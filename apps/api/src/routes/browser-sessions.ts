@@ -218,6 +218,7 @@ import {
 } from "../browser-state-authority";
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
 import { endBrowserDiscardingLostRuntime } from "../browser-lost-runtime-end";
+import { resolveBrowserActionFences, type BrowserActionFences } from "../browser-action-fences";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { ApiHttpError } from "../http/api-error";
 import { interactionControlApiError } from "../http/interaction-control-error";
@@ -1114,6 +1115,10 @@ export function registerBrowserSessionRoutes(
         await requireAccessGrant(context, deps, workspaceId, "files:read");
       }
       const startedAtMs = performance.now();
+      // Omitted fences mean the target's current state. Read them once from the
+      // live controller in this request (a recovery retry of the callback must
+      // replay the same command digest, so it reuses the first read).
+      let resolvedFences: BrowserActionFences | null = null;
       const result = await withActiveBrowserController(
         context,
         grant,
@@ -1122,15 +1127,16 @@ export function registerBrowserSessionRoutes(
         "session.control",
         "browser.action",
         async ({ sessionClient, binding, record, sourceAuthorization }) => {
+          resolvedFences ??= await resolveBrowserActionFences(request, () =>
+            sessionClient.targetState(request.targetId),
+          );
           const commandFields = {
             protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
             operationId: request.operationId,
             browserSessionId,
             controllerGeneration: binding.controllerGeneration,
             targetId: request.targetId,
-            expectedTargetGeneration: request.expectedTargetGeneration,
-            expectedDocumentGeneration: request.expectedDocumentGeneration,
-            expectedFrameId: request.expectedFrameId,
+            ...resolvedFences,
             actor: interactionActorForGrant(grant),
             observationMode: request.observationMode,
             action: request.action,

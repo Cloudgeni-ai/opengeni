@@ -1041,9 +1041,11 @@ export type BrowserSessionAttachmentRequest = {
 export type BrowserActionRequest = {
   operationId: string;
   targetId: string;
-  expectedTargetGeneration: string;
-  expectedDocumentGeneration: string | null;
-  expectedFrameId: string | null;
+  /** Omit the three fences to act on the target's current state; the API reads
+   * them from the live controller in the same request. */
+  expectedTargetGeneration?: string | undefined;
+  expectedDocumentGeneration?: string | null | undefined;
+  expectedFrameId?: string | null | undefined;
   /** `input` is negotiated by focusedInputObservations on a live attachment.
    * It returns optional native-select metadata after a pointer click, and null
    * for ordinary input. Use full for agent observations. */

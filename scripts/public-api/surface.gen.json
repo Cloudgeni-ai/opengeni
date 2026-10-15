@@ -10949,9 +10949,9 @@
         "$.action": "union!=[\"0\",\"type=batch\"]",
         "$.action|0": "ref(BrowserAction)",
         "$.action|type=batch": "ref(BrowserActionBatch)",
-        "$.expectedDocumentGeneration": "string! null",
-        "$.expectedFrameId": "string! null",
-        "$.expectedTargetGeneration": "string!",
+        "$.expectedDocumentGeneration": "string? null",
+        "$.expectedFrameId": "string? null",
+        "$.expectedTargetGeneration": "string?",
         "$.observationMode": "enum?=[\"\\\"full\\\"\",\"\\\"input\\\"\",\"\\\"none\\\"\"]",
         "$.operationId": "string!",
         "$.targetId": "string!"

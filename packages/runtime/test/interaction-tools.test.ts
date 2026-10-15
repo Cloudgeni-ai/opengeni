@@ -64,6 +64,9 @@ describe("interaction attempt tools", () => {
           getBrowserTargetState: async () => {
             throw failure;
           },
+          actInBrowser: async () => {
+            throw failure;
+          },
         }),
       });
       const result = await definitions[0]!.execute(
@@ -967,25 +970,16 @@ describe("interaction attempt tools", () => {
     }
   });
 
-  test("keeps model and Codemode Browser actions on the same durable operation and fences", async () => {
+  test("sends a fence-free Browser action as one request for the API to fence", async () => {
     const target = browserTarget();
     const observation = browserObservation(target);
     let request: BrowserActionRequest | null = null;
-    let stateCalls = 0;
     const transport = partialTransport({
       observeBrowserTarget: async () => {
         throw new Error("unexpected full AX read");
       },
       getBrowserTargetState: async () => {
-        stateCalls += 1;
-        return {
-          browserSessionId,
-          controllerGeneration: target.controllerGeneration,
-          targetId: target.id,
-          targetGeneration: target.targetGeneration,
-          documentGeneration: target.documentGeneration,
-          frameId: observation.frameId,
-        };
+        throw new Error("unexpected separate target-state request");
       },
       actInBrowser: async (_workspaceId, _browserSessionId, value) => {
         request = value;
@@ -1027,12 +1021,8 @@ describe("interaction attempt tools", () => {
     expect(request).toEqual({
       operationId,
       targetId: target.id,
-      expectedTargetGeneration: target.targetGeneration,
-      expectedDocumentGeneration: target.documentGeneration,
-      expectedFrameId: observation.frameId,
       action: { type: "scroll", deltaX: 0, deltaY: 480 },
     });
-    expect(stateCalls).toBe(1);
     expect(result.structuredContent).toMatchObject({
       operationId,
       browserSessionId,
