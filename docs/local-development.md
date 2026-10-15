@@ -265,6 +265,11 @@ OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=http://garage:3900
 # Prefer unset: `bun run dev` sets OPENGENI_DOCKER_NETWORK=${COMPOSE_PROJECT_NAME}_default
 ```
 
+For private remote browser access, set the public endpoint to the reachable
+HTTPS storage origin and keep `OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT` on
+loopback. The local artifact materializer validates the internal endpoint used
+for server-side storage requests (falling back to the public endpoint if unset).
+
 The public endpoint is embedded in browser-facing signed URLs. The internal
 endpoint is used by API and worker storage requests, while the sandbox endpoint
 is supplied to Docker agent containers. The two private endpoints may share the
