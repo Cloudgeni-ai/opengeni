@@ -525,7 +525,11 @@ async function drainingDockerLease(epoch: number, instanceId: string, root: stri
   const envelope = {
     backendId: "docker",
     sessionState: {
-      providerState: { containerId: instanceId, workspaceRootPath: root, workspaceRootOwned: false },
+      providerState: {
+        containerId: instanceId,
+        workspaceRootPath: root,
+        workspaceRootOwned: false,
+      },
     },
   };
   await admin`
