@@ -66,8 +66,10 @@ Setup credentials are provider-specific:
 
 An Only-me connection can back only its owner's Only-me vaults. Shared
 workspace and organization connections retain their corresponding ownership;
-organization setup requires `account:admin`. Agent attempts cannot redirect a
-connection endpoint, install credentials, or reconnect themselves.
+organization setup requires `account:admin`. Setup and reconnect use the
+existing `connections:write` and `secrets:write` gates and current ownership
+checks. Authorized agent attempts can manage shared connections through the
+same gates; Only-me setup still requires the verified personal-owner principal.
 
 Setup reserves a connection identity before contacting upstream. Keeper's
 successful token binding is saved encrypted immediately; the bootstrap token
@@ -115,9 +117,23 @@ that failure. An explicitly named healthy vault can still be used when an
 unrelated provider is unavailable.
 
 Provider pages are bounded and checked for duplicate IDs, repeating cursors,
-snapshot changes and excessive counts. Only a full successful traversal may
-remove absent mirror rows. The native limit remains 2,000 items per vault;
-the first 2,000 of a larger inventory are never certified as complete.
+snapshot changes and excessive counts. Only a full consistent traversal may
+remove absent mirror rows: multiple pages must carry one stable non-null
+snapshot. The native limit remains 2,000 items per vault; the first 2,000 of a
+larger inventory are never certified as complete.
+
+## Moving and copying
+
+Copying requires the destination to support the item's type and fields.
+Moving also requires recoverable removal at the source. These operations
+are not a transaction across providers. For a versioned connected source,
+Opengeni checks its version before reading values and again after saving the
+copy, before archiving the original. A changed version or failed recheck
+keeps the original and reports `saved: true`, `sourceArchived: false`; compare
+the two items rather than repeat the move. Providers without item versions
+cannot offer this check, and an edit after the final check remains a race
+because the archive operation is not conditional. The original is recoverable
+in its provider's archive or Trash.
 
 ## A product that owns its users' passwords
 

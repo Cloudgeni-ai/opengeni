@@ -126,8 +126,10 @@ bounded and validated. Unknown response fields are rejected or projected
 away before storage; provider messages never pass through as secret-bearing
 diagnostics. Returned field IDs must be requested IDs.
 
-Registration is an administrator/verified-human setup operation, not an agent
-tool. Reuse the integration endpoint policy: HTTPS outside local/test,
+Registration uses the existing connection/secret-write permissions and owner
+checks, including authorized agent attempts for shared connections. Personal
+setup requires the verified owner; organization setup requires its admin.
+Reuse the integration endpoint policy: HTTPS outside local/test,
 DNS-pinned egress, no redirects, private/special addresses refused unless the
 operator explicitly permits them, bounded deadline and response bytes.
 Keep callback credentials distinct from ordinary MCP header injection.
@@ -350,7 +352,7 @@ merge-tree compatibility without ritual rebasing. No merge/deploy in this task.
 
 All repository work and evidence stay on `/workspace`. Use pinned Bun 1.4.0,
 bounded build/test concurrency, unique service ports and task-owned processes.
-Track cleanup in `/workspace/sessions/f5980f29/external-vaults/OWNERSHIP.md`.
+Track cleanup in the task's ownership ledger.
 
 ## 18. Research evidence and implementation boundaries
 
@@ -382,4 +384,5 @@ per-vault `writeAccess` is read-only, read-write or unknown. Add trusted
 authority, cache epoch and force-refresh to call context. Remote request
 version is `opengeni.vault.v1`, operation-discriminated and exact-body signed.
 Receiver authorization is mandatory after signature verification. Registered
-endpoints are never model-selected URLs. No automatic mutation retry.
+endpoints are fixed by the connection; value/list operations cannot override
+them with per-call URLs. No automatic mutation retry.

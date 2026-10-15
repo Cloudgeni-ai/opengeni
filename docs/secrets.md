@@ -254,6 +254,8 @@ read-write) or create a managed vault with
   can create the item type. Moving additionally requires recoverable removal
   at the source. Provider field-history restoration and unsupported file
   operations are not offered. Provider removal never means permanent deletion.
+  Moves are not atomic across providers; see the [source-version check and
+  recovery guidance](external-vaults.md#moving-and-copying).
 
 **Host provider (embedders).** Products that embed Opengeni can supply a
 `vaultProvider` implementing `VaultProvider` from `@opengeni/vaults`; link its

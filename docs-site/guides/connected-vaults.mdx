@@ -27,6 +27,12 @@ The UI only offers supported operations. A read-write connection does not
 automatically support every item type, TOTP update, file upload or history
 restore. Provider permissions can also change after setup.
 
+Moves between providers are not atomic. If a versioned original changes while
+its copy is being saved, Opengeni keeps the original and reports that the copy
+was saved. Compare the two rather than repeat the move. A final check cannot
+prevent an edit immediately before archive, and unversioned providers cannot
+offer that check; the source archive or Trash remains recoverable.
+
 ## Connect and link
 
 Choose **Connect** in Vaults, select the provider and choose who owns the

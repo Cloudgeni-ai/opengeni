@@ -211,6 +211,12 @@ the host's actual tenant/user before authorizing it. A shared connection must
 not return a different user's inventory into the same metadata mirror; use
 separate user-owned connections for user-specific stores.
 
+Connection setup uses the existing `connections:write` and `secrets:write`
+permissions and native owner checks, including authorized agent attempts for
+shared connections. Personal setup requires the verified owner, and
+organization setup requires its admin. List/read/write operations always use
+the registered connection endpoint, not a per-call URL chosen by a tool caller.
+
 `getVaultProviderCatalog` includes deployment availability even before anyone
 connects; disable unavailable setup choices instead of collecting credentials
 that this deployment cannot use. `listVaultProviderConnections` remains a
