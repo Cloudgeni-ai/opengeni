@@ -667,8 +667,22 @@ export const VaultProviderConnectionSummary = /* @__PURE__ */ defineSchema(() =>
 );
 export type VaultProviderConnectionSummary = z.infer<typeof VaultProviderConnectionSummary>;
 
+/** Deployment configuration, independent of whether anyone has connected yet. */
+export const VaultProviderAvailability = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    provider: VaultProviderConnectionSummary.shape.provider,
+    available: z.boolean(),
+    reason: z.enum(["not_enabled"]).nullable(),
+  }),
+);
+export type VaultProviderAvailability = z.infer<typeof VaultProviderAvailability>;
+
 export const ListVaultProviderConnectionsResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({ connections: z.array(VaultProviderConnectionSummary) }),
+  z.object({
+    connections: z.array(VaultProviderConnectionSummary),
+    /** Additive: older servers may omit this metadata-only deployment catalog. */
+    providers: z.array(VaultProviderAvailability).optional(),
+  }),
 );
 export type ListVaultProviderConnectionsResponse = z.infer<
   typeof ListVaultProviderConnectionsResponse

@@ -360,6 +360,12 @@ export type VaultProviderConnectionSummary = {
 };
 export type ListVaultProviderConnectionsResponse = {
   connections: VaultProviderConnectionSummary[];
+  providers?: VaultProviderAvailability[] | undefined;
+};
+export type VaultProviderAvailability = {
+  provider: VaultProviderConnectionSummary["provider"];
+  available: boolean;
+  reason: "not_enabled" | null;
 };
 export type InstallVaultProviderResponse = {
   connectionId: string;

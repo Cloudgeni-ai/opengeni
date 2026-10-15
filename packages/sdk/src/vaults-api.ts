@@ -26,6 +26,7 @@ import type {
   InstallVaultProviderResponse,
   ReplaceVaultProviderCredentialsRequest,
   VaultProviderConnectionSummary,
+  ListVaultProviderConnectionsResponse,
   DisconnectVaultProviderResponse,
 } from "./vault-types";
 
@@ -202,6 +203,15 @@ export function vaultsApi(client: VaultClientLike, workspaceId: string) {
       ).vaults,
     installVaultProvider: (request: InstallVaultProviderRequest) =>
       json<InstallVaultProviderResponse>("POST", `${base}/vault-providers/connections`, request),
+    /** Connections plus configured providers, even before the first connection. */
+    getVaultProviderCatalog: (signal?: AbortSignal) =>
+      json<ListVaultProviderConnectionsResponse>(
+        "GET",
+        `${base}/vault-providers/connections`,
+        undefined,
+        {},
+        signal,
+      ),
     listVaultProviderConnections: async (signal?: AbortSignal) =>
       (
         await json<{ connections: VaultProviderConnectionSummary[] }>(
