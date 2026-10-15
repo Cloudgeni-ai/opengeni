@@ -12,7 +12,7 @@ import {
 } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
-import { resolveCatalogSettings } from "@opengeni/core";
+import { createRemoteExternalVaultFactories, resolveCatalogSettings } from "@opengeni/core";
 import { createObjectStorage } from "@opengeni/storage";
 import type { ActivityDependencies, SharedActivityServices } from "./activities/types";
 import { observabilityEventBusOptions } from "./observability-metrics";
@@ -92,7 +92,10 @@ export function createSharedActivityServices(
           dependencies.onePasswordVaultProvider === undefined
             ? loadOnePasswordVaultProvider
             : dependencies.onePasswordVaultProvider,
-        externalVaultProviders: dependencies.externalVaultProviders ?? null,
+        externalVaultProviders:
+          dependencies.externalVaultProviders === undefined
+            ? createRemoteExternalVaultFactories(settings)
+            : dependencies.externalVaultProviders,
       };
     })();
     return await servicesPromise;

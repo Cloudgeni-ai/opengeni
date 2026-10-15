@@ -27,6 +27,7 @@ import {
   ONEPASSWORD_CREDENTIAL_ROLE,
   ONEPASSWORD_PROVIDER_DOMAIN,
   createWorkspaceVaultProviderRegistry,
+  createRemoteExternalVaultFactories,
   externalActorContinuationForAuthorization,
   hasPermission,
   isVaultError,
@@ -179,7 +180,9 @@ export function vaultProviderRegistryFor(
 }
 
 export function externalVaultFactoriesFor(deps: ApiRouteDeps): ExternalVaultProviderFactories {
-  return deps.externalVaultProviders ?? {};
+  return deps.externalVaultProviders === undefined
+    ? createRemoteExternalVaultFactories(deps.settings)
+    : (deps.externalVaultProviders ?? {});
 }
 
 /** Both native 1Password and the generic connection lifecycle use this catalog. */

@@ -25,6 +25,10 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
+import {
+  createExternalVaultReceiver,
+  createInMemoryExternalVaultReceiverStore,
+} from "../../../packages/sdk/src/external-vault-receiver";
 
 const delegationSecret = randomBytes(32).toString("hex");
 const encryptionKey = randomBytes(32).toString("base64");
@@ -69,7 +73,7 @@ async function scope(): Promise<Scope> {
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
-function fixture() {
+function fixture(useDefaultProviders = false) {
   const calls: unknown[] = [];
   let accountId = "upstream-account-a";
   let keeperUnavailable = true;
@@ -122,7 +126,7 @@ function fixture() {
     bus: {} as never,
     workflowClient: {} as never,
     managedAuth: null,
-    externalVaultProviders: factories,
+    ...(useDefaultProviders ? {} : { externalVaultProviders: factories }),
   } as never);
   async function request(
     nativeScope: Scope,
@@ -171,6 +175,145 @@ const installBody = (ownership = "workspace") => ({
 });
 
 describe("generic external vault connection lifecycle", () => {
+  test("default signed remote connection supports register, verify and metadata-only discovery", async () => {
+    if (!shared) return;
+    const native = await scope();
+    const f = fixture(true);
+    let registeredId: string | null = null;
+    let authorizedCalls = 0;
+    const receiver = createExternalVaultReceiver({
+      resolveConnection: async (id) =>
+        id === registeredId
+          ? {
+              provider: "external",
+              signingSecrets: [signingSecret],
+              accountId: native.accountId,
+              connectionWorkspaceId: native.workspaceId,
+              context: { tenantId: "fixture-tenant" },
+            }
+          : null,
+      authorize: async ({ authority, connection }) => {
+        authorizedCalls++;
+        expect(authority).toMatchObject({
+          accountId: native.accountId,
+          workspaceId: native.workspaceId,
+        });
+        expect(connection).toEqual({ tenantId: "fixture-tenant" });
+        return authority.subjectId === "person-a" ? { id: "fixture-user" } : null;
+      },
+      store: createInMemoryExternalVaultReceiverStore(),
+      handlers: {
+        describe: async () => ({
+          result: {
+            accountId: "fixture-tenant",
+            accountName: "Product vaults",
+            inventoryScope: "connection",
+            operations: {
+              createItemTypes: [],
+              updateItem: false,
+              removeField: false,
+              archiveItem: false,
+              archiveKind: "none",
+              deleteItem: false,
+              restoreItem: false,
+              readFiles: false,
+              writeFiles: false,
+              createTotp: false,
+              updateTotp: false,
+              createVault: false,
+              restoreFieldHistory: false,
+            },
+            capabilities: { totp: false, files: false },
+          },
+        }),
+        listVaults: async () => ({
+          result: {
+            items: [
+              {
+                externalVaultId: "product-vault",
+                name: "Product",
+                contentVersion: null,
+                itemCount: 0,
+                writeAccess: "read_only",
+              },
+            ],
+            nextCursor: null,
+            snapshot: "fixture-1",
+          },
+        }),
+        listItems: async () => ({ result: { items: [], nextCursor: null, snapshot: "fixture-1" } }),
+        readFields: async () => {
+          throw new Error("Metadata discovery must not resolve values");
+        },
+      },
+    });
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (req) => receiver.fetch(req),
+    });
+    try {
+      const installed = await f.request(native, "/vault-providers/connections", "POST", {
+        ownership: "user",
+        credentials: { provider: "external", endpoint: server.url.href, signingSecret },
+      });
+      expect(installed.status).toBe(202);
+      const pending = (await installed.json()) as {
+        connectionId: string;
+        discoveryPending: boolean;
+      };
+      expect(pending.discoveryPending).toBe(true);
+      expect(authorizedCalls).toBe(0);
+      registeredId = pending.connectionId;
+      const verified = await f.request(
+        native,
+        `/vault-providers/connections/${registeredId}/verify`,
+        "POST",
+        {},
+      );
+      expect(verified.status).toBe(200);
+      expect(await verified.json()).toMatchObject({
+        connectionId: registeredId,
+        provider: "external",
+        vaults: [{ externalVaultId: "product-vault", writeAccess: "read_only" }],
+      });
+      expect(authorizedCalls).toBe(2);
+      const metadata = await f.request(native, "/vault-providers/connections");
+      expect(metadata.status).toBe(200);
+      const text = await metadata.text();
+      expect(text).not.toContain(signingSecret);
+      expect(text).toContain(registeredId!);
+      expect(authorizedCalls).toBe(2);
+      const catalog = await f.request(native, `/connections/${registeredId}/provider-vaults`);
+      expect(catalog.status).toBe(200);
+      expect(await catalog.json()).toMatchObject({
+        vaults: [{ externalVaultId: "product-vault" }],
+      });
+      expect(authorizedCalls).toBe(3);
+      expect(
+        (
+          await f.request(
+            native,
+            `/connections/${registeredId}/provider-vaults`,
+            "GET",
+            undefined,
+            { person: "person-b" },
+          )
+        ).status,
+      ).toBe(404);
+      expect(authorizedCalls).toBe(3);
+      expect(
+        (await f.request(native, `/vault-providers/connections/${registeredId}`, "DELETE")).status,
+      ).toBe(200);
+      expect(authorizedCalls).toBe(3);
+      expect((await f.request(native, `/connections/${registeredId}/provider-vaults`)).status).toBe(
+        404,
+      );
+    } finally {
+      await server.stop(true);
+    }
+  }, 30_000);
+
   test("retains Keeper bound keys after partial setup and resumes without replaying the token", async () => {
     if (!shared) return;
     const native = await scope();

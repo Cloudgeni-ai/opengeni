@@ -135,6 +135,48 @@ Private targets require an explicit operator policy, not an agent-provided URL.
 Do not blindly retry a timed-out write: the provider may have completed it.
 Use operation identity and durable idempotency/reconciliation at the host.
 
+### Implement the receiver
+
+The server-only `@opengeni/sdk/external-vault-receiver` subpath supplies
+`createExternalVaultReceiver`. It verifies raw-body signatures, signs responses,
+rejects replayed requests, projects metadata without values, and
+claims writes through your durable idempotency store. Do not implement a
+second signature format or import this helper into browser code.
+
+Provide three pieces:
+
+- `resolveConnection(connectionId)` loads the signing keys and fixed host
+  tenant/inventory for that connection. Bind the native `accountId` and
+  `connectionWorkspaceId` as well; do not select a tenant from unchecked
+  request metadata.
+- `authorize({ connection, authority, operation })` maps the verified native
+  person to your user and checks current access for this operation. Return
+  `null` to deny it. Inventory handlers intentionally receive only the fixed
+  connection scope, not that person's principal.
+- `handlers` implement `describe`, `listVaults`, `listItems` and `readFields`,
+  with optional `refresh`, `writeItem` and `archiveItem`. Return bounded pages
+  and explicit capabilities. Use `ExternalVaultReceiverError` for safe,
+  structured refusals; raw backend errors are not sent to Opengeni.
+
+Mount `receiver.fetch(request)` in your server route, or pass the untouched
+body and headers to `receiver.handle`. Choose a durable implementation of
+`ExternalVaultReceiverStore`: its replay and mutation claims must be atomic
+across all replicas. `createInMemoryExternalVaultReceiverStore` is for local
+tests only, not production writes.
+
+If your receiver needs the new native connection ID before accepting its
+first request, use the pending setup flow: `installVaultProvider` saves the
+encrypted key and returns the ID with `discoveryPending: true`; register that
+ID against your fixed host tenant/user, then call
+`verifyVaultProviderConnection`. Do not solve registration by accepting every
+unknown connection into one shared tenant. A customer-controlled Bitwarden
+bridge follows this same registration flow.
+
+The source-level receiver examples and tests live in
+`packages/sdk/test/external-vault-receiver.test.ts`; the customer-run bridge
+and its configuration are documented in
+`packages/vaults-bitwarden-bridge/README.md`.
+
 The native secret ask card still saves atomically to hosted vaults only. A
 host can collect a secret in its own UI and then expose the resulting item
 through its vault provider. This first wave does not turn the ask card into
