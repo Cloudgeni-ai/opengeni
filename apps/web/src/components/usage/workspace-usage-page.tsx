@@ -14,6 +14,7 @@ import { apiErrorDetails, userErrorTextWithoutReference } from "@/lib/api-error"
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { CONSOLE_ALLOWANCE_LABELS, formatCredits } from "@/lib/usage-allowances";
 import { MemberLimitsSection, type MemberName } from "./member-limits-section";
+import { SitePlatformUsageSection } from "./site-platform-usage-section";
 import { isForbidden, useWorkspaceBudget } from "./use-workspace-budget";
 
 /**
@@ -81,19 +82,23 @@ export function WorkspaceUsagePage({
       </Section>
     );
   }
+  const sites = <SitePlatformUsageSection client={context.client} workspaceId={workspaceId} />;
   if (summary.state === "unlimited") {
     return (
-      <EmptyState
-        variant="page"
-        icon={<GaugeIcon />}
-        title="No usage limits here"
-        description={`Work in ${workspaceName} uses the organization's credits with no monthly budget. ${
-          isOwner
-            ? "Set a budget to cap what this workspace spends each month."
-            : "Organization owners can set a monthly budget."
-        }`}
-        action={manageBudget}
-      />
+      <SectionStack>
+        <EmptyState
+          variant="page"
+          icon={<GaugeIcon />}
+          title="No usage limits here"
+          description={`Work in ${workspaceName} uses the organization's credits with no monthly budget. ${
+            isOwner
+              ? "Set a budget to cap what this workspace spends each month."
+              : "Organization owners can set a monthly budget."
+          }`}
+          action={manageBudget}
+        />
+        {sites}
+      </SectionStack>
     );
   }
   const own = summary.member;
@@ -152,6 +157,8 @@ export function WorkspaceUsagePage({
           onChangeRule={budget.setMemberRule}
         />
       ) : null}
+
+      {sites}
     </SectionStack>
   );
 }

@@ -3,6 +3,8 @@ import type {
   SiteAbuseReport,
   SiteHostnameAvailability,
   SitePublication,
+  SitePublishWarning,
+  SitePublishWarningFix,
   WorkspaceArtifact,
 } from "@opengeni/sdk";
 import {
@@ -12,8 +14,10 @@ import {
   FlagIcon,
   GlobeIcon,
   LoaderCircleIcon,
+  PlusIcon,
   RotateCcwIcon,
   UsersIcon,
+  XIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -26,6 +30,7 @@ import { useCopyToClipboard } from "@/components/ui/copy-field";
 import { showUndoToast } from "@/components/ui/destructive-confirm";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { EmailChipsInput } from "@/components/ui/email-chips-input";
+import { Disclosure } from "@/components/ui/disclosure";
 import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "@/components/ui/field";
 import { FormDialog, FormPage } from "@/components/ui/form-dialog";
 import { ListRow, RowList } from "@/components/ui/list-row";
@@ -33,34 +38,37 @@ import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { Section } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
+import { SelectMenu } from "@/components/ui/select-menu";
+import { SettingRow } from "@/components/ui/setting-row";
 import { StatusBadge } from "@/components/ui/status-badge";
-import { UsageMeter } from "@/components/ui/usage-meter";
-import { apiErrorFacts, userErrorText } from "@/lib/api-error";
+import { Switch } from "@/components/ui/switch";
+import { userErrorText } from "@/lib/api-error";
 import {
   ACCESS_CHOICES,
-  CUSTOM_LIMIT_FIELDS,
-  LIMIT_PROFILE_OPTIONS,
+  SPEND_PERIOD_OPTIONS,
   abuseCategoryLabel,
   availabilityMessage,
-  customOverrides,
   domainFromHostname,
   draftFromPublication,
-  formatUsdMicros,
+  hasOutsideViewers,
   invitedEmailProblem,
-  knownLimits,
   labelProblemMessage,
-  limitProfileDescription,
-  limitSummary,
   normalizeLabelInput,
+  outsideLimitsFromDraft,
+  outsideUsageLine,
+  platformRefusal,
   publicationRequest,
+  readinessTitle,
   sentence,
+  siteErrorCode,
   sitePublicationLoadFromError,
   suggestedLabel,
   suspendedByLabel,
+  viewAsVisitorUrl,
   type SitePublicationLoad,
   type SitePublishDraft,
   type SitesClientConfig,
+  type SpendPeriod,
 } from "@/lib/site-publishing";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { cn } from "@/lib/utils";
@@ -75,6 +83,7 @@ export type SitePublishingClient = Pick<
   | "restoreSite"
   | "listSiteAbuseReports"
   | "updateSiteAbuseReport"
+  | "applySitePublicationFix"
 >;
 
 /**
@@ -227,10 +236,7 @@ export type SitePublishPageProps = {
   onBack: () => void;
   /** The viewer owns the Site or administers the workspace, and may publish. */
   canManage: boolean;
-  /**
-   * The viewer administers the workspace. Only admins change limits, give
-   * guests the agent's tools, and restore an admin's takedown.
-   */
+  /** The viewer administers the workspace. Only admins change limits and restore an admin's takedown. */
   isAdmin: boolean;
   /** Offered while the Site is Only me and the viewer owns it. */
   onShareWithWorkspace?: (() => void) | undefined;
@@ -321,8 +327,9 @@ function SitePublishForm({
   );
   const [labelError, setLabelError] = useState<string | null>(null);
   const [emailError, setEmailError] = useState<string | null>(null);
-  const [customError, setCustomError] = useState<string | null>(null);
+  const [limitError, setLimitError] = useState<string | null>(null);
   const [agentError, setAgentError] = useState<string | null>(null);
+  const [refusal, setRefusal] = useState<{ title: string; body: string } | null>(null);
   const [busy, setBusy] = useState<"unpublish" | "restore" | null>(null);
   const [takedownOpen, setTakedownOpen] = useState(false);
   const update = (patch: Partial<SitePublishDraft>) =>
@@ -355,19 +362,11 @@ function SitePublishForm({
     canChangeLimits: isAdmin,
   });
   const dirty = Object.keys(request).length > 0;
-  const limits = knownLimits(
-    draft.profile,
-    saved,
-    (() => {
-      const custom = customOverrides(draft);
-      return "overrides" in custom ? custom.overrides : {};
-    })(),
-  );
+  const outsideViewers = hasOutsideViewers(draft.access);
   const publicDisabled = sites.publicEnabled === false;
-  const agentsBlocked = draft.access === "public" && sites.publicAgentsEnabled === false;
-  const agentTools = saved?.agent.tools ?? [];
-  // Non-admins may turn guest tools off, never on.
-  const guestToolsLocked = !isAdmin && !draft.guestTools && !saved?.agent.guestTools;
+  // Readiness warnings describe the saved access; hide them while it changes.
+  const warnings =
+    saved?.status === "active" && saved.access === draft.access ? saved.warnings : [];
 
   const submit = async () => {
     setLabelError(null);
@@ -381,14 +380,12 @@ function SitePublishForm({
       return false;
     }
     setEmailError(null);
-    if (draft.profile === "custom") {
-      const custom = customOverrides(draft);
-      if ("invalid" in custom) {
-        setCustomError("Use whole numbers, and dollar amounts like 0.05.");
-        return false;
-      }
+    if (outsideViewers && isAdmin && "invalid" in outsideLimitsFromDraft(draft)) {
+      setLimitError("Use dollar amounts like 10 or 0.50.");
+      return false;
     }
-    setCustomError(null);
+    setLimitError(null);
+    setRefusal(null);
     try {
       const next = await client.updateSitePublication(workspaceId, site.id, request);
       onPublication(next);
@@ -397,25 +394,31 @@ function SitePublishForm({
       });
       return true;
     } catch (error) {
-      const { code } = apiErrorFacts(error);
+      const code = siteErrorCode(error);
       if (code === "site_hostname_taken") {
         setLabelError("Another Site uses this name.");
         return false;
       }
       if (code === "site_admin_required") {
-        if (request.limitProfile) setCustomError("Only a workspace admin can change limits.");
-        else if (request.access === "public")
-          setAgentError(
-            draft.guestTools
-              ? "Only a workspace admin can open a Site with tools to everyone."
-              : "Only a workspace admin can give the agent's tools to invited people.",
-          );
-        else if (request.access === "invited" || request.invitedEmails)
-          setEmailError("Only a workspace admin can invite people while the agent has tools.");
-        else setAgentError("Only a workspace admin can give the agent's tools to guests.");
+        if (request.limitProfile) setLimitError("Only a workspace admin can change limits.");
+        else setAgentError("Only a workspace admin can make this change.");
+        return false;
+      }
+      const platform = platformRefusal(error);
+      if (platform) {
+        setRefusal(platform);
         return false;
       }
       throw error;
+    }
+  };
+
+  const applyFix = async (fix: SitePublishWarningFix) => {
+    try {
+      onPublication(await client.applySitePublicationFix(workspaceId, site.id, fix));
+      toast.success("Fixed");
+    } catch (error) {
+      toast.error("Couldn't apply the fix", { description: userErrorText(error) });
     }
   };
 
@@ -468,6 +471,11 @@ function SitePublishForm({
         footer={publishing || dirty ? undefined : false}
       >
         <FieldStack>
+          {refusal ? (
+            <Notice tone="failed" title={refusal.title}>
+              {refusal.body}
+            </Notice>
+          ) : null}
           {saved ? (
             <PublicationStatus
               publication={saved}
@@ -555,97 +563,43 @@ function SitePublishForm({
             </Field>
           ) : null}
 
+          {warnings.length > 0 ? (
+            <SiteReadiness warnings={warnings} access={draft.access} onFix={applyFix} />
+          ) : null}
+
           <div className="flex min-w-0 flex-col gap-4">
             <CheckboxField
-              label="Let visitors chat with the Site's agent"
+              label="Let people chat with the Site's agent"
               description="Your organization pays for these conversations."
-              checked={draft.agentEnabled && !agentsBlocked}
-              disabled={agentsBlocked}
-              disabledReason="Agents on public Sites are turned off on this server."
+              checked={draft.agentEnabled}
               onCheckedChange={(agentEnabled) => update({ agentEnabled })}
             />
-            {draft.agentEnabled && !agentsBlocked ? (
+            {draft.agentEnabled ? (
               <div className="flex min-w-0 flex-col gap-4 pl-7">
                 <SiteAgentModelField
                   workspaceId={workspaceId}
                   model={draft.agentModel}
-                  allowed={limits?.agentModels ?? null}
+                  allowed={saved?.effectiveLimits.agentModels ?? null}
                   onChange={(agentModel) => update({ agentModel })}
                 />
-                {agentTools.length > 0 ? (
-                  <Field label="Tools" group error={agentError}>
-                    <div className="flex min-w-0 flex-col gap-3">
-                      <p className="text-sm text-fg-muted">
-                        Uses {agentTools.length} workspace{" "}
-                        {agentTools.length === 1 ? "connection" : "connections"}.
-                      </p>
-                      {draft.access === "public" ? (
-                        <CheckboxField
-                          label="Let everyone use these tools"
-                          description="Visitors who aren't members or invited get them too."
-                          checked={draft.guestTools}
-                          disabled={guestToolsLocked}
-                          disabledReason="Only workspace admins can turn this on."
-                          onCheckedChange={(guestTools) => {
-                            setAgentError(null);
-                            update({ guestTools });
-                          }}
-                        />
-                      ) : null}
-                    </div>
-                  </Field>
+                {outsideViewers ? (
+                  <OutsideAgentSection
+                    workspaceId={workspaceId}
+                    draft={draft}
+                    saved={saved}
+                    isAdmin={isAdmin}
+                    error={limitError ?? agentError}
+                    onChange={(patch) => {
+                      setLimitError(null);
+                      update(patch);
+                    }}
+                  />
+                ) : agentError ? (
+                  <p className="text-sm text-danger">{agentError}</p>
                 ) : null}
               </div>
             ) : null}
           </div>
-
-          <Field
-            label="Limits"
-            group
-            hint={
-              isAdmin
-                ? limitProfileDescription(draft.profile)
-                : "Only workspace admins change limits."
-            }
-            error={customError}
-          >
-            <div className="flex min-w-0 flex-col gap-4">
-              <SegmentedControl
-                options={LIMIT_PROFILE_OPTIONS}
-                value={draft.profile}
-                disabled={!isAdmin}
-                onValueChange={(profile) => {
-                  setCustomError(null);
-                  update({ profile });
-                }}
-                className="self-start max-sm:self-stretch"
-                fullWidth={false}
-              />
-              {draft.profile === "custom" && isAdmin ? (
-                <CustomLimitFields
-                  values={draft.custom}
-                  onChange={(custom) => {
-                    setCustomError(null);
-                    update({ custom });
-                  }}
-                />
-              ) : limits ? (
-                <LimitFacts limits={limits} />
-              ) : null}
-              {saved && saved.effectiveLimits.agentMicrosPerSitePerMonth ? (
-                <UsageMeter
-                  label="Agent spend this month"
-                  measure="used"
-                  percent={
-                    (saved.usage.agentMicrosThisMonth /
-                      saved.effectiveLimits.agentMicrosPerSitePerMonth) *
-                    100
-                  }
-                  valueLabel={`${formatUsdMicros(saved.usage.agentMicrosThisMonth)} of ${formatUsdMicros(saved.effectiveLimits.agentMicrosPerSitePerMonth)}`}
-                />
-              ) : null}
-            </div>
-          </Field>
 
           <CheckboxField
             label="Hide from search engines"
@@ -733,6 +687,7 @@ function PublicationStatus({
   onRestore: () => void;
 }) {
   const { state: copied, copy } = useCopyToClipboard();
+  const viewAs = viewAsVisitorUrl(publication);
   if (publication.status === "suspended") {
     const { suspendedAt, suspendedBy, suspendedReason } = publication.moderation;
     const byPlatform = suspendedBy === "platform";
@@ -806,60 +761,23 @@ function PublicationStatus({
         </div>
       }
     >
-      <a
-        href={publication.url}
-        target="_blank"
-        rel="noreferrer"
-        className="inline-flex max-w-full items-center gap-1 font-medium og-link"
-      >
-        <span className="truncate">{publication.hostname}</span>
-        <ExternalLinkIcon aria-hidden="true" className="size-3.5 shrink-0" />
-      </a>
+      <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+        <a
+          href={publication.url}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex max-w-full items-center gap-1 font-medium og-link"
+        >
+          <span className="truncate">{publication.hostname}</span>
+          <ExternalLinkIcon aria-hidden="true" className="size-3.5 shrink-0" />
+        </a>
+        {viewAs ? (
+          <a href={viewAs} target="_blank" rel="noreferrer" className="text-fg-muted og-link">
+            View as visitor
+          </a>
+        ) : null}
+      </span>
     </Notice>
-  );
-}
-
-function LimitFacts({ limits }: { limits: NonNullable<ReturnType<typeof knownLimits>> }) {
-  return (
-    <dl className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-6 gap-y-1.5 text-sm max-sm:grid-cols-1 max-sm:gap-y-0.5">
-      {limitSummary(limits).map((fact) => (
-        <div key={fact.label} className="contents max-sm:block max-sm:pb-1.5">
-          <dt className="text-fg-muted">{fact.label}</dt>
-          <dd className="min-w-0 text-fg">{fact.value}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
-function CustomLimitFields({
-  values,
-  onChange,
-}: {
-  values: SitePublishDraft["custom"];
-  onChange: (values: SitePublishDraft["custom"]) => void;
-}) {
-  return (
-    <div className="grid min-w-0 grid-cols-2 gap-4 max-sm:grid-cols-1">
-      {CUSTOM_LIMIT_FIELDS.map((field) => (
-        <Field key={field.key} label={field.label}>
-          <div className="relative min-w-0">
-            {field.money ? (
-              <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-sm text-fg-muted">
-                $
-              </span>
-            ) : null}
-            <TextInput
-              inputMode="decimal"
-              placeholder="No limit"
-              value={values[field.key]}
-              onChange={(event) => onChange({ ...values, [field.key]: event.target.value })}
-              className={cn(field.money && "pl-6")}
-            />
-          </div>
-        </Field>
-      ))}
-    </div>
   );
 }
 
@@ -912,6 +830,205 @@ function SiteAgentModelField({
 const reportRowLeading = (size: LogoTileSize) => (
   <LogoTile size={size} icon={<FlagIcon />} name="Report" />
 );
+
+/**
+ * Invited and public Sites: the agent for people outside the workspace, the
+ * one Site limit, the optional limit per person and this period's usage.
+ * Members are never limited here. Only admins change it.
+ */
+function OutsideAgentSection({
+  workspaceId,
+  draft,
+  saved,
+  isAdmin,
+  error,
+  onChange,
+}: {
+  workspaceId: string;
+  draft: SitePublishDraft;
+  saved: SitePublication | null;
+  isAdmin: boolean;
+  error: string | null;
+  onChange: (patch: Partial<SitePublishDraft>) => void;
+}) {
+  const locked = !isAdmin;
+  // The usage line and the model line describe what is saved.
+  const savedHere = saved?.status === "active" && saved.access === draft.access ? saved : null;
+  return (
+    <SettingRow
+      variant="control-right"
+      label="Agent for people outside the workspace"
+      description="People outside the workspace can only use this Site's own data."
+      hint={locked ? "Only workspace admins change this." : undefined}
+      error={error}
+      control={
+        <Switch
+          checked={draft.outsideAgent}
+          disabled={locked}
+          disabledReason="Only workspace admins change this."
+          onCheckedChange={(outsideAgent) => onChange({ outsideAgent })}
+        />
+      }
+      className="border-0 px-0"
+    >
+      {draft.outsideAgent ? (
+        <div className="flex min-w-0 flex-col gap-3 pt-1">
+          {savedHere?.outsideAgentModel && savedHere.agent.model === draft.agentModel ? (
+            <OutsideModelLine workspaceId={workspaceId} model={savedHere.outsideAgentModel} />
+          ) : null}
+          <SpendLimitLine
+            label="Limit"
+            amount={draft.siteLimit}
+            period={draft.sitePeriod}
+            disabled={locked}
+            onAmountChange={(siteLimit) => onChange({ siteLimit })}
+            onPeriodChange={(sitePeriod) => onChange({ sitePeriod })}
+          />
+          {draft.personLimitOn ? (
+            <SpendLimitLine
+              label="Per person"
+              amount={draft.personLimit}
+              period={draft.personPeriod}
+              disabled={locked}
+              onAmountChange={(personLimit) => onChange({ personLimit })}
+              onPeriodChange={(personPeriod) => onChange({ personPeriod })}
+              onRemove={() => onChange({ personLimitOn: false, personLimit: "" })}
+            />
+          ) : locked ? null : (
+            <button
+              type="button"
+              onClick={() =>
+                onChange({ personLimitOn: true, personLimit: "1", personPeriod: "day" })
+              }
+              className="inline-flex items-center gap-1 self-start text-sm font-medium og-link"
+            >
+              <PlusIcon aria-hidden="true" className="size-3.5" />
+              Limit per person
+            </button>
+          )}
+          {savedHere ? (
+            <p className="text-xs text-fg-muted">{outsideUsageLine(savedHere)}</p>
+          ) : null}
+        </div>
+      ) : null}
+    </SettingRow>
+  );
+}
+
+/** "Limit: [$10] per [month ▾]". */
+function SpendLimitLine({
+  label,
+  amount,
+  period,
+  disabled,
+  onAmountChange,
+  onPeriodChange,
+  onRemove,
+}: {
+  label: string;
+  amount: string;
+  period: SpendPeriod;
+  disabled: boolean;
+  onAmountChange: (amount: string) => void;
+  onPeriodChange: (period: SpendPeriod) => void;
+  onRemove?: () => void;
+}) {
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
+      <span className="w-20 shrink-0 text-fg-muted max-sm:w-auto">{label}</span>
+      <div className="relative w-24 shrink-0">
+        <span className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-fg-muted">
+          $
+        </span>
+        <TextInput
+          aria-label={`${label} amount`}
+          inputMode="decimal"
+          placeholder="None"
+          value={amount}
+          disabled={disabled}
+          onChange={(event) => onAmountChange(event.target.value)}
+          className="pl-6"
+        />
+      </div>
+      <span className="text-fg-muted">per</span>
+      <SelectMenu
+        aria-label={`${label} period`}
+        options={SPEND_PERIOD_OPTIONS}
+        value={period}
+        disabled={disabled}
+        onValueChange={onPeriodChange}
+        className="w-28"
+      />
+      {onRemove && !disabled ? (
+        <Button
+          type="button"
+          size="icon-sm"
+          variant="ghost"
+          aria-label={`Remove the ${label.toLowerCase()} limit`}
+          onClick={onRemove}
+        >
+          <XIcon aria-hidden="true" />
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+/** A subscription model is never used by people outside the workspace: name the one they get. */
+function OutsideModelLine({ workspaceId, model }: { workspaceId: string; model: string }) {
+  const catalog = useWorkspaceModelCatalog(workspaceId);
+  const label = catalog.rows.find((row) => row.id === model)?.label ?? model;
+  return (
+    <p className="text-xs text-fg-muted">
+      People outside the workspace use {label} (paid with credits).
+    </p>
+  );
+}
+
+/** "2 things won't work for public visitors", opening to the list with one-click fixes. */
+function SiteReadiness({
+  warnings,
+  access,
+  onFix,
+}: {
+  warnings: readonly SitePublishWarning[];
+  access: SitePublication["access"];
+  onFix: (fix: SitePublishWarningFix) => Promise<void>;
+}) {
+  const [fixing, setFixing] = useState<number | null>(null);
+  return (
+    <Disclosure title={readinessTitle(warnings, access)}>
+      <ul className="flex min-w-0 flex-col gap-3 pt-1">
+        {warnings.map((warning, index) => (
+          <li
+            key={`${warning.code}:${warning.message}`}
+            className="flex min-w-0 items-start justify-between gap-3"
+          >
+            <div className="min-w-0">
+              <p className="text-sm text-fg">{warning.message}</p>
+              <p className="text-xs leading-[18px] text-fg-muted">{warning.suggestion}</p>
+            </div>
+            {warning.fix ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={fixing !== null}
+                onClick={() => {
+                  setFixing(index);
+                  void onFix(warning.fix!).finally(() => setFixing(null));
+                }}
+                className="shrink-0 rounded-[10px] pointer-coarse:h-11"
+              >
+                {fixing === index ? "Fixing…" : "Fix"}
+              </Button>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </Disclosure>
+  );
+}
 
 function SiteReports({
   client,

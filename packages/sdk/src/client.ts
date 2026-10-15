@@ -58,7 +58,9 @@ import type {
   SiteAuthAuthorizeResponse,
   SiteHostnameAvailability,
   SiteLimitProfile,
+  SitePlatformUsage,
   SitePublication,
+  SitePublishWarningFix,
   SiteTakedownRequest,
   UpsertSitePublicationRequest,
 } from "@opengeni/contracts";
@@ -8707,6 +8709,46 @@ export class OpenGeniClient {
     return await this.requestJson<SitePublication>(
       "DELETE",
       sitePublicationPath(workspaceId, siteId),
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * Apply a readiness warning's one-click fix (`publication.warnings[].fix`):
+   * a Site Data collection's guest access or a Site SQL query's audience.
+   * Answers the publication with fresh warnings. 404
+   * `site_fix_target_missing` when the collection or query no longer exists.
+   */
+  async applySitePublicationFix(
+    workspaceId: string,
+    siteId: string,
+    fix: SitePublishWarningFix,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePublication> {
+    return await this.requestJson<SitePublication>(
+      "POST",
+      `${sitePublicationPath(workspaceId, siteId)}/fixes`,
+      fix,
+      undefined,
+      options,
+    );
+  }
+
+  /**
+   * This month's Site platform usage of the workspace (gateway requests,
+   * Site SQL rows read and written, Site SQL and Site Data storage) against
+   * its monthly allowance, with the billing mode and the Opengeni-wide
+   * brake state.
+   */
+  async getSitePlatformUsage(
+    workspaceId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<SitePlatformUsage> {
+    return await this.requestJson<SitePlatformUsage>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/site-platform-usage`,
       undefined,
       undefined,
       options,

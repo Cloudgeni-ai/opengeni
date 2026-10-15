@@ -1,5 +1,8 @@
 import {
-  DEFAULT_FREE_SITE_LIMITS,
+  DEFAULT_SITE_LIMITS,
+  SITE_PLATFORM_QUOTA_ERROR_CODE,
+  type SitePlatformUsage,
+  type SitePublishWarning,
   type SiteAbuseReport,
   type SiteHostnameAvailability,
   type SitePublication,
@@ -29,11 +32,13 @@ const publication = (patch: Partial<SitePublication> = {}): SitePublication => (
   status: "active",
   noindex: true,
   agent: { enabled: false, model: null, instructions: null, tools: null, guestTools: false },
-  limitProfile: { kind: "free", overrides: null },
-  effectiveLimits: { ...DEFAULT_FREE_SITE_LIMITS },
+  limitProfile: { kind: "standard", overrides: null },
+  effectiveLimits: { ...DEFAULT_SITE_LIMITS },
   invitedEmails: [],
   moderation: { openReports: 0, suspendedAt: null, suspendedBy: null, suspendedReason: null },
-  usage: { agentMicrosThisMonth: 430_000, conversationsToday: 12 },
+  usage: { agentMicrosThisMonth: 1_200_000, agentMicrosToday: 180_000, conversationsToday: 12 },
+  warnings: [],
+  outsideAgentModel: null,
   createdAt: minutesAgo(60 * 24 * 3),
   updatedAt: minutesAgo(30),
   ...patch,
@@ -46,6 +51,27 @@ const agentWithTools = {
   instructions: null,
   tools: ["linear", "github"],
   guestTools: false,
+};
+
+// What a public page that reads workspace tools and Site Data would be told.
+const warnings: SitePublishWarning[] = [
+  {
+    code: "workspace_tools_members_only",
+    message: "The page calls workspace tools (linear). Public visitors can't use them.",
+    suggestion: "Show this part only to workspace members, or keep the data in Site Data.",
+    fix: null,
+  },
+  {
+    code: "site_data_guest_read",
+    message: "The page reads the deals collection. Public visitors can't read it.",
+    suggestion: "Let visitors read deals, or show it only to members.",
+    fix: { kind: "site_data_guest_access", collection: "deals", guestAccess: "read" },
+  },
+];
+
+const personLimits = {
+  ...DEFAULT_SITE_LIMITS,
+  agentMicrosPerVisitorPerDay: 500_000,
 };
 
 // Every scenario views as the Site's owner; all but one are also workspace admins.
@@ -66,8 +92,48 @@ const saved: Record<string, SitePublication | null> = {
     access: "public",
     agent: { ...agentWithTools },
   }),
+  "public-person": publication({
+    access: "public",
+    agent: { enabled: true, model: "gpt-6", instructions: null, tools: null, guestTools: false },
+    limitProfile: { kind: "custom", overrides: { agentMicrosPerVisitorPerDay: 500_000 } },
+    effectiveLimits: personLimits,
+  }),
+  warnings: publication({
+    access: "public",
+    agent: { enabled: true, model: "gpt-6", instructions: null, tools: null, guestTools: false },
+    warnings,
+  }),
+  codex: publication({
+    access: "invited",
+    invitedEmails: ["ada@analytical.example"],
+    agent: {
+      enabled: true,
+      model: "codex/gpt-6-astra",
+      instructions: null,
+      tools: null,
+      guestTools: false,
+    },
+    outsideAgentModel: "claude-opus-5-5",
+    warnings: [
+      {
+        code: "agent_model_outside_fallback",
+        message: "GPT-6 Astra runs on a ChatGPT plan. Invited people use Claude Opus 5.5 instead.",
+        suggestion: "Pick a model paid with credits to use the same one for everyone.",
+        fix: null,
+      },
+    ],
+  }),
+  quota: publication({
+    access: "public",
+    agent: { enabled: true, model: "gpt-6", instructions: null, tools: null, guestTools: false },
+  }),
+  members: publication({
+    access: "members",
+    agent: { enabled: true, model: "gpt-6", instructions: null, tools: null, guestTools: false },
+  }),
   invited: publication({
     access: "invited",
+    agent: { enabled: true, model: "gpt-6", instructions: null, tools: null, guestTools: false },
     invitedEmails: ["ada@analytical.example", "grace@compiler.example", "katherine@orbit.example"],
   }),
   moderation: publication({
@@ -128,18 +194,51 @@ const notFound = () =>
 const version = { id: "88888888-8888-4888-8888-888888888888", revision: 4, requestedTools: [] };
 let current = saved[scenario] ?? null;
 
-const model = (id: string, label: string, provider: string, providerLabel: string) => ({
+const model = (
+  id: string,
+  label: string,
+  provider: string,
+  providerLabel: string,
+  cost: "paid" | "subscription" = "paid",
+) => ({
   id,
   label,
   provider,
   providerLabel,
   api: "responses",
   capabilities: { reasoning: { efforts: ["medium"], defaultEffort: "medium" }, latencyModes: [] },
-  cost: "paid",
+  cost,
   credentialReadiness: { status: "ready", reason: null, basis: "configuration", checkedAt: null },
   policyAllowed: true,
   availability: { status: "available", selectable: true, reason: null, checkedAt: null },
 });
+
+const meter = (
+  name: SitePlatformUsage["meters"][number]["meter"],
+  used: number,
+  allowance: number,
+  priceMicros: number,
+  priceUnit: number,
+) => ({ meter: name, used, peak: used, allowance, priceMicros, priceUnit, estimatedMicros: 0 });
+
+export const platformUsage: SitePlatformUsage = {
+  workspaceId,
+  periodStart: "2026-10-01",
+  billingMode: scenario === "usage-credits" ? "credits" : "usage_only",
+  meters: [
+    meter("requests", 412_380, 1_000_000, 600_000, 1_000_000),
+    meter("sql_rows_read", 8_600_000, 10_000_000, 2_000, 1_000_000),
+    meter("sql_rows_written", 23_400, 100_000, 2_000_000, 1_000_000),
+    meter("storage_bytes", 310_000_000, 1_000_000_000, 400_000, 1_000_000_000),
+  ],
+  estimatedMicros: 312_000,
+  chargedMicros: scenario === "usage-credits" ? 140_000 : 0,
+  shadowMicros: 0,
+  brake: {
+    engaged: scenario === "usage-brake",
+    engagedAt: scenario === "usage-brake" ? minutesAgo(20) : null,
+  },
+};
 
 export const client = {
   tools: { forWorkspace: () => ({ $catalog: async () => ({ entries: [] }) }) },
@@ -177,6 +276,7 @@ export const client = {
       models: [
         model("gpt-6", "GPT-6", "openai", "OpenAI"),
         model("claude-opus-5-5", "Claude Opus 5.5", "anthropic", "Anthropic"),
+        model("codex/gpt-6-astra", "GPT-6 Astra", "codex", "Codex", "subscription"),
       ],
       defaultSelection: { model: "gpt-6", reasoningEffort: "medium", source: "workspace" },
     };
@@ -211,6 +311,18 @@ export const client = {
     request: UpsertSitePublicationRequest,
   ) {
     fixtureActivity.puts.push(request);
+    if (scenario === "quota")
+      throw new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: {
+            code: "payment_required",
+            message: "This workspace has used this month's Sites allowance.",
+            details: { code: SITE_PLATFORM_QUOTA_ERROR_CODE },
+          },
+        }),
+        { mutation: true },
+      );
     const base = current ?? publication({ status: "unpublished" });
     const label = request.label ?? base.label;
     current = {
@@ -227,6 +339,13 @@ export const client = {
       updatedAt: new Date().toISOString(),
     };
     return current;
+  },
+  async applySitePublicationFix() {
+    current = { ...current!, warnings: current!.warnings.slice(0, 1) };
+    return current;
+  },
+  async getSitePlatformUsage(): Promise<SitePlatformUsage> {
+    return platformUsage;
   },
   async unpublishSite() {
     current = { ...current!, status: "unpublished", updatedAt: new Date().toISOString() };

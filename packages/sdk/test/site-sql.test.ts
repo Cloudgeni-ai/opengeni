@@ -140,4 +140,76 @@ describe("site.sql", () => {
       close();
     }
   });
+
+  test("a query this viewer may not run answers not_available_for_viewer", async () => {
+    const { client, close } = host({
+      advertise: true,
+      respond: () => ({
+        status: 403,
+        body: {
+          error: {
+            code: "forbidden",
+            message: "This query is for signed-in people",
+            details: { code: "not_available_for_viewer", feature: "site_sql" },
+          },
+        },
+      }),
+    });
+    try {
+      const error = await client.sql.run("my_votes").catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(OpenGeniSiteSqlError);
+      expect(error).toMatchObject({
+        code: "not_available_for_viewer",
+        status: 403,
+        details: { feature: "site_sql" },
+      });
+    } finally {
+      close();
+    }
+  });
+});
+
+describe("site.capabilities", () => {
+  const capabilities = {
+    agent: true,
+    workspaceTools: false,
+    siteData: "guest",
+    sqlQueryAudiences: ["everyone"],
+    viewAs: "public",
+  };
+
+  test("reads what the viewer may do from the Site config, once", async () => {
+    const { client, seen, close } = host({
+      advertise: true,
+      respond: () => ({ status: 200, body: { viewer: null, capabilities } }),
+    });
+    try {
+      expect(await client.capabilities).toEqual(capabilities as never);
+      expect(await client.capabilities).toEqual(capabilities as never);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.method).toBe("GET");
+      expect(seen[0]!.path.endsWith("/site/config")).toBe(true);
+    } finally {
+      close();
+    }
+  });
+
+  test("is null where the host does not report it", async () => {
+    const unsupported = host({ advertise: false, respond: () => ({ status: 200, body: {} }) });
+    const missing = host({ advertise: true, respond: () => ({ status: 404, body: {} }) });
+    const malformed = host({
+      advertise: true,
+      respond: () => ({ status: 200, body: { capabilities: { agent: "yes" } } }),
+    });
+    try {
+      expect(await unsupported.client.capabilities).toBeNull();
+      expect(unsupported.seen).toHaveLength(0);
+      expect(await missing.client.capabilities).toBeNull();
+      expect(await malformed.client.capabilities).toBeNull();
+    } finally {
+      unsupported.close();
+      missing.close();
+      malformed.close();
+    }
+  });
 });

@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import {
-  DEFAULT_FREE_SITE_LIMITS,
+  DEFAULT_SITE_LIMITS,
   type SiteHostnameAvailability,
   type SitePublication,
   type UpsertSitePublicationRequest,
@@ -51,11 +51,13 @@ const published = (patch: Partial<SitePublication> = {}): SitePublication => ({
   status: "active",
   noindex: true,
   agent: { enabled: false, model: null, instructions: null, tools: null, guestTools: false },
-  limitProfile: { kind: "free", overrides: null },
-  effectiveLimits: { ...DEFAULT_FREE_SITE_LIMITS },
+  limitProfile: { kind: "standard", overrides: null },
+  effectiveLimits: { ...DEFAULT_SITE_LIMITS },
   invitedEmails: [],
   moderation: { openReports: 0, suspendedAt: null, suspendedBy: null, suspendedReason: null },
-  usage: { agentMicrosThisMonth: 0, conversationsToday: 0 },
+  usage: { agentMicrosThisMonth: 0, agentMicrosToday: 0, conversationsToday: 0 },
+  warnings: [],
+  outsideAgentModel: null,
   createdAt: now,
   updatedAt: now,
   ...patch,
@@ -99,6 +101,7 @@ function fakeClient(overrides: Record<string, unknown> = {}) {
     updateSiteAbuseReport: async () => {
       throw new Error("unused");
     },
+    applySitePublicationFix: async () => published(),
     ...overrides,
   };
   return { client, calls };
@@ -148,14 +151,6 @@ const waitForCheck = async () => {
 const button = (root: ParentNode, label: string) =>
   [...root.querySelectorAll("button")].find((element) => element.textContent?.trim() === label);
 
-/** The checkbox a CheckboxField's label names. */
-const checkbox = (root: ParentNode, label: string) => {
-  const element = [...root.querySelectorAll("label")].find(
-    (candidate) => candidate.textContent?.trim() === label,
-  );
-  return element ? (document.getElementById(element.htmlFor) as HTMLButtonElement | null) : null;
-};
-
 function typeInto(element: HTMLInputElement | HTMLTextAreaElement, value: string) {
   const prototype = Object.getPrototypeOf(element) as object;
   Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(element, value);
@@ -183,7 +178,6 @@ test("a first publish suggests an address, checks it and sends the whole request
       label: "team-crm-abcd",
       access: "members",
       agent: { enabled: false },
-      limitProfile: { kind: "free", overrides: null },
       noindex: true,
       status: "active",
     },
@@ -363,139 +357,201 @@ test("a taken-down Site keeps its address, and only admins restore an admin's ta
   await admin.unmount();
 });
 
-test("admins let everyone use the agent's tools; others can't turn it on or change limits", async () => {
-  const withTools = published({
+const withAgent = (patch: Partial<SitePublication> = {}) =>
+  published({
     access: "public",
     agent: { enabled: true, model: null, instructions: null, tools: ["linear"], guestTools: false },
+    usage: { agentMicrosThisMonth: 1_200_000, agentMicrosToday: 0, conversationsToday: 4 },
+    ...patch,
   });
-  const { client, calls } = fakeClient();
-  const admin = await renderPage({
-    client: client as never,
-    load: { state: "ready", publication: withTools },
-  });
-  expect(admin.host.textContent).toContain("Uses 1 workspace connection.");
-  await act(async () => checkbox(admin.host, "Let everyone use these tools")!.click());
-  await act(async () => button(admin.host, "Save changes")!.click());
-  await flush();
-  expect(calls.updates.at(-1)).toEqual({ agent: { enabled: true, model: null, guestTools: true } });
-  await admin.unmount();
+const input = (root: ParentNode, label: string) =>
+  root.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
 
+test("invited and public Sites show one Site limit, an optional per-person limit and usage", async () => {
+  const { client, calls } = fakeClient();
+  const page = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: withAgent() },
+  });
+  const text = page.host.textContent ?? "";
+  expect(text).toContain("Agent for people outside the workspace");
+  expect(text).toContain("People outside the workspace can only use this Site's own data.");
+  expect(text).toContain("$1.20 of $10 used this month");
+  // No workspace tools for people outside the workspace, and no guard fields.
+  expect(text).not.toContain("Let everyone use these tools");
+  expect(text).not.toContain("Messages per conversation");
+  expect(input(page.host, "Limit amount")?.value).toBe("10");
+  expect(input(page.host, "Per person amount")).toBeNull();
+
+  await act(async () => button(page.host, "Limit per person")!.click());
+  await act(async () => typeInto(input(page.host, "Per person amount")!, "0.20"));
+  await act(async () => typeInto(input(page.host, "Limit amount")!, "25"));
+  await act(async () => button(page.host, "Save changes")!.click());
+  await flush();
+  expect(calls.updates.at(-1)).toEqual({
+    limitProfile: {
+      kind: "custom",
+      overrides: {
+        agentsEnabled: true,
+        agentMicrosPerSitePerMonth: 25_000_000,
+        agentMicrosPerSitePerDay: null,
+        agentMicrosPerVisitorPerDay: 200_000,
+        agentMicrosPerVisitorPerMonth: null,
+      },
+    },
+  });
+  await page.unmount();
+});
+
+test("turning the outside agent off hides its limits and saves it", async () => {
+  const { client, calls } = fakeClient();
+  const page = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: withAgent({ access: "invited" }) },
+  });
+  const toggle = page.host.querySelector<HTMLButtonElement>('[role="switch"]')!;
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  await act(async () => toggle.click());
+  expect(input(page.host, "Limit amount")).toBeNull();
+  await act(async () => button(page.host, "Save changes")!.click());
+  await flush();
+  expect(calls.updates.at(-1)?.limitProfile?.overrides).toMatchObject({ agentsEnabled: false });
+  await page.unmount();
+});
+
+test("non-admins see the outside limits but can't change them; members Sites have none", async () => {
+  const { client } = fakeClient();
   const member = await renderPage({
     client: client as never,
-    load: { state: "ready", publication: withTools },
+    load: { state: "ready", publication: withAgent() },
     isAdmin: false,
   });
-  expect(checkbox(member.host, "Let everyone use these tools")?.disabled).toBe(true);
-  expect(member.host.textContent).toContain("Only workspace admins can turn this on.");
-  expect(member.host.textContent).toContain("Only workspace admins change limits.");
+  expect(input(member.host, "Limit amount")?.disabled).toBe(true);
+  expect(button(member.host, "Limit per person")).toBeUndefined();
+  expect(member.host.textContent).toContain("Only workspace admins change this.");
   await member.unmount();
+
+  const membersOnly = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: withAgent({ access: "members" }) },
+  });
+  expect(membersOnly.host.textContent).not.toContain("Agent for people outside the workspace");
+  expect(input(membersOnly.host, "Limit amount")).toBeNull();
+  expect(membersOnly.host.textContent).not.toContain("View as visitor");
+  await membersOnly.unmount();
 });
 
-test("an admin-only refusal shows next to the agent's tools", async () => {
-  const withTools = published({
-    access: "public",
-    agent: { enabled: true, model: null, instructions: null, tools: ["linear"], guestTools: false },
-  });
-  const { client } = fakeClient({
-    updateSitePublication: async () => {
-      throw new OpenGeniApiError(403, "admin", { code: "site_admin_required" });
-    },
-  });
+test("a subscription model names the credit-billed model outside people use", async () => {
+  const { client } = fakeClient();
   const page = await renderPage({
     client: client as never,
-    load: { state: "ready", publication: withTools },
+    load: {
+      state: "ready",
+      publication: withAgent({
+        agent: {
+          enabled: true,
+          model: "codex/gpt-6.1-sol",
+          instructions: null,
+          tools: null,
+          guestTools: false,
+        },
+        outsideAgentModel: "gpt-6",
+      }),
+    },
   });
-  await act(async () => checkbox(page.host, "Let everyone use these tools")!.click());
-  await act(async () => button(page.host, "Save changes")!.click());
-  await flush();
   expect(page.host.textContent).toContain(
-    "Only a workspace admin can give the agent's tools to guests.",
+    "People outside the workspace use gpt-6 (paid with credits).",
   );
-  expect(page.published).toHaveLength(0);
   await page.unmount();
 });
 
-test("opening a Site with tools for everyone is refused for non-admins next to the tools", async () => {
-  const withTools = published({
-    access: "members",
-    agent: { enabled: true, model: null, instructions: null, tools: ["linear"], guestTools: true },
-  });
+test("readiness warnings open to a list with one-click fixes", async () => {
+  const fixes: unknown[] = [];
+  const fix = {
+    kind: "site_data_guest_access" as const,
+    collection: "votes",
+    guestAccess: "append" as const,
+  };
   const { client } = fakeClient({
-    updateSitePublication: async () => {
-      throw new OpenGeniApiError(403, "admin", { code: "site_admin_required" });
+    applySitePublicationFix: async (_ws: string, _site: string, request: unknown) => {
+      fixes.push(request);
+      return withAgent();
     },
   });
   const page = await renderPage({
     client: client as never,
-    load: { state: "ready", publication: withTools },
-    isAdmin: false,
+    load: {
+      state: "ready",
+      publication: withAgent({
+        warnings: [
+          {
+            code: "site_data_guest_write",
+            message: "Public visitors can't add to votes.",
+            suggestion: "Let guests append to votes.",
+            fix,
+          },
+          {
+            code: "workspace_tools_members_only",
+            message: "The page calls workspace tools, which only members can use.",
+            suggestion: "Use Site Data or Site SQL instead.",
+            fix: null,
+          },
+        ],
+      }),
+    },
   });
-  const anyone = [...page.host.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find(
-    (element) => element.textContent?.includes("Anyone with the link"),
-  );
-  await act(async () => anyone!.click());
-  await act(async () => button(page.host, "Save changes")!.click());
+  const line = [...page.host.querySelectorAll("button")].find((element) =>
+    element.textContent?.includes("2 things won't work for public visitors"),
+  )!;
+  expect(line.getAttribute("aria-expanded")).toBe("false");
+  await act(async () => line.click());
+  expect(line.getAttribute("aria-expanded")).toBe("true");
+  expect(page.host.textContent).toContain("Public visitors can't add to votes.");
+  expect(page.host.textContent).toContain("Use Site Data or Site SQL instead.");
+  await act(async () => button(page.host, "Fix")!.click());
   await flush();
-  expect(page.host.textContent).toContain(
-    "Only a workspace admin can open a Site with tools to everyone.",
-  );
-  expect(page.published).toHaveLength(0);
+  expect(fixes).toEqual([fix]);
+  expect(page.published).toHaveLength(1);
   await page.unmount();
 });
 
-test("inviting people while the agent has tools is refused for non-admins next to the invitees", async () => {
-  const withTools = published({
-    access: "members",
-    agent: { enabled: true, model: null, instructions: null, tools: ["linear"], guestTools: false },
-  });
-  const { client } = fakeClient({
-    updateSitePublication: async () => {
-      throw new OpenGeniApiError(403, "admin", { code: "site_admin_required" });
-    },
-  });
+test("View as visitor opens the Site as its visitors' role", async () => {
+  const { client } = fakeClient();
   const page = await renderPage({
     client: client as never,
-    load: { state: "ready", publication: withTools },
-    isAdmin: false,
+    load: { state: "ready", publication: withAgent({ access: "invited" }) },
   });
-  const invited = [...page.host.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find(
-    (element) => element.textContent?.includes("Invited people"),
+  const link = [...page.host.querySelectorAll("a")].find(
+    (element) => element.textContent === "View as visitor",
   );
-  await act(async () => invited!.click());
-  await act(async () => button(page.host, "Save changes")!.click());
-  await flush();
-  expect(page.host.textContent).toContain(
-    "Only a workspace admin can invite people while the agent has tools.",
+  expect(link?.getAttribute("href")).toBe(
+    "https://team-crm-4k9x.sites.example/?og_view_as=invited",
   );
-  expect(page.published).toHaveLength(0);
   await page.unmount();
 });
 
-test("opening a Site that lists invitees while the agent has tools is refused for non-admins", async () => {
-  const withTools = published({
-    access: "members",
-    invitedEmails: ["ada@example.com"],
-    agent: { enabled: true, model: null, instructions: null, tools: ["linear"], guestTools: false },
-  });
+test("a platform refusal explains itself instead of failing the form", async () => {
   const { client } = fakeClient({
     updateSitePublication: async () => {
-      throw new OpenGeniApiError(403, "admin", { code: "site_admin_required" });
+      throw new OpenGeniApiError(
+        402,
+        JSON.stringify({
+          error: {
+            code: "payment_required",
+            message: "Sites allowance used up",
+            details: { code: "site_platform_quota_exhausted" },
+          },
+        }),
+        { mutation: true },
+      );
     },
   });
-  const page = await renderPage({
-    client: client as never,
-    load: { state: "ready", publication: withTools },
-    isAdmin: false,
-  });
-  const anyone = [...page.host.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find(
-    (element) => element.textContent?.includes("Anyone with the link"),
-  );
-  await act(async () => anyone!.click());
-  await act(async () => button(page.host, "Save changes")!.click());
+  const page = await renderPage({ client: client as never, load: { state: "none" } });
+  await waitForCheck();
+  await act(async () => button(page.host, "Publish")!.click());
   await flush();
-  expect(page.host.textContent).toContain(
-    "Only a workspace admin can give the agent's tools to invited people.",
-  );
+  expect(page.host.textContent).toContain("Sites allowance used up");
+  expect(page.host.textContent).toContain("Add credits to publish again.");
   expect(page.published).toHaveLength(0);
   await page.unmount();
 });
