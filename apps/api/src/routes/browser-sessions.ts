@@ -3133,12 +3133,14 @@ export function registerBrowserSessionRoutes(
         workspaceId,
         browserSessionId,
       });
+      stages?.mark("record");
       const sourceAuthorization = await authorizeSourceSession(
         deps,
         grant,
         record.sourceSessionId,
         authorizationOperation,
       );
+      stages?.mark("authorize");
       let sourceSession: Session | null = null;
       if (record.session.placement?.kind === "connected_machine") {
         sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
@@ -3150,6 +3152,7 @@ export function registerBrowserSessionRoutes(
           );
         }
       }
+      stages?.mark("source_session");
       if (record.session.lifecycle !== "active" || !record.session.controller) {
         throw new BrowserSessionStateError("BrowserSession is not active");
       }
@@ -3244,6 +3247,7 @@ export function registerBrowserSessionRoutes(
         return result;
       };
       const cached = await cachedBrowserPlacement(record);
+      stages?.mark("placement_cache");
       if (cached) {
         try {
           return await run(cached);
@@ -3272,12 +3276,16 @@ export function registerBrowserSessionRoutes(
         channelOperation,
         context.req.raw.signal,
         async (placement) => {
-          const use = async () =>
-            await run(
-              await cacheBrowserControllerPlacement(grant, workspaceId, placement).catch(
-                () => placement,
-              ),
-            );
+          stages?.mark("placement_resolve");
+          const use = async () => {
+            const cachedPlacement = await cacheBrowserControllerPlacement(
+              grant,
+              workspaceId,
+              placement,
+            ).catch(() => placement);
+            stages?.mark("placement_cache_write");
+            return await run(cachedPlacement);
+          };
           if (browserSessionStorageMode(record.session) === "ephemeral_context") return await use();
           return await withControllerTransportRecovery({
             channelOperation,

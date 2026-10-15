@@ -4,7 +4,13 @@ import type { Context } from "hono";
 /** Fixed stage names, so the histogram label stays bounded. */
 export type InteractionRouteStage =
   | "auth"
+  | "record"
+  | "authorize"
+  | "source_session"
   | "control"
+  | "placement_cache"
+  | "placement_resolve"
+  | "placement_cache_write"
   | "placement"
   | "fences"
   | "passkey_pre"
