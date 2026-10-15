@@ -3,6 +3,7 @@ import {
   parseSiteHostname,
   SiteAuthAuthorizeRequest,
   SiteLimitProfile,
+  SitePublishWarningFix,
   siteHostname,
   SiteTakedownRequest,
   SITE_GATEWAY_CALLBACK_PATH,
@@ -42,7 +43,14 @@ import {
   effectiveSiteLimits,
   siteLimitOverrides,
   sourceSiteLimitProfile,
+  storedSiteLimitProfileKind,
 } from "../site-publishing/limits";
+import { readSitePlatformUsageView } from "../site-publishing/platform-usage";
+import { applySitePublishWarningFix, SiteFixTargetMissing } from "../site-publishing/readiness";
+import { SiteDataError } from "@opengeni/db";
+import { SiteSqlError } from "../site-sql/service";
+import { siteDataHttpError } from "./site-data";
+import { siteSqlHttpError } from "./site-sql";
 import {
   requireSiteManager,
   requireSitesDomain,
@@ -195,6 +203,39 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
       upsertSitePublicationForManager(deps, grant, management, request),
     );
     return context.json(result.publication, result.created ? 201 : 200);
+  });
+
+  /**
+   * Apply a readiness warning's safe fix (a collection's guest access or a
+   * query's audience), then answer the publication with fresh warnings.
+   */
+  app.post(`${base}/fixes`, async (context) => {
+    requireSitesDomain(deps.settings);
+    const grant = await grantFor(context, "artifacts:publish");
+    const fix = await body(context, SitePublishWarningFix);
+    const management = await resolveSiteManagement(deps, grant, siteIdParam(context), {
+      mutate: true,
+    });
+    requireSiteManager(management);
+    const publication = await getSitePublication(deps.db, management.scope, management.record.id);
+    if (!publication)
+      throw sitePublishingError(404, "not_found", "site_not_published", "This Site is not published");
+    try {
+      await applySitePublishWarningFix(
+        deps,
+        grant,
+        management.scope,
+        management.record.id,
+        fix,
+      );
+    } catch (error) {
+      if (error instanceof SiteFixTargetMissing)
+        throw sitePublishingError(404, "not_found", "site_fix_target_missing", error.message);
+      if (error instanceof SiteDataError) throw siteDataHttpError(error);
+      if (error instanceof SiteSqlError) throw siteSqlHttpError(error);
+      throw error;
+    }
+    return context.json(await sitePublicationView(deps, management.scope, publication));
   });
 
   // Unpublish: the Site stops being served; its hostname stays with it.
@@ -380,6 +421,27 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
     );
   });
 
+  /**
+   * This month's Site platform usage of the workspace (gateway requests,
+   * Site SQL rows and storage, Site Data storage) against its allowance, and
+   * the Opengeni-wide brake state.
+   */
+  app.get("/v1/workspaces/:workspaceId/site-platform-usage", async (context) => {
+    requireSitesDomain(deps.settings);
+    const grant = await requireAccessGrant(
+      context,
+      deps,
+      context.req.param("workspaceId")!,
+      "workspace:read",
+    );
+    return context.json(
+      await readSitePlatformUsageView(deps, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+      }),
+    );
+  });
+
   // The workspace's default limit profile for its published Sites.
   app.get("/v1/workspaces/:workspaceId/site-limit-profile", async (context) => {
     requireSitesDomain(deps.settings);
@@ -420,7 +482,7 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
       deps.db,
       { accountId: grant.accountId, workspaceId: grant.workspaceId },
       {
-        kind: request.kind,
+        kind: storedSiteLimitProfileKind(request.kind),
         overrides:
           request.kind === "custom"
             ? (siteLimitOverrides(request.overrides as Record<string, unknown> | null) as Record<

@@ -7,7 +7,14 @@ import {
 } from "@opengeni/core";
 import type { Context, Next } from "hono";
 import { HTTPException } from "hono/http-exception";
+import {
+  SITE_AGENT_EDITABLE_ARTIFACT_RESOURCE,
+  siteAgentMayEditArtifacts,
+} from "./mcp/site-agent-clamp-tools";
 import { requireSiteAgentMayChangeArtifact, sitePublishingError } from "./site-publishing/service";
+
+/** Document, spreadsheet and presentation writes: open only when the Site declares them. */
+const EDITABLE_ARTIFACT_WRITES = /^\/editable-artifacts(?:\/.*)?$/u;
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
@@ -58,7 +65,6 @@ export const SITE_AGENT_WRITES: readonly RegExp[] = [
   // status and audience follow `requireSiteAgentMayChangeArtifact`.
   /^\/files\/(?:uploads|uploads\/[^/]+\/complete|[^/]+\/download-url)\/?$/u,
   /^\/artifacts\/[^/]+\/playback-source\/?$/u,
-  /^\/editable-artifacts(?:\/.*)?$/u,
   /^\/published-artifacts(?:\/uploads)?\/?$/u,
   /^\/published-artifacts\/[^/]+\/(?:data|files)(?:\/.*)?$/u,
   // Reads sent as POST: searches, download links and a dry run.
@@ -228,6 +234,15 @@ export function siteClampedAgentGuard(deps: ApiRouteDeps) {
       return;
     }
     const clamp = await siteAgentClamp(deps.db, grant);
+    if (clamp?.clamped && EDITABLE_ARTIFACT_WRITES.test(workspaceRoute(path) ?? "")) {
+      if (await siteAgentMayEditArtifacts(deps, grant, clamp)) {
+        await next();
+        return;
+      }
+      throw new HTTPException(403, {
+        message: siteClampedAgentMessage(SITE_AGENT_EDITABLE_ARTIFACT_RESOURCE),
+      });
+    }
     if (clamp?.clamped) {
       const what = siteAgentWriteResource(path);
       if (what === "Site publications")

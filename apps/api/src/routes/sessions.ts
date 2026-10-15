@@ -170,6 +170,7 @@ import {
   getLiveEnrollmentConnection,
   getRetainedProcess,
   getSandbox,
+  getPublishedSiteVersion,
   getSession,
   readActiveSandbox,
   deleteSessionTreeIfQuiescent,
@@ -764,7 +765,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             },
             403,
           );
-        payload = await siteFrameSessionProfile(deps, workspaceId, payload);
+        payload = await siteFrameSessionProfile(deps, workspaceId, payload, {
+          accountId: grant.accountId,
+          siteId: siteOrigin.siteId,
+          versionId: siteOrigin.versionId ?? null,
+        });
       }
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
@@ -6368,6 +6373,7 @@ async function siteFrameSessionProfile(
   deps: ApiRouteDeps,
   workspaceId: string,
   payload: unknown,
+  frame: { accountId: string; siteId: string | null; versionId: string | null },
 ): Promise<Record<string, unknown>> {
   const body = (payload ?? {}) as Record<string, unknown>;
   const profile: Record<string, unknown> = {};
@@ -6379,6 +6385,15 @@ async function siteFrameSessionProfile(
       ? Object.fromEntries(Object.entries(metadata).filter(([key]) => !key.startsWith("_opengeni")))
       : {};
   profile.vaultPolicy = { mode: "selected", vaultIds: [] };
+  // Tools are the overlap of what the Site declares and what the person may
+  // use: only the workspace MCP connections the Site version requests (the
+  // person's own access to each still applies), never the workspace
+  // default set. A frame with no published Site declares none.
+  profile.tools = (await siteFrameDeclaredServerIds(deps, workspaceId, frame)).map((id) => ({
+    kind: "mcp",
+    id,
+    optional: true,
+  }));
   profile.agent = {
     capabilities: siteFrameCapabilities(
       resolveWorkspaceAgentDefaults((await requireWorkspace(deps.db, workspaceId)).settings)
@@ -6387,6 +6402,28 @@ async function siteFrameSessionProfile(
     ),
   };
   return profile;
+}
+
+/** The workspace MCP connections (not the first-party server) a Site version declares. */
+async function siteFrameDeclaredServerIds(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  frame: { accountId: string; siteId: string | null; versionId: string | null },
+): Promise<string[]> {
+  if (!frame.siteId || !frame.versionId) return [];
+  const version = await getPublishedSiteVersion(
+    deps.db,
+    { accountId: frame.accountId, workspaceId },
+    frame.siteId,
+    frame.versionId,
+  ).catch(() => null);
+  return [
+    ...new Set(
+      (version?.requestedTools ?? [])
+        .map((tool) => tool.serverId)
+        .filter((serverId) => serverId !== "opengeni" && /^[A-Za-z0-9_-]{1,200}$/u.test(serverId)),
+    ),
+  ];
 }
 
 /**

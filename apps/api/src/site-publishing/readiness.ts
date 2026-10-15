@@ -1,4 +1,6 @@
 import type {
+  AccessGrant,
+  SitePublishWarningFix,
   SiteAccessMode,
   SiteDataAccessMode,
   SiteDataGuestAccess,
@@ -13,7 +15,9 @@ import {
   type SitePublishingScope,
 } from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { defineSiteDataCollection } from "../site-data/operations";
 import { siteDataStore } from "../site-data/service";
+import { defineSiteSqlQuery } from "../site-sql/service";
 import { resolveSiteOutsideModel, type SiteOutsideModelChoice } from "./agent-model";
 import { effectiveSiteAccess, siteGuestsAllowed } from "./viewer";
 
@@ -262,3 +266,45 @@ export async function readSitePublicationReadiness(
     outsideAgentModel: outsideModel?.kind === "fallback" ? outsideModel.model : null,
   };
 }
+
+/**
+ * Apply a readiness warning's safe fix through the ordinary definition
+ * paths (the same checks as defining the collection or query by hand): a
+ * collection's guest access, or a named query's audience. Everything else
+ * about the collection or query stays as it is.
+ */
+export async function applySitePublishWarningFix(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  scope: SitePublishingScope,
+  siteId: string,
+  fix: SitePublishWarningFix,
+): Promise<void> {
+  const siteScope = { ...scope, siteId };
+  if (fix.kind === "site_data_guest_access") {
+    const collection = await siteDataStore(deps.db).getCollection(siteScope, fix.collection);
+    if (!collection)
+      throw new SiteFixTargetMissing(`There is no collection named ${fix.collection}`);
+    await defineSiteDataCollection(deps, grant, siteId, collection.name, {
+      accessMode: collection.accessMode,
+      privateRecords: collection.privateRecords,
+      guestAccess: fix.guestAccess,
+      jsonSchema: collection.jsonSchema,
+      indexedFields: collection.indexedFields,
+      uniqueFields: collection.uniqueFields,
+    });
+    return;
+  }
+  const query = (await listSiteSqlQueries(deps.db, siteScope)).find(
+    (candidate) => candidate.name === fix.query,
+  );
+  if (!query) throw new SiteFixTargetMissing(`There is no query named ${fix.query}`);
+  await defineSiteSqlQuery(deps, grant, siteId, query.name, {
+    sql: query.sql,
+    audience: fix.audience,
+    ...(query.description ? { description: query.description } : {}),
+    ...(query.maxRows ? { maxRows: query.maxRows } : {}),
+  });
+}
+
+export class SiteFixTargetMissing extends Error {}
