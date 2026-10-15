@@ -100,7 +100,7 @@ async function storageStateFor(browser: Browser, user: string): Promise<string> 
   const run = signInChain.then(async () => {
     let failure: unknown;
     for (const delay of [0, 20_000, 45_000]) {
-      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      if (delay) await new Promise((done) => setTimeout(done, delay));
       try {
         return await signIn(browser, user);
       } catch (error) {
