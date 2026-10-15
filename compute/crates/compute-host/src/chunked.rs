@@ -76,41 +76,8 @@ impl Chunked {
     /// `az://container/prefix` or `s3://bucket/prefix`, with credentials
     /// from the environment or the machine's own identity. `None` if `url`
     /// is not an object storage URL.
-    pub fn from_url(url: &str) -> Result<Option<Self>, object_store::Error> {
-        use object_store::ObjectStore;
-        use object_store::aws::AmazonS3Builder;
-        use object_store::azure::MicrosoftAzureBuilder;
-        use object_store::gcp::GoogleCloudStorageBuilder;
-
-        let Some((scheme, rest)) = url.split_once("://") else {
-            return Ok(None);
-        };
-        let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
-        let backend: Arc<dyn ObjectStore> = match scheme {
-            "gs" => Arc::new(
-                GoogleCloudStorageBuilder::from_env()
-                    .with_bucket_name(bucket)
-                    .build()?,
-            ),
-            "az" => Arc::new(
-                MicrosoftAzureBuilder::from_env()
-                    .with_container_name(bucket)
-                    .build()?,
-            ),
-            "s3" => Arc::new(
-                AmazonS3Builder::from_env()
-                    .with_bucket_name(bucket)
-                    .build()?,
-            ),
-            other => {
-                return Err(object_store::Error::Generic {
-                    store: "compute-host",
-                    source: format!("unknown store {other}://; use gs://, az:// or s3://").into(),
-                });
-            }
-        };
-        let prefix = object_store::path::Path::from(prefix.trim_end_matches('/'));
-        Ok(Some(Self::new(ChunkStore::new(backend, prefix))))
+    pub fn from_url(url: &str) -> Result<Option<Self>, compute_storage::Error> {
+        Ok(ChunkStore::from_url(url)?.map(Self::new))
     }
 
     async fn head(&self, operation: &'static str, id: Id) -> Result<Option<Head>, EngineError> {
