@@ -61,6 +61,10 @@ pub struct FetchInto {
     pub profile: PathBuf,
     /// Whether to bring back the memory image.
     pub memory: bool,
+    /// A local file the disk was probably created from, such as the host's
+    /// base image: a store may copy chunks that match it at the same offset
+    /// instead of downloading them.
+    pub seed: Option<PathBuf>,
 }
 
 /// The memory image a fetch brought back.

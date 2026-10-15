@@ -15,7 +15,10 @@
 //!
 //! Fetching brings the disk and device state back whole but leaves memory
 //! in the store, to be paged in as the guest touches it (see
-//! [`crate::lazy`]).
+//! [`crate::lazy`]). A disk starts as a copy (a reflink where the
+//! filesystem allows) of the host's base image it was created from, and
+//! only chunks that differ from the base at the same offset are downloaded:
+//! a sandbox that changed little of its disk wakes from local bytes.
 //!
 //! Chunks no pointer refers to any more are left for garbage collection,
 //! which is not part of this module.
@@ -27,6 +30,7 @@ use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use compute_engine::{EngineError, ErrorKind};
 use compute_storage::Error as StorageError;
@@ -35,9 +39,10 @@ use compute_storage::manifest::{DiskManifest, Extent, ExtentSource};
 use compute_storage::store::ChunkStore;
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 pub use crate::image::CHUNK_BYTES;
-use crate::image::{Hash, ZERO, chunk_count, chunk_range, data_ranges, overlaps};
+use crate::image::{Hash, ZERO, chunk_count, chunk_range, data_ranges, hash_chunks, overlaps};
 use crate::protocol::Id;
 use crate::store::{FetchInto, FetchedMemory, Receipt, SavedFiles, Store};
 
@@ -85,6 +90,66 @@ fn parse_head(operation: &'static str, bytes: &[u8]) -> Result<Head, EngineError
 #[derive(Clone, Debug)]
 pub struct Chunked {
     chunks: ChunkStore,
+    /// The chunk hashes of the base image disks are fetched over, computed
+    /// once per version of that file.
+    seed: Arc<Mutex<Option<Arc<Seed>>>>,
+}
+
+/// What identifies one version of a local file: if any of it changes, the
+/// file's chunk hashes must be computed again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Identity {
+    device: u64,
+    inode: u64,
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl Identity {
+    fn of(path: &Path) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(path)?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        })
+    }
+}
+
+/// A local file a fetched disk probably shares most of its chunks with, at
+/// the same offsets, and the hash of each of its chunks.
+#[derive(Debug)]
+struct Seed {
+    path: PathBuf,
+    identity: Identity,
+    hashes: Vec<Hash>,
+}
+
+impl Seed {
+    fn compute(path: &Path) -> io::Result<Self> {
+        let identity = Identity::of(path)?;
+        let file = File::open(path)?;
+        let indices: Vec<usize> = (0..chunk_count(identity.len)).collect();
+        let hashes = hash_chunks(&file, identity.len, &indices)?;
+        if Identity::of(path)? != identity {
+            return Err(io::Error::other("the file changed while it was hashed"));
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            identity,
+            hashes,
+        })
+    }
+
+    /// Whether chunk `index` of the seed holds exactly `hash`.
+    fn holds(&self, index: usize, hash: &str) -> bool {
+        self.hashes
+            .get(index)
+            .zip(hash_from_hex(hash).ok())
+            .is_some_and(|(held, wanted)| *held == wanted)
+    }
 }
 
 impl Chunked {
@@ -92,7 +157,10 @@ impl Chunked {
     /// chunks, so the prefix is also the boundary of who may see whose bytes.
     #[must_use]
     pub fn new(chunks: ChunkStore) -> Self {
-        Self { chunks }
+        Self {
+            chunks,
+            seed: Arc::default(),
+        }
     }
 
     /// Opens the object storage `url` names: `gs://bucket/prefix`,
@@ -113,6 +181,36 @@ impl Chunked {
             return Ok(None);
         };
         parse_head(operation, &bytes).map(Some)
+    }
+
+    /// The chunk hashes of `path` as it is now, computed at most once per
+    /// version of the file however many fetches ask at once. `None` if it
+    /// cannot be read: fetching then downloads everything.
+    async fn seed(&self, path: &Path) -> Option<Arc<Seed>> {
+        let mut cached = self.seed.lock().await;
+        let current = Identity::of(path).ok()?;
+        if let Some(seed) = cached.as_ref()
+            && seed.path == path
+            && seed.identity == current
+        {
+            return Some(Arc::clone(seed));
+        }
+        let owned = path.to_owned();
+        match tokio::task::spawn_blocking(move || Seed::compute(&owned)).await {
+            Ok(Ok(seed)) => {
+                let seed = Arc::new(seed);
+                *cached = Some(Arc::clone(&seed));
+                Some(seed)
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(path = %path.display(), %error, "base image unreadable; downloading whole disks");
+                None
+            }
+            Err(error) => {
+                tracing::warn!(%error, "hashing the base image failed");
+                None
+            }
+        }
     }
 
     /// The whole chunks of an earlier copy of a file, by offset, so bytes that
@@ -223,7 +321,14 @@ impl Chunked {
     }
 
     /// Writes the file a manifest describes to `path`, replacing it whole.
-    async fn get_file(&self, digest: &str, path: &Path) -> Result<(), EngineError> {
+    /// With a `seed`, the file starts as a copy of it and only chunks that
+    /// differ from the seed at the same offset are downloaded.
+    async fn get_file(
+        &self,
+        digest: &str,
+        path: &Path,
+        seed: Option<&Seed>,
+    ) -> Result<(), EngineError> {
         const OP: &str = "fetch";
         let manifest = self
             .chunks
@@ -231,26 +336,42 @@ impl Chunked {
             .await
             .map_err(|error| storage_error(OP, error))?;
         let staging = staging_path(path);
-        let file = File::create(&staging).map_err(|error| EngineError::io(OP, error))?;
+        let seed = match seed {
+            Some(seed) if copy_seed(seed, &staging).await? => Some(seed),
+            _ => None,
+        };
+        let file = if seed.is_some() {
+            fs::OpenOptions::new().write(true).open(&staging)
+        } else {
+            File::create(&staging)
+        }
+        .map_err(|error| EngineError::io(OP, error))?;
         file.set_len(manifest.disk_len)
             .map_err(|error| EngineError::io(OP, error))?;
         let file = Arc::new(file);
-        let mut reads = Vec::new();
-        for extent in manifest.extents {
-            match extent.source {
-                ExtentSource::Zero => {}
-                ExtentSource::Chunk { reference, offset } => {
-                    reads.push((extent.offset, extent.length, reference, offset));
-                }
-                ExtentSource::Base { .. } => {
-                    return Err(EngineError::new(
-                        ErrorKind::Fatal,
-                        OP,
-                        "stored copy refers to a base image this store does not hold",
-                    ));
-                }
-            }
+        let Plan {
+            reads,
+            zeros,
+            local,
+        } = plan(manifest.extents, seed)?;
+        if !zeros.is_empty() {
+            let file = Arc::clone(&file);
+            tokio::task::spawn_blocking(move || {
+                zeros
+                    .into_iter()
+                    .try_for_each(|range| punch_hole(&file, range))
+            })
+            .await
+            .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
+            .map_err(|error| EngineError::io(OP, error))?;
         }
+        let downloaded: u64 = reads.iter().map(|(_, length, ..)| length).sum();
+        tracing::debug!(
+            path = %path.display(),
+            local_mib = local >> 20,
+            downloaded_mib = downloaded >> 20,
+            "fetching file"
+        );
         stream::iter(reads)
             .map(|(at, length, reference, within)| {
                 let file = Arc::clone(&file);
@@ -398,7 +519,13 @@ impl Store for Chunked {
                 "no stored copy of this sandbox",
             ));
         };
-        let disk = self.get_file(&head.disk, &into.disk);
+        let disk = async {
+            let seed = match &into.seed {
+                Some(path) => self.seed(path).await,
+                None => None,
+            };
+            self.get_file(&head.disk, &into.disk, seed.as_deref()).await
+        };
         let profile = async {
             if let Some(reference) = &head.profile {
                 // A missing or damaged profile only makes the wake slower.
@@ -432,7 +559,8 @@ impl Store for Chunked {
                     .await
                     .map_err(|error| storage_error(OP, error))
             };
-            let ((), manifest) = tokio::try_join!(self.get_file(&stored.state, &state), manifest)?;
+            let ((), manifest) =
+                tokio::try_join!(self.get_file(&stored.state, &state, None), manifest)?;
             if let Some(refs) = chunk_refs(&manifest) {
                 let chunks = refs
                     .iter()
@@ -458,7 +586,7 @@ impl Store for Chunked {
             // A manifest not laid out in whole chunks cannot be paged in;
             // bring the memory back whole instead.
             let memory = into.scratch.join("memory");
-            self.get_file(&stored.memory, &memory).await?;
+            self.get_file(&stored.memory, &memory, None).await?;
             Ok(FetchedMemory::Local { state, memory })
         };
         let ((), (), memory) = tokio::try_join!(disk, profile, memory)?;
@@ -618,6 +746,104 @@ fn staging_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// One chunk range to download: where it goes, its length, its chunk and
+/// where in the chunk it starts.
+type Read = (u64, u64, ChunkRef, u32);
+
+/// How a fetched file is filled in.
+struct Plan {
+    /// Ranges to download.
+    reads: Vec<Read>,
+    /// Ranges a seeded file must have zeroed.
+    zeros: Vec<Range<u64>>,
+    /// Bytes the seed already holds.
+    local: u64,
+}
+
+/// Decides which of a manifest's `extents` must be downloaded, given the
+/// file starts as a copy of `seed` (or empty without one).
+fn plan(extents: Vec<Extent>, seed: Option<&Seed>) -> Result<Plan, EngineError> {
+    let mut plan = Plan {
+        reads: Vec::new(),
+        zeros: Vec::new(),
+        local: 0,
+    };
+    for extent in extents {
+        match extent.source {
+            // A fresh file is zeros already; a seeded one may not be.
+            ExtentSource::Zero => {
+                if seed.is_some() {
+                    plan.zeros
+                        .push(extent.offset..extent.offset + extent.length);
+                }
+            }
+            ExtentSource::Chunk { reference, offset } => {
+                let whole = offset == 0
+                    && extent.offset % CHUNK_BYTES == 0
+                    && extent.length == u64::from(reference.plain_len);
+                let index = usize::try_from(extent.offset / CHUNK_BYTES).unwrap_or(usize::MAX);
+                if whole && seed.is_some_and(|seed| seed.holds(index, &reference.hash)) {
+                    plan.local += extent.length;
+                } else {
+                    plan.reads
+                        .push((extent.offset, extent.length, reference, offset));
+                }
+            }
+            ExtentSource::Base { .. } => {
+                return Err(EngineError::new(
+                    ErrorKind::Fatal,
+                    "fetch",
+                    "stored copy refers to a base image this store does not hold",
+                ));
+            }
+        }
+    }
+    Ok(plan)
+}
+
+/// Starts `staging` as a copy of `seed`'s file. Returns whether the copy
+/// matches the seed's hashes; a file replaced since they were taken does
+/// not, and the fetch then starts from an empty file instead.
+async fn copy_seed(seed: &Seed, staging: &Path) -> Result<bool, EngineError> {
+    let (from, to) = (seed.path.clone(), staging.to_owned());
+    let identity = seed.identity;
+    let copied = tokio::task::spawn_blocking(move || {
+        crate::layout::copy_sparse(&from, &to)?;
+        Ok::<_, io::Error>(Identity::of(&from)? == identity)
+    })
+    .await
+    .map_err(|error| EngineError::caused_by(ErrorKind::Transient, "fetch", error))?;
+    Ok(copied.unwrap_or_else(|error| {
+        tracing::debug!(%error, "could not start from the base image");
+        false
+    }))
+}
+
+/// Makes `range` of `file` read as zeros, freeing its blocks.
+#[cfg(target_os = "linux")]
+fn punch_hole(file: &File, range: Range<u64>) -> io::Result<()> {
+    use rustix::fs::{FallocateFlags, fallocate};
+    fallocate(
+        file,
+        FallocateFlags::PUNCH_HOLE | FallocateFlags::KEEP_SIZE,
+        range.start,
+        range.end - range.start,
+    )
+    .map_err(io::Error::from)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn punch_hole(file: &File, range: Range<u64>) -> io::Result<()> {
+    let zeros = vec![0_u8; usize::try_from(CHUNK_BYTES).unwrap_or(0)];
+    let mut at = range.start;
+    while at < range.end {
+        let length = usize::try_from((range.end - at).min(CHUNK_BYTES)).unwrap_or(0);
+        file.write_all_at(&zeros[..length], at)?;
+        at += length as u64;
+    }
+    Ok(())
+}
+
 /// How a storage failure affects the sandbox.
 fn storage_error(operation: &'static str, error: StorageError) -> EngineError {
     let kind = match &error {
@@ -726,7 +952,75 @@ mod tests {
             scratch: dir.join("scratch"),
             profile: dir.join("profile"),
             memory,
+            seed: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_disk_fetched_over_its_base_downloads_only_what_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base");
+        let at = |chunk: u64, within: u64| chunk * CHUNK_BYTES + within;
+        sparse(
+            &base,
+            at(4, 500),
+            &[
+                (at(0, 1), b"same"),
+                (at(1, 2), b"before"),
+                (at(2, 3), b"erased"),
+                (at(3, 4), b"kept"),
+            ],
+        );
+        let backend = Arc::new(InMemory::new());
+        let store = Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")));
+        let mut base_files = files(dir.path(), false);
+        base_files.disk.clone_from(&base);
+        store
+            .archive(id("00000000000000000000000000000001"), &base_files)
+            .await
+            .unwrap();
+        let base_chunks: Vec<_> = backend
+            .list(Some(&ObjectPath::from("t/chunks")))
+            .map_ok(|object| object.location)
+            .try_collect()
+            .await
+            .unwrap();
+
+        // The sandbox changed one chunk, erased another and grew.
+        let saved = files(dir.path(), false);
+        sparse(
+            &saved.disk,
+            at(5, 9),
+            &[
+                (at(0, 1), b"same"),
+                (at(1, 2), b"after!"),
+                (at(3, 4), b"kept"),
+                (at(4, 600), b"grown"),
+            ],
+        );
+        let sandbox = id("00000000000000000000000000000002");
+        store.archive(sandbox, &saved).await.unwrap();
+        // Only the base's copy of the unchanged chunks remains, locally.
+        for location in &base_chunks {
+            backend.delete(location).await.unwrap();
+        }
+
+        let restored = tempfile::tempdir().unwrap();
+        let mut into = into(restored.path(), false);
+        assert!(
+            store.fetch(sandbox, &into).await.is_err(),
+            "without the base the deleted chunks are needed"
+        );
+        into.seed = Some(base.clone());
+        store.fetch(sandbox, &into).await.unwrap();
+        assert_eq!(
+            fs::read(&saved.disk).unwrap(),
+            fs::read(&into.disk).unwrap()
+        );
+
+        // A changed base is hashed again, never trusted from before.
+        sparse(&base, at(4, 500), &[(at(0, 1), b"SAME")]);
+        assert!(store.fetch(sandbox, &into).await.is_err());
     }
 
     /// Rebuilds a memory file from a remote image's manifest, as lazy wake

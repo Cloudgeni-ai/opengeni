@@ -972,6 +972,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             cancel,
             live: if needs_vm { slot.vm.take() } else { None },
             restore_notice_port: self.restore_notice_port,
+            base_image: self.base_image.clone(),
             #[cfg(target_os = "linux")]
             fetcher: self.fetcher.clone(),
         };

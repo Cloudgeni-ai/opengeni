@@ -146,6 +146,9 @@ pub(crate) struct Job<E: Engine, S> {
     pub live: Option<Live<E::Vm>>,
     /// Guest port to tell about a restore, if any.
     pub restore_notice_port: Option<u32>,
+    /// The image new sandboxes' disks are copied from, which a fetched
+    /// disk probably still mostly matches.
+    pub base_image: PathBuf,
     /// Fetches remote memory for every VM on the host, when the store keeps
     /// memory as chunks.
     #[cfg(target_os = "linux")]
@@ -764,6 +767,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             scratch: scratch.clone(),
             profile: wake_profile(&paths),
             memory: self.record.image,
+            seed: Some(self.base_image.clone()),
         };
         let fetched = match self.store.fetch(self.id, &into).await {
             Ok(fetched) => fetched,

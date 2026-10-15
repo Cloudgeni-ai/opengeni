@@ -105,6 +105,7 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
         scratch: restored.path().join("scratch"),
         profile: restored.path().join("profile"),
         memory: true,
+        seed: None,
     };
     let started = Instant::now();
     let fetched = store.fetch(id, &into).await.unwrap();
