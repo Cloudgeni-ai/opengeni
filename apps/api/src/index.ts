@@ -74,6 +74,7 @@ import {
   type StandaloneEditableArtifactApplication,
 } from "./editable-artifact-production";
 import { installApiFatalProcessBoundary } from "./fatal-process-boundary";
+import { installApiShutdownHandlers } from "./shutdown";
 
 /**
  * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
@@ -590,6 +591,8 @@ export async function startApi(
     server,
     close: async () => {
       server.stop(true);
+      // Start private CLI session cleanup even if another service's drain stalls.
+      const vaultProvidersClosed = closeNativeExternalVaultProviders().catch(() => undefined);
       metricsServer?.stop(true);
       stopSlackInteractionPump?.();
       await stopMemorySlackPublicationPump();
@@ -602,7 +605,7 @@ export async function startApi(
       // Write queued presence before the database pool closes.
       await routeDeps.userPresence?.close().catch(() => undefined);
       await Promise.allSettled([
-        closeNativeExternalVaultProviders(),
+        vaultProvidersClosed,
         Promise.resolve(editableArtifactComposition?.close()),
         authCalloutResponder?.close(),
         bus.close(),
@@ -619,7 +622,14 @@ if (import.meta.main) {
     const settings = getSettings();
     const observability = createObservability(settings, { component: "api" });
     fatalBoundary.attachObservability(observability);
-    await startApi({ settings, observability });
+    const api = await startApi({ settings, observability });
+    installApiShutdownHandlers({
+      close: api.close,
+      onFailure: () =>
+        observability.warn("Opengeni API shutdown did not finish cleanly", {
+          errorCode: "api_shutdown_failed",
+        }),
+    });
     fatalBoundary.markRunning();
   } catch (error) {
     await fatalBoundary.reportStartupFailure(error);
