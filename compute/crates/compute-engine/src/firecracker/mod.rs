@@ -27,6 +27,48 @@ use crate::{CancellationToken, Completion, Engine};
 /// wake arriving mid-compression waits only a few milliseconds.
 const RECLAIM_CHUNK: u64 = 16 << 20;
 
+/// Guest clock source that restore can correct.
+///
+/// A restored guest's clock otherwise stands still for as long as the VM was
+/// saved. Firecracker fixes that on restore (`clock_realtime`) by moving the
+/// paravirtual KVM clock forward, which only helps a guest that reads time from
+/// that clock. Left to choose, Linux prefers the processor's own counter (TSC),
+/// so boot pins it unless the caller already chose a clock source.
+const CLOCK_SOURCE: &str = "clocksource=kvm-clock";
+
+/// The kernel command line to boot with: the caller's, plus [`CLOCK_SOURCE`]
+/// if it names no clock source of its own.
+fn boot_args(requested: &str) -> String {
+    if requested
+        .split_whitespace()
+        .any(|arg| arg.starts_with("clocksource="))
+    {
+        requested.to_owned()
+    } else if requested.trim().is_empty() {
+        CLOCK_SOURCE.to_owned()
+    } else {
+        format!("{} {CLOCK_SOURCE}", requested.trim_end())
+    }
+}
+
+/// The `/snapshot/load` request for restoring `files` as the VM in `spec`.
+///
+/// Host-side paths and devices are taken from `spec`, not from the snapshot, so
+/// a snapshot restores the same way on another host or in another directory.
+fn load_request(spec: &VmSpec, files: &SnapshotFiles) -> Value {
+    let mut body = json!({
+        "snapshot_path": files.state,
+        "mem_backend": { "backend_type": "File", "backend_path": files.memory },
+        "resume_vm": false,
+        "clock_realtime": true,
+        "vsock_override": { "uds_path": spec.vsock_path() },
+    });
+    if let Some(network) = &spec.network {
+        body["network_overrides"] = json!([{ "iface_id": "eth0", "host_dev_name": network.tap }]);
+    }
+    body
+}
+
 /// Whether a VMM process is still alive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {
@@ -256,7 +298,7 @@ impl Engine for Firecracker {
             };
             put(
                 "/boot-source",
-                json!({ "kernel_image_path": spec.kernel, "boot_args": spec.boot_args }),
+                json!({ "kernel_image_path": spec.kernel, "boot_args": boot_args(&spec.boot_args) }),
             )
             .await?;
             for drive in &spec.drives {
@@ -325,11 +367,7 @@ impl Engine for Firecracker {
         let vm = self.launch(spec, OP).await?;
         // A rejected image means the memory state is unusable; the disk is not
         // involved.
-        let body = json!({
-            "snapshot_path": files.state,
-            "mem_backend": { "backend_type": "File", "backend_path": files.memory },
-            "resume_vm": false,
-        });
+        let body = load_request(spec, files);
         let load = vm.call(OP, ErrorKind::MemoryLost, "PUT", "/snapshot/load", &body);
         self.or_kill(&vm, load).await?;
         Ok(vm)
@@ -450,5 +488,58 @@ async fn remove_if_present(path: &Path) -> io::Result<()> {
     match tokio::fs::remove_file(path).await {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::Network;
+
+    #[test]
+    fn boot_pins_the_clock_source_restore_can_correct() {
+        assert_eq!(
+            boot_args("console=ttyS0 quiet"),
+            "console=ttyS0 quiet clocksource=kvm-clock"
+        );
+        assert_eq!(boot_args(""), "clocksource=kvm-clock");
+        assert_eq!(
+            boot_args("console=ttyS0 clocksource=tsc"),
+            "console=ttyS0 clocksource=tsc"
+        );
+    }
+
+    #[test]
+    fn restore_takes_host_paths_from_the_spec_not_the_snapshot() {
+        let mut spec = VmSpec {
+            name: "a".into(),
+            dir: "/lab/a".into(),
+            vcpus: 1,
+            memory_mib: 512,
+            kernel: "/lab/vmlinux".into(),
+            boot_args: String::new(),
+            drives: Vec::new(),
+            network: None,
+            free_page_reporting: true,
+        };
+        let files = SnapshotFiles {
+            state: "/lab/a/vm.state".into(),
+            memory: "/lab/a/vm.mem".into(),
+        };
+        let body = load_request(&spec, &files);
+        assert_eq!(body["clock_realtime"], true);
+        assert_eq!(body["resume_vm"], false);
+        assert_eq!(body["vsock_override"]["uds_path"], "/lab/a/vsock.sock");
+        assert!(body.get("network_overrides").is_none());
+
+        spec.network = Some(Network {
+            tap: "tap7".into(),
+            mac: "06:00:ac:10:00:02".into(),
+        });
+        let body = load_request(&spec, &files);
+        assert_eq!(
+            body["network_overrides"],
+            json!([{ "iface_id": "eth0", "host_dev_name": "tap7" }])
+        );
     }
 }

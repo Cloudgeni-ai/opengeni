@@ -5,7 +5,7 @@
 //! `base.ext4`, whose guest runs a shell on vsock port 52), and only as root.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use compute_engine::firecracker::Firecracker;
 use compute_engine::{CancellationToken, Completion, Drive, Engine, SnapshotFiles, VmSpec, vsock};
@@ -47,6 +47,20 @@ async fn wait_for_shell(uds: &Path, timeout: Duration) -> Duration {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// Fails unless the guest's wall clock agrees with the host's to the second.
+async fn assert_guest_clock_is_current(uds: &Path) {
+    let (output, _) = exec(uds, "date +%s").await.unwrap();
+    let guest: u64 = output.trim().parse().unwrap();
+    let host = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(
+        guest.abs_diff(host) <= 1,
+        "guest clock {guest} is not the host's {host}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -132,6 +146,8 @@ async fn boot_pause_compress_snapshot_restore() {
     engine.snapshot(&vm, &files).await.unwrap();
     let snapshot = started.elapsed();
     engine.stop(vm).await.unwrap();
+    // Long enough that a clock left standing during the save is caught below.
+    tokio::time::sleep(Duration::from_secs(3)).await;
     let started = Instant::now();
     let vm = engine.restore(&spec, &files).await.unwrap();
     engine.resume(&vm).await.unwrap();
@@ -142,6 +158,7 @@ async fn boot_pause_compress_snapshot_restore() {
         "marker",
         "state did not survive the snapshot"
     );
+    assert_guest_clock_is_current(&uds).await;
     eprintln!(
         "snapshot {snapshot:?}; restore {restore:?}; first byte after restore {first_byte:?}; total {:?}",
         started.elapsed()
