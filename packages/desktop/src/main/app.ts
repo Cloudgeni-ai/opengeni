@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 
 import {
   app,
+  dialog,
   ipcMain,
   Menu,
   nativeTheme,
@@ -11,6 +12,7 @@ import {
   powerMonitor,
   safeStorage,
   session,
+  shell,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
   type WebContents,
@@ -28,13 +30,14 @@ import {
   type DesktopAccountsSnapshot,
   type DesktopPlatform,
   type ThisComputerConnectOptions,
+  type ThisComputerPermissionId,
   type WelcomeState,
 } from "../contract";
 import { AccountStore, type StoredAccount } from "./accounts";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
 import { inboxItemPath } from "./inbox-model";
-import { installAppImageIntegration } from "./linux-integration";
+import { installAppImageIntegration, installLinuxAutostart } from "./linux-integration";
 import { LOCAL_ORIGIN } from "./local-pages";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
 import { buildApplicationMenu } from "./menu";
@@ -101,6 +104,12 @@ async function recordMemory(): Promise<void> {
   flushMarks(idle === null ? loadedMarks : { ...loadedMarks, idleMemoryMb: idle });
 }
 
+/** Opened by the system at login, to keep this computer available without a window. */
+function openedAtLogin(): boolean {
+  if (process.argv.includes("--hidden")) return true;
+  return process.platform === "darwin" && app.getLoginItemSettings().wasOpenedAtLogin === true;
+}
+
 /** The path a person was on, when it is one the app reopens: a workspace or a session. */
 function reopenablePath(url: string): { path: string; workspaceId: string | null } | null {
   const link = parseAppLink(url);
@@ -126,6 +135,10 @@ export class DesktopShell {
   private tray: AppTray | null = null;
   private updates: AppUpdates | null = null;
   private quitting = false;
+  /** Quitting was confirmed (or needs no confirmation); the agent is stopping. */
+  private quitConfirmed = false;
+  private confirmingQuit = false;
+  private loginItemSet = false;
   private readonly lastPaths = new Map<string, string>();
   /** Accounts whose page didn't load, with the address to try again. */
   private readonly failedLoads = new Map<string, string>();
@@ -149,7 +162,13 @@ export class DesktopShell {
     });
     this.computer = new ThisComputer({
       platform: process.platform as "darwin" | "linux" | "win32",
+      arch: process.arch,
       home: homedir(),
+      env: process.env,
+      agentSigningKey: config.agentSigningKey,
+      fetch: (url) => net.fetch(url),
+      dataDir: app.getPath("userData"),
+      logDir: app.getPath("logs"),
       mintEnrollToken: async (accountId, workspaceId, screenControl) => {
         const client = await this.client(accountId);
         if (!client) throw new Error("Sign in again to connect this computer.");
@@ -159,12 +178,8 @@ export class DesktopShell {
         });
         return minted.token;
       },
-      fetchInstaller: async (baseUrl, fileName) => {
-        const response = await net.fetch(new URL(`/${fileName}`, baseUrl).toString());
-        if (!response.ok)
-          throw new Error(`The server didn't provide its agent installer (${response.status}).`);
-        return await response.text();
-      },
+      openSystemSettings: (url) => void shell.openExternal(url),
+      trash: (path) => shell.trashItem(path),
       onChange: () => {
         this.broadcast(DESKTOP_IPC.computerChanged);
         void this.refreshTray();
@@ -202,8 +217,8 @@ export class DesktopShell {
       app.setAsDefaultProtocolClient(config.scheme);
     }
     const queued: string[] = [];
-    let shell: DesktopShell | null = null;
-    const deliver = (url: string) => (shell ? shell.handleUrl(url) : queued.push(url));
+    let desktop: DesktopShell | null = null;
+    const deliver = (url: string) => (desktop ? desktop.handleUrl(url) : queued.push(url));
     app.on("open-url", (event, url) => {
       event.preventDefault();
       deliver(url);
@@ -211,27 +226,35 @@ export class DesktopShell {
     app.on("second-instance", (_event, argv) => {
       const url = argv.find((arg) => arg.startsWith(`${config.scheme}://`));
       if (url) deliver(url);
-      else shell?.reveal();
+      else desktop?.reveal();
     });
     const launchUrl = process.argv.find((arg) => arg.startsWith(`${config.scheme}://`));
     if (launchUrl) queued.push(launchUrl);
     void app.whenReady().then(() => {
       mark("ready");
       serveLocalPages(dirname(config.welcomePagePath));
-      shell = new DesktopShell(config);
-      shell.start();
-      for (const url of queued.splice(0)) shell.handleUrl(url);
+      desktop = new DesktopShell(config);
+      desktop.start();
+      for (const url of queued.splice(0)) desktop.handleUrl(url);
     });
   }
 
   start(): void {
     this.registerIpc();
-    this.openWindow();
+    const hidden = openedAtLogin() && this.store.active() !== null;
+    if (!hidden) this.openWindow();
     app.on("activate", () => this.reveal());
     powerMonitor.on("resume", () => this.retryUnreachable());
-    app.on("before-quit", () => {
-      this.quitting = true;
+    app.on("before-quit", (event) => {
+      if (this.quitConfirmed) {
+        this.quitting = true;
+        return;
+      }
+      event.preventDefault();
+      void this.confirmQuit();
     });
+    // However the app ends, its agent doesn't outlive it.
+    app.on("will-quit", () => this.computer.shutdownNow());
     app.on("window-all-closed", () => {
       if (process.platform !== "darwin" && !this.tray) app.quit();
     });
@@ -244,11 +267,13 @@ export class DesktopShell {
           app.getVersion(),
           () => Menu.setApplicationMenu(this.menu()),
           () => {
+            this.quitConfirmed = true;
             this.quitting = true;
           },
         );
         this.updates.start();
       }
+      if (this.config.thisComputer) void this.computer.boot();
       Menu.setApplicationMenu(this.menu());
       this.inbox.start();
       void this.refreshTray();
@@ -267,6 +292,42 @@ export class DesktopShell {
         }
       }
     }, 0);
+  }
+
+  /**
+   * Quitting stops the agent, so agents lose this computer until the app opens
+   * again. While this computer serves agents, ask first; closing the window
+   * keeps it available. macOS quits the app itself to apply a new permission,
+   * so there is no question while permissions are being set up.
+   */
+  private async confirmQuit(): Promise<void> {
+    if (this.confirmingQuit) return;
+    this.confirmingQuit = true;
+    try {
+      const summary = this.config.thisComputer ? await this.computer.summary() : null;
+      if (summary?.running && !summary.needsPermissions) {
+        const parent = this.window?.window;
+        const options: Electron.MessageBoxOptions = {
+          type: "question",
+          buttons: ["Quit", "Cancel"],
+          defaultId: 0,
+          cancelId: 1,
+          message: `Quit ${this.config.productName}?`,
+          detail:
+            "Agents can't use this computer until you open the app again. To keep it available, close the window instead.",
+        };
+        const { response } = parent
+          ? await dialog.showMessageBox(parent, options)
+          : await dialog.showMessageBox(options);
+        if (response !== 0) return;
+      }
+      this.quitConfirmed = true;
+      this.quitting = true;
+      await this.computer.shutdown();
+      app.quit();
+    } finally {
+      this.confirmingQuit = false;
+    }
   }
 
   reveal(): void {
@@ -742,7 +803,10 @@ export class DesktopShell {
       }),
     );
     handle(DESKTOP_IPC.computerPause, () => this.computer.pause());
-    handle(DESKTOP_IPC.computerResume, (account) => this.computer.resume(account.baseUrl));
+    handle(DESKTOP_IPC.computerResume, () => this.computer.resume());
+    handle(DESKTOP_IPC.computerRequestPermission, (_account, id) =>
+      this.computer.requestPermission(id as ThisComputerPermissionId),
+    );
     handle(DESKTOP_IPC.openExternal, (_account, url) => {
       if (typeof url === "string") openExternalSafely(url);
     });
@@ -843,7 +907,8 @@ export class DesktopShell {
     const hasAccounts = this.store.snapshot().accounts.length > 0;
     const summary = this.config.thisComputer
       ? await this.computer.summary()
-      : { installed: false, connected: false, running: false };
+      : { installed: false, connected: false, running: false, needsPermissions: false };
+    if (summary.connected) this.openAtLogin();
     // macOS keeps running without a window anyway; the menu bar item is for the
     // computer. Elsewhere the tray is how a closed window comes back.
     const wanted = process.platform === "darwin" ? summary.connected : hasAccounts;
@@ -859,6 +924,19 @@ export class DesktopShell {
       quit: () => app.quit(),
     });
     this.tray.update(summary);
+  }
+
+  /** A connected computer stays available after a restart: the app opens, without a window, at login. */
+  private openAtLogin(): void {
+    if (this.loginItemSet || !app.isPackaged) return;
+    this.loginItemSet = true;
+    if (process.platform === "linux") {
+      installLinuxAutostart(this.config.productName);
+      return;
+    }
+    if (!app.getLoginItemSettings().openAtLogin) {
+      app.setLoginItemSettings({ openAtLogin: true, args: ["--hidden"] });
+    }
   }
 }
 
