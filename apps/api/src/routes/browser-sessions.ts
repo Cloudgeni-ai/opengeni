@@ -350,7 +350,9 @@ export function registerBrowserSessionRoutes(
     const grant = await requireAccessGrant(context, deps, workspaceId, "sessions:control");
     const request = await parseJsonBody(context, CreateBrowserSessionRequest);
     const startedAtMs = performance.now();
+    const stages = new InteractionRouteStages("create");
     await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
+    stages.mark("authorize");
     const origin = requestOrigin(context, deps.settings);
     const authority = browserAuthorityRoot(deps);
     let prepared: Awaited<ReturnType<typeof prepareBrowserSessionCreate>> | null = null;
@@ -371,6 +373,7 @@ export function registerBrowserSessionRoutes(
         );
       }
       if (existing) assertCreateReplay(request, existing.session);
+      stages.mark("replay_check");
       prepared = existing
         ? await prepareBrowserSessionCreate(
             deps.db,
@@ -398,6 +401,7 @@ export function registerBrowserSessionRoutes(
       }
 
       const sourceSession = await requireSourceSession(deps, workspaceId, request.sessionId);
+      stages.mark("source_session");
       const response = await withBrowserPlacement(
         sourceSession,
         grant,
@@ -406,6 +410,7 @@ export function registerBrowserSessionRoutes(
         "browser.create",
         context.req.raw.signal,
         async (placement) => {
+          stages.mark("placement_resolve");
           let revisionAuthority: BrowserRevisionArtifactAuthority | null = null;
           if (!prepared) {
             prepared = await prepareBrowserSessionCreate(
@@ -413,6 +418,7 @@ export function registerBrowserSessionRoutes(
               browserCreateInput(grant, workspaceId, request, placement.placement),
             );
           }
+          stages.mark("prepare");
           if (isTerminalOperation(prepared.operation.state)) return prepared;
 
           if (prepared.session.baseRevisionId && !revisionAuthority) {
@@ -433,6 +439,7 @@ export function registerBrowserSessionRoutes(
             placement.placement,
             revisionAuthority,
           );
+          stages.mark("restore");
 
           try {
             const networkRoute = await resolveBrowserNetworkRouteLaunch({
@@ -444,6 +451,7 @@ export function registerBrowserSessionRoutes(
               rootSecret: authority,
               placement: placement.placement,
             });
+            stages.mark("network_route");
             const interactionHeld = await ensureInteractionHolder(
               deps,
               grant,
@@ -452,6 +460,7 @@ export function registerBrowserSessionRoutes(
               placement,
               context.req.raw.signal,
             );
+            stages.mark("holder");
             const record = await ensureDispatchedGeneration(
               deps,
               grant,
@@ -471,6 +480,7 @@ export function registerBrowserSessionRoutes(
               }
               throw error;
             });
+            stages.mark("generation");
             const preparedSession = prepared.session;
             const controllerGeneration = requireOperationGeneration(record);
             const adminToken = deriveBrowserControllerAdminToken({
@@ -518,11 +528,13 @@ export function registerBrowserSessionRoutes(
                       controllerGeneration,
                     },
                     async () => {
+                      stages.mark("provision");
                       await ensureHeadedBrowserDisplayStack(
                         placement.session,
                         preparedSession.headless,
                         linkedComputer !== null,
                       );
+                      stages.mark("display");
                       return await client.createSession({
                         browserSessionId: preparedSession.id,
                         controllerGeneration,
@@ -544,9 +556,11 @@ export function registerBrowserSessionRoutes(
                   );
                 },
               );
+              stages.mark("launch");
               await cacheBrowserControllerPlacement(grant, workspaceId, placement).catch(
                 () => placement,
               );
+              stages.mark("placement_cache_write");
             } catch (error) {
               if (
                 error instanceof BrowserControlTransportError ||
@@ -579,7 +593,7 @@ export function registerBrowserSessionRoutes(
             // Once the controller has accepted the exact binding, a persistence
             // failure is retried against that same idempotent physical session.
             // Never terminalize or release its placement authority here.
-            return await activateBrowserSession(deps.db, {
+            const activated = await activateBrowserSession(deps.db, {
               accountId: grant.accountId,
               workspaceId,
               operationId: request.operationId,
@@ -591,6 +605,8 @@ export function registerBrowserSessionRoutes(
               },
               engineVersion: null,
             });
+            stages.mark("activate");
+            return activated;
           } finally {
             restore?.dataKey.fill(0);
             restore?.aad.fill(0);
@@ -599,6 +615,7 @@ export function registerBrowserSessionRoutes(
       );
       const parsed = BrowserSessionMutationResponse.parse(response);
       observeLifecycleResult(deps.observability, startedAtMs, parsed);
+      reportInteractionRouteStages(context, deps.observability, stages);
       return context.json(
         parsed,
         parsed.operation.state === "completed" && !parsed.operation.replayed ? 201 : 200,
