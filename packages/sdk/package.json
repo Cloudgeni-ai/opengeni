@@ -78,6 +78,10 @@
       "types": "./src/workspace-integrations.ts",
       "default": "./src/workspace-integrations.ts"
     },
+    "./external-vault-receiver": {
+      "types": "./src/external-vault-receiver.ts",
+      "default": "./src/external-vault-receiver.ts"
+    },
     "./session-history-import": {
       "types": "./src/session-history-import.ts",
       "default": "./src/session-history-import.ts"

@@ -33,6 +33,7 @@ export default defineConfig({
     "src/document-authority.ts",
     "src/knowledge.ts",
     "src/workspace-integrations.ts",
+    "src/external-vault-receiver.ts",
     "src/session-history-import.ts",
     "src/session-list-entries.ts",
     "src/usage-allowances.ts",
