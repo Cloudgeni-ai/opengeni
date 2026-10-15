@@ -4119,6 +4119,28 @@ describe("API component integration", () => {
       eventType: "agent_run.created",
       since: startOfUtcMonth(),
     });
+    // A paused schedule never runs, so triggering it is refused without
+    // dispatching a workflow or charging a run.
+    const refused = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`),
+      { method: "POST" },
+    );
+    expect(refused.status).toBe(409);
+    expect(workflow.triggers).toHaveLength(0);
+    expect(
+      await sumUsageQuantity(dbClient.db, {
+        workspaceId,
+        eventType: "agent_run.created",
+        since: startOfUtcMonth(),
+      }),
+    ).toBe(agentRunsBefore);
+
+    const resumed = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}/resume`),
+      { method: "POST" },
+    );
+    expect(resumed.status).toBe(200);
+
     const triggered = await app.request(
       workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`),
       { method: "POST" },
