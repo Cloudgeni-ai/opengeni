@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type { VaultErrorCode, VaultSummary } from "@opengeni/react";
 import {
-  connectionAttention,
   expiryLabel,
   expiryState,
   groupVaults,
@@ -12,6 +11,7 @@ import {
   secretsOffIn,
   syncLabel,
   vaultAudience,
+  vaultError,
   vaultErrorText,
   vaultsOfConnection,
 } from "./vault-model";
@@ -77,7 +77,7 @@ describe("vault list grouping", () => {
     ]);
   });
 
-  test("a connection's vaults and what it needs", () => {
+  test("a connection's vaults", () => {
     const connectionId = "00000000-0000-4000-8000-0000000000c1";
     const linked = [
       vault({ name: "B", source: "onepassword", providerConnectionId: connectionId }),
@@ -87,13 +87,12 @@ describe("vault list grouping", () => {
     ];
     const ofConnection = vaultsOfConnection(linked, connectionId);
     expect(ofConnection.map((each) => each.name)).toEqual(["A", "B"]);
-    expect(connectionAttention(ofConnection)).toBeNull();
-    expect(connectionAttention([...ofConnection, vault({ syncStatus: "error" })])).toBe(
-      "sync_failed",
-    );
-    expect(
-      connectionAttention([vault({ syncStatus: "error" }), vault({ syncStatus: "auth_expired" })]),
-    ).toBe("token_expired");
+    const proton = vault({ name: "P", source: "protonpass", providerConnectionId: connectionId });
+    expect(vaultsOfConnection([...linked, proton], connectionId).map((each) => each.name)).toEqual([
+      "A",
+      "B",
+      "P",
+    ]);
   });
 
   test("an empty list has no groups and item counts read naturally", () => {
@@ -155,9 +154,12 @@ describe("provider sync status", () => {
 
 describe("error copy (UI-9)", () => {
   test("vault errors read as product sentences, never raw codes or server text", () => {
-    const readOnly = vaultErrorText(vaultApiError(409, "vault_read_only"));
+    const readOnly = vaultErrorText(vaultApiError(409, "vault_read_only"), undefined, "1Password");
     expect(readOnly).toBe(
       "This vault is read-only. Change it in 1Password or link it as Read & write.",
+    );
+    expect(vaultErrorText(vaultApiError(409, "vault_read_only"))).toBe(
+      "This vault is read-only. Link it as Read & write to save to it.",
     );
     expect(readOnly).not.toContain("raw server text");
     expect(vaultErrorText(vaultApiError(409, "vault_name_conflict"))).toContain("Choose another");
@@ -167,8 +169,37 @@ describe("error copy (UI-9)", () => {
     expect(
       vaultErrorText(
         vaultApiError(429, "provider_rate_limited", { retryAt: "2026-10-12T13:00:00Z" }),
+        undefined,
+        "1Password",
       ),
     ).toStartWith("1Password is limiting requests. Try again after ");
+    expect(
+      vaultErrorText(
+        vaultApiError(429, "provider_rate_limited", { retryAt: "2026-10-12T13:00:00Z" }),
+      ),
+    ).toStartWith("The password manager is limiting requests. Try again after ");
+  });
+
+  test("provider errors name the password manager, and 1Password keeps its own words", () => {
+    expect(
+      vaultErrorText(vaultApiError(401, "provider_auth_expired"), undefined, "1Password"),
+    ).toBe("The 1Password token expired. Paste a new service account token to reconnect.");
+    expect(vaultErrorText(vaultApiError(401, "provider_auth_expired"), undefined, "Keeper")).toBe(
+      "Access to Keeper expired. Reconnect it to keep using its vaults.",
+    );
+    expect(vaultErrorText(vaultApiError(423, "provider_locked"), undefined, "Bitwarden")).toBe(
+      "Bitwarden is locked on the bridge. Unlock it there, then try again.",
+    );
+    expect(
+      vaultErrorText(vaultApiError(502, "provider_outcome_unknown"), undefined, "Proton Pass"),
+    ).toContain("so nothing is saved twice");
+  });
+
+  test("a wrapped error keeps naming its password manager when unwrapped again", () => {
+    const raw = vaultApiError(423, "provider_locked");
+    const wrapped = vaultError(raw, undefined, "Proton Pass");
+    expect(wrapped.message).toBe("Proton Pass is locked. Unlock it, then try again.");
+    expect(vaultErrorText((wrapped as { cause?: unknown }).cause)).toBe(wrapped.message);
   });
 
   test("the missing encryption key is recognised", () => {

@@ -37,10 +37,18 @@ import {
   ExpiryBadge,
   ItemTile,
   SecretsLoadFailure,
+  SourceCopyLine,
   VaultChips,
   VaultSyncNotice,
   VaultTile,
 } from "./vault-parts";
+import {
+  creatableTypes,
+  everListed,
+  sourceHome,
+  vaultHealth,
+  vaultOperations,
+} from "./vault-providers";
 
 /* ----------------------------------------------------------------------------
    A vault's page (S2): header with one primary action (New item), a toolbar
@@ -64,7 +72,8 @@ export interface VaultPageActions {
   rename: () => void;
   editAvailability: () => void;
   sync: () => Promise<void>;
-  reconnect: () => void;
+  /** Opens the connection's renewal page; absent when nobody here can renew it. */
+  reconnect?: (() => void) | undefined;
   deleteVault: () => void;
   retry: () => void;
 }
@@ -112,7 +121,7 @@ export function VaultPage({
   showArchived: boolean;
   onShowArchivedChange: (value: boolean) => void;
   canManageAvailability: boolean;
-  /** The 1Password account a linked vault comes from; opens its connection page. */
+  /** The password manager account a linked vault comes from; opens its connection page. */
   providerAccount?: { name: string; onOpen: () => void } | null | undefined;
   actions: VaultPageActions;
 }) {
@@ -145,6 +154,19 @@ export function VaultPage({
 
   const readOnly = vault.mode === "read_only";
   const isProvider = vault.source !== "opengeni";
+  const operations = vaultOperations(vault);
+  const creatable = creatableTypes(operations);
+  const canAdd = vault.canWrite && creatable.length > 0;
+  const health = vaultHealth(vault);
+  const home = sourceHome(vault);
+  // A source that failed before its first listing has nothing to show, which is
+  // not the same as an empty vault.
+  const unlisted =
+    isProvider &&
+    !everListed(vault) &&
+    health.kind !== "ok" &&
+    health.kind !== "stale" &&
+    health.kind !== "syncing";
   const canDelete = vault.canManage && !vault.isDefault && vault.ownerKind !== "task";
   const canRename = vault.canManage && vault.ownerKind !== "task" && !isProvider;
   const loaded = items !== null;
@@ -179,7 +201,8 @@ export function VaultPage({
     menuItems.push(
       <DropdownMenuItem
         key="sync"
-        disabled={syncing}
+        // A rate limit says when it lifts in the banner; syncing before then can't help.
+        disabled={syncing || health.kind === "rate_limited"}
         onSelect={() => {
           setSyncing(true);
           void actions.sync().finally(() => setSyncing(false));
@@ -189,7 +212,8 @@ export function VaultPage({
         Sync now
       </DropdownMenuItem>,
     );
-  if (!empty)
+  // Provider vaults don't keep archived items: they leave with the next sync.
+  if (!empty && !isProvider)
     menuItems.push(
       <DropdownMenuItem key="archived" onSelect={() => onShowArchivedChange(!showArchived)}>
         <ArchiveIcon aria-hidden="true" />
@@ -208,7 +232,7 @@ export function VaultPage({
 
   const headerActions = (
     <div className="flex items-center gap-2">
-      {vault.canWrite && !empty ? newItemButton : null}
+      {canAdd && !empty ? newItemButton : null}
       {menuItems.length ? (
         <MoreMenu label={`More actions for ${vault.name}`}>{menuItems}</MoreMenu>
       ) : null}
@@ -230,6 +254,15 @@ export function VaultPage({
         <ListRowSkeleton count={8} />
       </RowList>
     );
+  } else if (empty && unlisted) {
+    body = (
+      <EmptyState
+        variant="page"
+        icon={<KeyRoundIcon />}
+        title="No items to show yet"
+        description={`Items appear here after the first successful sync with ${home}.`}
+      />
+    );
   } else if (empty) {
     body = (
       <EmptyState
@@ -237,13 +270,13 @@ export function VaultPage({
         icon={<KeyRoundIcon />}
         title={vault.ownerKind === "task" ? "Nothing saved in this task yet" : "No items yet"}
         description={
-          vault.canWrite
-            ? "Add a login, API key, note or file. Agents use it by reference, never by value."
-            : readOnly
-              ? "Items you add to this vault in 1Password show up here."
+          canAdd
+            ? `Add ${typesSentence(creatable)}. Agents use it by reference, never by value.`
+            : isProvider
+              ? `Items you add to this vault in ${home} show up here.`
               : "Someone who can edit this vault can add items."
         }
-        action={vault.canWrite ? newItemButton : undefined}
+        action={canAdd ? newItemButton : undefined}
       />
     );
   } else {
@@ -379,15 +412,34 @@ export function VaultPage({
           }}
           onReconnect={actions.reconnect}
         />
-        {readOnly && vault.syncStatus === "ok" ? (
-          <p className="m-0 text-sm leading-5 text-fg-muted">
-            Read-only: items come from 1Password and change there.
-          </p>
+        {isProvider && (health.kind === "ok" || health.kind === "stale") ? (
+          readOnly ? (
+            <p className="m-0 text-sm leading-5 text-fg-muted">
+              Read-only: items come from {home} and change there.
+            </p>
+          ) : vault.canWrite && !operations.updateItem ? (
+            <p className="m-0 text-sm leading-5 text-fg-muted">
+              New items can be saved here. Change existing ones in {home}.
+            </p>
+          ) : null
         ) : null}
+        {isProvider && health.kind === "ok" ? <SourceCopyLine vault={vault} /> : null}
         <div className="min-w-0">{body}</div>
       </div>
     </DetailPage>
   );
+}
+
+/** "a login, API key, note or file", from the types a vault accepts. */
+function typesSentence(types: VaultItemType[]): string {
+  const words = types.map((each) =>
+    each === "api_key" ? "API key" : ITEM_TYPE_LABEL[each].toLowerCase(),
+  );
+  const withArticle = words.map((word, index) =>
+    index === 0 ? `${/^[aeiou]/iu.test(word) ? "an" : "a"} ${word}` : word,
+  );
+  if (withArticle.length <= 1) return withArticle[0] ?? "an item";
+  return `${withArticle.slice(0, -1).join(", ")} or ${withArticle.at(-1)}`;
 }
 
 /** Loading, in the page's own shape. */

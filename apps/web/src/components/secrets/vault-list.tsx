@@ -1,5 +1,5 @@
-import type { OnePasswordConnectionSummary, VaultSummary } from "@opengeni/react";
-import { KeyRoundIcon, PlusIcon, RotateCcwIcon, ShieldOffIcon } from "lucide-react";
+import type { VaultSummary } from "@opengeni/react";
+import { KeyRoundIcon, PlugIcon, PlusIcon, RotateCcwIcon, ShieldOffIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { EmptyState, EmptyStateLink } from "@/components/ui/empty-state";
@@ -9,26 +9,22 @@ import { PageHeader } from "@/components/ui/page-header";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { Section, SectionStack } from "@/components/ui/section";
 
-import { OnePasswordConnectionsSection } from "./onepassword-connections";
-import {
-  OnePasswordMark,
-  SecretsLoadFailure,
-  SyncStatus,
-  VaultChips,
-  VaultTile,
-} from "./vault-parts";
+import { ConnectionsSection } from "./provider-connections";
+import { SecretsLoadFailure, SyncStatus, VaultChips, VaultTile } from "./vault-parts";
+import { groupVaults, isMissingKeyError, itemsLabel, VAULT_GROUP_TITLE } from "./vault-model";
 import {
   connectionName,
-  groupVaults,
-  isMissingKeyError,
-  itemsLabel,
-  VAULT_GROUP_TITLE,
-} from "./vault-model";
+  needsAttention,
+  providerOfVault,
+  PROVIDERS,
+  vaultHealth,
+  type VaultConnection,
+} from "./vault-providers";
 
 /* ----------------------------------------------------------------------------
    Settings › Secrets (S1): the vaults this person can use, grouped by who
-   owns them, then the 1Password service accounts connected here. The whole
-   row opens the vault's (or the connection's) page.
+   owns them, then the password managers connected here. The whole row opens
+   the vault's (or the connection's) page.
    -------------------------------------------------------------------------- */
 
 export const SECRETS_DESCRIPTION =
@@ -56,14 +52,14 @@ export function SecretsListPage({
   onOpenVault,
   onOpenConnection,
   onNewVault,
-  onConnectOnePassword,
+  onConnect,
   onOpenAgentSettings,
 }: {
   state: SecretsListState;
   error: unknown;
   vaults: VaultSummary[];
-  /** 1Password connections; null until loaded or when they can't be listed. */
-  connections: OnePasswordConnectionSummary[] | null;
+  /** Password manager connections; null until loaded or when they can't be listed. */
+  connections: VaultConnection[] | null;
   connectionsLoading: boolean;
   canList: boolean;
   canCreate: boolean;
@@ -73,9 +69,10 @@ export function SecretsListPage({
   agentSettingsHref: string | null;
   onRetry: () => void;
   onOpenVault: (vault: VaultSummary) => void;
-  onOpenConnection: (connection: OnePasswordConnectionSummary) => void;
+  onOpenConnection: (connection: VaultConnection) => void;
   onNewVault: () => void;
-  onConnectOnePassword: () => void;
+  /** Opens Connect a password manager. */
+  onConnect: () => void;
   onOpenAgentSettings: () => void;
 }) {
   const missingKey = state === "error" && isMissingKeyError(error);
@@ -88,16 +85,9 @@ export function SecretsListPage({
     </Button>
   );
   const connectButton = (
-    <Button
-      type="button"
-      variant="outline"
-      onClick={onConnectOnePassword}
-      className="pointer-coarse:h-11"
-    >
-      <span aria-hidden="true" className="inline-flex size-4">
-        <OnePasswordMark />
-      </span>
-      Connect 1Password
+    <Button type="button" variant="outline" onClick={onConnect} className="pointer-coarse:h-11">
+      <PlugIcon aria-hidden="true" />
+      Connect password manager
     </Button>
   );
   const headerActions =
@@ -112,9 +102,11 @@ export function SecretsListPage({
   );
   const describe = (vault: VaultSummary): string | undefined => {
     if (vault.description) return vault.description;
-    if (vault.source !== "onepassword") return undefined;
+    const provider = providerOfVault(vault);
+    if (!provider) return undefined;
+    const from = `From ${PROVIDERS[provider].home}`;
     const account = vault.providerConnectionId ? accountOf.get(vault.providerConnectionId) : null;
-    return account ? `From 1Password · ${account}` : "From 1Password";
+    return account ? `${from} · ${account}` : from;
   };
 
   const renderRow = (vault: VaultSummary) => (
@@ -124,7 +116,7 @@ export function SecretsListPage({
       title={vault.name}
       titleAddon={<VaultChips vault={vault} />}
       description={describe(vault)}
-      status={vault.syncStatus === "ok" ? undefined : <SyncStatus vault={vault} />}
+      status={needsAttention(vaultHealth(vault)) ? <SyncStatus vault={vault} /> : undefined}
       cells={{
         items: itemsLabel(vault.itemCount),
         updated: <RelativeTime date={vault.updatedAt} />,
@@ -184,7 +176,7 @@ export function SecretsListPage({
             <div className="flex flex-col items-center gap-3">
               {newVaultButton}
               {canConnect ? (
-                <EmptyStateLink onClick={onConnectOnePassword}>Or connect 1Password</EmptyStateLink>
+                <EmptyStateLink onClick={onConnect}>Or connect a password manager</EmptyStateLink>
               ) : null}
             </div>
           ) : undefined
@@ -211,7 +203,7 @@ export function SecretsListPage({
             </RowList>
           </Section>
         ))}
-        <OnePasswordConnectionsSection
+        <ConnectionsSection
           connections={connections}
           loading={connectionsLoading}
           vaults={vaults}

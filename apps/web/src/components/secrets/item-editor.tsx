@@ -30,6 +30,7 @@ import { PasswordGeneratorPopover } from "./password-generator-popover";
 import { HIT_AREA } from "./secret-actions";
 import { formatTotpCode, TotpRing, useTotp } from "./totp-code";
 import { ITEM_TYPE_LABEL, vaultErrorText } from "./vault-model";
+import { creatableTypes, sourceHome, vaultOperations } from "./vault-providers";
 
 /* ----------------------------------------------------------------------------
    New item and Edit item (S4): a form page. Concealed values are never
@@ -57,7 +58,7 @@ type Draft = {
 let draftCounter = 0;
 const nextKey = () => `draft-${(draftCounter += 1)}`;
 
-function template(type: CreatableType): Draft[] {
+function template(type: CreatableType, totp = true): Draft[] {
   const make = (name: string, kind: VaultFieldKind): Draft => ({
     key: nextKey(),
     name,
@@ -71,7 +72,7 @@ function template(type: CreatableType): Draft[] {
       return [
         make("username", "text"),
         make("password", "concealed"),
-        make("one-time password", "totp"),
+        ...(totp ? [make("one-time password", "totp")] : []),
       ];
     case "api_key":
       return [make("value", "concealed")];
@@ -159,8 +160,20 @@ export function ItemEditorPage({
   onReload: () => void;
 }) {
   const editing = Boolean(item);
+  // What this vault's home lets Opengeni write: types, files, one-time codes.
+  const operations = vaultOperations(vault);
+  const home = sourceHome(vault);
+  const allowedTypes = creatableTypes(operations).filter(
+    (each): each is CreatableType => each !== "passkey",
+  );
+  const totpAllowed = editing ? operations.updateTotp : operations.createTotp;
+  const typeOptions = TYPE_OPTIONS.filter((option) => allowedTypes.includes(option.value));
   const [type, setType] = useState<CreatableType>(
-    item && item.type !== "passkey" ? item.type : initialType,
+    item && item.type !== "passkey"
+      ? item.type
+      : allowedTypes.includes(initialType)
+        ? initialType
+        : (allowedTypes[0] ?? initialType),
   );
   const [name, setName] = useState(item?.name ?? "");
   // Each row keeps its id, so removing one keeps focus and edits on the rest.
@@ -171,7 +184,9 @@ export function ItemEditorPage({
     })),
   );
   const [expires, setExpires] = useState(toDateInput(item?.expiresAt ?? null));
-  const [drafts, setDrafts] = useState<Draft[]>(() => (item ? fromItem(item) : template(type)));
+  const [drafts, setDrafts] = useState<Draft[]>(() =>
+    item ? fromItem(item) : template(type, totpAllowed),
+  );
   const [errors, setErrors] = useState<Errors>({ fields: {} });
   const [formError, setFormError] = useState<ReactNode>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -186,7 +201,7 @@ export function ItemEditorPage({
         current.filter((draft) => draft.value).map((draft) => [draft.name, draft]),
       );
       return [
-        ...template(next).map((draft) => kept.get(draft.name) ?? draft),
+        ...template(next, totpAllowed).map((draft) => kept.get(draft.name) ?? draft),
         ...current.filter((draft) => draft.custom),
       ];
     });
@@ -327,19 +342,26 @@ export function ItemEditorPage({
 
   const kindChoices = useMemo(
     () =>
-      KIND_OPTIONS.map((option) => ({
+      KIND_OPTIONS.filter((option) => option.value !== "totp" || totpAllowed).map((option) => ({
         value: option.value,
         label: option.label,
         description: option.description,
       })),
-    [],
+    [totpAllowed],
   );
 
   const renderDraft = (draft: Draft) => {
     const error = errors.fields[draft.key];
+    // A saved file or one-time code this vault's home won't take from Opengeni.
+    const lockedHere =
+      draft.existing &&
+      ((draft.kind === "file" && !operations.writeFiles) ||
+        (draft.kind === "totp" && !operations.updateTotp));
     const removable =
       draft.custom ||
       (draft.existing &&
+        operations.removeField &&
+        !lockedHere &&
         draft.name !== (type === "login" ? "password" : type === "api_key" ? "value" : type));
     const removeButton = removable ? (
       <Button
@@ -362,7 +384,19 @@ export function ItemEditorPage({
 
     let control: ReactNode;
     let hint: ReactNode = keepHint;
-    if (draft.kind === "file") {
+    if (lockedHere) {
+      const saved = item?.fields.find((field) => field.id === draft.fieldId);
+      return (
+        <Field key={draft.key} label={draftLabel(draft)} group>
+          <p className="m-0 min-w-0 text-sm text-fg-muted">
+            {draft.kind === "file" && saved?.fileName ? (
+              <span className="text-fg">{saved.fileName}. </span>
+            ) : null}
+            Change it in {home}.
+          </p>
+        </Field>
+      );
+    } else if (draft.kind === "file") {
       control = (
         <div className="flex min-w-0 items-center gap-3">
           <Button
@@ -531,10 +565,10 @@ export function ItemEditorPage({
       }}
     >
       <FieldStack>
-        {!editing ? (
+        {!editing && typeOptions.length > 1 ? (
           <Field label="Type" group>
             <SegmentedControl
-              options={TYPE_OPTIONS}
+              options={typeOptions}
               value={type}
               onValueChange={changeType}
               fullWidth

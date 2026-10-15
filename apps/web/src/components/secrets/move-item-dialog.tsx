@@ -8,25 +8,30 @@ import { SelectMenu } from "@/components/ui/select-menu";
 
 import { VAULT_GROUP_TITLE, vaultErrorText, vaultGroup } from "./vault-model";
 
-/** Move or copy one item to another writable vault (a small prompt, so a dialog). */
+/**
+ * Move or copy one item to another vault (a small prompt, so a dialog). Copy
+ * only when this vault can't let the item go, for example a password manager
+ * vault Opengeni can't archive in.
+ */
 export function MoveItemDialog({
   item,
-  vaults,
+  targets,
+  canMove = true,
   open,
   onOpenChange,
   onMove,
 }: {
   item: VaultItem | undefined;
-  /** Every vault the person can see; the dialog offers the writable ones. */
-  vaults: VaultSummary[];
+  /** The vaults that can take this item, decided by the route. */
+  targets: VaultSummary[];
+  /** Whether this vault can let the item go; otherwise only Copy. */
+  canMove?: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onMove: (request: MoveVaultItemRequest, target: VaultSummary) => Promise<void>;
 }) {
-  const targets = vaults.filter(
-    (vault) => vault.canWrite && vault.id !== item?.vaultId && vault.ownerKind !== "task",
-  );
-  const [mode, setMode] = useState<MoveVaultItemRequest["mode"]>("move");
+  const initialMode: MoveVaultItemRequest["mode"] = canMove ? "move" : "copy";
+  const [mode, setMode] = useState<MoveVaultItemRequest["mode"]>(initialMode);
   const [target, setTarget] = useState<string | null>(null);
   const [error, setError] = useState<string | undefined>();
 
@@ -35,15 +40,27 @@ export function MoveItemDialog({
       open={open}
       onOpenChange={(next) => {
         if (next) {
-          setMode("move");
+          setMode(initialMode);
           setTarget(null);
           setError(undefined);
         }
         onOpenChange(next);
       }}
       size="sm"
-      title={item ? `Move ${item.name}` : "Move item"}
-      description="References that name the old vault stop working after a move. A copy leaves this item where it is."
+      title={
+        canMove
+          ? item
+            ? `Move ${item.name}`
+            : "Move item"
+          : item
+            ? `Copy ${item.name}`
+            : "Copy item"
+      }
+      description={
+        canMove
+          ? "References that name the old vault stop working after a move. A copy leaves this item where it is."
+          : "A copy leaves this item where it is. Only vaults that can hold everything in it are listed."
+      }
       submitLabel={mode === "move" ? "Move item" : "Copy item"}
       pendingLabel={mode === "move" ? "Moving…" : "Copying…"}
       submitDisabled={targets.length === 0}
@@ -67,17 +84,19 @@ export function MoveItemDialog({
       }}
     >
       <FieldStack>
-        <Field label="Action" group>
-          <SegmentedControl
-            options={[
-              { value: "move" as const, label: "Move" },
-              { value: "copy" as const, label: "Copy" },
-            ]}
-            value={mode}
-            onValueChange={setMode}
-            fullWidth
-          />
-        </Field>
+        {canMove ? (
+          <Field label="Action" group>
+            <SegmentedControl
+              options={[
+                { value: "move" as const, label: "Move" },
+                { value: "copy" as const, label: "Copy" },
+              ]}
+              value={mode}
+              onValueChange={setMode}
+              fullWidth
+            />
+          </Field>
+        ) : null}
         <Field label="To vault" error={error}>
           <SelectMenu
             options={targets.map((vault) => ({
