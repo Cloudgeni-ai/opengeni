@@ -1432,6 +1432,8 @@ export async function runTurnStreamAttempt(
             if (images.some((image) => image !== null)) {
               const receipts: Array<RetainedArtifactMetadata | null> = [];
               for (const image of images) {
+                // Retention is an optimization here: any failure, expected or
+                // not, keeps that image inline as before.
                 const receipt = image
                   ? await retainSessionScreenshot({
                       db,
@@ -1442,7 +1444,7 @@ export async function runTurnStreamAttempt(
                       turnId: activeTurnId,
                       attemptId: input.attemptId,
                       output: image,
-                    })
+                    }).catch(() => null)
                   : null;
                 receipts.push(receipt?.available ? receipt : null);
               }
