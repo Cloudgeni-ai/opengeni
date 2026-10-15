@@ -59,7 +59,11 @@ import {
   sitePublishedDataViewer,
 } from "../site-publishing/agent-data-tools";
 import { isSubscriptionBilledModel, resolveSiteOutsideModel } from "../site-publishing/agent-model";
-import { afterSitePlatformUsage, requireSitePlatformOpen } from "../site-publishing/platform-usage";
+import {
+  afterSitePlatformUsage,
+  requireSitePlatformOpen,
+  sitePlatformBrakeEngaged,
+} from "../site-publishing/platform-usage";
 import { SiteSqlError } from "../site-sql/service";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
@@ -92,7 +96,6 @@ import {
   resolveSiteRuntimeViewer,
   settleSiteRuntimeSpend,
   sha256Text,
-  siteAgentRefusal,
   siteReservationRefused,
   siteClientAddressPrincipal,
   siteNotAvailableForViewer,
@@ -225,12 +228,20 @@ function parseJson<S extends z.ZodType>(bytes: Uint8Array, schema: S): z.infer<S
   return parsed.data;
 }
 
-/** Site Data for a viewer: refusals for this viewer answer `not_available_for_viewer`. */
+/**
+ * Site Data for a viewer: what the viewer's audience may not use answers
+ * `not_available_for_viewer`; other refusals (a record the viewer does not
+ * own, a manager-only write) keep their Site Data code.
+ */
 async function runSiteData<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (error) {
-    if (error instanceof SiteDataError && error.code === "forbidden")
+    if (
+      error instanceof SiteDataError &&
+      error.code === "forbidden" &&
+      error.details.reason === "guest_access"
+    )
       throw siteNotAvailableForViewer("site_data", error.message, error.details);
     if (error instanceof SiteDataError) throw siteDataHttpError(error);
     throw error;
@@ -850,6 +861,43 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     };
   };
 
+  /**
+   * What this viewer can use, from the same checks the routes enforce: the
+   * agent also needs the platform brake open for people outside the
+   * workspace who are not invited, and a credit-billed model for anyone
+   * outside the workspace; the assistant's workspace tools need a member who
+   * may use connections.
+   */
+  const viewerCapabilities = async (
+    host: SiteRuntimeHost,
+    viewer: SiteRuntimeViewer,
+    limits: Parameters<typeof siteViewerCapabilities>[3],
+  ) => {
+    const base = siteViewerCapabilities(deps, host, viewer, limits);
+    let agent = base.agent;
+    if (agent && (viewer.kind === "guest" || viewer.kind === "user"))
+      agent = !(await sitePlatformBrakeEngaged(deps).catch(() => false));
+    if (agent && viewer.kind !== "member")
+      agent =
+        (
+          await resolveSiteOutsideModel(deps, host.scope, {
+            siteId: host.site.id,
+            agentModel: host.publication.agent.model,
+          }).catch(() => null)
+        )?.kind !== "unavailable";
+    const workspaceTools =
+      base.workspaceTools &&
+      viewer.subjectId !== null &&
+      viewer.subjectId !== undefined &&
+      siteViewerGetsTools(
+        viewer,
+        await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId).catch(
+          () => null,
+        ),
+      );
+    return { ...base, agent, workspaceTools };
+  };
+
   const operation = async (request: RuntimeRequest, id: string): Promise<Response> => {
     const { host, viewer, limits, profileKind } = await viewing(request);
     const { context } = request;
@@ -862,6 +910,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         // The Site's own view of "its workspace": no tenant data.
         return context.json({ id: host.scope.workspaceId, name: host.site.title });
       case "site.config": {
+        const capabilities = await viewerCapabilities(host, viewer, limits);
         const config: SiteRuntimeConfig = {
           siteId: host.site.id,
           title: host.site.title,
@@ -869,9 +918,9 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           versionId: host.versionId,
           access: effectiveSiteAccess(host.publication.access, deps.settings),
           viewer: publicSiteViewer(viewer),
-          capabilities: siteViewerCapabilities(deps, host, viewer, limits),
+          capabilities,
           agent: {
-            enabled: siteAgentRefusal(deps, host, viewer, limits) === null,
+            enabled: capabilities.agent,
             model: host.publication.agent.model,
           },
           siteData: true,

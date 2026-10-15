@@ -57,14 +57,15 @@ const agentWithTools = {
 const warnings: SitePublishWarning[] = [
   {
     code: "workspace_tools_members_only",
-    message: "The page calls workspace tools (linear). Public visitors can't use them.",
-    suggestion: "Show this part only to workspace members, or keep the data in Site Data.",
+    message:
+      "The page uses workspace tools, which work only inside Opengeni; public visitors on the published Site can't use them.",
+    suggestion: "Build the page on Site Data and Site SQL instead, or publish to members only.",
     fix: null,
   },
   {
     code: "site_data_guest_read",
-    message: "The page reads the deals collection. Public visitors can't read it.",
-    suggestion: "Let visitors read deals, or show it only to members.",
+    message: "deals can't be read by anonymous public visitors.",
+    suggestion: "Allow guests to read deals, or publish to invited people only.",
     fix: { kind: "site_data_guest_access", collection: "deals", guestAccess: "read" },
   },
 ];

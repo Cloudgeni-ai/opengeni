@@ -944,7 +944,12 @@ test("guests reach Site Data only through each collection's guest rule", async (
     });
   const hidden = await data("POST", "/data/query", { collection: "notes" });
   expect(hidden.status).toBe(403);
-  expect(hidden.json.error.details).toMatchObject({ reason: "guest_access" });
+  expect(hidden.json.error.details).toMatchObject({
+    code: "not_available_for_viewer",
+    feature: "site_data",
+    reason: "guest_access",
+    legacyCode: "forbidden",
+  });
   const board = await data("POST", "/data/query", { collection: "board" });
   expect(board.status, JSON.stringify(board.json)).toBe(200);
   expect(board.json.records.map((record: any) => record.data.title)).toEqual(["Welcome"]);
@@ -978,6 +983,8 @@ test("guests reach Site Data only through each collection's guest rule", async (
     operations: [{ op: "delete", collection: "todo", id: theirs.json.results[0].record.id }],
   });
   expect(foreign.status).not.toBe(200);
+  // A record the guest does not own is not an audience refusal: it keeps its Site Data code.
+  expect(foreign.json.error?.details?.code).not.toBe("not_available_for_viewer");
   // Files are for signed-in viewers only.
   const files = await data("GET", "/files");
   expect(files.status).toBe(403);
@@ -1144,6 +1151,8 @@ test("agent conversations run as the Site, belong to one viewer and stay within 
     code: "not_available_for_viewer",
     feature: "agent",
     reason: "agent_disabled",
+    // The code Site pages matched on before, until the next SDK major.
+    legacyCode: "site_agents_unavailable",
   });
   await f.publication(f.owner, sibling.id, "PUT", { agent: { enabled: true } });
   const noPublicAgents = f.appWith(sitesSettings({ sitesPublicAgentsEnabled: false }));
@@ -3036,9 +3045,13 @@ test("the platform brake: alert, engage at the monthly limit, refuse writes, ope
     });
     expect(guestTurn.status).toBe(503);
     expect(code(guestTurn)).toBe("site_platform_brake_engaged");
-    expect(
-      (await f.gateway(site.host, "GET", "/site/config", { visitor: visitorId() })).status,
-    ).toBe(200);
+    const brakedConfig = await f.gateway(site.host, "GET", "/site/config", {
+      visitor: visitorId(),
+    });
+    expect(brakedConfig.status).toBe(200);
+    // The page is told the assistant won't answer guests while the brake holds.
+    expect(brakedConfig.json.capabilities.agent).toBe(false);
+    expect(brakedConfig.json.agent.enabled).toBe(false);
     expect((await usage()).brake.engaged).toBe(true);
 
     // An operator lift holds for the rest of the month, even over the limit.
@@ -3046,6 +3059,11 @@ test("the platform brake: alert, engage at the monthly limit, refuse writes, ope
     resetSitePlatformBrakeCache();
     const again = await evaluateSitePlatformLimit(f.deps as never);
     expect(again.brake.engagedAt).toBeNull();
+    resetSitePlatformBrakeCache();
+    expect(
+      (await f.gateway(site.host, "GET", "/site/config", { visitor: visitorId() })).json
+        .capabilities.agent,
+    ).toBe(true);
     expect((await f.publication(f.owner, next.id, "PUT", {})).status).toBe(201);
     // An operator can engage it by hand, and lift it again.
     await engageSitePlatformBrake(db.db, { reason: "Manual check" });

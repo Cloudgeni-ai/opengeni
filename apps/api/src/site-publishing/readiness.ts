@@ -125,13 +125,13 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
   if (input.requestedTools > 0 || input.page?.workspaceTools)
     add({
       code: "workspace_tools_members_only",
-      message: `The page uses workspace tools, which ${who} can't use.`,
+      message: `The page uses workspace tools, which work only inside Opengeni; ${who} on the published Site can't use them.`,
       suggestion: "Build the page on Site Data and Site SQL instead, or publish to members only.",
     });
   if (input.agent.enabled && (input.agent.tools?.length ?? 0) > 0)
     add({
       code: "agent_tools_members_only",
-      message: `The assistant's workspace tools are for workspace members only; ${who} get none.`,
+      message: `The assistant's workspace tools are only for workspace members who may use connections; ${who} get none.`,
       suggestion: "Let the assistant answer from the page and the Site's own data for them.",
     });
   const byName = new Map(input.collections.map((collection) => [collection.name, collection]));

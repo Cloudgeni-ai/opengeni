@@ -223,14 +223,28 @@ export type SiteViewerFeature =
   | "site_data"
   | "site_sql";
 
+/**
+ * The `details.code` each feature answered before `not_available_for_viewer`,
+ * kept as `details.legacyCode` until the next SDK major so older Site code
+ * that matched on it keeps working.
+ */
+const SITE_VIEWER_FEATURE_LEGACY_CODES: Partial<Record<SiteViewerFeature, string>> = {
+  agent: "site_agents_unavailable",
+  workspace_tools: "site_tools_unavailable",
+  site_data: "forbidden",
+  site_sql: "forbidden",
+};
+
 export function siteNotAvailableForViewer(
   feature: SiteViewerFeature,
   message: string,
   extra: Record<string, unknown> = {},
 ) {
+  const legacyCode = SITE_VIEWER_FEATURE_LEGACY_CODES[feature];
   return sitePublishingError(403, "forbidden", SITE_NOT_AVAILABLE_FOR_VIEWER_ERROR_CODE, message, {
     ...extra,
     feature,
+    ...(legacyCode ? { legacyCode } : {}),
   });
 }
 

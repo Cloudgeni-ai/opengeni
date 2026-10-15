@@ -390,7 +390,7 @@ test("invited and public Sites show one Site limit, an optional per-person limit
   await flush();
   expect(calls.updates.at(-1)).toEqual({
     limitProfile: {
-      kind: "custom",
+      kind: "standard",
       overrides: {
         agentsEnabled: true,
         agentMicrosPerSitePerMonth: 25_000_000,
@@ -492,8 +492,10 @@ test("readiness warnings open to a list with one-click fixes", async () => {
           },
           {
             code: "workspace_tools_members_only",
-            message: "The page calls workspace tools, which only members can use.",
-            suggestion: "Use Site Data or Site SQL instead.",
+            message:
+              "The page uses workspace tools, which work only inside Opengeni; public visitors on the published Site can't use them.",
+            suggestion:
+              "Build the page on Site Data and Site SQL instead, or publish to members only.",
             fix: null,
           },
         ],
@@ -507,7 +509,9 @@ test("readiness warnings open to a list with one-click fixes", async () => {
   await act(async () => line.click());
   expect(line.getAttribute("aria-expanded")).toBe("true");
   expect(page.host.textContent).toContain("Public visitors can't add to votes.");
-  expect(page.host.textContent).toContain("Use Site Data or Site SQL instead.");
+  expect(page.host.textContent).toContain(
+    "Build the page on Site Data and Site SQL instead, or publish to members only.",
+  );
   await act(async () => button(page.host, "Fix")!.click());
   await flush();
   expect(fixes).toEqual([fix]);

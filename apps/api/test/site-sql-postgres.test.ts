@@ -730,6 +730,7 @@ test("published hosts run named queries as the verified viewer; guests only ever
     code: "not_available_for_viewer",
     feature: "site_sql",
     reason: "sign_in_required",
+    legacyCode: "forbidden",
   });
   const guestMine = await run("my_vote", {}, guest);
   expect(guestMine.status).toBe(403);
