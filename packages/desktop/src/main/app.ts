@@ -361,7 +361,9 @@ export class DesktopShell {
    * as it would from its login item.
    */
   private rememberClosedAtLogout(): void {
-    if (process.platform !== "darwin" || this.window || !this.computer.opensAtLogin) return;
+    // Closing only hides the window, so what counts is whether it is visible.
+    const windowShown = this.window?.window.isVisible() ?? false;
+    if (process.platform !== "darwin" || windowShown || !this.computer.opensAtLogin) return;
     try {
       writeFileSync(this.closedAtLogoutPath(), "");
     } catch {
