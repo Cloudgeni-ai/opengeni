@@ -272,7 +272,9 @@ function semanticRef(options: {
       ].join("\0"),
     )
     .digest("hex")
-    .slice(0, 32);
+    // 64 bits is ample within one document (refs are scoped by generation)
+    // and keeps every node the model reads short.
+    .slice(0, 16);
   return `${kind}-${digest}`;
 }
 

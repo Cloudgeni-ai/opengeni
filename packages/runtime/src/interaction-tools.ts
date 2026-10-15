@@ -7,8 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import {
-  AttachedBrowserBridge,
-  AttachedBrowserDevice,
+  AttachedBrowserDeviceListResponse,
   AuthRun,
   AuthRunListResponse,
   AuthRunMutationResponse,
@@ -29,6 +28,13 @@ import {
   BrowserIdentityListResponse,
   BrowserIdentityMutationResponse,
   BrowserObservation,
+  BrowserActionResolvedTarget,
+  BrowserDialog,
+  InteractionDiagnosticSummary,
+  InteractionError,
+  InteractionOperationState,
+  InteractionRect,
+  RetainedArtifactReferenceSchema,
   InteractionSemanticNode,
   BrowserRevisionListResponse,
   BrowserSession,
@@ -119,31 +125,70 @@ const BrowserAgentNode = z
         z.object({ redacted: z.literal(true), reason: z.string().max(32) }).strict(),
       ])
       .optional(),
-    states: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).max(6),
-    actions: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).max(6),
+    // Omitted when empty: most nodes have no states or actions, and repeating
+    // empty arrays on every node only costs the model tokens.
+    states: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).min(1).max(6).optional(),
+    actions: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).min(1).max(6).optional(),
   })
   .strict();
+/** The model-facing view keeps only what a next call can use: what is on the
+ * page, the refs to act on, the fences an action may pass, and explicit budget
+ * omissions. Zero counts and constant limits are left out. */
 const BrowserAgentView = z
   .object({
-    kind: z.literal("compact"),
     sourceKind: z.enum(["snapshot", "diff", "none"]),
     nodes: z.array(BrowserAgentNode).max(BROWSER_AGENT_MAX_NODES),
-    sourceNodeCount: z.number().int().nonnegative(),
-    omittedNodeCount: z.number().int().nonnegative(),
-    removedRefCount: z.number().int().nonnegative(),
-    clippedFieldCount: z.number().int().nonnegative(),
-    maxNodes: z.number().int().positive(),
-    maxNodeBytes: z.number().int().positive(),
+    omittedNodeCount: z.number().int().positive().optional(),
+    removedRefCount: z.number().int().positive().optional(),
+    clippedFieldCount: z.number().int().positive().optional(),
   })
   .strict();
-const CompactBrowserObservation = BrowserObservation.safeExtend({
-  semantic: z.null(),
-  agentView: BrowserAgentView,
-});
+/** A tab as the model needs it: identity, page, selection and the generations
+ * an action or human request may pass as fences. Timestamps stay out. */
+const AgentBrowserTarget = z
+  .object({
+    id: z.string().max(512),
+    kind: z.enum(["page", "popup", "background_page", "worker"]),
+    title: z.string().max(4_096),
+    url: z.string().max(16_384),
+    selected: z.boolean(),
+    controllerGeneration: z.string().max(256),
+    targetGeneration: z.string().max(256),
+    documentGeneration: z.string().max(256).nullable(),
+  })
+  .strict();
+const CompactBrowserObservation = z
+  .object({
+    target: AgentBrowserTarget,
+    frameId: z.string().max(256).optional(),
+    viewport: z
+      .object({
+        width: z.number().int().positive(),
+        height: z.number().int().positive(),
+        deviceScaleFactor: z.number().positive().optional(),
+        maxTouchPoints: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    focusedRef: z.string().max(512).optional(),
+    changedRegions: z.array(InteractionRect).min(1).optional(),
+    diagnostics: InteractionDiagnosticSummary.optional(),
+    dialog: BrowserDialog.optional(),
+    screenshot: RetainedArtifactReferenceSchema.optional(),
+    agentView: BrowserAgentView,
+  })
+  .strict();
 const BrowserAgentObservation = z.union([BrowserObservation, CompactBrowserObservation]);
-const BrowserAgentActionReceipt = BrowserActionReceipt.safeExtend({
-  observation: BrowserAgentObservation.nullable(),
-});
+const CompactBrowserActionReceipt = z
+  .object({
+    targetId: z.string().max(512),
+    state: InteractionOperationState,
+    error: InteractionError.optional(),
+    targets: z.array(BrowserActionResolvedTarget).optional(),
+    observation: CompactBrowserObservation.optional(),
+  })
+  .strict();
+const BrowserAgentActionReceipt = z.union([BrowserActionReceipt, CompactBrowserActionReceipt]);
 const BrowserScreenshotInput = z
   .object({
     browserSessionId: z.string().uuid(),
@@ -283,6 +328,7 @@ type FlatBrowserNode = {
   depth: number;
   index: number;
   withinScope: boolean;
+  parentName?: string;
 };
 
 const TOOL_PERMISSION = {
@@ -318,6 +364,28 @@ const DiscoveryInput = z
     includeDisconnectedDevices: z.boolean().optional(),
   })
   .strict();
+/** An attached Chrome profile as the model needs it to choose one: identity,
+ * labels, state and any capability it lacks. Enrollment, generation and
+ * timestamp bookkeeping stay out. */
+const AgentAttachedBrowser = z
+  .object({
+    id: z.string().uuid(),
+    name: z.string().max(200),
+    profileLabel: z.string().max(200).optional(),
+    browserName: z.string().max(100),
+    platform: z.enum(["linux", "macos", "windows"]),
+    state: z.enum(["connected", "disconnected"]),
+    tabCount: z.number().int().nonnegative(),
+    unsupported: z.array(z.string().max(64)).min(1).optional(),
+  })
+  .strict();
+/** An online machine that can host the extension but has no attached profile. */
+const AgentAttachedBrowserBridge = z
+  .object({
+    enrollmentId: z.string().uuid(),
+    connectedProfileCount: z.number().int().nonnegative(),
+  })
+  .strict();
 const DiscoveryOutput = z
   .object({
     browserRevision: z.number().int().nonnegative(),
@@ -327,8 +395,8 @@ const DiscoveryOutput = z
     browsers: z.array(BrowserSession),
     computers: z.array(ComputerSession),
     identities: z.array(BrowserIdentity),
-    attachedBrowserBridges: z.array(AttachedBrowserBridge),
-    attachedBrowsers: z.array(AttachedBrowserDevice),
+    attachedBrowserBridges: z.array(AgentAttachedBrowserBridge),
+    attachedBrowsers: z.array(AgentAttachedBrowser),
   })
   .strict();
 
@@ -386,7 +454,7 @@ const BrowserOpenInput = z
 const BrowserOpenOutput = z
   .object({
     session: BrowserSession,
-    targets: z.array(BrowserTarget),
+    targets: z.array(AgentBrowserTarget),
     otherTabCount: z.number().int().nonnegative().optional(),
     observation: CompactBrowserObservation.optional(),
   })
@@ -416,9 +484,13 @@ const BrowserTabsInput = z.discriminatedUnion("operation", [
     })
     .strict(),
 ]);
-const BrowserTabsOutput = BrowserTargetListResponse.safeExtend({
-  mutationObservation: CompactBrowserObservation.optional(),
-});
+const BrowserTabsOutput = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    targets: z.array(AgentBrowserTarget),
+    mutationObservation: CompactBrowserObservation.optional(),
+  })
+  .strict();
 
 const BrowserObserveInput = z
   .object({
@@ -748,8 +820,7 @@ export function createInteractionAttemptToolDefinitions(
           browsers: [],
           computers: [],
           identities: [],
-          attachedBrowserBridges: attached.bridges,
-          attachedBrowsers: attached.devices,
+          ...agentAttachedInventory(attached),
         };
       }
       // Narrow in SQL: a workspace can retain thousands of ended sessions, and
@@ -786,8 +857,9 @@ export function createInteractionAttemptToolDefinitions(
           value.includeTerminal ?? false,
         ),
         identities: scope === "workspace" ? identities.identities : [],
-        attachedBrowserBridges: scope === "workspace" ? attached.bridges : [],
-        attachedBrowsers: scope === "workspace" ? attached.devices : [],
+        ...(scope === "workspace"
+          ? agentAttachedInventory(attached)
+          : { attachedBrowserBridges: [], attachedBrowsers: [] }),
       };
     },
   });
@@ -830,10 +902,12 @@ export function createInteractionAttemptToolDefinitions(
           value.targetId,
         );
       } else if (value.operation === "close") {
-        return await input.transport.closeBrowserTarget(
-          input.workspaceId,
-          value.browserSessionId,
-          value.targetId,
+        return agentTargetList(
+          await input.transport.closeBrowserTarget(
+            input.workspaceId,
+            value.browserSessionId,
+            value.targetId,
+          ),
         );
       }
       const tabs = await input.transport.listBrowserTargets(
@@ -842,10 +916,10 @@ export function createInteractionAttemptToolDefinitions(
       );
       return mutationObservation
         ? {
-            ...tabs,
+            ...agentTargetList(tabs),
             mutationObservation: projectBrowserObservation(mutationObservation, "compact"),
           }
-        : tabs;
+        : agentTargetList(tabs);
     },
   });
 
@@ -854,7 +928,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "observe"],
     title: "Observe browser tab",
     description:
-      "Read one tab's URL, title, viewport, causal generations, and a bounded accessibility view. Compact view is the default: agentView lists selected refs and reports omitted nodes and clipped fields; it is not a complete page tree. Set view=full for the complete accessibility snapshot. Set includeScreenshot=true to add a current still image as tool image content; browser_screenshot is faster when only pixels are needed.",
+      "Read one tab's URL, title, viewport, causal generations, and a bounded accessibility view. Compact view is the default: agentView lists selected refs, and omittedNodeCount or clippedFieldCount appear only when something was left out; it is not a complete page tree. Empty and default fields are omitted. Set view=full for the complete accessibility snapshot. Set includeScreenshot=true to add a current still image as tool image content; browser_screenshot is faster when only pixels are needed.",
     input: BrowserObserveInput,
     output: BrowserAgentObservation,
     readOnly: true,
@@ -1054,9 +1128,7 @@ export function createInteractionAttemptToolDefinitions(
           action: value.action,
         },
       );
-      return receipt.observation && (value.view ?? "compact") === "compact"
-        ? { ...receipt, observation: projectBrowserObservation(receipt.observation, "compact") }
-        : receipt;
+      return value.view === "full" ? receipt : compactActionReceipt(receipt);
     },
   });
 
@@ -1879,7 +1951,7 @@ async function openBrowser(
   const shown = opened && targets.length > 1 ? [opened] : targets;
   return {
     session,
-    targets: shown,
+    targets: shown.map(agentBrowserTarget),
     ...(shown.length < targets.length ? { otherTabCount: targets.length - shown.length } : {}),
     ...(observation ? { observation } : {}),
   };
@@ -2033,7 +2105,12 @@ function flattenBrowserNodes(
   scopeRef?: string,
 ): FlatBrowserNode[] {
   const flattened: FlatBrowserNode[] = [];
-  const stack = [...roots].reverse().map((node) => ({ node, depth: 0, withinScope: !scopeRef }));
+  const stack: Array<{
+    node: BrowserSemanticNodeValue;
+    depth: number;
+    withinScope: boolean;
+    parentName?: string;
+  }> = [...roots].reverse().map((node) => ({ node, depth: 0, withinScope: !scopeRef }));
   while (stack.length > 0) {
     const next = stack.pop()!;
     const withinScope = next.withinScope || next.node.ref === scopeRef;
@@ -2042,12 +2119,51 @@ function flattenBrowserNodes(
       depth: next.depth,
       index: flattened.length,
       withinScope,
+      ...(next.parentName !== undefined ? { parentName: next.parentName } : {}),
     });
     for (const child of [...(next.node.children ?? [])].reverse()) {
-      stack.push({ node: child, depth: next.depth + 1, withinScope });
+      stack.push({
+        node: child,
+        depth: next.depth + 1,
+        withinScope,
+        ...(next.node.name !== undefined ? { parentName: next.node.name } : {}),
+      });
     }
   }
   return flattened;
+}
+
+/** Container roles that help the model orient even without a name. */
+const BROWSER_AGENT_STRUCTURAL_ROLES = new Set([
+  "dialog",
+  "alertdialog",
+  "alert",
+  "status",
+  "navigation",
+  "main",
+  "form",
+  "table",
+  "grid",
+  "list",
+  "listbox",
+  "menu",
+  "menubar",
+  "tablist",
+  "radiogroup",
+]);
+
+/** Nodes that add nothing to the compact view: static text repeating its
+ * parent's accessible name, and unnamed, stateless, non-actionable containers.
+ * Their children keep their own depth, so the outline stays readable. */
+function redundantAgentNode(flat: FlatBrowserNode): boolean {
+  const { node } = flat;
+  if (node.actions.length > 0 || node.states.length > 0) return false;
+  const hasValue = node.value !== undefined && node.value !== null && node.value !== "";
+  if (node.role === "text" || node.role === "StaticText") {
+    return !hasValue && !node.description && (!node.name || node.name === flat.parentName);
+  }
+  if (BROWSER_AGENT_STRUCTURAL_ROLES.has(node.role)) return false;
+  return !node.name && !node.description && !hasValue;
 }
 
 function boundedAgentField(value: string, onClip: () => void): string {
@@ -2079,8 +2195,12 @@ function projectAgentNode(flat: FlatBrowserNode): {
             typeof source.value === "string" ? boundedAgentField(source.value, clip) : source.value,
         }
       : {}),
-    states: source.states.slice(0, 6).map((state) => boundedAgentField(state, clip)),
-    actions: source.actions.slice(0, 6).map((action) => boundedAgentField(action, clip)),
+    ...(source.states.length > 0
+      ? { states: source.states.slice(0, 6).map((state) => boundedAgentField(state, clip)) }
+      : {}),
+    ...(source.actions.length > 0
+      ? { actions: source.actions.slice(0, 6).map((action) => boundedAgentField(action, clip)) }
+      : {}),
   };
   if (source.states.length > 6) clippedFieldCount += source.states.length - 6;
   if (source.actions.length > 6) clippedFieldCount += source.actions.length - 6;
@@ -2143,26 +2263,123 @@ function projectBrowserObservation(
       : semantic?.kind === "diff"
         ? semantic.changed
         : [];
-  const flattened = flattenBrowserNodes(roots);
+  const flattened = flattenBrowserNodes(roots).filter((flat) => !redundantAgentNode(flat));
   const projected = selectAgentNodes(
     flattened,
     BROWSER_AGENT_MAX_NODES,
     BROWSER_AGENT_MAX_NODE_BYTES,
   );
+  const omittedNodeCount = flattened.length - projected.nodes.length;
+  const removedRefCount = semantic?.kind === "diff" ? semantic.removedRefs.length : 0;
+  const viewport = observation.viewport;
+  const diagnostics = observation.diagnostics;
+  const hasDiagnostics =
+    diagnostics.consoleErrorCount > 0 ||
+    diagnostics.failedRequestCount > 0 ||
+    diagnostics.downloadCount > 0 ||
+    diagnostics.pageErrorCount > 0;
   return {
-    ...observation,
-    semantic: null,
+    target: agentBrowserTarget(observation.target),
+    ...(observation.frameId ? { frameId: observation.frameId } : {}),
+    ...(viewport
+      ? {
+          viewport: {
+            width: viewport.width,
+            height: viewport.height,
+            ...(viewport.deviceScaleFactor !== 1
+              ? { deviceScaleFactor: viewport.deviceScaleFactor }
+              : {}),
+            ...(viewport.maxTouchPoints > 0 ? { maxTouchPoints: viewport.maxTouchPoints } : {}),
+          },
+        }
+      : {}),
+    ...(observation.focusedRef ? { focusedRef: observation.focusedRef } : {}),
+    ...(observation.changedRegions.length > 0
+      ? { changedRegions: observation.changedRegions }
+      : {}),
+    ...(hasDiagnostics ? { diagnostics } : {}),
+    ...(observation.dialog ? { dialog: observation.dialog } : {}),
+    ...(observation.screenshot ? { screenshot: observation.screenshot } : {}),
     agentView: {
-      kind: "compact",
       sourceKind: semantic?.kind ?? "none",
       nodes: projected.nodes,
-      sourceNodeCount: flattened.length,
-      omittedNodeCount: flattened.length - projected.nodes.length,
-      removedRefCount: semantic?.kind === "diff" ? semantic.removedRefs.length : 0,
-      clippedFieldCount: projected.clippedFieldCount,
-      maxNodes: BROWSER_AGENT_MAX_NODES,
-      maxNodeBytes: BROWSER_AGENT_MAX_NODE_BYTES,
+      ...(omittedNodeCount > 0 ? { omittedNodeCount } : {}),
+      ...(removedRefCount > 0 ? { removedRefCount } : {}),
+      ...(projected.clippedFieldCount > 0
+        ? { clippedFieldCount: projected.clippedFieldCount }
+        : {}),
     },
+  };
+}
+
+function agentBrowserTarget(
+  target: z.infer<typeof BrowserTarget>,
+): z.infer<typeof AgentBrowserTarget> {
+  return {
+    id: target.id,
+    kind: target.kind,
+    title: target.title,
+    url: target.url,
+    selected: target.selected,
+    controllerGeneration: target.controllerGeneration,
+    targetGeneration: target.targetGeneration,
+    documentGeneration: target.documentGeneration,
+  };
+}
+
+/** Attached profiles are what the model selects. Bridges only explain why
+ * none is available, so they are listed (online only) when no profile is. */
+function agentAttachedInventory(inventory: z.infer<typeof AttachedBrowserDeviceListResponse>): {
+  attachedBrowserBridges: z.infer<typeof AgentAttachedBrowserBridge>[];
+  attachedBrowsers: z.infer<typeof AgentAttachedBrowser>[];
+} {
+  const attachedBrowsers = inventory.devices.map((device) => {
+    const unsupported = Object.entries(device.capabilities)
+      .filter(([, supported]) => !supported)
+      .map(([capability]) => capability);
+    return {
+      id: device.id,
+      name: device.name,
+      ...(device.profileLabel ? { profileLabel: device.profileLabel } : {}),
+      browserName: device.browserName,
+      platform: device.platform,
+      state: device.state,
+      tabCount: device.tabCount,
+      ...(unsupported.length > 0 ? { unsupported } : {}),
+    };
+  });
+  const anyConnected = inventory.devices.some((device) => device.state === "connected");
+  const attachedBrowserBridges = anyConnected
+    ? []
+    : inventory.bridges
+        .filter((bridge) => bridge.state === "online")
+        .map((bridge) => ({
+          enrollmentId: bridge.enrollmentId,
+          connectedProfileCount: bridge.connectedProfileCount,
+        }));
+  return { attachedBrowserBridges, attachedBrowsers };
+}
+
+function agentTargetList(
+  list: z.infer<typeof BrowserTargetListResponse>,
+): z.infer<typeof BrowserTabsOutput> {
+  return {
+    browserSessionId: list.browserSessionId,
+    targets: list.targets.map(agentBrowserTarget),
+  };
+}
+
+function compactActionReceipt(
+  receipt: z.infer<typeof BrowserActionReceipt>,
+): z.infer<typeof CompactBrowserActionReceipt> {
+  return {
+    targetId: receipt.targetId,
+    state: receipt.state,
+    ...(receipt.error ? { error: receipt.error } : {}),
+    ...(receipt.targets && receipt.targets.length > 0 ? { targets: receipt.targets } : {}),
+    ...(receipt.observation
+      ? { observation: projectBrowserObservation(receipt.observation, "compact") }
+      : {}),
   };
 }
 
