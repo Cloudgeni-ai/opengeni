@@ -600,6 +600,36 @@ impl Store for Chunked {
             .map_err(|error| storage_error("delete", error))
     }
 
+    /// Points the sandbox at its disk alone. The memory chunks stay until
+    /// garbage collection finds nothing refers to them.
+    async fn forget_memory(&self, id: Id) -> Result<Option<Receipt>, EngineError> {
+        const OP: &str = "forget";
+        let Some(stored) = self
+            .chunks
+            .get_pointer(&id.to_string())
+            .await
+            .map_err(|error| storage_error(OP, error))?
+        else {
+            return Ok(None);
+        };
+        let head = parse_head(OP, &stored)?;
+        if head.memory.is_none() {
+            return Ok(Some(Receipt(blake3::hash(&stored).to_hex().to_string())));
+        }
+        let head = Head {
+            memory: None,
+            ..head
+        };
+        let bytes = serde_json::to_vec(&head)
+            .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
+        let receipt = Receipt(blake3::hash(&bytes).to_hex().to_string());
+        self.chunks
+            .put_pointer(&id.to_string(), bytes)
+            .await
+            .map_err(|error| storage_error(OP, error))?;
+        Ok(Some(receipt))
+    }
+
     fn chunks(&self) -> Option<&ChunkStore> {
         Some(&self.chunks)
     }

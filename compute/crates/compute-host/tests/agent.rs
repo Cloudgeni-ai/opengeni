@@ -16,10 +16,10 @@ use compute_engine::{
 };
 use compute_host::client::Client;
 use compute_host::protocol::{
-    ErrorCode, HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
-    SandboxStatus, SleepRule,
+    DurabilityName, ErrorCode, HostStatus, Id, LevelName, PriorityName, Reply, Request,
+    SandboxConfig, SandboxStatus, SleepConfig,
 };
-use compute_host::{GuestPort, HostAgent, HostConfig, NoStore, serve};
+use compute_host::{BusyRule, GuestPort, HostAgent, HostConfig, NoStore, serve};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::watch;
@@ -61,6 +61,9 @@ struct World {
     violations: Mutex<Vec<String>>,
     boots: AtomicUsize,
     restores: AtomicUsize,
+    /// Restores still to refuse as a VMM does when it cannot load an image
+    /// (with a memory-lost error), whatever the image holds.
+    refuse_restores: Mutex<usize>,
     resumes: AtomicUsize,
     adopted: AtomicUsize,
     restoring: AtomicUsize,
@@ -82,6 +85,7 @@ struct Process {
     paused: Arc<Mutex<bool>>,
     exit: watch::Sender<bool>,
     guest: AbortHandle,
+    cpu: Arc<Mutex<CpuMeter>>,
 }
 
 impl World {
@@ -117,6 +121,34 @@ impl std::ops::Deref for FakeVm {
     }
 }
 
+/// Processor time a fake VM used: one full processor while its guest is
+/// told to be busy.
+#[derive(Debug, Default)]
+struct CpuMeter {
+    used: Duration,
+    busy_since: Option<Instant>,
+}
+
+impl CpuMeter {
+    fn total(&self) -> Duration {
+        self.used
+            + self
+                .busy_since
+                .map_or(Duration::ZERO, |since| since.elapsed())
+    }
+
+    fn set_busy(&mut self, busy: bool) {
+        match (busy, self.busy_since) {
+            (true, None) => self.busy_since = Some(Instant::now()),
+            (false, Some(since)) => {
+                self.used += since.elapsed();
+                self.busy_since = None;
+            }
+            _ => {}
+        }
+    }
+}
+
 impl Fake {
     fn launch(&self, spec: &VmSpec, memory: String) -> FakeVm {
         let name = spec.name.clone();
@@ -128,12 +160,14 @@ impl Fake {
         let _ = std::fs::remove_file(&vsock);
         let listener = UnixListener::bind(&vsock).unwrap();
         let memory = Arc::new(Mutex::new(memory));
+        let cpu = Arc::new(Mutex::new(CpuMeter::default()));
         let (exit, mut exited) = watch::channel(false);
         let guest = tokio::spawn(guest(
             listener,
             Arc::clone(&memory),
             spec.drives[0].path.clone(),
             Arc::new(AtomicBool::new(false)),
+            Arc::clone(&cpu),
         ));
         let world = Arc::clone(&self.world);
         let dead = name.clone();
@@ -151,6 +185,7 @@ impl Fake {
             paused: Arc::default(),
             exit,
             guest: guest.abort_handle(),
+            cpu,
         };
         self.world
             .vms
@@ -195,11 +230,13 @@ async fn guest(
     memory: Arc<Mutex<String>>,
     disk: PathBuf,
     told_restored: Arc<AtomicBool>,
+    cpu: Arc<Mutex<CpuMeter>>,
 ) {
     while let Ok((stream, _)) = listener.accept().await {
         let memory = Arc::clone(&memory);
         let disk = disk.clone();
         let told_restored = Arc::clone(&told_restored);
+        let cpu = Arc::clone(&cpu);
         tokio::spawn(async move {
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
@@ -228,6 +265,14 @@ async fn guest(
                         "ok".into()
                     }
                     ("told-restored?", _) => told_restored.load(Ordering::SeqCst).to_string(),
+                    ("busy", _) => {
+                        cpu.lock().unwrap().set_busy(true);
+                        "ok".into()
+                    }
+                    ("quiet", _) => {
+                        cpu.lock().unwrap().set_busy(false);
+                        "ok".into()
+                    }
                     (other, _) => format!("unknown {other}"),
                 };
                 if write
@@ -260,6 +305,17 @@ impl Engine for Fake {
         self.world.max_restoring.fetch_max(now, Ordering::SeqCst);
         sleep(self.delays.restore).await;
         self.world.restoring.fetch_sub(1, Ordering::SeqCst);
+        let refuse = {
+            let mut left = self.world.refuse_restores.lock().unwrap();
+            left.checked_sub(1).map(|fewer| *left = fewer)
+        };
+        if refuse.is_some() {
+            return Err(EngineError::new(
+                ErrorKind::MemoryLost,
+                "restore",
+                "snapshot load refused",
+            ));
+        }
         let MemorySource::File(path) = &files.memory else {
             panic!("a bare-metal host restores local images from files");
         };
@@ -381,6 +437,10 @@ impl Engine for Fake {
         Ok(100 << 20)
     }
 
+    fn cpu_time(&self, vm: &FakeVm) -> Result<Duration, EngineError> {
+        Ok(vm.cpu.lock().unwrap().total())
+    }
+
     fn exited(&self, vm: &FakeVm) -> impl Future<Output = ()> + Send + 'static {
         let mut exit = vm.exit.subscribe();
         let late = self.delays.exit_notice;
@@ -434,6 +494,11 @@ impl Lab {
             restore_notice_port: None,
             first_uid: 1 << 30,
             network: None,
+            busy: Some(BusyRule {
+                cpu_percent: 50,
+                window: Duration::from_millis(100),
+            }),
+            can_compress: true,
         };
         configure(&mut config);
         let engine = Fake {
@@ -448,14 +513,17 @@ impl Lab {
             let _ = serve(handle, &listening).await;
         });
         // Generous: on a loaded machine the server can take a while to bind.
+        // The socket file appears at bind, before the server listens, so
+        // wait for a request to succeed rather than for the file.
+        let client = Client::new(&socket);
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !socket.exists() {
+        while client.call(&Request::Status).await.is_err() {
             assert!(Instant::now() < deadline, "the host API never came up");
             sleep(Duration::from_millis(1)).await;
         }
         Self {
             root,
-            client: Client::new(socket),
+            client,
             world,
             server,
         }
@@ -473,17 +541,11 @@ impl Lab {
         (self.root, self.world)
     }
 
-    async fn create(&self, id: Id, sleep: &[(LevelName, u64)]) {
+    async fn create(&self, id: Id, sleep: SleepConfig) {
         let config = SandboxConfig {
             vcpus: 1,
             memory_mib: 256,
-            sleep: sleep
-                .iter()
-                .map(|(level, after_ms)| SleepRule {
-                    level: *level,
-                    after_ms: *after_ms,
-                })
-                .collect(),
+            sleep,
         };
         let reply = self
             .client
@@ -491,6 +553,21 @@ impl Lab {
             .await
             .unwrap();
         assert_eq!(reply, Reply::Done);
+    }
+
+    async fn sleep_to(&self, id: Id, level: LevelName) -> Reply {
+        self.client
+            .call(&Request::Sleep { id, level })
+            .await
+            .unwrap()
+    }
+
+    fn sandbox(status: &HostStatus, id: Id) -> &compute_host::protocol::SandboxStatus {
+        status
+            .sandboxes
+            .iter()
+            .find(|sandbox| sandbox.id == id)
+            .unwrap()
     }
 
     /// Runs guest shell lines in one connection and returns the replies.
@@ -561,7 +638,7 @@ impl Lab {
         self.record(id)["image"].as_bool().unwrap()
     }
 
-    async fn sandbox(&self, id: Id) -> SandboxStatus {
+    async fn view(&self, id: Id) -> SandboxStatus {
         self.status()
             .await
             .sandboxes
@@ -579,7 +656,29 @@ fn vm_name(id: Id) -> String {
     id.to_string()
 }
 
-const SAVE_QUICKLY: &[(LevelName, u64)] = &[(LevelName::Paused, 30), (LevelName::Saved, 60)];
+/// Never sleeps on its own.
+const NEVER: SleepConfig = SleepConfig {
+    pause_after_ms: None,
+    save_after_ms: None,
+    archive_after_ms: None,
+    drop_after_ms: None,
+    evict_after_ms: None,
+    forget_after_ms: None,
+    compress: false,
+};
+
+/// Pauses and saves quickly, and keeps the paused VM.
+const SAVE_IN_PLACE: SleepConfig = SleepConfig {
+    pause_after_ms: Some(30),
+    save_after_ms: Some(60),
+    ..NEVER
+};
+
+/// Pauses, saves and ends the VM process quickly.
+const SAVE_QUICKLY: SleepConfig = SleepConfig {
+    drop_after_ms: Some(90),
+    ..SAVE_IN_PLACE
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sleeping_through_save_keeps_memory_and_disk() {
@@ -606,6 +705,287 @@ async fn sleeping_through_save_keeps_memory_and_disk() {
     );
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
     assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_keeps_the_paused_vm_ready_to_resume() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(12);
+    lab.create(sandbox, SAVE_IN_PLACE).await;
+    assert_eq!(lab.run(sandbox, &["set hello"]).await, ["ok"]);
+    let status = lab
+        .wait_until("the save to finish", |status| {
+            let view = Lab::sandbox(status, sandbox);
+            view.durability == DurabilityName::Local && view.step.is_none()
+        })
+        .await;
+    let view = Lab::sandbox(&status, sandbox);
+    assert_eq!(view.level, LevelName::Paused);
+    assert!(view.memory_saved);
+    assert!(lab.image(sandbox));
+    assert!(lab.world.live.lock().unwrap().contains(&vm_name(sandbox)));
+
+    let resumes = lab.world.resumes.load(Ordering::SeqCst);
+    assert_eq!(lab.run(sandbox, &["get"]).await, ["hello"]);
+    assert_eq!(lab.world.resumes.load(Ordering::SeqCst), resumes + 1);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 0);
+    assert!(
+        !lab.image(sandbox),
+        "a resumed guest makes the saved image stale"
+    );
+    lab.assert_clean();
+}
+
+/// The memory file of the sandbox's current image, made writable.
+fn current_image_memory(lab: &Lab, sandbox: Id) -> PathBuf {
+    let images = lab.sandbox_dir(sandbox).join("images");
+    let newest = std::fs::read_dir(&images)
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.unwrap().file_name().into_string().ok()?;
+            Some((name.parse::<u64>().ok()?, name))
+        })
+        .max()
+        .map(|(_, name)| name)
+        .unwrap();
+    let memory = images.join(newest).join("memory");
+    let mut permissions = std::fs::metadata(&memory).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&memory, permissions).unwrap();
+    memory
+}
+
+fn quarantined(lab: &Lab, sandbox: Id) -> Vec<String> {
+    let dir = lab.sandbox_dir(sandbox).join("images/quarantine");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_restore_of_a_good_image_keeps_it_and_tries_again() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(17);
+    lab.create(sandbox, SAVE_QUICKLY).await;
+    lab.run(sandbox, &["set hello"]).await;
+    lab.wait_level(sandbox, LevelName::Saved).await;
+
+    // A VMM may refuse for reasons of the host's own, such as a pager that
+    // could not start; the image itself is fine.
+    *lab.world.refuse_restores.lock().unwrap() = 2;
+    assert_eq!(lab.run(sandbox, &["get"]).await, ["hello"]);
+    assert_eq!(*lab.world.refuse_restores.lock().unwrap(), 0);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1, "never rebooted");
+    assert_eq!(quarantined(&lab, sandbox), Vec::<String>::new());
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_restore_of_a_damaged_image_quarantines_it() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(18);
+    lab.create(sandbox, SAVE_QUICKLY).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    lab.wait_level(sandbox, LevelName::Saved).await;
+
+    // Damage only the memory: the quick check before a restore passes, and
+    // only the full check the refusal triggers finds it.
+    let memory = current_image_memory(&lab, sandbox);
+    let mut bytes = std::fs::read(&memory).unwrap();
+    bytes[0] ^= 0xff;
+    std::fs::write(&memory, bytes).unwrap();
+    *lab.world.refuse_restores.lock().unwrap() = 1;
+    assert_eq!(
+        lab.run(sandbox, &["get", "disk"]).await,
+        ["", "kept"],
+        "booted fresh from the files"
+    );
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
+    let quarantined = quarantined(&lab, sandbox);
+    assert!(
+        quarantined.len() == 1 && quarantined[0].ends_with("-damaged"),
+        "{quarantined:?}"
+    );
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crash_after_a_save_loses_nothing() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(13);
+    lab.create(sandbox, SAVE_IN_PLACE).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    lab.wait_until("the save to finish", |status| {
+        Lab::sandbox(status, sandbox).durability == DurabilityName::Local
+    })
+    .await;
+    lab.world.crash(&vm_name(sandbox));
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["hello", "kept"]);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sleep_request_overrides_the_settings_until_the_next_wake() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(14);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    assert_eq!(lab.sleep_to(sandbox, LevelName::Saved).await, Reply::Done);
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    assert!(lab.world.live.lock().unwrap().is_empty());
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["hello", "kept"]);
+
+    // The wake cleared the request: a never-sleeping sandbox stays awake.
+    sleep(Duration::from_millis(200)).await;
+    let status = lab.status().await;
+    assert_eq!(Lab::sandbox(&status, sandbox).level, LevelName::Running);
+
+    // Without a store, nothing can be archived.
+    let reply = lab.sleep_to(sandbox, LevelName::Archived).await;
+    assert!(
+        matches!(&reply, Reply::Error { message, .. } if message.contains("store")),
+        "{reply:?}"
+    );
+    let reply = lab.sleep_to(id(99), LevelName::Paused).await;
+    assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+    lab.assert_clean();
+}
+
+/// Pauses soon after the last activity.
+const PAUSE_SOON: SleepConfig = SleepConfig {
+    pause_after_ms: Some(200),
+    ..NEVER
+};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn work_inside_the_guest_keeps_it_awake() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(16);
+    lab.create(sandbox, PAUSE_SOON).await;
+    // The guest starts a background job and nobody is connected any more.
+    assert_eq!(lab.run(sandbox, &["busy"]).await, ["ok"]);
+    sleep(Duration::from_millis(800)).await;
+    let status = lab.status().await;
+    assert_eq!(
+        Lab::sandbox(&status, sandbox).level,
+        LevelName::Running,
+        "a busy guest stays awake"
+    );
+    // The job ends; the sandbox goes idle and pauses.
+    assert_eq!(lab.run(sandbox, &["quiet"]).await, ["ok"]);
+    let quiet = Instant::now();
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    assert!(quiet.elapsed() >= Duration::from_millis(200));
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_named_hold_wakes_a_sandbox_and_keeps_it_awake_until_it_lapses() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(17);
+    lab.create(sandbox, PAUSE_SOON).await;
+    let hold = |ttl_ms| Request::Hold {
+        id: sandbox,
+        hold: "turn".into(),
+        ttl_ms,
+        priority: PriorityName::Interactive,
+    };
+    let started = Instant::now();
+    assert_eq!(
+        lab.client.call(&hold(Some(600))).await.unwrap(),
+        Reply::Done
+    );
+    // Holding wakes it: a turn starting is a good moment to boot.
+    lab.wait_level(sandbox, LevelName::Running).await;
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
+    sleep(Duration::from_millis(450)).await;
+    let status = lab.status().await;
+    assert_eq!(Lab::sandbox(&status, sandbox).level, LevelName::Running);
+    assert_eq!(Lab::sandbox(&status, sandbox).holds, 1);
+    // Nobody refreshed it: it lapses, and the idle clock runs from there.
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(800),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // A hold without expiry lasts until released.
+    assert_eq!(lab.client.call(&hold(None)).await.unwrap(), Reply::Done);
+    lab.wait_level(sandbox, LevelName::Running).await;
+    sleep(Duration::from_millis(400)).await;
+    let status = lab.status().await;
+    assert_eq!(Lab::sandbox(&status, sandbox).level, LevelName::Running);
+    let release = Request::Release {
+        id: sandbox,
+        hold: "turn".into(),
+    };
+    assert_eq!(lab.client.call(&release).await.unwrap(), Reply::Done);
+    lab.wait_level(sandbox, LevelName::Paused).await;
+
+    let missing = Request::Release {
+        id: id(98),
+        hold: "turn".into(),
+    };
+    let reply = lab.client.call(&missing).await.unwrap();
+    assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_that_cannot_compress_refuses_to() {
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        |config| config.can_compress = false,
+    )
+    .await;
+    let sandbox = id(18);
+    let compressible = SleepConfig {
+        compress: true,
+        ..PAUSE_SOON
+    };
+    lab.create(sandbox, compressible).await;
+    lab.run(sandbox, &["set x"]).await;
+    let reply = lab.sleep_to(sandbox, LevelName::Compressed).await;
+    assert!(
+        matches!(&reply, Reply::Error { message, .. } if message.contains("compress")),
+        "{reply:?}"
+    );
+    assert_eq!(lab.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forgetting_memory_keeps_the_files() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(15);
+    let forget_soon = SleepConfig {
+        forget_after_ms: Some(150),
+        ..SAVE_QUICKLY
+    };
+    lab.create(sandbox, forget_soon).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    lab.wait_until("the memory image to be forgotten", |status| {
+        let view = Lab::sandbox(status, sandbox);
+        view.level == LevelName::Saved && !view.memory_saved && view.step.is_none()
+    })
+    .await;
+    assert!(!lab.image(sandbox));
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["", "kept"]);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 0);
     lab.assert_clean();
 }
 
@@ -652,7 +1032,7 @@ async fn a_burst_of_wakes_respects_the_restore_limit() {
 async fn a_crash_loses_memory_but_keeps_files() {
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
     let sandbox = id(2);
-    lab.create(sandbox, &[]).await;
+    lab.create(sandbox, NEVER).await;
     lab.run(sandbox, &["set hello", "write kept"]).await;
     lab.world.crash(&vm_name(sandbox));
     lab.wait_until("the crash to be noticed", |status| {
@@ -673,12 +1053,18 @@ async fn a_wake_interrupts_compression() {
     };
     let lab = Lab::new(delays, HostPolicy::default()).await;
     let sandbox = id(3);
-    lab.create(
-        sandbox,
-        &[(LevelName::Paused, 20), (LevelName::Compressed, 40)],
-    )
-    .await;
+    let compressible = SleepConfig {
+        pause_after_ms: Some(20),
+        compress: true,
+        ..NEVER
+    };
+    lab.create(sandbox, compressible).await;
     lab.run(sandbox, &["set warm"]).await;
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    assert_eq!(
+        lab.sleep_to(sandbox, LevelName::Compressed).await,
+        Reply::Done
+    );
     lab.wait_until("compression to start", |status| {
         status.sandboxes[0].step.as_deref() == Some("compress")
     })
@@ -703,7 +1089,7 @@ async fn a_wake_during_save_resumes_the_paused_vm() {
     };
     let lab = Lab::new(delays, HostPolicy::default()).await;
     let sandbox = id(4);
-    lab.create(sandbox, SAVE_QUICKLY).await;
+    lab.create(sandbox, SAVE_IN_PLACE).await;
     lab.run(sandbox, &["set warm"]).await;
     lab.wait_until("the save to start", |status| {
         status.sandboxes[0].step.as_deref() == Some("save")
@@ -778,7 +1164,7 @@ async fn remove_waits_for_a_running_save_and_deletes_everything() {
     assert!(lab.world.live.lock().unwrap().is_empty());
     assert_eq!(lab.status().await.sandboxes.len(), 0);
     // The id is free again.
-    lab.create(sandbox, &[]).await;
+    lab.create(sandbox, NEVER).await;
     assert_eq!(lab.run(sandbox, &["get"]).await, [""]);
     lab.assert_clean();
 }
@@ -788,8 +1174,15 @@ async fn a_restarted_agent_takes_back_running_vms_and_recovers_the_rest() {
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
     let (saved, running, paused) = (id(6), id(7), id(12));
     lab.create(saved, SAVE_QUICKLY).await;
-    lab.create(running, &[]).await;
-    lab.create(paused, &[(LevelName::Paused, 30)]).await;
+    lab.create(running, NEVER).await;
+    lab.create(
+        paused,
+        SleepConfig {
+            pause_after_ms: Some(30),
+            ..NEVER
+        },
+    )
+    .await;
     lab.run(saved, &["set kept", "write saved-disk"]).await;
     lab.run(running, &["set alive", "write running-disk"]).await;
     lab.run(paused, &["set asleep"]).await;
@@ -836,9 +1229,9 @@ async fn requests_for_a_replaced_execution_are_refused() {
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
     let sandbox = id(13);
     lab.create(sandbox, SAVE_QUICKLY).await;
-    assert_eq!(lab.sandbox(sandbox).await.generation, 0, "not yet run");
+    assert_eq!(lab.view(sandbox).await.generation, 0, "not yet run");
     lab.run(sandbox, &["set first"]).await;
-    let first = lab.sandbox(sandbox).await.generation;
+    let first = lab.view(sandbox).await.generation;
     assert_eq!(first, 1);
     let wake = |generation| Request::Wake {
         id: sandbox,
@@ -854,7 +1247,7 @@ async fn requests_for_a_replaced_execution_are_refused() {
     // execution.
     lab.wait_level(sandbox, LevelName::Saved).await;
     assert_eq!(lab.run(sandbox, &["get"]).await, ["first"]);
-    let second = lab.sandbox(sandbox).await.generation;
+    let second = lab.view(sandbox).await.generation;
     assert_eq!(second, first + 1);
     let reply = lab.client.call(&wake(first)).await.unwrap();
     assert!(
@@ -902,8 +1295,8 @@ async fn requests_for_a_replaced_execution_are_refused() {
 async fn a_removal_cut_short_finishes_on_the_next_start() {
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
     let (doomed, kept) = (id(14), id(15));
-    lab.create(doomed, &[]).await;
-    lab.create(kept, &[]).await;
+    lab.create(doomed, NEVER).await;
+    lab.create(kept, NEVER).await;
     lab.run(doomed, &["set x"]).await;
     let dir = lab.sandbox_dir(doomed);
     let (root, world) = lab.stop().await;
@@ -930,7 +1323,7 @@ async fn a_removal_cut_short_finishes_on_the_next_start() {
         "the removed sandbox's VM still runs"
     );
     // Its id is free again.
-    lab.create(doomed, &[]).await;
+    lab.create(doomed, NEVER).await;
     assert_eq!(lab.run(doomed, &["get"]).await, [""]);
     lab.assert_clean();
 }
@@ -958,21 +1351,13 @@ async fn bad_requests_are_refused() {
         ),
         "{reply:?}"
     );
-    let archived = &[
-        (LevelName::Paused, 10),
-        (LevelName::Saved, 20),
-        (LevelName::Archived, 30),
-    ];
     let config = SandboxConfig {
         vcpus: 1,
         memory_mib: 256,
-        sleep: archived
-            .iter()
-            .map(|(level, after_ms)| SleepRule {
-                level: *level,
-                after_ms: *after_ms,
-            })
-            .collect(),
+        sleep: SleepConfig {
+            archive_after_ms: Some(90),
+            ..SAVE_IN_PLACE
+        },
     };
     let reply = lab
         .client
@@ -986,7 +1371,6 @@ async fn bad_requests_are_refused() {
         matches!(&reply, Reply::Error { message, .. } if message.contains("store")),
         "{reply:?}"
     );
-    lab.create(missing, &[]).await;
     let reply = lab
         .client
         .call(&Request::Create {
@@ -994,7 +1378,27 @@ async fn bad_requests_are_refused() {
             config: SandboxConfig {
                 vcpus: 1,
                 memory_mib: 256,
-                sleep: Vec::new(),
+                sleep: SleepConfig {
+                    save_after_ms: Some(10),
+                    ..NEVER
+                },
+            },
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(&reply, Reply::Error { message, .. } if message.contains("pause")),
+        "saving needs pausing first: {reply:?}"
+    );
+    lab.create(missing, NEVER).await;
+    let reply = lab
+        .client
+        .call(&Request::Create {
+            id: missing,
+            config: SandboxConfig {
+                vcpus: 1,
+                memory_mib: 256,
+                sleep: NEVER,
             },
         })
         .await
@@ -1016,7 +1420,14 @@ async fn data_for_a_sleeping_sandbox_wakes_it() {
     )
     .await;
     let sandbox = id(10);
-    lab.create(sandbox, &[(LevelName::Paused, 30)]).await;
+    lab.create(
+        sandbox,
+        SleepConfig {
+            pause_after_ms: Some(30),
+            ..NEVER
+        },
+    )
+    .await;
     lab.run(sandbox, &["set up"]).await;
 
     // The test plays the guest: it opens a connection to its host, the way

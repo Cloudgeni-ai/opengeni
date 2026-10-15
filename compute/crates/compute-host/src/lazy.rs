@@ -60,8 +60,13 @@ const FETCHES_PER_HOST: usize = 512;
 /// Recently fetched chunks kept in memory, shared by every VM: sandboxes
 /// started from the same template share most of their memory.
 const CACHE_BYTES: usize = 1 << 30;
-/// Tries per chunk before the VM's memory counts as lost.
-const ATTEMPTS: u32 = 3;
+/// How long a chunk keeps being retried while the store or host fails in
+/// ways that may pass (timeouts, dropped connections, local resource
+/// limits) before the VM's memory counts as lost. The guest waits on a
+/// demand fetch meanwhile, which beats losing its programs.
+const RETRY_FOR: Duration = Duration::from_secs(60);
+/// The longest pause between two tries of a chunk.
+const RETRY_DELAY_MAX: Duration = Duration::from_secs(2);
 /// Most pages a learned profile keeps.
 const PROFILE_PAGES: usize = 1 << 16;
 /// How long a pager waits for its VMM to connect.
@@ -69,7 +74,35 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the first-touch order is recorded after a wake.
 const RECORD_FOR: Duration = Duration::from_secs(3);
 
-type Fetched = Result<Arc<Vec<u8>>, Arc<String>>;
+type Fetched = Result<Arc<Vec<u8>>, Arc<compute_storage::Error>>;
+
+/// Why a remote image's memory could not be filled.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("{reason}")]
+pub(crate) struct Unavailable {
+    /// What failed.
+    pub reason: String,
+    /// The store's copy is bad or gone, so no retry can bring it back. When
+    /// false, the copy may still be good and the failure was the host's or
+    /// the network's.
+    pub permanent: bool,
+}
+
+impl Unavailable {
+    fn permanent(reason: String) -> Self {
+        Self {
+            reason,
+            permanent: true,
+        }
+    }
+
+    fn passing(reason: String) -> Self {
+        Self {
+            reason,
+            permanent: false,
+        }
+    }
+}
 
 /// Fetches chunks for every VM on the host: one request per chunk however
 /// many VMs want it at once, and a bounded cache of recent chunks.
@@ -144,7 +177,7 @@ impl Fetcher {
                             .get_chunk(&reference)
                             .await
                             .map(Arc::new)
-                            .map_err(|error| Arc::new(error.to_string()))
+                            .map_err(Arc::new)
                     }
                     .boxed()
                     .shared()
@@ -192,8 +225,8 @@ pub(crate) struct Hydration {
     /// Signalled whenever chunks arrive; the pager waits on it.
     arrived: OwnedFd,
     requests: mpsc::UnboundedSender<Request>,
-    failure: Mutex<Option<String>>,
-    done: watch::Sender<Option<Result<(), String>>>,
+    failure: Mutex<Option<Unavailable>>,
+    done: watch::Sender<Option<Result<(), Unavailable>>>,
 }
 
 impl Hydration {
@@ -267,29 +300,36 @@ impl Hydration {
     }
 
     /// Waits until every chunk is in the memory file, or fetching failed.
-    pub async fn finished(&self) -> Result<(), String> {
+    pub async fn finished(&self) -> Result<(), Unavailable> {
         let mut done = self.done.subscribe();
         let result = done
             .wait_for(Option::is_some)
             .await
-            .map_err(|_| "hydration stopped".to_owned())?
+            .map_err(|_| Unavailable::passing("hydration stopped".to_owned()))?
             .clone();
         result.unwrap_or(Ok(()))
     }
 
-    fn store(&self, index: usize, plain: &[u8]) -> Result<(), String> {
+    /// Why filling failed, if it did.
+    pub fn failure(&self) -> Option<Unavailable> {
+        lock(&self.failure).clone()
+    }
+
+    fn store(&self, index: usize, plain: &[u8]) -> Result<(), Unavailable> {
         let range = chunk_range(index, self.len);
         if plain.len() as u64 != range.end - range.start {
-            return Err(format!("chunk {index} has the wrong length"));
+            return Err(Unavailable::permanent(format!(
+                "chunk {index} has the wrong length"
+            )));
         }
         if *blake3::hash(plain).as_bytes() != self.hashes[index] {
-            return Err(format!(
+            return Err(Unavailable::permanent(format!(
                 "chunk {index} does not match the image's chunk map"
-            ));
+            )));
         }
         self.file
             .write_all_at(plain, range.start)
-            .map_err(|error| format!("writing chunk {index}: {error}"))?;
+            .map_err(|error| Unavailable::passing(format!("writing chunk {index}: {error}")))?;
         self.present[index].store(true, Ordering::Release);
         if self.missing.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.done.send_replace(Some(Ok(())));
@@ -298,10 +338,10 @@ impl Hydration {
         Ok(())
     }
 
-    fn fail(&self, reason: String) {
-        tracing::error!(%reason, "remote memory unavailable");
-        lock(&self.failure).get_or_insert(reason.clone());
-        self.done.send_replace(Some(Err(reason)));
+    fn fail(&self, why: Unavailable) {
+        tracing::error!(reason = %why.reason, permanent = why.permanent, "remote memory unavailable");
+        lock(&self.failure).get_or_insert(why.clone());
+        self.done.send_replace(Some(Err(why)));
         self.signal();
     }
 
@@ -390,37 +430,56 @@ async fn fill(
     }
 }
 
-/// Fetches chunk `index`, retrying transient failures, and stores it.
+/// Fetches chunk `index` and stores it, retrying failures that may pass
+/// for up to [`RETRY_FOR`]. A chunk the store proves bad or gone fails at
+/// once: [`ChunkStore::get_chunk`] has already read it twice.
 fn fetch_one(
     fetcher: &Arc<Fetcher>,
     hydration: &Arc<Hydration>,
     index: usize,
     background: bool,
-) -> impl Future<Output = (usize, Result<(), String>)> + use<> {
+) -> impl Future<Output = (usize, Result<(), Unavailable>)> + use<> {
     let fetcher = Arc::clone(fetcher);
     let hydration = Arc::clone(hydration);
     async move {
         let Some(reference) = hydration.refs[index].clone() else {
             return (index, Ok(()));
         };
+        let started = tokio::time::Instant::now();
         let mut delay = Duration::from_millis(50);
-        let mut last = String::new();
-        for _ in 0..ATTEMPTS {
+        loop {
             match fetcher.get(&reference, background).await {
                 Ok(plain) => {
                     let hydration = Arc::clone(&hydration);
                     let stored =
                         tokio::task::spawn_blocking(move || hydration.store(index, &plain))
                             .await
-                            .unwrap_or_else(|error| Err(error.to_string()));
+                            .unwrap_or_else(|error| {
+                                Err(Unavailable::passing(format!(
+                                    "storing chunk {index}: {error}"
+                                )))
+                            });
                     return (index, stored);
                 }
-                Err(error) => last.clone_from(&error),
+                Err(error) if error.is_permanent() => {
+                    return (
+                        index,
+                        Err(Unavailable::permanent(format!("chunk {index}: {error}"))),
+                    );
+                }
+                Err(error) if started.elapsed() >= RETRY_FOR => {
+                    return (
+                        index,
+                        Err(Unavailable::passing(format!("chunk {index}: {error}"))),
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(index, %error, "chunk fetch failed; trying again");
+                }
             }
             tokio::time::sleep(delay).await;
-            delay *= 4;
+            delay = (delay * 2).min(RETRY_DELAY_MAX);
         }
-        (index, Err(format!("chunk {index}: {last}")))
     }
 }
 
@@ -449,8 +508,8 @@ impl Source for ChunkSource {
 
     fn get(&mut self, offset: u64, len: u64, urgent: bool) -> io::Result<Option<&[u8]>> {
         let hydration = &self.hydration;
-        if let Some(reason) = lock(&hydration.failure).as_ref() {
-            return Err(io::Error::other(reason.clone()));
+        if let Some(why) = lock(&hydration.failure).as_ref() {
+            return Err(io::Error::other(why.clone()));
         }
         let end = offset
             .checked_add(len)

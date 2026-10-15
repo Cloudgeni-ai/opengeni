@@ -125,6 +125,14 @@ pub trait Store: Send + Sync + 'static {
     fn chunks(&self) -> Option<&ChunkStore> {
         None
     }
+
+    /// Deletes the memory image from the stored copy and keeps its disk.
+    /// Returns the receipt of what is stored afterwards, `None` if nothing
+    /// is.
+    fn forget_memory(
+        &self,
+        id: Id,
+    ) -> impl Future<Output = Result<Option<Receipt>, EngineError>> + Send;
 }
 
 /// No store: sandboxes never leave the host.
@@ -166,6 +174,13 @@ impl Store for NoStore {
 
     fn delete(&self, _: Id) -> impl Future<Output = Result<(), EngineError>> + Send {
         ready(Ok(()))
+    }
+
+    fn forget_memory(
+        &self,
+        _: Id,
+    ) -> impl Future<Output = Result<Option<Receipt>, EngineError>> + Send {
+        ready(Ok(None))
     }
 }
 
@@ -293,6 +308,33 @@ impl Store for Directory {
         blocking("delete", move || match fs::remove_dir_all(&stored) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
+        })
+        .await
+    }
+
+    async fn forget_memory(&self, id: Id) -> Result<Option<Receipt>, EngineError> {
+        let stored = self.dir(id);
+        blocking("forget", move || {
+            // The device state goes first: without it, what remains of the
+            // memory image can never be mistaken for a usable one.
+            for name in ["state", "memory"] {
+                match fs::remove_file(stored.join(name)) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(error);
+                    }
+                    _ => {}
+                }
+            }
+            if !stored.exists() {
+                return Ok(None);
+            }
+            sync_file(&stored)?;
+            // The receipt names the copy, which still holds the same disk.
+            match fs::read_to_string(stored.join(RECEIPT)) {
+                Ok(receipt) => Ok(Some(Receipt(receipt))),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            }
         })
         .await
     }

@@ -25,7 +25,7 @@ use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
 use compute_host::protocol::{
-    Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepRule,
+    Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
 };
 use compute_host::{Chunked, Directory, HostAgent, HostConfig, NoStore, Store, serve};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -99,6 +99,8 @@ async fn start<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> Ag
         restore_notice_port: None,
         first_uid,
         network: None,
+        busy: None,
+        can_compress: true,
     };
     let socket = root.join("agent.sock");
     let (handle, agent) = HostAgent::start(config, engine, store).await.unwrap();
@@ -158,24 +160,22 @@ async fn wait_for(client: &Client, id: Id, level: LevelName) {
     }
 }
 
-fn ladder(deepest: LevelName) -> Vec<SleepRule> {
-    let levels = [
-        LevelName::Paused,
-        LevelName::Saved,
-        LevelName::Archived,
-        LevelName::Remote,
-    ];
-    let mut rules = Vec::new();
-    for (step, level) in (1_u64..).zip(levels) {
-        rules.push(SleepRule {
-            level,
-            after_ms: 500 * step,
-        });
-        if level == deepest {
-            break;
-        }
+/// Pauses after half a second, then each half second goes one level deeper
+/// until `deepest`. Saving ends the VM process, so every wake restores.
+fn ladder(deepest: LevelName) -> SleepConfig {
+    let mut config = SleepConfig {
+        pause_after_ms: Some(500),
+        save_after_ms: Some(1_000),
+        drop_after_ms: Some(1_000),
+        ..SleepConfig::default()
+    };
+    if matches!(deepest, LevelName::Archived | LevelName::Remote) {
+        config.archive_after_ms = Some(1_500);
     }
-    rules
+    if deepest == LevelName::Remote {
+        config.evict_after_ms = Some(2_000);
+    }
+    config
 }
 
 /// Starts a process that counts once a second into a file in guest memory,

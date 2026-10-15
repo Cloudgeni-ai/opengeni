@@ -54,6 +54,13 @@ impl Cgroup {
         read_u64(&self.path.join("memory.current"))
     }
 
+    /// Processor time the group's processes have used since it was created
+    /// (`usage_usec` in cpu.stat).
+    pub fn cpu_time(&self) -> io::Result<Duration> {
+        let stat = fs::read_to_string(self.path.join("cpu.stat"))?;
+        parse_cpu_usage(&stat)
+    }
+
     /// Pushes the group's memory out of RAM: anonymous pages into compressed
     /// memory (zswap, never written to disk), file pages dropped.
     ///
@@ -129,4 +136,27 @@ fn read_u64(path: &Path) -> io::Result<u64> {
         .trim()
         .parse()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn parse_cpu_usage(stat: &str) -> io::Result<Duration> {
+    stat.lines()
+        .find_map(|line| line.strip_prefix("usage_usec "))
+        .and_then(|value| value.trim().parse().ok())
+        .map(Duration::from_micros)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "cpu.stat has no usage_usec"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_processor_time_from_cpu_stat() {
+        let stat = "usage_usec 1234567\nuser_usec 1000000\nsystem_usec 234567\n";
+        assert_eq!(
+            parse_cpu_usage(stat).unwrap(),
+            Duration::from_micros(1_234_567)
+        );
+        assert!(parse_cpu_usage("user_usec 5\n").is_err());
+    }
 }

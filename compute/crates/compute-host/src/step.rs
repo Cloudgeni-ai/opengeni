@@ -13,7 +13,10 @@
 //! sandbox's newest state is deleted or replaced only after another copy has
 //! been checked and found good, and a copy that fails a check is moved to
 //! quarantine rather than deleted. Local images are checked by
-//! [`Images::verify`]; the store's copy by [`Store::verify`].
+//! [`Images::verify`]; the store's copy by [`Store::verify`]. Only a check
+//! that proves a copy bad counts: a copy that could not be read for reasons
+//! of the host's own (a full file table, a pager that did not start) is kept
+//! and the step retried.
 
 use std::fs;
 use std::io;
@@ -255,7 +258,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             );
         }
         match step {
-            Step::Pause | Step::Resume | Step::Compress | Step::Save => {
+            Step::Pause | Step::Resume | Step::Compress | Step::Save | Step::Drop => {
                 let Some(live) = self.live.take() else {
                     // The VM vanished between the decision and the step; the
                     // exit notice is on its way.
@@ -263,16 +266,25 @@ impl<E: Engine, S: Store> Job<E, S> {
                 };
                 match step {
                     Step::Pause => self.simple(self.engine.pause(&live.vm).await, live),
-                    Step::Resume => self.simple(self.engine.resume(&live.vm).await, live),
+                    Step::Resume => self.resume(live).await,
                     Step::Compress => self.compress(live).await,
-                    _ => self.save(live).await,
+                    Step::Save => self.save(live).await,
+                    _ => self.end_process(live).await,
                 }
             }
             Step::Restore => self.restore().await,
             Step::Boot => self.boot().await,
-            Step::Archive => (self.archive().await, After::NoVm),
+            // A paused VM stays as it is while its saved copy is archived.
+            Step::Archive => {
+                let outcome = self.archive().await;
+                (outcome, self.live.take().map_or(After::NoVm, After::Kept))
+            }
             Step::Evict => (self.evict().await, After::NoVm),
             Step::Fetch => (self.fetch().await, After::NoVm),
+            Step::Forget => {
+                let outcome = self.forget().await;
+                (outcome, self.live.take().map_or(After::NoVm, After::Kept))
+            }
         }
     }
 
@@ -295,6 +307,21 @@ impl<E: Engine, S: Store> Job<E, S> {
         (outcome, After::Kept(live))
     }
 
+    /// Resumes a paused VM. A saved copy of it goes stale the moment the
+    /// guest runs and its disk moves on, so it is unmarked first.
+    async fn resume(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        // The image stays on disk as the base the VM's next save is a diff
+        // against; only the record stops vouching for it.
+        if (self.record.image || self.record.archived)
+            && let Err(error) = self
+                .commit(Change::new().image(false).archived(false))
+                .await
+        {
+            return (state_failure(&error), After::Kept(live));
+        }
+        self.simple(self.engine.resume(&live.vm).await, live)
+    }
+
     async fn compress(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
         let outcome = match self.engine.compress(&live.vm, &self.cancel).await {
             Ok(Completion::Finished) => Outcome::Done,
@@ -305,11 +332,12 @@ impl<E: Engine, S: Store> Job<E, S> {
         (outcome, After::Kept(live))
     }
 
-    /// Writes the pages that changed, merges them offline into a new
-    /// self-contained image, marks it valid, then ends the VM process. A
-    /// wake that arrives before the process ends cancels the save and the
-    /// still-paused VM simply resumes; the new image stays as the base of
-    /// its next save.
+    /// Writes the pages that changed and merges them offline into a new
+    /// self-contained image, which becomes valid and the base of the VM's
+    /// next save. The VM stays paused in memory, so a wake still only has to
+    /// resume it; the image lets memory pressure end the process instantly
+    /// and survives the process crashing. A wake that arrives during the
+    /// save cancels it.
     async fn save(&mut self, mut live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
         // A live VM's record never vouches for an image; this is a guard.
         if self.record.image
@@ -343,12 +371,28 @@ impl<E: Engine, S: Store> Job<E, S> {
                 return (failure(&error), After::Kept(live));
             }
         }
+        (Outcome::Done, After::Kept(live))
+    }
+
+    /// Ends the VM process of a paused VM whose current state is saved, which
+    /// frees all of its memory at once and loses nothing.
+    async fn end_process(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        if !self.record.image {
+            // The core only drops a VM with a current copy; ending this one
+            // would lose its running programs.
+            tracing::error!(id = %self.id, "no saved copy to fall back on; keeping the VM");
+            return (Outcome::Failed(Failure::Fatal), After::Kept(live));
+        }
         live.stopping.store(true, Ordering::Release);
         match self.engine.stop(live.vm).await {
             Ok(()) => (Outcome::Done, After::NoVm),
-            // The image is safe on disk either way; a VMM that would not die
-            // is a host problem worth surfacing.
-            Err(error) => (failure(&error), After::NoVm),
+            Err(error) => {
+                // The copy is safe on disk either way, so the sandbox moves
+                // on without the process; a VMM that would not die is a host
+                // problem worth surfacing.
+                tracing::error!(id = %self.id, %error, "VM process did not end cleanly");
+                (Outcome::Failed(Failure::MemoryLost), After::NoVm)
+            }
         }
     }
 
@@ -367,10 +411,14 @@ impl<E: Engine, S: Store> Job<E, S> {
                 .as_ref()
                 .and_then(|paging| paging.hydration.clone()),
         ) {
-            hydration
-                .finished()
-                .await
-                .map_err(|reason| EngineError::new(ErrorKind::MemoryLost, OP, reason))?;
+            hydration.finished().await.map_err(|why| {
+                let kind = if why.permanent {
+                    ErrorKind::MemoryLost
+                } else {
+                    ErrorKind::Transient
+                };
+                EngineError::caused_by(kind, OP, why)
+            })?;
             let images = images.clone();
             blocking(move || {
                 let image = images.verify(generation, crate::image::Depth::Light)?;
@@ -455,7 +503,6 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
             Err(error) => return (io_failure(OP, error), After::NoVm),
         };
-        let generation = image.generation();
         let (memory, live_memory) = match self.memory_source(&images, &image) {
             Ok(prepared) => prepared,
             Err(error) => return (failure(&error), After::NoVm),
@@ -466,19 +513,11 @@ impl<E: Engine, S: Store> Job<E, S> {
         };
         let vm = match self.engine.restore(&self.spec, &files).await {
             Ok(vm) => vm,
-            Err(error) => {
-                if error.kind == ErrorKind::MemoryLost {
-                    // The VMM rejected the image: keep it for inspection,
-                    // never offer it again.
-                    let suspect = Suspect::Damaged {
-                        generation,
-                        reason: error.to_string(),
-                    };
-                    let _ = images.quarantine(generation, &suspect);
-                    let _ = self.commit(Change::new().image(false)).await;
-                }
-                return (failure(&error), After::NoVm);
+            Err(error) if error.kind == ErrorKind::MemoryLost => {
+                let outcome = self.rejected(&images, &image, &live_memory, &error).await;
+                return (outcome, After::NoVm);
             }
+            Err(error) => return (failure(&error), After::NoVm),
         };
         let archived = self.record.archived;
         let running = Change::new().image(false).archived(false).execution();
@@ -499,6 +538,71 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
         self.tell_guest_restored().await;
         (Outcome::Done, After::New(vm, live_memory))
+    }
+
+    /// Decides what the VMM refusing to load `image` means. The image is
+    /// given up only when it is proven bad: a local image that fails the
+    /// deep check goes to quarantine, and a remote image whose store copy
+    /// is bad or gone is dropped. Otherwise the refusal was the host's (a
+    /// pager that could not start or could not reach the store, say) and
+    /// the image is kept for a retry.
+    async fn rejected(
+        &mut self,
+        images: &Images,
+        image: &Verified,
+        memory: &LiveMemory,
+        error: &EngineError,
+    ) -> Outcome {
+        const OP: &str = "restore";
+        tracing::warn!(id = %self.id, %error, "the VMM refused the memory image");
+        if image.meta().remote {
+            #[cfg(target_os = "linux")]
+            let lost = memory
+                .paging
+                .as_ref()
+                .and_then(|paging| paging.hydration.as_ref())
+                .and_then(|hydration| hydration.failure())
+                .filter(|why| why.permanent);
+            #[cfg(not(target_os = "linux"))]
+            let lost: Option<String> = {
+                let _ = memory;
+                None
+            };
+            if let Some(why) = lost {
+                if let Err(error) = self.commit(Change::new().image(false)).await {
+                    return state_failure(&error);
+                }
+                return failure(&EngineError::caused_by(ErrorKind::MemoryLost, OP, why));
+            }
+            return failure(&EngineError::new(
+                ErrorKind::Transient,
+                OP,
+                error.to_string(),
+            ));
+        }
+        let checked = {
+            let images = images.clone();
+            let generation = image.generation();
+            blocking(move || images.verify(generation, crate::image::Depth::Deep)).await
+        };
+        match checked {
+            Ok(Ok(_)) => {
+                tracing::warn!(
+                    id = %self.id,
+                    "the refused image passes every check; keeping it and trying again"
+                );
+                failure(&EngineError::new(
+                    ErrorKind::Transient,
+                    OP,
+                    error.to_string(),
+                ))
+            }
+            Ok(Err(Suspect::Io(error))) | Err(error) => io_failure(OP, error),
+            Ok(Err(suspect)) => {
+                self.quarantine_current(images, &suspect).await;
+                failure(&suspect_error(OP, suspect))
+            }
+        }
     }
 
     /// Links `image` into the jail and decides how the VM's memory is
@@ -582,8 +686,13 @@ impl<E: Engine, S: Store> Job<E, S> {
     }
 
     /// Moves the current image aside for inspection and records that the
-    /// sandbox has no usable memory image.
+    /// sandbox has no usable memory image. A failure to read the image is
+    /// no verdict on it: the image is kept.
     async fn quarantine_current(&mut self, images: &Images, suspect: &Suspect) {
+        if let Suspect::Io(error) = suspect {
+            tracing::warn!(id = %self.id, %error, "memory image unreadable for now; keeping it");
+            return;
+        }
         if let Ok(Some(generation)) = images.current()
             && let Err(error) = images.quarantine(generation, suspect)
         {
@@ -819,6 +928,59 @@ impl<E: Engine, S: Store> Job<E, S> {
         match self.commit(Change::new().disk(Disk::Local)).await {
             Ok(()) => Outcome::Done,
             Err(error) => state_failure(&error),
+        }
+    }
+
+    /// Deletes the memory image here and in the store, keeping the files.
+    /// The image is unmarked first, so a crash part-way never claims an
+    /// image that is gone.
+    async fn forget(&mut self) -> Outcome {
+        const OP: &str = "forget";
+        if self.record.image
+            && let Err(error) = self.commit(Change::new().image(false)).await
+        {
+            return state_failure(&error);
+        }
+        // A paused VM loses the base its next diff would be merged over.
+        if let Some(live) = self.live.as_mut() {
+            live.memory.base = Base::Unknown;
+        }
+        let paths = self.paths.clone();
+        let cleared = blocking(move || {
+            remove_if_present(&paths.snapshot.state)?;
+            remove_if_present(&paths.snapshot.memory)?;
+            images_of(&paths).clear()
+        })
+        .await
+        .and_then(|cleared| cleared);
+        if let Err(error) = cleared {
+            return io_failure(OP, error);
+        }
+        if !self.record.archived {
+            return Outcome::Done;
+        }
+        // Until the new receipt is written, the old one no longer matches
+        // the store, so nothing evicts against a copy in flux.
+        let receipt = match self.store.forget_memory(self.id).await {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => {
+                return match self.commit(Change::new().archived(false)).await {
+                    Ok(()) => Outcome::Done,
+                    Err(error) => state_failure(&error),
+                };
+            }
+            Err(error) => return failure(&error),
+        };
+        let marker = Archived {
+            receipt,
+            memory: false,
+        };
+        let written = serde_json::to_vec(&marker)
+            .map_err(io::Error::other)
+            .and_then(|bytes| write_atomic(&archive_receipt(&self.paths), &bytes));
+        match written {
+            Ok(()) => Outcome::Done,
+            Err(error) => io_failure(OP, error),
         }
     }
 }

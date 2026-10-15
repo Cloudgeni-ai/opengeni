@@ -22,7 +22,7 @@ use std::time::Duration;
 use compute_core::SandboxId;
 use compute_host::client::Client;
 use compute_host::protocol::{
-    HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepRule,
+    HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
@@ -160,15 +160,33 @@ impl Agent {
     }
 }
 
+/// The sleep config for a ladder of levels and idle milliseconds. Reaching
+/// `Saved` ends the VM process.
+fn sleep_config(ladder: &[(LevelName, u64)]) -> SleepConfig {
+    let mut config = SleepConfig::default();
+    for &(level, after) in ladder {
+        let after = Some(after);
+        match level {
+            LevelName::Running => {}
+            LevelName::Paused => config.pause_after_ms = after,
+            LevelName::Compressed => config.compress = true,
+            LevelName::Saved => {
+                config.save_after_ms = after;
+                config.drop_after_ms = after;
+            }
+            LevelName::Archived => config.archive_after_ms = after,
+            LevelName::Remote => config.evict_after_ms = after,
+        }
+    }
+    config
+}
+
 /// Creates `sandbox` with the sleep ladder `sleep`.
 async fn create(client: &Client, sandbox: Id, sleep: &[(LevelName, u64)]) {
     let config = SandboxConfig {
         vcpus: 1,
         memory_mib: 512,
-        sleep: sleep
-            .iter()
-            .map(|&(level, after_ms)| SleepRule { level, after_ms })
-            .collect(),
+        sleep: sleep_config(sleep),
     };
     let reply = client
         .call(&Request::Create {
