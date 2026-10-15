@@ -1,0 +1,23 @@
+//! The Opengeni compute host agent.
+//!
+//! It runs every sandbox on one machine as a microVM, puts idle sandboxes
+//! to sleep through the levels of [`compute_core::Level`] and wakes them
+//! the moment something needs them. The pure [`compute_core::Host`] decides
+//! what to do; this crate does it with a [`compute_engine::Engine`] and a
+//! [`Store`], and serves a small local API ([`protocol`]) on a Unix socket.
+//!
+//! The API's central request is `connect`: wake a sandbox and stream bytes
+//! to a port inside it, keeping it awake while the stream is open. Commands,
+//! terminals, file access and previews are all that one primitive.
+
+mod agent;
+pub mod client;
+mod layout;
+pub mod protocol;
+mod server;
+mod step;
+mod store;
+
+pub use agent::{Handle, HostAgent, HostConfig, HostError, Lease};
+pub use server::serve;
+pub use store::{Directory, NoStore, SavedFiles, Store};

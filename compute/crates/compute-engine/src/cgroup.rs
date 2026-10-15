@@ -51,19 +51,48 @@ impl Cgroup {
     /// Pushes the group's memory out of RAM: anonymous pages into compressed
     /// memory (zswap, never written to disk), file pages dropped.
     ///
-    /// Blocks until the kernel has done what it can, which can take a while
-    /// for a large group; call it from a blocking thread.
-    pub fn reclaim_to_zswap(&self) -> io::Result<()> {
+    /// Works in chunks of `chunk` bytes and checks `stop` before each one, so
+    /// a caller can interrupt it within one chunk's worth of work. Returns
+    /// `true` if it ran until the kernel could reclaim no more, `false` if
+    /// `stop` interrupted it. Blocks; call it from a blocking thread.
+    pub fn reclaim_to_zswap(&self, chunk: u64, stop: impl Fn() -> bool) -> io::Result<bool> {
         fs::write(self.path.join("memory.zswap.max"), "max")?;
         fs::write(self.path.join("memory.zswap.writeback"), "0")?;
-        let current = self.memory_current()?;
-        match fs::write(self.path.join("memory.reclaim"), current.to_string()) {
-            // EAGAIN means the kernel reclaimed less than asked, which is expected:
-            // some memory is always in use.
-            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::AGAIN.raw_os_error()) => {
-                Ok(())
+        let request = chunk.max(1).to_string();
+        let reclaim = self.path.join("memory.reclaim");
+        loop {
+            if stop() {
+                return Ok(false);
             }
+            match fs::write(&reclaim, &request) {
+                Ok(()) => {}
+                // EAGAIN means the kernel reclaimed less than asked: what is
+                // left is in use or already compressed, so we are done.
+                Err(error)
+                    if error.raw_os_error() == Some(rustix::io::Errno::AGAIN.raw_os_error()) =>
+                {
+                    return Ok(true);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Kills every process in the group at once (cgroup.kill). Used to
+    /// clean up a VMM the host no longer controls.
+    pub fn kill_all(&self) -> io::Result<()> {
+        match fs::write(self.path.join("cgroup.kill"), "1") {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             other => other,
+        }
+    }
+
+    /// Whether any process is still in the group.
+    pub fn is_populated(&self) -> io::Result<bool> {
+        match fs::read_to_string(self.path.join("cgroup.events")) {
+            Ok(events) => Ok(events.lines().any(|line| line == "populated 1")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
         }
     }
 

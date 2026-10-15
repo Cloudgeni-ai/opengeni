@@ -18,6 +18,17 @@ use std::future::Future;
 
 pub use error::{EngineError, ErrorKind};
 pub use spec::{Drive, Network, SnapshotFiles, VmSpec};
+pub use tokio_util::sync::CancellationToken;
+
+/// How an interruptible operation ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Completion {
+    /// It ran to the end.
+    Finished,
+    /// It stopped early because it was cancelled. Whatever it did so far is
+    /// valid: the VM is in the same level as before, just partly done.
+    Cancelled,
+}
 
 /// What the host needs from a VM program.
 ///
@@ -31,8 +42,13 @@ pub trait Engine: Send + Sync + 'static {
     /// Boots a fresh VM from its disks.
     fn boot(&self, spec: &VmSpec) -> impl Future<Output = Result<Self::Vm, EngineError>> + Send;
 
-    /// Starts a VM from saved state and resumes it. Memory is loaded lazily,
-    /// as the guest touches it.
+    /// Starts a VM from saved state and leaves it paused. Memory is loaded
+    /// lazily, as the guest touches it.
+    ///
+    /// The VM stays paused so the caller can mark the saved image as stale
+    /// before the guest runs: once the guest writes to its disk, the old
+    /// memory image no longer matches the disk and must never be restored
+    /// again.
     fn restore(
         &self,
         spec: &VmSpec,
@@ -45,8 +61,13 @@ pub trait Engine: Send + Sync + 'static {
     /// Restarts the processors of a paused VM.
     fn resume(&self, vm: &Self::Vm) -> impl Future<Output = Result<(), EngineError>> + Send;
 
-    /// Moves a paused VM's memory into compressed host RAM.
-    fn compress(&self, vm: &Self::Vm) -> impl Future<Output = Result<(), EngineError>> + Send;
+    /// Moves a paused VM's memory into compressed host RAM, in small chunks
+    /// so a wake that arrives meanwhile only waits for the current chunk.
+    fn compress(
+        &self,
+        vm: &Self::Vm,
+        cancel: &CancellationToken,
+    ) -> impl Future<Output = Result<Completion, EngineError>> + Send;
 
     /// Writes a paused VM's processor, device and memory state to `files`.
     /// The VM stays paused, so the caller can still resume it instead of
@@ -61,6 +82,15 @@ pub trait Engine: Send + Sync + 'static {
     /// any snapshot stay on disk.
     fn stop(&self, vm: Self::Vm) -> impl Future<Output = Result<(), EngineError>> + Send;
 
+    /// Ends any VM process an earlier run of the host agent left behind for
+    /// `spec` and releases its host resources. Succeeds when there is none.
+    fn clean_up(&self, spec: &VmSpec) -> impl Future<Output = Result<(), EngineError>> + Send;
+
     /// Bytes of host memory the VM holds right now.
     fn resident_bytes(&self, vm: &Self::Vm) -> Result<u64, EngineError>;
+
+    /// Resolves once the VM process has ended for any reason, including
+    /// [`Engine::stop`]. The future does not borrow the VM, so the host can
+    /// watch for a VM dying on its own while a step uses it.
+    fn exited(&self, vm: &Self::Vm) -> impl Future<Output = ()> + Send + 'static;
 }

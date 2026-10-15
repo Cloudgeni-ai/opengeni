@@ -18,10 +18,14 @@ use tokio::time::{Instant, sleep};
 
 use self::api::Api;
 pub use self::api::ApiError;
-use crate::Engine;
 use crate::cgroup::Cgroup;
 use crate::error::{EngineError, ErrorKind};
 use crate::spec::{SnapshotFiles, VmSpec};
+use crate::{CancellationToken, Completion, Engine};
+
+/// Memory pushed to compressed RAM per reclaim request. Small enough that a
+/// wake arriving mid-compression waits only a few milliseconds.
+const RECLAIM_CHUNK: u64 = 16 << 20;
 
 /// Whether a VMM process is still alive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -324,7 +328,7 @@ impl Engine for Firecracker {
         let body = json!({
             "snapshot_path": files.state,
             "mem_backend": { "backend_type": "File", "backend_path": files.memory },
-            "resume_vm": true,
+            "resume_vm": false,
         });
         let load = vm.call(OP, ErrorKind::MemoryLost, "PUT", "/snapshot/load", &body);
         self.or_kill(&vm, load).await?;
@@ -353,12 +357,24 @@ impl Engine for Firecracker {
         .await
     }
 
-    async fn compress(&self, vm: &FirecrackerVm) -> Result<(), EngineError> {
+    async fn compress(
+        &self,
+        vm: &FirecrackerVm,
+        cancel: &CancellationToken,
+    ) -> Result<Completion, EngineError> {
         let cgroup = vm.cgroup.clone();
-        tokio::task::spawn_blocking(move || cgroup.reclaim_to_zswap())
-            .await
-            .map_err(|error| EngineError::caused_by(ErrorKind::Transient, "compress", error))?
-            .map_err(|error| EngineError::io("compress", error))
+        let cancel = cancel.clone();
+        let finished = tokio::task::spawn_blocking(move || {
+            cgroup.reclaim_to_zswap(RECLAIM_CHUNK, || cancel.is_cancelled())
+        })
+        .await
+        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, "compress", error))?
+        .map_err(|error| EngineError::io("compress", error))?;
+        Ok(if finished {
+            Completion::Finished
+        } else {
+            Completion::Cancelled
+        })
     }
 
     async fn snapshot(&self, vm: &FirecrackerVm, files: &SnapshotFiles) -> Result<(), EngineError> {
@@ -387,10 +403,46 @@ impl Engine for Firecracker {
         Ok(())
     }
 
+    async fn clean_up(&self, spec: &VmSpec) -> Result<(), EngineError> {
+        const OP: &str = "clean_up";
+        let cgroup = self
+            .cgroups
+            .child(&spec.name)
+            .map_err(|error| EngineError::io(OP, error))?;
+        tokio::task::spawn_blocking(move || -> io::Result<()> {
+            cgroup.kill_all()?;
+            let mut delay = Duration::from_millis(1);
+            for _ in 0..12 {
+                if !cgroup.is_populated()? {
+                    break;
+                }
+                std::thread::sleep(delay);
+                delay *= 2;
+            }
+            cgroup.remove()
+        })
+        .await
+        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
+        .map_err(|error| EngineError::io(OP, error))?;
+        for socket in [spec.api_socket(), spec.vsock_path()] {
+            remove_if_present(&socket)
+                .await
+                .map_err(|error| EngineError::io(OP, error))?;
+        }
+        Ok(())
+    }
+
     fn resident_bytes(&self, vm: &FirecrackerVm) -> Result<u64, EngineError> {
         vm.cgroup
             .memory_current()
             .map_err(|error| EngineError::io("resident_bytes", error))
+    }
+
+    fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {
+        let mut exit = vm.exit.clone();
+        async move {
+            let _ = exit.wait_for(|exit| *exit != Exit::Running).await;
+        }
     }
 }
 

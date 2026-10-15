@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use compute_engine::firecracker::Firecracker;
-use compute_engine::{Drive, Engine, SnapshotFiles, VmSpec, vsock};
+use compute_engine::{CancellationToken, Completion, Drive, Engine, SnapshotFiles, VmSpec, vsock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const SHELL_PORT: u32 = 52;
@@ -104,7 +104,11 @@ async fn boot_pause_compress_snapshot_restore() {
     engine.pause(&vm).await.unwrap();
     let pause = started.elapsed();
     let started = Instant::now();
-    engine.compress(&vm).await.unwrap();
+    let completion = engine
+        .compress(&vm, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(completion, Completion::Finished);
     let compress = started.elapsed();
     let compressed = engine.resident_bytes(&vm).unwrap();
     let started = Instant::now();
@@ -130,6 +134,7 @@ async fn boot_pause_compress_snapshot_restore() {
     engine.stop(vm).await.unwrap();
     let started = Instant::now();
     let vm = engine.restore(&spec, &files).await.unwrap();
+    engine.resume(&vm).await.unwrap();
     let restore = started.elapsed();
     let (output, first_byte) = exec(&uds, "cat /root/marker").await.unwrap();
     assert_eq!(
