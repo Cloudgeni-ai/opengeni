@@ -2982,17 +2982,20 @@ rule when heartbeat authority rejects a closed attempt. It does not refresh the
 closed holder, renew execution authority, or extend the capture deadline; the
 finalizer releases after physical settlement. Epoch replacement and expired
 captures still release promptly.
-A drain capture is stopped at its drain budget. A host-backed spool capture
-rejects at its next chunk (including the archive re-read and inventory
-verification passes), removes its spool and releases its exact claim, so a
-workspace that needs longer must get a larger
-`OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` rather than late publication. A
-provider-native capture that already started cannot be interrupted and keeps
-its late publication. Inside one worker, a retry of the same lease epoch and
-instance defers while an earlier drain capture is still reading, publishing or
-removing its spool: it neither replaces that claim nor starts a second capture.
-Other leases are unaffected, an already published archive still resumes
-teardown, and an entry older than the one-hour capture ceiling stops deferring.
+A drain attempt stops waiting for its capture at its drain budget, but the
+capture is not abandoned: it keeps reading and can publish late through its
+claim's provider-request lineage, after which a retry tears down from that
+archive. Inside one worker, a retry of the same lease epoch and instance defers
+while an earlier drain capture is still reading, publishing or removing its
+spool: it neither replaces that claim nor starts a second capture, so a capture
+slower than the retry interval no longer gains another full read and host spool
+per retry. Other leases are unaffected, an already published archive still
+resumes teardown, a capture that failed releases its claim for a fresh one, and
+an entry older than the one-hour capture ceiling stops deferring. The deferral
+is per worker: another worker that receives the retry replaces the claim under
+the ordinary takeover rules, so each worker runs at most one such capture. Host
+spool reads also honour a capture's abort signal in the archive re-read and
+inventory verification passes.
 Migration 0497 repairs the global Modal orphan inventory for non-bypass migration
 owners. Its private backend-PID/transaction read capability opens only inside the
 inventory function, preserves cross-tenant warming/warm/draining attribution,
