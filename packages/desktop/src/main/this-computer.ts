@@ -157,6 +157,8 @@ export class ThisComputer {
   private connectionsCache: { at: number; value: AgentConnection[] } | null = null;
   private permissionsCache: { at: number; value: Permissions } | null = null;
   private reading: Promise<AgentConnection[]> | null = null;
+  /** The last connections read, kept when the cache is cleared, to notice a change. */
+  private lastConnections: AgentConnection[] | null = null;
   private checking: Promise<Permissions> | null = null;
   private installing: Promise<string> | null = null;
   /** How much of the agent has downloaded, from 0 to 1, while it downloads. */
@@ -588,18 +590,35 @@ export class ThisComputer {
     const cached = this.connectionsCache;
     if (!fresh && cached && Date.now() - cached.at < CONNECTIONS_TTL_MS) return cached.value;
     this.reading ??= (async () => {
-      if (!existsSync(this.hostedPath)) return [];
+      if (!existsSync(this.hostedPath)) return [] as AgentConnection[];
       const result = await run(this.hostedPath, ["connections"], { timeoutMs: 15_000 });
-      return result.code === 0 ? parseConnections(result.output) : [];
+      // A read that failed (busy, timed out) says nothing new: keep what was known.
+      return result.code === 0 ? parseConnections(result.output) : null;
     })()
-      .then((value) => {
+      .then((read) => {
+        const before = this.lastConnections;
+        const value = read ?? before ?? [];
+        this.lastConnections = value;
         this.connectionsCache = { at: Date.now(), value };
+        if (before && before.length > 0 !== value.length > 0) this.connectionsChanged(value);
         return value;
       })
       .finally(() => {
         this.reading = null;
       });
     return await this.reading;
+  }
+
+  /**
+   * This computer was connected outside the app or, more often, disconnected
+   * (`opengeni-agent disconnect`): the menu bar item, opening at login and the
+   * windows follow, and an agent left with nothing to serve stops.
+   */
+  private connectionsChanged(connections: readonly AgentConnection[]): void {
+    if (connections.length === 0 && this.agent.state !== "stopped") {
+      void this.agent.stop().catch(() => undefined);
+    }
+    this.deps.onChange();
   }
 
   /** The screen-control permissions to set up, or null when there are none to ask for. */
