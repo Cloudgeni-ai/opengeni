@@ -184,6 +184,14 @@ funds only if the locked queue has no accepted work or physical writers. A delay
 dispatch with the revoked token cannot enqueue. Neither timeout nor an idle status
 alone proves that funding can be released.
 
+An idempotent Start replay checks the canonical `session.created` marker, not
+merely whether a session row exists. A committed but uninitialized keyed shell
+gets a funded repair admission and re-enters core's existing keyed Start repair.
+The original prompt and model remain accepted; repair counts no extra conversation
+or turn and stamps only the newly funded allowance. The initialization marker is
+checked again under the admission lock so a concurrent successful repair is replayed
+without reserving more money.
+
 The Sites skill recommends a selector for this Site's conversations plus New
 conversation. First Send creates one session with a retry-stable idempotency key;
 thereafter the standard `SessionConversation` owns chat interaction. No project

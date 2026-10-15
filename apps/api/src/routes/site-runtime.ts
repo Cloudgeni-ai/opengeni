@@ -49,6 +49,7 @@ import {
   getSession,
   isSiteWorkspaceMember,
   listOwnedSiteRuntimeConversations,
+  listSessionEvents,
   releaseSiteRuntimeConversationStart,
   reserveSiteRuntimeConversationStart,
   reserveSiteRuntimeConversationWork,
@@ -56,6 +57,7 @@ import {
   SiteDataError,
   SITE_RUNTIME_SITE_PRINCIPAL,
   type SiteRuntimeReservation,
+  type SiteRuntimeConversationRecord,
 } from "@opengeni/db";
 import {
   SITE_AGENT_DATA_TOOL_PERMISSIONS,
@@ -1294,6 +1296,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       const requestedSessionId = input.idempotencyKey
         ? idempotentSessionId(`${host.site.id}\n${viewer.principal}\n${input.idempotencyKey}`)
         : randomUUID();
+      let repair: { conversation: SiteRuntimeConversationRecord; model: string } | undefined;
       if (input.idempotencyKey) {
         const replay = await getOwnedSiteRuntimeConversation(deps.db, host.scope, {
           sessionId: requestedSessionId,
@@ -1304,14 +1307,29 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           // A lost start response may have left only a reservation. Reconcile
           // before replay so this key cannot remain stuck on a missing session.
           await settleSiteRuntimeSpend(deps, host, replay);
-          if (
-            await getOwnedSiteRuntimeConversation(deps.db, host.scope, {
-              sessionId: requestedSessionId,
-              siteId: host.site.id,
-              viewerPrincipal: viewer.principal,
-            })
-          )
-            return await projected(await send("GET", `${base}/${replay.sessionId}`), 202);
+          const retained = await getOwnedSiteRuntimeConversation(deps.db, host.scope, {
+            sessionId: requestedSessionId,
+            siteId: host.site.id,
+            viewerPrincipal: viewer.principal,
+          });
+          if (retained) {
+            const shell = await getSession(deps.db, host.scope.workspaceId, requestedSessionId);
+            const started = await listSessionEvents(
+              deps.db,
+              host.scope.workspaceId,
+              requestedSessionId,
+              {
+                includeTypes: ["session.created"],
+                payloadMode: "none",
+                limit: 1,
+              },
+            );
+            if (!shell || started.length > 0)
+              return await projected(await send("GET", `${base}/${replay.sessionId}`), 202);
+            // Core deliberately retains a keyed shell when initialization fails.
+            // Re-enter its keyed Start repair, never insert/count a new conversation.
+            repair = { conversation: retained, model: shell.model };
+          }
         }
       }
       // Settle the viewer's recent spend so the day budget sees it.
@@ -1327,6 +1345,40 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           ? await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId)
           : null;
       const mcpTools = siteAgentToolRefs(agent, viewer, memberPermissions);
+      if (repair) {
+        const previous = repair.conversation;
+        const legacyMember =
+          viewer.kind === "member" &&
+          previous.viewerKind === "member" &&
+          previous.budgetKey === SITE_RUNTIME_SITE_PRINCIPAL;
+        if (
+          (previous.budgetKey !== siteRuntimeBudgetKey(viewer) && !legacyMember) ||
+          previous.toolIds.some((tool) => !mcpTools.some((allowed) => allowed.id === tool))
+        )
+          throw sitePublishingError(
+            409,
+            "conflict",
+            "site_conversation_outdated",
+            "This Site's assistant changed since this conversation started; start a new one",
+          );
+        if (
+          viewer.kind !== "member" &&
+          !(await siteCreditModelIds(deps, host.scope, host.site.id)).includes(repair.model)
+        )
+          throw siteNotAvailableForViewer(
+            "agent_model",
+            "This Site's assistant cannot use that model for you",
+            { reason: "subscription_model" },
+          );
+        if (viewer.kind === "member" && previous.limitMicros !== null)
+          await liftSiteConversationUsageLimit(
+            deps,
+            host,
+            requestedSessionId,
+            previous.limitMicros,
+            null,
+          );
+      }
       // Every conversation gets this Site's own data tools, pinned to this
       // Site and acting as this viewer (site-publishing/agent-data-tools.ts).
       const dataTools = await siteAgentDataToolsForStart(
@@ -1342,19 +1394,30 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       // later stops it.
       const admissionId = randomUUID();
       const reservation = await reserve(() =>
-        reserveSiteRuntimeConversationStart(deps.db, host.scope, {
-          admissionId,
-          sessionId: requestedSessionId,
-          siteId: host.site.id,
-          viewerPrincipal: viewer.principal,
-          viewerKind: viewer.kind,
-          viewerEmail: viewer.email,
-          toolIds: mcpTools.map((tool) => tool.id),
-          versionId: host.versionId,
-          limits: budgets,
-          budgetKey: siteRuntimeBudgetKey(viewer),
-        }),
+        repair
+          ? reserveSiteRuntimeConversationWork(deps.db, host.scope, {
+              admissionId,
+              sessionId: requestedSessionId,
+              limits: budgets,
+              newTurn: false,
+              uncapped: viewer.kind === "member",
+              repairStart: true,
+            })
+          : reserveSiteRuntimeConversationStart(deps.db, host.scope, {
+              admissionId,
+              sessionId: requestedSessionId,
+              siteId: host.site.id,
+              viewerPrincipal: viewer.principal,
+              viewerKind: viewer.kind,
+              viewerEmail: viewer.email,
+              toolIds: mcpTools.map((tool) => tool.id),
+              versionId: host.versionId,
+              limits: budgets,
+              budgetKey: siteRuntimeBudgetKey(viewer),
+            }),
       );
+      if (reservation.alreadyStarted)
+        return await projected(await send("GET", `${base}/${requestedSessionId}`), 202);
       pendingAdmission = { sessionId: requestedSessionId, admissionId };
       const body = {
         initialMessage: input.initialMessage,
@@ -1379,7 +1442,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         // No sandbox: a Site's agent answers from the page and the Site's
         // data, with no shell or workspace files.
         sandboxBackend: "none",
-        ...(models.default ? { model: models.default } : {}),
+        ...(repair ? { model: repair.model } : models.default ? { model: models.default } : {}),
         instructions: siteAgentInstructions(host, viewer, dataTools, agent.instructions),
         // Always explicit: an empty list means no workspace tools at all.
         tools: mcpTools,
@@ -1397,9 +1460,29 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       // Workspace members get no Site budget at all: their conversation is an
       // ordinary session under the workspace's normal limits, so no session
       // usage limit is stamped on it, whatever the Site's limits say.
-      const usageLimitMicros = viewer.kind === "member" ? null : reservation.executionLimitMicros;
+      const usageLimitMicros =
+        viewer.kind === "member" || repair ? null : reservation.executionLimitMicros;
       let created: Response;
       try {
+        // Initial create's limit command is idempotent, not a top-up. A retained
+        // shell must receive its newly funded ceiling before core repairs it.
+        if (repair && viewer.kind !== "member" && reservation.executionLimitMicros !== null) {
+          try {
+            await capSiteConversationUsageLimit(deps, host, requestedSessionId, null);
+          } catch (error) {
+            // Dispatch has not begun: this failure is definitive, unlike a
+            // lost response from core's initialization transaction.
+            await finishSiteRuntimeAdmission(deps.db, host.scope, pendingAdmission);
+            pendingAdmission = undefined;
+            const retained = await getOwnedSiteRuntimeConversation(deps.db, host.scope, {
+              sessionId: requestedSessionId,
+              siteId: host.site.id,
+              viewerPrincipal: viewer.principal,
+            });
+            if (retained) await settleSiteRuntimeSpend(deps, host, retained, { release: true });
+            throw error;
+          }
+        }
         created =
           usageLimitMicros === null
             ? await start()

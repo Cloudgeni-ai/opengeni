@@ -1941,6 +1941,8 @@ export type SiteRuntimeReservation =
       limitMicros: number | null;
       executionLimitMicros: number | null;
       reservedMicros: number;
+      /** A keyed Start was initialized while its repair request was being prepared. */
+      alreadyStarted?: boolean;
     }
   | {
       ok: false;
@@ -2151,6 +2153,8 @@ export async function reserveSiteRuntimeConversationWork(
     newTurn: boolean;
     uncapped?: boolean;
     admissionId?: string;
+    /** Repair only the first Start; do not fund a replay that already initialized. */
+    repairStart?: boolean;
     now?: Date;
   },
 ): Promise<SiteRuntimeReservation> {
@@ -2165,9 +2169,34 @@ export async function reserveSiteRuntimeConversationWork(
         for update`,
     );
     if (!row) throw new SitePublishingError("not_found", "Conversation not found");
+    const conversation = toConversation(row);
+    if (input.repairStart) {
+      // Initial enqueue takes this same conversation lock through commit. Check
+      // its canonical marker here, not just at the earlier HTTP read boundary.
+      const [initialized] = await rawRows<{ started: boolean }>(
+        tx,
+        sql`select exists (
+        select 1 from session_events where workspace_id = ${scope.workspaceId}
+          and session_id = ${input.sessionId} and type = 'session.created'
+      ) as started`,
+      );
+      if (initialized?.started)
+        return {
+          ok: true,
+          alreadyStarted: true,
+          limitMicros: conversation.limitMicros,
+          executionLimitMicros:
+            conversation.limitMicros === null
+              ? null
+              : Math.min(
+                  conversation.limitMicros,
+                  conversation.meteredMicros + conversation.reservedMicros,
+                ),
+          reservedMicros: conversation.reservedMicros,
+        } as const;
+    }
     if (row.pending_admission_id !== null)
       return { ok: false, budget: "agent_micros_per_conversation", busy: true } as const;
-    const conversation = toConversation(row);
     if (
       input.newTurn &&
       limits.turnsPerConversation !== null &&

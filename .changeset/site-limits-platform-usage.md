@@ -20,4 +20,6 @@ Members receive no Site budget or session usage-limit stamp. Every published-hos
 
 Migration 0790 also adds nullable pending-admission tokens. Funding stays reserved across dispatch, and enqueue transactions verify the token. Crash/unknown-outcome recovery revokes delayed requests and reconciles the locked canonical queue before refunding; neither an idle label nor a timeout can double-allocate funds.
 
+Keyed Site Start retries also repair sessions whose shell committed but whose first turn did not. Repair reuses the original prompt/model, acquires fresh funding without duplicating conversation or turn counts, and invokes the existing core initialization path.
+
 Platform usage excludes model spend and defaults to metering only. Site SQL has no monthly row quotas by default and 5 GiB storage per Site. Publishing can return 402 `site_platform_quota_exhausted` only in credits mode and 503 `site_platform_brake_engaged` while the global brake is engaged. The `OPENGENI_SITES_FREE_*` agent settings are deprecated fallbacks for `OPENGENI_SITES_AGENT_*` and `OPENGENI_SITES_GUEST_*` settings.

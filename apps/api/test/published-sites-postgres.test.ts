@@ -3407,6 +3407,126 @@ test("a crashed Site start recovers on its idempotent retry and fences the origi
   }
 });
 
+test("a committed keyed Site shell repairs one funded initial turn after initialization fails", async () => {
+  const f = await fixture();
+  const site = await f.live("Shell repair", { access: "public", agent: { enabled: true } });
+  await f.publication(f.admin, site.id, "PUT", {
+    limitProfile: { kind: "custom", overrides: { agentMicrosPerSitePerMonth: 300_000 } },
+  });
+  const visitor = visitorId();
+  const body = {
+    initialMessage: "The original accepted prompt",
+    idempotencyKey: crypto.randomUUID(),
+  };
+  const fault = `site_shell_${crypto.randomUUID().replaceAll("-", "")}`;
+  await shared.admin.unsafe(`create function ${fault}() returns trigger language plpgsql as $fault$
+    begin
+      if new.workspace_id = '${f.workspace.id}'::uuid and new.type = 'session.created' then
+        raise exception 'injected failure after shell commit before initial turn';
+      end if;
+      return new;
+    end $fault$`);
+  await shared.admin.unsafe(
+    `create trigger ${fault} before insert on session_events for each row execute function ${fault}()`,
+  );
+  const original = f.app.fetch;
+  f.app.fetch = async (...args) => {
+    const response = await original(...args);
+    if (
+      args[0].method === "POST" &&
+      new URL(args[0].url).pathname === `/v1/workspaces/${f.workspace.id}/sessions`
+    ) {
+      expect(response.status).toBe(500);
+      throw new Error("injected lost response after shell commit");
+    }
+    return response;
+  };
+  try {
+    expect((await f.gateway(site.host, "POST", "/sessions", { visitor, body })).status).toBe(500);
+  } finally {
+    f.app.fetch = original;
+    await shared.admin.unsafe(`drop trigger ${fault} on session_events`);
+    await shared.admin.unsafe(`drop function ${fault}()`);
+  }
+  const [shell] = await shared.admin`select s.id, c.pending_admission_id, c.reserved_micros, c.turns
+    from sessions s join site_runtime_conversations c on c.session_id = s.id
+    where c.site_id = ${site.id}`;
+  expect(shell).toBeDefined(); // The creation transaction really committed.
+  const sessionId = String(shell!.id);
+  expect(shell!.pending_admission_id).not.toBeNull();
+  expect(Number(shell!.reserved_micros)).toBe(250_000);
+  const turnCount = async () =>
+    Number(
+      (
+        await shared.admin`select count(*)::int as count from session_turns where session_id = ${sessionId}`
+      )[0]!.count,
+    );
+  expect(await turnCount()).toBe(0);
+  // Unknown admission is not silently replayed as a successful initialized session.
+  const pending = await f.gateway(site.host, "POST", "/sessions", { visitor, body });
+  expect(pending.status).toBe(429);
+  expect(pending.json.error.details.code).toBe("site_budget_busy");
+  await shared.admin`update site_runtime_conversations set pending_admission_until = now() - interval '1 second' where session_id = ${sessionId}`;
+  await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
+  // Recovery refunds the empty shell; another viewer takes $0.25. Repair must
+  // fund and stamp only the remaining $0.05, not reuse its old $0.25 ceiling.
+  const competing = await f.gateway(site.host, "POST", "/sessions", {
+    visitor: visitorId(),
+    body: { initialMessage: "Competing" },
+  });
+  expect(competing.status).toBe(202);
+  const repaired = await f.gateway(site.host, "POST", "/sessions", {
+    visitor,
+    body: { ...body, initialMessage: "A retry must not replace the original prompt" },
+  });
+  expect(repaired.status, JSON.stringify(repaired.json)).toBe(202);
+  expect(repaired.json.id).toBe(sessionId);
+  expect(await turnCount()).toBe(1);
+  const [message] =
+    await shared.admin`select payload from session_events where session_id = ${sessionId} and type = 'user.message'`;
+  expect(message!.payload.text).toBe(body.initialMessage);
+  const inspect = await f.api(
+    f.owner,
+    "GET",
+    `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}`,
+  );
+  expect(inspect.json.usageLimit.limitMicros).toBe(50_000);
+  expect((await f.gateway(site.host, "POST", "/sessions", { visitor, body })).status).toBe(202);
+  expect(await turnCount()).toBe(1);
+  const [conversation] =
+    await shared.admin`select turns, reserved_micros, pending_admission_id from site_runtime_conversations where session_id = ${sessionId}`;
+  expect(conversation!.turns).toBe(1);
+  expect(Number(conversation!.reserved_micros)).toBe(50_000);
+  expect(conversation!.pending_admission_id).toBeNull();
+  const ownWindows =
+    await shared.admin`select conversations, reserved_micros from site_runtime_usage where site_id = ${site.id} and principal_key = ${`guest:${visitor}`}`;
+  expect(ownWindows.map((row) => Number(row.conversations))).toEqual([1, 1]);
+  expect(ownWindows.map((row) => Number(row.reserved_micros))).toEqual([50_000, 50_000]);
+  const siteWindows =
+    await shared.admin`select conversations, reserved_micros from site_runtime_usage where site_id = ${site.id} and principal_key = '*'`;
+  expect(siteWindows.map((row) => Number(row.conversations))).toEqual([2, 2]);
+  expect(siteWindows.map((row) => Number(row.reserved_micros))).toEqual([300_000, 300_000]);
+  // If initialization won after a repair caller's earlier read, the locked
+  // admission check returns a replay even though the Site is now fully funded.
+  const [beforeReplay] =
+    await shared.admin`select admissions from site_runtime_conversations where session_id = ${sessionId}`;
+  const lateRepair = await reserveSiteRuntimeConversationWork(
+    db.db,
+    { accountId: f.accountId, workspaceId: f.workspace.id },
+    {
+      sessionId,
+      limits: siteRuntimeBudgetLimits(DEFAULT_SITE_LIMITS, f.settings),
+      admissionId: crypto.randomUUID(),
+      newTurn: false,
+      repairStart: true,
+    },
+  );
+  expect(lateRepair).toMatchObject({ ok: true, alreadyStarted: true, reservedMicros: 50_000 });
+  const [afterReplay] =
+    await shared.admin`select admissions from site_runtime_conversations where session_id = ${sessionId}`;
+  expect(afterReplay).toEqual(beforeReplay);
+});
+
 test("view as visitor shows a member less, never anyone more", async () => {
   const f = await fixture();
   const outsider = (await fixture()).owner;
