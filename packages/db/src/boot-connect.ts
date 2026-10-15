@@ -39,6 +39,7 @@ export type BootGraceSocketDependencies = {
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   connect?: (endpoint: DatabaseConnectEndpoint, timeoutMs: number | null) => Promise<net.Socket>;
+  open?: (endpoint: DatabaseConnectEndpoint) => net.Socket;
 };
 
 function errorCode(error: unknown): string | undefined {
@@ -63,16 +64,25 @@ function connectTimeoutError(endpoint: DatabaseConnectEndpoint): Error {
   return Object.assign(new Error(`write CONNECT_TIMEOUT ${where}`), { code: "CONNECT_TIMEOUT" });
 }
 
+/**
+ * Starts connecting and returns the socket at once, like postgres.js's own
+ * connection path: a failure arrives as the socket's `error` and `close`
+ * events, which postgres.js handles by failing the waiting query and putting
+ * the connection back in its pool to reconnect later.
+ */
+export function openDatabaseSocket(endpoint: DatabaseConnectEndpoint): net.Socket {
+  return endpoint.kind === "tcp"
+    ? net.connect({ host: endpoint.host, port: endpoint.port })
+    : net.connect({ path: endpoint.path });
+}
+
 /** Opens one connected socket, failing on the first socket error or timeout. */
 export function connectDatabaseSocket(
   endpoint: DatabaseConnectEndpoint,
   timeoutMs: number | null,
 ): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const socket =
-      endpoint.kind === "tcp"
-        ? net.connect({ host: endpoint.host, port: endpoint.port })
-        : net.connect({ path: endpoint.path });
+    const socket = openDatabaseSocket(endpoint);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const fail = (error: unknown) => {
       if (timer) clearTimeout(timer);
@@ -100,6 +110,14 @@ export function connectDatabaseSocket(
  * reached the server" state, so the grace ends at the first success or when the
  * window since client creation has elapsed, whichever comes first. Each attempt
  * keeps the client's own `connect_timeout`.
+ *
+ * The factory never rejects. postgres.js does not recover a pooled connection
+ * whose socket factory rejects: it fails the waiting query but never returns
+ * the connection to its pool, so after a database restart every connection
+ * leaked one by one and the client hung for good, even once the database was
+ * back. Outside the grace, and when the grace gives up, the factory instead
+ * returns a socket that is still connecting, so a failure reaches postgres.js
+ * as socket events and the connection reconnects like any other.
  */
 export function createBootGraceDatabaseSocket(
   dependencies: BootGraceSocketDependencies = {},
@@ -109,6 +127,7 @@ export function createBootGraceDatabaseSocket(
   const sleep =
     dependencies.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const connect = dependencies.connect ?? connectDatabaseSocket;
+  const open = dependencies.open ?? openDatabaseSocket;
   const createdAt = now();
   let reachedServer = false;
 
@@ -120,19 +139,24 @@ export function createBootGraceDatabaseSocket(
       typeof target.connect_timeout === "number" && target.connect_timeout > 0
         ? target.connect_timeout * 1_000
         : null;
+    const withTarget = (socket: net.Socket): net.Socket => {
+      if (endpoint.kind === "tcp") {
+        // postgres.js reads these for TLS SNI and error messages.
+        Object.assign(socket, { host: endpoint.host, port: endpoint.port });
+      }
+      return socket;
+    };
     for (let attempt = 0; ; attempt += 1) {
+      if (reachedServer || graceMs - (now() - createdAt) <= 0) return withTarget(open(endpoint));
       try {
         const socket = await connect(endpoint, timeoutMs);
         reachedServer = true;
-        if (endpoint.kind === "tcp") {
-          // postgres.js reads these for TLS SNI and error messages.
-          Object.assign(socket, { host: endpoint.host, port: endpoint.port });
-        }
-        return socket;
+        return withTarget(socket);
       } catch (error) {
         const remainingMs = graceMs - (now() - createdAt);
         if (reachedServer || remainingMs <= 0 || !isDatabaseBootTransientConnectError(error)) {
-          throw error;
+          // One more attempt that fails, if it still fails, the way postgres.js expects.
+          return withTarget(open(endpoint));
         }
         await sleep(Math.min(remainingMs, databaseBootConnectRetryDelayMs(attempt)));
       }
