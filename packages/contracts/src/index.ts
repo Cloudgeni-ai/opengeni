@@ -1097,6 +1097,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_files_delete",
   "site_publication_get",
   "site_publication_update",
+  "site_publication_apply_fix",
   "site_hostname_check",
   "site_sql_inspect",
   "site_sql_enable",
