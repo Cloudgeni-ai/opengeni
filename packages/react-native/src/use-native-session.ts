@@ -24,7 +24,11 @@ import {
   type TimelineItem,
 } from "@opengeni/react/session";
 import { sessionAdmissionBlocked, type SessionDisplayStatus } from "@opengeni/react/timeline-model";
-import { useNativeFileAttachments, type NativeFileAttachmentsResult } from "./attachments";
+import {
+  nativeComposerAttachmentCallbacks,
+  useNativeFileAttachments,
+  type NativeFileAttachmentsResult,
+} from "./attachments";
 import { useOpenGeniReactNativeEnvironment } from "./environment";
 import {
   useNativeReadAcknowledgement,
@@ -144,7 +148,7 @@ export function useOpenGeniNativeSession(input: {
       (session.session?.activeTurnId ?? null) !== null || queue.queue.length > 0 ? "queue" : "chat",
     sendExtras: () => ({ resources: attachments.readyResources }),
     sendBlocked: () => attachments.hasUnresolved,
-    onSent: () => attachments.clear(),
+    ...nativeComposerAttachmentCallbacks(attachments),
   });
   const control = useSessionControl(input.sessionId, {
     client: input.client,
