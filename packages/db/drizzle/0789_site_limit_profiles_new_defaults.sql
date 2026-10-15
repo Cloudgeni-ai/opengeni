@@ -19,7 +19,8 @@
 --    200000 ($0.20), agentMicrosPerSitePerMonth 2000000 ($2.00) and
 --    agentModels null. So none of them turns on a per-person limit or a $0.02
 --    conversation cap. The API ignores the same values when it reads a
---    profile, which covers rows an old pod writes after this runs.
+--    full legacy custom form, which covers rows an old pod writes after this
+--    runs; new sparse explicit overrides are preserved at request time.
 -- 3. A custom profile left with no field of its own becomes `standard`.
 --    Overrides on other kinds were never applied, and are removed.
 -- 4. Fields an owner set to another value keep it. The new model reads them

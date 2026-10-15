@@ -64,9 +64,13 @@ export function siteOutsideModelChoice(input: {
       .model;
   // Always the concrete model: a session created without one would take the
   // workspace's ordinary default, which may be a subscription.
-  if (!isSubscriptionBilledModel(input.selections, chosen)) return { kind: "same", model: chosen };
   // The fallback is paid with credits, as the publish dialog says.
   const credited = input.selections.filter((selection) => selection.model.cost === "credits");
+  if (
+    admissibleWorkspaceModel(credited, chosen) &&
+    !isSubscriptionBilledModel(input.selections, chosen)
+  )
+    return { kind: "same", model: chosen };
   const fallback = selectDefaultSessionModel({
     ...base,
     selections: credited,
@@ -76,6 +80,25 @@ export function siteOutsideModelChoice(input: {
     !isSubscriptionBilledModel(input.selections, fallback)
     ? { kind: "fallback", model: fallback }
     : { kind: "unavailable" };
+}
+
+/** Actual catalog billing, not just provider-name heuristics, fences every admission. */
+export async function siteCreditModelIds(
+  deps: { db: Database; settings: Settings },
+  scope: { accountId: string; workspaceId: string },
+  siteId: string,
+): Promise<string[]> {
+  const input = await loadWorkspaceModelSelectionInput(deps.db, deps.settings, {
+    ...scope,
+    subjectId: `site:${siteId}`,
+  });
+  return resolveWorkspaceModelSelection(input)
+    .filter(
+      (selection) =>
+        selection.model.cost === "credits" &&
+        admissibleWorkspaceModel([selection], selection.model.id),
+    )
+    .map((selection) => selection.model.id);
 }
 
 /** Load the workspace's model selection and decide for people outside the workspace. */

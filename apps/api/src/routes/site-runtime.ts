@@ -29,6 +29,9 @@ import {
 import {
   withHostSessionUsageLimit,
   withSiteSessionOrigin,
+  admissibleWorkspaceModel,
+  loadWorkspaceModelSelectionInput,
+  resolveWorkspaceModelSelection,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -58,7 +61,11 @@ import {
   siteAgentInstructions,
   sitePublishedDataViewer,
 } from "../site-publishing/agent-data-tools";
-import { isSubscriptionBilledModel, resolveSiteOutsideModel } from "../site-publishing/agent-model";
+import {
+  isSubscriptionBilledModel,
+  resolveSiteOutsideModel,
+  siteCreditModelIds,
+} from "../site-publishing/agent-model";
 import {
   afterSitePlatformUsage,
   requireSitePlatformOpen,
@@ -853,18 +860,29 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         models.filter((model): model is string => typeof model === "string" && model.length > 0),
       ),
     ];
-    if (viewer.kind === "member")
+    if (viewer.kind === "member") {
+      if (!viewer.subjectId)
+        throw siteNotAvailableForViewer("agent_model", "Sign in to use your workspace's models");
+      const selections = resolveWorkspaceModelSelection(
+        await loadWorkspaceModelSelectionInput(deps.db, deps.settings, {
+          ...host.scope,
+          subjectId: viewer.subjectId,
+        }),
+      );
       return {
-        allowed: named([agentModel, ...(limits.agentModels ?? [])]),
+        allowed: selections
+          .filter((selection) => admissibleWorkspaceModel([selection], selection.model.id))
+          .map((selection) => selection.model.id),
         default: agentModel,
         unavailable: false,
       };
+    }
     const choice = await resolveSiteOutsideModel(deps, host.scope, {
       siteId: host.site.id,
       agentModel,
     });
-    const credited = (models: string[]) =>
-      models.filter((model) => !isSubscriptionBilledModel([], model));
+    const creditModels = new Set(await siteCreditModelIds(deps, host.scope, host.site.id));
+    const credited = (models: string[]) => models.filter((model) => creditModels.has(model));
     if (choice.kind === "unavailable")
       return {
         allowed: credited(named(limits.agentModels ?? [])),
@@ -895,14 +913,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     let agent = base.agent;
     if (agent && (viewer.kind === "guest" || viewer.kind === "user"))
       agent = !(await sitePlatformBrakeEngaged(deps).catch(() => false));
-    if (agent && viewer.kind !== "member")
-      agent =
-        (
-          await resolveSiteOutsideModel(deps, host.scope, {
-            siteId: host.site.id,
-            agentModel: host.publication.agent.model,
-          }).catch(() => null)
-        )?.kind !== "unavailable";
+    if (agent && viewer.kind !== "member") {
+      const choice = await resolveSiteOutsideModel(deps, host.scope, {
+        siteId: host.site.id,
+        agentModel: host.publication.agent.model,
+      }).catch(() => null);
+      agent = choice !== null && choice.kind !== "unavailable";
+    }
     const workspaceTools =
       base.workspaceTools &&
       viewer.subjectId !== null &&
@@ -1282,8 +1299,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         host.site.id,
         viewer.kind,
       );
-      // One transaction counts the start and reserves the conversation's whole
-      // cap against the visitor's day and the Site's day and month; the cap
+      // One transaction counts the start and reserves a per-turn estimate
+      // against the visitor's and the Site's windows; the conversation cap
       // becomes the session's usage limit, set in the create transaction. The
       // row also records the tools the conversation gets, so narrowing them
       // later stops it.
@@ -1468,7 +1485,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       // whatever model the conversation holds.
       if (viewer.kind !== "member") {
         const session = await getSession(deps.db, host.scope.workspaceId, conversation.sessionId);
-        if (session && isSubscriptionBilledModel([], session.model))
+        if (
+          session &&
+          !(await siteCreditModelIds(deps, host.scope, host.site.id)).includes(session.model)
+        )
           throw siteNotAvailableForViewer(
             "agent_model",
             "This Site's assistant cannot use that model for you",

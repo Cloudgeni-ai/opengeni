@@ -8,6 +8,7 @@ import {
   type SiteHostMapRecord,
 } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
+import { resolveWorkspaceModelSelection } from "@opengeni/core";
 import { createSiteContentScanner, siteHtmlUrls } from "../src/site-publishing/content-scanner";
 import { createSiteEdgeSync } from "../src/site-publishing/edge-sync";
 import {
@@ -492,9 +493,17 @@ describe("agent model for people outside the workspace", () => {
       workspaceDefaults: null,
       organizationDefaults: null,
     };
-    expect(siteOutsideModelChoice({ ...input, agentModel: "gpt-6" })).toEqual({
+    const selections = resolveWorkspaceModelSelection({
+      settings: input.settings,
+      policy: null,
+      codexSubscriptionActive: false,
+      xaiSubscriptionActive: false,
+    });
+    expect(
+      siteOutsideModelChoice({ ...input, selections, agentModel: input.settings.openaiModel }),
+    ).toEqual({
       kind: "same",
-      model: "gpt-6",
+      model: input.settings.openaiModel,
     });
     expect(siteOutsideModelChoice({ ...input, agentModel: "codex/gpt-6-astra" })).toEqual({
       kind: "unavailable",
@@ -502,9 +511,15 @@ describe("agent model for people outside the workspace", () => {
   });
 
   test("the workspace default is resolved to a concrete model, never left to the session", () => {
+    const settings = testSettings();
     const choice = siteOutsideModelChoice({
-      settings: testSettings(),
-      selections: [],
+      settings,
+      selections: resolveWorkspaceModelSelection({
+        settings,
+        policy: null,
+        codexSubscriptionActive: false,
+        xaiSubscriptionActive: false,
+      }),
       agentModel: null,
       workspaceDefaults: null,
       organizationDefaults: null,

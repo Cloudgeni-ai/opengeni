@@ -1,7 +1,7 @@
 -- deployment-mode: rolling
 -- Site limits by access mode and Site platform usage (docs/published-sites.md).
 --
--- 1. Limit profiles move to the new model in 0787 (kept apart so this
+-- 1. Limit profiles move to the new model in 0789 (kept apart so this
 --    migration takes no lock on site_publications).
 -- 2. site_runtime_conversations.budget_key: the Site-wide usage windows a
 --    conversation counts in. `*` (every existing row) is the Site's budgets
@@ -11,7 +11,7 @@
 --    per workspace (this month's gateway requests, Site SQL rows and the
 --    Site SQL plus Site Data storage level), and three deployment-global
 --    tables for the Opengeni-wide monthly brake: per-month totals in eight
---    shards (spreads row contention), the storage level in eight shards, and
+--    shards (spreads row contention), absolute per-workspace storage levels, and
 --    the brake state per month. The global tables hold counters only, no
 --    tenant content. They are FORCE RLS with a single lane policy: a
 --    transaction sees them only after setting `opengeni.site_platform_lane`
@@ -19,11 +19,23 @@
 --    never touch them by accident. Writers lock a workspace row before a
 --    shard row.
 -- 4. site_viewer_sessions.view_as: the owner's "View as visitor" preview role.
--- New tables and two added columns (no rewrite).
+-- New tables and additive columns (no rewrite).
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
+-- Acquire the workspace FK lock before any session table lock, matching writers.
+-- Store absolute levels per workspace so writes do not contend on global shards;
+-- deletion cascades so a removed workspace cannot leave stale global storage.
+CREATE TABLE site_platform_storage (
+  workspace_id uuid PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+  storage_bytes bigint NOT NULL DEFAULT 0 CHECK (storage_bytes >= 0),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 ALTER TABLE site_runtime_conversations ADD COLUMN budget_key text NOT NULL DEFAULT '*';
+-- Old pods reserve only viewer-day and Site-month. New writers explicitly mark
+-- the four-window protocol; defaults stay false for old pods during rollout.
+ALTER TABLE site_runtime_conversations ADD COLUMN reservation_windows_complete boolean NOT NULL DEFAULT false;
 ALTER TABLE site_runtime_conversations
   ADD CONSTRAINT site_runtime_conversations_budget_key_check
   CHECK (budget_key IN ('*', '*members')) NOT VALID;
@@ -67,15 +79,6 @@ CREATE TABLE site_platform_totals (
   sql_rows_written bigint NOT NULL DEFAULT 0 CHECK (sql_rows_written >= 0),
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (period_start, shard)
-);
-
--- Each workspace's current Site storage level, readable on the platform lane;
--- the Opengeni-wide level is their sum. Levels are set, not added to, so they
--- cannot drift, and each workspace writes only its own row.
-CREATE TABLE site_platform_storage (
-  workspace_id uuid PRIMARY KEY,
-  storage_bytes bigint NOT NULL DEFAULT 0 CHECK (storage_bytes >= 0),
-  updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 -- The monthly brake. The API engages it automatically at the configured

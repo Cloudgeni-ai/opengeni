@@ -225,8 +225,8 @@ export type SiteViewerFeature =
 
 /**
  * The `details.code` each feature answered before `not_available_for_viewer`,
- * kept as `details.legacyCode` until the next SDK major so older Site code
- * that matched on it keeps working.
+ * retained as `details.legacyCode` for migration. Clients matching
+ * `details.code` must adopt the new code; the alias is not automatic compatibility.
  */
 const SITE_VIEWER_FEATURE_LEGACY_CODES: Partial<Record<SiteViewerFeature, string>> = {
   agent: "site_agents_unavailable",

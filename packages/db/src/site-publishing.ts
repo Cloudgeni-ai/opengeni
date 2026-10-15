@@ -1391,6 +1391,7 @@ type ConversationRow = {
   reserved_micros: string | number;
   reserved_day: unknown;
   reserved_month: unknown;
+  reservation_windows_complete: boolean;
   admissions: string | number;
   created_at: unknown;
   updated_at: unknown;
@@ -1399,7 +1400,20 @@ type ConversationRow = {
 const CONVERSATION_COLUMNS = sql`session_id, site_id, viewer_principal, viewer_kind, tool_ids,
   budget_key, version_id, turns,
   metered_micros, limit_micros, reserved_micros, reserved_day::text as reserved_day,
-  reserved_month::text as reserved_month, admissions, created_at, updated_at`;
+  reserved_month::text as reserved_month, reservation_windows_complete, admissions, created_at, updated_at`;
+
+/** Old writers reserved viewer-day and Site-month only, including during rollout. */
+function conversationReservedInWindow(
+  row: ConversationRow,
+  window: { principal: string; period: "day" | "month" },
+): boolean {
+  return (
+    row.reservation_windows_complete ||
+    (window.principal === row.viewer_principal
+      ? window.period === "day"
+      : window.period === "month")
+  );
+}
 
 function toConversation(row: ConversationRow): SiteRuntimeConversationRecord {
   return {
@@ -1936,11 +1950,11 @@ export async function reserveSiteRuntimeConversationStart(
     await tx.execute(
       sql`insert into site_runtime_conversations (session_id, account_id, workspace_id, site_id,
           viewer_principal, viewer_kind, tool_ids, budget_key, version_id, turns, limit_micros,
-          reserved_micros, reserved_day, reserved_month, admissions)
+          reserved_micros, reserved_day, reserved_month, admissions, reservation_windows_complete)
         values (${input.sessionId}, ${scope.accountId}, ${scope.workspaceId}, ${input.siteId},
           ${input.viewerPrincipal}, ${input.viewerKind}, ${JSON.stringify(input.toolIds)}::jsonb,
           ${budgetKey}, ${input.versionId}, 1, ${limitMicros}, ${reserve}, ${periods.day}::date,
-          ${periods.month}::date, 1)`,
+          ${periods.month}::date, 1, true)`,
     );
     for (const window of Object.values(windows))
       await adjustUsageWindow(tx, scope, input.siteId, window, {
@@ -1989,7 +2003,7 @@ export async function releaseSiteRuntimeConversationStart(
       { principal: budgetKey, period: "month" as const, periodStart: month },
     ];
     for (const window of windows)
-      if (window.periodStart)
+      if (window.periodStart && conversationReservedInWindow(row, window))
         await adjustUsageWindow(tx, scope, row.site_id, window, {
           conversations: -1,
           reservedMicros: -reserved,
@@ -2047,7 +2061,7 @@ export async function reserveSiteRuntimeConversationWork(
           : Math.min(conversation.limitMicros, limits.agentMicrosPerConversation);
     if (cap !== null && conversation.meteredMicros >= cap)
       return { ok: false, budget: "agent_micros_per_conversation" } as const;
-    const target = cap === null ? 0 : turnReservation(limits, cap - conversation.meteredMicros);
+    let target = cap === null ? 0 : turnReservation(limits, cap - conversation.meteredMicros);
     const windows = await lockConversationWindows(
       tx,
       scope,
@@ -2059,33 +2073,38 @@ export async function reserveSiteRuntimeConversationWork(
     const reservedDay = String(row.reserved_day ?? "").slice(0, 10);
     const reservedMonth = String(row.reserved_month ?? "").slice(0, 10);
     // A reservation counted in an earlier period vanished when that window rolled.
-    const dayDelta = target - (reservedDay === periods.day ? conversation.reservedMicros : 0);
-    const monthDelta = target - (reservedMonth === periods.month ? conversation.reservedMicros : 0);
+    const ownReservation = (window: UsageWindow) =>
+      conversationReservedInWindow(row, window) &&
+      (window.period === "day" ? reservedDay === periods.day : reservedMonth === periods.month)
+        ? conversation.reservedMicros
+        : 0;
     const budgets = spendBudgets(limits, windows);
-    // A message spends at least something: an exhausted budget refuses it even
-    // when this conversation's reservation already covers it.
+    const floor = Math.min(SITE_RUNTIME_MIN_RESERVATION_MICROS, target);
+    // Reserve the estimate capped by what remains, including this conversation's
+    // own existing reservation, rather than refusing a smaller last turn.
     for (const budget of budgets) {
-      const delta = budget.window.period === "day" ? dayDelta : monthDelta;
-      if (remaining(budget.limit, budget.window) - Math.max(0, delta) < 0)
+      const room = remaining(budget.limit, budget.window) + ownReservation(budget.window);
+      if (room < floor)
         return {
           ok: false,
           budget: budget.budget,
           // Settled spend alone leaves room for this turn: others' reservations refuse it.
-          ...(unspent(budget.limit, budget.window) - target >= 0 ? { busy: true } : {}),
+          ...(unspent(budget.limit, budget.window) >= floor ? { busy: true } : {}),
         } as const;
+      target = Math.min(target, Math.max(0, room));
     }
     for (const budget of budgets)
       if (budget.limit !== null && budget.window.agentMicros >= budget.limit)
         return { ok: false, budget: budget.budget } as const;
     for (const window of Object.values(windows))
       await adjustUsageWindow(tx, scope, conversation.siteId, window, {
-        reservedMicros: window.period === "day" ? dayDelta : monthDelta,
+        reservedMicros: target - ownReservation(window),
       });
     await tx.execute(
       sql`update site_runtime_conversations set reserved_micros = ${target},
           reserved_day = ${periods.day}::date, reserved_month = ${periods.month}::date,
           limit_micros = ${cap}, turns = turns + ${input.newTurn ? 1 : 0},
-          admissions = admissions + 1, updated_at = now()
+          admissions = admissions + 1, reservation_windows_complete = true, updated_at = now()
         where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}`,
     );
     return { ok: true, limitMicros: cap, reservedMicros: target } as const;
@@ -2150,6 +2169,11 @@ export async function settleSiteRuntimeConversationSpend(
         reservedIn: reservedMonth,
       },
     ];
+    // Legacy member rows retain the original reservation key for safe release,
+    // but their newly settled spend must never consume the non-member budget.
+    const legacyMember =
+      conversation.viewerKind === "member" &&
+      conversation.budgetKey === SITE_RUNTIME_SITE_PRINCIPAL;
     for (const window of windows) {
       const current = await lockUsageWindow(
         tx,
@@ -2162,9 +2186,27 @@ export async function settleSiteRuntimeConversationSpend(
       // Spend lands in the current period; the release only in the period the
       // reservation was counted in (gone if that window has rolled since).
       await adjustUsageWindow(tx, scope, conversation.siteId, current, {
-        agentMicros: delta,
-        reservedMicros: current.periodStart === window.reservedIn ? -release : 0,
+        agentMicros: legacyMember && window.principal === SITE_RUNTIME_SITE_PRINCIPAL ? 0 : delta,
+        reservedMicros:
+          current.periodStart === window.reservedIn && conversationReservedInWindow(row, window)
+            ? -release
+            : 0,
       });
+    }
+    if (legacyMember && delta > 0) {
+      for (const period of ["day", "month"] as const) {
+        const memberWindow = await lockUsageWindow(
+          tx,
+          scope,
+          conversation.siteId,
+          SITE_RUNTIME_MEMBERS_PRINCIPAL,
+          period,
+          periods[period],
+        );
+        await adjustUsageWindow(tx, scope, conversation.siteId, memberWindow, {
+          agentMicros: delta,
+        });
+      }
     }
     await tx.execute(
       sql`update site_runtime_conversations set metered_micros = ${Math.max(

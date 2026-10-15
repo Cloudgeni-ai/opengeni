@@ -5,6 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   SITE_GATEWAY_BODY_SHA256_HEADER,
   SITE_GATEWAY_CALLBACK_PATH,
+  DEFAULT_SITE_LIMITS,
   type AccessGrant,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
@@ -20,6 +21,9 @@ import {
   liftSitePlatformBrake,
   readSitePlatformTotals,
   recordSitePlatformUsage,
+  releaseSiteRuntimeConversationStart,
+  reserveSiteRuntimeConversationWork,
+  settleSiteRuntimeConversationSpend,
   setSessionUsageLimitInTransaction,
   withWorkspaceSessionActivityRls,
   type DbClient,
@@ -35,6 +39,7 @@ import { createApp, type AppDependencies } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { sha256Hex, signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import type { SiteContentScanner } from "../src/site-publishing/content-scanner";
+import { siteRuntimeBudgetLimits } from "../src/site-publishing/runtime";
 import { moderateSiteAsPlatform } from "../src/site-publishing/platform";
 import {
   evaluateSitePlatformLimit,
@@ -2670,6 +2675,23 @@ test("a member's conversation from before members were uncapped keeps working, u
   expect(row).toMatchObject({ budget_key: "*", limit_micros: null });
   expect(Number(row!.reserved_micros)).toBe(0);
   expect(await usageLimit()).toBeNull();
+  await settleSiteRuntimeConversationSpend(
+    db.db,
+    { accountId: f.accountId, workspaceId: f.workspace.id },
+    { sessionId, usedMicros: 50_000, idle: true },
+  );
+  const windows = await shared.admin`select principal_key, agent_micros
+    from site_runtime_usage where site_id = ${site.id} and principal_key in ('*', '*members')`;
+  expect(
+    windows
+      .filter((window) => window.principal_key === "*")
+      .map((window) => Number(window.agent_micros)),
+  ).toEqual([0, 0]);
+  expect(
+    windows
+      .filter((window) => window.principal_key === "*members")
+      .map((window) => Number(window.agent_micros)),
+  ).toEqual([50_000, 50_000]);
 });
 
 test("the model follows the viewer: people outside the workspace never use a subscription", async () => {
@@ -2711,6 +2733,64 @@ test("the model follows the viewer: people outside the workspace never use a sub
   // The Site lets it through (this test deployment has no Codex connection,
   // so the session itself may still say the model is unavailable).
   expect(memberSent.json?.error?.details?.code ?? null).not.toBe("not_available_for_viewer");
+  expect(await modelOf(String(member.json.id))).toBe(subscription);
+
+  // Selecting a subscription on the Site resolves a concrete credit model for
+  // outsiders, rather than passing null to the subscription-preferring default.
+  const changed = await f.publication(f.admin, site.id, "PUT", {
+    agent: { model: subscription, enabled: true },
+  });
+  expect(changed.status, JSON.stringify(changed.json)).toBe(200);
+  const fallback = await start({ visitor: visitorId() });
+  expect(fallback.status, JSON.stringify(fallback.json)).toBe(202);
+  expect(await modelOf(String(fallback.json.id))).toBe(guestModel);
+
+  // A workspace policy with no credit-billed choices refuses before creating a session.
+  await shared.admin`insert into workspace_model_policies (account_id, workspace_id, allowed_models)
+    values (${f.accountId}, ${f.workspace.id}, ${[subscription]})`;
+  const unavailable = await start({ visitor: visitorId() });
+  expect(unavailable.status, JSON.stringify(unavailable.json)).toBe(403);
+  expect(unavailable.json.error.details).toMatchObject({
+    code: "not_available_for_viewer",
+    feature: "agent_model",
+  });
+});
+
+test("legacy two-window settlement and release preserve newer four-window reservations", async () => {
+  for (const action of ["settle", "release"] as const) {
+    const f = await fixture();
+    const site = await f.live(`Legacy ${action}`, { access: "public", agent: { enabled: true } });
+    const visitor = visitorId();
+    const start = () =>
+      f.gateway(site.host, "POST", "/sessions", { visitor, body: { initialMessage: "Hello" } });
+    const legacy = await start();
+    const newer = await start();
+    expect(legacy.status).toBe(202);
+    expect(newer.status).toBe(202);
+    const estimate = f.settings.sitesAgentReservationMicrosPerTurn;
+    // Reproduce an old pod's writes: viewer-day and Site-month only.
+    await shared.admin`update site_runtime_conversations set reservation_windows_complete = false where session_id = ${legacy.json.id}`;
+    await shared.admin`update site_runtime_usage set reserved_micros = reserved_micros - ${estimate}
+      where site_id = ${site.id} and ((principal_key = '*' and period = 'day') or (principal_key = ${`guest:${visitor}`} and period = 'month'))`;
+    const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+    if (action === "release")
+      await releaseSiteRuntimeConversationStart(db.db, scope, { sessionId: legacy.json.id });
+    else
+      await settleSiteRuntimeConversationSpend(db.db, scope, {
+        sessionId: legacy.json.id,
+        usedMicros: 0,
+        idle: true,
+      });
+    const windows =
+      await shared.admin`select reserved_micros from site_runtime_usage where site_id = ${site.id}`;
+    expect(windows).toHaveLength(4);
+    expect(windows.map((row) => Number(row.reserved_micros))).toEqual([
+      estimate,
+      estimate,
+      estimate,
+      estimate,
+    ]);
+  }
 });
 
 test("turns reserve an estimate, so open conversations don't use up a Site; busy is retryable", async () => {
@@ -2737,11 +2817,17 @@ test("turns reserve an estimate, so open conversations don't use up a Site; busy
   const started = await Promise.all(Array.from({ length: 6 }, () => start(visitorId())));
   expect(started.map((result) => result.status)).toEqual(Array(6).fill(202));
   expect(await siteReserved()).toBe(6 * f.settings.sitesAgentReservationMicrosPerTurn);
-  // Their session usage limit is still the conversation cap.
-  const [conversation] = await shared.admin`select limit_micros, reserved_micros
-    from site_runtime_conversations where session_id = ${started[0]!.json.id}`;
-  expect(Number(conversation!.limit_micros)).toBe(1_000_000);
-  expect(Number(conversation!.reserved_micros)).toBe(f.settings.sitesAgentReservationMicrosPerTurn);
+  // Arrival order is nondeterministic: each cap is clipped to the budget
+  // remaining when admitted, while each reservation is only one estimate.
+  const conversations = await shared.admin`select limit_micros, reserved_micros
+    from site_runtime_conversations where site_id = ${site.id}`;
+  expect(conversations.map((row) => Number(row.limit_micros)).sort((a, b) => a - b)).toEqual([
+    250_000, 500_000, 750_000, 1_000_000, 1_000_000, 1_000_000,
+  ]);
+  for (const conversation of conversations)
+    expect(Number(conversation.reserved_micros)).toBe(
+      f.settings.sitesAgentReservationMicrosPerTurn,
+    );
   // The next finds only the others' reservations in the way: busy, retry shortly.
   const busy = await start(visitorId());
   expect(busy.status, JSON.stringify(busy.json)).toBe(429);
@@ -2780,6 +2866,29 @@ test("Site agent sessions run without a sandbox, whatever the deployment default
     // Only this Site's own data tools (Site SQL is off here), no management tools.
     expect([...row!.first_party_mcp_tools].sort()).toEqual(["site_data_query", "site_data_write"]);
   }
+});
+
+test("a later turn reserves only the budget remaining below the estimate", async () => {
+  const f = await fixture();
+  const site = await f.live("Last turn", { access: "public", agent: { enabled: true } });
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    visitor: visitorId(),
+    body: { initialMessage: "Hi" },
+  });
+  expect(created.status).toBe(202);
+  const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+  await settleSiteRuntimeConversationSpend(db.db, scope, {
+    sessionId: created.json.id,
+    usedMicros: 0,
+    idle: true,
+  });
+  await shared.admin`update site_runtime_usage set agent_micros = 9950000 where site_id = ${site.id} and principal_key = '*' and period = 'month'`;
+  const admitted = await reserveSiteRuntimeConversationWork(db.db, scope, {
+    sessionId: created.json.id,
+    newTurn: true,
+    limits: siteRuntimeBudgetLimits(DEFAULT_SITE_LIMITS, f.settings),
+  });
+  expect(admitted).toMatchObject({ ok: true, reservedMicros: 50_000 });
 });
 
 test("view as visitor shows a member less, never anyone more", async () => {
@@ -3040,6 +3149,28 @@ test("platform storage: the Opengeni-wide level is each workspace's level, set r
   await recordSitePlatformUsage(db.db, scope, { refreshStorage: true });
   expect(await level()).toBe(400);
   expect((await readSitePlatformTotals(db.db)).storageBytes).toBe(before + 400);
+});
+
+test("repeated publication reads reuse the immutable version readiness scan", async () => {
+  const f = await fixture();
+  const site = await f.live("Cached readiness", { access: "public" });
+  const storage = f.deps.objectStorage!;
+  const original = storage.getObjectBytes;
+  let reads = 0;
+  storage.getObjectBytes = async (...args) => {
+    reads++;
+    return await original.apply(storage, args);
+  };
+  try {
+    for (let index = 0; index < 3; index++) {
+      const result = await f.publication(f.admin, site.id, "GET");
+      expect(result.status).toBe(200);
+      expect(result.json.warnings).toEqual(site.publication.warnings);
+    }
+    expect(reads).toBe(0);
+  } finally {
+    storage.getObjectBytes = original;
+  }
 });
 
 test("the platform brake: alert, engage at the monthly limit, refuse writes, operator lift", async () => {

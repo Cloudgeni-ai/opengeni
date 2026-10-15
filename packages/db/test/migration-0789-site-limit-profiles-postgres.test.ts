@@ -1,7 +1,7 @@
-// Migrations 0786 and 0787, applied together as one release does, over data
-// the previous release wrote. 0786: existing Site agent conversations count in
+// Migrations 0788 and 0789, applied together as one release does, over data
+// the previous release wrote. 0788: existing Site agent conversations count in
 // the Site's windows (budget key `*`) and the platform usage tables arrive
-// owner-only. 0787: stored Site limit profiles move to the new limits model, so
+// owner-only. 0789: stored Site limit profiles move to the new limits model, so
 // existing Sites pick up the new defaults without a republish. Fields equal to
 // the old free defaults are dropped
 // (the old custom form prefilled all of them), a custom profile left with no
@@ -22,8 +22,8 @@ import { provisionRoles } from "../src/provision-roles";
 setDefaultTimeout(180_000);
 
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const FIRST = "0786_site_limits_and_platform_usage.sql";
-const MIGRATIONS = [FIRST, "0787_site_limit_profiles_new_defaults.sql"];
+const FIRST = "0788_site_limits_and_platform_usage.sql";
+const MIGRATIONS = [FIRST, "0789_site_limit_profiles_new_defaults.sql"];
 
 /** The previous release's custom form saved every field, prefilled with these. */
 const OLD_PREFILLED = {
@@ -67,7 +67,7 @@ afterAll(async () => {
 });
 
 test.skipIf(!realDb)(
-  "0786 and 0787 keep existing conversations and move old-default limit profiles to the new model",
+  "0788 and 0789 keep existing conversations and move old-default limit profiles to the new model",
   async () => {
     const admin = database!.admin;
     const userId = `site-limit-profiles-${crypto.randomUUID()}`;
@@ -234,10 +234,10 @@ test.skipIf(!realDb)(
     // The owner-only posture of both tables is restored.
     expect((await forcedRls()).every((row) => row.forced)).toBe(true);
     // The old conversation keeps its row and counts in the Site's windows.
-    const [conversation] = await admin<{ budgetKey: string; limit: string }[]>`
-      select budget_key as "budgetKey", limit_micros::text as limit
+    const [conversation] = await admin<{ budgetKey: string; limit: string; complete: boolean }[]>`
+      select budget_key as "budgetKey", limit_micros::text as limit, reservation_windows_complete as complete
       from site_runtime_conversations where session_id = ${conversationId}::uuid`;
-    expect(conversation).toEqual({ budgetKey: "*", limit: "20000" });
+    expect(conversation).toEqual({ budgetKey: "*", limit: "20000", complete: false });
     const platform = await admin<{ relname: string; forced: boolean }[]>`
       select relname, relforcerowsecurity as forced from pg_class
       where relname like 'site_platform_%' and relkind = 'r'
