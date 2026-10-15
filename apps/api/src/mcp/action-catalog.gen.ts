@@ -3259,6 +3259,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getSitePlatformUsage",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/site-platform-usage",
+    "request": [],
+    "response": [
+      "SitePlatformUsage"
+    ]
+  },
+  {
     "id": "getSiteSql",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql",
@@ -5357,6 +5366,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes",
     "request": [],
     "response": []
   },
