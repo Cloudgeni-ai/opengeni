@@ -170,7 +170,12 @@ test("a Windows machine gets a PowerShell relay to the system curl, with no POSI
       async execWithInput(args) {
         seen.push({ shell: args.shell, workdir: args.workdir });
         return {
-          stdout: frame("HTTP/1.1 200 OK\r\n\r\n", Buffer.from('{"protocolVersion":1,"ok":true,"data":7}'), "0", request.marker),
+          stdout: frame(
+            "HTTP/1.1 200 OK\r\n\r\n",
+            Buffer.from('{"protocolVersion":1,"ok":true,"data":7}'),
+            "0",
+            request.marker,
+          ),
           exitCode: 0,
         };
       },
