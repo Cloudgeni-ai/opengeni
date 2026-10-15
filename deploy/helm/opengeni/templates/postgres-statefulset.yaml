@@ -31,6 +31,16 @@ spec:
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.postgres.securityContext | nindent 12 }}
+          {{- with .Values.postgres.parameters }}
+          args:
+            {{- range $name, $value := . }}
+            {{- if not (regexMatch "^[A-Za-z_][A-Za-z0-9_.]*$" $name) }}
+            {{- fail (printf "postgres.parameters key %q is not a valid PostgreSQL setting name" $name) }}
+            {{- end }}
+            - "-c"
+            - {{ printf "%s=%v" $name $value | quote }}
+            {{- end }}
+          {{- end }}
           ports:
             - name: postgres
               containerPort: {{ .Values.postgres.service.port }}

@@ -1,4 +1,5 @@
 -- deployment-mode: rolling
+-- contract-step: Previous-release writers are unaffected: CHECK replacements only widen accepted kinds and retain free for old pods.
 -- Stored Site limit profiles move to the new limits model (docs/published-sites.md),
 -- so existing Sites pick up the new defaults without a republish. Limits are
 -- resolved from the stored profile and settings on every request; nothing

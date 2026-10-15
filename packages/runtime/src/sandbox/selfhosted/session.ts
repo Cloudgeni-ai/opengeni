@@ -971,6 +971,11 @@ export class SelfhostedSession {
     return shellDialectFor(shell?.trim() || null, this.hostOs());
   }
 
+  /** Host family for the browser/computer controller transport. */
+  controllerHostOs(): "posix" | "windows" {
+    return this.hostOs() === "windows" ? "windows" : "posix";
+  }
+
   private async prepareSecretExec(
     args: SelfhostedExecArgs,
     requestedShell: string | undefined,

@@ -132,6 +132,9 @@ export type BrowserControlPlacementSession = {
     login: boolean;
     workdir: string;
   }) => Promise<ExecResultLike>;
+  /** Host family of a Connected Machine. Windows hosts have no POSIX shell,
+   * /tmp or base64, so the controller transport uses its Windows form there. */
+  controllerHostOs?: () => "posix" | "windows";
   exec?: (args: {
     cmd: string;
     workdir?: string;
@@ -251,9 +254,10 @@ export type ExpectedComputerFrameEvidence = {
  * session directory may disappear; managed sandboxes must use /workspace
  * because provider exec confines workdir to the workspace root. */
 function placementControllerWorkdir(session: BrowserControlPlacementSession): string {
-  return session.ensureBrowserControl
-    ? NATIVE_PLACEMENT_CONTROLLER_WORKDIR
-    : MANAGED_PLACEMENT_CONTROLLER_WORKDIR;
+  if (!session.ensureBrowserControl) return MANAGED_PLACEMENT_CONTROLLER_WORKDIR;
+  // A Windows machine has no /tmp. The relative "." resolves to its reported
+  // workspace root, which exists for the connection's lifetime.
+  return session.controllerHostOs?.() === "windows" ? "." : NATIVE_PLACEMENT_CONTROLLER_WORKDIR;
 }
 
 export type PlacementBrowserSessionReference = {
@@ -1480,12 +1484,13 @@ export class BrowserControlClient {
       ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
       timeoutMs: boundedTimeout(input.timeoutMs ?? this.timeoutMs),
       maxBytes,
+      host: this.session.controllerHostOs?.() ?? "posix",
     });
     try {
       const result = await this.session.execWithInput!({
         cmd: request.cmd,
         stdin: request.stdin,
-        shell: "/bin/sh",
+        shell: request.shell,
         login: false,
         workdir: placementControllerWorkdir(this.session),
       });
