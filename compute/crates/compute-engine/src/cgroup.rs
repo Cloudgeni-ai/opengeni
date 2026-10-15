@@ -1,0 +1,97 @@
+//! Linux cgroup v2 groups: one per VM, so the host can account, limit and
+//! reclaim each VM's memory on its own.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// One cgroup v2 directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cgroup {
+    path: PathBuf,
+}
+
+impl Cgroup {
+    /// Opens or creates the group at `path`.
+    pub fn create(path: impl Into<PathBuf>) -> io::Result<Self> {
+        let path = path.into();
+        match fs::create_dir(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        Ok(Self { path })
+    }
+
+    /// Opens or creates a parent group whose children get memory and CPU
+    /// controllers.
+    pub fn create_parent(path: impl Into<PathBuf>) -> io::Result<Self> {
+        let group = Self::create(path)?;
+        fs::write(group.path.join("cgroup.subtree_control"), "+memory +cpu")?;
+        Ok(group)
+    }
+
+    /// The group's directory.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The child group `name`.
+    pub fn child(&self, name: &str) -> io::Result<Self> {
+        Self::create(self.path.join(name))
+    }
+
+    /// Bytes of memory charged to the group, compressed swap included.
+    pub fn memory_current(&self) -> io::Result<u64> {
+        read_u64(&self.path.join("memory.current"))
+    }
+
+    /// Pushes the group's memory out of RAM: anonymous pages into compressed
+    /// memory (zswap, never written to disk), file pages dropped.
+    ///
+    /// Blocks until the kernel has done what it can, which can take a while
+    /// for a large group; call it from a blocking thread.
+    pub fn reclaim_to_zswap(&self) -> io::Result<()> {
+        fs::write(self.path.join("memory.zswap.max"), "max")?;
+        fs::write(self.path.join("memory.zswap.writeback"), "0")?;
+        let current = self.memory_current()?;
+        match fs::write(self.path.join("memory.reclaim"), current.to_string()) {
+            // EAGAIN means the kernel reclaimed less than asked, which is expected:
+            // some memory is always in use.
+            Err(error) if error.raw_os_error() == Some(rustix::io::Errno::AGAIN.raw_os_error()) => {
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
+    /// Removes the group once its processes have exited. Retries briefly,
+    /// because the kernel frees an exited process's group membership
+    /// asynchronously.
+    pub fn remove(&self) -> io::Result<()> {
+        let mut delay = Duration::from_millis(1);
+        for _ in 0..10 {
+            match fs::remove_dir(&self.path) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(error)
+                    if error.raw_os_error() == Some(rustix::io::Errno::BUSY.raw_os_error()) =>
+                {
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        fs::remove_dir(&self.path)
+    }
+}
+
+fn read_u64(path: &Path) -> io::Result<u64> {
+    fs::read_to_string(path)?
+        .trim()
+        .parse()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
