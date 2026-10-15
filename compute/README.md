@@ -27,9 +27,9 @@ Tests that drive a real Firecracker run as root on a KVM host prepared by
 ```sh
 sudo env COMPUTE_TEST_LAB=/lab cargo test --workspace
 # the nested-host memory profile (needs a reserved 2 MiB page pool)
-sudo env COMPUTE_TEST_LAB=/lab COMPUTE_TEST_PROFILE=nested cargo test -p compute-host --test lab
+sudo env COMPUTE_TEST_LAB=/lab COMPUTE_TEST_PROFILE=nested cargo test -p compute-host --test save_wake
 # the archive and object-storage wake cycle
-sudo env COMPUTE_TEST_LAB=/lab COMPUTE_TEST_STORE=gs://bucket/prefix cargo test -p compute-host --test lab
+sudo env COMPUTE_TEST_LAB=/lab COMPUTE_TEST_STORE=gs://bucket/prefix cargo test -p compute-host --test save_wake
 ```
 
 ## Saving and waking

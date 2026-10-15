@@ -1,313 +1,522 @@
-//! Save and wake cycles against a real Firecracker on a KVM host.
+//! The host agent binary against real Firecracker, jailed and networked.
 //!
-//! Runs only as root and only when `COMPUTE_TEST_LAB` names a directory
-//! prepared by `compute/lab/host-setup.sh` (it holds `bin/firecracker`,
-//! `bin/jailer`, `vmlinux` and `base.ext4`, whose guest runs a shell on vsock
-//! port 52). `COMPUTE_TEST_PROFILE` picks the host's memory profile
-//! (`bare-metal` by default; `nested` needs a reserved 2 MiB page pool), and
-//! `COMPUTE_TEST_STORE` (a directory or a `gs://`, `s3://` or `az://` URL)
-//! enables the archive and object-storage wake test.
+//! Runs only when `COMPUTE_TEST_LAB` names a directory prepared by
+//! `lab/host-setup.sh` (`bin/firecracker`, `bin/jailer`, `vmlinux`,
+//! `base.ext4`), as root:
 //!
-//! Each test starts a process in the guest that counts in memory, then lets
-//! the sandbox fall asleep and wakes it again several times. Every wake
-//! must find the same process still counting, from where it left off, and
-//! a block of guest memory that changes a little between saves must read
-//! back exactly as it was written: that only holds if every diff save was
-//! merged correctly into the image the next wake restores.
+//! ```text
+//! CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="sudo -E" COMPUTE_TEST_LAB=/lab \
+//!   cargo test --release -p compute-host --test lab -- --nocapture --test-threads 1
+//! ```
+//!
+//! `COMPUTE_TEST_SANDBOXES` sets how many sandboxes each test uses
+//! (default 12) and `COMPUTE_TEST_RESULTS` a directory for JSON results.
 
-#![cfg(target_os = "linux")]
-
+use std::collections::BTreeMap;
+use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
-use compute_core::HostPolicy;
-use compute_engine::MemoryProfile;
-use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
+use compute_core::SandboxId;
 use compute_host::client::Client;
 use compute_host::protocol::{
-    Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepRule,
+    HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepRule,
 };
-use compute_host::{Chunked, Directory, HostAgent, HostConfig, NoStore, Store, serve};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::time::Instant;
+use tokio::task::JoinSet;
+use tokio::time::{Instant, sleep, timeout};
 
-const SHELL_PORT: u32 = 52;
+const PORT: u32 = 52;
 
 fn lab() -> Option<PathBuf> {
-    let lab = std::env::var_os("COMPUTE_TEST_LAB").map(PathBuf::from);
-    if lab.is_none() {
-        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
-    }
-    lab
+    std::env::var_os("COMPUTE_TEST_LAB").map(PathBuf::from)
 }
 
-fn profile() -> MemoryProfile {
-    std::env::var("COMPUTE_TEST_PROFILE").map_or_else(
-        |_| MemoryProfile::bare_metal(),
-        |name| name.parse().unwrap(),
-    )
+fn count() -> usize {
+    std::env::var("COMPUTE_TEST_SANDBOXES")
+        .ok()
+        .and_then(|count| count.parse().ok())
+        .unwrap_or(12)
 }
 
-/// A short name for the profile: socket paths have little room.
-fn short() -> &'static str {
-    if profile() == MemoryProfile::nested() {
-        "n"
-    } else {
-        "b"
-    }
+fn id(n: usize) -> Id {
+    Id(SandboxId((0x1ab << 64) | n as u128))
 }
 
-/// A running agent on a fresh state root, reached through its socket.
+/// One run of the agent binary.
 struct Agent {
+    child: Child,
     client: Client,
+}
+
+struct Host {
+    lab: PathBuf,
     root: PathBuf,
-    task: tokio::task::JoinHandle<()>,
+    socket: PathBuf,
+    extra: Vec<String>,
 }
 
-impl Drop for Agent {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-async fn start<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> Agent {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_test_writer()
-        .try_init();
-    let root = lab.join("ht").join(name);
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
-    let engine = Firecracker::new(FirecrackerConfig {
-        firecracker: lab.join("bin/firecracker"),
-        jailer: lab.join("bin/jailer"),
-        cgroup_parent: "/sys/fs/cgroup/compute-host-test".into(),
-    })
-    .unwrap()
-    .with_memory_profile(profile())
-    .unwrap();
-    let config = HostConfig {
-        root: root.join("s"),
-        kernel: lab.join("vmlinux"),
-        boot_args:
-            "console=ttyS0 reboot=k panic=1 quiet loglevel=1 page_reporting.page_reporting_order=0"
-                .into(),
-        base_image: lab.join("base.ext4"),
-        policy: HostPolicy::default(),
-        sample_every: Duration::from_secs(1),
-        guest_ports: Vec::new(),
-        restore_notice_port: None,
-        first_uid,
-    };
-    let socket = root.join("agent.sock");
-    let (handle, agent) = HostAgent::start(config, engine, store).await.unwrap();
-    let serving = socket.clone();
-    let task = tokio::spawn(async move {
-        tokio::select! {
-            result = serve(handle, &serving) => result.unwrap(),
-            result = agent => result.unwrap(),
-        }
-    });
-    for _ in 0..100 {
-        if socket.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    Agent {
-        client: Client::new(&socket),
-        root,
-        task,
-    }
-}
-
-/// Runs `script` in the guest's shell, waking the sandbox first.
-async fn exec(client: &Client, id: Id, script: &str) -> String {
-    let (reply, mut stream) = client
-        .connect(id, SHELL_PORT, PriorityName::Interactive)
-        .await
-        .unwrap();
-    assert!(matches!(reply, Reply::Connected { .. }), "{reply:?}");
-    stream
-        .get_mut()
-        .write_all(format!("{script}\nexit\n").as_bytes())
-        .await
-        .unwrap();
-    let mut output = Vec::new();
-    stream.read_to_end(&mut output).await.unwrap();
-    String::from_utf8_lossy(&output).into_owned()
-}
-
-async fn wait_for(client: &Client, id: Id, level: LevelName) {
-    let started = Instant::now();
-    loop {
-        let Reply::Status(status) = client.call(&Request::Status).await.unwrap() else {
-            panic!("status failed");
-        };
-        let sandbox = status.sandboxes.iter().find(|s| s.id == id).unwrap();
-        if sandbox.level == level && sandbox.step.is_none() {
-            assert!(sandbox.memory_saved, "{sandbox:?}");
-            return;
-        }
-        assert!(
-            started.elapsed() < Duration::from_secs(120),
-            "never reached {level:?}: {sandbox:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-fn ladder(deepest: LevelName) -> Vec<SleepRule> {
-    let levels = [
-        LevelName::Paused,
-        LevelName::Saved,
-        LevelName::Archived,
-        LevelName::Remote,
-    ];
-    let mut rules = Vec::new();
-    for (step, level) in (1_u64..).zip(levels) {
-        rules.push(SleepRule {
-            level,
-            after_ms: 500 * step,
-        });
-        if level == deepest {
-            break;
+impl Host {
+    fn new(lab: &Path, name: &str, extra: &[&str]) -> Self {
+        let root = lab.join("t").join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        Self {
+            lab: lab.to_owned(),
+            socket: root.join("agent.sock"),
+            root,
+            extra: extra.iter().map(|&arg| arg.to_owned()).collect(),
         }
     }
-    rules
+
+    async fn start(&self) -> Agent {
+        let _ = std::fs::remove_file(&self.socket);
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.root.join("agent.log"))
+            .unwrap();
+        let lab = &self.lab;
+        let child = Command::new(env!("CARGO_BIN_EXE_compute-host"))
+            .arg("--socket")
+            .arg(&self.socket)
+            .arg("serve")
+            .arg("--root")
+            .arg(self.root.join("state"))
+            .arg("--firecracker")
+            .arg(lab.join("bin/firecracker"))
+            .arg("--jailer")
+            .arg(lab.join("bin/jailer"))
+            .arg("--kernel")
+            .arg(lab.join("vmlinux"))
+            .arg("--base-image")
+            .arg(lab.join("base.ext4"))
+            .arg("--cgroup")
+            .arg("/sys/fs/cgroup/compute-test")
+            .args(["--limit", "boot=32", "--limit", "restore=32"])
+            .args(&self.extra)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(log)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let client = Client::new(&self.socket);
+        loop {
+            if self.socket.exists() && client.call(&Request::Status).await.is_ok() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the agent never came up");
+            sleep(Duration::from_millis(20)).await;
+        }
+        Agent { child, client }
+    }
 }
 
-/// Starts a process that counts once a second into a file in guest memory,
-/// and fills 64 MiB of guest memory with random data. Returns the
-/// process's id and the data's checksum.
-const SETUP: &str = "\
-mkdir -p /dev/shm
-mount -t tmpfs -o size=128m tmpfs /dev/shm 2>/dev/null
-head -c 64M /dev/urandom > /dev/shm/blob
-setsid sh -c 'i=0; while true; do i=$((i+1)); echo $i > /dev/shm/count; sleep 1; done' \
-  </dev/null >/dev/null 2>&1 &
-echo pid=$!
-echo sum=$(md5sum < /dev/shm/blob | cut -d' ' -f1)";
+impl Agent {
+    /// Ends the agent the hard way: SIGKILL, no chance to clean up.
+    fn kill(mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
 
-/// Checks on the counter, then changes a random 1 MiB of the data so the
-/// next save holds a fresh diff.
-fn check(pid: &str) -> String {
-    format!(
-        "\
-kill -0 {pid} && echo alive=yes
-echo count=$(cat /dev/shm/count)
-echo was=$(md5sum < /dev/shm/blob | cut -d' ' -f1)
-dd if=/dev/urandom of=/dev/shm/blob bs=1M count=1 seek=$((RANDOM % 64)) conv=notrunc 2>/dev/null
-echo sum=$(md5sum < /dev/shm/blob | cut -d' ' -f1)"
-    )
+    async fn status(&self) -> HostStatus {
+        match self.client.call(&Request::Status).await.unwrap() {
+            Reply::Status(status) => *status,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    async fn create(&self, sandbox: Id, sleep: &[(LevelName, u64)]) {
+        create(&self.client, sandbox, sleep).await;
+    }
+
+    async fn remove_all(&self) {
+        for sandbox in self.status().await.sandboxes {
+            let reply = self
+                .client
+                .call(&Request::Remove {
+                    id: sandbox.id,
+                    generation: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(reply, Reply::Done);
+        }
+    }
+
+    async fn wait_until(&self, what: &str, done: impl Fn(&HostStatus) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(300);
+        loop {
+            let status = self.status().await;
+            if done(&status) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            sleep(Duration::from_millis(50)).await;
+        }
+    }
 }
 
-fn field<'a>(output: &'a str, name: &str) -> &'a str {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
-        .unwrap_or_else(|| panic!("no {name} in {output:?}"))
-        .trim()
-}
-
-/// Sleeps to `deepest` and wakes `cycles` times, checking each wake.
-async fn cycle(agent: &Agent, id: &str, deepest: LevelName, cycles: u32) {
-    let id: Id = id.parse().unwrap();
+/// Creates `sandbox` with the sleep ladder `sleep`.
+async fn create(client: &Client, sandbox: Id, sleep: &[(LevelName, u64)]) {
     let config = SandboxConfig {
-        vcpus: 2,
+        vcpus: 1,
         memory_mib: 512,
-        sleep: ladder(deepest),
+        sleep: sleep
+            .iter()
+            .map(|&(level, after_ms)| SleepRule { level, after_ms })
+            .collect(),
     };
-    let created = agent
-        .client
-        .call(&Request::Create { id, config })
-        .await
-        .unwrap();
-    assert!(matches!(created, Reply::Done), "{created:?}");
-    let setup = exec(&agent.client, id, SETUP).await;
-    let pid = field(&setup, "pid").to_owned();
-    let mut sum = field(&setup, "sum").to_owned();
-    let mut count = 0_u64;
-    for round in 1..=cycles {
-        wait_for(&agent.client, id, deepest).await;
-        let started = Instant::now();
-        let output = exec(&agent.client, id, &check(&pid)).await;
-        let woke = started.elapsed();
-        assert_eq!(field(&output, "alive"), "yes", "round {round}: {output}");
-        assert_eq!(field(&output, "was"), sum, "round {round}: memory differs");
-        let now: u64 = field(&output, "count").parse().unwrap();
-        assert!(
-            now >= count,
-            "round {round}: count went back from {count} to {now}"
-        );
-        count = now;
-        field(&output, "sum").clone_into(&mut sum);
-        eprintln!("round {round}: woke from {deepest:?} and checked in {woke:?}, count {count}");
-    }
-    let images = agent
-        .root
-        .join("s/vm/firecracker")
-        .join(id.to_string())
-        .join("images");
-    let generations = std::fs::read_dir(&images)
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().len() == 16)
-        .count();
-    assert!(
-        generations <= 1,
-        "old images left behind in {}",
-        images.display()
-    );
-    let removed = agent
-        .client
-        .call(&Request::Remove {
-            id,
-            generation: None,
+    let reply = client
+        .call(&Request::Create {
+            id: sandbox,
+            config,
         })
         .await
         .unwrap();
-    assert!(matches!(removed, Reply::Done), "{removed:?}");
+    assert_eq!(reply, Reply::Done, "create {sandbox}");
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn guest_processes_survive_repeated_saves_and_wakes() {
-    let Some(lab) = lab() else { return };
-    let agent = start(&lab, &format!("s{}", short()), 1 << 30, NoStore).await;
-    cycle(
-        &agent,
-        "00000000-0000-4000-8000-0000000000b1",
-        LevelName::Saved,
-        5,
-    )
-    .await;
+/// Wakes `sandbox`, runs `script` in its shell and returns the output and
+/// how long the wake took.
+async fn exec(client: &Client, sandbox: Id, script: &str) -> (String, Duration) {
+    let started = Instant::now();
+    let (reply, mut stream) = client
+        .connect(sandbox, PORT, PriorityName::Interactive)
+        .await
+        .unwrap();
+    let Reply::Connected { waited_us, .. } = reply else {
+        panic!("{sandbox}: {reply:?}");
+    };
+    let mut input = script.to_owned();
+    input.push_str("\nexit\n");
+    stream.get_mut().write_all(input.as_bytes()).await.unwrap();
+    let mut output = String::new();
+    timeout(Duration::from_secs(120), stream.read_to_string(&mut output))
+        .await
+        .unwrap_or_else(|_| panic!("{sandbox}: script timed out after {:?}", started.elapsed()))
+        .unwrap();
+    (output, Duration::from_micros(waited_us))
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn guest_processes_survive_waking_from_object_storage() {
-    let Some(lab) = lab() else { return };
-    let Ok(url) = std::env::var("COMPUTE_TEST_STORE") else {
-        eprintln!("skipped: set COMPUTE_TEST_STORE to archive sandboxes");
+fn percentile(values: &mut [f64], percent: f64) -> f64 {
+    values.sort_by(f64::total_cmp);
+    if values.is_empty() {
+        return 0.0;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let index = ((values.len() as f64 - 1.0) * percent / 100.0).round() as usize;
+    values[index]
+}
+
+fn summary(values: &[f64]) -> serde_json::Value {
+    let mut values = values.to_vec();
+    serde_json::json!({
+        "n": values.len(),
+        "p50": percentile(&mut values, 50.0),
+        "p90": percentile(&mut values, 90.0),
+        "p99": percentile(&mut values, 99.0),
+        "max": percentile(&mut values, 100.0),
+    })
+}
+
+fn save_results(name: &str, results: &serde_json::Value) {
+    println!("{name}: {}", serde_json::to_string_pretty(results).unwrap());
+    if let Some(dir) = std::env::var_os("COMPUTE_TEST_RESULTS") {
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.json")),
+            serde_json::to_vec_pretty(results).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+fn firecrackers() -> usize {
+    let output = Command::new("pgrep")
+        .args(["-c", "-x", "firecracker"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
+}
+
+/// What each sandbox is left doing before the agent is killed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Kind {
+    Running,
+    Paused,
+    Saved,
+}
+
+impl Kind {
+    fn of(n: usize) -> Self {
+        [Self::Running, Self::Paused, Self::Saved][n % 3]
+    }
+
+    fn ladder(self) -> &'static [(LevelName, u64)] {
+        match self {
+            Self::Running => &[],
+            Self::Paused => &[(LevelName::Paused, 500)],
+            Self::Saved => &[(LevelName::Paused, 500), (LevelName::Saved, 1_000)],
+        }
+    }
+
+    fn level(self) -> LevelName {
+        match self {
+            Self::Running => LevelName::Running,
+            Self::Paused => LevelName::Paused,
+            Self::Saved => LevelName::Saved,
+        }
+    }
+}
+
+/// Sandboxes running, paused and saved survive the agent being killed with
+/// SIGKILL and restarted: every one wakes with the processes and in-memory
+/// files its guest had.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn sandboxes_survive_the_agent_being_killed() {
+    let Some(lab) = lab() else {
+        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
         return;
     };
-    let name = format!("r{}", short());
-    if let Some(chunked) = Chunked::from_url(&url).unwrap() {
-        let agent = start(&lab, &name, (1 << 30) + 1000, chunked).await;
-        cycle(
-            &agent,
-            "00000000-0000-4000-8000-0000000000b2",
-            LevelName::Remote,
-            3,
-        )
-        .await;
-    } else {
-        let agent = start(&lab, &name, (1 << 30) + 1000, Directory::new(url)).await;
-        cycle(
-            &agent,
-            "00000000-0000-4000-8000-0000000000b2",
-            LevelName::Remote,
-            3,
-        )
-        .await;
+    let count = count();
+    let host = Host::new(&lab, "kill", &["--network"]);
+    let agent = host.start().await;
+    let ids: Vec<Id> = (0..count).map(id).collect();
+    let mut creates = JoinSet::new();
+    for (n, sandbox) in ids.iter().copied().enumerate() {
+        let client = agent.client.clone();
+        creates.spawn(async move {
+            create(&client, sandbox, Kind::of(n).ladder()).await;
+            // A background process and a file in memory: both live only in
+            // the guest's RAM.
+            let script = format!(
+                "sleep 1000000 & echo $! > /dev/shm/pid; echo token-{n} > /dev/shm/token; cat /dev/shm/token"
+            );
+            let (output, _) = exec(&client, sandbox, &script).await;
+            assert_eq!(output.trim(), format!("token-{n}"));
+        });
     }
+    while let Some(done) = creates.join_next().await {
+        done.unwrap();
+    }
+    agent
+        .wait_until("every sandbox to settle", |status| {
+            status
+                .sandboxes
+                .iter()
+                .enumerate()
+                .all(|(n, sandbox)| sandbox.step.is_none() && sandbox.level == Kind::of(n).level())
+        })
+        .await;
+    let before = agent.status().await;
+    let live = ids
+        .iter()
+        .enumerate()
+        .filter(|(n, _)| Kind::of(*n) != Kind::Saved)
+        .count();
+    assert_eq!(
+        firecrackers(),
+        live,
+        "one VMM per running or paused sandbox"
+    );
+
+    agent.kill();
+    assert_eq!(firecrackers(), live, "VMMs outlive a killed agent");
+    let restarted = Instant::now();
+    let agent = host.start().await;
+    let recovery = restarted.elapsed();
+    let after = agent.status().await;
+    assert_eq!(after.sandboxes.len(), count);
+    for (old, new) in before.sandboxes.iter().zip(&after.sandboxes) {
+        assert_eq!(
+            (old.id, old.level, old.generation),
+            (new.id, new.level, new.generation),
+            "the restart changed a sandbox"
+        );
+    }
+
+    let waits = wake_and_check_state(&agent.client, &ids).await;
+    let status = agent.status().await;
+    let restore = status
+        .steps
+        .iter()
+        .find(|(name, _)| name == "restore")
+        .map(|(_, stats)| *stats);
+    save_results(
+        &format!("kill-restart-{count}"),
+        &serde_json::json!({
+            "sandboxes": count,
+            "agent_restart_to_serving_ms": recovery.as_secs_f64() * 1e3,
+            "wake_ms_after_restart": waits
+                .iter()
+                .map(|(kind, values)| (format!("{kind:?}").to_lowercase(), summary(values)))
+                .collect::<BTreeMap<_, _>>(),
+            "restore_steps": restore,
+        }),
+    );
+    agent.remove_all().await;
+    assert_eq!(firecrackers(), 0);
+    agent.kill();
+    let _ = std::fs::remove_dir_all(&host.root);
+}
+
+/// Wakes every sandbox at once and checks its guest kept the background
+/// process and in-memory file it had; returns wake times by kind.
+async fn wake_and_check_state(client: &Client, ids: &[Id]) -> BTreeMap<Kind, Vec<f64>> {
+    let client = Arc::new(client.clone());
+    let mut wakes = JoinSet::new();
+    for (n, sandbox) in ids.iter().copied().enumerate() {
+        let client = Arc::clone(&client);
+        wakes.spawn(async move {
+            let script = "cat /dev/shm/token; kill -0 $(cat /dev/shm/pid) && echo alive";
+            let (output, waited) = exec(&client, sandbox, script).await;
+            (n, output, waited)
+        });
+    }
+    let mut waits: BTreeMap<Kind, Vec<f64>> = BTreeMap::new();
+    while let Some(done) = wakes.join_next().await {
+        let (n, output, waited) = done.unwrap();
+        assert_eq!(
+            output.split_whitespace().collect::<Vec<_>>(),
+            [format!("token-{n}").as_str(), "alive"],
+            "sandbox {n} ({:?}) lost its state",
+            Kind::of(n)
+        );
+        waits
+            .entry(Kind::of(n))
+            .or_default()
+            .push(waited.as_secs_f64() * 1e3);
+    }
+    waits
+}
+
+/// The host's addresses guests must not reach, with a listener on each so a
+/// connection would succeed if the firewall let it through.
+fn host_addresses() -> Vec<Ipv4Addr> {
+    let output = Command::new("hostname").arg("-I").output().unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .filter_map(|address| address.parse().ok())
+        .collect()
+}
+
+/// Every restored guest reaches the internet with its very first
+/// connection, and none reaches the cloud metadata service, the host, or
+/// another sandbox.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn restored_guests_reach_the_internet_at_once_and_nothing_else() {
+    let Some(lab) = lab() else {
+        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
+        return;
+    };
+    let count = count();
+    // Something to reach on every host address and on the sandboxes' link
+    // addresses, which are the host's too.
+    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || for _ in listener.incoming() {});
+    let host = Host::new(&lab, "net", &["--network"]);
+    let agent = host.start().await;
+    let ids: Vec<Id> = (0..count).map(id).collect();
+    let ladder = [(LevelName::Paused, 300), (LevelName::Saved, 600)];
+    for sandbox in &ids {
+        agent.create(*sandbox, &ladder).await;
+    }
+    let mut boots = JoinSet::new();
+    for sandbox in ids.iter().copied() {
+        let client = agent.client.clone();
+        boots.spawn(async move { exec(&client, sandbox, "true").await });
+    }
+    while let Some(done) = boots.join_next().await {
+        done.unwrap();
+    }
+    agent
+        .wait_until("every sandbox to be saved", |status| {
+            status
+                .sandboxes
+                .iter()
+                .all(|sandbox| sandbox.level == LevelName::Saved && sandbox.step.is_none())
+        })
+        .await;
+
+    let mut blocked: Vec<String> = vec!["169.254.169.254:80".into()];
+    blocked.extend(
+        host_addresses()
+            .iter()
+            .map(|address| format!("{address}:{port}")),
+    );
+    // The host's and another sandbox's ends of their links.
+    blocked.push(format!("198.18.0.0:{port}"));
+    blocked.push(format!("198.18.0.3:{port}"));
+    // The first command after the restore is the outbound connection, then
+    // a second one to tell network latency from the restored guest's first
+    // page faults; then each forbidden destination must fail, and fast.
+    let script = format!(
+        "s=$(date +%s%N); if exec 3<>/dev/tcp/1.1.1.1/80; then echo out $(( ($(date +%s%N) - s) / 1000 )); else echo out-failed; fi
+s=$(date +%s%N); if exec 4<>/dev/tcp/1.1.1.1/80; then echo again $(( ($(date +%s%N) - s) / 1000 )); else echo again-failed; fi
+for t in {}; do s=$(date +%s%N); if timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*}}/${{t#*:}}\" 2>/dev/null; then r=open; else r=closed; fi; echo $t $r $(( ($(date +%s%N) - s) / 1000 )); done",
+        blocked.join(" ")
+    );
+    let started = Instant::now();
+    let client = Arc::new(agent.client.clone());
+    let mut wakes = JoinSet::new();
+    for sandbox in ids.iter().copied() {
+        let (client, script) = (Arc::clone(&client), script.clone());
+        wakes.spawn(async move { (sandbox, exec(&client, sandbox, &script).await) });
+    }
+    let mut first_connect_ms = Vec::new();
+    let mut second_connect_ms = Vec::new();
+    let mut wake_ms = Vec::new();
+    let mut refusal_ms = Vec::new();
+    while let Some(done) = wakes.join_next().await {
+        let (sandbox, (output, waited)) = done.unwrap();
+        let mut lines = output.lines();
+        let first = lines.next().unwrap_or_default();
+        let Some(micros) = first.strip_prefix("out ") else {
+            panic!("{sandbox}: the first connection failed: {output}");
+        };
+        #[allow(clippy::cast_precision_loss)]
+        first_connect_ms.push(micros.trim().parse::<u64>().unwrap() as f64 / 1e3);
+        let second = lines.next().unwrap_or_default();
+        let Some(micros) = second.strip_prefix("again ") else {
+            panic!("{sandbox}: the second connection failed: {output}");
+        };
+        #[allow(clippy::cast_precision_loss)]
+        second_connect_ms.push(micros.trim().parse::<u64>().unwrap() as f64 / 1e3);
+        wake_ms.push(waited.as_secs_f64() * 1e3);
+        for line in lines {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(fields.get(1), Some(&"closed"), "{sandbox}: {line}");
+            #[allow(clippy::cast_precision_loss)]
+            refusal_ms.push(fields[2].parse::<u64>().unwrap() as f64 / 1e3);
+        }
+    }
+    let total = started.elapsed();
+    save_results(
+        &format!("network-restore-{count}"),
+        &serde_json::json!({
+            "sandboxes": count,
+            "blocked_destinations": blocked,
+            "all_wakes_s": total.as_secs_f64(),
+            "wake_ms": summary(&wake_ms),
+            "first_outbound_connect_ms": summary(&first_connect_ms),
+            "second_outbound_connect_ms": summary(&second_connect_ms),
+            "blocked_refusal_ms": summary(&refusal_ms),
+        }),
+    );
+    agent.remove_all().await;
+    agent.kill();
+    let _ = std::fs::remove_dir_all(&host.root);
 }

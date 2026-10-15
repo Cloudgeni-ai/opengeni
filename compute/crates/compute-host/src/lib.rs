@@ -18,6 +18,7 @@ mod image;
 mod layout;
 #[cfg(target_os = "linux")]
 mod lazy;
+pub mod net;
 pub mod protocol;
 pub mod restore_notice;
 mod server;

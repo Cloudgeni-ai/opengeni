@@ -1,5 +1,6 @@
 //! `compute-host`: run the host agent, or talk to one.
 
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -10,6 +11,7 @@ use compute_core::{HostPolicy, MemoryPolicy, SandboxId, Step};
 use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
+use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::protocol::{
     HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepRule, step_name,
 };
@@ -32,7 +34,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the agent.
-    Serve(ServeArgs),
+    Serve(Box<ServeArgs>),
     /// Create a sandbox.
     Create {
         id: Id,
@@ -117,6 +119,26 @@ struct ServeArgs {
     /// through `/proc/sys/vm/nr_hugepages`.
     #[arg(long, default_value_t = MemoryProfile::bare_metal())]
     memory_profile: MemoryProfile,
+    /// Give every sandbox a network: its own namespace, a fixed guest
+    /// address, internet access through NAT, and nothing else.
+    #[arg(long)]
+    network: bool,
+    /// Addresses for the host's links to sandbox namespaces, two per
+    /// sandbox. Must not be used for anything else.
+    #[arg(long, default_value = "198.18.0.0/15")]
+    network_pool: Ipv4Net,
+    /// Let sandboxes reach this host's local network (private and shared
+    /// ranges). The host itself, metadata services and other sandboxes
+    /// stay blocked.
+    #[arg(long)]
+    trusted: bool,
+    /// Another range sandboxes may not reach, such as the host's public
+    /// address where the cloud maps it onto a private one. Repeatable.
+    #[arg(long = "block")]
+    blocked: Vec<Ipv4Net>,
+    /// A name server for guests; repeatable, at most two are used.
+    #[arg(long = "dns", default_values_t = [Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)])]
+    dns: Vec<Ipv4Addr>,
 }
 
 #[derive(Args)]
@@ -217,7 +239,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let client = Client::new(&cli.socket);
     match cli.command {
-        Command::Serve(args) => run_serve(args, cli.socket).await,
+        Command::Serve(args) => run_serve(*args, cli.socket).await,
         Command::Create {
             id,
             vcpus,
@@ -296,6 +318,12 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         guest_ports: args.guest_ports,
         restore_notice_port: args.restore_notice_port,
         first_uid: args.first_uid,
+        network: args.network.then_some(NetworkConfig {
+            pool: args.network_pool,
+            trusted: args.trusted,
+            blocked: args.blocked,
+            dns: args.dns,
+        }),
     };
     let Some(store) = args.store else {
         return run_agent(config, engine, NoStore, socket).await;
