@@ -1568,13 +1568,16 @@ const SettingsSchema = z.object({
       return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
     }, "must be an https origin (http only on loopback)")
     .optional(),
+  // Site SQL storage per Site; defaults to the 5 GiB hard ceiling.
   sitesSqlFreeStorageBytes: z.coerce
     .number()
     .int()
     .positive()
-    .default(50 * 1024 * 1024),
-  sitesSqlFreeRowsReadPerMonth: z.coerce.number().int().positive().default(5_000_000),
-  sitesSqlFreeRowsWrittenPerMonth: z.coerce.number().int().positive().default(100_000),
+    .default(5 * 1024 * 1024 * 1024),
+  // Optional per-Site monthly row quotas; unset means none (the platform
+  // meters rows per workspace instead; rate and per-call caps still apply).
+  sitesSqlFreeRowsReadPerMonth: z.coerce.number().int().positive().optional(),
+  sitesSqlFreeRowsWrittenPerMonth: z.coerce.number().int().positive().optional(),
   sitesSqlFreeCallsPerMinutePerViewer: z.coerce.number().int().positive().default(60),
   sitesSqlFreeCallsPerMinutePerSite: z.coerce.number().int().positive().default(600),
   sitesSqlMaxRowsPerCall: z.coerce.number().int().min(1).max(5_000).default(1_000),
@@ -1638,17 +1641,70 @@ const SettingsSchema = z.object({
   sitesAbuseEmail: z.string().email().optional(),
   // Guests start embedded agents only after the gateway verified a bot challenge.
   sitesGuestAgentHumanCheck: EnvBoolean.default(false),
-  // The free limit profile (DEFAULT_FREE_SITE_LIMITS); money in micro-USD.
+  // Rate brakes of every Site limit profile (all access modes).
   sitesFreeRequestsPerMinutePerVisitor: z.coerce.number().int().positive().default(120),
   sitesFreeGuestWritesPerMinute: z.coerce.number().int().nonnegative().default(30),
-  sitesFreeConversationsPerVisitorPerDay: z.coerce.number().int().nonnegative().default(10),
-  sitesFreeConversationsPerSitePerDay: z.coerce.number().int().nonnegative().default(50),
-  sitesFreeTurnsPerConversation: z.coerce.number().int().nonnegative().default(20),
-  sitesFreeAgentMicrosPerConversation: z.coerce.number().int().nonnegative().default(20_000),
-  sitesFreeAgentMicrosPerVisitorPerDay: z.coerce.number().int().nonnegative().default(200_000),
-  sitesFreeAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().default(2_000_000),
-  // The credits profile multiplies the free conversation and spend caps.
+  // Deprecated (the former free profile): fallbacks for the public and guest
+  // settings below when those are unset.
+  sitesFreeConversationsPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeConversationsPerSitePerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeTurnsPerConversation: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeAgentMicrosPerConversation: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeAgentMicrosPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().optional(),
+  // Standard model-spend caps (micro-USD) by access mode. Members-only Sites
+  // have none: members use the workspace's normal session limits.
+  sitesInvitedAgentMicrosPerPersonPerDay: z.coerce.number().int().nonnegative().default(1_000_000),
+  sitesInvitedAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().default(10_000_000),
+  // Unset: the deprecated free setting, else $0.20 a visitor a day and $10 a Site a month.
+  sitesPublicAgentMicrosPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesPublicAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().optional(),
+  // Internal guards for public visitors (not shown to Site owners). Unset:
+  // the deprecated free setting, else 20, 500, 50 and $1.
+  sitesGuestConversationsPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesGuestConversationsPerSitePerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesGuestTurnsPerConversation: z.coerce.number().int().nonnegative().optional(),
+  sitesGuestAgentMicrosPerConversation: z.coerce.number().int().nonnegative().optional(),
+  // The credits profile multiplies the standard spend caps and guest guards.
   sitesCreditsLimitMultiplier: z.coerce.number().int().min(1).max(1_000).default(10),
+  // Site platform usage (gateway requests, Site SQL rows and storage, Site
+  // Data storage), metered apart from model spend. usage_only records it;
+  // shadow computes the charge without charging; credits charges usage above
+  // the per-workspace monthly allowance.
+  sitesPlatformBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
+  // Credits mode: false refuses usage past the allowance instead of charging it.
+  sitesPlatformOverageEnabled: EnvBoolean.default(true),
+  sitesPlatformAllowanceRequests: z.coerce.number().int().nonnegative().default(1_000_000),
+  sitesPlatformAllowanceSqlRowsRead: z.coerce.number().int().nonnegative().default(10_000_000),
+  sitesPlatformAllowanceSqlRowsWritten: z.coerce.number().int().nonnegative().default(100_000),
+  sitesPlatformAllowanceStorageBytes: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(1_000_000_000),
+  // Unit prices in micro-USD: twice the Cloudflare list price (Workers
+  // requests, Durable Object SQLite rows and storage), covering host lookups,
+  // Durable Object requests and duration, and API work.
+  sitesPlatformPriceMicrosPerMillionRequests: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(600_000),
+  sitesPlatformPriceMicrosPerMillionSqlRowsRead: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(2_000),
+  sitesPlatformPriceMicrosPerMillionSqlRowsWritten: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(2_000_000),
+  sitesPlatformPriceMicrosPerGbMonth: z.coerce.number().int().nonnegative().default(400_000),
+  // The Opengeni-wide monthly brake: estimated USD cost of all workspaces'
+  // platform usage at the prices above. 0 turns the brake off.
+  sitesPlatformMonthlyLimitUsd: z.coerce.number().nonnegative().max(100_000_000).default(1_000),
+  sitesPlatformAlertPercent: z.coerce.number().int().min(1).max(100).default(80),
   sitesReportsPerMinutePerVisitor: z.coerce.number().int().positive().default(5),
   sitesViewerSessionIdleSeconds: z.coerce
     .number()
@@ -5062,6 +5118,52 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_SITES_FREE_AGENT_MICROS_PER_SITE_PER_MONTH",
     ),
     sitesCreditsLimitMultiplier: optional("OPENGENI_SITES_CREDITS_LIMIT_MULTIPLIER"),
+    sitesInvitedAgentMicrosPerPersonPerDay: optional(
+      "OPENGENI_SITES_INVITED_AGENT_MICROS_PER_PERSON_PER_DAY",
+    ),
+    sitesInvitedAgentMicrosPerSitePerMonth: optional(
+      "OPENGENI_SITES_INVITED_AGENT_MICROS_PER_SITE_PER_MONTH",
+    ),
+    sitesPublicAgentMicrosPerVisitorPerDay: optional(
+      "OPENGENI_SITES_PUBLIC_AGENT_MICROS_PER_VISITOR_PER_DAY",
+    ),
+    sitesPublicAgentMicrosPerSitePerMonth: optional(
+      "OPENGENI_SITES_PUBLIC_AGENT_MICROS_PER_SITE_PER_MONTH",
+    ),
+    sitesGuestConversationsPerVisitorPerDay: optional(
+      "OPENGENI_SITES_GUEST_CONVERSATIONS_PER_VISITOR_PER_DAY",
+    ),
+    sitesGuestConversationsPerSitePerDay: optional(
+      "OPENGENI_SITES_GUEST_CONVERSATIONS_PER_SITE_PER_DAY",
+    ),
+    sitesGuestTurnsPerConversation: optional("OPENGENI_SITES_GUEST_TURNS_PER_CONVERSATION"),
+    sitesGuestAgentMicrosPerConversation: optional(
+      "OPENGENI_SITES_GUEST_AGENT_MICROS_PER_CONVERSATION",
+    ),
+    sitesPlatformBillingMode: optional("OPENGENI_SITES_PLATFORM_BILLING_MODE"),
+    sitesPlatformOverageEnabled: optional("OPENGENI_SITES_PLATFORM_OVERAGE_ENABLED"),
+    sitesPlatformAllowanceRequests: optional("OPENGENI_SITES_PLATFORM_ALLOWANCE_REQUESTS"),
+    sitesPlatformAllowanceSqlRowsRead: optional("OPENGENI_SITES_PLATFORM_ALLOWANCE_SQL_ROWS_READ"),
+    sitesPlatformAllowanceSqlRowsWritten: optional(
+      "OPENGENI_SITES_PLATFORM_ALLOWANCE_SQL_ROWS_WRITTEN",
+    ),
+    sitesPlatformAllowanceStorageBytes: optional(
+      "OPENGENI_SITES_PLATFORM_ALLOWANCE_STORAGE_BYTES",
+    ),
+    sitesPlatformPriceMicrosPerMillionRequests: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_MILLION_REQUESTS",
+    ),
+    sitesPlatformPriceMicrosPerMillionSqlRowsRead: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_MILLION_SQL_ROWS_READ",
+    ),
+    sitesPlatformPriceMicrosPerMillionSqlRowsWritten: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_MILLION_SQL_ROWS_WRITTEN",
+    ),
+    sitesPlatformPriceMicrosPerGbMonth: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_GB_MONTH",
+    ),
+    sitesPlatformMonthlyLimitUsd: optional("OPENGENI_SITES_PLATFORM_MONTHLY_LIMIT_USD"),
+    sitesPlatformAlertPercent: optional("OPENGENI_SITES_PLATFORM_ALERT_PERCENT"),
     sitesReportsPerMinutePerVisitor: optional("OPENGENI_SITES_REPORTS_PER_MINUTE_PER_VISITOR"),
     sitesViewerSessionIdleSeconds: optional("OPENGENI_SITES_VIEWER_SESSION_IDLE_SECONDS"),
     sitesViewerSessionAbsoluteSeconds: optional("OPENGENI_SITES_VIEWER_SESSION_ABSOLUTE_SECONDS"),

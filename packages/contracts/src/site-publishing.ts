@@ -254,9 +254,9 @@ export type SitePublicationStatus = z.infer<typeof SitePublicationStatus>;
 
 export const SiteLimitProfileKind = /* @__PURE__ */ defineSchema(() =>
   z
-    .enum(["free", "credits", "unlimited", "custom"])
+    .enum(["standard", "free", "credits", "unlimited", "custom"])
     .describe(
-      "free: strict platform defaults. credits: larger defaults paid from organization credits. unlimited: no Opengeni budget caps (flood brakes and per-conversation caps still apply). custom: explicit values.",
+      "standard: platform defaults for the Site's access mode (members-only Sites have no Site caps). free: accepted alias of standard, stored and returned as standard. credits: the standard spend caps and guest guards multiplied. unlimited: no spend caps for viewers outside the workspace (flood brakes still apply). custom: explicit values over the standard defaults.",
     ),
 );
 export type SiteLimitProfileKind = z.infer<typeof SiteLimitProfileKind>;
@@ -285,6 +285,9 @@ export const SiteLimits = /* @__PURE__ */ defineSchema(() =>
     agentMicrosPerConversation: NullableLimit("Agent spend per conversation, micro-USD."),
     agentMicrosPerVisitorPerDay: NullableLimit("Agent spend per visitor per UTC day, micro-USD."),
     agentMicrosPerSitePerMonth: NullableLimit("Agent spend per Site per UTC month, micro-USD."),
+    memberAgentMicrosPerSitePerMonth: NullableLimit(
+      "Optional soft budget for workspace members' conversations on this Site per UTC month, micro-USD; checked before new work, so the last conversation may overshoot it.",
+    ).optional(),
     agentModels: z
       .array(z.string().min(1).max(200))
       .max(20)
@@ -294,20 +297,60 @@ export const SiteLimits = /* @__PURE__ */ defineSchema(() =>
 );
 export type SiteLimits = z.infer<typeof SiteLimits>;
 
-/** Platform default for the free profile; deployments override through settings. */
-export const DEFAULT_FREE_SITE_LIMITS: Readonly<SiteLimits> = Object.freeze({
+/**
+ * Members-only Sites: no Site caps or conversation guards. Members' agent
+ * work runs under the workspace's normal session limits only.
+ */
+export const DEFAULT_MEMBER_SITE_LIMITS: Readonly<SiteLimits> = Object.freeze({
   requestsPerMinutePerVisitor: 120,
   guestWritesPerMinute: 30,
   agentsEnabled: true,
   guestAgentsEnabled: true,
-  conversationsPerVisitorPerDay: 10,
-  conversationsPerSitePerDay: 50,
-  turnsPerConversation: 20,
-  agentMicrosPerConversation: 20_000,
-  agentMicrosPerVisitorPerDay: 200_000,
-  agentMicrosPerSitePerMonth: 2_000_000,
+  conversationsPerVisitorPerDay: null,
+  conversationsPerSitePerDay: null,
+  turnsPerConversation: null,
+  agentMicrosPerConversation: null,
+  agentMicrosPerVisitorPerDay: null,
+  agentMicrosPerSitePerMonth: null,
+  memberAgentMicrosPerSitePerMonth: null,
   agentModels: null,
 });
+
+/** Invited Sites: $1 per person per day and $10 per Site per month by default. */
+export const DEFAULT_INVITED_SITE_LIMITS: Readonly<SiteLimits> = Object.freeze({
+  ...DEFAULT_MEMBER_SITE_LIMITS,
+  agentMicrosPerVisitorPerDay: 1_000_000,
+  agentMicrosPerSitePerMonth: 10_000_000,
+});
+
+/**
+ * Public Sites: $0.20 per visitor per day and $10 per Site per month, plus
+ * internal guards against guest floods (conversation and message counts are
+ * not shown to Site owners).
+ */
+export const DEFAULT_PUBLIC_SITE_LIMITS: Readonly<SiteLimits> = Object.freeze({
+  ...DEFAULT_MEMBER_SITE_LIMITS,
+  conversationsPerVisitorPerDay: 20,
+  conversationsPerSitePerDay: 500,
+  turnsPerConversation: 50,
+  agentMicrosPerConversation: 1_000_000,
+  agentMicrosPerVisitorPerDay: 200_000,
+  agentMicrosPerSitePerMonth: 10_000_000,
+});
+
+/** The standard defaults by access mode; deployments override them through settings. */
+export const DEFAULT_STANDARD_SITE_LIMITS: Readonly<Record<SiteAccessMode, Readonly<SiteLimits>>> =
+  Object.freeze({
+    members: DEFAULT_MEMBER_SITE_LIMITS,
+    invited: DEFAULT_INVITED_SITE_LIMITS,
+    public: DEFAULT_PUBLIC_SITE_LIMITS,
+  });
+
+/**
+ * @deprecated The former single `free` profile. Limits now depend on the
+ * Site's access mode (DEFAULT_STANDARD_SITE_LIMITS); this is the public one.
+ */
+export const DEFAULT_FREE_SITE_LIMITS: Readonly<SiteLimits> = DEFAULT_PUBLIC_SITE_LIMITS;
 
 /** Hard caps that still apply under every profile, unlimited included. */
 export const UNLIMITED_SITE_FLOOD_BRAKES = Object.freeze({
@@ -316,10 +359,16 @@ export const UNLIMITED_SITE_FLOOD_BRAKES = Object.freeze({
   agentMicrosPerConversation: 5_000_000,
 });
 
+/** Limits by access mode: what applies to members, invited people and public visitors. */
+export const SiteLimitsByAccess = /* @__PURE__ */ defineSchema(() =>
+  z.object({ members: SiteLimits, invited: SiteLimits, public: SiteLimits }),
+);
+export type SiteLimitsByAccess = z.infer<typeof SiteLimitsByAccess>;
+
 export const SiteLimitProfile = /* @__PURE__ */ defineSchema(() =>
   z.object({
     kind: SiteLimitProfileKind,
-    /** Only for custom; ignored otherwise. Missing fields take the free defaults. */
+    /** Only for custom; ignored otherwise. Missing fields take the standard defaults. */
     overrides: SiteLimits.partial().nullable().default(null),
   }),
 );
@@ -374,8 +423,14 @@ export const SitePublication = /* @__PURE__ */ defineSchema(() =>
     noindex: z.boolean(),
     agent: SiteEmbeddedAgent,
     limitProfile: SiteLimitProfile,
-    /** Limits after workspace and platform defaults are applied. */
+    /**
+     * Limits for the Site's access mode after workspace and platform
+     * defaults are applied (limitsByAccess[access]). Workspace members
+     * always get limitsByAccess.members.
+     */
     effectiveLimits: SiteLimits,
+    /** The limits the same profile gives each access mode. */
+    limitsByAccess: SiteLimitsByAccess,
     invitedEmails: z.array(z.string().email()).max(500),
     moderation: z.object({
       openReports: z.number().int().nonnegative(),
@@ -384,8 +439,11 @@ export const SitePublication = /* @__PURE__ */ defineSchema(() =>
       suspendedReason: z.string().max(2000).nullable(),
     }),
     usage: z.object({
+      /** Viewers outside the workspace (invited people and public visitors). */
       agentMicrosThisMonth: z.number().int().nonnegative(),
       conversationsToday: z.number().int().nonnegative(),
+      /** Workspace members' conversations on this Site. */
+      memberAgentMicrosThisMonth: z.number().int().nonnegative(),
     }),
     createdAt: z.string(),
     updatedAt: z.string(),
@@ -646,6 +704,77 @@ export type SiteHostMapRecord = z.infer<typeof SiteHostMapRecord>;
 export function siteHostMapKey(hostname: string): string {
   return `host:${hostname.toLowerCase()}`;
 }
+
+// ---------------------------------------------------------------------------
+// Platform usage (Site infrastructure, metered apart from model spend)
+// ---------------------------------------------------------------------------
+
+/**
+ * usage_only: meter, never charge (the default). shadow: compute what
+ * credits mode would charge, without charging. credits: charge organization
+ * credits for usage above the workspace's monthly allowance.
+ */
+export const SitePlatformBillingMode = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["usage_only", "shadow", "credits"]),
+);
+export type SitePlatformBillingMode = z.infer<typeof SitePlatformBillingMode>;
+
+/** Gateway requests, Site SQL rows read and written, and Site SQL plus Site Data storage. */
+export const SitePlatformMeter = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["requests", "sql_rows_read", "sql_rows_written", "storage_bytes"]),
+);
+export type SitePlatformMeter = z.infer<typeof SitePlatformMeter>;
+
+export const SitePlatformMeterUsage = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    meter: SitePlatformMeter,
+    /** This UTC month (storage: the current level). */
+    used: z.number().int().nonnegative(),
+    /** The highest storage level this month (equals `used` for other meters). */
+    peak: z.number().int().nonnegative(),
+    /** Included every month before credits are charged (only shadow and credits modes charge). */
+    allowance: z.number().int().nonnegative(),
+    /** Price in micro-USD per `priceUnit` units (storage: per GB-month, GB = 10^9 bytes). */
+    priceMicros: z.number().int().nonnegative(),
+    priceUnit: z.number().int().positive(),
+    /** Estimated cost of all usage this month, micro-USD, before the allowance. */
+    estimatedMicros: z.number().int().nonnegative(),
+  }),
+);
+export type SitePlatformMeterUsage = z.infer<typeof SitePlatformMeterUsage>;
+
+/** The Opengeni-wide brake on Site platform usage (see docs/published-sites.md). */
+export const SitePlatformBrakeState = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    engaged: z.boolean(),
+    engagedAt: z.string().nullable(),
+  }),
+);
+export type SitePlatformBrakeState = z.infer<typeof SitePlatformBrakeState>;
+
+/** GET /v1/workspaces/:ws/site-platform-usage */
+export const SitePlatformUsage = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    workspaceId: z.string().uuid(),
+    /** First day of the UTC month, YYYY-MM-DD. */
+    periodStart: z.string(),
+    billingMode: SitePlatformBillingMode,
+    meters: z.array(SitePlatformMeterUsage),
+    /** Estimated cost of this month's usage, micro-USD, before the allowance. */
+    estimatedMicros: z.number().int().nonnegative(),
+    /** Credits charged this month (credits mode). */
+    chargedMicros: z.number().int().nonnegative(),
+    /** What credits mode would have charged this month (shadow mode). */
+    shadowMicros: z.number().int().nonnegative(),
+    brake: SitePlatformBrakeState,
+  }),
+);
+export type SitePlatformUsage = z.infer<typeof SitePlatformUsage>;
+
+/** details.code of the 503 every brake refusal carries. */
+export const SITE_PLATFORM_BRAKE_ERROR_CODE = "site_platform_brake_engaged" as const;
+/** details.code of the 402 a workspace past its allowance without credits gets (credits mode). */
+export const SITE_PLATFORM_QUOTA_ERROR_CODE = "site_platform_quota_exhausted" as const;
 
 export * from "./site-operations";
 

@@ -1,5 +1,7 @@
 import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
+import type { Permission } from "@opengeni/contracts";
+import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 
 /**
  * Published Sites storage (migration 0782). Every read and write runs in the
@@ -39,7 +41,8 @@ export class SitePublishingError extends Error {
 export type SitePublicationAccess = "members" | "invited" | "public";
 export type SitePublicationStatusValue = "active" | "unpublished" | "suspended";
 export type SiteSuspendedBy = "owner" | "admin" | "platform";
-export type SiteLimitProfileKindValue = "free" | "credits" | "unlimited" | "custom";
+/** `free` is the legacy name of `standard`; readers treat both alike, writers store `standard`. */
+export type SiteLimitProfileKindValue = "standard" | "free" | "credits" | "unlimited" | "custom";
 export type SiteViewerKindValue = "member" | "invited" | "user";
 
 export type StoredSiteLimitProfile = {
@@ -1247,6 +1250,26 @@ export async function isSiteWorkspaceMember(
   });
 }
 
+/**
+ * The subject's workspace permissions (normalized), or null when they hold
+ * no membership. A Site conversation of a member gets only the Site's tools
+ * that member may use themselves.
+ */
+export async function getSiteWorkspaceMemberPermissions(
+  db: Database,
+  scope: SitePublishingScope,
+  subjectId: string,
+): Promise<Permission[] | null> {
+  return await withRlsContext(db, scope, async (tx) => {
+    const [row] = await rawRows<{ permissions: unknown }>(
+      tx,
+      sql`select permissions from workspace_memberships
+        where workspace_id = ${scope.workspaceId} and subject_id = ${subjectId} limit 1`,
+    );
+    return row ? normalizeWorkspaceMembershipPermissions(jsonValue<unknown>(row.permissions)) : null;
+  });
+}
+
 // --- limit profiles --------------------------------------------------------------
 
 export async function getWorkspaceSiteLimitProfile(
@@ -1298,6 +1321,11 @@ export type SiteRuntimeConversationRecord = {
   viewerKind: SiteRuntimeConversationViewerKind;
   /** The workspace tools (MCP connection ids) the conversation was started with. */
   toolIds: string[];
+  /**
+   * The Site-wide usage windows it counts in: `*` for viewers outside the
+   * workspace (the Site's budgets), `*members` for workspace members.
+   */
+  budgetKey: string;
   versionId: string | null;
   turns: number;
   meteredMicros: number;
@@ -1317,6 +1345,7 @@ type ConversationRow = {
   viewer_principal: string;
   viewer_kind: string;
   tool_ids: unknown;
+  budget_key: string | null;
   version_id: string | null;
   turns: number;
   metered_micros: string | number;
@@ -1330,7 +1359,7 @@ type ConversationRow = {
 };
 
 const CONVERSATION_COLUMNS = sql`session_id, site_id, viewer_principal, viewer_kind, tool_ids,
-  version_id, turns,
+  budget_key, version_id, turns,
   metered_micros, limit_micros, reserved_micros, reserved_day::text as reserved_day,
   reserved_month::text as reserved_month, admissions, created_at, updated_at`;
 
@@ -1341,6 +1370,7 @@ function toConversation(row: ConversationRow): SiteRuntimeConversationRecord {
     viewerPrincipal: row.viewer_principal,
     viewerKind: row.viewer_kind as SiteRuntimeConversationViewerKind,
     toolIds: jsonValue<string[] | null>(row.tool_ids) ?? [],
+    budgetKey: row.budget_key ?? SITE_RUNTIME_SITE_PRINCIPAL,
     versionId: row.version_id,
     turns: Number(row.turns),
     meteredMicros: Number(row.metered_micros),
@@ -1511,6 +1541,8 @@ export type SiteRuntimeUsageSnapshot = {
 
 /** The Site-wide principal key in usage windows. */
 export const SITE_RUNTIME_SITE_PRINCIPAL = "*";
+/** The Site-wide key of workspace members' conversations (apart from the Site's budgets). */
+export const SITE_RUNTIME_MEMBERS_PRINCIPAL = "*members";
 
 function periodStarts(now: Date): { day: string; month: string } {
   const iso = now.toISOString();
@@ -1521,9 +1553,16 @@ function periodStarts(now: Date): { day: string; month: string } {
 export async function readSiteRuntimeUsage(
   db: Database,
   scope: SitePublishingScope,
-  input: { siteId: string; viewerPrincipal: string; now?: Date },
+  input: {
+    siteId: string;
+    viewerPrincipal: string;
+    /** The Site-wide key to read (default `*`, the Site's budgets). */
+    sitePrincipal?: string;
+    now?: Date;
+  },
 ): Promise<SiteRuntimeUsageSnapshot> {
   const periods = periodStarts(input.now ?? new Date());
+  const sitePrincipal = input.sitePrincipal ?? SITE_RUNTIME_SITE_PRINCIPAL;
   return await withRlsContext(db, scope, async (tx) => {
     const rows = await rawRows<UsageRow & { principal_key: string; period: "day" | "month" }>(
       tx,
@@ -1531,7 +1570,7 @@ export async function readSiteRuntimeUsage(
           agent_micros, reserved_micros
         from site_runtime_usage
         where workspace_id = ${scope.workspaceId} and site_id = ${input.siteId}
-          and principal_key in (${input.viewerPrincipal}, ${SITE_RUNTIME_SITE_PRINCIPAL})`,
+          and principal_key in (${input.viewerPrincipal}, ${sitePrincipal})`,
     );
     const pick = (principal: string, period: "day" | "month") => {
       const row = rows.find(
@@ -1548,8 +1587,8 @@ export async function readSiteRuntimeUsage(
     };
     return {
       visitorDay: pick(input.viewerPrincipal, "day"),
-      siteDay: pick(SITE_RUNTIME_SITE_PRINCIPAL, "day"),
-      siteMonth: pick(SITE_RUNTIME_SITE_PRINCIPAL, "month"),
+      siteDay: pick(sitePrincipal, "day"),
+      siteMonth: pick(sitePrincipal, "month"),
     };
   });
 }
@@ -1683,6 +1722,8 @@ export async function reserveSiteRuntimeConversationStart(
     toolIds: readonly string[];
     versionId: string | null;
     limits: SiteRuntimeBudgetLimits;
+    /** The Site-wide windows to count in (default `*`; members use `*members`). */
+    budgetKey?: string;
     now?: Date;
   },
 ): Promise<SiteRuntimeReservation> {
@@ -1690,6 +1731,7 @@ export async function reserveSiteRuntimeConversationStart(
     throw new SitePublishingError("validation", "Invalid conversation");
   const periods = periodStarts(input.now ?? new Date());
   const { limits } = input;
+  const budgetKey = input.budgetKey ?? SITE_RUNTIME_SITE_PRINCIPAL;
   return await withRlsContext(db, scope, async (tx) => {
     const visitorDay = await lockUsageWindow(
       tx,
@@ -1703,7 +1745,7 @@ export async function reserveSiteRuntimeConversationStart(
       tx,
       scope,
       input.siteId,
-      SITE_RUNTIME_SITE_PRINCIPAL,
+      budgetKey,
       "day",
       periods.day,
     );
@@ -1711,7 +1753,7 @@ export async function reserveSiteRuntimeConversationStart(
       tx,
       scope,
       input.siteId,
-      SITE_RUNTIME_SITE_PRINCIPAL,
+      budgetKey,
       "month",
       periods.month,
     );
@@ -1738,11 +1780,11 @@ export async function reserveSiteRuntimeConversationStart(
     const limitMicros = cap === null ? null : reserve;
     await tx.execute(
       sql`insert into site_runtime_conversations (session_id, account_id, workspace_id, site_id,
-          viewer_principal, viewer_kind, tool_ids, version_id, turns, limit_micros,
+          viewer_principal, viewer_kind, tool_ids, budget_key, version_id, turns, limit_micros,
           reserved_micros, reserved_day, reserved_month, admissions)
         values (${input.sessionId}, ${scope.accountId}, ${scope.workspaceId}, ${input.siteId},
           ${input.viewerPrincipal}, ${input.viewerKind}, ${JSON.stringify(input.toolIds)}::jsonb,
-          ${input.versionId}, 1, ${limitMicros}, ${reserve}, ${periods.day}::date,
+          ${budgetKey}, ${input.versionId}, 1, ${limitMicros}, ${reserve}, ${periods.day}::date,
           ${periods.month}::date, 1)`,
     );
     for (const window of [visitorDay, siteDay, siteMonth])
@@ -1784,10 +1826,11 @@ export async function releaseSiteRuntimeConversationStart(
     const reserved = Number(row.reserved_micros);
     const day = String(row.reserved_day ?? "").slice(0, 10);
     const month = String(row.reserved_month ?? "").slice(0, 10);
+    const budgetKey = row.budget_key ?? SITE_RUNTIME_SITE_PRINCIPAL;
     const windows = [
       { principal: row.viewer_principal, period: "day" as const, periodStart: day },
-      { principal: SITE_RUNTIME_SITE_PRINCIPAL, period: "day" as const, periodStart: day },
-      { principal: SITE_RUNTIME_SITE_PRINCIPAL, period: "month" as const, periodStart: month },
+      { principal: budgetKey, period: "day" as const, periodStart: day },
+      { principal: budgetKey, period: "month" as const, periodStart: month },
     ];
     for (const window of windows)
       if (window.periodStart)
@@ -1851,7 +1894,7 @@ export async function reserveSiteRuntimeConversationWork(
       tx,
       scope,
       conversation.siteId,
-      SITE_RUNTIME_SITE_PRINCIPAL,
+      conversation.budgetKey,
       "day",
       periods.day,
     );
@@ -1859,7 +1902,7 @@ export async function reserveSiteRuntimeConversationWork(
       tx,
       scope,
       conversation.siteId,
-      SITE_RUNTIME_SITE_PRINCIPAL,
+      conversation.budgetKey,
       "month",
       periods.month,
     );
@@ -1948,9 +1991,9 @@ export async function settleSiteRuntimeConversationSpend(
     const reservedMonth = String(row.reserved_month ?? "").slice(0, 10);
     const windows = [
       { principal: conversation.viewerPrincipal, period: "day" as const, reservedIn: reservedDay },
-      { principal: SITE_RUNTIME_SITE_PRINCIPAL, period: "day" as const, reservedIn: reservedDay },
+      { principal: conversation.budgetKey, period: "day" as const, reservedIn: reservedDay },
       {
-        principal: SITE_RUNTIME_SITE_PRINCIPAL,
+        principal: conversation.budgetKey,
         period: "month" as const,
         reservedIn: reservedMonth,
       },
