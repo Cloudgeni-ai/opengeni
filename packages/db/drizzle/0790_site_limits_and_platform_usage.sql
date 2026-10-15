@@ -38,6 +38,10 @@ ALTER TABLE site_runtime_conversations ADD COLUMN budget_key text NOT NULL DEFAU
 ALTER TABLE site_runtime_conversations ADD COLUMN reservation_windows_complete boolean NOT NULL DEFAULT false;
 -- Server-verified viewer identity for live invitation checks at tool execution.
 ALTER TABLE site_runtime_conversations ADD COLUMN viewer_email text;
+-- Pending dispatch survives API crashes. Recovery revokes this token under the
+-- conversation lock before checking the canonical queue and releasing funding.
+ALTER TABLE site_runtime_conversations ADD COLUMN pending_admission_id uuid;
+ALTER TABLE site_runtime_conversations ADD COLUMN pending_admission_until timestamptz;
 ALTER TABLE site_runtime_conversations
   ADD CONSTRAINT site_runtime_conversations_budget_key_check
   CHECK (budget_key IN ('*', '*members')) NOT VALID;

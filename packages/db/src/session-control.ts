@@ -1,4 +1,5 @@
 import { parentOutboxAuthorityTx } from "./child-outbox-authority";
+import { lockSiteRuntimeAdmission } from "./site-runtime-admission";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -562,6 +563,9 @@ export async function lockWorkspaceInferenceControl(
   mode: WorkspaceControlLockMode,
   options: WorkspaceControlLockOptions = {},
 ): Promise<WorkspaceControlRow> {
+  // Some admission commands acquire control before the session writer helper.
+  // Keep the Site conversation -> control -> session order on those paths too.
+  await lockSiteRuntimeAdmission(db, workspaceId);
   const budget = lockBudgetFor(options);
   const [prior] = budget
     ? await db.execute<{ value: string }>(sql`select current_setting('lock_timeout') as value`)
@@ -741,6 +745,7 @@ export async function lockSessionEventWriteRows(
   db: Database,
   input: SessionEventWriteLockInput,
 ): Promise<SessionEventWriteLocks> {
+  await lockSiteRuntimeAdmission(db, input.workspaceId, input.sessionIds ?? []);
   const controlLock = input.controlLock;
   const control =
     controlLock === "share" || controlLock === "update"

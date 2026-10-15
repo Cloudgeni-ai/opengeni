@@ -2,6 +2,8 @@ import { sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
 import type { Permission } from "@opengeni/contracts";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
+import { lockSessionEventWriteRows } from "./session-control";
+import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
 
 /**
  * Published Sites storage (migration 0782). Every read and write runs in the
@@ -1426,6 +1428,8 @@ type ConversationRow = {
   reserved_day: unknown;
   reserved_month: unknown;
   reservation_windows_complete: boolean;
+  pending_admission_id: string | null;
+  pending_admission_until: unknown;
   admissions: string | number;
   created_at: unknown;
   updated_at: unknown;
@@ -1434,7 +1438,51 @@ type ConversationRow = {
 const CONVERSATION_COLUMNS = sql`session_id, site_id, viewer_principal, viewer_kind, tool_ids,
   budget_key, version_id, turns,
   metered_micros, limit_micros, reserved_micros, reserved_day::text as reserved_day,
-  reserved_month::text as reserved_month, reservation_windows_complete, admissions, created_at, updated_at`;
+  reserved_month::text as reserved_month, reservation_windows_complete,
+  pending_admission_id, pending_admission_until, admissions, created_at, updated_at`;
+
+/** A timeout is only permission to reconcile, never proof that enqueue failed. */
+const SITE_ADMISSION_RECOVERY_MS = 10 * 60 * 1000;
+
+/** Caller holds the conversation lock, before the canonical session lock. */
+async function conversationCanRelease(
+  tx: Database,
+  scope: SitePublishingScope,
+  row: ConversationRow,
+  now: Date,
+): Promise<boolean> {
+  if (row.pending_admission_id !== null) {
+    if (new Date(String(row.pending_admission_until)).getTime() > now.getTime()) return false;
+    // Revocation and queue reconciliation are atomic with release. A dispatch
+    // that has not committed must acquire this row and will reject the old token.
+    await tx.execute(sql`update site_runtime_conversations
+      set pending_admission_id = null, pending_admission_until = null
+      where workspace_id = ${scope.workspaceId} and session_id = ${row.session_id}`);
+  }
+  const locks = await lockSessionEventWriteRows(tx, {
+    workspaceId: scope.workspaceId,
+    sessionIds: [row.session_id],
+    controlLock: "none",
+  });
+  return (
+    locks.sessions.length === 0 ||
+    (await sessionQueueIsEmptyInTransaction(tx, scope.workspaceId, row.session_id))
+  );
+}
+
+/** A returned dispatch has finished; exceptions retain the pending marker for reconciliation. */
+export async function finishSiteRuntimeAdmission(
+  db: Database,
+  scope: SitePublishingScope,
+  input: { sessionId: string; admissionId: string },
+): Promise<void> {
+  await withRlsContext(db, scope, async (tx) => {
+    await tx.execute(sql`update site_runtime_conversations
+      set pending_admission_id = null, pending_admission_until = null
+      where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}
+        and pending_admission_id = ${input.admissionId}::uuid`);
+  });
+}
 
 /** Previous-release writers reserved all windows except viewer-month. */
 function conversationReservedInWindow(
@@ -1543,7 +1591,7 @@ export async function listOwnedSiteRuntimeConversations(
 
 /** Statuses of a session with no turn running or queued. */
 const IDLE_SESSION_STATUSES = ["idle", "failed", "cancelled"];
-/** A reservation with no admitted work or counted spend for this long is released. */
+/** Age triggers reconciliation; the canonical queue still decides whether funding can be released. */
 export const SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS = 6;
 /** A sweep revisits a conversation at most this often. */
 const SWEEP_REVISIT_SECONDS = 30;
@@ -1589,6 +1637,7 @@ export async function claimSiteRuntimeReservationSweep(
               )})
                 or (s.id is null and c.created_at < ${now}::timestamptz
                   - make_interval(mins => ${SITE_RUNTIME_ABANDONED_START_MINUTES}))
+                or c.pending_admission_until <= ${now}::timestamptz
                 or c.updated_at < ${now}::timestamptz
                   - make_interval(hours => ${SITE_RUNTIME_RESERVATION_MAX_IDLE_HOURS}))
             order by c.swept_at asc nulls first, c.updated_at asc
@@ -1962,6 +2011,7 @@ export async function reserveSiteRuntimeConversationStart(
     limits: SiteRuntimeBudgetLimits;
     /** The Site-wide windows to count in (default `*`; members use `*members`). */
     budgetKey?: string;
+    admissionId?: string;
     now?: Date;
   },
 ): Promise<SiteRuntimeReservation> {
@@ -2008,11 +2058,14 @@ export async function reserveSiteRuntimeConversationStart(
     await tx.execute(
       sql`insert into site_runtime_conversations (session_id, account_id, workspace_id, site_id,
           viewer_principal, viewer_kind, tool_ids, budget_key, version_id, turns, limit_micros,
-          reserved_micros, reserved_day, reserved_month, admissions, reservation_windows_complete, viewer_email)
+          reserved_micros, reserved_day, reserved_month, admissions, reservation_windows_complete, viewer_email,
+          pending_admission_id, pending_admission_until)
         values (${input.sessionId}, ${scope.accountId}, ${scope.workspaceId}, ${input.siteId},
           ${input.viewerPrincipal}, ${input.viewerKind}, ${JSON.stringify(input.toolIds)}::jsonb,
           ${budgetKey}, ${input.versionId}, 1, ${limitMicros}, ${reserve}, ${periods.day}::date,
-          ${periods.month}::date, 1, true, ${input.viewerEmail ?? null})`,
+          ${periods.month}::date, 1, true, ${input.viewerEmail ?? null},
+          ${input.admissionId ?? null}::uuid,
+          ${input.admissionId ? new Date(Date.now() + SITE_ADMISSION_RECOVERY_MS).toISOString() : null}::timestamptz)`,
     );
     for (const window of Object.values(windows))
       await adjustUsageWindow(tx, scope, input.siteId, window, {
@@ -2050,11 +2103,14 @@ export async function releaseSiteRuntimeConversationStart(
   await withRlsContext(db, scope, async (tx) => {
     const [row] = await rawRows<ConversationRow>(
       tx,
-      sql`delete from site_runtime_conversations
+      sql`select ${CONVERSATION_COLUMNS} from site_runtime_conversations
         where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}
-        returning ${CONVERSATION_COLUMNS}`,
+        for update`,
     );
     if (!row) return;
+    if (!(await conversationCanRelease(tx, scope, row, new Date()))) return;
+    await tx.execute(sql`delete from site_runtime_conversations
+      where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}`);
     const reserved = Number(row.reserved_micros);
     const day = String(row.reserved_day ?? "").slice(0, 10);
     const month = String(row.reserved_month ?? "").slice(0, 10);
@@ -2094,6 +2150,7 @@ export async function reserveSiteRuntimeConversationWork(
     limits: SiteRuntimeBudgetLimits;
     newTurn: boolean;
     uncapped?: boolean;
+    admissionId?: string;
     now?: Date;
   },
 ): Promise<SiteRuntimeReservation> {
@@ -2108,6 +2165,8 @@ export async function reserveSiteRuntimeConversationWork(
         for update`,
     );
     if (!row) throw new SitePublishingError("not_found", "Conversation not found");
+    if (row.pending_admission_id !== null)
+      return { ok: false, budget: "agent_micros_per_conversation", busy: true } as const;
     const conversation = toConversation(row);
     if (
       input.newTurn &&
@@ -2167,7 +2226,9 @@ export async function reserveSiteRuntimeConversationWork(
       sql`update site_runtime_conversations set reserved_micros = ${target},
           reserved_day = ${periods.day}::date, reserved_month = ${periods.month}::date,
           limit_micros = ${cap}, turns = turns + ${input.newTurn ? 1 : 0},
-          admissions = admissions + 1, reservation_windows_complete = true, updated_at = now()
+          admissions = admissions + 1, reservation_windows_complete = true, updated_at = now(),
+          pending_admission_id = ${input.admissionId ?? null}::uuid,
+          pending_admission_until = ${input.admissionId ? new Date(Date.now() + SITE_ADMISSION_RECOVERY_MS).toISOString() : null}::timestamptz
         where workspace_id = ${scope.workspaceId} and session_id = ${input.sessionId}`,
     );
     return {
@@ -2216,10 +2277,18 @@ export async function settleSiteRuntimeConversationSpend(
     const delta = Math.max(0, used - conversation.meteredMicros);
     const unchanged =
       input.expected === undefined || input.expected.admissions === conversation.admissions;
-    const release =
-      input.idle && unchanged
-        ? conversation.reservedMicros
-        : Math.min(conversation.reservedMicros, delta);
+    // Even an aged reservation or an idle status can have queued work. Pending
+    // admission and the locked canonical queue, not those hints, decide release.
+    const expiredAdmission =
+      row.pending_admission_id !== null &&
+      new Date(String(row.pending_admission_until)).getTime() <=
+        (input.now ?? new Date()).getTime();
+    const canRelease =
+      ((input.idle && unchanged) || expiredAdmission) &&
+      (await conversationCanRelease(tx, scope, row, input.now ?? new Date()));
+    const release = canRelease
+      ? conversation.reservedMicros
+      : Math.min(conversation.reservedMicros, delta);
     if (delta === 0 && release === 0) return 0;
     const reservedDay = String(row.reserved_day ?? "").slice(0, 10);
     const reservedMonth = String(row.reserved_month ?? "").slice(0, 10);

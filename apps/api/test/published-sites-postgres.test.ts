@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, setSystemTime, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -72,6 +72,11 @@ const DOMAIN = "sites.example.test";
 const SECRET = "c".repeat(40);
 const PREVIOUS_SECRET = "p".repeat(40);
 const noop = async () => undefined;
+/** No worker runs in this fixture: finish both canonical turns and the projection. */
+async function finishConversation(sessionId: string) {
+  await shared.admin`update session_turns set status = 'completed' where session_id = ${sessionId}`;
+  await shared.admin`update sessions set status = 'idle', active_turn_id = null where id = ${sessionId}`;
+}
 const memberPermissions = [
   "workspace:read",
   "sessions:read",
@@ -1691,16 +1696,22 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   const view = (visitor: string, clientIp: string) =>
     f.gateway(rated.host, "GET", "/site/config", { visitor, clientIp });
   const repeat = visitorId();
-  expect((await view(repeat, "203.0.113.1")).status).toBe(200);
-  expect((await view(repeat, "203.0.113.2")).status).toBe(200);
-  const limited = await view(repeat, "203.0.113.3");
-  expect(limited.status).toBe(429);
-  expect(code(limited)).toBe("site_rate_limited");
-  const fromOneAddress: number[] = [];
-  for (let index = 0; index < 9; index += 1)
-    fromOneAddress.push((await view(visitorId(), "203.0.113.9")).status);
-  expect(fromOneAddress).toEqual([200, 200, 200, 200, 200, 200, 200, 200, 429]);
-  expect((await view(visitorId(), "203.0.113.10")).status).toBe(200);
+  // All calls belong to one fixed window, even when the test starts at :59.
+  setSystemTime(new Date());
+  try {
+    expect((await view(repeat, "203.0.113.1")).status).toBe(200);
+    expect((await view(repeat, "203.0.113.2")).status).toBe(200);
+    const limited = await view(repeat, "203.0.113.3");
+    expect(limited.status).toBe(429);
+    expect(code(limited)).toBe("site_rate_limited");
+    const fromOneAddress: number[] = [];
+    for (let index = 0; index < 9; index += 1)
+      fromOneAddress.push((await view(visitorId(), "203.0.113.9")).status);
+    expect(fromOneAddress).toEqual([200, 200, 200, 200, 200, 200, 200, 200, 429]);
+    expect((await view(visitorId(), "203.0.113.10")).status).toBe(200);
+  } finally {
+    setSystemTime();
+  }
 
   // Bodies are capped before they are read or verified.
   const huge = await f.gateway(rated.host, "POST", "/site/reports", {
@@ -1826,7 +1837,7 @@ test("finished conversations free the Site budget; a lowered cap lowers running 
 
   // The first conversation finished (its session went idle) without anyone
   // settling it: a refused start sweeps it and then succeeds.
-  await shared.admin`update sessions set status = 'idle' where id = ${first.json.id}`;
+  await finishConversation(first.json.id);
   const third = await start(carol);
   expect(third.status, JSON.stringify(third.json)).toBe(202);
   expect((await reserved(first.json.id)).reserved).toBe(0);
@@ -2805,6 +2816,7 @@ test("legacy three-window settlement, release and conversion preserve newer rese
     await shared.admin`update site_runtime_usage set reserved_micros = reserved_micros - ${estimate}, conversations = conversations - 1
       where site_id = ${site.id} and principal_key = ${`guest:${visitor}`} and period = 'month'`;
     const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+    await finishConversation(legacy.json.id);
     if (action === "release")
       await releaseSiteRuntimeConversationStart(db.db, scope, { sessionId: legacy.json.id });
     else if (action === "settle")
@@ -2928,6 +2940,7 @@ test("a later turn reserves only the budget remaining below the estimate", async
   });
   expect(created.status).toBe(202);
   const scope = { accountId: f.accountId, workspaceId: f.workspace.id };
+  await finishConversation(created.json.id);
   await settleSiteRuntimeConversationSpend(db.db, scope, {
     sessionId: created.json.id,
     usedMicros: 0,
@@ -2979,6 +2992,419 @@ test("funded execution tops up cumulatively before sending, without multiplying 
     await shared.admin`select metered_micros, reserved_micros from site_runtime_conversations where session_id = ${first}`;
   expect(Number(row!.metered_micros)).toBe(250_000);
   expect(Number(row!.reserved_micros)).toBe(100_000);
+});
+
+test("pending Site admission survives settling GET and competing funding before enqueue", async () => {
+  const f = await fixture();
+  const site = await f.live("Admission race", { access: "public", agent: { enabled: true } });
+  await f.publication(f.admin, site.id, "PUT", {
+    limitProfile: { kind: "custom", overrides: { agentMicrosPerSitePerMonth: 250_000 } },
+  });
+  const visitor = visitorId();
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    visitor,
+    body: { initialMessage: "First" },
+  });
+  expect(created.status).toBe(202);
+  const sessionId = String(created.json.id);
+  await finishConversation(sessionId);
+  let reached!: () => void;
+  let resume!: () => void;
+  const atEnqueue = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  const original = f.app.fetch;
+  f.app.fetch = async (...args) => {
+    if (
+      new URL(args[0].url).pathname ===
+        `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}/events` &&
+      args[0].method === "POST"
+    ) {
+      reached();
+      await gate;
+    }
+    return await original(...args);
+  };
+  const sending = f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+    visitor,
+    body: { type: "user.message", payload: { text: "Next" } },
+  });
+  try {
+    await atEnqueue;
+    const [funded] = await shared.admin`select pending_admission_id, admissions, reserved_micros
+      from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(funded!.pending_admission_id).not.toBeNull();
+    expect(Number(funded!.admissions)).toBe(2);
+    const ceiling = await f.api(
+      f.owner,
+      "GET",
+      `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}`,
+    );
+    expect(ceiling.json.usageLimit.limitMicros).toBe(250_000);
+    // This sees the NEW admission counter and the OLD idle projection.
+    expect((await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor })).status).toBe(
+      200,
+    );
+    const competitor = await f.gateway(site.host, "POST", "/sessions", {
+      visitor: visitorId(),
+      body: { initialMessage: "Competing" },
+    });
+    expect(competitor.json.error.details.code).toBe("site_budget_busy");
+    const [held] =
+      await shared.admin`select reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(Number(held!.reserved_micros)).toBe(250_000);
+  } finally {
+    resume();
+    f.app.fetch = original;
+  }
+  expect((await sending).status).toBe(202);
+  // Even a stale idle label after enqueue is not proof that the queue is empty.
+  await shared.admin`update sessions set status = 'idle' where id = ${sessionId}`;
+  await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
+  const [retained] =
+    await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+  expect(retained!.pending_admission_id).toBeNull();
+  expect(Number(retained!.reserved_micros)).toBe(250_000);
+});
+
+test("definitive Site dispatch refusal releases idle funding", async () => {
+  const f = await fixture();
+  const site = await f.live("Refused admission", { access: "public", agent: { enabled: true } });
+  const visitor = visitorId();
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    visitor,
+    body: { initialMessage: "First" },
+  });
+  const sessionId = String(created.json.id);
+  await finishConversation(sessionId);
+  const original = f.app.fetch;
+  f.app.fetch = async (...args) =>
+    new URL(args[0].url).pathname ===
+      `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}/events` && args[0].method === "POST"
+      ? Response.json(
+          { error: { code: "validation_failed", message: "Definitive rejection" } },
+          { status: 400 },
+        )
+      : await original(...args);
+  try {
+    const refused = await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+      visitor,
+      body: { type: "user.message", payload: { text: "Refuse" } },
+    });
+    expect(refused.status).toBe(400);
+    const [row] =
+      await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(row!.pending_admission_id).toBeNull();
+    expect(Number(row!.reserved_micros)).toBe(0);
+  } finally {
+    f.app.fetch = original;
+  }
+});
+
+test("unknown Site dispatch keeps funding; recovery fences a delayed enqueue before refund", async () => {
+  const f = await fixture();
+  const site = await f.live("Unknown admission", { access: "public", agent: { enabled: true } });
+  await f.publication(f.admin, site.id, "PUT", {
+    limitProfile: { kind: "custom", overrides: { agentMicrosPerSitePerMonth: 250_000 } },
+  });
+  const visitor = visitorId();
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    visitor,
+    body: { initialMessage: "First" },
+  });
+  const sessionId = String(created.json.id);
+  await finishConversation(sessionId);
+  let resume!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  let delayed: Promise<Response> | undefined;
+  const original = f.app.fetch;
+  f.app.fetch = async (...args) => {
+    if (
+      new URL(args[0].url).pathname ===
+        `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}/events` &&
+      args[0].method === "POST"
+    ) {
+      // Keep the dispatch's real async context alive after losing its response.
+      delayed = (async () => {
+        await gate;
+        return await original(...args);
+      })();
+      throw new Error("injected outcome unknown");
+    }
+    return await original(...args);
+  };
+  try {
+    const unknown = await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+      visitor,
+      body: { type: "user.message", payload: { text: "Delayed" } },
+    });
+    expect(unknown.status).toBe(500);
+    await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
+    const [pending] =
+      await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(pending!.pending_admission_id).not.toBeNull();
+    expect(Number(pending!.reserved_micros)).toBe(250_000);
+    // Simulated crash recovery after the grace period, not a wall-clock sleep.
+    await shared.admin`update site_runtime_conversations set pending_admission_until = now() - interval '1 second' where session_id = ${sessionId}`;
+    await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
+    const [recovered] =
+      await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(recovered!.pending_admission_id).toBeNull();
+    expect(Number(recovered!.reserved_micros)).toBe(0);
+    const competitor = await f.gateway(site.host, "POST", "/sessions", {
+      visitor: visitorId(),
+      body: { initialMessage: "Now funded" },
+    });
+    expect(competitor.status).toBe(202);
+    resume();
+    expect((await delayed!).status).toBeGreaterThanOrEqual(400);
+    const [turns] =
+      await shared.admin`select count(*)::int as count from session_turns where session_id = ${sessionId}`;
+    expect(turns!.count).toBe(1); // The revoked late enqueue did not commit.
+  } finally {
+    resume();
+    f.app.fetch = original;
+    await delayed;
+  }
+});
+
+test("unknown post-commit Site dispatch reconciles queued work instead of refunding it", async () => {
+  const f = await fixture();
+  const site = await f.live("Committed admission", { access: "public", agent: { enabled: true } });
+  const visitor = visitorId();
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    visitor,
+    body: { initialMessage: "First" },
+  });
+  const sessionId = String(created.json.id);
+  await finishConversation(sessionId);
+  const original = f.app.fetch;
+  f.app.fetch = async (...args) => {
+    const response = await original(...args);
+    if (
+      new URL(args[0].url).pathname ===
+        `/v1/workspaces/${f.workspace.id}/sessions/${sessionId}/events` &&
+      args[0].method === "POST"
+    ) {
+      expect(response.status).toBe(202);
+      throw new Error("injected response loss after commit");
+    }
+    return response;
+  };
+  try {
+    expect(
+      (
+        await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+          visitor,
+          body: { type: "user.message", payload: { text: "Committed" } },
+        })
+      ).status,
+    ).toBe(500);
+  } finally {
+    f.app.fetch = original;
+  }
+  await shared.admin`update site_runtime_conversations set pending_admission_until = now() - interval '1 second' where session_id = ${sessionId}`;
+  await shared.admin`update sessions set status = 'idle' where id = ${sessionId}`;
+  await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
+  const [row] =
+    await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+  expect(row!.pending_admission_id).toBeNull();
+  expect(Number(row!.reserved_micros)).toBe(250_000);
+  await finishConversation(sessionId);
+  await f.gateway(site.host, "GET", `/sessions/${sessionId}`, { visitor });
+  const [finished] =
+    await shared.admin`select reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+  expect(Number(finished!.reserved_micros)).toBe(0);
+});
+
+test("Site admission fencing covers start, steer, queued steer, composer submit and resume", async () => {
+  for (const operation of ["start", "steer", "queued-steer", "composer", "resume"] as const) {
+    const f = await fixture();
+    const site = await f.live(`Fence ${operation}`, { access: "public", agent: { enabled: true } });
+    const visitor = visitorId();
+    let sessionId = "";
+    let path = "/sessions";
+    let body: Record<string, unknown> = { initialMessage: "First" };
+    if (operation !== "start") {
+      const created = await f.gateway(site.host, "POST", path, { visitor, body });
+      expect(created.status).toBe(202);
+      sessionId = String(created.json.id);
+      if (operation === "steer") {
+        path = `/sessions/${sessionId}/steer`;
+        body = { text: "Steer", clientEventId: crypto.randomUUID() };
+      } else if (operation === "queued-steer") {
+        const [turn] =
+          await shared.admin`select id, version from session_turns where session_id = ${sessionId} limit 1`;
+        path = `/sessions/${sessionId}/queue/${turn!.id}/steer`;
+        body = { clientEventId: crypto.randomUUID(), expectedTurnVersion: Number(turn!.version) };
+      } else if (operation === "composer") {
+        const draft = await f.gateway(site.host, "GET", `/sessions/${sessionId}/composer-draft`, {
+          visitor,
+        });
+        const saved = await f.gateway(site.host, "PUT", `/sessions/${sessionId}/composer-draft`, {
+          visitor,
+          body: {
+            text: "Draft",
+            annotations: [],
+            resources: [],
+            model: draft.json.model,
+            reasoningEffort: draft.json.reasoningEffort,
+            latencyMode: draft.json.latencyMode,
+            expectedRevision: draft.json.revision,
+          },
+        });
+        expect(saved.status).toBe(200);
+        path = `/sessions/${sessionId}/composer-draft/submit`;
+        body = {
+          text: "Draft",
+          annotations: [],
+          resources: [],
+          model: draft.json.model,
+          reasoningEffort: draft.json.reasoningEffort,
+          latencyMode: draft.json.latencyMode,
+          expectedDraftRevision: saved.json.revision,
+          clientEventId: crypto.randomUUID(),
+          delivery: "send",
+        };
+      } else {
+        path = `/sessions/${sessionId}/control`;
+        expect(
+          (
+            await f.gateway(site.host, "POST", path, {
+              visitor,
+              body: { action: "pause", clientEventId: crypto.randomUUID() },
+            })
+          ).status,
+        ).toBeLessThan(300);
+        body = { action: "resume", clientEventId: crypto.randomUUID() };
+      }
+    }
+    const original = f.app.fetch;
+    let fenced = false;
+    let reached!: () => void;
+    let resume!: () => void;
+    const intercepted = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    f.app.fetch = async (...args) => {
+      if (
+        new URL(args[0].url).pathname === `/v1/workspaces/${f.workspace.id}${path}` &&
+        args[0].method === "POST"
+      ) {
+        if (operation === "start") sessionId = (await args[0].clone().json()).requestedSessionId;
+        const [pending] =
+          await shared.admin`select pending_admission_id from site_runtime_conversations where session_id = ${sessionId}`;
+        expect(pending!.pending_admission_id, operation).not.toBeNull();
+        fenced = true;
+        reached();
+        await gate;
+      }
+      return await original(...args);
+    };
+    const dispatching = f.gateway(site.host, "POST", path, { visitor, body });
+    try {
+      await Promise.race([
+        intercepted,
+        dispatching.then((response) => {
+          if (!fenced)
+            throw new Error(
+              `${operation} never reached dispatch: ${JSON.stringify(response.json)}`,
+            );
+        }),
+      ]);
+      // A separate caller wins recovery, not the pending dispatch's async context.
+      await shared.admin`update site_runtime_conversations set pending_admission_until = now() - interval '1 second' where session_id = ${sessionId}`;
+      await settleSiteRuntimeConversationSpend(
+        db.db,
+        { accountId: f.accountId, workspaceId: f.workspace.id },
+        { sessionId, usedMicros: 0, idle: true },
+      );
+      resume();
+      const response = await dispatching;
+      expect(fenced, operation).toBe(true);
+      expect(
+        response.status,
+        `${operation}: ${JSON.stringify(response.json)}`,
+      ).toBeGreaterThanOrEqual(400);
+      const [turns] =
+        await shared.admin`select count(*)::int as count from session_turns where session_id = ${sessionId}`;
+      expect(turns!.count, operation).toBe(operation === "start" ? 0 : 1);
+    } finally {
+      resume();
+      f.app.fetch = original;
+      await dispatching;
+    }
+  }
+}, 60_000);
+
+test("a crashed Site start recovers on its idempotent retry and fences the original dispatch", async () => {
+  const f = await fixture();
+  const site = await f.live("Start recovery", { access: "public", agent: { enabled: true } });
+  const visitor = visitorId();
+  const body = { initialMessage: "First", idempotencyKey: crypto.randomUUID() };
+  let resume!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  let delayed: Promise<Response> | undefined;
+  let sessionId = "";
+  const original = f.app.fetch;
+  let intercept = true;
+  f.app.fetch = async (...args) => {
+    if (
+      intercept &&
+      args[0].method === "POST" &&
+      new URL(args[0].url).pathname === `/v1/workspaces/${f.workspace.id}/sessions`
+    ) {
+      intercept = false;
+      sessionId = (await args[0].clone().json()).requestedSessionId;
+      delayed = (async () => {
+        await gate;
+        return await original(...args);
+      })();
+      throw new Error("injected unknown start");
+    }
+    return await original(...args);
+  };
+  try {
+    expect((await f.gateway(site.host, "POST", "/sessions", { visitor, body })).status).toBe(500);
+    const [pending] =
+      await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(pending!.pending_admission_id).not.toBeNull();
+    expect(Number(pending!.reserved_micros)).toBe(250_000);
+    await shared.admin`update site_runtime_conversations set created_at = now() - interval '11 minutes',
+      pending_admission_until = now() - interval '1 second' where session_id = ${sessionId}`;
+    const retry = await f.gateway(site.host, "POST", "/sessions", { visitor, body });
+    expect(retry.status, JSON.stringify(retry.json)).toBe(202);
+    expect(retry.json.id).toBe(sessionId);
+    resume();
+    await delayed;
+    const [turns] =
+      await shared.admin`select count(*)::int as count from session_turns where session_id = ${sessionId}`;
+    expect(turns!.count).toBe(1);
+    const [funding] =
+      await shared.admin`select pending_admission_id, reserved_micros from site_runtime_conversations where session_id = ${sessionId}`;
+    expect(funding!.pending_admission_id).toBeNull();
+    expect(Number(funding!.reserved_micros)).toBe(250_000);
+    const windows =
+      await shared.admin`select conversations, reserved_micros from site_runtime_usage where site_id = ${site.id}`;
+    expect(windows.map((row) => Number(row.conversations))).toEqual([1, 1, 1, 1]);
+    expect(windows.map((row) => Number(row.reserved_micros))).toEqual([
+      250_000, 250_000, 250_000, 250_000,
+    ]);
+  } finally {
+    resume();
+    f.app.fetch = original;
+    await delayed;
+  }
 });
 
 test("view as visitor shows a member less, never anyone more", async () => {

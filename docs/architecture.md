@@ -43,6 +43,10 @@ merged refs intersect that ceiling and children cannot widen it. Console Site
 agents use it for the overlap of Site-declared tools and the viewer's permissions.
 Their editable-artifact writes also require immutable create/import provenance
 within the same Site-clamped session tree; read-created session links grant no edits.
+Published-host Site funding retains a pending-admission token through dispatch.
+Its trusted async context locks the conversation before the session writer prefix;
+recovery revokes that token and checks the locked canonical queue before refunding,
+so delayed enqueue and idle settlement cannot allocate the same funds twice.
 Signed callbacks retain accepted initiators; children inherit bounded lineage.
 Continuations freeze causal-turn provenance at claim; renewals preserve snapshots
 and service principals. See

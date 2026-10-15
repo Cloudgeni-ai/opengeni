@@ -291,7 +291,12 @@ first settles spend and atomically funds the next allowance, then stamps that
 ceiling before execution; exhausted allowances stop at the normal session-usage
 boundary. One provider call may overshoot before its receipt is metered, as with
 ordinary session limits. Reservations are settled to actual spend and released as turns and
-conversations finish. When only other conversations' outstanding
+conversations finish. A durable pending-admission token protects the interval
+between funding and enqueue. Session writers verify it under the conversation lock;
+recovery revokes abandoned tokens after ten minutes and checks the canonical queue
+under the session lock before refunding. A lost response never proves that enqueue
+failed, and a delayed request cannot enqueue after recovery revoked its token.
+When only other conversations' outstanding
 reservations stand in the way, a start or message answers a retryable 429
 `site_budget_busy` with `retryAfterSeconds`. Guests are also
 rate limited per client address (four visitors' worth), so new visitor ids

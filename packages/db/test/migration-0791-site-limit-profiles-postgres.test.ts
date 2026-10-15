@@ -287,10 +287,25 @@ test.skipIf(!realDb)(
     // The owner-only posture of both tables is restored.
     expect((await forcedRls()).every((row) => row.forced)).toBe(true);
     // The old conversation keeps its row and counts in the Site's windows.
-    const [conversation] = await admin<{ budgetKey: string; limit: string; complete: boolean }[]>`
-      select budget_key as "budgetKey", limit_micros::text as limit, reservation_windows_complete as complete
+    const [conversation] = await admin<
+      {
+        budgetKey: string;
+        limit: string;
+        complete: boolean;
+        pending: string | null;
+        pendingUntil: Date | null;
+      }[]
+    >`
+      select budget_key as "budgetKey", limit_micros::text as limit, reservation_windows_complete as complete,
+        pending_admission_id as pending, pending_admission_until as "pendingUntil"
       from site_runtime_conversations where session_id = ${conversationId}::uuid`;
-    expect(conversation).toEqual({ budgetKey: "*", limit: "20000", complete: false });
+    expect(conversation).toEqual({
+      budgetKey: "*",
+      limit: "20000",
+      complete: false,
+      pending: null,
+      pendingUntil: null,
+    });
     const platform = await admin<{ relname: string; forced: boolean }[]>`
       select relname, relforcerowsecurity as forced from pg_class
       where relname like 'site_platform_%' and relkind = 'r'

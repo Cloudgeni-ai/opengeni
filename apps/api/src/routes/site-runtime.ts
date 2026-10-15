@@ -36,6 +36,8 @@ import {
 } from "@opengeni/core";
 import {
   consumeSiteAuthCode,
+  finishSiteRuntimeAdmission,
+  withSiteRuntimeAdmission,
   createSiteAbuseReport,
   getSiteWorkspaceMemberPermissions,
   readSitePlatformUsage,
@@ -1173,23 +1175,45 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     // carries the Site and version headers the API's Site frame guard
     // validates; sessions and turns it starts record this Site and version.
     const siteOrigin = { siteId: host.site.id, title: host.site.title, versionId: host.versionId };
+    let pendingAdmission: { sessionId: string; admissionId: string } | undefined;
     const send = async (
       method: string,
       path: string,
       body?: unknown,
       extraPermissions?: readonly Permission[],
-    ) =>
-      await withSiteSessionOrigin(siteOrigin, async () =>
-        dispatch(
-          await siteRuntimeSessionRequest(deps, host, viewer, {
-            origin: url.origin,
-            method,
-            path,
-            ...(body === undefined ? {} : { body }),
-            ...(extraPermissions ? { extraPermissions } : {}),
-          }),
-        ),
+    ) => {
+      const execute = () =>
+        withSiteSessionOrigin(siteOrigin, async () =>
+          dispatch(
+            await siteRuntimeSessionRequest(deps, host, viewer, {
+              origin: url.origin,
+              method,
+              path,
+              ...(body === undefined ? {} : { body }),
+              ...(extraPermissions ? { extraPermissions } : {}),
+            }),
+          ),
+        );
+      const pending = pendingAdmission;
+      if (!pending) return await execute();
+      // The trusted context fences every session write through enqueue commit.
+      // A thrown/unknown dispatch retains its marker; recovery reconciles it.
+      const response = await withSiteRuntimeAdmission(
+        { ...pending, workspaceId: host.scope.workspaceId },
+        execute,
       );
+      await finishSiteRuntimeAdmission(deps.db, host.scope, pending);
+      pendingAdmission = undefined;
+      if (!response.ok) {
+        const current = await getOwnedSiteRuntimeConversation(deps.db, host.scope, {
+          sessionId: pending.sessionId,
+          siteId: host.site.id,
+          viewerPrincipal: viewer.principal,
+        });
+        if (current) await settleSiteRuntimeSpend(deps, host, current, { release: true });
+      }
+      return response;
+    };
     /** A forwarded session read, answered with the Site-safe projection. */
     const projected = async (response: Response, status = response.status) => {
       if (!response.ok) return siteRuntimeForwardedResponse(response);
@@ -1276,7 +1300,19 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           siteId: host.site.id,
           viewerPrincipal: viewer.principal,
         });
-        if (replay) return await projected(await send("GET", `${base}/${replay.sessionId}`), 202);
+        if (replay) {
+          // A lost start response may have left only a reservation. Reconcile
+          // before replay so this key cannot remain stuck on a missing session.
+          await settleSiteRuntimeSpend(deps, host, replay);
+          if (
+            await getOwnedSiteRuntimeConversation(deps.db, host.scope, {
+              sessionId: requestedSessionId,
+              siteId: host.site.id,
+              viewerPrincipal: viewer.principal,
+            })
+          )
+            return await projected(await send("GET", `${base}/${replay.sessionId}`), 202);
+        }
       }
       // Settle the viewer's recent spend so the day budget sees it.
       for (const conversation of await listOwnedSiteRuntimeConversations(deps.db, host.scope, {
@@ -1304,8 +1340,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       // becomes the session's usage limit, set in the create transaction. The
       // row also records the tools the conversation gets, so narrowing them
       // later stops it.
+      const admissionId = randomUUID();
       const reservation = await reserve(() =>
         reserveSiteRuntimeConversationStart(deps.db, host.scope, {
+          admissionId,
           sessionId: requestedSessionId,
           siteId: host.site.id,
           viewerPrincipal: viewer.principal,
@@ -1317,6 +1355,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           budgetKey: siteRuntimeBudgetKey(viewer),
         }),
       );
+      pendingAdmission = { sessionId: requestedSessionId, admissionId };
       const body = {
         initialMessage: input.initialMessage,
         requestedSessionId,
@@ -1507,8 +1546,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
           conversation.limitMicros,
           usage,
         );
+      const admissionId = randomUUID();
       const admitted = await reserve(() =>
         reserveSiteRuntimeConversationWork(deps.db, host.scope, {
+          admissionId,
           sessionId: conversation.sessionId,
           limits: budgets,
           newTurn,
@@ -1517,8 +1558,23 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       );
       // Stamp the funded ceiling before work, including atomic top-ups and
       // reduced caps. Members never carry a Site-imposed usage limit.
-      if (admitted.executionLimitMicros !== null && viewer.kind !== "member")
-        await capSiteConversationUsageLimit(deps, host, conversation.sessionId, usage);
+      pendingAdmission = { sessionId: conversation.sessionId, admissionId };
+      try {
+        if (admitted.executionLimitMicros !== null && viewer.kind !== "member")
+          await capSiteConversationUsageLimit(deps, host, conversation.sessionId, usage);
+      } catch (error) {
+        // No dispatch has begun, so failure here is definitive. Reconcile the
+        // queue before refunding: a previous turn may still be executing.
+        await finishSiteRuntimeAdmission(deps.db, host.scope, pendingAdmission);
+        pendingAdmission = undefined;
+        await settleSiteRuntimeSpend(
+          deps,
+          host,
+          { sessionId: conversation.sessionId, admissions: conversation.admissions + 1 },
+          { release: true },
+        );
+        throw error;
+      }
     };
     /**
      * A Site's composer drafts are text only: no workspace resources,

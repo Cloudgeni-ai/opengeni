@@ -174,6 +174,16 @@ Further sends, steering and resumes fund a top-up before execution; a single
 provider call can overshoot before metering. Data tools revalidate the current
 audience on every call, independently of best-effort cancellation.
 
+Funding admission retains a durable pending token across the gap before enqueue.
+Start, Send, Steer, queued-message Steer, composer submission and Resume carry that
+token through the in-process dispatch; session writer transactions lock and verify
+it before accepting work. Idle settlement cannot release pending funding. A returned
+refusal revokes the token and reconciles the locked canonical queue; a lost response
+retains it. After ten minutes, recovery may revoke an abandoned token, but releases
+funds only if the locked queue has no accepted work or physical writers. A delayed
+dispatch with the revoked token cannot enqueue. Neither timeout nor an idle status
+alone proves that funding can be released.
+
 The Sites skill recommends a selector for this Site's conversations plus New
 conversation. First Send creates one session with a retry-stable idempotency key;
 thereafter the standard `SessionConversation` owns chat interaction. No project
