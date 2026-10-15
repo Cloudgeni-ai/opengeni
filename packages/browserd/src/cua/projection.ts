@@ -74,12 +74,15 @@ export function projectElements(
     }
     return {
       ref: element.element_token ?? `read-only:${element.element_index}`,
-      role: roles[element.role] ?? element.role,
-      ...(element.label && !valueLabel ? { name: element.label } : {}),
+      // Desktop labels and values can be whole documents (an editor's text
+      // area). Clip to the semantic-node contract so one element cannot make
+      // the entire observation invalid.
+      role: (roles[element.role] ?? element.role).slice(0, 256),
+      ...(element.label && !valueLabel ? { name: element.label.slice(0, 8_192) } : {}),
       ...(protectedReason
         ? { value: { redacted: true as const, reason: protectedReason } }
         : element.value !== undefined
-          ? { value: String(element.value) }
+          ? { value: String(element.value).slice(0, 32_768) }
           : {}),
       states: [
         ...(element.enabled === false ? ["disabled"] : []),
