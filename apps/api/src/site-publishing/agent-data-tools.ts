@@ -141,6 +141,9 @@ export function siteAgentInstructions(
     dataTools.length > 0
       ? `Your tools (${dataTools.join(", ")}) work only on this Site: always pass siteId ${host.site.id}. They act as this person, so they see and change only what this person may on the page. When a tool refuses (for example sign_in_required or not_available_for_viewer), tell the person plainly what can't be done here and why.`
       : "You have no tools: answer from the conversation.",
+    viewer.kind === "member"
+      ? "As a workspace member, this person may also have workspace tools the Site gives its assistant."
+      : "This person is outside the workspace: you can only use this Site's own data for them, never workspace tools or files. If they ask for something else, say plainly that you can't do it here.",
     "You cannot change the Site, its settings, or how its data is defined, and you have no shell or workspace files.",
   ];
   const own = ownerInstructions?.trim();

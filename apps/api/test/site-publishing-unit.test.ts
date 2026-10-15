@@ -17,6 +17,7 @@ import {
   verifySiteGatewayRequest,
 } from "../src/site-publishing/gateway-signature";
 import { siteAgentToolRefs } from "../src/routes/site-runtime";
+import { siteAgentInstructions } from "../src/site-publishing/agent-data-tools";
 import {
   isSubscriptionBilledModel,
   siteOutsideModelChoice,
@@ -447,6 +448,21 @@ describe("readiness", () => {
       outsideModel: { kind: "unavailable" },
     });
     expect(none.map((warning) => warning.code)).toEqual(["agent_model_outside_unavailable"]);
+  });
+});
+
+describe("Site agent instructions", () => {
+  test("name the viewer and say plainly what a person outside the workspace can't get", () => {
+    const host = { site: { id: "site-1", title: "Shop" } } as never;
+    const tools = ["site_data_query", "site_data_write"];
+    const guest = siteAgentInstructions(host, { kind: "guest" }, tools, "Be brief.");
+    expect(guest).toContain("an anonymous visitor");
+    expect(guest).toContain("only use this Site's own data");
+    expect(guest).toContain("say plainly that you can't do it here");
+    expect(guest.endsWith("\n\nBe brief.")).toBe(true);
+    const member = siteAgentInstructions(host, { kind: "member" }, tools, null);
+    expect(member).toContain("a member of the workspace that owns this Site");
+    expect(member).not.toContain("only use this Site's own data");
   });
 });
 
