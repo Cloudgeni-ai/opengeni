@@ -1039,9 +1039,28 @@ describe("target-only workspace tool calls", () => {
       expect(
         f.state.resolved.some((input) => input.connectionRef.connectionId === f.personal.id),
       ).toBe(false);
-      // The still-active shared account remains callable through its own route.
+      // Revocation leaves only one visible account, so its description loses
+      // the account-disambiguation line. That is definition drift too: the old
+      // catalog must fail closed until the caller refreshes it.
+      await expectHttpStatus(
+        call(f, attestations, {
+          catalogDigest: catalog.digest,
+          identity: f.identity(f.shared),
+          arguments: {},
+        }),
+        409,
+        "catalog_stale",
+      );
+      expect(f.grafana.calls).toHaveLength(before);
+      const refreshed = await attestedCatalog(f, attestations);
+      expect(refreshed.digest).not.toBe(catalog.digest);
+      expect(refreshed.entries.map((entry) => entry.identity)).not.toContainEqual(
+        f.identity(f.personal),
+      );
+      // The still-active shared account remains callable through its own route
+      // with the current definition, never as a substitute for the revoked one.
       const shared = await call(f, attestations, {
-        catalogDigest: catalog.digest,
+        catalogDigest: refreshed.digest,
         identity: f.identity(f.shared),
         arguments: {},
       });

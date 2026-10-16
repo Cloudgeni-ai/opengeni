@@ -589,6 +589,9 @@ export function sessionEffectiveToolProjectionInput(
     "request_human_input",
     "list_models",
     ...webSearchPlan.providerTools,
+    // Interaction entry tools stay visible even with progressive disclosure;
+    // the remaining authorized family tools are disclosed after opening.
+    ...firstPartyMcpTools.filter((name) => name === "browser_open" || name === "computer_open"),
     ...(toolRefs.some((ref) => ref.id === "opengeni" && ref.eager === true) ||
     !progressiveDisclosure
       ? firstPartyMcpTools.filter((name) => !interactionNames.has(name) || !progressiveDisclosure)
