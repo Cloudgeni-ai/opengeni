@@ -9896,9 +9896,11 @@ export class OpenGeniClient {
     organizationId: string,
     connectionId: string,
   ): Promise<void> {
+    // JSON even without fields: the route admits browsers only as same-origin JSON.
     await this.requestVoid(
       "DELETE",
       `/v1/organizations/${organizationId}/mcp-connections/${connectionId}`,
+      {},
     );
   }
 
@@ -9930,9 +9932,11 @@ export class OpenGeniClient {
 
   /** Revoke a personal key: its next request is refused. Its person, or an admin. */
   async revokePersonalApiKey(organizationId: string, apiKeyId: string): Promise<void> {
+    // JSON even without fields: the route admits browsers only as same-origin JSON.
     await this.requestVoid(
       "DELETE",
       `/v1/organizations/${organizationId}/personal-api-keys/${apiKeyId}`,
+      {},
     );
   }
 
@@ -10540,9 +10544,12 @@ export class OpenGeniClient {
 
   /** Begin device-code login: show `userCode` at `verificationUri`, then poll with `state`. */
   async codexConnectStart(workspaceId: string): Promise<CodexConnectStart> {
+    // A JSON body even though the route reads none: signed-in browsers are
+    // admitted to subscription mutations only as same-origin JSON requests.
     return await this.requestJson<CodexConnectStart>(
       "POST",
       `/v1/workspaces/${workspaceId}/codex/connect/start`,
+      {},
     );
   }
 
