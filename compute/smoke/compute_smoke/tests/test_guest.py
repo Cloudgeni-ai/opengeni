@@ -4,9 +4,11 @@ the host instead of vsock inside a VM."""
 from __future__ import annotations
 
 import base64
+import dataclasses
 import importlib.util
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -20,7 +22,11 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from compute_smoke.__main__ import DEFAULT_GUEST_PORT
+from compute_smoke.services import SmokeServices
+
 GUEST = Path(__file__).resolve().parents[2] / "guest" / "smoke_guest.py"
+INSTALL = GUEST.parent / "install.sh"
 
 
 def _b64(data: bytes) -> str:
@@ -29,6 +35,27 @@ def _b64(data: bytes) -> str:
 
 def _unb64(text: str) -> bytes:
     return base64.b64decode(text)
+
+
+class GuestInstall(unittest.TestCase):
+    """What install.sh puts into an image, read from the script: installing
+    needs root and an image."""
+
+    def setUp(self) -> None:
+        self.script = INSTALL.read_text(encoding="utf-8")
+
+    def test_the_service_starts_after_the_lab_images_identity_service(self) -> None:
+        after = [line for line in self.script.splitlines() if line.startswith("After=")]
+        self.assertEqual(len(after), 1, after)
+        self.assertIn("lab-identity.service", after[0].removeprefix("After=").split())
+
+    def test_the_suite_looks_for_the_service_on_the_port_it_is_installed_on(self) -> None:
+        installed = re.search(r'^port="\$\{2:-(\d+)\}"$', self.script, re.MULTILINE)
+        self.assertIsNotNone(installed)
+        port = int(installed.group(1))
+        fields = {field.name: field for field in dataclasses.fields(SmokeServices)}
+        self.assertEqual(port, DEFAULT_GUEST_PORT)
+        self.assertEqual(port, fields["guest_port"].default)
 
 
 class GuestService(unittest.TestCase):

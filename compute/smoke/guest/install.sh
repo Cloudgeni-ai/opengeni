@@ -60,7 +60,10 @@ unit="$mount_point/etc/systemd/system/smoke-guest.service"
 cat >"$unit" <<EOF
 [Unit]
 Description=Compute smoke-suite guest service on vsock port $port
-After=local-fs.target
+# In a copy of the lab image, lab-identity may replace the machine id at boot;
+# this service reads and renews the identity only after it has. Ordering after
+# a unit the image does not have is a no-op.
+After=local-fs.target lab-identity.service
 
 [Service]
 ExecStart=/usr/bin/python3 /opt/smoke/smoke_guest.py --listen vsock:$port --notice vsock:$notice_port
