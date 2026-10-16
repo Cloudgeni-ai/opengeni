@@ -7,6 +7,8 @@ import {
   groupVaults,
   isMissingKeyError,
   itemsLabel,
+  createdManagedVault,
+  managedVaultCreationText,
   savedCreation,
   savedTransfer,
   secretsCapabilityOff,
@@ -84,6 +86,53 @@ describe("a confirmed create awaiting inventory", () => {
       savedCreation(vaultApiError(503, "provider_outcome_unknown"), "Example", "Operations"),
     ).toBeNull();
     expect(savedCreation(null, "Example", "Operations")).toBeNull();
+  });
+});
+
+describe("a confirmed managed vault creation", () => {
+  test("retains unknown linking and unconfirmed sharing independently", () => {
+    const error = vaultApiError(503, "provider_unavailable", {
+      created: true,
+      linked: null,
+      externalVaultId: "external",
+      groupGrantConfirmed: false,
+    });
+    const created = createdManagedVault(vaultError(error), "Agents")!;
+    expect(created.linked).toBeNull();
+    expect(created.vaultId).toBeNull();
+    expect(created.externalVaultId).toBe("external");
+    expect(managedVaultCreationText(created, "1Password")).toContain("Its link wasn't confirmed.");
+    expect(managedVaultCreationText(created, "1Password")).toContain(
+      "Also check sharing in 1Password.",
+    );
+    expect(managedVaultCreationText(created, "1Password")).toContain("Don't create it again.");
+  });
+
+  test("preflight and uncertain outcomes never become confirmed creates", () => {
+    for (const created of [undefined, false, "true", 1]) {
+      expect(
+        createdManagedVault(vaultApiError(403, "vault_permission_denied", { created }), "Agents"),
+      ).toBeNull();
+    }
+    expect(
+      createdManagedVault(vaultApiError(503, "provider_outcome_unknown"), "Agents"),
+    ).toBeNull();
+  });
+
+  test("local refusals guide repair of the existing vault, never repeat creation", () => {
+    for (const code of [
+      "vault_name_conflict",
+      "vault_permission_denied",
+      "vault_limit_reached",
+    ] as const) {
+      const created = createdManagedVault(
+        vaultApiError(409, code, { created: true, linked: false }),
+        "Agents",
+      )!;
+      const text = managedVaultCreationText(created, "1Password");
+      expect(text).toContain("existing vault");
+      expect(text).toContain("Don't create it again.");
+    }
   });
 });
 

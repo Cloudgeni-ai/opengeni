@@ -337,6 +337,14 @@ export function SecretsRoute({
       ),
     createManaged: (name, ownerKind, linkConnectionId) =>
       attempt(() => api.createManagedProviderVault(linkConnectionId, { name, ownerKind })),
+    refreshVaults: async (linkConnectionId) => {
+      const [providerVaults] = await Promise.all([
+        api.listProviderVaults(linkConnectionId),
+        refreshVaults(),
+        refreshConnections(),
+      ]);
+      return providerVaults;
+    },
     openVault: (linked) => {
       void vaults.refresh();
       openVault(linked.id);

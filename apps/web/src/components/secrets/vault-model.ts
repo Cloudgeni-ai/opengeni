@@ -345,6 +345,58 @@ export function savedCreation(
   };
 }
 
+export interface CreatedManagedVault {
+  name: string;
+  externalVaultId: string | null;
+  vaultId: string | null;
+  linked: boolean | null;
+  sharingUnconfirmed: boolean;
+  errorCode: VaultErrorCode | null;
+}
+
+/** Creation is confirmed independently of local linking, sharing and discovery. */
+export function createdManagedVault(caught: unknown, name: string): CreatedManagedVault | null {
+  const error = (caught as { cause?: unknown } | null)?.cause ?? caught;
+  if (vaultErrorDetail(error, "created") !== true) return null;
+  const linked = vaultErrorDetail(error, "linked");
+  return {
+    name,
+    externalVaultId: stringDetail(error, "externalVaultId"),
+    vaultId: stringDetail(error, "vaultId"),
+    linked: typeof linked === "boolean" ? linked : null,
+    sharingUnconfirmed: vaultErrorDetail(error, "groupGrantConfirmed") === false,
+    errorCode: vaultErrorCode(error),
+  };
+}
+
+export function managedVaultCreationText(created: CreatedManagedVault, home: string): string {
+  let next: string;
+  if (created.linked) {
+    next = created.sharingUnconfirmed
+      ? `It's linked, but group access wasn't confirmed. Check sharing in ${home}.`
+      : "It's linked. Open the vault and sync it to check its items.";
+  } else if (created.linked === null) {
+    next = "Its link wasn't confirmed. Check the list before linking this existing vault.";
+  } else {
+    switch (created.errorCode) {
+      case "vault_name_conflict":
+        next = `A vault with this name already exists here. Rename that vault or the one in ${home}, then link the existing vault.`;
+        break;
+      case "vault_permission_denied":
+        next =
+          "You don't have access to link it here. Ask a workspace admin to link the existing vault.";
+        break;
+      case "vault_limit_reached":
+        next = "The vault limit prevented linking. Free a place, then link the existing vault.";
+        break;
+      default:
+        next = "It isn't linked here. Choose its access, then link this existing vault.";
+    }
+  }
+  if (!created.linked && created.sharingUnconfirmed) next += ` Also check sharing in ${home}.`;
+  return `${next} Don't create it again.`;
+}
+
 /* ------------------------------------------------- a move that half finished */
 
 /** A move or copy that failed after its copy was saved: what to tell the person. */

@@ -1,7 +1,7 @@
 import { isValidSecretName, VAULT_LIMITS } from "@opengeni/contracts";
 import type { ProviderVaultMeta, VaultMode, VaultSummary } from "@opengeni/react";
 import { Building2Icon, PlusIcon, UserIcon, UsersIcon } from "lucide-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
@@ -9,15 +9,19 @@ import { Field, FieldStack, TextInput } from "@/components/ui/field";
 import { FlushFormPage } from "@/components/ui/flush-form-page";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { ListRow, ListRowSkeleton, RowList } from "@/components/ui/list-row";
+import { Notice } from "@/components/ui/notice";
 import { Section } from "@/components/ui/section";
 import { SelectMenu } from "@/components/ui/select-menu";
 
 import { ProviderTile } from "./provider-marks";
 import {
   connectionOwnerLabel,
+  createdManagedVault,
+  managedVaultCreationText,
   MODE_LABEL,
   vaultErrorText,
   type ConnectionOwner,
+  type CreatedManagedVault,
 } from "./vault-model";
 import { SecretsLoadFailure, VaultTile } from "./vault-parts";
 import {
@@ -52,7 +56,9 @@ export interface LinkVaultActions {
     owner: ConnectionOwner,
     connectionId: string,
   ) => Promise<VaultSummary>;
-  openVault: (vault: VaultSummary) => void;
+  /** Re-read provider metadata and refresh the caller's local vault lists. */
+  refreshVaults: (connectionId: string) => Promise<ProviderVaultMeta[]>;
+  openVault: (vault: Pick<VaultSummary, "id">) => void;
 }
 
 /* ------------------------------------------------------------ who can use it */
@@ -250,6 +256,7 @@ export function ChooseVaultsPage({
 
   return (
     <VaultChooser
+      key={connection.id}
       provider={provider}
       title={`Choose ${info.vaultNoun.many}`}
       description={description}
@@ -272,7 +279,7 @@ export function VaultChooser({
   title,
   description,
   backLabel = "Secrets",
-  providerVaults,
+  providerVaults: initialProviderVaults,
   linkedVaults,
   owner,
   connectionId,
@@ -306,6 +313,39 @@ export function VaultChooser({
   const [linkedNow, setLinkedNow] = useState<Record<string, VaultSummary>>({});
   const [creating, setCreating] = useState(false);
   const [formError, setFormError] = useState<ReactNode>(null);
+  const [recoveredVaults, setRecoveredVaults] = useState<ProviderVaultMeta[] | null>(null);
+  const [created, setCreated] = useState<CreatedManagedVault | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checkFailed, setCheckFailed] = useState(false);
+  // A confirmed link must not become an unlinked choice in a stale listing.
+  const providerVaults = (recoveredVaults ?? initialProviderVaults).map((vault) =>
+    created?.linked && created.vaultId && vault.externalVaultId === created.externalVaultId
+      ? { ...vault, linkedVaultId: created.vaultId }
+      : vault,
+  );
+  async function refreshCreated(result: CreatedManagedVault) {
+    setChecking(true);
+    setCheckFailed(false);
+    try {
+      const fresh = await actions.refreshVaults(connectionId);
+      setRecoveredVaults(fresh);
+      const found = fresh.find((vault) => vault.externalVaultId === result.externalVaultId);
+      if (found?.linkedVaultId) {
+        setCreated({ ...result, linked: true, vaultId: found.linkedVaultId });
+      } else if (found && result.linked !== true) {
+        setCreated({ ...result, linked: false });
+        setChoices((current) => ({
+          ...current,
+          [found.externalVaultId]:
+            providerVaultAccess(found) === "read_only" ? "read_only" : "read_write",
+        }));
+      }
+    } catch {
+      setCheckFailed(true);
+    } finally {
+      setChecking(false);
+    }
+  }
   const available = providerVaults.filter((vault) => !vault.linkedVaultId);
   const chosen = available.filter((vault) => (choices[vault.externalVaultId] ?? "off") !== "off");
   const allLinked = providerVaults.length > 0 && available.length === 0;
@@ -347,15 +387,19 @@ export function VaultChooser({
             return false;
           }
         }
-        onLinked([...managed, ...Object.values(done)]);
+        // A confirmed managed link may not have a full summary yet. Finish at
+        // that known vault rather than claiming the setup linked no vaults.
+        if (created?.linked && created.vaultId) actions.openVault({ id: created.vaultId });
+        else onLinked([...managed, ...Object.values(done)]);
         return true;
       }}
     >
       <FieldStack>
         {providerVaults.length === 0 ? (
           <p className="m-0 text-sm leading-5 text-fg-muted">
-            {grantee} can't see any {info.vaultNoun.many}. Give it access in {info.home}
-            {canCreateManaged ? ", or create a managed vault below." : "."}
+            {created
+              ? "The new vault isn't in this list yet."
+              : `${grantee} can't see any ${info.vaultNoun.many}. Give it access in ${info.home}${canCreateManaged ? ", or create a managed vault below." : "."}`}
           </p>
         ) : (
           <RowList label={`${info.name} ${info.vaultNoun.many}`}>
@@ -364,14 +408,17 @@ export function VaultChooser({
                 ? linkedVaults.find((each) => each.id === vault.linkedVaultId)
                 : undefined;
               if (vault.linkedVaultId) {
+                const canOpen = Boolean(linked || created?.vaultId === vault.linkedVaultId);
                 return (
                   <ListRow
                     key={vault.externalVaultId}
                     leading={<ProviderTile provider={provider} />}
                     title={vault.name}
                     description={linked ? `Linked · ${MODE_LABEL[linked.mode]}` : "Already linked"}
-                    indicator={linked ? "open" : undefined}
-                    onOpen={linked ? () => actions.openVault(linked) : undefined}
+                    indicator={canOpen ? "open" : undefined}
+                    onOpen={
+                      canOpen ? () => actions.openVault({ id: vault.linkedVaultId! }) : undefined
+                    }
                   />
                 );
               }
@@ -413,14 +460,59 @@ export function VaultChooser({
         {canCreateManaged ? (
           <Section
             title="Managed vault"
-            description={`Opengeni creates a new vault in ${info.home} and saves the items agents create there.`}
+            description={
+              created
+                ? undefined
+                : `Opengeni creates a new vault in ${info.home} and saves the items agents create there.`
+            }
             action={
-              <Button variant="outline" size="sm" onClick={() => setCreating(true)}>
-                <PlusIcon aria-hidden="true" />
-                Create managed vault
-              </Button>
+              created ? undefined : (
+                <Button type="button" variant="outline" size="sm" onClick={() => setCreating(true)}>
+                  <PlusIcon aria-hidden="true" />
+                  Create managed vault
+                </Button>
+              )
             }
           >
+            {created ? (
+              <Notice
+                tone="waiting"
+                live="polite"
+                title={`Created ${created.name} in ${info.home}`}
+                actionLayout="responsive"
+                action={
+                  created.linked && created.vaultId ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => actions.openVault({ id: created.vaultId! })}
+                    >
+                      Open vault
+                    </Button>
+                  ) : checking ||
+                    checkFailed ||
+                    !providerVaults.some(
+                      (vault) => vault.externalVaultId === created.externalVaultId,
+                    ) ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={checking}
+                      onClick={() => void refreshCreated(created)}
+                    >
+                      {checking ? "Checking…" : "Check again"}
+                    </Button>
+                  ) : undefined
+                }
+              >
+                {managedVaultCreationText(created, info.home)}
+                {checkFailed ? (
+                  <p className="mb-0 mt-2">The vault list couldn't be refreshed.</p>
+                ) : null}
+              </Notice>
+            ) : null}
             {managed.length > 0 ? (
               <RowList label="Managed vaults">
                 {managed.map((vault) => (
@@ -444,8 +536,17 @@ export function VaultChooser({
           open={creating}
           onOpenChange={setCreating}
           onCreate={async (name) => {
-            const vault = await actions.createManaged(name, owner, connectionId);
-            setManaged((current) => [...current, vault]);
+            try {
+              const vault = await actions.createManaged(name, owner, connectionId);
+              setManaged((current) => [...current, vault]);
+            } catch (caught) {
+              const result = createdManagedVault(caught, name);
+              if (!result) throw caught;
+              setCreated(result);
+              setCreating(false);
+              // Reads may fail or be slow. Neither reopens a completed create.
+              void refreshCreated(result);
+            }
           }}
         />
       ) : null}
@@ -466,6 +567,10 @@ function ManagedVaultDialog({
 }) {
   const [name, setName] = useState("Opengeni");
   const [error, setError] = useState<string | undefined>();
+  const submission = useRef<"idle" | "pending" | "done">("idle");
+  useEffect(() => {
+    if (open) submission.current = "idle";
+  }, [open]);
   return (
     <FormDialog
       open={open}
@@ -480,6 +585,9 @@ function ManagedVaultDialog({
       pendingLabel="Creating…"
       onSubmit={async (event) => {
         event.preventDefault();
+        // The dialog's portal still bubbles through the surrounding chooser.
+        event.stopPropagation();
+        if (submission.current !== "idle") return false;
         const trimmed = name.trim();
         const issue = !trimmed
           ? "Give the vault a name."
@@ -488,12 +596,16 @@ function ManagedVaultDialog({
             : "Names can't contain /, {, }, # or \\, or start with id:.";
         setError(issue);
         if (issue) return false;
+        submission.current = "pending";
         try {
           await onCreate(trimmed);
+          submission.current = "done";
           return true;
         } catch (caught) {
           setError(vaultErrorText(causeOf(caught), undefined, home));
           return false;
+        } finally {
+          if (submission.current !== "done") submission.current = "idle";
         }
       }}
     >
