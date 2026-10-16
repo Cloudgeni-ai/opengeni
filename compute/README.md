@@ -111,7 +111,8 @@ asks for a minimum depth once holds allow it; a later wake cancels it.
 - **One memory profile per host** ([ADR 5](docs/adr/0005-host-memory-profiles.md)):
   `bare-metal` uses 4 KiB pages, dirty tracking and in-RAM compression;
   `nested` (a host that is itself a cloud VM) uses 2 MiB huge pages, which
-  make wakes far cheaper there but cannot be compressed.
+  make wakes far cheaper there but cannot be compressed. The agent picks
+  `nested` when the host's CPU reports a hypervisor, unless told otherwise.
 
 ## Surviving restarts
 

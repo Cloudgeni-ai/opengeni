@@ -110,6 +110,24 @@ impl MemoryProfile {
         }
     }
 
+    /// The profile a host should use, from the text of its `/proc/cpuinfo`:
+    /// nested when the CPU says it runs under a hypervisor (the x86
+    /// `hypervisor` flag, which cloud VMs report and bare metal does not),
+    /// bare metal otherwise, including on CPUs that report no such flag.
+    #[must_use]
+    pub fn for_cpuinfo(cpuinfo: &str) -> Self {
+        let under_hypervisor = cpuinfo
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(key, _)| key.trim() == "flags")
+            .any(|(_, flags)| flags.split_whitespace().any(|flag| flag == "hypervisor"));
+        if under_hypervisor {
+            Self::nested()
+        } else {
+            Self::bare_metal()
+        }
+    }
+
     /// Returns the profile if it is safe, or the first rule it breaks.
     pub const fn validate(self) -> Result<Self, ProfileError> {
         match (self.pages, self.save, self.compress) {
@@ -228,5 +246,24 @@ mod tests {
             assert_eq!(profile.to_string().parse::<MemoryProfile>(), Ok(profile));
         }
         assert!("huge".parse::<MemoryProfile>().is_err());
+    }
+
+    #[test]
+    fn a_host_under_a_hypervisor_gets_the_nested_profile() {
+        let cloud_vm = "processor\t: 0\nflags\t\t: fpu vme lahf_lm hypervisor avx2\n";
+        let bare_metal = "processor\t: 0\nflags\t\t: fpu vme lahf_lm avx2\n";
+        let no_flags = "processor\t: 0\nFeatures\t: fp asimd evtstrm\n";
+        assert_eq!(
+            MemoryProfile::for_cpuinfo(cloud_vm),
+            MemoryProfile::nested()
+        );
+        assert_eq!(
+            MemoryProfile::for_cpuinfo(bare_metal),
+            MemoryProfile::bare_metal()
+        );
+        assert_eq!(
+            MemoryProfile::for_cpuinfo(no_flags),
+            MemoryProfile::bare_metal()
+        );
     }
 }

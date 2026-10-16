@@ -155,10 +155,12 @@ struct ServeArgs {
     /// How guest memory is backed and saved: `bare-metal` (4 KiB pages,
     /// dirty-page tracking, compression allowed) or `nested` (2 MiB pages
     /// from the host's reserved huge-page pool, resident-page saves, no
-    /// compression). Nested hosts need the pool reserved first, for example
-    /// through `/proc/sys/vm/nr_hugepages`.
-    #[arg(long, default_value_t = MemoryProfile::bare_metal())]
-    memory_profile: MemoryProfile,
+    /// compression). By default `nested` when this host is itself a VM (its
+    /// CPU reports the hypervisor flag) and `bare-metal` otherwise. Nested
+    /// hosts need the pool reserved first, for example through
+    /// `/proc/sys/vm/nr_hugepages`.
+    #[arg(long)]
+    memory_profile: Option<MemoryProfile>,
     /// Give every sandbox a network: its own namespace, a fixed guest
     /// address, internet access through NAT, and nothing else.
     #[arg(long)]
@@ -402,15 +404,25 @@ fn expect_done(reply: Reply) -> anyhow::Result<()> {
 }
 
 async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
+    let memory_profile = match args.memory_profile {
+        Some(profile) => profile,
+        None => {
+            let cpuinfo =
+                std::fs::read_to_string("/proc/cpuinfo").context("reading /proc/cpuinfo")?;
+            let profile = MemoryProfile::for_cpuinfo(&cpuinfo);
+            tracing::info!(%profile, "memory profile chosen from the CPU's hypervisor flag");
+            profile
+        }
+    };
     let engine = Firecracker::new(FirecrackerConfig {
         firecracker: args.firecracker,
         jailer: args.jailer,
         cgroup_parent: args.cgroup.clone(),
     })
     .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?
-    .with_memory_profile(args.memory_profile)
-    .with_context(|| format!("memory profile {}", args.memory_profile))?;
-    check_huge_pages(args.memory_profile)?;
+    .with_memory_profile(memory_profile)
+    .with_context(|| format!("memory profile {memory_profile}"))?;
+    check_huge_pages(memory_profile)?;
     raise_open_file_limit();
     let mut policy = HostPolicy::default();
     for (step, limit) in args.limits {
@@ -522,7 +534,8 @@ fn check_huge_pages(profile: MemoryProfile) -> anyhow::Result<()> {
     let total = field("HugePages_Total:");
     if total == 0 {
         bail!(
-            "the {profile} memory profile needs reserved huge pages; set /proc/sys/vm/nr_hugepages"
+            "the {profile} memory profile needs reserved huge pages; set \
+             /proc/sys/vm/nr_hugepages, or choose a profile with --memory-profile"
         );
     }
     tracing::info!(
