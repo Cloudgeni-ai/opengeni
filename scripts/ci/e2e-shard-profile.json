@@ -1,0 +1,290 @@
+{
+  "schemaVersion": 1,
+  "tier": "e2e",
+  "units": "milliseconds",
+  "evidence": {
+    "repository": "Cloudgeni-ai/opengeni",
+    "runId": 38914937705,
+    "sourceSha": "5a4f468d1454c1a6aa951fb9b0d577a3f7572c9c",
+    "jobIds": [117022999272, 117022999365, 117022999411, 117022999316],
+    "measurement": "Elapsed log timestamps between successive file starts or the shard completion marker; includes every browser engine and runner overhead. Only completed successful files are used.",
+    "additionalSuccessfulCoverage": {
+      "runId": 38871856784,
+      "sourceSha": "90266f07fc2f983b4826f083f12811b048c4840e",
+      "files": {
+        "packages/react/test/timeline-search.browser.e2e.ts": 116878420430,
+        "test/e2e/react-compiled-css.browser.e2e.ts": 116878420572
+      },
+      "reason": "These unchanged files were not selected by the later impact plan. Retain their successful timings for full plans."
+    },
+    "startupException": {
+      "path": "test/e2e/session-loading-startup.browser.e2e.ts",
+      "runId": 38871856784,
+      "jobId": 116878420469,
+      "sourceSha": "90266f07fc2f983b4826f083f12811b048c4840e",
+      "reason": "The later run killed this file at the aggregate deadline. Its identical source completed all 24 tests in this earlier successful CI job. Never treat the truncated duration as its cost."
+    }
+  },
+  "environment": {
+    "platform": "linux",
+    "architecture": "x64",
+    "bunVersion": "1.4.0",
+    "bunVersionFileSha256": "78b591400c56b7b67b8cb3b2b8a8e65e9093897f02ce0878e6b5405c68620fa7",
+    "dependencyLockSha256": "93acb65e7eb00fcacdcad1d6370d4044dbdc104366bf85fe753cd0cab4d5e7be",
+    "browserRunnerSha256": "d182894c55b112e4a843f08883b1f4f41727b8dcd3aeb9fd470c5060c4443eef"
+  },
+  "entries": {
+    "packages/react/test/timeline-search.browser.e2e.ts": {
+      "sha256": "be254863c5e6b1137c4605f5414cb5a4b570d83f7f611a96471de1aaf2e789e2",
+      "planningWeight": 19138
+    },
+    "test/e2e/ai-gateway-connection.browser.e2e.ts": {
+      "sha256": "ab8002ee8a912c058d6d53ac8cd1d9a51926485372887a12a13a2c468e59661b",
+      "planningWeight": 51326
+    },
+    "test/e2e/annotation-scroll.browser.e2e.ts": {
+      "sha256": "011c4ed92e57fc9dc275ee469254b70d5e93f16e0d1a99a810654775f7ec9e99",
+      "planningWeight": 83948
+    },
+    "test/e2e/appearance.browser.e2e.ts": {
+      "sha256": "6aaa8d48241c1d68e358b1b9af4545a37cabc3f6236787676545c9dcb163dec2",
+      "planningWeight": 10581
+    },
+    "test/e2e/artifact-desktop.browser.e2e.ts": {
+      "sha256": "2d2c0069aa89341c8ef232ae46e75f34bf3dd1fe2c4b5695632a25801a0a0480",
+      "planningWeight": 12228
+    },
+    "test/e2e/artifact-library.browser.e2e.ts": {
+      "sha256": "c55215bfc887786a0a1b6c8e524d0d6614287202d82c507cd88b0c4f054c57aa",
+      "planningWeight": 106685
+    },
+    "test/e2e/capability-catalog.browser.e2e.ts": {
+      "sha256": "08eb37d4a9e0cd60d34f6a4cfa7edfb2ceb628a542cfa2ce450cdd710fa5becb",
+      "planningWeight": 14191
+    },
+    "test/e2e/capability-details.browser.e2e.ts": {
+      "sha256": "86fc39c3766e9706bd3a4b4b27a15d8d3af3321836c8c3c8df812fb0890cbbe3",
+      "planningWeight": 29617
+    },
+    "test/e2e/chat-media-entry.browser.e2e.ts": {
+      "sha256": "67e368a72a18ab078bb2ef82aca4b30afb36a4da859458c889b562ec46f6e8ba",
+      "planningWeight": 15869
+    },
+    "test/e2e/claude-subscription.browser.e2e.ts": {
+      "sha256": "457001c863eba843e7143f84585715a2a61c1eda65cfeacf8f2f99ef15e13e2d",
+      "planningWeight": 89766
+    },
+    "test/e2e/code-editor.browser.e2e.ts": {
+      "sha256": "016cc0aeee1406751cae4d38ad848998a6d6b56f06e09ad1b24d0cb511c58fb4",
+      "planningWeight": 6751
+    },
+    "test/e2e/codex-account.browser.e2e.ts": {
+      "sha256": "98dd65c381a66f58efae1ebd7704b4fd1886f4506c76624b8b15e0c292a0d6e6",
+      "planningWeight": 17479
+    },
+    "test/e2e/compact-session-view.browser.e2e.ts": {
+      "sha256": "21ff3345757888132cd6ab73e5f37bc6e3cd2f71a74b023b34380881bc0b0e04",
+      "planningWeight": 88141
+    },
+    "test/e2e/composer-focus-handoff.browser.e2e.ts": {
+      "sha256": "97fcc2c3d15b1f6b1fb8a54610edbcf53b7a8bc1c4076b4c66ded04402fa2f24",
+      "planningWeight": 10719
+    },
+    "test/e2e/composer-keyboard.browser.e2e.ts": {
+      "sha256": "8a6511c91439f256aab2fba91677e54e99f843a35955186caf7da020be699775",
+      "planningWeight": 46983
+    },
+    "test/e2e/composer-menus.browser.e2e.ts": {
+      "sha256": "ea675174ffb6ea9059847204248f57f66fc5d3aa0223cd7a6d24bee258f3cb30",
+      "planningWeight": 28785
+    },
+    "test/e2e/composer-pane.browser.e2e.ts": {
+      "sha256": "2ab69773d7d684b37887e8f342f3b20768e0310e3902fd24dcae60b1deaece83",
+      "planningWeight": 16811
+    },
+    "test/e2e/composer-responsive.browser.e2e.ts": {
+      "sha256": "4a2a63f0b4e7ae60709979e2f4fc08a5e0a0528102564ac9ab371fcb32f3c657",
+      "planningWeight": 47156
+    },
+    "test/e2e/connected-machine-removal.browser.e2e.ts": {
+      "sha256": "1c727f074dcbbdde4d66fc1e1d8d6b9d7e304fc3fa21e6ef2fb2a9ff605c558f",
+      "planningWeight": 33068
+    },
+    "test/e2e/connector-accounts.browser.e2e.ts": {
+      "sha256": "7b23c8311e4f70ab15d8c113a9dc51745918a118fdb31e656934bb00e14d9aa0",
+      "planningWeight": 19953
+    },
+    "test/e2e/crypto-random-uuid.browser.e2e.ts": {
+      "sha256": "49aa9c9050f4978da4ca927cfa201bf95579b7251255a64e69a9a135237e306e",
+      "planningWeight": 4110
+    },
+    "test/e2e/developer-settings.browser.e2e.ts": {
+      "sha256": "ad26bad9f073b81023f211c0f439145238705498e3273f350f012bb9c4a26d8e",
+      "planningWeight": 21210
+    },
+    "test/e2e/embedded-artifact-viewer.browser.e2e.ts": {
+      "sha256": "e58e5d7bef37e6dd21a0bdfc7ba37e36778607ffe7c5094b1650b9fb385302ec",
+      "planningWeight": 20858
+    },
+    "test/e2e/error-branding.browser.e2e.ts": {
+      "sha256": "0d6209b2e2da2f0ae0fb8c942b82138894da891df436ed301f9c55e17d0b5ea0",
+      "planningWeight": 26629
+    },
+    "test/e2e/external-vaults.e2e.ts": {
+      "sha256": "1dada50fe35ced1dd8fa918a3904a4c6a06683fc88648750cf20cb77f7c4db64",
+      "planningWeight": 1778
+    },
+    "test/e2e/failed-session-recovery.browser.e2e.ts": {
+      "sha256": "467351284cbf2a460939c3654765cd351bb9d7ec78139352ffc19e130c121d70",
+      "planningWeight": 56844
+    },
+    "test/e2e/lossless-message.browser.e2e.ts": {
+      "sha256": "47e8bb70bdfc94e158666f10bb866f50946db512f4bb840bf0e279ddf9b13cb0",
+      "planningWeight": 14302
+    },
+    "test/e2e/managed-actor-response.browser.e2e.ts": {
+      "sha256": "04b89836e0fd29d80eeb4b2e7a03cdd39030dfa6f91ae26b0415c6d11c5aabe6",
+      "planningWeight": 4814
+    },
+    "test/e2e/member-connection-access.browser.e2e.ts": {
+      "sha256": "3e9b8a39263cff1e7abe86d05478dd4548d790234c0c1e9720729b47bd2350a6",
+      "planningWeight": 5038
+    },
+    "test/e2e/new-conversation.browser.e2e.ts": {
+      "sha256": "cb1409aa4b4aed70f6e77fb323285068e386eb851f8f990b53c5a43691504958",
+      "planningWeight": 8266
+    },
+    "test/e2e/onepassword-catalog.browser.e2e.ts": {
+      "sha256": "7b53b7cd986dcc427f90b910f2049a0521cb10c56b01e9a981900daeb87fd191",
+      "planningWeight": 11935
+    },
+    "test/e2e/organization-recovery.browser.e2e.ts": {
+      "sha256": "4da6bad87866f03feb58a740417df251416458485d08acaec0f53327526b97ba",
+      "planningWeight": 97369
+    },
+    "test/e2e/organization-workspace-administration.browser.e2e.ts": {
+      "sha256": "581514e215fab1b4da1bae4892c54a2ac36d9882ddbfab1fa2b37e304dee4ce7",
+      "planningWeight": 19060
+    },
+    "test/e2e/personal-github-identity.browser.e2e.ts": {
+      "sha256": "0bda1838283a7431694e4e052dbd7d94e2584f909c75b8087681b7c03d179f7b",
+      "planningWeight": 6109
+    },
+    "test/e2e/personal-resource-attachments.browser.e2e.ts": {
+      "sha256": "e0cf17d5ac6615c157e76b901d5eca2cf235f4b9efc56576459cc461819e21c1",
+      "planningWeight": 11170
+    },
+    "test/e2e/personal-workspace-accessibility.browser.e2e.ts": {
+      "sha256": "0ae190fcc7d3fafbe36d592922e67813d9b0ee50a1d260ea179140bf24d61c46",
+      "planningWeight": 8404
+    },
+    "test/e2e/plugin-discovery.browser.e2e.ts": {
+      "sha256": "75f20316ae0243f8f8ab463ee08b76de3d6cedb97a9a1e3db34dc5092ca13cf1",
+      "planningWeight": 28372
+    },
+    "test/e2e/plugin-removal.browser.e2e.ts": {
+      "sha256": "5740efc8d62059af7c90932f6eed6bd472125c07e07470feca953f8f93ba895d",
+      "planningWeight": 84331
+    },
+    "test/e2e/preview-loading.browser.e2e.ts": {
+      "sha256": "879017a25193121ee44a3272e236496ef6476d1992af005efa30771ea40d09ad",
+      "planningWeight": 4907
+    },
+    "test/e2e/project-rename.browser.e2e.ts": {
+      "sha256": "249fa83e9541a074dff660501bb88fa88f640abd3fc7172b4882aa9997800f1c",
+      "planningWeight": 26783
+    },
+    "test/e2e/react-compiled-css.browser.e2e.ts": {
+      "sha256": "a5a132787762f3d23d9500412fcabd5bf8880667d2f4a4f23a53b6f0b8a91ead",
+      "planningWeight": 431
+    },
+    "test/e2e/restored-attachment-preview.browser.e2e.ts": {
+      "sha256": "0d41e8ac51bab8e332fe1cb66257e50601151d647729ab66dbcb1892a36ed49d",
+      "planningWeight": 6255
+    },
+    "test/e2e/secrets-fake-login-suite.browser.e2e.ts": {
+      "sha256": "3e1993b61f16a68460bda295bb32747ce00bc2f048390e242003162021809bb8",
+      "planningWeight": 4025
+    },
+    "test/e2e/secrets-fake-login.browser.e2e.ts": {
+      "sha256": "db734e512da5fd0fcf340c25e91f98028cc44f29d5946d18ce37fa84aa1781ef",
+      "planningWeight": 12607
+    },
+    "test/e2e/session-artifact-navigation.browser.e2e.ts": {
+      "sha256": "39820905db0ba9c9540a9448f21ccbd8eb92e7c63307753c63994216cfda5864",
+      "planningWeight": 73556
+    },
+    "test/e2e/session-capability-cards.browser.e2e.ts": {
+      "sha256": "cbbe8f100818438a30fbaae69ed3209d4f68527a8a4659ecb314a91d1bf7be54",
+      "planningWeight": 38878
+    },
+    "test/e2e/session-conversation-controller.browser.e2e.ts": {
+      "sha256": "02e95cbdf692a9614d3f79af1256d0d1885c315a5e0b33836bcd13e2695195c4",
+      "planningWeight": 6947
+    },
+    "test/e2e/session-lazy-panels.browser.e2e.ts": {
+      "sha256": "c451d89c3b4722bafdea91c5f0e586cd78d0bd2f994c5fe77551960a45f74655",
+      "planningWeight": 25130
+    },
+    "test/e2e/session-loading-startup.browser.e2e.ts": {
+      "sha256": "deaf166684c04cc188f211ad7abe66158038c3b62ab637bbc52d38b1313b8d20",
+      "planningWeight": 198210
+    },
+    "test/e2e/session-rail-row-metadata.browser.e2e.ts": {
+      "sha256": "12266f19a91431d3973e182fd8390e6d476435f8ea83da22eea2fd7ea423b40d",
+      "planningWeight": 19528
+    },
+    "test/e2e/session-sidebar.browser.e2e.ts": {
+      "sha256": "39c992c7b1fc1e68e51515d67b95e29397ec85d4ac056f45c4d066753aff6301",
+      "planningWeight": 52648
+    },
+    "test/e2e/session-skill-review.browser.e2e.ts": {
+      "sha256": "e31cee5ca81a55bfb7a6c83b656a82f8d3955125e9b337a3eee22f53840835cf",
+      "planningWeight": 7105
+    },
+    "test/e2e/session-usage-limit.browser.e2e.ts": {
+      "sha256": "74b358e1b71286b520a15478ef4b92fddf279c7c4d1e67ec3582cde76951e0fb",
+      "planningWeight": 44385
+    },
+    "test/e2e/setup-account-token.browser.e2e.ts": {
+      "sha256": "2d671e18c0504f2f7353af36164b217f0300f3b91146ac68b5c63eff538c9c95",
+      "planningWeight": 10514
+    },
+    "test/e2e/signed-out-page.browser.e2e.ts": {
+      "sha256": "b7869cc1ad56ad9306f499fb9d0447ce0284b62e5adae8736a4d5a844979e540",
+      "planningWeight": 19252
+    },
+    "test/e2e/site-conversations.browser.e2e.ts": {
+      "sha256": "6113834b585f0608e0f631c7492c152ebcfa71bd43b895ffed5a2767fae18587",
+      "planningWeight": 8013
+    },
+    "test/e2e/skill-review.browser.e2e.ts": {
+      "sha256": "f601664d494d10a2f92a4a76b5862ffd84c682f0b3a73c486ac8ea653d144541",
+      "planningWeight": 7376
+    },
+    "test/e2e/slack-access-link.browser.e2e.ts": {
+      "sha256": "3b1851ebcd85fe13df5c958f024996188d8be363225f754f3992879fd1eceea7",
+      "planningWeight": 30818
+    },
+    "test/e2e/slack-installation-binding.browser.e2e.ts": {
+      "sha256": "dfd927da2912360b2df3624a1a0b9d225bcb3b98ae713752ffe995e29b6d4f88",
+      "planningWeight": 15922
+    },
+    "test/e2e/slack-settings.browser.e2e.ts": {
+      "sha256": "10ee092b0cd44b08932b2c64771952554c9b4e05a03f828b9429b739c19ec3e8",
+      "planningWeight": 25640
+    },
+    "test/e2e/usage-allowances.browser.e2e.ts": {
+      "sha256": "85c65a4195b284a9ca7b6f36ff01e925397f7819dc577239d623ffb0a0f376d2",
+      "planningWeight": 9114
+    },
+    "test/e2e/workspace-pause-timers.browser.e2e.ts": {
+      "sha256": "e38e57e4f420b9d08e4aeaa12ce2ed42409b0b9df7efa1d9532ffa162bf56ae1",
+      "planningWeight": 32141
+    },
+    "test/e2e/workspace-switcher-trigger.browser.e2e.ts": {
+      "sha256": "b69af6c5acdcd9f012a2b7ad6055e10bd494a9ef091fe73617175bd0f3c1336f",
+      "planningWeight": 13338
+    }
+  }
+}
