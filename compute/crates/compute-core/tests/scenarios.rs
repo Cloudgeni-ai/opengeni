@@ -983,6 +983,41 @@ fn a_refused_restore_that_loses_its_records_boots_fresh_from_disk() {
 }
 
 #[test]
+fn a_refused_restore_that_keeps_its_local_record_retries_from_the_local_copy() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(
+        1,
+        state(Level::Archived, Durability::Remote, true),
+        recommended(),
+    );
+    let (step, op) = only_start(&rig.touch(1));
+    assert_eq!(step, Step::Restore);
+    let actions = rig.finish(1, op, Outcome::Failed(Failure::RemoteUntrusted));
+    assert_eq!(
+        rig.state(1),
+        state(Level::Saved, Durability::Local, true),
+        "only the copy in object storage lost its record"
+    );
+    let notices = notices(&actions, 1);
+    assert!(!notices.contains(&Notice::MemoryLost), "programs survive");
+    assert!(notices.contains(&Notice::Retrying {
+        step: Step::Restore,
+        failures: 1,
+    }));
+    assert_nothing_started(&actions);
+    let (step, op) = only_start(&rig.tick_at_deadline());
+    assert_eq!(step, Step::Restore, "the retry restores the local copy");
+    rig.finish(1, op, Outcome::Done);
+    assert_eq!(rig.state(1), State::RUNNING);
+
+    rig.add(2, paused(Durability::Remote), recommended());
+    let (step, op) = only_start(&rig.touch(2));
+    assert_eq!(step, Step::Resume);
+    rig.finish(2, op, Outcome::Failed(Failure::RemoteUntrusted));
+    assert_eq!(rig.state(2), paused(Durability::Local));
+}
+
+#[test]
 fn memory_pressure_cancels_an_archive_that_would_hold_it_up() {
     let mut rig = pressured_rig();
     let rules = SleepRules {
