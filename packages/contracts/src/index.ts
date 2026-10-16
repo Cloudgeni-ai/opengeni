@@ -11887,6 +11887,27 @@ export const ScheduledTaskAccountPlan = /* @__PURE__ */ /* @__PURE__ */ defineSc
 );
 export type ScheduledTaskAccountPlan = z.infer<typeof ScheduledTaskAccountPlan>;
 
+/**
+ * What blocks a schedule. `paused`: no later run could start until a person
+ * acts, so the schedule paused itself; resume it once the cause is fixed.
+ * `notified`: its scheduled runs kept failing or being skipped and its owner
+ * was told once; it keeps running. `message` says what would unblock it.
+ */
+export const ScheduledTaskBlocker = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      state: z.enum(["paused", "notified"]),
+      /** Stable machine reason, such as `scheduled_session_paused`. Readers must tolerate new ones. */
+      reason: z.string().min(1).max(128),
+      message: z.string().min(1).max(1000),
+      /** The run that showed the blocker (the first of a failing streak). */
+      runId: z.string().uuid(),
+      since: z.string(),
+    })
+    .strict(),
+);
+export type ScheduledTaskBlocker = z.infer<typeof ScheduledTaskBlocker>;
+
 export const ScheduledTask = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: z.string().uuid(),
@@ -11937,6 +11958,13 @@ export const ScheduledTask = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
      * authority. Absent when it could not be computed.
      */
     accountPlan: ScheduledTaskAccountPlan.optional(),
+    /**
+     * Read-only response projection: why this schedule paused itself
+     * (`paused`, shown while it stays paused) or why its owner was told its
+     * runs keep failing or being skipped (`notified`, shown while it stays
+     * active and until a run succeeds). Absent when nothing blocks it.
+     */
+    blocker: ScheduledTaskBlocker.optional(),
   }),
 );
 export type ScheduledTask = z.infer<typeof ScheduledTask>;

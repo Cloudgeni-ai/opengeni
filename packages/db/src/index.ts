@@ -5,6 +5,7 @@ export {
   acknowledgeScheduledTaskScheduleReconciliation,
   deferScheduledTaskScheduleReconciliation,
 } from "./scheduled-task-lifecycle";
+export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./human-input-secret-answers";
 export * from "./connected-machine-audience";
