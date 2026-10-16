@@ -46,6 +46,7 @@ import {
   withoutAbsentLaterPosture,
   withoutAbsentVaultPosture,
   stageConnectionAccountIntentColumns,
+  stageSiteSessionAudienceColumns,
 } from "./vault-policy-column-fixture";
 
 setDefaultTimeout(180_000);
@@ -258,6 +259,7 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     await stageVaultPolicyColumns(database.ownerUrl);
     await stageConnectionAccountIntentColumns(database.ownerUrl);
+    await stageSiteSessionAudienceColumns(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await staging.end();
@@ -451,6 +453,11 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
         (table) => `session usage limit private table ${table} is missing or unsafe`,
       ),
       "session usage limit capability has unsafe owner or direct runtime privileges",
+      // Nor the later Site lifecycle cancellation capability (0795).
+      "Site cancellation capability ledger is missing or unsafe",
+      "Site cancellation policy predicate is missing or unsafe",
+      "Site cancellation routine begin_site_session_cancellation(uuid, uuid, uuid, uuid) is missing or unsafe",
+      "Site cancellation routine end_site_session_cancellation(uuid) is missing or unsafe",
     ];
     expect(posture).toEqual({ unprovisioned: expected, provisioned: expected });
   });

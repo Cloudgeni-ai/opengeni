@@ -17,6 +17,7 @@ import { provisionRoles } from "../src/provision-roles";
 import {
   stageVaultPolicyColumns,
   stageConnectionAccountIntentColumns,
+  stageSiteSessionAudienceColumns,
 } from "./vault-policy-column-fixture";
 
 setDefaultTimeout(180_000);
@@ -45,6 +46,7 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     await stageVaultPolicyColumns(database.ownerUrl);
     await stageConnectionAccountIntentColumns(database.ownerUrl);
+    await stageSiteSessionAudienceColumns(database.ownerUrl);
     await provisionRoles(database.adminUrl, {
       appPassword: database.appPassword,
     });

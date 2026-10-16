@@ -1,6 +1,35 @@
 import postgres from "postgres";
 import { VAULT_RUNTIME_ROUTINES, VAULT_TABLES } from "../src/runtime-posture";
 
+/** Current session adapters project 0793 audience columns even in historical
+ * non-Site fixtures. Stage only nullable fields, never the later access policy.
+ * Drop them before replaying 0793 so that migration owns its real backfill. */
+export async function stageSiteSessionAudienceColumns(ownerUrl: string): Promise<void> {
+  const owner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
+  try {
+    await owner`alter table sessions
+      add column site_id uuid,
+      add column site_access_root_id uuid,
+      add column site_viewer_principal text,
+      add column site_owner_subject_id text`;
+  } finally {
+    await owner.end({ timeout: 5 });
+  }
+}
+
+export async function dropSiteSessionAudienceColumns(ownerUrl: string): Promise<void> {
+  const owner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
+  try {
+    await owner`alter table sessions
+      drop column site_id,
+      drop column site_access_root_id,
+      drop column site_viewer_principal,
+      drop column site_owner_subject_id`;
+  } finally {
+    await owner.end({ timeout: 5 });
+  }
+}
+
 /**
  * Fixtures stopped before 0739 still write sessions and schedules through the
  * current adapters, which name `vault_policy`. Stage the column exactly as
