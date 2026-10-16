@@ -8,6 +8,7 @@ import {
   type OwnerMigratedTestDatabase,
 } from "../../testing/src/shared-pg";
 import { migrate } from "../src/migrate";
+import { migrationSqlForServer } from "../src/migration-postgres-compatibility";
 import {
   canonicalSessionVisibilityTransitionHash,
   createDb,
@@ -366,7 +367,11 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
       // Full-schema coverage above still applies the complete migration chain.
       await setup`insert into schema_migrations (name) select unnest(${embeddingMigrationTail}::text[])`;
       await migrate(driftOwned.ownerUrl);
-      const migration = await readFile(migrationUrl, "utf8");
+      const migration = await migrationSqlForServer(
+        setup,
+        "0345_tenant_scoped_session_tenancy_fence.sql",
+        await readFile(migrationUrl, "utf8"),
+      );
       const sessionEventCursorMigration = await readFile(sessionEventCursorMigrationUrl, "utf8");
       const blockStart = migration.indexOf("DO $repair_owner_fenced_access_scopes$");
       const blockTerminator = "$repair_owner_fenced_access_scopes$;";
@@ -1225,7 +1230,11 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
         prepare: false,
         onnotice: () => undefined,
       });
-      const migration0345 = await readFile(migrationUrl, "utf8");
+      const migration0345 = await migrationSqlForServer(
+        ownerSetup,
+        "0345_tenant_scoped_session_tenancy_fence.sql",
+        await readFile(migrationUrl, "utf8"),
+      );
       const pre0345Files = (await readdir(migrationsDir))
         .filter((file) => file.endsWith(".sql") && file < "0345_")
         .sort();
@@ -1721,7 +1730,7 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
         await ownerAclReplay.unsafe(`SET search_path = "${targetA}", opengeni_private, public`);
         let aclDriftError: unknown;
         try {
-          await ownerAclReplay.unsafe(await readFile(migrationUrl, "utf8"));
+          await ownerAclReplay.unsafe(migration0345);
         } catch (error) {
           aclDriftError = error;
         }

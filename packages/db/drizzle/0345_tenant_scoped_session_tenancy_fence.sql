@@ -61,10 +61,7 @@ BEGIN
     ORDER BY constraint_value.conname
   ) INTO actual_constraints
   FROM pg_catalog.pg_constraint constraint_value
-  WHERE constraint_value.conrelid = registry_table
-    -- PostgreSQL 18 also records column NOT NULL constraints here; those are
-    -- already checked through pg_attribute.attnotnull above.
-    AND constraint_value.contype <> 'n';
+  WHERE constraint_value.conrelid = registry_table;
   IF actual_constraints IS DISTINCT FROM ARRAY[
     'session_tenancy_fence_target_registry_pk:p:PRIMARY KEY (singleton)',
     'session_tenancy_fence_target_registry_singleton_chk:c:CHECK (singleton)'
@@ -241,7 +238,6 @@ BEGIN
     OR (
       SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint constraint_value
       WHERE constraint_value.conrelid = capability_table
-        AND constraint_value.contype <> 'n'
     ) <> 1
   THEN
     RAISE EXCEPTION '0345 session tenancy inventory ledger constraint drift'
@@ -407,7 +403,6 @@ BEGIN
     OR (
       SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint constraint_value
       WHERE constraint_value.conrelid = capability_table
-        AND constraint_value.contype <> 'n'
     ) <> 1
     OR EXISTS (
       SELECT 1
