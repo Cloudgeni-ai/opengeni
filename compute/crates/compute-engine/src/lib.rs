@@ -11,6 +11,7 @@
 pub mod cgroup;
 mod error;
 pub mod firecracker;
+mod profile;
 mod spec;
 pub mod vsock;
 
@@ -18,7 +19,8 @@ use std::future::Future;
 use std::time::Duration;
 
 pub use error::{EngineError, ErrorKind};
-pub use spec::{Drive, Network, SnapshotFiles, VmSpec};
+pub use profile::{MemoryProfile, PageSize, ProfileError, SaveMode};
+pub use spec::{Drive, MemorySource, Network, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
 pub use tokio_util::sync::CancellationToken;
 
 /// How an interruptible operation ended.
@@ -53,11 +55,16 @@ pub trait Engine: Send + Sync + 'static {
     /// A running VM process.
     type Vm: Send + Sync + 'static;
 
+    /// How this engine backs, saves and compresses guest memory.
+    fn memory_profile(&self) -> MemoryProfile;
+
     /// Boots a fresh VM from its disks.
     fn boot(&self, spec: &VmSpec) -> impl Future<Output = Result<Self::Vm, EngineError>> + Send;
 
     /// Starts a VM from saved state and leaves it paused. Memory is loaded
-    /// lazily, as the guest touches it.
+    /// lazily, as the guest touches it, from `files.memory`. A
+    /// [`MemorySource::Pager`] must already be listening, and must keep
+    /// serving until the VM ends: restoring devices touches guest memory.
     ///
     /// The VM stays paused so the caller can mark the saved image as stale
     /// before the guest runs: once the guest writes to its disk, the old
@@ -66,7 +73,7 @@ pub trait Engine: Send + Sync + 'static {
     fn restore(
         &self,
         spec: &VmSpec,
-        files: &SnapshotFiles,
+        files: &RestoreFiles,
     ) -> impl Future<Output = Result<Self::Vm, EngineError>> + Send;
 
     /// Stops the VM's processors. Memory stays in place. A transient
@@ -86,13 +93,19 @@ pub trait Engine: Send + Sync + 'static {
         cancel: &CancellationToken,
     ) -> impl Future<Output = Result<Completion, EngineError>> + Send;
 
-    /// Writes a paused VM's processor, device and memory state to `files`.
-    /// The VM stays paused, so the caller can still resume it instead of
-    /// stopping it.
+    /// Writes a paused VM's processor, device and memory state to `files`,
+    /// which must not exist yet. The VM stays paused, so the caller can
+    /// still resume it instead of stopping it.
+    ///
+    /// A [`SnapshotKind::Diff`] that succeeds is the only record of which
+    /// pages changed: the next diff starts from it. A caller that cannot
+    /// merge it, or sees this call fail, must ask for
+    /// [`SnapshotKind::Full`] next time.
     fn snapshot(
         &self,
         vm: &Self::Vm,
         files: &SnapshotFiles,
+        kind: SnapshotKind,
     ) -> impl Future<Output = Result<(), EngineError>> + Send;
 
     /// Ends the VM process and releases its host resources. Its disks and

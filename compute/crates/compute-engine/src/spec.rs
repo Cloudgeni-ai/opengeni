@@ -75,11 +75,45 @@ impl VmSpec {
     }
 }
 
-/// Where a saved VM lives on local disk.
+/// Where a snapshot is written on local disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotFiles {
     /// Device and processor state; small.
     pub state: PathBuf,
-    /// Guest memory image; as large as guest memory, but sparse.
+    /// Guest memory: a sparse file as large as guest memory. Which pages it
+    /// holds depends on the [`SnapshotKind`].
     pub memory: PathBuf,
+}
+
+/// Which memory pages a snapshot writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotKind {
+    /// Only pages that may differ from the VM's memory source: the image it
+    /// was restored from, or zeros for a VM booted fresh. Every page the file
+    /// does not hold (a hole) equals the source, so the result is only
+    /// usable merged over that source. Cheap: work scales with what changed.
+    Diff,
+    /// Every page. Needed whenever the source is unknown, for example after a
+    /// diff that was written but never merged.
+    Full,
+}
+
+/// Where a restored VM's memory comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemorySource {
+    /// Map this complete memory image file copy-on-write; the page cache
+    /// supplies pages as the guest touches them. Only for 4 KiB pages.
+    File(PathBuf),
+    /// A page-fault handler listening on this Unix socket supplies every
+    /// page; see the `compute-pager` crate.
+    Pager(PathBuf),
+}
+
+/// What a VM is restored from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreFiles {
+    /// Device and processor state.
+    pub state: PathBuf,
+    /// Guest memory.
+    pub memory: MemorySource,
 }

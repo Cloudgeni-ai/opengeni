@@ -1,15 +1,15 @@
-//! Linux UFFD transport and serialized pager. The owner must keep the snapshot
+//! Linux UFFD transport and serialized pager. The owner must keep the image
 //! immutable and supervise both the pager and VMM: a dead pager stalls the VM.
 
+use crate::source::Source;
 use crate::{Layout, Mapping, Page, Profile};
-use memmap2::{Mmap, MmapMut, MmapOptions};
+use memmap2::MmapMut;
 use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
 use serde::Serialize;
 use std::{
     collections::VecDeque,
-    fs::File,
     io::{self, IoSliceMut, Read},
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     os::unix::net::UnixStream,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
@@ -21,6 +21,13 @@ const PRESENT: u8 = 1;
 const REMOVED: u8 = 2;
 const UNMAPPED: u8 = 4;
 const RECORDED: u8 = 8;
+/// Queued for prefetch and waiting on the source.
+const WAITING: u8 = 16;
+/// Largest single copy, and largest range asked of a source.
+pub const MAX_BATCH: u64 = 2 << 20;
+/// Prefetch runs waiting on the source at once. Each one asks the source
+/// for its bytes, so this is how far ahead of the copies fetching runs.
+const LOOKAHEAD: usize = 256;
 
 #[repr(C)]
 #[derive(Default, Debug)]
@@ -44,8 +51,12 @@ fn invalid(message: &str) -> io::Error {
 }
 
 fn decode(bytes: &[u8; 32]) -> io::Result<Event> {
-    let a = u64::from_ne_bytes(bytes[8..16].try_into().expect("fixed slice"));
-    let b = u64::from_ne_bytes(bytes[16..24].try_into().expect("fixed slice"));
+    let word = |at: usize| {
+        let mut word = [0_u8; 8];
+        word.copy_from_slice(&bytes[at..at + 8]);
+        u64::from_ne_bytes(word)
+    };
+    let (a, b) = (word(8), word(16));
     match bytes[0] {
         0x12 if a & !1 == 0 => Ok(Event::Fault(b)),
         0x15 if a < b => Ok(Event::Remove(a, b)),
@@ -109,9 +120,11 @@ pub fn handshake(mut stream: &UnixStream) -> io::Result<(OwnedFd, Vec<Mapping>)>
 }
 
 /// Counters are cumulative; timing the caller's full wake also includes prefetch.
-#[derive(Default, Debug, Serialize)]
+#[derive(Default, Debug, Clone, Serialize)]
 pub struct Stats {
     pub faults: u64,
+    /// Faults that had to wait for the source.
+    pub parked_faults: u64,
     pub copy_calls: u64,
     pub copied_bytes: u64,
     pub zero_bytes: u64,
@@ -119,41 +132,89 @@ pub struct Stats {
     pub retry_events: u64,
     pub remove_events: u64,
     pub unmap_events: u64,
+    /// Pages the prefetch plan copied in.
+    pub prefetched_pages: u64,
+    /// Time from queueing the prefetch plan to its last page arriving.
     pub prefetch_ms: f64,
 }
 
-/// One snapshot and UFFD. No global runtime or thread pool is required.
+/// Something the caller of [`Pager::run`] may want to act on.
 #[derive(Debug)]
-pub struct Pager {
+pub enum Progress<'a> {
+    /// Every page of the prefetch plan is in place (or was discarded).
+    Prefetched,
+    /// The first-touch recording window closed; these are the image offsets
+    /// the guest touched first, in order.
+    Recorded(&'a [u64]),
+}
+
+/// How one copy attempt went.
+enum Copied {
+    /// This many pages are now in place.
+    Pages(usize),
+    /// A mapping change raced the copy; read events, then retry.
+    Retry,
+    /// The source does not have the bytes yet.
+    Pending,
+}
+
+/// A contiguous run of pages: `count` pages starting at `first`.
+#[derive(Clone, Copy, Debug)]
+struct Run {
+    first: Page,
+    count: usize,
+}
+
+impl Run {
+    fn page(&self, at: usize) -> Page {
+        let step = self.first.size * at as u64;
+        Page {
+            address: self.first.address + step,
+            offset: self.first.offset + step,
+            size: self.first.size,
+            index: self.first.index + at,
+        }
+    }
+}
+
+/// One memory image served to one VMM through its UFFD. A single owner
+/// serializes demand faults, discard events and prefetch; nothing here
+/// blocks on the source.
+#[derive(Debug)]
+pub struct Pager<S> {
     fd: OwnedFd,
     // Keep the stream alive; its HUP signals VMM exit, unlike the shared UFFD.
     peer: UnixStream,
-    source: Mmap,
+    source: S,
     zero: MmapMut,
     layout: Layout,
     state: Vec<u8>,
     trace: Vec<u64>,
-    pending: VecDeque<u64>,
+    /// Faulting addresses ready to serve.
+    faults: VecDeque<u64>,
+    /// Faulting addresses waiting on the source.
+    parked: Vec<u64>,
+    /// Prefetch pages not tried yet, in priority order.
+    plan: VecDeque<Page>,
+    /// Prefetch runs waiting on the source.
+    waiting: Vec<Run>,
+    max_batch: u64,
     started: Instant,
     record_for: Duration,
+    recorded: bool,
+    prefetch_started: Option<Instant>,
     pub stats: Stats,
 }
 
-impl Pager {
-    #[must_use]
-    pub fn layout(&self) -> &Layout {
-        &self.layout
-    }
-
-    /// # Safety
-    /// The file must not be modified or truncated while this pager is alive.
-    pub unsafe fn new(peer: UnixStream, snapshot: &File, record_for: Duration) -> io::Result<Self> {
+impl<S: Source> Pager<S> {
+    /// Completes the VMM's handshake on `peer` and serves its memory from
+    /// `source`, recording the order the guest first touches pages for
+    /// `record_for`.
+    pub fn new(peer: UnixStream, source: S, record_for: Duration) -> io::Result<Self> {
         peer.set_read_timeout(Some(Duration::from_secs(10)))?;
         let (fd, regions) = handshake(&peer)?;
-        let layout = Layout::new(regions, snapshot.metadata()?.len())?;
-        // SAFETY: the caller guarantees an immutable snapshot for the map lifetime.
-        let source = unsafe { MmapOptions::new().map(snapshot)? };
-        let zero = MmapMut::map_anon(2_097_152)?;
+        let layout = Layout::new(regions, source.len())?;
+        let zero = MmapMut::map_anon(usize::try_from(MAX_BATCH).map_err(|_| invalid("batch"))?)?;
         let state = vec![0; layout.page_count()];
         Ok(Self {
             fd,
@@ -163,13 +224,30 @@ impl Pager {
             layout,
             state,
             trace: Vec::new(),
-            pending: VecDeque::new(),
+            faults: VecDeque::new(),
+            parked: Vec::new(),
+            plan: VecDeque::new(),
+            waiting: Vec::new(),
+            max_batch: MAX_BATCH,
             started: Instant::now(),
             record_for,
+            recorded: false,
+            prefetch_started: None,
             stats: Stats::default(),
         })
     }
 
+    #[must_use]
+    pub fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
+    #[must_use]
+    pub fn source(&self) -> &S {
+        &self.source
+    }
+
+    /// The pages the guest touched first so far, bound to `snapshot_id`.
     #[must_use]
     pub fn profile(&self, snapshot_id: String) -> Profile {
         Profile {
@@ -179,25 +257,70 @@ impl Pager {
         }
     }
 
+    /// Queues `pages` to be copied in ahead of demand, in order, in copies
+    /// of at most `max_batch` bytes. Demand faults always go first.
+    pub fn queue_prefetch(&mut self, pages: &[Page], max_batch: u64) -> io::Result<()> {
+        // Revalidate public Page inputs rather than trusting caller indices.
+        if pages
+            .iter()
+            .any(|page| self.layout.offset(page.offset) != Some(*page))
+        {
+            return Err(invalid("invalid prefetch page"));
+        }
+        self.max_batch = max_batch.clamp(1, MAX_BATCH);
+        self.plan.extend(pages);
+        self.prefetch_started.get_or_insert_with(Instant::now);
+        Ok(())
+    }
+
+    /// Whether the prefetch plan is finished.
+    #[must_use]
+    pub fn prefetched(&self) -> bool {
+        self.plan.is_empty() && self.waiting.is_empty()
+    }
+
+    /// Copies `pages` in ahead of demand and returns once they are all in
+    /// place, serving demand faults meanwhile.
+    pub fn prefetch(&mut self, pages: &[Page], max_batch: u64) -> io::Result<()> {
+        self.queue_prefetch(pages, max_batch)?;
+        while !self.prefetched() {
+            self.turn()?;
+            if !self.prefetched() && self.wait(Duration::from_millis(100))? {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "the VMM disconnected during prefetch",
+                ));
+            }
+        }
+        self.finish_prefetch();
+        Ok(())
+    }
+
+    fn finish_prefetch(&mut self) {
+        if let Some(started) = self.prefetch_started.take() {
+            self.stats.prefetch_ms += started.elapsed().as_secs_f64() * 1000.0;
+        }
+    }
+
     fn read_event(&self) -> io::Result<Option<Event>> {
         let mut bytes = [0_u8; 32];
-        // SAFETY: valid writable buffer; fd remains owned for the call.
-        let count =
-            unsafe { libc::read(self.fd.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len()) };
-        if count == 32 {
-            return decode(&bytes).map(Some);
-        }
-        if count == -1 {
+        loop {
+            // SAFETY: valid writable buffer; fd remains owned for the call.
+            let count =
+                unsafe { libc::read(self.fd.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len()) };
+            if count == 32 {
+                return decode(&bytes).map(Some);
+            }
+            if count != -1 {
+                return Err(invalid("short UFFD event read"));
+            }
             let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::WouldBlock {
-                return Ok(None);
+            match error.kind() {
+                io::ErrorKind::WouldBlock => return Ok(None),
+                io::ErrorKind::Interrupted => {}
+                _ => return Err(error),
             }
-            if error.kind() == io::ErrorKind::Interrupted {
-                return self.read_event();
-            }
-            return Err(error);
         }
-        Err(invalid("short UFFD event read"))
     }
 
     fn invalidate(&mut self, start: u64, end: u64, unmapped: bool) -> io::Result<()> {
@@ -217,14 +340,15 @@ impl Pager {
         Ok(())
     }
 
-    /// Drain notifications before copying. REMOVE invalidates snapshot content
-    /// permanently, whereas UNMAP retires the destination and forbids copying.
-    pub fn service_pending(&mut self) -> io::Result<()> {
+    /// Reads every pending notification. REMOVE invalidates image contents
+    /// permanently (the page reads as zeros from then on), whereas UNMAP
+    /// retires the destination.
+    fn drain_events(&mut self) -> io::Result<()> {
         while let Some(event) = self.read_event()? {
             match event {
                 Event::Fault(address) => {
                     self.stats.faults += 1;
-                    self.pending.push_back(address);
+                    self.faults.push_back(address);
                 }
                 Event::Remove(start, end) => {
                     self.stats.remove_events += 1;
@@ -236,7 +360,45 @@ impl Pager {
                 }
             }
         }
-        while let Some(address) = self.pending.pop_front() {
+        Ok(())
+    }
+
+    /// One round of work that never blocks: read notifications, serve every
+    /// fault whose bytes are available, then advance prefetch.
+    pub fn turn(&mut self) -> io::Result<()> {
+        self.drain_events()?;
+        if self.source.ready_fd().is_some() && readable(self.source_fd())? {
+            self.source.acknowledge()?;
+            self.unpark();
+        }
+        self.serve_faults()?;
+        self.advance_prefetch()
+    }
+
+    /// Serves pending demand faults; an alias of [`Pager::turn`] kept for
+    /// callers that drive the pager by hand.
+    pub fn service_pending(&mut self) -> io::Result<()> {
+        self.turn()
+    }
+
+    fn source_fd(&self) -> RawFd {
+        self.source.ready_fd().map_or(-1, |fd| fd.as_raw_fd())
+    }
+
+    /// Retries everything that waited on the source.
+    fn unpark(&mut self) {
+        self.faults.extend(self.parked.drain(..));
+        for run in self.waiting.drain(..).rev() {
+            for at in (0..run.count).rev() {
+                let page = run.page(at);
+                self.state[page.index] &= !WAITING;
+                self.plan.push_front(page);
+            }
+        }
+    }
+
+    fn serve_faults(&mut self) -> io::Result<()> {
+        while let Some(address) = self.faults.pop_front() {
             let page = self
                 .layout
                 .address(address)
@@ -248,22 +410,98 @@ impl Pager {
                 self.trace.push(page.offset);
                 self.state[page.index] |= RECORDED;
             }
-            if self.copy(page, 1)? == 0 {
-                self.pending.push_front(address);
-                break;
+            match self.copy(
+                Run {
+                    first: page,
+                    count: 1,
+                },
+                true,
+            )? {
+                Copied::Pages(_) => {}
+                Copied::Retry => {
+                    self.faults.push_front(address);
+                    break;
+                }
+                Copied::Pending => {
+                    self.stats.parked_faults += 1;
+                    self.parked.push(address);
+                }
             }
         }
         Ok(())
     }
 
-    fn copy(&mut self, page: Page, pages: usize) -> io::Result<usize> {
+    fn advance_prefetch(&mut self) -> io::Result<()> {
+        while self.faults.is_empty() && self.waiting.len() < LOOKAHEAD {
+            let Some(first) = self.plan.pop_front() else {
+                break;
+            };
+            if self.state[first.index] & (PRESENT | UNMAPPED | WAITING) != 0 {
+                continue;
+            }
+            let region_end = self
+                .layout
+                .region_end(first.address)
+                .ok_or_else(|| invalid("invalid prefetch region"))?;
+            let mut run = Run { first, count: 1 };
+            while self.state[first.index] & REMOVED == 0 {
+                let Some(&next) = self.plan.front() else {
+                    break;
+                };
+                let expected = run.page(run.count);
+                let length = first.size * (run.count as u64 + 1);
+                if length > self.max_batch
+                    || first.address + length > region_end
+                    || next != expected
+                    || self.state[next.index] & (PRESENT | REMOVED | UNMAPPED | WAITING) != 0
+                {
+                    break;
+                }
+                self.plan.pop_front();
+                run.count += 1;
+            }
+            match self.copy(run, false)? {
+                Copied::Pages(done) => {
+                    self.stats.prefetched_pages += done as u64;
+                    // Put back whatever the kernel did not copy this time.
+                    for at in (done..run.count).rev() {
+                        self.plan.push_front(run.page(at));
+                    }
+                }
+                Copied::Retry => {
+                    for at in (0..run.count).rev() {
+                        self.plan.push_front(run.page(at));
+                    }
+                    break;
+                }
+                Copied::Pending => {
+                    for at in 0..run.count {
+                        self.state[run.page(at).index] |= WAITING;
+                    }
+                    self.waiting.push(run);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Copies `run` into guest memory: zeros for discarded pages, the
+    /// image's bytes otherwise.
+    fn copy(&mut self, run: Run, urgent: bool) -> io::Result<Copied> {
+        let page = run.first;
         let zero = self.state[page.index] & REMOVED != 0;
-        let length = page.size * u64::try_from(pages).map_err(|_| invalid("batch overflow"))?;
+        let length = page.size * run.count as u64;
+        if length > MAX_BATCH {
+            return Err(invalid("copy larger than a batch"));
+        }
         let source = if zero {
             self.zero.as_ptr()
         } else {
-            let offset = usize::try_from(page.offset).map_err(|_| invalid("offset overflow"))?;
-            self.source[offset..].as_ptr()
+            match self.source.get(page.offset, length, urgent)? {
+                Some(bytes) if bytes.len() as u64 == length => bytes.as_ptr(),
+                Some(_) => return Err(invalid("source returned the wrong length")),
+                None => return Ok(Copied::Pending),
+            }
         };
         let mut range = CopyRange {
             dst: page.address,
@@ -272,8 +510,9 @@ impl Pager {
             ..CopyRange::default()
         };
         self.stats.copy_calls += 1;
-        // SAFETY: the UAPI structure is repr(C); layout and batching validate
-        // the destination and mapped source bounds. The kernel validates the FD.
+        // SAFETY: the UAPI structure is repr(C); the layout validated the
+        // destination, and the source bytes stay valid until the next call
+        // on the source, which cannot happen during this ioctl.
         let result = unsafe { libc::ioctl(self.fd.as_raw_fd(), COPY, &raw mut range) };
         if range.copied > 0 {
             let bytes = u64::try_from(range.copied).map_err(|_| invalid("negative copy count"))?;
@@ -289,18 +528,18 @@ impl Pager {
             if zero {
                 self.stats.zero_bytes += bytes;
             }
-            return Ok(done);
+            return Ok(Copied::Pages(done));
         }
         if result < 0 {
             let error = io::Error::last_os_error();
             // A mapping-changing event raced the copy. Read it before retrying
-            // so REMOVE can replace the snapshot source with zero contents.
+            // so REMOVE can replace the image contents with zeros.
             if matches!(
                 error.raw_os_error(),
                 Some(libc::EAGAIN | libc::EINTR | libc::ENOENT)
             ) {
                 self.stats.retry_events += 1;
-                return Ok(0);
+                return Ok(Copied::Retry);
             }
             if error.raw_os_error() == Some(libc::EEXIST) {
                 self.state[page.index] |= PRESENT;
@@ -310,62 +549,60 @@ impl Pager {
                 if unsafe { libc::ioctl(self.fd.as_raw_fd(), WAKE, range.as_mut_ptr()) } < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                return Ok(1);
+                return Ok(Copied::Pages(1));
             }
             return Err(error);
         }
         Err(invalid("UFFD copy made no progress"))
     }
 
-    /// Bulk-copy contiguous profile runs, bounded by `max_batch` bytes. Demand
-    /// faults and discard events take priority at each batch boundary.
-    pub fn prefetch(&mut self, pages: &[Page], max_batch: u64) -> io::Result<()> {
-        let started = Instant::now();
-        let mut cursor = 0;
-        while cursor < pages.len() {
-            self.service_pending()?;
-            let first = pages[cursor];
-            // Revalidate public Page inputs rather than trusting caller indices.
-            if self.layout.offset(first.offset) != Some(first) {
-                return Err(invalid("invalid prefetch page"));
+    /// Sleeps until the UFFD, the VMM's socket or the source has something,
+    /// or `timeout` passes. Returns whether the VMM hung up.
+    fn wait(&self, timeout: Duration) -> io::Result<bool> {
+        let mut poll = [
+            libc::pollfd {
+                fd: self.fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.peer.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: self.source_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let millis = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
+        // SAFETY: valid pollfd array with the matching element count; poll
+        // ignores the negative descriptor of a source without one.
+        let result = unsafe { libc::poll(poll.as_mut_ptr(), 3, millis) };
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
             }
-            let region_end = self
-                .layout
-                .region_end(first.address)
-                .ok_or_else(|| invalid("invalid prefetch region"))?;
-            if self.state[first.index] & (PRESENT | UNMAPPED) != 0 {
-                cursor += 1;
-                continue;
-            }
-            let mut count = 1;
-            while self.state[first.index] & REMOVED == 0 && cursor + count < pages.len() {
-                let next = pages[cursor + count];
-                let distance =
-                    u64::try_from(count).map_err(|_| invalid("batch overflow"))? * first.size;
-                if distance + first.size > max_batch
-                    || distance + first.size > region_end - first.address
-                    || next.address != first.address + distance
-                    || next.offset != first.offset + distance
-                    || next.size != first.size
-                    || next.index != first.index + count
-                    || self.layout.offset(next.offset) != Some(next)
-                    || self.state[next.index] & (PRESENT | REMOVED | UNMAPPED) != 0
-                {
-                    break;
-                }
-                count += 1;
-            }
-            cursor += self.copy(first, count)?;
         }
-        self.stats.prefetch_ms += started.elapsed().as_secs_f64() * 1000.0;
-        Ok(())
+        if poll[0].revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Err(invalid("UFFD disconnected"));
+        }
+        Ok(poll[1].revents & libc::POLLHUP != 0)
     }
 
-    /// Service until cancellation or VMM disconnect. Intended for a dedicated
-    /// thread (or Tokio `spawn_blocking`), never an async executor's poll thread.
-    pub fn run(&mut self, stopped: &AtomicBool) -> io::Result<()> {
+    /// Serves the VMM until `stopped` is set or the VMM disconnects,
+    /// reporting [`Progress`] as it happens. Intended for a dedicated
+    /// thread, never an async executor's poll thread.
+    pub fn run(
+        &mut self,
+        stopped: &AtomicBool,
+        mut progress: impl FnMut(Progress<'_>),
+    ) -> io::Result<()> {
+        let mut reported_prefetch = false;
         while !stopped.load(Ordering::Relaxed) {
-            if let Err(error) = self.service_pending() {
+            if let Err(error) = self.turn() {
                 // The VMM can disappear between the last peer poll and COPY.
                 // ESRCH means its mm no longer exists, not a paging failure.
                 if error.raw_os_error() == Some(libc::ESRCH) {
@@ -373,43 +610,53 @@ impl Pager {
                 }
                 return Err(error);
             }
-            let mut poll = [
-                libc::pollfd {
-                    fd: self.fd.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: self.peer.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-            ];
-            // SAFETY: valid pollfd array with the matching element count.
-            let result = unsafe {
-                libc::poll(
-                    poll.as_mut_ptr(),
-                    2,
-                    if self.pending.is_empty() { 100 } else { 1 },
-                )
+            if !reported_prefetch && self.prefetched() {
+                reported_prefetch = true;
+                self.finish_prefetch();
+                progress(Progress::Prefetched);
+            }
+            if !self.recorded && self.started.elapsed() > self.record_for {
+                self.recorded = true;
+                progress(Progress::Recorded(&self.trace));
+            }
+            let busy = !self.faults.is_empty()
+                || (!self.plan.is_empty() && self.waiting.len() < LOOKAHEAD);
+            let timeout = if !self.faults.is_empty() {
+                Duration::from_millis(1)
+            } else if busy {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(100)
             };
-            if result < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-                return Err(io::Error::last_os_error());
-            }
-            if poll[1].revents & libc::POLLHUP != 0 {
+            if self.wait(timeout)? {
                 return Ok(());
-            }
-            if poll[0].revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
-                return Err(invalid("UFFD disconnected"));
             }
         }
         Ok(())
     }
 }
 
+/// Whether `fd` is readable right now.
+fn readable(fd: RawFd) -> io::Result<bool> {
+    let mut poll = [libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    // SAFETY: one valid pollfd; a zero timeout never blocks.
+    let result = unsafe { libc::poll(poll.as_mut_ptr(), 1, 0) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(poll[0].revents & libc::POLLIN != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::MappedFile;
+    use std::fs::File;
+
     #[test]
     fn event_decoding_is_strict() {
         let mut bytes = [0; 32];
@@ -425,6 +672,7 @@ mod tests {
         bytes[0] = 0x16;
         assert_eq!(decode(&bytes).unwrap(), Event::Unmap(0x1000, 0x2000));
     }
+
     #[test]
     fn copy_abi_size() {
         assert_eq!(size_of::<CopyRange>(), 40);
@@ -479,9 +727,11 @@ mod tests {
         assert!(handshake(&peer).is_err());
     }
 
-    fn live_pager() -> (Pager, MmapMut, UnixStream) {
+    /// A UFFD registered over 16 KiB of fresh anonymous memory, and the
+    /// VMM end of the handshake socket, as Firecracker would send them.
+    fn registered_memory() -> (OwnedFd, MmapMut, UnixStream, UnixStream) {
         use nix::sys::socket::{ControlMessage, sendmsg};
-        use std::io::{IoSlice, Write};
+        use std::io::IoSlice;
         // SAFETY: standard Linux UFFD syscall with nonblocking and CLOEXEC flags.
         let raw = unsafe {
             libc::syscall(
@@ -505,12 +755,6 @@ mod tests {
             unsafe { libc::ioctl(fd.as_raw_fd(), 0xc020_aa00, register.as_mut_ptr()) },
             0
         );
-        // SAFETY: nul-terminated name, valid memfd flags.
-        let raw_source = unsafe { libc::memfd_create(c"pager-test".as_ptr(), libc::MFD_CLOEXEC) };
-        assert!(raw_source >= 0);
-        // SAFETY: memfd_create returned a new owned FD.
-        let mut source = unsafe { File::from_raw_fd(raw_source) };
-        source.write_all(&vec![0x5a; 16384]).unwrap();
         let (peer, sender) = UnixStream::pair().unwrap();
         let mapping = vec![Mapping {
             base_host_virt_addr: memory.as_ptr() as u64,
@@ -528,9 +772,87 @@ mod tests {
             None,
         )
         .unwrap();
-        // SAFETY: source is private to this test and never changed after mapping.
-        let pager = unsafe { Pager::new(peer, &source, Duration::from_secs(60)) }.unwrap();
+        (fd, memory, peer, sender)
+    }
+
+    fn image_file(byte: u8) -> File {
+        use std::io::Write;
+        // SAFETY: nul-terminated name, valid memfd flags.
+        let raw = unsafe { libc::memfd_create(c"pager-test".as_ptr(), libc::MFD_CLOEXEC) };
+        assert!(raw >= 0);
+        // SAFETY: memfd_create returned a new owned FD.
+        let mut file = unsafe { File::from_raw_fd(raw) };
+        file.write_all(&[byte; 16384]).unwrap();
+        file
+    }
+
+    fn live_pager() -> (Pager<MappedFile>, MmapMut, UnixStream) {
+        let (_fd, memory, peer, sender) = registered_memory();
+        let image = image_file(0x5a);
+        // SAFETY: the image is private to this test and never changed.
+        let source = unsafe { MappedFile::new(&image) }.unwrap();
+        let pager = Pager::new(peer, source, Duration::from_secs(60)).unwrap();
         (pager, memory, sender)
+    }
+
+    /// A source whose bytes arrive only when the test says so, signalled
+    /// through an eventfd as a real remote source would.
+    struct Delayed {
+        bytes: Vec<u8>,
+        arrived: bool,
+        asked: Vec<(u64, bool)>,
+        event: OwnedFd,
+    }
+
+    impl Delayed {
+        fn new(fill: u8) -> Self {
+            // SAFETY: eventfd with valid flags returns a new owned descriptor.
+            let raw = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+            assert!(raw >= 0);
+            Self {
+                bytes: vec![fill; 16384],
+                arrived: false,
+                asked: Vec::new(),
+                // SAFETY: eventfd returned a new owned descriptor.
+                event: unsafe { OwnedFd::from_raw_fd(raw) },
+            }
+        }
+
+        fn arrive(fd: RawFd) {
+            let one = 1_u64.to_ne_bytes();
+            // SAFETY: eight bytes to a valid eventfd.
+            assert_eq!(unsafe { libc::write(fd, one.as_ptr().cast(), 8) }, 8);
+        }
+    }
+
+    impl Source for Delayed {
+        fn len(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+
+        fn get(&mut self, offset: u64, len: u64, urgent: bool) -> io::Result<Option<&[u8]>> {
+            self.asked.push((offset, urgent));
+            if !self.arrived {
+                return Ok(None);
+            }
+            let start = usize::try_from(offset).unwrap();
+            Ok(Some(
+                &self.bytes[start..start + usize::try_from(len).unwrap()],
+            ))
+        }
+
+        fn ready_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+            use std::os::fd::AsFd;
+            Some(self.event.as_fd())
+        }
+
+        fn acknowledge(&mut self) -> io::Result<()> {
+            let mut count = [0_u8; 8];
+            // SAFETY: eight writable bytes from a valid eventfd.
+            unsafe { libc::read(self.event.as_raw_fd(), count.as_mut_ptr().cast(), 8) };
+            self.arrived = true;
+            Ok(())
+        }
     }
 
     /// Run with `cargo test -- --include-ignored` on a UFFD-enabled Linux host.
@@ -565,7 +887,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(5);
             while pager.stats.remove_events == 0 {
                 assert!(Instant::now() < deadline, "REMOVE notification timed out");
-                pager.service_pending().unwrap();
+                pager.turn().unwrap();
                 std::thread::yield_now();
             }
             discard.join().unwrap();
@@ -587,7 +909,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(5);
             while !reader.is_finished() {
                 assert!(Instant::now() < deadline, "demand fault timed out");
-                pager.service_pending().unwrap();
+                pager.turn().unwrap();
                 std::thread::yield_now();
             }
             assert_eq!(reader.join().unwrap(), 0x5a);
@@ -598,7 +920,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(5);
             while pager.stats.unmap_events == 0 {
                 assert!(Instant::now() < deadline, "UNMAP notification timed out");
-                pager.service_pending().unwrap();
+                pager.turn().unwrap();
                 std::thread::yield_now();
             }
             unmapper.join().unwrap();
@@ -607,5 +929,41 @@ mod tests {
         let plan = pager.layout.plan(&[0, 4096, 8192, 12288]).unwrap();
         pager.prefetch(&plan, 16384).unwrap();
         assert_eq!(pager.stats.copy_calls, calls);
+    }
+
+    #[test]
+    #[ignore = "requires Linux userfaultfd permission"]
+    fn kernel_faults_wait_for_a_slow_source_without_blocking_the_pager() {
+        let (fd, memory, peer, _sender) = registered_memory();
+        let mut pager = Pager::new(peer, Delayed::new(0x33), Duration::from_secs(60)).unwrap();
+        // Only the pager may hold the UFFD when the memory is unmapped, or the
+        // unmap waits for someone to read its event.
+        drop(fd);
+        let event = pager.source().event.as_raw_fd();
+        let plan = pager.layout.plan(&[8192, 12288]).unwrap();
+        pager.queue_prefetch(&plan, 8192).unwrap();
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| memory[4096]);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while pager.stats.parked_faults == 0 {
+                assert!(Instant::now() < deadline, "fault never parked");
+                pager.turn().unwrap();
+                std::thread::yield_now();
+            }
+            // The demand fault asked urgently; prefetch asked as a batch.
+            assert!(pager.source().asked.contains(&(4096, true)));
+            assert!(pager.source().asked.contains(&(8192, false)));
+            assert!(!reader.is_finished());
+            Delayed::arrive(event);
+            while !reader.is_finished() || !pager.prefetched() {
+                assert!(Instant::now() < deadline, "parked work never resumed");
+                pager.turn().unwrap();
+                std::thread::yield_now();
+            }
+            assert_eq!(reader.join().unwrap(), 0x33);
+        });
+        assert!(memory[8192..].iter().all(|byte| *byte == 0x33));
+        assert_eq!(pager.stats.prefetched_pages, 2);
+        drop(pager);
     }
 }

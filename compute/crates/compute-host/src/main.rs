@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use compute_core::{HostPolicy, MemoryPolicy, SandboxId, Step};
+use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
 use compute_host::net::{Ipv4Net, NetworkConfig};
@@ -139,6 +140,13 @@ struct ServeArgs {
     /// the guest can set its clock and reconnect.
     #[arg(long)]
     restore_notice_port: Option<u32>,
+    /// How guest memory is backed and saved: `bare-metal` (4 KiB pages,
+    /// dirty-page tracking, compression allowed) or `nested` (2 MiB pages
+    /// from the host's reserved huge-page pool, resident-page saves, no
+    /// compression). Nested hosts need the pool reserved first, for example
+    /// through `/proc/sys/vm/nr_hugepages`.
+    #[arg(long, default_value_t = MemoryProfile::bare_metal())]
+    memory_profile: MemoryProfile,
     /// Give every sandbox a network: its own namespace, a fixed guest
     /// address, internet access through NAT, and nothing else.
     #[arg(long)]
@@ -167,7 +175,7 @@ struct ServeArgs {
     #[arg(long, default_value = "5s", value_parser = parse_duration)]
     busy_window: Duration,
     /// This host cannot compress paused VMs' memory, for example because
-    /// guest memory uses huge pages.
+    /// guest memory uses huge pages. The `nested` memory profile implies it.
     #[arg(long)]
     no_compress: bool,
 }
@@ -421,7 +429,11 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         jailer: args.jailer,
         cgroup_parent: args.cgroup.clone(),
     })
-    .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?;
+    .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?
+    .with_memory_profile(args.memory_profile)
+    .with_context(|| format!("memory profile {}", args.memory_profile))?;
+    check_huge_pages(args.memory_profile)?;
+    raise_open_file_limit();
     let mut policy = HostPolicy::default();
     for (step, limit) in args.limits {
         policy.limits = policy.limits.with(step, limit);
@@ -831,5 +843,59 @@ async fn bench(client: &Client, args: &BenchArgs) -> anyhow::Result<()> {
             expect_done(result??)?;
         }
     }
+    Ok(())
+}
+
+/// Refuses a huge-page memory profile on a host without a reserved pool of
+/// 2 MiB pages: every VM's memory would fail to allocate.
+/// Lets the agent hold as many open files as the system allows it. Every VM
+/// keeps several open here (its process, pager, image files and store
+/// connections), so the usual soft limit of 1024 runs out near a hundred
+/// VMs.
+fn raise_open_file_limit() {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let limit = getrlimit(Resource::Nofile);
+    if limit.current == limit.maximum {
+        return;
+    }
+    let raised = Rlimit {
+        current: limit.maximum,
+        maximum: limit.maximum,
+    };
+    match setrlimit(Resource::Nofile, raised) {
+        Ok(()) => tracing::info!(limit = ?limit.maximum, "open-file limit raised"),
+        Err(error) => {
+            tracing::warn!(%error, current = ?limit.current, "could not raise the open-file limit");
+        }
+    }
+}
+
+fn check_huge_pages(profile: MemoryProfile) -> anyhow::Result<()> {
+    if profile.pages != compute_engine::PageSize::Huge {
+        return Ok(());
+    }
+    let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
+    let field = |name: &str| {
+        meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    if field("Hugepagesize:") != 2048 {
+        bail!("the {profile} memory profile needs 2 MiB default huge pages");
+    }
+    let total = field("HugePages_Total:");
+    if total == 0 {
+        bail!(
+            "the {profile} memory profile needs reserved huge pages; set /proc/sys/vm/nr_hugepages"
+        );
+    }
+    tracing::info!(
+        pool_mib = total * 2,
+        free_mib = field("HugePages_Free:") * 2,
+        "huge-page pool"
+    );
     Ok(())
 }

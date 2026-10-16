@@ -520,6 +520,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::protocol::SleepConfig;
 
     /// splitmix64: small, fast and good enough to drive simulations.
     struct Rng(u64);
@@ -546,7 +547,7 @@ mod tests {
         SandboxConfig {
             vcpus: 1,
             memory_mib: 256,
-            sleep: crate::protocol::SleepConfig::default(),
+            sleep: SleepConfig::default(),
         }
     }
 

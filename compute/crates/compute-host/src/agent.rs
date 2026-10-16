@@ -35,7 +35,7 @@ use crate::layout::{Images, Paths, check_root, copy_sparse, link_kernel, vm_spec
 use crate::net::{NetworkConfig, Networks};
 use crate::protocol::{HostStatus, Id, SandboxConfig, SandboxStatus, StepStats, step_name};
 use crate::state::{Change, Disk, Fence, Record, Records, StateError, Stray, check_generation};
-use crate::step::{After, Job, Live};
+use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::Store;
 
 /// How long a starting agent waits for the previous one to let go of the
@@ -550,6 +550,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     pressure: bool,
     guest_ports: Arc<[GuestPort]>,
     restore_notice_port: Option<u32>,
+    #[cfg(target_os = "linux")]
+    fetcher: Option<Arc<crate::lazy::Fetcher>>,
     busy: Option<BusyRule>,
     can_compress: bool,
     /// Lets guest connections report activity without keeping the agent
@@ -608,9 +610,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let (commands_tx, commands) = mpsc::unbounded_channel();
         let (events_tx, events) = mpsc::unbounded_channel();
+        #[cfg(target_os = "linux")]
+        let fetcher = store
+            .chunks()
+            .map(|chunks| Arc::new(crate::lazy::Fetcher::new(chunks.clone())));
+        // Huge-page profiles cannot compress, whatever the host says.
+        let can_compress = config.can_compress && engine.memory_profile().compress;
         let mut agent = Self {
             engine: Arc::new(engine),
             store: Arc::new(store),
+            #[cfg(target_os = "linux")]
+            fetcher,
             records: Arc::new(records),
             net,
             images: Images {
@@ -639,7 +649,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             guest_ports: config.guest_ports.into(),
             restore_notice_port: config.restore_notice_port,
             busy: config.busy,
-            can_compress: config.can_compress,
+            can_compress,
             commands_tx: commands_tx.downgrade(),
         };
         agent.recover(strays).await;
@@ -790,8 +800,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .map_err(HostError::Invalid)?;
         let paths = Paths::new(&self.root, id);
         let spec = vm_spec(id, record.ordinal, &record.config, &paths, &self.images);
-        let (state, vm) = if let Some((vm, found)) = found? {
-            (self.adopted_state(&record, &paths, found).await?, Some(vm))
+        let found = match found? {
+            Some((vm, _)) if crate::step::paged(&paths) => {
+                // The previous agent's pager served this VM's memory and
+                // went with it: the guest would stall on its next page
+                // fault. Its record still says whether a saved image
+                // stands in for it.
+                tracing::warn!(%id, "the VM's memory pager is gone; stopping the VM");
+                self.engine
+                    .stop(vm)
+                    .await
+                    .map_err(|error| HostError::Io(error.to_string()))?;
+                None
+            }
+            found => found,
+        };
+        let (state, vm) = if let Some((vm, found)) = found {
+            (self.adopted_state(&record, found).await?, Some(vm))
         } else {
             // A kernel upgrade on the host reaches the sandbox on its next
             // boot.
@@ -804,7 +829,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let adopted = vm.is_some();
         self.insert(id, paths, spec);
         if let Some(vm) = vm {
-            let live = self.own(id, vm);
+            // What its memory was based on is unknown, so its next save
+            // holds every page.
+            let live = self.own(id, vm, LiveMemory::adopted());
             if let Some(slot) = self.slots.get_mut(&id.0) {
                 slot.incarnation = Some(live.incarnation);
                 slot.vm = Some(live);
@@ -823,17 +850,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// a guest run withdraws the record's word first. A running VM has
     /// moved past any copy, and a paused one without a memory image has no
     /// copy of its current state.
-    async fn adopted_state(
-        &self,
-        record: &Record,
-        paths: &Paths,
-        found: Found,
-    ) -> Result<State, HostError> {
-        let keeps_copy = found == Found::Paused
-            && record.image
-            && record.disk == Disk::Local
-            && paths.snapshot.state.exists()
-            && paths.snapshot.memory.exists();
+    async fn adopted_state(&self, record: &Record, found: Found) -> Result<State, HostError> {
+        // The image itself is checked when a step relies on it, and set
+        // aside if it proves bad.
+        let keeps_copy = found == Found::Paused && record.image;
         if !keeps_copy && (record.image || record.archived) {
             let stale = Change::new().image(false).archived(false);
             self.records
@@ -864,7 +884,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     return Err(HostError::Io("the recorded local disk is missing".into()));
                 }
                 let mut image = record.image;
-                if image && !(paths.snapshot.state.exists() && paths.snapshot.memory.exists()) {
+                if image && !crate::step::recover_images(paths) {
                     tracing::warn!(id = %record.id, "recorded memory image is missing; its programs are lost");
                     let lost = Change::new().image(false);
                     self.records.commit(record.id, record.fence(), lost).await?;
@@ -1348,6 +1368,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             cancel,
             live: if needs_vm { slot.vm.take() } else { None },
             restore_notice_port: self.restore_notice_port,
+            base_image: self.base_image.clone(),
+            #[cfg(target_os = "linux")]
+            fetcher: self.fetcher.clone(),
         };
         let events = self.events_tx.clone();
         tokio::spawn(async move {
@@ -1363,7 +1386,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     fn step_done(&mut self, id: Id, op: OpId, outcome: Outcome, after: After<E::Vm>) {
         let fresh = match after {
-            After::New(vm) => Some(self.own(id, vm)),
+            After::New(vm, memory) => Some(self.own(id, vm, memory)),
             After::Kept(live) => Some(live),
             After::NoVm => None,
         };
@@ -1422,15 +1445,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Takes charge of a VM process, started by a step or found still
     /// running, and watches for it dying on its own.
-    fn own(&mut self, id: Id, vm: E::Vm) -> Live<E::Vm> {
+    fn own(&mut self, id: Id, vm: E::Vm, memory: LiveMemory) -> Live<E::Vm> {
         let incarnation = self.next_incarnation;
         self.next_incarnation += 1;
         let stopping = Arc::new(AtomicBool::new(false));
         let exited = self.engine.exited(&vm);
         let events = self.events_tx.clone();
         let deliberate = Arc::clone(&stopping);
+        let memory_lost = memory.failed();
         tokio::spawn(async move {
-            exited.await;
+            let lost = memory_lost;
+            tokio::select! {
+                () = exited => {}
+                // Its memory can no longer be served: the next page fault
+                // would wait forever, so it counts as dead.
+                () = lost => {}
+            }
             if !deliberate.load(Ordering::Acquire) {
                 let _ = events.send(Event::Exited { id, incarnation });
             }
@@ -1439,6 +1469,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             vm,
             incarnation,
             stopping,
+            memory,
         }
     }
 

@@ -9,7 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig, FirecrackerVm};
 use compute_engine::{
-    CancellationToken, Completion, Drive, Engine, Found, SnapshotFiles, VmSpec, vsock,
+    CancellationToken, Completion, Drive, Engine, Found, MemorySource, RestoreFiles, SnapshotFiles,
+    SnapshotKind, VmSpec, vsock,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -159,6 +160,7 @@ fn owner_and_name(pid: i32) -> (u32, String) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
 async fn boot_pause_compress_snapshot_restore() {
     let Some(lab) = lab() else {
         eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
@@ -230,13 +232,22 @@ async fn boot_pause_compress_snapshot_restore() {
     };
     engine.pause(&vm).await.unwrap();
     let started = Instant::now();
-    engine.snapshot(&vm, &files).await.unwrap();
+    // A fresh boot's memory source is all zeros, so its first diff stands
+    // alone: every page the guest ever wrote is in it.
+    engine
+        .snapshot(&vm, &files, SnapshotKind::Diff)
+        .await
+        .unwrap();
     let snapshot = started.elapsed();
     engine.stop(vm).await.unwrap();
     // Long enough that a clock left standing during the save is caught below.
     tokio::time::sleep(Duration::from_secs(3)).await;
     let started = Instant::now();
-    let vm = engine.restore(&spec, &files).await.unwrap();
+    let restore_files = RestoreFiles {
+        state: files.state.clone(),
+        memory: MemorySource::File(files.memory.clone()),
+    };
+    let vm = engine.restore(&spec, &restore_files).await.unwrap();
     engine.resume(&vm).await.unwrap();
     let restore = started.elapsed();
     let (output, first_byte) = exec(&uds, "cat /root/marker").await.unwrap();

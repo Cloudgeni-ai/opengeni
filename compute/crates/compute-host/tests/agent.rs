@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use compute_core::{HostPolicy, SandboxId, Step};
 use compute_engine::{
-    CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, SnapshotFiles, VmSpec,
+    CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, MemoryProfile,
+    MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
 };
 use compute_host::client::Client;
 use compute_host::protocol::{
@@ -24,6 +25,10 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep};
+
+/// Bytes of fake guest memory, as a memory image is as long as the guest's
+/// memory.
+const FAKE_MEMORY: usize = 64 << 10;
 
 /// How long each fake operation takes.
 #[derive(Clone, Copy, Debug)]
@@ -56,6 +61,9 @@ struct World {
     violations: Mutex<Vec<String>>,
     boots: AtomicUsize,
     restores: AtomicUsize,
+    /// Restores still to refuse as a VMM does when it cannot load an image
+    /// (with a memory-lost error), whatever the image holds.
+    refuse_restores: Mutex<usize>,
     resumes: AtomicUsize,
     adopted: AtomicUsize,
     /// While set, every resume is refused before the guest runs.
@@ -63,6 +71,8 @@ struct World {
     restoring: AtomicUsize,
     max_restoring: AtomicUsize,
     compress_cancelled: AtomicUsize,
+    /// Snapshots taken: full, then diff.
+    snapshots: [AtomicUsize; 2],
     next_vm: AtomicU64,
     /// The latest VM process of every sandbox, by name, so a restarted
     /// agent can take it back and a test can crash it.
@@ -288,13 +298,34 @@ impl Engine for Fake {
         Ok(self.launch(spec, String::new()))
     }
 
-    async fn restore(&self, spec: &VmSpec, files: &SnapshotFiles) -> Result<FakeVm, EngineError> {
+    fn memory_profile(&self) -> MemoryProfile {
+        MemoryProfile::bare_metal()
+    }
+
+    async fn restore(&self, spec: &VmSpec, files: &RestoreFiles) -> Result<FakeVm, EngineError> {
         let now = self.world.restoring.fetch_add(1, Ordering::SeqCst) + 1;
         self.world.max_restoring.fetch_max(now, Ordering::SeqCst);
         sleep(self.delays.restore).await;
         self.world.restoring.fetch_sub(1, Ordering::SeqCst);
-        let memory = std::fs::read_to_string(&files.memory)
+        let refuse = {
+            let mut left = self.world.refuse_restores.lock().unwrap();
+            left.checked_sub(1).map(|fewer| *left = fewer)
+        };
+        if refuse.is_some() {
+            return Err(EngineError::new(
+                ErrorKind::MemoryLost,
+                "restore",
+                "snapshot load refused",
+            ));
+        }
+        let MemorySource::File(path) = &files.memory else {
+            panic!("a bare-metal host restores local images from files");
+        };
+        let memory = std::fs::read(path)
             .map_err(|error| EngineError::caused_by(ErrorKind::MemoryLost, "restore", error))?;
+        let memory = String::from_utf8_lossy(&memory)
+            .trim_end_matches('\0')
+            .to_owned();
         self.world.restores.fetch_add(1, Ordering::Relaxed);
         let vm = self.launch(spec, memory);
         *vm.paused.lock().unwrap() = true;
@@ -340,14 +371,26 @@ impl Engine for Fake {
         Ok(Completion::Finished)
     }
 
-    async fn snapshot(&self, vm: &FakeVm, files: &SnapshotFiles) -> Result<(), EngineError> {
+    async fn snapshot(
+        &self,
+        vm: &FakeVm,
+        files: &SnapshotFiles,
+        kind: SnapshotKind,
+    ) -> Result<(), EngineError> {
         Self::alive(vm, "snapshot")?;
         self.expect_paused(vm, "snapshot", true);
         sleep(self.delays.snapshot).await;
         Self::alive(vm, "snapshot")?;
         let memory = vm.memory.lock().unwrap().clone();
         std::fs::write(&files.state, "state").unwrap();
-        std::fs::write(&files.memory, memory).unwrap();
+        // Like a real engine, the image is as long as guest memory. A diff
+        // holding every page is still a valid diff.
+        let mut image = memory.into_bytes();
+        assert!(image.len() <= FAKE_MEMORY, "fake guest memory overflow");
+        image.resize(FAKE_MEMORY, 0);
+        std::fs::write(&files.memory, image).unwrap();
+        self.world.snapshots[usize::from(kind == SnapshotKind::Diff)]
+            .fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -703,6 +746,84 @@ async fn a_save_keeps_the_paused_vm_ready_to_resume() {
     assert!(
         !lab.image(sandbox),
         "a resumed guest makes the saved image stale"
+    );
+    lab.assert_clean();
+}
+
+/// The memory file of the sandbox's current image, made writable.
+fn current_image_memory(lab: &Lab, sandbox: Id) -> PathBuf {
+    let images = lab.sandbox_dir(sandbox).join("images");
+    let newest = std::fs::read_dir(&images)
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.unwrap().file_name().into_string().ok()?;
+            Some((name.parse::<u64>().ok()?, name))
+        })
+        .max()
+        .map(|(_, name)| name)
+        .unwrap();
+    let memory = images.join(newest).join("memory");
+    let mut permissions = std::fs::metadata(&memory).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&memory, permissions).unwrap();
+    memory
+}
+
+fn quarantined(lab: &Lab, sandbox: Id) -> Vec<String> {
+    let dir = lab.sandbox_dir(sandbox).join("images/quarantine");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_restore_of_a_good_image_keeps_it_and_tries_again() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(17);
+    lab.create(sandbox, SAVE_QUICKLY).await;
+    lab.run(sandbox, &["set hello"]).await;
+    lab.wait_level(sandbox, LevelName::Saved).await;
+
+    // A VMM may refuse for reasons of the host's own, such as a pager that
+    // could not start; the image itself is fine.
+    *lab.world.refuse_restores.lock().unwrap() = 2;
+    assert_eq!(lab.run(sandbox, &["get"]).await, ["hello"]);
+    assert_eq!(*lab.world.refuse_restores.lock().unwrap(), 0);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1, "never rebooted");
+    assert_eq!(quarantined(&lab, sandbox), Vec::<String>::new());
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_restore_of_a_damaged_image_quarantines_it() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(18);
+    lab.create(sandbox, SAVE_QUICKLY).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    lab.wait_level(sandbox, LevelName::Saved).await;
+
+    // Damage only the memory: the quick check before a restore passes, and
+    // only the full check the refusal triggers finds it.
+    let memory = current_image_memory(&lab, sandbox);
+    let mut bytes = std::fs::read(&memory).unwrap();
+    bytes[0] ^= 0xff;
+    std::fs::write(&memory, bytes).unwrap();
+    *lab.world.refuse_restores.lock().unwrap() = 1;
+    assert_eq!(
+        lab.run(sandbox, &["get", "disk"]).await,
+        ["", "kept"],
+        "booted fresh from the files"
+    );
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
+    let quarantined = quarantined(&lab, sandbox);
+    assert!(
+        quarantined.len() == 1 && quarantined[0].ends_with("-damaged"),
+        "{quarantined:?}"
     );
     lab.assert_clean();
 }
