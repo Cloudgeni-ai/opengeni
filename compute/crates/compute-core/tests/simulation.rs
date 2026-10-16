@@ -98,6 +98,8 @@ struct Truth {
     process_lost: bool,
     broken: bool,
     woke: bool,
+    /// The deepest level asked for by a sleep request still to be met.
+    requested: Option<Level>,
     /// Losses of running programs the core has yet to report.
     unreported_losses: u32,
     /// Latest resident memory reported to the core.
@@ -109,6 +111,33 @@ impl Truth {
         self.holds
             .values()
             .any(|until| until.is_none_or(|until| until > now))
+    }
+
+    /// Whether someone waits for the sandbox to wake, or a step wakes it.
+    fn waking(&self, now: At) -> bool {
+        self.wake_pending || self.held(now) || self.op.is_some_and(|(_, step)| step.wakes())
+    }
+
+    /// A wake is done once the sandbox runs. A held sandbox that ends up
+    /// anywhere else needs waking, and stays wanted awake until it runs even
+    /// if the hold ends first.
+    fn update_wake(&mut self, now: At) {
+        if self.state.level == Level::Running {
+            self.wake_pending = false;
+        } else if self.held(now) {
+            self.wake_pending = true;
+        }
+    }
+
+    /// A request to sleep counts relative to where the sandbox is going: a
+    /// sandbox on its way up counts as running.
+    fn request_sleep(&mut self, level: Level, now: At) {
+        let current = if self.waking(now) {
+            Level::Running
+        } else {
+            self.state.level
+        };
+        self.requested = (level > current).then_some(level);
     }
 
     /// Applies a loss computed by the model and expects it to be reported.
@@ -255,28 +284,33 @@ impl World {
         } else {
             match self.rng.below(1000) {
                 0..900 => Outcome::Done,
-                900..960 => Outcome::Failed(Failure::Transient),
+                900..945 => Outcome::Failed(Failure::Transient),
+                945..960 => Outcome::Failed(Failure::Untrusted),
                 960..995 => Outcome::Failed(Failure::MemoryLost),
                 _ => Outcome::Failed(Failure::Fatal),
             }
         };
+        let now = self.now;
         if let Some(truth) = self.live.get_mut(&pending.sandbox)
             && truth.op.is_some_and(|(op, _)| op == pending.op)
         {
             truth.op = None;
-            if pending.step == Step::Resume
+            if matches!(pending.step, Step::Resume | Step::Restore)
                 && matches!(
                     outcome,
                     Outcome::Failed(Failure::MemoryLost | Failure::Fatal)
                 )
             {
-                // The guest may have run, so the saved copy is stale. A
-                // refused or cancelled resume changed nothing.
-                truth.state = State::new(truth.state.level, Durability::Volatile, false);
+                // The guest may have run, so every saved copy is stale. A
+                // refused or cancelled wake changed nothing.
+                truth.settle(truth.state.without_saved_copies());
             }
             match outcome {
                 Outcome::Done => truth.state = pending.step.apply(truth.state),
                 Outcome::Cancelled | Outcome::Failed(Failure::Transient) => {}
+                Outcome::Failed(Failure::Untrusted) => {
+                    truth.settle(truth.state.without_saved_copies());
+                }
                 Outcome::Failed(Failure::MemoryLost) => {
                     truth.settle(truth.state.without_memory_image());
                 }
@@ -285,8 +319,16 @@ impl World {
             if std::mem::take(&mut truth.process_lost) {
                 truth.settle(truth.state.without_process());
             }
-            if truth.state.level == Level::Running {
-                truth.wake_pending = false;
+            truth.update_wake(now);
+            // A sleep step meets a request once nobody waits for a wake.
+            if !pending.step.wakes()
+                && !truth.wake_pending
+                && !truth.held(now)
+                && truth
+                    .requested
+                    .is_some_and(|level| truth.state.level >= level)
+            {
+                truth.requested = None;
             }
         }
         self.send(Input::Finished {
@@ -346,6 +388,11 @@ impl World {
             assert!(view.state.is_consistent(), "{id:?} {:?}", view.state);
             assert_eq!(view.step, truth.op.map(|(_, step)| step), "{id:?} step");
             assert_eq!(view.broken, truth.broken, "{id:?} broken");
+            assert_eq!(
+                view.requested,
+                truth.requested.unwrap_or(Level::Running),
+                "{id:?} sleep request"
+            );
             assert_eq!(truth.unreported_losses, 0, "{id:?} lost programs silently");
             if matches!(truth.state.level, Level::Paused | Level::Compressed)
                 && truth.state.durability != Durability::Volatile
@@ -372,6 +419,7 @@ impl World {
                 process_lost: false,
                 broken: false,
                 woke: false,
+                requested: None,
                 unreported_losses: 0,
                 resident: 0,
             },
@@ -386,6 +434,21 @@ impl World {
     fn random_sandbox(&mut self) -> Option<SandboxId> {
         let ids: Vec<SandboxId> = self.live.keys().copied().collect();
         (!ids.is_empty()).then(|| self.rng.pick(&ids))
+    }
+
+    fn request_sleep(&mut self, id: SandboxId) {
+        let level = self.rng.pick(&Level::ALL);
+        let now = self.now;
+        self.live.get_mut(&id).unwrap().request_sleep(level, now);
+        self.send(Input::Sleep { sandbox: id, level });
+    }
+
+    /// A request to sleep right behind a wake, often while a sleep step is
+    /// still giving way to the wake, which must hold it until the wake ends.
+    fn maybe_request_sleep_while_waking(&mut self, id: SandboxId) {
+        if self.rng.chance(20) {
+            self.request_sleep(id);
+        }
     }
 
     fn random_input(&mut self) {
@@ -404,10 +467,12 @@ impl World {
                 if truth.state.level != Level::Running || truth.op.is_some() {
                     truth.wake_pending = true;
                 }
+                truth.requested = None;
                 self.send(Input::Touch {
                     sandbox: id,
                     priority,
                 });
+                self.maybe_request_sleep_while_waking(id);
             }
             30..45 => {
                 self.next_hold += 1;
@@ -421,12 +486,14 @@ impl World {
                 if truth.state.level != Level::Running || truth.op.is_some() {
                     truth.wake_pending = true;
                 }
+                truth.requested = None;
                 self.send(Input::Hold {
                     sandbox: id,
                     hold,
                     until,
                     priority,
                 });
+                self.maybe_request_sleep_while_waking(id);
             }
             45..60 => {
                 let truth = self.live.get_mut(&id).unwrap();
@@ -436,12 +503,14 @@ impl World {
                 }
             }
             60..65 => {
+                let now = self.now;
                 let truth = self.live.get_mut(&id).unwrap();
                 if truth.state.level.has_process() {
                     if truth.op.is_some() {
                         truth.process_lost = true;
                     } else {
                         truth.settle(truth.state.without_process());
+                        truth.update_wake(now);
                     }
                     self.send(Input::Lost { sandbox: id });
                 }
@@ -461,8 +530,7 @@ impl World {
             }
             90..95 => self.add(),
             95..98 => {
-                let level = self.rng.pick(&Level::ALL);
-                self.send(Input::Sleep { sandbox: id, level });
+                self.request_sleep(id);
             }
             98..100 => {
                 // One sweep of processor readings arrives as one batch.
@@ -520,6 +588,11 @@ fn run(seed: u64, events: usize) -> ([u64; Step::COUNT], u64) {
                 "seed {seed}: {id:?} has not settled at {:?}",
                 truth.state
             );
+            assert_eq!(
+                truth.requested, None,
+                "seed {seed}: {id:?} never met its sleep request at {:?}",
+                truth.state
+            );
         }
     }
 
@@ -531,6 +604,7 @@ fn run(seed: u64, events: usize) -> ([u64; Step::COUNT], u64) {
         if truth.state.level != Level::Running {
             truth.wake_pending = true;
         }
+        truth.requested = None;
         world.send(Input::Touch {
             sandbox: *id,
             priority: Priority::Interactive,

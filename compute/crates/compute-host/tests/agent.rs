@@ -37,6 +37,8 @@ struct Delays {
     restore: Duration,
     snapshot: Duration,
     compress: Duration,
+    /// How long a VM process takes to end once stopped.
+    stop: Duration,
     /// How late the host hears that a VM process ended.
     exit_notice: Duration,
 }
@@ -48,6 +50,7 @@ impl Default for Delays {
             restore: Duration::from_millis(5),
             snapshot: Duration::from_millis(5),
             compress: Duration::from_millis(5),
+            stop: Duration::ZERO,
             exit_notice: Duration::ZERO,
         }
     }
@@ -68,6 +71,14 @@ struct World {
     adopted: AtomicUsize,
     /// While set, every resume is refused before the guest runs.
     refuse_resumes: AtomicBool,
+    /// While set, a refused resume also makes the sandbox's directory
+    /// read-only, as a failing disk would.
+    freeze_on_refusal: AtomicBool,
+    /// Whether a freeze took effect; it does not for root.
+    froze: AtomicBool,
+    /// While set, every resume lets the guest run and then reports the VM
+    /// beyond control, with its process still alive.
+    lose_resumes: AtomicBool,
     restoring: AtomicUsize,
     max_restoring: AtomicUsize,
     compress_cancelled: AtomicUsize,
@@ -112,6 +123,8 @@ struct Fake {
 #[derive(Debug)]
 struct FakeVm {
     name: String,
+    /// The sandbox's directory on the host.
+    sandbox_dir: PathBuf,
     process: Process,
 }
 
@@ -195,7 +208,11 @@ impl Fake {
             .unwrap()
             .insert(name.clone(), process.clone());
         self.world.next_vm.fetch_add(1, Ordering::Relaxed);
-        FakeVm { name, process }
+        FakeVm {
+            name,
+            sandbox_dir: spec.dir.parent().unwrap().to_owned(),
+            process,
+        }
     }
 
     fn alive(vm: &FakeVm, op: &'static str) -> Result<(), EngineError> {
@@ -338,6 +355,11 @@ impl Engine for Fake {
 
     fn resume(&self, vm: &FakeVm) -> impl Future<Output = Result<(), EngineError>> + Send {
         if self.world.refuse_resumes.load(Ordering::SeqCst) {
+            if self.world.freeze_on_refusal.load(Ordering::SeqCst) {
+                self.world
+                    .froze
+                    .store(freeze(&vm.sandbox_dir), Ordering::SeqCst);
+            }
             return ready(Err(EngineError::new(
                 ErrorKind::Transient,
                 "resume",
@@ -345,6 +367,13 @@ impl Engine for Fake {
             )));
         }
         let resumed = self.set_paused(vm, "resume", false);
+        if resumed.is_ok() && self.world.lose_resumes.load(Ordering::SeqCst) {
+            return ready(Err(EngineError::new(
+                ErrorKind::MemoryLost,
+                "resume",
+                "no answer, and the VMM cannot say what happened",
+            )));
+        }
         if resumed.is_ok() {
             self.world.resumes.fetch_add(1, Ordering::Relaxed);
         }
@@ -394,12 +423,13 @@ impl Engine for Fake {
         Ok(())
     }
 
-    fn stop(&self, vm: FakeVm) -> impl Future<Output = Result<(), EngineError>> + Send {
+    async fn stop(&self, vm: FakeVm) -> Result<(), EngineError> {
+        sleep(self.delays.stop).await;
         let _ = vm.exit.send(true);
         vm.guest.abort();
         let _ = std::fs::remove_file(&vm.vsock);
         self.world.live.lock().unwrap().remove(&vm.name);
-        ready(Ok(()))
+        Ok(())
     }
 
     fn adopt(
@@ -423,6 +453,7 @@ impl Engine for Fake {
             };
             let vm = FakeVm {
                 name: spec.name.clone(),
+                sandbox_dir: spec.dir.parent().unwrap().to_owned(),
                 process,
             };
             (vm, found)
@@ -899,6 +930,109 @@ async fn a_refused_resume_keeps_the_saved_copy_for_a_crash() {
     assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["hello", "kept"]);
     assert!(lab.world.restores.load(Ordering::Relaxed) >= 2);
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
+    lab.assert_clean();
+}
+
+/// Makes `dir` read-only and returns whether that stops writes, which it
+/// does not for root.
+fn freeze(dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = dir.join("probe");
+    if std::fs::write(&probe, b"").is_ok() {
+        let _ = std::fs::remove_file(probe);
+        return false;
+    }
+    true
+}
+
+fn thaw(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vm_that_breaks_down_has_ended_before_its_replacement_starts() {
+    let delays = Delays {
+        stop: Duration::from_millis(200),
+        ..Delays::default()
+    };
+    let lab = Lab::new(delays, HostPolicy::default()).await;
+    let sandbox = id(16);
+    lab.create(sandbox, SAVE_IN_PLACE).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    lab.wait_until("the save to finish", |status| {
+        let view = Lab::sandbox(status, sandbox);
+        view.durability == DurabilityName::Local && view.step.is_none()
+    })
+    .await;
+
+    // The resume lets the guest run and loses track of the VM, whose
+    // process takes a while to end. The fresh boot must wait for it.
+    lab.world.lose_resumes.store(true, Ordering::SeqCst);
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["", "kept"]);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 0);
+    assert!(
+        !lab.image(sandbox),
+        "the guest ran, so the old copy is stale"
+    );
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_resume_that_cannot_vouch_again_trusts_no_copy() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(17);
+    lab.create(sandbox, SAVE_IN_PLACE).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    lab.wait_until("the save to finish", |status| {
+        let view = Lab::sandbox(status, sandbox);
+        view.durability == DurabilityName::Local && view.step.is_none()
+    })
+    .await;
+
+    lab.world.refuse_resumes.store(true, Ordering::SeqCst);
+    lab.world.freeze_on_refusal.store(true, Ordering::SeqCst);
+    let reply = lab
+        .client
+        .call(&Request::Touch {
+            id: sandbox,
+            generation: None,
+            priority: PriorityName::Interactive,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply, Reply::Done);
+    lab.wait_until("a refused resume", |status| {
+        status
+            .steps
+            .iter()
+            .any(|(name, stats)| name == "resume" && stats.failed > 0)
+    })
+    .await;
+    lab.world.freeze_on_refusal.store(false, Ordering::SeqCst);
+    let dir = lab.sandbox_dir(sandbox);
+    if !lab.world.froze.load(Ordering::SeqCst) {
+        // Root writes through read-only directories; nothing to test.
+        thaw(&dir);
+        return;
+    }
+    let status = lab.status().await;
+    let view = Lab::sandbox(&status, sandbox);
+    assert_eq!(view.level, LevelName::Paused, "the VM is intact");
+    assert_eq!(
+        view.durability,
+        DurabilityName::Volatile,
+        "no unmarked copy is trusted"
+    );
+    assert!(!lab.image(sandbox));
+
+    thaw(&dir);
+    lab.world.refuse_resumes.store(false, Ordering::SeqCst);
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["hello", "kept"]);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 0);
     lab.assert_clean();
 }
 
@@ -1503,7 +1637,7 @@ async fn create_refuses_an_existing_directory() {
         "{reply:?}"
     );
     assert_eq!(std::fs::read_to_string(dir.join("kept")).unwrap(), "kept");
-    assert!(lab.status().await.sandboxes.is_empty());
+    assert_eq!(lab.status().await.sandboxes.len(), 0, "nothing was created");
     lab.assert_clean();
 }
 

@@ -5,9 +5,9 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::ids::{HoldId, OpId, SandboxId};
-use crate::level::{Durability, Level, Priority, State, Step};
+use crate::level::{Level, Priority, State, Step};
 use crate::policy::{HostPolicy, PolicyError, SleepPolicy};
-use crate::sandbox::{InFlight, QueueKey, Retry, Sandbox, Wake};
+use crate::sandbox::{InFlight, QueueKey, Sandbox, Wake};
 use crate::time::At;
 
 /// Something that happened, fed to [`Host::handle`].
@@ -126,10 +126,20 @@ pub enum Failure {
     /// agent reports this only when that is certain; a failure whose effect
     /// on the VM is unknown is [`Failure::MemoryLost`].
     Transient,
+    /// Like [`Failure::Transient`], except that the host could not keep the
+    /// records vouching for the sandbox's saved copies, so they are no
+    /// longer trusted. This happens when a step takes those records away
+    /// before letting the guest run, as a resume or restore does, is refused,
+    /// and then cannot put them back. A VM process is unaffected; without
+    /// one, the files on local disk remain. See
+    /// [`State::without_saved_copies`](crate::State::without_saved_copies).
+    Untrusted,
     /// For a step on a VM process: the process is gone. A current saved
     /// copy takes its place; without one, only the files survive. For any
     /// other step: the memory image is unusable but the files are intact,
     /// so the sandbox boots fresh from its disk next time it is needed.
+    /// The host agent reports this only once the process has ended, so a
+    /// replacement never runs beside it.
     MemoryLost,
     /// The sandbox cannot be recovered on this host. It is left alone until
     /// removed.
@@ -458,67 +468,19 @@ impl Host {
         slot.in_flight = None;
         self.in_flight[flight.step.index()] -= 1;
         let before = slot.state;
-        if flight.step == Step::Resume
-            && matches!(
-                outcome,
-                Outcome::Failed(Failure::MemoryLost | Failure::Fatal)
-            )
-        {
-            // The guest may have run before the resume broke down, so a
-            // saved copy may no longer match the VM's disk. The host agent
-            // stops trusting it before resuming and trusts it again only
-            // when the resume was refused, which is a transient failure.
-            slot.state = State::new(slot.state.level, Durability::Volatile, false);
+        let backoff = if flight.step.wakes() {
+            &self.policy.wake_backoff
+        } else {
+            &self.policy.sleep_backoff
+        };
+        let settled = slot.settle_step(flight.step, outcome, now, backoff);
+        if let Some(notice) = settled.notice {
+            out.push(Action::Notify {
+                sandbox: id,
+                notice,
+            });
         }
-        let mut lost = false;
-        match outcome {
-            Outcome::Done => {
-                debug_assert!(
-                    flight.step.can_start(slot.state),
-                    "{flight:?} from {:?}",
-                    slot.state
-                );
-                slot.state = flight.step.apply(slot.state);
-                if flight.step.wakes() && slot.state.level == Level::Running {
-                    slot.touch(now);
-                }
-                slot.retry = None;
-            }
-            Outcome::Cancelled => {}
-            Outcome::Failed(Failure::Transient) => {
-                let failures = slot
-                    .retry
-                    .map_or(1, |retry| retry.failures.saturating_add(1));
-                let backoff = if flight.step.wakes() {
-                    self.policy.wake_backoff
-                } else {
-                    self.policy.sleep_backoff
-                };
-                slot.retry = Some(Retry {
-                    failures,
-                    not_before: now + backoff.delay(failures),
-                });
-                out.push(Action::Notify {
-                    sandbox: id,
-                    notice: Notice::Retrying {
-                        step: flight.step,
-                        failures,
-                    },
-                });
-            }
-            Outcome::Failed(Failure::MemoryLost) => {
-                let (state, lost_now) = slot.state.without_memory_image();
-                slot.state = state;
-                lost |= lost_now;
-            }
-            Outcome::Failed(Failure::Fatal) => {
-                slot.broken = true;
-                out.push(Action::Notify {
-                    sandbox: id,
-                    notice: Notice::Broken,
-                });
-            }
-        }
+        let mut lost = settled.lost;
         if std::mem::take(&mut slot.process_lost) {
             let (state, lost_now) = slot.state.without_process();
             slot.state = state;
@@ -537,9 +499,13 @@ impl Host {
             slot.floor = Level::Running;
             slot.floor_relief = 0;
         }
-        // A wake passes through deeper levels on its way up, such as Archived
-        // after a fetch; only a sleep step settles a request to sleep.
-        if !flight.step.wakes() && slot.state.level >= slot.requested {
+        // A request to sleep made while the sandbox is wanted awake applies
+        // once it is awake again. A wake passes through deeper levels on its
+        // way up, such as Archived after a fetch, and a sleep step asked to
+        // stop for a wake may still finish, so only a sleep step that leaves
+        // nobody waiting settles the request.
+        slot.expire_holds(now);
+        if !flight.step.wakes() && !slot.wants_awake() && slot.state.level >= slot.requested {
             slot.requested = Level::Running;
         }
         if slot.state != before {

@@ -162,6 +162,27 @@ impl State {
             lost,
         )
     }
+
+    /// The state after the host stops trusting the sandbox's saved copies,
+    /// both the one on local disk and the one in object storage, because it
+    /// could not keep the records vouching for them. A VM process carries
+    /// on with no copy. Without one, the files on local disk remain and the
+    /// next wake boots fresh from them. A sandbox kept only in object
+    /// storage has no local records to lose, so it is unchanged. Returns the
+    /// new state and whether running programs were lost.
+    #[must_use]
+    pub const fn without_saved_copies(self) -> (Self, bool) {
+        match self.level {
+            Level::Running | Level::Paused | Level::Compressed => {
+                (Self::new(self.level, Durability::Volatile, false), false)
+            }
+            Level::Saved | Level::Archived => (
+                Self::new(Level::Saved, Durability::Local, false),
+                self.memory_saved,
+            ),
+            Level::Remote => (self, false),
+        }
+    }
 }
 
 /// One operation that changes a sandbox's [`State`].
@@ -176,6 +197,7 @@ pub enum Step {
     /// the guest may have run before it failed.
     Resume,
     /// Start a VM from the saved memory image: Saved or Archived to Running.
+    /// Like a resume, one that breaks down leaves no trusted saved copy.
     Restore,
     /// Boot a fresh VM from the disk because no memory image exists: Saved
     /// or Archived to Running. Files survive; running programs do not.
