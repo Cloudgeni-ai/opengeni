@@ -1066,7 +1066,7 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
   const [role, setRole] = useState<OrganizationMembershipRole>("member");
   const [workspaceIds, setWorkspaceIds] = useState<string[]>([]);
   const [showErrors, setShowErrors] = useState(false);
-  const [seatLimitReached, setSeatLimitReached] = useState(false);
+  const [seatLimitError, setSeatLimitError] = useState<string | null>(null);
   const organizationName = directory.overview.value?.organization.name ?? "the organization";
   const workspaces = directory.overview.value?.workspaces ?? [];
 
@@ -1111,7 +1111,7 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
       pendingLabel="Sending…"
       footerStart="Invitations expire in 7 days."
       onSubmit={async () => {
-        setSeatLimitReached(false);
+        setSeatLimitError(null);
         setShowErrors(true);
         if (emails.length === 0 || problems.length > 0) return false;
         if (!canInviteOrganizationRole(directory.actorRole, role)) {
@@ -1130,8 +1130,9 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
         }
         if (result.failed.length > 0) {
           setEmails(result.failed.map((each) => each.email));
-          if (directory.plan && result.failed.some((each) => each.seatLimitReached)) {
-            setSeatLimitReached(true);
+          const seatFailure = result.failed.find((each) => each.seatLimitReached);
+          if (seatFailure) {
+            setSeatLimitError(seatFailure.message);
             return false;
           }
           throw new Error(
@@ -1146,11 +1147,15 @@ function InvitePage({ nav }: { nav: OrganizationNavigation }) {
     >
       <FieldStack>
         <PlanSeats plan={directory.plan} />
-        {seatLimitReached ? (
+        {seatLimitError && directory.plan ? (
           <SeatLimitNotice
             canManage={directory.actorRole === "owner"}
             onUpgrade={() => nav.openSection("billing")}
           />
+        ) : seatLimitError ? (
+          <Notice tone="waiting" title="Couldn't send the invitation" live="assertive">
+            {seatLimitError}
+          </Notice>
         ) : null}
         <Field
           label="Email addresses"
