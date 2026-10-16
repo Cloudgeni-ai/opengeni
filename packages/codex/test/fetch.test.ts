@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   CODEX_TRANSPORT_ERROR_HEADER,
+  CODEX_TRANSPORT_HEADER,
   CODEX_REQUEST_BODY_NORMALIZED_HEADER,
   CODEX_REQUEST_MODEL_HEADER,
   CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
@@ -1047,6 +1048,45 @@ describe("codexSubscriptionFetch", () => {
       "first_byte",
       "completed",
     ]);
+  });
+
+  test("the headers event reports how the request was carried", async () => {
+    const carried = async (transportHeader: string | null) => {
+      const events: CodexModelRequestEvent[] = [];
+      const response = await codexRequestStorage.run(
+        ctx({
+          onModelRequestEvent: (event) => {
+            events.push(event);
+          },
+        }),
+        () =>
+          codexSubscriptionFetch(
+            async () =>
+              new Response(
+                'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}\n\n',
+                {
+                  status: 200,
+                  headers: transportHeader ? { [CODEX_TRANSPORT_HEADER]: transportHeader } : {},
+                },
+              ),
+          )("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ stream: true }),
+          }),
+      );
+      await response.text();
+      return events.find((event) => event.phase === "headers")?.transport;
+    };
+    expect(await carried("websocket; connection=reused")).toEqual({
+      kind: "websocket",
+      connection: "reused",
+    });
+    expect(await carried("http; reason=connection_busy")).toEqual({
+      kind: "http",
+      reason: "connection_busy",
+    });
+    // A response the socket transport never labelled did not pass through it.
+    expect(await carried(null)).toEqual({ kind: "http", reason: "unavailable" });
   });
 
   test("whole-request deadline wins over a longer stream-idle deadline", async () => {

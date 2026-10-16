@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import {
   CODEX_RESPONSES_WEBSOCKET_BETA,
+  CODEX_TRANSPORT_HEADER,
   codexResponsesTransport,
+  formatCodexRequestTransport,
+  parseCodexRequestTransport,
   type CodexWebSocketLike,
 } from "../src/responses-websocket";
 import { parseCodexUsageHeaders } from "../src/fetch";
@@ -125,6 +128,7 @@ test("streams a response over one reused connection as SSE with usage headers", 
   expect(response.status).toBe(200);
   expect(response.headers.get("content-type")).toBe("text/event-stream");
   expect(response.headers.get("x-request-id")).toBe("upstream-1");
+  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe("websocket; connection=new");
   expect(parseCodexUsageHeaders(response.headers)).toMatchObject({
     primaryUsedPercent: 12,
     secondaryUsedPercent: 40,
@@ -145,7 +149,9 @@ test("streams a response over one reused connection as SSE with usage headers", 
   for (let i = 0; i < 50 && socket.sent.length < 2; i++) await Bun.sleep(1);
   expect(socket.sent).toHaveLength(2);
   socket.emit({ type: "response.completed", response: { id: "r2" } });
-  await (await second).text();
+  const reused = await second;
+  expect(reused.headers.get(CODEX_TRANSPORT_HEADER)).toBe("websocket; connection=reused");
+  await reused.text();
   expect(sockets).toHaveLength(1);
   expect(httpCalls).toEqual([]);
 });
@@ -155,6 +161,7 @@ test("a concurrent request of the same conversation uses HTTP while the socket i
   const first = transport(URL, request());
   const socket = await nextSend(() => sockets[0]);
   const second = await transport(URL, request());
+  expect(second.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=connection_busy");
   expect(await second.text()).toBe("http");
   expect(httpCalls).toEqual([URL]);
   socket.emit({ type: "response.completed", response: {} });
@@ -166,8 +173,12 @@ test("a failed handshake falls back to HTTP and backs off", async () => {
   const pending = transport(URL, request());
   for (let i = 0; i < 50 && !sockets[0]; i++) await Bun.sleep(1);
   sockets[0]!.drop(1006);
-  expect(await (await pending).text()).toBe("http");
-  expect(await (await transport(URL, request())).text()).toBe("http");
+  const failed = await pending;
+  expect(failed.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=handshake_failed");
+  expect(await failed.text()).toBe("http");
+  const backedOff = await transport(URL, request());
+  expect(backedOff.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=handshake_backoff");
+  expect(await backedOff.text()).toBe("http");
   expect(sockets).toHaveLength(1);
   expect(httpCalls).toHaveLength(2);
 });
@@ -183,6 +194,7 @@ test("a refused request keeps the HTTP error shape and the connection", async ()
   });
   const response = await pending;
   expect(response.status).toBe(429);
+  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe("websocket; connection=new");
   expect(await response.json()).toEqual({
     error: { type: "usage_limit_reached", message: "limit" },
   });
@@ -220,10 +232,47 @@ test("aborting a request closes its socket", async () => {
 
 test("non-streaming and non-Responses requests stay on HTTP", async () => {
   const { transport, sockets, httpCalls } = harness();
-  await transport(URL, request({ model: "m", input: [], stream: false }));
-  await transport("https://chatgpt.example/backend-api/codex/models", request());
+  const nonStreaming = await transport(URL, request({ model: "m", input: [], stream: false }));
+  expect(nonStreaming.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=not_eligible");
+  const models = await transport("https://chatgpt.example/backend-api/codex/models", request());
+  expect(models.headers.get(CODEX_TRANSPORT_HEADER)).toBeNull();
   const { body: _body, ...withoutBody } = request();
   await transport(URL, { ...withoutBody, method: "GET" });
   expect(sockets).toHaveLength(0);
   expect(httpCalls).toHaveLength(3);
+});
+
+test("a transport label round-trips and unknown labels are refused", () => {
+  for (const transport of [
+    { kind: "websocket", connection: "new" },
+    { kind: "websocket", connection: "reused" },
+    { kind: "http", reason: "connection_busy" },
+    { kind: "http", reason: "unavailable" },
+  ] as const) {
+    expect(parseCodexRequestTransport(formatCodexRequestTransport(transport))).toEqual(transport);
+  }
+  expect(parseCodexRequestTransport(null)).toBeNull();
+  expect(parseCodexRequestTransport("websocket; connection=other")).toBeNull();
+  expect(parseCodexRequestTransport("http; reason=other")).toBeNull();
+  expect(parseCodexRequestTransport("carrier-pigeon")).toBeNull();
+});
+
+test("an immutable HTTP response is labelled without losing its body", async () => {
+  const transport = codexResponsesTransport(
+    async () => {
+      const response = await fetch("data:text/plain,from-http");
+      return response;
+    },
+    { createSocket: null },
+  );
+  // Without a socket factory the transport is plain HTTP and adds nothing.
+  const plain = await transport(URL, request({ model: "m", input: [], stream: false }));
+  expect(plain.headers.get(CODEX_TRANSPORT_HEADER)).toBeNull();
+
+  const labelled = codexResponsesTransport(async () => await fetch("data:text/plain,from-http"), {
+    createSocket: () => new FakeSocket(URL, {}),
+  });
+  const response = await labelled(URL, request({ model: "m", input: [], stream: false }));
+  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=not_eligible");
+  expect(await response.text()).toBe("from-http");
 });

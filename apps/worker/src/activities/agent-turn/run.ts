@@ -61,9 +61,11 @@ import type {
   RunAgentTurnResult,
 } from "../types";
 import {
+  codexRequestTransportLabel,
   makeMachineOpObserver,
   modelRequestLifecycleMetricsFor,
   recordModelRequestPhase,
+  type ModelRequestTransportLabel,
   recordCompanyBrainContributions,
   recordTurnStartupPhase,
   measureTurnStartupPhase,
@@ -805,6 +807,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     resolvedToken = token;
                     return token;
                   };
+                  const codexRequestTransports = new Map<string, ModelRequestTransportLabel>();
                   const creditGuard = createCodexCreditGuard({
                     ...(coreUsageReader ? { fetchUsage: coreUsageReader } : {}),
                     canSpendCredits: async () => {
@@ -924,8 +927,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                               ? "terminal"
                               : null;
                       if (!phase) return;
+                      // The transport is known once headers arrive; later
+                      // phases of the same request carry the same label.
+                      const transportKey = `${event.requestId}:${event.transportAttempt}`;
+                      if (event.transport) {
+                        codexRequestTransports.set(
+                          transportKey,
+                          codexRequestTransportLabel(event.transport),
+                        );
+                      }
+                      const transport = codexRequestTransports.get(transportKey);
+                      if (phase === "terminal") codexRequestTransports.delete(transportKey);
                       recordModelRequestPhase(observability, {
                         provider: "codex-subscription",
+                        ...(transport ? { transport } : {}),
                         phase,
                         ...(event.phase === "completed"
                           ? { outcome: "completed" as const }

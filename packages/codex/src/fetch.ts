@@ -15,6 +15,7 @@ import { hasMeaningfulCodexOutput } from "./meaningful-output";
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
 import { opaqueProviderArtifactFingerprints } from "./opaque-artifact";
+import { CODEX_TRANSPORT_HEADER, parseCodexRequestTransport } from "./responses-websocket";
 import { CODEX_FIVE_HOUR_WINDOW_SECONDS, CODEX_WEEKLY_WINDOW_SECONDS } from "./usage-normalize";
 import {
   codexRequestStorage,
@@ -882,6 +883,11 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
           responseObserved: true,
           status: res.status,
           ...(upstreamRequestId ? { providerRequestId: upstreamRequestId } : {}),
+          // A response the socket transport did not label never passed through it.
+          transport: parseCodexRequestTransport(res.headers.get(CODEX_TRANSPORT_HEADER)) ?? {
+            kind: "http",
+            reason: "unavailable",
+          },
         });
         res = await observedResponse(res, audit, nextInit.signal, semanticTerminal);
       } catch (error) {

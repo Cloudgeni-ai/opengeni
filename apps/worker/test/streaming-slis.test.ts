@@ -9,6 +9,7 @@ import {
   recordContextCompactionStarted,
   recordCompanyBrainContributions,
   recordModelInputTokens,
+  codexRequestTransportLabel,
   recordModelRequestPhase,
   recordSandboxLogicalProvision,
   recordSandboxProvisionAttempt,
@@ -283,6 +284,24 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
 });
 
 describe("provider request lifecycle diagnostics", () => {
+  test("labels Codex request phases with how the request was carried", async () => {
+    const observability = worker();
+    expect(codexRequestTransportLabel({ kind: "websocket", connection: "new" })).toBe(
+      "websocket_new",
+    );
+    expect(codexRequestTransportLabel({ kind: "http" })).toBe("http");
+    recordModelRequestPhase(observability, {
+      provider: "codex-subscription",
+      phase: "first_byte",
+      durationSeconds: 0.2,
+      transport: codexRequestTransportLabel({ kind: "websocket", connection: "reused" }),
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_request_phase_duration_seconds_count\{[^}]*phase="first_byte"[^}]*transport="websocket_reused"[^}]*\} 1\b/,
+    );
+  });
+
   test("records bounded phase/outcome labels and monotonic duration", async () => {
     const observability = worker();
     recordModelRequestPhase(observability, {
