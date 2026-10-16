@@ -19,9 +19,10 @@
 //!    waits only for its own chunk.
 //! 3. **Hydration.** Alongside, the remaining chunks are fetched in the
 //!    background into the memory file, a few at a time per VM and a
-//!    bounded number on the whole host, so the image becomes a complete
-//!    local copy that the next save can merge over, and the pager can
-//!    hand the guest's memory to the kernel and exit.
+//!    bounded number on the whole host, fewer while any wake or fault waits
+//!    on the store (see [`crate::lanes`]), so the image becomes a complete
+//!    local copy that the next save can merge over, and the pager can hand
+//!    the guest's memory to the kernel and exit.
 //!
 //! Every chunk read from the store is checked against its content hash
 //! (see [`compute_storage::store::ChunkStore::get_chunk`]) and against the
@@ -49,6 +50,7 @@ use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::{Semaphore, mpsc, watch};
 
 use crate::image::{CHUNK_BYTES, Hash, ZERO, chunk_count, chunk_range};
+use crate::lanes::Lanes;
 use crate::working_set::PageSet;
 
 /// Chunk fetches in flight per VM for demand and prefetch.
@@ -57,9 +59,6 @@ const FOREGROUND_PER_VM: usize = 64;
 /// alongside demand: with 4 KiB pages a waking guest faults one chunk at a
 /// time, so waiting for a pause in demand would leave it fetching serially.
 const BACKGROUND_PER_VM: usize = 16;
-/// Background hydration fetches in flight on the whole host, so many VMs
-/// hydrating at once never starve a guest that is waiting on a page.
-const BACKGROUND_PER_HOST: usize = 128;
 /// Chunks after a demand-fetched one that are fetched along with it: a
 /// guest that touches one chunk usually touches its neighbours next.
 const READAHEAD_CHUNKS: usize = 4;
@@ -127,7 +126,8 @@ pub(crate) struct Fetcher {
     /// Tells requests for the same chunk apart over time.
     requests: AtomicU64,
     all: Arc<Semaphore>,
-    background: Arc<Semaphore>,
+    /// Background fetches give way to the ones somebody waits on.
+    lanes: Arc<Lanes>,
 }
 
 /// A chunk request under way and how many wait for it.
@@ -198,14 +198,14 @@ impl Cache {
 }
 
 impl Fetcher {
-    pub fn new(chunks: ChunkStore) -> Self {
+    pub fn new(chunks: ChunkStore, lanes: Arc<Lanes>) -> Self {
         Self {
             chunks,
             inflight: Arc::default(),
             cache: Arc::default(),
             requests: AtomicU64::new(0),
             all: Arc::new(Semaphore::new(FETCHES_PER_HOST)),
-            background: Arc::new(Semaphore::new(BACKGROUND_PER_HOST)),
+            lanes,
         }
     }
 
@@ -216,10 +216,10 @@ impl Fetcher {
         if let Some(chunk) = cached() {
             return Ok(chunk);
         }
-        let _slot = if background {
-            Some(self.background.acquire().await)
+        let (_waited_on, _background) = if background {
+            (None, Some(self.lanes.background().await))
         } else {
-            None
+            (Some(self.lanes.foreground()), None)
         };
         // Another VM may have brought it in meanwhile.
         if let Some(chunk) = cached() {
@@ -792,7 +792,7 @@ mod tests {
         file.set_len(3 * CHUNK_BYTES).unwrap();
         prefill(&file, &plain);
         let (hydration, _arrivals) = Hydration::start(
-            Arc::new(Fetcher::new(chunks)),
+            Arc::new(Fetcher::new(chunks, Arc::default())),
             &path,
             encoded
                 .iter()

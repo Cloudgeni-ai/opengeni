@@ -609,8 +609,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut agent = Self {
             engine: Arc::new(engine),
             #[cfg(target_os = "linux")]
-            fetcher: (store.chunks())
-                .map(|chunks| Arc::new(crate::lazy::Fetcher::new(chunks.clone()))),
+            fetcher: (store.chunks()).map(|(chunks, lanes)| {
+                Arc::new(crate::lazy::Fetcher::new(chunks.clone(), Arc::clone(lanes)))
+            }),
             store: Arc::new(store),
             records: Arc::new(records),
             net,

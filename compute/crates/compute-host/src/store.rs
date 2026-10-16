@@ -20,6 +20,7 @@ use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_storage::store::ChunkStore;
 use serde::{Deserialize, Serialize};
 
+use crate::lanes::Lanes;
 use crate::layout::{copy_file, copy_sparse, sync_file};
 use crate::protocol::Id;
 
@@ -193,8 +194,9 @@ pub trait Store: Send + Sync + 'static {
     fn delete(&self, id: Id) -> impl Future<Output = Result<(), EngineError>> + Send;
 
     /// The chunk store that remote memory images page in from, if this store
-    /// keeps memory as chunks.
-    fn chunks(&self) -> Option<&ChunkStore> {
+    /// keeps memory as chunks, and the host's transfer lanes, which the
+    /// agent's own fetches from it share with the store's.
+    fn chunks(&self) -> Option<(&ChunkStore, &Arc<Lanes>)> {
         None
     }
 

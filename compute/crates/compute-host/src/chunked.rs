@@ -44,6 +44,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 pub use crate::image::CHUNK_BYTES;
 use crate::image::{Hash, ZERO, chunk_count, chunk_range, hash_chunks};
+use crate::lanes::Lanes;
 use crate::protocol::Id;
 use crate::store::{Archive, FetchInto, FetchedMemory, Prefilled, Receipt, SavedFiles, Store};
 use crate::working_set::{self, WakeProfile};
@@ -114,6 +115,8 @@ pub struct Chunked {
     seed: Arc<Mutex<Option<Arc<Seed>>>>,
     /// Permits for chunk transfers, shared by every sandbox.
     transfers: Arc<Semaphore>,
+    /// A wake's transfers are foreground: background ones give way.
+    lanes: Arc<Lanes>,
 }
 
 /// What identifies one version of a local file: if any of it changes, the
@@ -182,6 +185,7 @@ impl Chunked {
             chunks,
             seed: Arc::default(),
             transfers: Arc::new(Semaphore::new(TRANSFERS_PER_HOST)),
+            lanes: Arc::default(),
         }
     }
 
@@ -526,6 +530,8 @@ impl Store for Chunked {
 
     async fn fetch(&self, id: Id, into: &FetchInto) -> Result<FetchedMemory, EngineError> {
         const OP: &str = "fetch";
+        // A sandbox waits on all of it: its disk, state and pack.
+        let _waited_on = self.lanes.foreground();
         let Some(head) = self.head(OP, id).await? else {
             return Err(EngineError::new(
                 ErrorKind::Fatal,
@@ -666,8 +672,8 @@ impl Store for Chunked {
         Ok(Some(receipt))
     }
 
-    fn chunks(&self) -> Option<&ChunkStore> {
-        Some(&self.chunks)
+    fn chunks(&self) -> Option<(&ChunkStore, &Arc<Lanes>)> {
+        Some((&self.chunks, &self.lanes))
     }
 }
 
