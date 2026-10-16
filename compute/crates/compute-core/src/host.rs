@@ -34,6 +34,10 @@ pub enum Input {
         policy: SleepPolicy,
         /// What it may take of host memory.
         size: Size,
+        /// Its last activity: now for a new sandbox, or as recorded for one
+        /// found on disk, so a restart does not reset how long it has been
+        /// idle. A time after now counts as now.
+        last_activity: At,
     },
     /// Stop managing a sandbox and delete it. What its VM occupied stays
     /// counted against the admission budget, as with [`Input::Unmanaged`],
@@ -502,9 +506,10 @@ impl Host {
                 state,
                 policy,
                 size,
+                last_activity,
             } => {
                 if let Entry::Vacant(entry) = self.sandboxes.entry(sandbox) {
-                    entry.insert(Sandbox::new(now, state, policy, size));
+                    entry.insert(Sandbox::new(last_activity.min(now), state, policy, size));
                     self.mark(sandbox);
                 }
             }

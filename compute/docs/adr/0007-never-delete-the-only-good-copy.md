@@ -26,8 +26,11 @@ same-length damage a size check cannot see.
 
 ## Consequences
 
-- Unchanged chunks are never uploaded twice, and identical chunks are shared
-  between sandboxes.
+- Unchanged chunks are not uploaded again, apart from a weekly refresh of
+  long-reused ones that keeps the sweep safe ([17](0017-sweeping-unnamed-chunks.md)).
+  Identical chunks are shared between the sandboxes of one store prefix, so
+  each sharing domain (a customer, or a trust zone) needs its own prefix
+  ([operations](../operations.md)).
 - A bad chunk is rejected instead of spreading to other sandboxes.
 - Silent same-length damage to a local image would not be caught before a
   wake. Hashing locally on every wake would cost too much wake time.

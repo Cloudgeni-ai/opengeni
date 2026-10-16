@@ -61,7 +61,7 @@ fn spawn_script(client: &Client, sandbox: Id, script: &str) -> tokio::task::Join
     input.push_str("\nexit\n");
     tokio::spawn(async move {
         let (reply, mut stream) = client
-            .connect(sandbox, PORT, PriorityName::Interactive)
+            .connect(sandbox, None, PORT, PriorityName::Interactive)
             .await
             .unwrap();
         assert!(matches!(reply, Reply::Connected { .. }), "{reply:?}");

@@ -19,7 +19,8 @@ Opengeni does not use this yet.
 
 Decisions and their reasons are in [docs/adr](docs/adr/README.md). Numbers
 below are observations from our lab runs, with workloads and hosts in
-[docs/measurements.md](docs/measurements.md); they are not bounds.
+[docs/measurements.md](docs/measurements.md); they are not bounds. What
+an operator must set up and watch is in [docs/operations.md](docs/operations.md).
 
 ## What we optimize for
 
@@ -112,7 +113,8 @@ asks for a minimum depth once holds allow it; a later wake cancels it.
 - **One memory profile per host** ([ADR 5](docs/adr/0005-host-memory-profiles.md)):
   `bare-metal` uses 4 KiB pages, dirty tracking and in-RAM compression;
   `nested` (a host that is itself a cloud VM) uses 2 MiB huge pages, which
-  make wakes far cheaper there but cannot be compressed.
+  make wakes far cheaper there but cannot be compressed. The agent picks
+  `nested` when the host's CPU reports a hypervisor, unless told otherwise.
 
 ## Surviving restarts
 
@@ -227,7 +229,7 @@ ready pool will keep clones already restored, so a create is a resume
 | `crates/archcheck` | Structure rules from `ARCHITECTURE.toml`, run as `cargo arch`. |
 | `smoke/` | End-to-end scenarios against a real agent, real VMs and a real guest. |
 | `lab/` | Measurement scripts used to size the design. Not production code. |
-| `docs/` | Decisions and measurements. |
+| `docs/` | Decisions, measurements and operations. |
 
 `compute-host` joins the others; `compute-core` and `compute-engine` know
 nothing of each other. `cargo arch` keeps every production file under 1,000

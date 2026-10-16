@@ -75,6 +75,7 @@ impl Rig {
             state,
             policy: no_compress(),
             size,
+            last_activity: self.now,
         })
     }
 
@@ -583,6 +584,7 @@ fn compressing_that_frees_nothing_goes_deeper_for_the_buffer() {
         state: paused_saved(),
         policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
         size: Size::whole(GIB),
+        last_activity: rig.now,
     });
     rig.resident(1, 1000 * MIB);
     rig.at(5);
@@ -831,6 +833,7 @@ impl Sim {
                     state,
                     policy,
                     size,
+                    last_activity: self.now,
                 }
             }
             0..30 => Input::Touch {

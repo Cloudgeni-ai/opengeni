@@ -14,7 +14,7 @@ use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
 use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::protocol::{
-    Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
+    About, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
 };
 use compute_host::{
     BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, NoStore, PagerConfig, Store,
@@ -22,6 +22,18 @@ use compute_host::{
 };
 
 use crate::bench::{BenchArgs, bench, exec};
+
+/// The agent's memory comes and goes in bursts: transfer buffers and
+/// compression contexts while sandboxes archive and wake, on hundreds of
+/// blocking threads at once. glibc keeps what each thread freed in that
+/// thread's arena; measured, an agent that had archived ten sandboxes kept
+/// about 750 MB it no longer used. jemalloc hands freed memory back after
+/// a short decay, from background threads while the agent is idle. It
+/// replaces `malloc` itself, so the C libraries linked in (zstd) use it
+/// too. Pagers run from this binary and use it as well.
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Parser)]
 #[command(about = "Run an Opengeni compute host agent, or talk to one")]
@@ -94,6 +106,16 @@ enum Command {
     },
     /// Create many sandboxes, let them sleep, then wake them all at once.
     Bench(BenchArgs),
+    /// Delete the chunks and manifests in object storage that no sandbox's
+    /// stored copy names any more, on any host. Run on a schedule, such as
+    /// daily; safe while agents archive. Without `--delete`, only reports.
+    Sweep {
+        /// The store, as `serve --store` takes it: `gs://bucket/prefix`.
+        #[arg(long)]
+        store: String,
+        #[arg(long)]
+        delete: bool,
+    },
 }
 
 #[derive(Args)]
@@ -103,6 +125,11 @@ struct ServeArgs {
     root: PathBuf,
     #[arg(long)]
     firecracker: PathBuf,
+    /// An older Firecracker binary kept after an upgrade, so that memory
+    /// images it made still wake with their programs. Repeatable; each
+    /// file must be named `firecracker`.
+    #[arg(long = "retained-firecracker")]
+    retained_firecracker: Vec<PathBuf>,
     /// Firecracker's jailer, from the same release.
     #[arg(long)]
     jailer: PathBuf,
@@ -189,10 +216,12 @@ struct ServeArgs {
     /// How guest memory is backed and saved: `bare-metal` (4 KiB pages,
     /// dirty-page tracking, compression allowed) or `nested` (2 MiB pages
     /// from the host's reserved huge-page pool, resident-page saves, no
-    /// compression). Nested hosts need the pool reserved first, for example
-    /// through `/proc/sys/vm/nr_hugepages`.
-    #[arg(long, default_value_t = MemoryProfile::bare_metal())]
-    memory_profile: MemoryProfile,
+    /// compression). By default `nested` when this host is itself a VM (its
+    /// CPU reports the hypervisor flag) and `bare-metal` otherwise. Nested
+    /// hosts need the pool reserved first, for example through
+    /// `/proc/sys/vm/nr_hugepages`.
+    #[arg(long)]
+    memory_profile: Option<MemoryProfile>,
     /// Give every sandbox a network: its own namespace, a fixed guest
     /// address, internet access through NAT, and nothing else.
     #[arg(long)]
@@ -429,6 +458,13 @@ async fn agent_main() -> anyhow::Result<()> {
         }
         Command::Exec { id, script, port } => exec(&client, id, port, &script).await,
         Command::Bench(args) => bench(&client, &args).await,
+        Command::Sweep { store, delete } => {
+            let chunked = Chunked::from_url(&store)?
+                .with_context(|| format!("{store} is not an object storage URL"))?;
+            let report = chunked.sweep(delete).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
     }
 }
 
@@ -439,17 +475,59 @@ fn expect_done(reply: Reply) -> anyhow::Result<()> {
     }
 }
 
+/// What this agent runs, as status reports it, so a measurement can say
+/// what it measured. The engine adds its runtime.
+fn describe(memory_profile: MemoryProfile, base_image: &std::path::Path) -> About {
+    let build = std::fs::File::open("/proc/self/exe")
+        .and_then(|exe| {
+            let mut hasher = blake3::Hasher::new();
+            std::io::copy(&mut std::io::BufReader::new(exe), &mut hasher)?;
+            Ok(hasher.finalize().to_hex()[..16].to_owned())
+        })
+        .unwrap_or_else(|error| format!("unknown ({error})"));
+    let base_image = match std::fs::metadata(base_image) {
+        Ok(found) => {
+            let changed = found
+                .modified()
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |since| since.as_secs());
+            format!(
+                "{} ({} bytes, changed at {changed} s past the epoch)",
+                base_image.display(),
+                found.len()
+            )
+        }
+        Err(error) => format!("{} ({error})", base_image.display()),
+    };
+    About {
+        build,
+        runtime: String::new(),
+        memory_profile: memory_profile.to_string(),
+        base_image,
+    }
+}
+
 async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
+    let memory_profile = if let Some(profile) = args.memory_profile {
+        profile
+    } else {
+        let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").context("reading /proc/cpuinfo")?;
+        let profile = MemoryProfile::for_cpuinfo(&cpuinfo);
+        tracing::info!(%profile, "memory profile chosen from the CPU's hypervisor flag");
+        profile
+    };
     let engine = Firecracker::new(FirecrackerConfig {
         firecracker: args.firecracker,
+        retained: args.retained_firecracker,
         jailer: args.jailer,
         cgroup_parent: args.cgroup.clone(),
     })
     .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?
-    .with_memory_profile(args.memory_profile)
-    .with_context(|| format!("memory profile {}", args.memory_profile))?;
-    check_huge_pages(args.memory_profile)?;
-    check_zswap(args.memory_profile.compress && !args.no_compress)?;
+    .with_memory_profile(memory_profile)
+    .with_context(|| format!("memory profile {memory_profile}"))?;
+    check_huge_pages(memory_profile)?;
+    check_zswap(memory_profile.compress && !args.no_compress)?;
     raise_open_file_limit();
     protect_from_oom()?;
     let mut policy = HostPolicy::default();
@@ -458,7 +536,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     }
     let sample_every = Duration::from_secs(1);
     let budget = admission_budget(
-        args.memory_profile,
+        memory_profile,
         args.memory_capacity_mib,
         args.memory_headroom_mib,
     )?;
@@ -484,6 +562,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         args.disk_reserve_mib,
         args.disk_reserve_inodes,
     )?);
+    let about = describe(memory_profile, &args.base_image);
     let config = HostConfig {
         root: args.root,
         kernel: args.kernel,
@@ -515,14 +594,22 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
                 .unwrap_or_else(|| PathBuf::from("/proc/self/exe")),
             record_for: Duration::from_millis(args.pager_record_ms),
         },
+        about,
     };
     let Some(store) = args.store else {
         return run_agent(config, engine, NoStore, socket).await;
     };
-    match Chunked::from_url(&store)? {
-        Some(chunked) => run_agent(config, engine, chunked, socket).await,
-        None => run_agent(config, engine, Directory::new(store), socket).await,
+    if let Some(chunked) = Chunked::from_url(&store)? {
+        chunked
+            .refuse_unreadable()
+            .await
+            .with_context(|| format!("opening {store}"))?;
+        return run_agent(config, engine, chunked, socket).await;
     }
+    // Fine for tests and a single machine, but an archive there does not
+    // survive losing this host.
+    tracing::warn!(%store, "archives go to a directory on this host, not off it");
+    run_agent(config, engine, Directory::new(store), socket).await
 }
 
 async fn run_agent<S: Store>(
@@ -647,7 +734,8 @@ fn check_huge_pages(profile: MemoryProfile) -> anyhow::Result<()> {
     let total = field("HugePages_Total:");
     if total == 0 {
         bail!(
-            "the {profile} memory profile needs reserved huge pages; set /proc/sys/vm/nr_hugepages"
+            "the {profile} memory profile needs reserved huge pages; set \
+             /proc/sys/vm/nr_hugepages, or choose a profile with --memory-profile"
         );
     }
     tracing::info!(

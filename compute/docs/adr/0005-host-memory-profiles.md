@@ -11,7 +11,9 @@ tracking splits them.
 
 ## Decision
 
-Each host runs one profile, chosen at start:
+Each host runs one profile, chosen at start. By default the agent picks
+`nested` when the host's CPU reports that it runs under a hypervisor and
+`bare-metal` otherwise; `--memory-profile` overrides that.
 
 - `bare-metal`: 4 KiB pages, KVM dirty tracking (saves write only changed
   pages), and compression of idle memory into RAM with zswap. Compressed pages

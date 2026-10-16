@@ -35,3 +35,9 @@ it; a later wake cancels it.
   losing its host.
 - Connections the guest opens out through the host do not hold it awake on
   their own; only their traffic and processor use count. This is deliberate.
+- Time keeps passing for a sleeping guest: its monotonic and wall clocks
+  include the sleep, so a timer that came due while it slept fires right
+  after it wakes (the engine test requires under a second after a pause and
+  after a save; it took about 0.1 s) and later ones fire on time. That test
+  uses one-shot sleeps; periodic timers and programs that catch up on
+  missed work were not tested.

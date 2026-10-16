@@ -14,7 +14,7 @@ use super::{
 };
 use crate::image::{Parts, Suspect};
 use crate::layout::{remove_if_present, write_atomic};
-use crate::state::{Change, Disk};
+use crate::state::{Change, Disk, unix_ms_now};
 use crate::store::{Archive, FetchInto, FetchedMemory, JailedFile, SavedFiles, SavedImage, Store};
 
 impl<E: Engine, S: Store> Job<E, S> {
@@ -75,6 +75,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 state: images.state(image.generation()),
                 memory: images.memory(image.generation()),
                 chunks: Some(Arc::new(chunks.0.clone())),
+                runtime: image.meta().runtime.clone(),
             }),
             profile: profile.exists().then_some(profile),
         };
@@ -96,7 +97,8 @@ impl<E: Engine, S: Store> Job<E, S> {
         if let Err(error) = written {
             return io_failure(OP, error);
         }
-        match self.commit(Change::new().archived(true)).await {
+        let change = Change::new().archived(true).backed_up(unix_ms_now());
+        match self.commit(change).await {
             Ok(()) => Outcome::Done,
             Err(error) => state_failure(&error),
         }
@@ -182,26 +184,42 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
         };
         let images = images_of(&paths);
+        let memory_len = self.spec.memory_bytes();
         let published = blocking(move || {
             let published = match &fetched {
                 FetchedMemory::None => images.clear().map_err(Suspect::from).map(|()| None),
-                FetchedMemory::Local { state, memory } => {
-                    images.publish(Parts::Whole { state, memory }).map(Some)
-                }
+                FetchedMemory::Local {
+                    state,
+                    memory,
+                    runtime,
+                } => images
+                    .publish_made_by(
+                        Parts::Whole {
+                            state,
+                            memory,
+                            len: memory_len,
+                        },
+                        runtime.as_deref(),
+                    )
+                    .map(Some),
                 FetchedMemory::Remote {
                     state,
                     memory_len,
                     chunks,
                     manifest,
                     prefilled,
+                    runtime,
                 } => images
-                    .publish(Parts::Remote {
-                        state,
-                        memory_len: *memory_len,
-                        chunks: crate::image::ChunkMap(chunks.clone()),
-                        manifest,
-                        prefilled: prefilled.as_ref(),
-                    })
+                    .publish_made_by(
+                        Parts::Remote {
+                            state,
+                            memory_len: *memory_len,
+                            chunks: crate::image::ChunkMap(chunks.clone()),
+                            manifest,
+                            prefilled: prefilled.as_ref(),
+                        },
+                        runtime.as_deref(),
+                    )
                     .map(Some),
             };
             let _ = fs::remove_dir_all(&scratch);
@@ -234,17 +252,23 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// image that is gone.
     pub(super) async fn forget(&mut self) -> Outcome {
         const OP: &str = "forget";
+        // The image a paused VM's pager reads stays until the pager holds
+        // all of it. That wait comes first, so a forget cancelled during it
+        // has changed nothing.
+        if let Some(live) = self.live.as_ref() {
+            match self.settled(live, OP).await {
+                None => return Outcome::Cancelled,
+                Some(Err(error)) => return failure(&error),
+                Some(Ok(())) => {}
+            }
+        }
         if self.record.image
             && let Err(error) = self.commit(Change::new().image(false)).await
         {
             return state_failure(&error);
         }
-        // A paused VM loses the base its next diff would be merged over;
-        // the image its pager reads stays until the pager holds all of it.
+        // A paused VM loses the base its next diff would be merged over.
         if let Some(live) = self.live.as_mut() {
-            if let Err(error) = live.memory.settled(OP).await {
-                return failure(&error);
-            }
             live.memory.base = Base::Unknown;
         }
         let paths = self.paths.clone();

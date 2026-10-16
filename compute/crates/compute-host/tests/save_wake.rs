@@ -6,7 +6,8 @@
 //! port 52). `COMPUTE_TEST_PROFILE` picks the host's memory profile
 //! (`bare-metal` by default; `nested` needs a reserved 2 MiB page pool), and
 //! `COMPUTE_TEST_STORE` (a directory or a `gs://`, `s3://` or `az://` URL)
-//! enables the archive and object-storage wake test.
+//! enables the archive and object-storage wake test. `COMPUTE_TEST_REQUIRE`
+//! (`lab,store` on a gate) makes a test that cannot run fail.
 //!
 //! Each test starts a process in the guest that counts in memory, then lets
 //! the sandbox fall asleep and wakes it again several times. Every wake
@@ -31,6 +32,10 @@ use compute_host::{Chunked, Directory, HostAgent, HostConfig, NoStore, PagerConf
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 
+#[path = "support/required.rs"]
+mod required;
+use required::skip;
+
 const SHELL_PORT: u32 = 52;
 
 /// How long pagers record first touches here: short, so a pager that has
@@ -44,7 +49,7 @@ const RECORD_LONG: Duration = Duration::from_secs(90);
 fn lab() -> Option<PathBuf> {
     let lab = std::env::var_os("COMPUTE_TEST_LAB").map(PathBuf::from);
     if lab.is_none() {
-        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
+        skip("lab", "set COMPUTE_TEST_LAB to run against Firecracker");
     }
     lab
 }
@@ -94,6 +99,7 @@ async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> 
     let root = lab.join("ht").join(name);
     let engine = Firecracker::new(FirecrackerConfig {
         firecracker: lab.join("bin/firecracker"),
+        retained: Vec::new(),
         jailer: lab.join("bin/jailer"),
         cgroup_parent: "/sys/fs/cgroup/compute-host-test".into(),
     })
@@ -120,6 +126,7 @@ async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> 
             program: env!("CARGO_BIN_EXE_compute-host").into(),
             record_for: RECORD_FOR,
         },
+        about: compute_host::protocol::About::default(),
     };
     let socket = root.join("agent.sock");
     let _ = std::fs::remove_file(&socket);
@@ -230,7 +237,7 @@ impl Process {
 /// Runs `script` in the guest's shell, waking the sandbox first.
 async fn exec(client: &Client, id: Id, script: &str) -> String {
     let (reply, mut stream) = client
-        .connect(id, SHELL_PORT, PriorityName::Interactive)
+        .connect(id, None, SHELL_PORT, PriorityName::Interactive)
         .await
         .unwrap();
     assert!(matches!(reply, Reply::Connected { .. }), "{reply:?}");
@@ -393,7 +400,7 @@ async fn guest_processes_survive_repeated_saves_and_wakes() {
 async fn guest_processes_survive_waking_from_object_storage() {
     let Some(lab) = lab() else { return };
     let Ok(url) = std::env::var("COMPUTE_TEST_STORE") else {
-        eprintln!("skipped: set COMPUTE_TEST_STORE to archive sandboxes");
+        skip("store", "set COMPUTE_TEST_STORE to archive sandboxes");
         return;
     };
     let name = format!("r{}", short());
@@ -554,12 +561,15 @@ fn paged_wake(prefix: &str) -> Option<(LevelName, Option<String>)> {
         return Some((LevelName::Saved, None));
     }
     let Ok(url) = std::env::var("COMPUTE_TEST_STORE") else {
-        eprintln!("skipped: 4 KiB pages page only from a store; set COMPUTE_TEST_STORE");
+        skip(
+            "store",
+            "4 KiB pages page only from a store; set COMPUTE_TEST_STORE",
+        );
         return None;
     };
     let url = format!("{url}/{prefix}");
     if Chunked::from_url(&url).unwrap().is_none() {
-        eprintln!("skipped: only a chunked store pages memory in");
+        skip("chunked", "only a chunked store pages memory in");
         return None;
     }
     Some((LevelName::Remote, Some(url)))

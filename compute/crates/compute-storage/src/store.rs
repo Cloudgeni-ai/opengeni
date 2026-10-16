@@ -14,22 +14,39 @@
 //! it. Names include the hash of the stored bytes, so every writer of a name
 //! writes exactly the same bytes: two repairs racing write the same object,
 //! and no operation can undo another's repair.
+//!
+//! Only a sweep (see [`crate::sweep`]) deletes chunks and manifests, once
+//! no pointer names them; the rules in [`crate::fresh`] keep it from
+//! deleting what an archive in flight is about to name.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use object_store::{ClientOptions, ObjectStore, PutMode, PutOptions, path::Path};
+use futures::TryStreamExt as _;
+use object_store::{ClientOptions, ObjectStore, PutMode, PutOptions, UpdateVersion, path::Path};
 
 use crate::{
     Error, Result,
     chunk::{ChunkRef, EncodedChunk, decode},
+    fresh::{Clock, Freshness},
     manifest::{DiskManifest, MAX_MANIFEST_BYTES},
-    upload::{Created, Gcs},
+    upload::{Created, Deleted, Gcs},
 };
 
 /// Largest pointer object accepted; pointers only name manifests.
 pub const MAX_POINTER_BYTES: usize = 64 * 1024;
+
+/// Length of the stamp every stored pointer begins with (see [`stamped`]).
+const STAMP_BYTES: usize = 16;
+
+/// Where pointers were stored before they carried a stamp.
+const UNSTAMPED_POINTERS: &str = "pointers/v1";
+
+/// How often [`ChunkStore::begin`], [`ChunkStore::fence`] and
+/// [`ChunkStore::delete_pointer`] try again when the pointer changes under
+/// them; a pointer has one writer, so more means something else is wrong.
+const POINTER_TRIES: usize = 4;
 
 /// Use provider-native environment or machine-identity credentials.
 pub fn provider_from_env(kind: &str) -> Result<Arc<dyn ObjectStore>> {
@@ -63,6 +80,67 @@ pub struct ChunkStore {
     backend: Arc<dyn ObjectStore>,
     prefix: Path,
     uploader: Uploader,
+    freshness: Freshness,
+    clock: Clock,
+}
+
+/// The kinds of stored object, each under its own prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Area {
+    /// The only objects ever replaced: each names a copy's manifests.
+    Pointers,
+    Manifests,
+    Chunks,
+}
+
+/// One change of a pointer between the version it started from and the
+/// pointer it writes: an archive (see [`ChunkStore::begin`]) or a change
+/// naming part of what the pointer named (see
+/// [`ChunkStore::read_for_change`]). It lands only on that version.
+#[derive(Clone, Debug)]
+#[must_use = "a change lands through its publication"]
+pub struct Publication {
+    path: Path,
+    /// The pointer's version when the change started.
+    version: UpdateVersion,
+}
+
+impl Area {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Pointers => "pointers/v2",
+            Self::Manifests => "manifests/v1",
+            Self::Chunks => "chunks/v1",
+        }
+    }
+}
+
+/// One stored object, as a listing shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    /// Its key under the store's prefix, as [`ChunkRef::key`] gives it.
+    pub key: String,
+    pub stored_at: SystemTime,
+    pub size: u64,
+}
+
+/// What a delete on condition did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removal {
+    Deleted,
+    /// It was stored again recently, so it stays.
+    Kept,
+    /// Nothing was stored under the key any more.
+    Gone,
+}
+
+/// What is stored under a content name.
+enum Found {
+    /// Exactly the bytes the name allows, stored at the time given if the
+    /// store says.
+    Ours(Option<SystemTime>),
+    /// Nothing, or other bytes.
+    Other,
 }
 
 impl ChunkStore {
@@ -74,6 +152,43 @@ impl ChunkStore {
             backend,
             prefix,
             uploader: Uploader::ReadBack,
+            freshness: Freshness::DEFAULT,
+            clock: Clock::system(),
+        }
+    }
+
+    /// The same store under other time rules; host agents and sweeps of
+    /// one store must agree on them.
+    #[must_use]
+    pub fn with_freshness(self, freshness: Freshness) -> Self {
+        Self { freshness, ..self }
+    }
+
+    /// The same store reading the time from `clock`.
+    #[must_use]
+    pub fn with_clock(self, clock: Clock) -> Self {
+        Self { clock, ..self }
+    }
+
+    #[must_use]
+    pub fn freshness(&self) -> Freshness {
+        self.freshness
+    }
+
+    #[must_use]
+    pub fn now(&self) -> SystemTime {
+        self.clock.now()
+    }
+
+    /// A store over `fake`'s bucket, under `prefix`, on `fake`'s clock.
+    #[cfg(test)]
+    pub(crate) fn over_fake(fake: &Arc<crate::fake::Fake>, prefix: &str) -> Self {
+        Self {
+            backend: Arc::new(crate::fake::Bucket(fake.clone())),
+            prefix: Path::from(prefix),
+            uploader: Uploader::Gcs(crate::fake::gcs(fake)),
+            freshness: Freshness::DEFAULT,
+            clock: fake.clock.clone(),
         }
     }
 
@@ -128,6 +243,8 @@ impl ChunkStore {
             backend,
             prefix,
             uploader,
+            freshness: Freshness::DEFAULT,
+            clock: Clock::system(),
         }))
     }
 
@@ -148,44 +265,238 @@ impl ChunkStore {
         {
             return Err(Error::Invalid("pointer name"));
         }
-        Ok(self.path(&format!("pointers/v1/{name}")))
+        Ok(self.path(&format!("pointers/v2/{name}")))
     }
 
-    /// Replaces the small mutable object `name`, such as the record of which
-    /// manifests make up a sandbox's current copy. Chunks and manifests are
-    /// immutable; pointers are the only objects ever overwritten, so write one
-    /// only after everything it names is stored.
-    pub async fn put_pointer(&self, name: &str, bytes: Vec<u8>) -> Result<()> {
-        if bytes.len() > MAX_POINTER_BYTES {
+    /// Whether this store deletes on condition (GCS), which a sweep that
+    /// deletes needs.
+    #[must_use]
+    pub fn deletes_on_condition(&self) -> bool {
+        matches!(self.uploader, Uploader::Gcs(_))
+    }
+
+    /// Refuses a store that holds pointers from before they carried a
+    /// stamp: this release does not read them, so their copies would look
+    /// absent and a sweep would delete what they name. Such a store needs
+    /// migrating; a new prefix starts afresh.
+    pub async fn refuse_unstamped_pointers(&self) -> Result<()> {
+        let prefix = self.path(UNSTAMPED_POINTERS);
+        match self.backend.list(Some(&prefix)).try_next().await? {
+            None => Ok(()),
+            Some(_) => Err(Error::Unsupported(
+                "the store holds pointers in an older format (pointers/v1): \
+                 migrate them or use a new prefix",
+            )),
+        }
+    }
+
+    /// Reads the pointer at `path`: what it holds, without its stamp, and
+    /// the version it is stored as; `None` when there is none.
+    async fn read_pointer(&self, path: &Path) -> Result<Option<(Bytes, UpdateVersion)>> {
+        let read = match self.backend.get(path).await {
+            Ok(read) => read,
+            Err(object_store::Error::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if read.meta.size > (STAMP_BYTES + MAX_POINTER_BYTES) as u64 {
             return Err(Error::Invalid("pointer too large"));
         }
+        let version = UpdateVersion {
+            e_tag: read.meta.e_tag.clone(),
+            version: read.meta.version.clone(),
+        };
+        let stored = read.bytes().await?;
+        Ok(Some((unstamped(&stored)?, version)))
+    }
+
+    /// Reads pointer `name` to replace it with one naming part of what it
+    /// names now, such as the same copy without its memory image. The
+    /// replacement goes through [`Self::publish`] with the publication
+    /// returned, so it lands only on the version read: a write held up in
+    /// flight long after its caller stopped waiting can never replace a
+    /// copy stored since, and a sweep's fence sends the caller to read
+    /// again. `None` when there is no pointer, or only the empty one an
+    /// archive in flight stored.
+    pub async fn read_for_change(&self, name: &str) -> Result<Option<(Vec<u8>, Publication)>> {
+        let path = self.pointer_path(name)?;
+        match self.read_pointer(&path).await? {
+            Some((pointer, version)) if !pointer.is_empty() => {
+                Ok(Some((pointer.to_vec(), Publication { path, version })))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Replaces pointer `name` with no condition, as a writer without the
+    /// fence would; for tests that show what the fence prevents.
+    #[cfg(test)]
+    pub(crate) async fn put_pointer_unfenced(&self, name: &str, bytes: Vec<u8>) -> Result<()> {
         self.backend
-            .put(&self.pointer_path(name)?, Bytes::from(bytes).into())
+            .put(&self.pointer_path(name)?, stamped(&bytes)?.into())
             .await?;
         Ok(())
     }
 
-    /// Reads pointer `name`, or `None` when there is none.
-    pub async fn get_pointer(&self, name: &str) -> Result<Option<Vec<u8>>> {
-        match self.backend.get(&self.pointer_path(name)?).await {
-            Ok(result) => {
-                if result.meta.size > MAX_POINTER_BYTES as u64 {
-                    return Err(Error::Invalid("pointer too large"));
+    /// Starts an archive that will replace pointer `name`: begin before
+    /// looking at the store at all. Notes which version of the pointer is
+    /// stored, first storing an empty one if there is none, so that a
+    /// sweep can stop the archive from publishing once it has taken stock
+    /// (see [`crate::fresh`]).
+    pub async fn begin(&self, name: &str) -> Result<Publication> {
+        let path = self.pointer_path(name)?;
+        for _ in 0..POINTER_TRIES {
+            match self.backend.head(&path).await {
+                Ok(meta) => {
+                    let version = UpdateVersion {
+                        e_tag: meta.e_tag,
+                        version: meta.version,
+                    };
+                    return Ok(Publication { path, version });
                 }
-                Ok(Some(result.bytes().await?.to_vec()))
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
             }
-            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            let create = PutOptions {
+                mode: PutMode::Create,
+                ..Default::default()
+            };
+            match self
+                .backend
+                .put_opts(&path, stamped(&[])?.into(), create)
+                .await
+            {
+                Ok(put) => {
+                    let version = UpdateVersion {
+                        e_tag: put.e_tag,
+                        version: put.version,
+                    };
+                    return Ok(Publication { path, version });
+                }
+                // Made meanwhile, or by an earlier try whose answer was
+                // lost: read its version.
+                Err(object_store::Error::AlreadyExists { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(Error::Superseded)
+    }
+
+    /// Ends `publication` by replacing its pointer with `bytes`, on
+    /// condition that the pointer is still the version the change started
+    /// from. Refused with [`Error::Superseded`] otherwise: a sweep has
+    /// taken stock since and may delete what an archive reused, or a newer
+    /// copy was stored, so the change starts again.
+    pub async fn publish(&self, publication: Publication, bytes: Vec<u8>) -> Result<()> {
+        if bytes.len() > MAX_POINTER_BYTES {
+            return Err(Error::Invalid("pointer too large"));
+        }
+        let options = PutOptions {
+            mode: PutMode::Update(publication.version),
+            ..Default::default()
+        };
+        match self
+            .backend
+            .put_opts(&publication.path, stamped(&bytes)?.into(), options)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(
+                object_store::Error::Precondition { .. } | object_store::Error::NotFound { .. },
+            ) => Err(Error::Superseded),
             Err(error) => Err(error.into()),
         }
     }
 
-    /// Deletes pointer `name`; succeeds when there is none. What it named
-    /// stays until garbage collection finds nothing refers to it.
-    pub async fn delete_pointer(&self, name: &str) -> Result<()> {
-        match self.backend.delete(&self.pointer_path(name)?).await {
-            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
-            Err(error) => Err(error.into()),
+    /// Stores pointer `key` (as a listing gives it) again as it is, on
+    /// condition that it has not changed since it was read, and returns
+    /// what it holds; `None` once it is gone. After this no archive that
+    /// began earlier can publish it, so what it names now is all it can
+    /// name until an archive begun later publishes: stored again under a
+    /// new stamp, it has a new version on every store.
+    pub async fn fence(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let name = Self::pointer_name(key).ok_or(Error::Invalid("pointer key"))?;
+        let path = self.pointer_path(name)?;
+        for _ in 0..POINTER_TRIES {
+            let Some((pointer, version)) = self.read_pointer(&path).await? else {
+                return Ok(None);
+            };
+            let options = PutOptions {
+                mode: PutMode::Update(version),
+                ..Default::default()
+            };
+            match self
+                .backend
+                .put_opts(&path, stamped(&pointer)?.into(), options)
+                .await
+            {
+                Ok(_) => return Ok(Some(pointer.to_vec())),
+                // Published meanwhile, or fenced by an earlier try whose
+                // answer was lost: read it again.
+                Err(object_store::Error::Precondition { .. }) => {}
+                Err(object_store::Error::NotFound { .. }) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            }
         }
+        Err(Error::Superseded)
+    }
+
+    /// Reads pointer `name`, or `None` when there is none or it is the
+    /// empty one an archive in flight stored (see [`Self::begin`]).
+    pub async fn get_pointer(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        let path = self.pointer_path(name)?;
+        Ok(self
+            .read_pointer(&path)
+            .await?
+            .filter(|(pointer, _)| !pointer.is_empty())
+            .map(|(pointer, _)| pointer.to_vec()))
+    }
+
+    /// Deletes pointer `name`; succeeds when there is none. It deletes only
+    /// the version it read, so a delete held up in flight long after its
+    /// caller stopped waiting can never take a copy stored since: on GCS by
+    /// generation; elsewhere, where a delete carries no condition, by
+    /// replacing the pointer with the empty one on condition, which reads
+    /// as no copy and stays. Every pointer write has its own stamp, so even
+    /// where the version follows the bytes (S3) a copy stored since with
+    /// the same contents is a version the delete did not read. A version
+    /// that changes between the read and the delete is read again. What
+    /// the pointer named stays until a sweep finds nothing names it.
+    pub async fn delete_pointer(&self, name: &str) -> Result<()> {
+        let path = self.pointer_path(name)?;
+        for _ in 0..POINTER_TRIES {
+            if let Uploader::Gcs(gcs) = &self.uploader {
+                let Some(stored) = gcs.stored(&path).await? else {
+                    return Ok(());
+                };
+                let generation = stored
+                    .generation
+                    .ok_or(Error::Invalid("the store gave no generation"))?;
+                match gcs.delete_generation(&path, &generation).await? {
+                    Deleted::Yes | Deleted::Gone => return Ok(()),
+                    Deleted::Changed => continue,
+                }
+            }
+            let Some((pointer, version)) = self.read_pointer(&path).await? else {
+                return Ok(());
+            };
+            if pointer.is_empty() {
+                return Ok(());
+            }
+            let options = PutOptions {
+                mode: PutMode::Update(version),
+                ..Default::default()
+            };
+            match self
+                .backend
+                .put_opts(&path, stamped(&[])?.into(), options)
+                .await
+            {
+                Ok(_) | Err(object_store::Error::NotFound { .. }) => return Ok(()),
+                Err(object_store::Error::Precondition { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(Error::Superseded)
     }
 
     /// Returns true only when this call created the object; never overwrites it.
@@ -209,8 +520,20 @@ impl ChunkStore {
         if self.create(&path, &bytes).await? == Created::New {
             return Ok(true);
         }
-        if self.holds(&path, &bytes).await? {
-            return Ok(false);
+        if let Found::Ours(stored_at) = self.found(&path, &bytes).await? {
+            // Reused as it is, unless it was stored too long ago for a
+            // sweep to see the pointer this archive will publish: then it
+            // is stored again (see `crate::fresh`).
+            let now = self.clock.now();
+            if stored_at.is_some_and(|at| !self.freshness.is_stale(at, now)) {
+                return Ok(false);
+            }
+            self.replace(&path, &bytes).await?;
+            return if self.holds(&path, &bytes).await? {
+                Ok(false)
+            } else {
+                Err(Error::Integrity)
+            };
         }
         // Something else is stored under our name: the remains of a bad
         // write or a damaged copy. Keep it for inspection and write ours
@@ -271,19 +594,33 @@ impl ChunkStore {
 
     /// Whether the object at `path` holds exactly `bytes`.
     async fn holds(&self, path: &Path, bytes: &Bytes) -> Result<bool> {
+        Ok(matches!(self.found(path, bytes).await?, Found::Ours(_)))
+    }
+
+    async fn found(&self, path: &Path, bytes: &Bytes) -> Result<Found> {
         if let Uploader::Gcs(gcs) = &self.uploader {
             // GCS kept the checksums it verified at upload: no download.
-            return Ok(gcs.stored(path).await? == Some(crate::upload::checksums(bytes)));
+            return Ok(match gcs.stored(path).await? {
+                Some(stored) if stored.checksums == crate::upload::checksums(bytes) => {
+                    Found::Ours(stored.at)
+                }
+                _ => Found::Other,
+            });
         }
         let result = match self.backend.get(path).await {
             Ok(result) => result,
-            Err(object_store::Error::NotFound { .. }) => return Ok(false),
+            Err(object_store::Error::NotFound { .. }) => return Ok(Found::Other),
             Err(error) => return Err(error.into()),
         };
         if result.meta.size != bytes.len() as u64 {
-            return Ok(false);
+            return Ok(Found::Other);
         }
-        Ok(result.bytes().await? == *bytes)
+        let stored_at = SystemTime::from(result.meta.last_modified);
+        Ok(if result.bytes().await? == *bytes {
+            Found::Ours(Some(stored_at))
+        } else {
+            Found::Other
+        })
     }
 
     /// Copies the object at `path` under `quarantine/v1/` for inspection.
@@ -325,7 +662,10 @@ impl ChunkStore {
         reference.validate()?;
         let path = self.path(&reference.key());
         if let (Uploader::Gcs(gcs), Some(expected)) = (&self.uploader, &reference.checksums) {
-            return Ok(gcs.stored(&path).await?.as_deref() == Some(expected.as_str()));
+            return Ok(gcs
+                .stored(&path)
+                .await?
+                .is_some_and(|stored| stored.checksums == *expected));
         }
         match self.read_chunk(&path, reference).await {
             Ok(_) => Ok(true),
@@ -383,9 +723,15 @@ impl ChunkStore {
     pub async fn put_manifest(&self, manifest: &DiskManifest) -> Result<String> {
         let bytes = manifest.encode()?;
         let digest = blake3::hash(&bytes).to_hex().to_string();
-        self.put_immutable(&format!("manifests/v1/{digest}.json"), Bytes::from(bytes))
+        self.put_immutable(&Self::manifest_key(&digest), Bytes::from(bytes))
             .await?;
         Ok(digest)
+    }
+
+    /// The key of the manifest whose digest is `digest`.
+    #[must_use]
+    pub fn manifest_key(digest: &str) -> String {
+        format!("manifests/v1/{digest}.json")
     }
 
     pub async fn get_manifest(&self, digest: &str) -> Result<DiskManifest> {
@@ -398,7 +744,7 @@ impl ChunkStore {
         }
         let result = self
             .backend
-            .get(&self.path(&format!("manifests/v1/{digest}.json")))
+            .get(&self.path(&Self::manifest_key(digest)))
             .await?;
         if result.meta.size > MAX_MANIFEST_BYTES as u64 {
             return Err(Error::Invalid("manifest too large"));
@@ -409,6 +755,88 @@ impl ChunkStore {
         }
         DiskManifest::decode(&bytes)
     }
+
+    /// Every object stored in `area`.
+    pub async fn list(&self, area: Area) -> Result<Vec<Listed>> {
+        let prefix = self.path(area.prefix());
+        self.backend
+            .list(Some(&prefix))
+            .map_err(Error::from)
+            .and_then(|meta| async move {
+                let key = meta
+                    .location
+                    .prefix_match(&self.prefix)
+                    .map(|parts| parts.map(|part| part.as_ref().to_owned()))
+                    .ok_or(Error::Invalid("listed object outside the store"))?
+                    .collect::<Vec<_>>()
+                    .join("/");
+                Ok(Listed {
+                    key,
+                    stored_at: meta.last_modified.into(),
+                    size: meta.size,
+                })
+            })
+            .try_collect()
+            .await
+    }
+
+    /// The name of the pointer a listing of [`Area::Pointers`] shows as
+    /// `key`.
+    #[must_use]
+    pub fn pointer_name(key: &str) -> Option<&str> {
+        key.strip_prefix("pointers/v2/")
+    }
+
+    /// Deletes the chunk or manifest at `key` if it was stored before
+    /// `before` and has not been stored again since this call looked. Only
+    /// GCS deletes on that condition; elsewhere this refuses with
+    /// [`Error::Unsupported`].
+    pub async fn delete_if_stored_before(&self, key: &str, before: SystemTime) -> Result<Removal> {
+        let Uploader::Gcs(gcs) = &self.uploader else {
+            return Err(Error::Unsupported(
+                "deleting stored objects needs a delete on condition (GCS)",
+            ));
+        };
+        if !(key.starts_with(Area::Chunks.prefix()) || key.starts_with(Area::Manifests.prefix())) {
+            return Err(Error::Invalid("only chunks and manifests are deleted"));
+        }
+        let path = self.path(key);
+        let Some(stored) = gcs.stored(&path).await? else {
+            return Ok(Removal::Gone);
+        };
+        let (Some(at), Some(generation)) = (stored.at, stored.generation) else {
+            return Ok(Removal::Kept);
+        };
+        if at >= before {
+            return Ok(Removal::Kept);
+        }
+        Ok(match gcs.delete_generation(&path, &generation).await? {
+            Deleted::Yes => Removal::Deleted,
+            Deleted::Changed => Removal::Kept,
+            Deleted::Gone => Removal::Gone,
+        })
+    }
+}
+
+/// `pointer` as stored: after a stamp no other write uses. Storing the
+/// same pointer again, or the empty one again, then still gives a new
+/// version where a store's entity tag follows the bytes (S3), so a write
+/// held up in flight, on condition of a version read long ago, can never
+/// land on a later write that happens to hold the same bytes.
+fn stamped(pointer: &[u8]) -> Result<Bytes> {
+    let mut stored = vec![0; STAMP_BYTES + pointer.len()];
+    let (stamp, rest) = stored.split_at_mut(STAMP_BYTES);
+    getrandom::fill(stamp).map_err(std::io::Error::from)?;
+    rest.copy_from_slice(pointer);
+    Ok(stored.into())
+}
+
+/// The pointer `stored` holds, without its stamp (see [`stamped`]).
+pub(crate) fn unstamped(stored: &Bytes) -> Result<Bytes> {
+    if stored.len() < STAMP_BYTES {
+        return Err(Error::Invalid("pointer without a stamp"));
+    }
+    Ok(stored.slice(STAMP_BYTES..))
 }
 
 #[cfg(test)]
@@ -420,8 +848,12 @@ mod tests {
     async fn pointers_are_replaced_read_and_deleted() {
         let store = ChunkStore::new(Arc::new(InMemory::new()), Path::from("tenant/test"));
         assert_eq!(store.get_pointer("a1").await.unwrap(), None);
-        store.put_pointer("a1", b"one".to_vec()).await.unwrap();
-        store.put_pointer("a1", b"two".to_vec()).await.unwrap();
+        assert!(store.read_for_change("a1").await.unwrap().is_none());
+        let first = store.begin("a1").await.unwrap();
+        store.publish(first, b"one two".to_vec()).await.unwrap();
+        let (read, part) = store.read_for_change("a1").await.unwrap().unwrap();
+        assert_eq!(read, b"one two".to_vec());
+        store.publish(part, b"two".to_vec()).await.unwrap();
         assert_eq!(
             store.get_pointer("a1").await.unwrap(),
             Some(b"two".to_vec())
@@ -429,13 +861,83 @@ mod tests {
         store.delete_pointer("a1").await.unwrap();
         store.delete_pointer("a1").await.unwrap();
         assert_eq!(store.get_pointer("a1").await.unwrap(), None);
-        assert!(store.put_pointer("../escape", Vec::new()).await.is_err());
+        assert!(store.read_for_change("a1").await.unwrap().is_none());
+        assert!(store.begin("../escape").await.is_err());
+        let big = store.begin("big").await.unwrap();
         assert!(
             store
-                .put_pointer("big", vec![0; MAX_POINTER_BYTES + 1])
+                .publish(big, vec![0; MAX_POINTER_BYTES + 1])
                 .await
                 .is_err()
         );
+    }
+
+    /// A change that read an older version never lands, and a delete
+    /// where deletes carry no condition leaves the empty pointer.
+    #[tokio::test]
+    async fn changes_land_only_on_the_version_they_read() {
+        let backend = Arc::new(InMemory::new());
+        let store = ChunkStore::new(backend.clone(), Path::from("p"));
+        let first = store.begin("a").await.unwrap();
+        store.publish(first, b"old".to_vec()).await.unwrap();
+        let (_, stale) = store.read_for_change("a").await.unwrap().unwrap();
+        let newer = store.begin("a").await.unwrap();
+        store.publish(newer, b"new".to_vec()).await.unwrap();
+        let refused = store.publish(stale, b"part of old".to_vec()).await;
+        assert!(matches!(refused, Err(Error::Superseded)), "{refused:?}");
+        assert_eq!(store.get_pointer("a").await.unwrap(), Some(b"new".to_vec()));
+
+        store.delete_pointer("a").await.unwrap();
+        assert_eq!(store.get_pointer("a").await.unwrap(), None);
+        let left = backend
+            .get(&Path::from("p/pointers/v2/a"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert!(
+            unstamped(&left).unwrap().is_empty(),
+            "the empty pointer stays"
+        );
+        assert!(store.read_for_change("a").await.unwrap().is_none());
+    }
+
+    /// Every write of a pointer is stored differently, even of the same
+    /// pointer, and a stored pointer without its stamp is refused.
+    #[tokio::test]
+    async fn every_pointer_write_has_its_own_stamp() {
+        let backend = Arc::new(InMemory::new());
+        let store = ChunkStore::new(backend.clone(), Path::from("p"));
+        let path = Path::from("p/pointers/v2/a");
+        let stored = || {
+            let (backend, path) = (backend.clone(), path.clone());
+            async move { backend.get(&path).await.unwrap().bytes().await.unwrap() }
+        };
+        let first = store.begin("a").await.unwrap();
+        let empty = stored().await;
+        store.publish(first, b"same".to_vec()).await.unwrap();
+        let once = stored().await;
+        let (_, again) = store.read_for_change("a").await.unwrap().unwrap();
+        store.publish(again, b"same".to_vec()).await.unwrap();
+        let twice = stored().await;
+        assert_eq!(unstamped(&once).unwrap(), unstamped(&twice).unwrap());
+        assert_ne!(once, twice);
+        store.fence("pointers/v2/a").await.unwrap();
+        assert_ne!(stored().await, twice, "a fence stores it anew");
+        store.delete_pointer("a").await.unwrap();
+        let deleted = stored().await;
+        assert!(unstamped(&deleted).unwrap().is_empty());
+        assert_ne!(deleted, empty, "two empty pointers differ by stamp");
+
+        backend
+            .put(&path, Bytes::from_static(b"short").into())
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.get_pointer("a").await,
+            Err(Error::Invalid(_))
+        ));
     }
 
     #[tokio::test]
@@ -549,30 +1051,29 @@ mod tests {
 
     #[tokio::test]
     async fn gcs_checksums_prove_a_chunk_without_reading_it() {
-        use crate::upload::tests::{Fake, gcs};
+        use crate::fake::{Fake, gcs};
         let fake = Arc::new(Fake::default());
         let store = ChunkStore {
             // Never read: GCS answers from the checksums it keeps.
             backend: Arc::new(InMemory::new()),
             prefix: Path::from("p"),
             uploader: Uploader::Gcs(gcs(&fake)),
+            freshness: Freshness::DEFAULT,
+            clock: Clock::system(),
         };
         let chunk = EncodedChunk::encode(&[9; 16384], 1).unwrap();
         assert!(!store.has_chunk(&chunk.reference).await.unwrap());
         assert!(store.put_chunk(&chunk).await.unwrap());
         assert!(store.has_chunk(&chunk.reference).await.unwrap());
         // Same-length damage under the chunk's name is not held...
-        let key = format!("/bucket/p/{}", chunk.object_key());
+        let key = format!("p/{}", chunk.object_key());
         let mut damaged = chunk.bytes.clone();
         damaged[1] ^= 0x10;
-        fake.objects
-            .lock()
-            .unwrap()
-            .insert(key.clone(), Bytes::from(damaged));
+        fake.put_raw(&key, Bytes::from(damaged));
         assert!(!store.has_chunk(&chunk.reference).await.unwrap());
         // ...and the next upload of the same content replaces it.
         assert!(store.put_chunk(&chunk).await.unwrap());
-        assert_eq!(fake.objects.lock().unwrap()[&key], chunk.bytes);
+        assert_eq!(fake.bytes(&key).unwrap(), chunk.bytes);
         assert!(store.has_chunk(&chunk.reference).await.unwrap());
         // A reference whose checksums disagree with its bytes is refused.
         let mut forged = chunk.clone();

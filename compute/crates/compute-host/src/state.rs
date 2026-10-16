@@ -64,6 +64,15 @@ const LOCK: &str = "agent.lock";
 /// record has used.
 const GENERATIONS: &str = "generations";
 
+/// Milliseconds since the Unix epoch, as records keep times.
+pub(crate) fn unix_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 /// Where a sandbox's disk is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -108,6 +117,16 @@ pub(crate) struct Record {
     /// Removal has begun; it finishes even across a restart.
     #[serde(default)]
     pub removing: bool,
+    /// Its last activity, in milliseconds since the Unix epoch, as of the
+    /// record's latest write, so a restart does not reset how long it has
+    /// been idle. Steps write it along with what they change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_ms: Option<u64>,
+    /// When the store's latest copy was made, in milliseconds since the
+    /// Unix epoch. It stays once the sandbox changes again: that copy is
+    /// still what losing this host would go back to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backed_up_ms: Option<u64>,
 }
 
 impl Record {
@@ -125,6 +144,8 @@ impl Record {
             image: false,
             archived: false,
             removing: false,
+            last_used_ms: None,
+            backed_up_ms: None,
         }
     }
 
@@ -164,6 +185,8 @@ pub(crate) struct Change {
     archived: Option<bool>,
     execution: bool,
     removing: bool,
+    last_used_ms: Option<u64>,
+    backed_up_ms: Option<u64>,
 }
 
 impl Change {
@@ -198,6 +221,19 @@ impl Change {
         self
     }
 
+    /// Records the sandbox's last activity. It never moves backwards.
+    pub fn last_used(mut self, unix_ms: u64) -> Self {
+        self.last_used_ms = Some(unix_ms);
+        self
+    }
+
+    /// Records that the store now holds a copy made at `unix_ms`. It never
+    /// moves backwards.
+    pub fn backed_up(mut self, unix_ms: u64) -> Self {
+        self.backed_up_ms = Some(unix_ms);
+        self
+    }
+
     fn apply_to(self, record: &mut Record) {
         if let Some(disk) = self.disk {
             record.disk = disk;
@@ -212,6 +248,12 @@ impl Change {
             record.generation += 1;
         }
         record.removing |= self.removing;
+        if let Some(at) = self.last_used_ms {
+            record.last_used_ms = Some(record.last_used_ms.map_or(at, |was| was.max(at)));
+        }
+        if let Some(at) = self.backed_up_ms {
+            record.backed_up_ms = Some(record.backed_up_ms.map_or(at, |was| was.max(at)));
+        }
     }
 }
 
@@ -336,6 +378,28 @@ struct Locks {
     /// The host's lock, when the agent took one: host-wide resources such
     /// as user ids and networks are touched only under it.
     _host: Option<File>,
+}
+
+/// A share of the state root's ownership. Work outside the records that
+/// must not outlive their owner, such as a write of a sandbox's holds,
+/// keeps one until it lands, so a successor takes the root only after.
+#[derive(Clone, Debug)]
+pub(crate) struct Ownership {
+    _locks: Arc<Locks>,
+}
+
+#[cfg(test)]
+impl Ownership {
+    /// A share of no root's ownership, for tests of work that keeps one.
+    pub fn detached() -> Self {
+        let root = File::open("/dev/null").expect("/dev/null opens");
+        Self {
+            _locks: Arc::new(Locks {
+                _root: root,
+                _host: None,
+            }),
+        }
+    }
 }
 
 /// The lowest generation no record has used, as [`GENERATIONS`] holds it.
@@ -560,6 +624,13 @@ impl Records {
             slot.current().ok_or(StateError::NotFound(id))
         })
         .await
+    }
+
+    /// A share of the root's ownership; see [`Ownership`].
+    pub fn ownership(&self) -> Ownership {
+        Ownership {
+            _locks: Arc::clone(&self.locks),
+        }
     }
 
     /// Writes the first record of a new sandbox, which starts at a

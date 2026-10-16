@@ -22,6 +22,7 @@ old one; old records stay as history.
 | 14 | [Requests, limits and admission](0014-requests-limits-and-admission.md) | Accepted |
 | 15 | [Placement and moving sandboxes between hosts](0015-placement-and-moves-between-hosts.md) | Proposed |
 | 16 | [Observability: wide events, small metrics, zero alarms](0016-observability.md) | Proposed |
+| 17 | [Sweeping the chunks no copy names](0017-sweeping-unnamed-chunks.md) | Accepted |
 
 ## Format
 

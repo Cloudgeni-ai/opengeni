@@ -50,6 +50,7 @@ impl Rig {
             state: State::new(Level::Running, Durability::Volatile, true),
             policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
             size,
+            last_activity: self.now,
         });
         self.send(Input::Hold {
             sandbox,
@@ -267,6 +268,7 @@ fn idle_sandboxes_go_before_busy_ones_are_squeezed() {
         state: State::new(Level::Paused, Durability::Local, true),
         policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
         size: Size::whole(4 * GIB),
+        last_activity: rig.now,
     });
     rig.resident(4, 2 * GIB);
     rig.at(10);
@@ -480,6 +482,7 @@ fn a_balloon_the_vm_did_not_take_is_set_again_after_a_backoff() {
         state: State::new(Level::Running, Durability::Volatile, true),
         policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
         size: size(GIB, 4 * GIB),
+        last_activity: rig.now,
     });
     assert_eq!(balloons(&actions), [(1, 0)]);
     let mut request = asked(&actions, 1);

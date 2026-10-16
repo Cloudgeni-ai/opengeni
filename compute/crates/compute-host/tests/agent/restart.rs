@@ -9,6 +9,7 @@ use compute_host::protocol::{
     DurabilityName, ErrorCode, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
     SleepConfig,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 
 use super::{Delays, Lab, NEVER, PAUSE_SOON, SAVE_IN_PLACE, SAVE_QUICKLY, id, vm_name};
@@ -90,7 +91,7 @@ async fn requests_for_a_replaced_execution_are_refused() {
     };
     assert!(matches!(
         lab.client.call(&wake(first)).await.unwrap(),
-        Reply::Woken { .. }
+        Reply::Woken { generation, .. } if generation == first
     ));
 
     // Saving and restoring keep the guest's programs, so the execution
@@ -100,7 +101,7 @@ async fn requests_for_a_replaced_execution_are_refused() {
     assert_eq!(lab.current(sandbox).await.generation, first);
     assert!(matches!(
         lab.client.call(&wake(first)).await.unwrap(),
-        Reply::Woken { .. }
+        Reply::Woken { generation, .. } if generation == first
     ));
 
     // A crash loses them: the next boot is a new execution.
@@ -147,6 +148,123 @@ async fn requests_for_a_replaced_execution_are_refused() {
         .await
         .unwrap();
     assert_eq!(reply, Reply::Done);
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn named_holds_outlast_a_restart_unless_they_lapse_meanwhile() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(17);
+    lab.create(sandbox, PAUSE_SOON).await;
+    let hold = |name: &str, ttl_ms| Request::Hold {
+        id: sandbox,
+        generation: None,
+        hold: name.into(),
+        ttl_ms,
+        priority: PriorityName::Interactive,
+    };
+    assert_eq!(
+        lab.client.call(&hold("turn", None)).await.unwrap(),
+        Reply::Done
+    );
+    assert_eq!(
+        lab.client.call(&hold("brief", Some(300))).await.unwrap(),
+        Reply::Done
+    );
+    lab.wait_level(sandbox, LevelName::Running).await;
+    let (root, world) = lab.stop().await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // The open-ended hold is back; the brief one lapsed while no agent ran.
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    assert_eq!(lab.current(sandbox).await.holds, 1);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let status = lab.status().await;
+    assert_eq!(Lab::sandbox(&status, sandbox).level, LevelName::Running);
+    assert_eq!(
+        lab.world.boots.load(Ordering::Relaxed),
+        1,
+        "it kept running"
+    );
+
+    // Released, it is forgotten for good: idle, it pauses, and stays
+    // unheld across another restart.
+    let release = Request::Release {
+        id: sandbox,
+        generation: None,
+        hold: "turn".into(),
+    };
+    assert_eq!(lab.client.call(&release).await.unwrap(), Reply::Done);
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    let (root, world) = lab.stop().await;
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    assert_eq!(lab.current(sandbox).await.holds, 0);
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replies_name_the_execution_they_reached() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(16);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set first"]).await;
+    let first = lab.current(sandbox).await.generation;
+    let wake = Request::Wake {
+        id: sandbox,
+        generation: None,
+        priority: PriorityName::Interactive,
+    };
+    let reply = lab.client.call(&wake).await.unwrap();
+    assert!(
+        matches!(reply, Reply::Woken { generation, .. } if generation == first),
+        "{reply:?}"
+    );
+
+    // A connection that names no execution follows the sandbox to a fresh
+    // boot, and says it reached the new one.
+    lab.world.crash(&vm_name(sandbox));
+    let (reply, mut stream) = lab
+        .client
+        .connect(sandbox, None, 52, PriorityName::Interactive)
+        .await
+        .unwrap();
+    let second = first + 1;
+    assert!(
+        matches!(reply, Reply::Connected { generation, .. } if generation == second),
+        "{reply:?}"
+    );
+    stream.get_mut().write_all(b"get\nexit\n").await.unwrap();
+    let mut output = String::new();
+    stream.read_to_string(&mut output).await.unwrap();
+    assert_eq!(output, "\n", "the new execution starts empty");
+    assert_eq!(lab.current(sandbox).await.generation, second);
+
+    // One that names the old execution is refused rather than reaching
+    // the new one.
+    let (reply, _) = lab
+        .client
+        .connect(sandbox, Some(first), 52, PriorityName::Interactive)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            reply,
+            Reply::Error {
+                code: ErrorCode::Stale,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    let (reply, _) = lab
+        .client
+        .connect(sandbox, Some(second), 52, PriorityName::Interactive)
+        .await
+        .unwrap();
+    assert!(
+        matches!(reply, Reply::Connected { generation, .. } if generation == second),
+        "{reply:?}"
+    );
     lab.assert_clean();
 }
 
@@ -240,7 +358,7 @@ async fn an_unreadable_record_blocks_its_id() {
             matches!(
                 reply,
                 Reply::Error {
-                    code: ErrorCode::Broken,
+                    code: ErrorCode::Blocked,
                     ..
                 }
             ),
@@ -349,7 +467,7 @@ async fn a_failed_recovery_blocks_the_id_until_removed() {
     assert_eq!(status.blocked.len(), 1);
     assert_eq!(status.blocked[0].id, sandbox);
     let reply = lab.client.call(&create_request(sandbox)).await.unwrap();
-    assert!(is_error(&reply, ErrorCode::Broken), "{reply:?}");
+    assert!(is_error(&reply, ErrorCode::Blocked), "{reply:?}");
     assert!(dir.join("sandbox.json").exists(), "its record is kept");
 
     let reply = lab
@@ -496,6 +614,157 @@ async fn local_files_an_eviction_left_are_deleted_on_restart() {
     lab.assert_clean();
 }
 
+/// A restart does not reset how long a sleeping sandbox has been idle, so
+/// its retention clocks run on: a sandbox idle for almost its forget time
+/// forgets its memory soon after the restart, not a full period later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_keeps_how_long_a_sandbox_has_been_idle() {
+    const FORGET_MS: u64 = 60_000;
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(47);
+    let config = SleepConfig {
+        forget_after_ms: Some(FORGET_MS),
+        ..SAVE_QUICKLY
+    };
+    let unix_ms = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    };
+    lab.create(sandbox, config).await;
+    let used = unix_ms();
+    lab.run(sandbox, &["set x"]).await;
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    let recorded = lab.record(sandbox)["last_used_ms"].as_u64().unwrap();
+    assert!(
+        (used..=unix_ms()).contains(&recorded),
+        "the save recorded the last activity: {recorded} not after {used}"
+    );
+    let dir = lab.sandbox_dir(sandbox);
+    let (root, world) = lab.stop().await;
+    // As if its last activity were most of a forget period ago.
+    let path = dir.join("sandbox.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["last_used_ms"] = (unix_ms() - FORGET_MS + 500).into();
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    lab.wait_until("the memory forgotten", |status| {
+        !Lab::sandbox(status, sandbox).memory_saved
+    })
+    .await;
+    assert_eq!(lab.run(sandbox, &["get"]).await, [""], "booted fresh");
+    lab.assert_clean();
+}
+
+/// A pause records the sandbox's last activity, so an agent restarted
+/// before the save counts its idle time from then, not from its boot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pause_records_when_the_sandbox_was_last_used() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(48);
+    let unix_ms = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    };
+    lab.create(sandbox, PAUSE_SOON).await;
+    lab.run(sandbox, &["set x"]).await;
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let used = unix_ms();
+    lab.run(sandbox, &["get"]).await;
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    let recorded = lab.record(sandbox)["last_used_ms"].as_u64().unwrap();
+    assert!(
+        (used..=unix_ms()).contains(&recorded),
+        "the pause recorded the last activity: {recorded} not after {used}"
+    );
+    lab.assert_clean();
+}
+
+/// A restarted agent hands the core a sandbox together with its holds, so
+/// a sandbox whose memory was due to be forgotten while no agent ran, but
+/// which a caller holds awake, wakes with its memory instead of losing it.
+/// A holds file that cannot be read holds it awake the same way, until
+/// that hold is released by name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn holds_taken_back_on_restart_come_before_any_forgetting() {
+    const FORGET_MS: u64 = 60_000;
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let (held, unreadable) = (id(49), id(50));
+    let config = SleepConfig {
+        forget_after_ms: Some(FORGET_MS),
+        ..SAVE_QUICKLY
+    };
+    for sandbox in [held, unreadable] {
+        lab.create(sandbox, config).await;
+        lab.run(sandbox, &["set kept"]).await;
+        lab.wait_level(sandbox, LevelName::Saved).await;
+    }
+    let dirs = [lab.sandbox_dir(held), lab.sandbox_dir(unreadable)];
+    let (root, world) = lab.stop().await;
+    let long_ago = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+        - 2 * FORGET_MS;
+    for dir in &dirs {
+        // Idle past its forget time, as if the agent had been down long.
+        let path = dir.join("sandbox.json");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record["last_used_ms"] = long_ago.into();
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+    // A hold acknowledged just before the agent stopped, its wake not yet
+    // started; and a holds file damaged meanwhile.
+    std::fs::write(dirs[0].join("holds.json"), r#"{"turn":null}"#).unwrap();
+    std::fs::write(dirs[1].join("holds.json"), "not json").unwrap();
+
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    let status = lab.status().await;
+    let forgets = status
+        .steps
+        .iter()
+        .find(|(name, _)| name == "forget")
+        .map(|(_, stats)| stats.started);
+    assert_eq!(
+        forgets,
+        Some(0),
+        "a forget started before the holds were back"
+    );
+    for sandbox in [held, unreadable] {
+        assert_eq!(lab.current(sandbox).await.holds, 1);
+        lab.wait_level(sandbox, LevelName::Running).await;
+        assert_eq!(
+            lab.run(sandbox, &["get"]).await,
+            ["kept"],
+            "its memory was forgotten"
+        );
+    }
+    let release = Request::Release {
+        id: unreadable,
+        generation: None,
+        hold: "holds-file-unreadable".into(),
+    };
+    assert_eq!(lab.client.call(&release).await.unwrap(), Reply::Done);
+    assert_eq!(lab.current(unreadable).await.holds, 0);
+    lab.assert_clean();
+}
+
 /// Creating a sandbox whose directory is already there is refused, and the
 /// directory is left as it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -531,5 +800,73 @@ async fn create_refuses_an_existing_directory() {
     );
     assert_eq!(std::fs::read_to_string(dir.join("kept")).unwrap(), "kept");
     assert_eq!(lab.status().await.sandboxes.len(), 0, "nothing was created");
+    lab.assert_clean();
+}
+
+/// A client that lost the reply to its create retries it: the same
+/// settings find the sandbox already made, other settings are refused, and
+/// either way there is one sandbox.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repeated_create_succeeds_only_with_the_same_settings() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(43);
+    let config = SandboxConfig {
+        vcpus: 1,
+        memory_mib: 256,
+        memory_request_mib: None,
+        cpu_request_millis: None,
+        sleep: NEVER,
+    };
+    let create = |config: SandboxConfig| Request::Create {
+        id: sandbox,
+        config,
+    };
+    for _ in 0..2 {
+        let reply = lab.client.call(&create(config.clone())).await.unwrap();
+        assert!(matches!(reply, Reply::Done), "{reply:?}");
+    }
+    let other = SandboxConfig {
+        memory_mib: 512,
+        ..config.clone()
+    };
+    let reply = lab.client.call(&create(other)).await.unwrap();
+    assert!(
+        matches!(
+            reply,
+            Reply::Error {
+                code: ErrorCode::Exists,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    assert_eq!(lab.status().await.sandboxes.len(), 1);
+    let reply = lab
+        .client
+        .call(&Request::Remove {
+            id: sandbox,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(reply, Reply::Done), "{reply:?}");
+    let reply = lab
+        .client
+        .call(&Request::Remove {
+            id: sandbox,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            reply,
+            Reply::Error {
+                code: ErrorCode::NotFound,
+                ..
+            }
+        ),
+        "a repeated remove: {reply:?}"
+    );
     lab.assert_clean();
 }

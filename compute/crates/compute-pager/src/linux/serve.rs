@@ -529,6 +529,7 @@ fn greet(stream: UnixStream, filling: &Fill, status: &Status, hello: &Hello) -> 
         told_complete: false,
     };
     host.send(&ToHost::Hello {
+        protocol: control::PROTOCOL,
         tag: hello.tag.clone(),
         device: hello.device,
         inode: hello.inode,

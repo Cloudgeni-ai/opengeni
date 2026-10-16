@@ -55,7 +55,7 @@ pub(super) async fn connect(
     sandbox: Id,
 ) -> Result<tokio::io::BufReader<tokio::net::UnixStream>, String> {
     let (reply, stream) = client
-        .connect(sandbox, PORT, PriorityName::Interactive)
+        .connect(sandbox, None, PORT, PriorityName::Interactive)
         .await
         .unwrap();
     match reply {

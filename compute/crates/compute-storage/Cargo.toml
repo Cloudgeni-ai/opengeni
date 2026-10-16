@@ -13,7 +13,9 @@ workspace = true
 base64 = "0.22"
 blake3 = "1.8"
 bytes = "1"
+chrono = { version = "0.4.34", default-features = false, features = ["clock"] }
 crc32c = "0.6"
+getrandom = { version = "0.3", features = ["std"] }
 http = "1"
 md-5 = "0.10"
 object_store = { version = "0.12.4", features = ["aws", "azure", "gcp"] }
@@ -23,9 +25,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 futures = "0.3"
 zstd = "0.13"
-libc = "0.2"
 
 [dev-dependencies]
 async-trait = "0.1"
 tokio = { version = "1", features = ["test-util"] }
-tempfile = "3"

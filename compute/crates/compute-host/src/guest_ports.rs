@@ -8,6 +8,13 @@
 //!
 //! The listeners belong to the sandbox, not to one VM process, so they stay
 //! in place while the sandbox sleeps at any level and across restores.
+//!
+//! A forwarded connection carries no proof of which sandbox opened it. Every
+//! sandbox's relay reaches the upstream from the same host address, and
+//! whatever identity the guest states in its bytes is the guest's own claim.
+//! An upstream that acts for a sandbox must authenticate each connection by
+//! a credential only that sandbox was given, such as a per-sandbox token
+//! handed to it at create, and never by address or a stated id.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -31,6 +38,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const BUFFER: usize = 8 * 1024;
 /// Inbound data wakes the sandbox at most this often per connection.
 const REPORT_EVERY: Duration = Duration::from_millis(250);
+/// Connections one sandbox may hold open on one port at once. Each costs the
+/// agent two open files, and those are shared by every sandbox on the host,
+/// so a guest that opens more has the extra ones closed at once. Closing
+/// rather than leaving them queued keeps the guest's VMM from blocking in a
+/// connect on a full backlog. (Firecracker allows a guest 1023 vsock
+/// connections in all.)
+const MAX_CONNECTIONS: usize = 64;
 
 /// A port the guest may connect to on its host, and where it leads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,10 +215,26 @@ async fn accept<A: Activity>(
     let guest_port = &ports[index];
     // Connections end with the listener: aborting this task drops the set.
     let mut connections = JoinSet::new();
+    // Whether the limit was reported since the guest last stayed under it.
+    let mut over_limit = false;
     loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
+                    while connections.try_join_next().is_some() {}
+                    if connections.len() >= MAX_CONNECTIONS {
+                        drop(stream);
+                        if !over_limit {
+                            tracing::warn!(
+                                port = guest_port.port,
+                                limit = MAX_CONNECTIONS,
+                                "a sandbox holds too many connections to a guest port; closing new ones",
+                            );
+                            over_limit = true;
+                        }
+                        continue;
+                    }
+                    over_limit = false;
                     let route = guest_port.route.clone();
                     let activity = activity.clone();
                     let port = guest_port.port;
@@ -386,5 +416,72 @@ mod tests {
             "inbound data must not wake without wake_on_inbound"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn connections_over_the_limit_are_closed_until_one_ends() {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = upstream.local_addr().unwrap();
+        let (accepted_tx, mut accepted) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = upstream.accept().await.unwrap();
+                accepted_tx.send(()).unwrap();
+                // Each upstream connection lasts until the guest ends its own.
+                tokio::spawn(async move {
+                    let mut sink = Vec::new();
+                    let _ = stream.read_to_end(&mut sink).await;
+                });
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("guest-ports-limit-{}", std::process::id()));
+        let vsock = dir.join("vsock.sock");
+        let ports: Arc<[GuestPort]> = vec![format!("9={address}").parse().unwrap()].into();
+        let _listeners = listen(&vsock, (0, 0), &ports, &Recorder::default()).unwrap();
+        let socket = socket_path(&vsock, 9);
+
+        let mut open = Vec::new();
+        for _ in 0..MAX_CONNECTIONS {
+            open.push(UnixStream::connect(&socket).await.unwrap());
+            within(accepted.recv()).await.unwrap();
+        }
+        let mut extra = UnixStream::connect(&socket).await.unwrap();
+        let mut byte = [0; 1];
+        assert_eq!(
+            within(extra.read(&mut byte)).await.unwrap(),
+            0,
+            "a connection over the limit is closed"
+        );
+        assert!(accepted.try_recv().is_err(), "and never reaches upstream");
+
+        drop(open.pop());
+        // The ended connection frees its place once its relay finishes; a
+        // connection refused meanwhile is simply closed again.
+        let next = within(async {
+            loop {
+                let mut next = UnixStream::connect(&socket).await.unwrap();
+                let served = tokio::select! {
+                    _ = accepted.recv() => true,
+                    read = next.read(&mut byte) => {
+                        assert_eq!(read.unwrap(), 0);
+                        false
+                    }
+                };
+                if served {
+                    break next;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        open.push(next);
+        assert_eq!(open.len(), MAX_CONNECTIONS);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    async fn within<F: std::future::IntoFuture>(what: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(10), what)
+            .await
+            .expect("timed out")
     }
 }

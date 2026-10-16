@@ -3,6 +3,8 @@
 //! Runs only when `COMPUTE_TEST_LAB` names a directory prepared by
 //! `compute/lab/host-setup.sh` (it holds `bin/firecracker`, `vmlinux` and
 //! `base.ext4`, whose guest runs a shell on vsock port 52), and only as root.
+//! With `COMPUTE_TEST_REQUIRE=lab`, as on a gate, a test that cannot run
+//! fails instead of skipping.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,9 +17,21 @@ use compute_engine::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const SHELL_PORT: u32 = 52;
+/// Seconds until a guest timer armed before a save comes due: after the
+/// restore, which follows the save by a few seconds.
+const TIMER_AFTER_RESTORE: u32 = 12;
 
 fn lab() -> Option<PathBuf> {
-    std::env::var_os("COMPUTE_TEST_LAB").map(PathBuf::from)
+    let lab = std::env::var_os("COMPUTE_TEST_LAB").map(PathBuf::from);
+    if lab.is_none() {
+        let required = std::env::var("COMPUTE_TEST_REQUIRE").unwrap_or_default();
+        assert!(
+            !required.split(',').any(|listed| listed.trim() == "lab"),
+            "a required test cannot run: COMPUTE_TEST_LAB is not set"
+        );
+        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
+    }
+    lab
 }
 
 /// Runs `script` in the guest shell and returns its output and the time to
@@ -64,6 +78,59 @@ async fn assert_guest_clock_is_current(uds: &Path) {
         guest.abs_diff(host) <= 1,
         "guest clock {guest} is not the host's {host}"
     );
+}
+
+/// The host's wall clock, in seconds.
+fn host_now() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+}
+
+/// Seconds since the guest booted, by its monotonic clock (`/proc/uptime`
+/// reads the boot-time clock, which moves with the monotonic one in a guest
+/// that never suspends itself), and the host's time when the reading arrived:
+/// the guest shell takes a while to close after it answers.
+async fn guest_uptime(uds: &Path) -> (f64, f64) {
+    let asked = host_now();
+    let (output, first_byte) = exec(uds, "cut -d' ' -f1 /proc/uptime").await.unwrap();
+    (
+        output.trim().parse().unwrap(),
+        asked + first_byte.as_secs_f64(),
+    )
+}
+
+/// Starts a guest timer: `sleep`, which counts on the monotonic clock, then
+/// writes to `file` the guest's uptime when it started and when it fired.
+async fn arm_guest_timer(uds: &Path, seconds: u32, file: &str) {
+    exec(
+        uds,
+        &format!(
+            "(up() {{ cut -d' ' -f1 /proc/uptime; }}; start=$(up); sleep {seconds}; \
+             echo $start $(up) > {file}.part; mv {file}.part {file}) \
+             < /dev/null > /dev/null 2>&1 &"
+        ),
+    )
+    .await
+    .unwrap();
+}
+
+/// The guest's uptime when the timer writing `file` started, and when it
+/// fired.
+async fn guest_timer_fired(uds: &Path, file: &str) -> (f64, f64) {
+    let started = Instant::now();
+    loop {
+        let (output, _) = exec(uds, &format!("cat {file} 2>/dev/null")).await.unwrap();
+        if let Some((start, fired)) = output.trim().split_once(' ') {
+            return (start.parse().unwrap(), fired.parse().unwrap());
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "guest timer {file} never fired"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Processor time is what the host's activity rule reads: guest work must show
@@ -173,6 +240,7 @@ fn jailed_spec(lab: &Path, name: &str, uid: u32) -> VmSpec {
 fn engine(lab: &Path) -> Firecracker {
     Firecracker::new(FirecrackerConfig {
         firecracker: lab.join("bin/firecracker"),
+        retained: Vec::new(),
         jailer: lab.join("bin/jailer"),
         cgroup_parent: "/sys/fs/cgroup/compute-test".into(),
     })
@@ -190,12 +258,16 @@ fn owner_and_name(pid: i32) -> (u32, String) {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn boot_pause_compress_snapshot_restore() {
-    let Some(lab) = lab() else {
-        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
-        return;
-    };
+    let Some(lab) = lab() else { return };
     let name = format!("engine-test-{}", std::process::id());
     let engine = engine(&lab);
+    assert!(
+        engine
+            .runtime()
+            .starts_with("Firecracker snapshot format v"),
+        "{}",
+        engine.runtime()
+    );
     let spec = jailed_spec(&lab, &name, 3_900_001);
     let dir = spec.logs.clone();
     let uds = spec.vsock_path();
@@ -232,6 +304,12 @@ async fn boot_pause_compress_snapshot_restore() {
     assert_processor_time_follows_work(&engine, &vm, &uds).await;
     assert_traffic_follows_io(&engine, &vm, &uds).await;
 
+    // A timer that comes due while the VM is paused fires as soon as it
+    // resumes, and the guest's clocks count the paused time. Guest uptimes
+    // map to host time through one reading of both clocks.
+    let (uptime_before, host_before) = guest_uptime(&uds).await;
+    let on_host = |uptime: f64| host_before + (uptime - uptime_before);
+    arm_guest_timer(&uds, 1, "/root/timer-paused").await;
     let started = Instant::now();
     engine.pause(&vm).await.unwrap();
     let pause = started.elapsed();
@@ -243,6 +321,8 @@ async fn boot_pause_compress_snapshot_restore() {
     assert_eq!(completion, Completion::Finished);
     let compress = started.elapsed();
     let compressed = engine.resident_bytes(&vm).unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let resumed_at = host_now();
     let started = Instant::now();
     engine.resume(&vm).await.unwrap();
     let (output, first_byte) = exec(&uds, "cat /root/marker").await.unwrap();
@@ -254,11 +334,33 @@ async fn boot_pause_compress_snapshot_restore() {
         started.elapsed()
     );
     assert!(compressed < awake, "compression freed nothing");
+    let (uptime_after, host_after) = guest_uptime(&uds).await;
+    let (guest_passed, host_passed) = (uptime_after - uptime_before, host_after - host_before);
+    let (_, fired) = guest_timer_fired(&uds, "/root/timer-paused").await;
+    let after_resume = on_host(fired) - resumed_at;
+    eprintln!(
+        "across a pause: guest clock moved {guest_passed:.2} s while the host's moved \
+         {host_passed:.2} s; a timer due while paused fired {after_resume:.2} s after resume"
+    );
+    assert!(
+        (guest_passed - host_passed).abs() < 0.5,
+        "the guest's clock moved {guest_passed} s across a pause that took {host_passed} s"
+    );
+    assert!(
+        (-0.2..1.0).contains(&after_resume),
+        "a timer due while paused fired {after_resume} s after resume"
+    );
 
     let files = SnapshotFiles {
         state: spec.dir.join("vm.state"),
         memory: spec.dir.join("vm.mem"),
     };
+    // The same across a save and restore: one timer comes due while the VM
+    // is saved, one after it is back.
+    let (uptime_before, host_before) = guest_uptime(&uds).await;
+    let on_host = |uptime: f64| host_before + (uptime - uptime_before);
+    arm_guest_timer(&uds, TIMER_AFTER_RESTORE, "/root/timer-later").await;
+    arm_guest_timer(&uds, 1, "/root/timer-saved").await;
     engine.pause(&vm).await.unwrap();
     let started = Instant::now();
     // A fresh boot's memory source is all zeros, so its first diff stands
@@ -275,8 +377,10 @@ async fn boot_pause_compress_snapshot_restore() {
     let restore_files = RestoreFiles {
         state: files.state.clone(),
         memory: MemorySource::File(files.memory.clone()),
+        made_under: None,
     };
     let vm = engine.restore(&spec, &restore_files).await.unwrap();
+    let restored_at = host_now();
     engine.resume(&vm).await.unwrap();
     let restore = started.elapsed();
     let (output, first_byte) = exec(&uds, "cat /root/marker").await.unwrap();
@@ -289,6 +393,29 @@ async fn boot_pause_compress_snapshot_restore() {
     eprintln!(
         "snapshot {snapshot:?}; restore {restore:?}; first byte after restore {first_byte:?}; total {:?}",
         started.elapsed()
+    );
+    let (uptime_after, host_after) = guest_uptime(&uds).await;
+    let (guest_passed, host_passed) = (uptime_after - uptime_before, host_after - host_before);
+    let (_, overdue) = guest_timer_fired(&uds, "/root/timer-saved").await;
+    let after_restore = on_host(overdue) - restored_at;
+    let (start, fired) = guest_timer_fired(&uds, "/root/timer-later").await;
+    let late_by = fired - start - f64::from(TIMER_AFTER_RESTORE);
+    eprintln!(
+        "across a save: guest clock moved {guest_passed:.2} s while the host's moved \
+         {host_passed:.2} s; a timer due while saved fired {after_restore:.2} s after \
+         restore; one due after it fired {late_by:.2} s late"
+    );
+    assert!(
+        (guest_passed - host_passed).abs() < 1.0,
+        "the guest's clock moved {guest_passed} s across a save that took {host_passed} s"
+    );
+    assert!(
+        (-0.2..1.0).contains(&after_restore),
+        "a timer due while saved fired {after_restore} s after restore"
+    );
+    assert!(
+        (0.0..0.5).contains(&late_by),
+        "a timer due after the restore fired {late_by} s late"
     );
 
     let cgroup = vm.cgroup().path().to_owned();
@@ -303,10 +430,7 @@ async fn boot_pause_compress_snapshot_restore() {
 /// and a holder left after its VMM died does not stop a clean-up.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_engine_adopts_a_running_vm_without_disturbing_it() {
-    let Some(lab) = lab() else {
-        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
-        return;
-    };
+    let Some(lab) = lab() else { return };
     let name = format!("adopt-test-{}", std::process::id());
     let spec = jailed_spec(&lab, &name, 3_900_002);
     let uds = spec.vsock_path();
@@ -390,14 +514,12 @@ async fn a_new_engine_adopts_a_running_vm_without_disturbing_it() {
 /// one.
 #[tokio::test(flavor = "multi_thread")]
 async fn only_a_vmm_seen_running_counts_as_a_launch() {
-    let Some(lab) = lab() else {
-        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
-        return;
-    };
+    let Some(lab) = lab() else { return };
     let name = format!("launch-test-{}", std::process::id());
     let spec = jailed_spec(&lab, &name, 3_900_003);
     let failing = Firecracker::new(FirecrackerConfig {
         firecracker: lab.join("bin/firecracker"),
+        retained: Vec::new(),
         jailer: "/bin/false".into(),
         cgroup_parent: "/sys/fs/cgroup/compute-test".into(),
     })
@@ -412,6 +534,7 @@ async fn only_a_vmm_seen_running_counts_as_a_launch() {
     let files = RestoreFiles {
         state,
         memory: MemorySource::File(memory),
+        made_under: None,
     };
     let error = engine(&lab).restore(&spec, &files).await.unwrap_err();
     assert!(

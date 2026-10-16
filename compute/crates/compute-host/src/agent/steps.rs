@@ -20,6 +20,7 @@ use crate::state::{Change, Fence, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::Store;
 
+use super::holds::Closing;
 use super::{Event, HostAgent, HostError, Reply, Running, TEARDOWN_RETRY, Woke};
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
@@ -54,6 +55,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     state: State::new(Level::Saved, Durability::Local, false),
                     policy,
                     size,
+                    last_activity: self.now(),
                 });
                 let _ = reply.send(Ok(()));
             }
@@ -219,6 +221,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Runs the step the slot's `op` names.
     pub(super) fn spawn_job(&mut self, id: Id, op: OpId, step: Step) {
+        let last_activity = self
+            .core
+            .sandbox(id.0)
+            .map_or_else(|| self.now(), |view| view.last_activity);
+        let last_used_ms = self.unix_ms(last_activity);
         let (Some(slot), Some(record)) = (self.slots.get_mut(&id.0), self.records.get(id)) else {
             tracing::error!(%id, ?step, "step for a sandbox without a record");
             let _ = self.events_tx.send(Event::StepDone {
@@ -257,6 +264,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             fetcher: self.fetcher.clone(),
             pager: self.pager.clone(),
             launches: 0,
+            last_used_ms,
         };
         let events = self.events_tx.clone();
         tokio::spawn(async move {
@@ -409,6 +417,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         self.teardowns.spawn(async move {
             let _records = records;
+            live.memory.ending();
             let mut result = engine.stop(live.vm).await;
             let mut delay = Duration::from_millis(100);
             while let Err(error) = &result {
@@ -487,7 +496,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         let removers = std::mem::take(&mut slot.removers);
         if let Some(record) = self.records.get(id) {
-            self.remove_recorded(&record, live.map(|live| (live.vm, live.memory)), removers);
+            let closing = slot.holds.close();
+            self.remove_recorded(
+                &record,
+                live.map(|live| (live.vm, live.memory)),
+                removers,
+                Some(closing),
+            );
         } else {
             tracing::error!(%id, "removing a sandbox without a record");
             for remover in removers {
@@ -496,13 +511,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    /// Deletes a recorded sandbox in the background. Its ordinal and id
-    /// stay taken until nothing of it is left.
+    /// Deletes a recorded sandbox in the background, once `holds` has
+    /// closed its holds writer if it had one. Its ordinal and id stay taken
+    /// until nothing of it is left.
     pub(super) fn remove_recorded(
         &mut self,
         record: &Record,
         vm: Option<(E::Vm, LiveMemory)>,
         removers: Vec<Reply<()>>,
+        holds: Option<Closing>,
     ) {
         let id = record.id;
         self.destroying.insert(id.0, removers);
@@ -515,6 +532,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         let (ordinal, fence) = (record.ordinal, record.fence());
         tokio::spawn(async move {
+            if let Some(closing) = holds {
+                closing.await;
+            }
             let removal = Removal {
                 engine: &*engine,
                 store: &*store,
@@ -640,10 +660,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     expected,
                     found,
                 }),
-                _ => result.clone().map(|vsock| Woke {
+                (_, Some(found)) => result.clone().map(|vsock| Woke {
                     vsock,
                     during: waiter.during,
+                    generation: found,
                 }),
+                (_, None) => result.clone().and(Err(HostError::Removed(id))),
             };
             let _ = waiter.reply.send(answer);
         }
@@ -679,10 +701,18 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
             .await?;
         let stopped = match vm {
             Some((vm, memory)) => {
+                memory.ending();
                 let stopped = self.engine.stop(vm).await;
-                // Whatever serves or fetches its memory writes into the
-                // directory about to go, so it ends first.
-                memory.close().await;
+                if stopped.is_ok() {
+                    // Whatever serves or fetches its memory writes into
+                    // the directory about to go, so it ends first.
+                    memory.close().await;
+                } else {
+                    // The VM may still run, and then still fault on its
+                    // memory; the directory stays, since removal stops
+                    // here.
+                    memory.serve_detached();
+                }
                 stopped
             }
             None => self.engine.clean_up(spec).await,

@@ -57,6 +57,7 @@ impl Rig {
             state,
             policy: rules(),
             size: Size::whole(GIB),
+            last_activity: self.now,
         });
     }
 
@@ -284,6 +285,7 @@ fn copies_that_cannot_live_in_object_storage_are_kept() {
         state: saved(),
         policy: local_only,
         size: Size::whole(GIB),
+        last_activity: rig.now,
     });
     rig.add(2, State::RUNNING);
     rig.at(1);

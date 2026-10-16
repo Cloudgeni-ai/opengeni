@@ -1,16 +1,16 @@
-//! Content-addressed checkpoints for sleepable compute disks.
+//! Content-addressed storage of sandbox disks and memory images.
 //!
-//! The caller must supply an immutable, point-in-time disk view. Dirty tracking
-//! is a candidate filter, not a replacement for quiescing or snapshotting a disk.
-//! Object publication is separate from advancing the control-plane checkpoint.
+//! The caller must supply an immutable, point-in-time view of what it stores.
+//! Publishing objects is separate from advancing which stored copy is current;
+//! that pointer belongs to the host agent.
 
 pub mod chunk;
-pub mod dirty;
-#[cfg(target_os = "linux")]
-pub mod fiemap;
-pub mod lazy;
+#[cfg(test)]
+mod fake;
+pub mod fresh;
 pub mod manifest;
 pub mod store;
+pub mod sweep;
 mod upload;
 
 /// Fail closed on invalid metadata, unavailable objects and corrupt content.
@@ -27,6 +27,15 @@ pub enum Error {
     /// An upload or download did not complete; trying again may work.
     #[error("transfer failed: {0}")]
     Transfer(String),
+    /// The pointer a change was to replace changed after the change read
+    /// it (an archive, when it began), so the change may not land; it
+    /// starts again from the pointer as it is now. A sweep changes every
+    /// pointer before it deletes anything (see [`fresh`]).
+    #[error("the stored copy changed meanwhile; the change starts again")]
+    Superseded,
+    /// This store cannot do what was asked.
+    #[error("unsupported by this store: {0}")]
+    Unsupported(&'static str),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -47,8 +56,9 @@ impl Error {
             | Self::Integrity
             | Self::Truncated { .. }
             | Self::Json(_)
+            | Self::Unsupported(_)
             | Self::Object(object_store::Error::NotFound { .. }) => true,
-            Self::Transfer(_) | Self::Io(_) | Self::Object(_) => false,
+            Self::Transfer(_) | Self::Superseded | Self::Io(_) | Self::Object(_) => false,
         }
     }
 }

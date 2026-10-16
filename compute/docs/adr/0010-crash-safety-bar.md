@@ -16,6 +16,8 @@ What each failure may cost:
 | --- | --- |
 | Agent crash or upgrade | nothing; running sandboxes keep running |
 | A VM process (or its pager) dies | with a valid saved memory image, the sandbox wakes from it; without one (running, or paused but not yet saved), it boots fresh from its disk: programs lost, data the guest wrote to its disk kept |
+| VMM upgrade under a saved image | nothing while some Firecracker binary the host keeps reads the image's snapshot format (Firecracker reads its own major version up to its own minor one; [6](0006-memory-images-and-disks.md)); once none does, which the host can prove, the sandbox boots fresh from its disk |
+| Processor model changes under a saved image (a move to another kind of host) | not covered: a binary does not carry a processor's capabilities, so the image may be refused; it is then kept, and the sandbox reports why it cannot wake, since the image still wakes on a host like the one that made it |
 | Host lost | what changed since the sandbox's last completed archive |
 | A copy goes bad | nothing, as long as another verified copy exists |
 
@@ -30,6 +32,10 @@ simplest fix, or write the window down instead of adding a mechanism.
 ## Consequences
 
 - Review findings are judged against this table.
+- Archiving follows idleness, not a schedule, so a sandbox that stays busy
+  for a week has a week to lose if its host dies. Status reports
+  `backed_up_ms`, when the store's latest copy was made, so Opengeni can
+  show it and decide whether a long-running sandbox needs a checkpoint.
 - Two mechanisms exist only to meet the first row: the separate pager process
   ([8](0008-lazy-wake-with-a-working-set.md)) and the disk holder, which keeps
   lost disk writes detectable after an agent restart

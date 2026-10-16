@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use compute_core::SandboxId;
 use compute_engine::Found;
@@ -17,6 +17,13 @@ struct Counting {
     restores: AtomicUsize,
     resumes: AtomicUsize,
     stops: AtomicUsize,
+    /// What [`Engine::runtime`] says.
+    runtime: String,
+    /// What [`Engine::reads`] says of any runtime but its own.
+    reads: Option<Readable>,
+    /// Whether it refuses every memory image, as a VMM refuses a snapshot
+    /// format it no longer reads.
+    refuses: AtomicBool,
 }
 
 impl Counting {
@@ -34,12 +41,30 @@ impl Engine for Counting {
         MemoryProfile::bare_metal()
     }
 
+    fn runtime(&self) -> &str {
+        &self.runtime
+    }
+
+    fn reads(&self, made_under: &str) -> Readable {
+        if made_under == self.runtime && !made_under.is_empty() {
+            return Readable::Yes;
+        }
+        self.reads.clone().unwrap_or(Readable::Unknown)
+    }
+
     async fn boot(&self, _: &VmSpec) -> Result<(), EngineError> {
         unreachable!("no step here boots")
     }
 
     async fn restore(&self, _: &VmSpec, _: &RestoreFiles) -> Result<(), EngineError> {
         self.restores.fetch_add(1, Ordering::SeqCst);
+        if self.refuses.load(Ordering::SeqCst) {
+            return Err(EngineError::new(
+                ErrorKind::MemoryLost,
+                "restore",
+                "unsupported snapshot version",
+            ));
+        }
         Ok(())
     }
 
@@ -186,6 +211,7 @@ impl Sandbox {
             fetcher: None,
             pager: crate::PagerConfig::new(self.root.path().join("no-pager")),
             launches: 0,
+            last_used_ms: 1_700_000_000_000,
         }
     }
 
@@ -344,6 +370,7 @@ async fn an_uncertain_restore_keeps_the_image_and_the_vm() {
         .publish(Parts::Whole {
             state: &state,
             memory: &memory,
+            len: 8192,
         })
         .unwrap();
     sandbox.fail_record_writes();
@@ -390,6 +417,7 @@ async fn an_uncertain_eviction_keeps_the_local_copy() {
     let sandbox = Sandbox::new().await;
     let store = sandbox.root.path().join("store");
     let idle = sandbox.record(Change::new()).await;
+    let before = crate::state::unix_ms_now();
     let ran = sandbox
         .job(Directory::new(&store), idle, false)
         .run(Step::Archive)
@@ -397,6 +425,13 @@ async fn an_uncertain_eviction_keeps_the_local_copy() {
     assert_eq!(ran.outcome, Outcome::Done);
     let archived = sandbox.records.get(sandbox.id).unwrap();
     assert!(archived.archived);
+    assert!(
+        archived
+            .backed_up_ms
+            .is_some_and(|at| (before..=crate::state::unix_ms_now()).contains(&at)),
+        "an archive records when its copy was made: {:?}",
+        archived.backed_up_ms
+    );
     sandbox.fail_record_writes();
 
     let job = tokio::spawn(
@@ -417,6 +452,99 @@ async fn an_uncertain_eviction_keeps_the_local_copy() {
     let sandbox = sandbox.restart().await;
     let durable = sandbox.records.settle(sandbox.id).await.unwrap();
     assert_eq!(durable.disk, Disk::Remote);
+}
+
+/// A refusal alone proves nothing about a sound image: the host may have
+/// run short of memory, or the VMM been killed while loading. So an image
+/// is kept for a retry when the engine reads its runtime, made it under
+/// another processor, or cannot tell (an image labelled before runtimes
+/// named their snapshot format, say). Only an image the engine proves no
+/// VMM of its reads is given up, and the sandbox wakes from its disk
+/// instead of retrying forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_an_image_no_vmm_here_reads_is_given_up() {
+    const NOW: &str = "Firecracker snapshot format v13.0.0 on a new processor";
+    const OLD: &str = "Firecracker snapshot format v12.0.0 on a new processor";
+    const ELSEWHERE: &str = "Firecracker snapshot format v13.0.0 on another processor";
+    const LEGACY: &str = "Firecracker v1.13.1 on a new processor";
+    let unreadable = || Some(Readable::No("format v12 is not read here".into()));
+    for (made_under, runtime, reads, kept) in [
+        (NOW, NOW, None, true),
+        (OLD, NOW, unreadable(), false),
+        (OLD, NOW, Some(Readable::Yes), true),
+        (ELSEWHERE, NOW, Some(Readable::Yes), true),
+        (LEGACY, NOW, Some(Readable::Unknown), true),
+        (OLD, "", None, true),
+    ] {
+        let mut sandbox = Sandbox::new().await;
+        sandbox.engine = Arc::new(Counting {
+            runtime: runtime.to_owned(),
+            reads,
+            refuses: AtomicBool::new(true),
+            ..Counting::default()
+        });
+        let saved = sandbox.record(Change::new().image(true)).await;
+        let (state, memory) = (
+            sandbox.paths.dir.join("state"),
+            sandbox.paths.dir.join("memory"),
+        );
+        fs::write(&state, "state").unwrap();
+        fs::write(&memory, vec![7; 8192]).unwrap();
+        let images = images_of(&sandbox.paths);
+        images
+            .publish_made_by(
+                Parts::Whole {
+                    state: &state,
+                    memory: &memory,
+                    len: 8192,
+                },
+                Some(made_under),
+            )
+            .unwrap();
+
+        let ran = sandbox.job(NoStore, saved, false).run(Step::Restore).await;
+        assert_eq!(Counting::count(&sandbox.engine.restores), 1);
+        let durable = sandbox.records.settle(sandbox.id).await.unwrap();
+        if kept {
+            assert_eq!(ran.outcome, Outcome::Failed(Failure::Transient));
+            assert!(durable.image, "a sound image of this runtime was given up");
+        } else {
+            assert_eq!(ran.outcome, Outcome::Failed(Failure::MemoryLost));
+            assert!(!durable.image, "the sandbox would retry the image forever");
+        }
+    }
+}
+
+/// A save of a VM whose memory is still arriving waits for it, but a wake
+/// or a removal meanwhile does not have to: cancelling the save ends it at
+/// once with nothing changed, however long the memory takes.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_save_waiting_for_memory_that_does_not_arrive_can_be_cancelled() {
+    let sandbox = Sandbox::new().await;
+    let record = sandbox.record(Change::new()).await;
+    let mut job = sandbox.job(NoStore, record, true);
+    // A pager that never listens: the memory it serves never completes.
+    let paging = Paging::start(
+        sandbox.root.path().join("silent-pager.sock"),
+        "1".into(),
+        ((0, 0), 1 << 20),
+        None,
+        Vec::new(),
+    );
+    job.live.as_mut().unwrap().memory.paging = Some(paging);
+    let cancel = job.cancel.clone();
+    let save = tokio::spawn(async move { job.run(Step::Save).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!save.is_finished(), "the save did not wait for the memory");
+    cancel.cancel();
+    let ran = tokio::time::timeout(Duration::from_secs(5), save)
+        .await
+        .expect("the cancelled save ends")
+        .unwrap();
+    assert_eq!(ran.outcome, Outcome::Cancelled);
+    let durable = sandbox.records.settle(sandbox.id).await.unwrap();
+    assert!(!durable.image);
 }
 
 /// A failed disk check, or one an agent never finished, keeps every later

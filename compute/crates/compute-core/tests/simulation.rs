@@ -441,6 +441,7 @@ impl World {
             state,
             policy,
             size: Size::whole(GIB),
+            last_activity: self.now,
         });
     }
 

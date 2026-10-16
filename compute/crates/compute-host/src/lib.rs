@@ -15,9 +15,12 @@ mod chunked;
 pub mod client;
 pub mod guest_ports;
 mod image;
+mod lanes;
 mod layout;
 #[cfg(target_os = "linux")]
 mod lazy;
+#[cfg(target_os = "linux")]
+mod logs;
 pub mod net;
 #[cfg(target_os = "linux")]
 mod paging;
@@ -32,6 +35,7 @@ mod working_set;
 pub use agent::{BusyRule, Handle, HostAgent, HostConfig, HostError, Lease, PagerConfig};
 pub use chunked::{CHUNK_BYTES, Chunked};
 pub use guest_ports::{GuestPort, Route};
+pub use lanes::Lanes;
 pub use server::serve;
 pub use store::{
     Archive, Directory, FetchInto, FetchedMemory, JailedFile, NoStore, Prefilled, Receipt,

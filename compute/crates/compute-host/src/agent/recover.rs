@@ -3,8 +3,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
-use compute_core::{Durability, Input, Level, SandboxId, State};
+use compute_core::{Durability, Input, Level, Priority, SandboxId, State};
 use compute_engine::{Engine, EngineError, ErrorKind, Found, VmSpec};
 use futures::StreamExt;
 
@@ -14,7 +15,8 @@ use crate::state::{Change, Disk, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory, Reconnected};
 use crate::store::Store;
 
-use super::{HostAgent, HostError};
+use super::holds::{Holds, UNREADABLE, hold_id};
+use super::{HostAgent, HostError, unix_ms_now};
 
 /// A VM found still running after an agent restart, with what it is doing
 /// and, if its memory is paged, the agent's side of its pager.
@@ -57,7 +59,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             if record.removing {
                 // Its VM may still run until the removal ends it.
                 self.unmanaged(id, &record.config);
-                self.remove_recorded(&record, None, Vec::new());
+                self.remove_recorded(&record, None, Vec::new(), None);
                 continue;
             }
             recovering.push(record);
@@ -185,7 +187,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Stops managing sandbox `id` for now: requests for it fail with
-    /// [`HostError::Broken`] and status lists it with `problem`. Its record,
+    /// [`HostError::Blocked`] and status lists it with `problem`. Its record,
     /// files and any VM stay as they are; a recorded sandbox can still be
     /// removed.
     pub(super) fn block(&mut self, id: Id, problem: String) {
@@ -390,6 +392,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         } else {
             (self.sleeping_state(&record, &paths).await?, None)
         };
+        // A running VM may be in use right now. A sleeping sandbox has been
+        // idle since its record says, so a restart resets no retention clock.
+        let last_activity = match record.last_used_ms {
+            Some(unix_ms) if state.level != Level::Running => self.at_unix_ms(unix_ms),
+            _ => self.now(),
+        };
         let adopted = vm.is_some();
         // Taken back before the agent can ask the VMM to sync the disk, so
         // it sees what the disk lost while no agent watched; see
@@ -419,17 +427,61 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 slot.vm = Some(live);
             }
         }
-        self.input(Input::Add {
+        // The core plans once it has all of these: a sandbox added alone
+        // could start a step its holds or an unsavable VM rule out, such
+        // as forgetting the memory of one a caller holds awake.
+        let mut inputs = vec![Input::Add {
             sandbox: id.0,
             state,
             policy,
             size,
-        });
+            last_activity,
+        }];
         if unsavable {
             // It still runs and wakes, but is never saved.
-            self.input(Input::Unsavable { sandbox: id.0 });
+            inputs.push(Input::Unsavable { sandbox: id.0 });
         }
+        inputs.extend(self.restore_holds(id));
+        self.inputs(inputs);
         Ok(adopted)
+    }
+
+    /// Takes back the named holds sandbox `id` had, less those that lapsed
+    /// while no agent ran, and returns them for the core. A holds file
+    /// that cannot be read holds the sandbox awake until released; see
+    /// [`Holds::load`].
+    fn restore_holds(&mut self, id: Id) -> Vec<Input> {
+        let owner = self.records.ownership();
+        let Some(slot) = self.slots.get_mut(&id.0) else {
+            return Vec::new();
+        };
+        let now_ms = unix_ms_now();
+        let (holds, error) = Holds::load(slot.paths.holds.clone(), now_ms, owner);
+        if let Some(error) = error {
+            tracing::error!(
+                %id,
+                %error,
+                hold = UNREADABLE,
+                "could not read the sandbox's holds; it stays awake until that hold is released"
+            );
+        }
+        let named: Vec<(String, Option<u64>)> = holds
+            .named()
+            .map(|(name, lapses)| (name.to_owned(), lapses))
+            .collect();
+        slot.holds = holds;
+        let now = self.now();
+        named
+            .into_iter()
+            .map(|(name, lapses_ms)| Input::Hold {
+                sandbox: id.0,
+                hold: hold_id(&name),
+                until: lapses_ms.map(|at| now + Duration::from_millis(at.saturating_sub(now_ms))),
+                // Nobody waits on it: the sandbox was awake when it was
+                // taken, and wakes only if it has since gone to sleep.
+                priority: Priority::Background,
+            })
+            .collect()
     }
 
     /// Where a sandbox whose VM was found still running stands. A paused

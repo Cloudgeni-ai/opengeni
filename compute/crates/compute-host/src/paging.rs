@@ -232,6 +232,9 @@ pub(crate) struct Paging {
     /// For remote images: the filling of the memory file.
     pub hydration: Option<Arc<Hydration>>,
     cancel: CancellationToken,
+    /// Set once the agent is ending the VM, whose pager then goes away by
+    /// design.
+    ending: CancellationToken,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     prefetched: watch::Receiver<bool>,
     complete: watch::Receiver<bool>,
@@ -395,6 +398,7 @@ impl Paging {
         let (complete_tx, complete) = watch::channel(false);
         let (failed_tx, failed) = watch::channel(false);
         let cancel = CancellationToken::new();
+        let ending = CancellationToken::new();
         let (hydration, arrivals) = hydration.map_or((None, None), |(hydration, arrivals)| {
             (Some(hydration), Some(arrivals))
         });
@@ -406,6 +410,7 @@ impl Paging {
             prefetched: prefetched_tx,
             complete: complete_tx,
             cancel: cancel.clone(),
+            ending: ending.clone(),
         };
         let task = tokio::spawn(async move {
             if let Err(why) = conversation.run(connected).await {
@@ -416,11 +421,25 @@ impl Paging {
         Self {
             hydration,
             cancel,
+            ending,
             task: Mutex::new(Some(task)),
             prefetched,
             complete,
             failed,
         }
+    }
+
+    /// Says the agent is about to end the VM: its pager going away is then
+    /// expected, and ends the conversation without counting as lost memory.
+    /// Call it before stopping the VM, and [`Paging::close`] once it is gone.
+    ///
+    /// A pager that died just before, unnoticed so far, then also counts
+    /// as expected. That loses nothing: whatever the agent ends a VM after
+    /// does not rest on its pager. A save first waits for the pager to hold
+    /// every byte ([`Paging::complete`]), and an image still being filled
+    /// from the store stays current, so the next wake fetches it again.
+    pub fn ending(&self) {
+        self.ending.cancel();
     }
 
     /// Stops talking and filling, for a VM that has ended or whose files
@@ -584,12 +603,24 @@ async fn greet(link: &Link) -> Result<Connected, Refused> {
         Err(_) => return Err(Refused::Wrong("the pager did not greet".into())),
     };
     match control::parse::<ToHost>(&greeting) {
+        // Every message this agent sends exists in each protocol it serves.
+        Ok(ToHost::Hello { protocol, .. })
+            if !(control::OLDEST_PROTOCOL..=control::PROTOCOL).contains(&protocol) =>
+        {
+            Err(Refused::Wrong(format!(
+                "the pager speaks protocol {protocol}, which this agent does not \
+                 (it serves {} to {})",
+                control::OLDEST_PROTOCOL,
+                control::PROTOCOL
+            )))
+        }
         Ok(ToHost::Hello {
             tag,
             device,
             inode,
             missing,
             prefetched,
+            ..
         }) if tag == link.tag => {
             if link.identity != (0, 0) && (device, inode) != link.identity {
                 return Err(Refused::Wrong(
@@ -627,6 +658,7 @@ struct Talk {
     prefetched: watch::Sender<bool>,
     complete: watch::Sender<bool>,
     cancel: CancellationToken,
+    ending: CancellationToken,
 }
 
 impl Talk {
@@ -651,6 +683,8 @@ impl Talk {
                 }
                 Ended::Cancelled => return Ok(()),
                 Ended::Failed(why) => return Err(why),
+                // The agent is ending the VM, and the pager with it.
+                Ended::Lost if self.ending.is_cancelled() => return Ok(()),
                 Ended::Lost => tracing::debug!("pager connection lost; reconnecting"),
             }
         }
@@ -671,6 +705,7 @@ impl Talk {
                 let _ = self.complete.send(true);
                 Ok(None)
             }
+            Err(Refused::Gone(_)) if self.ending.is_cancelled() => Ok(None),
             Err(Refused::Gone(error)) => Err(format!("the pager has gone: {error}")),
             Err(Refused::Wrong(why)) => Err(why),
         }
@@ -813,277 +848,4 @@ async fn send(write: &mut OwnedWriteHalf, message: &ToPager) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_resumed_hydration_keeps_what_the_pager_has() {
-        let len = 3 * CHUNK_BYTES;
-        let page = 4096;
-        let missing = [(page, 2 * page), (CHUNK_BYTES + page, 2 * CHUNK_BYTES)];
-        let (filled, settled) = resumed(&missing, len);
-        assert_eq!(settled, vec![false, false, true]);
-        assert!(filled.covers(0..page));
-        assert!(!filled.covers(page..2 * page));
-        assert!(filled.covers(2 * page..CHUNK_BYTES + page));
-        assert!(!filled.covers(CHUNK_BYTES + page..CHUNK_BYTES + 2 * page));
-        assert!(filled.covers(2 * CHUNK_BYTES..len));
-    }
-
-    #[test]
-    fn arrived_chunks_are_told_as_merged_ranges() {
-        let len = 4 * CHUNK_BYTES - 4096;
-        assert_eq!(
-            coalesce(len, [3, 0, 1, 1].into_iter()),
-            vec![(0, 2 * CHUNK_BYTES), (3 * CHUNK_BYTES, len)]
-        );
-    }
-
-    /// A pager on `control` that greets with `missing` and passes on what
-    /// the agent first tells it, then says the file is complete and, if
-    /// `done`, that it is done; it stays connected until the agent goes.
-    fn fake_pager(
-        control: &Path,
-        tag: String,
-        identity: (u64, u64),
-        missing: Vec<(u64, u64)>,
-        done: bool,
-    ) -> tokio::sync::oneshot::Receiver<ToPager> {
-        let listener = tokio::net::UnixListener::bind(control).unwrap();
-        let (pass, told) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (read, mut write) = stream.into_split();
-            let hello = ToHost::Hello {
-                tag,
-                device: identity.0,
-                inode: identity.1,
-                missing,
-                prefetched: true,
-            };
-            write
-                .write_all(&control::line(&hello).unwrap())
-                .await
-                .unwrap();
-            let mut lines = BufReader::new(read).lines();
-            let line = lines.next_line().await.unwrap().unwrap();
-            let _ = pass.send(control::parse::<ToPager>(line.as_bytes()).unwrap());
-            write
-                .write_all(&control::line(&ToHost::Complete).unwrap())
-                .await
-                .unwrap();
-            if done {
-                write
-                    .write_all(&control::line(&ToHost::Done).unwrap())
-                    .await
-                    .unwrap();
-            }
-            while let Ok(Some(_)) = lines.next_line().await {}
-        });
-        told
-    }
-
-    /// A local image, its launch marker and the pager's control socket.
-    fn local_image(dir: &Path) -> (Images, Generation, PathBuf, PathBuf, String) {
-        let images = Images::new(dir.join("images"));
-        let (state, memory) = (dir.join("state"), dir.join("memory"));
-        std::fs::write(&state, b"s").unwrap();
-        std::fs::write(&memory, vec![7_u8; 3 * 4096]).unwrap();
-        let image = images
-            .publish(crate::image::Parts::Whole {
-                state: &state,
-                memory: &memory,
-            })
-            .unwrap();
-        let generation = image.generation();
-        let tag = tag(generation);
-        let marker = dir.join("paged");
-        std::fs::write(&marker, &tag).unwrap();
-        (images, generation, marker, dir.join("pager.sock"), tag)
-    }
-
-    #[tokio::test]
-    async fn a_pager_that_missed_word_of_a_local_image_is_told_it_is_whole() {
-        let dir = tempfile::tempdir().unwrap();
-        let (images, generation, marker, control, tag) = local_image(dir.path());
-        let identity = identity(&images.memory(generation)).unwrap();
-        // The last fill was written but never acknowledged before the
-        // agent died, and the image has since become local.
-        let pager = fake_pager(&control, tag, identity, vec![(4096, 3 * 4096)], false);
-        let paging = Paging::reconnect(&marker, &control, images, None)
-            .await
-            .unwrap()
-            .expect("the pager runs");
-        let told = timeout(Duration::from_secs(5), pager)
-            .await
-            .expect("the pager is told")
-            .unwrap();
-        assert_eq!(
-            told,
-            ToPager::Filled {
-                ranges: vec![(4096, 3 * 4096)]
-            }
-        );
-        timeout(Duration::from_secs(5), paging.complete())
-            .await
-            .expect("the pager says it is complete")
-            .unwrap();
-        paging.close().await;
-    }
-
-    #[tokio::test]
-    async fn a_conversation_that_ended_still_reads_as_complete() {
-        let dir = tempfile::tempdir().unwrap();
-        let (images, generation, marker, control, tag) = local_image(dir.path());
-        let identity = identity(&images.memory(generation)).unwrap();
-        let pager = fake_pager(&control, tag, identity, vec![(4096, 3 * 4096)], true);
-        let paging = Paging::reconnect(&marker, &control, images, None)
-            .await
-            .unwrap()
-            .expect("the pager runs");
-        timeout(Duration::from_secs(5), pager)
-            .await
-            .expect("the pager is told")
-            .unwrap();
-        // Once the conversation has ended, both channels are closed and
-        // either may look ready to a waiter.
-        let (mut complete, mut failed) = (paging.complete.clone(), paging.failed.clone());
-        timeout(Duration::from_secs(5), async {
-            while complete.changed().await.is_ok() {}
-            while failed.changed().await.is_ok() {}
-        })
-        .await
-        .expect("the conversation ends");
-        assert!(*complete.borrow() && !*failed.borrow());
-        for _ in 0..200 {
-            timeout(Duration::from_secs(1), paging.complete())
-                .await
-                .expect("completion is seen, whichever channel is polled first")
-                .unwrap();
-        }
-        paging.close().await;
-    }
-
-    #[tokio::test]
-    async fn a_pager_gone_without_word_leaves_the_verdict_to_the_vmm() {
-        let dir = tempfile::tempdir().unwrap();
-        let (images, _, marker, control, _) = local_image(dir.path());
-        // Nothing to reconnect to, done or not: the engine's adoption
-        // decides from the VMM whether its memory was lost.
-        for done in [false, true] {
-            if done {
-                std::fs::write(done_file(&control), b"").unwrap();
-            }
-            assert!(
-                Paging::reconnect(&marker, &control, images.clone(), None)
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
-        }
-    }
-
-    #[test]
-    fn launch_tags_name_their_generation() {
-        let generation = Generation::parse("00000000000000a7").unwrap();
-        let tag = tag(generation);
-        assert_eq!(generation_of(&tag), Some(generation));
-        assert_ne!(tag, super::tag(generation));
-        assert_eq!(generation_of("00000000000000a7"), None);
-    }
-
-    #[tokio::test]
-    async fn a_line_longer_than_its_bound_is_refused_before_it_is_held() {
-        let (agent, pager) = tokio::net::UnixStream::pair().unwrap();
-        let (read, _write) = agent.into_split();
-        let mut frames = Frames::new(read);
-        let (_pager_read, mut pager) = pager.into_split();
-        // A line read in part survives a read that gave up waiting.
-        pager.write_all(b"{\"want\":{\"offset\":0,").await.unwrap();
-        assert!(
-            timeout(Duration::from_millis(50), frames.next(MESSAGE_BYTES))
-                .await
-                .is_err()
-        );
-        pager
-            .write_all(b"\"len\":4096,\"urgent\":true}}\n")
-            .await
-            .unwrap();
-        let line = frames.next(MESSAGE_BYTES).await.unwrap().unwrap();
-        assert_eq!(
-            control::parse::<ToHost>(&line).unwrap(),
-            ToHost::Want {
-                offset: 0,
-                len: 4096,
-                urgent: true
-            }
-        );
-        // Megabytes without a newline: refused after the bound, and the
-        // rest is never read.
-        let flood = tokio::spawn(async move {
-            let spaces = vec![b' '; 64 << 10];
-            let mut sent = 0_usize;
-            while sent < 8 << 20 {
-                if pager.write_all(&spaces).await.is_err() {
-                    break;
-                }
-                sent += spaces.len();
-            }
-        });
-        let error = frames.next(MESSAGE_BYTES).await.unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(frames.line.capacity() <= MESSAGE_BYTES + 1);
-        drop(frames);
-        flood.abort();
-    }
-
-    #[test]
-    fn a_greeting_names_ordered_ranges_inside_the_image() {
-        let len = Some(3 * 4096);
-        assert!(plausible(&[], len));
-        assert!(plausible(&[(0, 4096), (8192, 3 * 4096)], len));
-        assert!(plausible(&[(0, u64::MAX)], None));
-        assert!(!plausible(&[(0, 4 * 4096)], len));
-        assert!(!plausible(&[(4096, 4096)], len));
-        assert!(!plausible(&[(8192, 3 * 4096), (0, 4096)], len));
-        assert!(!plausible(&[(0, 8192), (4096, 3 * 4096)], len));
-    }
-
-    #[tokio::test]
-    async fn a_pager_whose_greeting_cannot_be_true_is_not_believed() {
-        let dir = tempfile::tempdir().unwrap();
-        let (images, generation, marker, control, tag) = local_image(dir.path());
-        let (device, inode) = identity(&images.memory(generation)).unwrap();
-        let outside = ToHost::Hello {
-            tag: tag.clone(),
-            device,
-            inode,
-            missing: vec![(0, 1 << 40)],
-            prefetched: false,
-        };
-        let crowded = ToHost::Hello {
-            tag,
-            device,
-            inode,
-            missing: (0..100)
-                .map(|page| (page * 8192, page * 8192 + 4096))
-                .collect(),
-            prefetched: false,
-        };
-        for hello in [outside, crowded] {
-            let _ = std::fs::remove_file(&control);
-            let listener = tokio::net::UnixListener::bind(&control).unwrap();
-            // Greets every attempt the same way, and hangs up.
-            let pager = tokio::spawn(async move {
-                while let Ok((mut stream, _)) = listener.accept().await {
-                    let _ = stream.write_all(&control::line(&hello).unwrap()).await;
-                }
-            });
-            let refused = Paging::reconnect(&marker, &control, images.clone(), None)
-                .await
-                .unwrap_err();
-            assert_eq!(refused.kind, ErrorKind::Transient);
-            pager.abort();
-        }
-    }
-}
+mod tests;

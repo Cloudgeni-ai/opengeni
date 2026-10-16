@@ -30,12 +30,13 @@ use tokio::time::{Instant, sleep_until};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
-use crate::protocol::{HostStatus, Id, SandboxConfig, StepStats};
-use crate::state::{Record, Records, StateError, claim_host};
+use crate::protocol::{About, HostStatus, Id, SandboxConfig, StepStats};
+use crate::state::{Record, Records, StateError, claim_host, unix_ms_now};
 use crate::step::{After, Live};
 use crate::store::Store;
 
 mod handle;
+mod holds;
 mod recover;
 mod requests;
 mod sample;
@@ -60,6 +61,42 @@ const TEARDOWN_RETRY: Duration = Duration::from_secs(30);
 /// Bytes a save writes besides guest memory at most: the device state, the
 /// chunk map (32 bytes per 256 KiB) and the record, with room to spare.
 const SAVE_EXTRA: u64 = 64 << 20;
+/// Where the agent's clock for the decision core starts, so a sandbox found
+/// on disk can have been idle since long before this agent started.
+const CLOCK_BASE: Duration = Duration::from_secs(10 * 365 * 86_400);
+
+/// Refuses settings no host can run with.
+fn check_config(config: &HostConfig) -> Result<(), HostError> {
+    check_root(&config.root).map_err(HostError::Invalid)?;
+    if config.first_uid == 0 {
+        return Err(HostError::Invalid(
+            "first_uid must not be 0: VMMs run as unprivileged users".into(),
+        ));
+    }
+    if let Some(network) = &config.network {
+        network.check().map_err(HostError::Invalid)?;
+    }
+    Ok(())
+}
+
+/// Refuses settings that do not fit the sandboxes already recorded: a
+/// sandbox keeps the user and addresses it was given, while new ones are
+/// handed out by today's settings, which therefore must agree.
+fn check_fit(images: &Images, records: &Records) -> Result<(), HostError> {
+    let misfits: Vec<String> = records
+        .all()
+        .iter()
+        .filter_map(|record| images.check(record).err())
+        .collect();
+    if misfits.is_empty() {
+        Ok(())
+    } else {
+        Err(HostError::Invalid(format!(
+            "this host's settings do not fit its sandboxes: {}",
+            misfits.join("; ")
+        )))
+    }
+}
 
 /// How a host is set up.
 #[derive(Clone, Debug)]
@@ -107,6 +144,9 @@ pub struct HostConfig {
     pub host_lock: Option<PathBuf>,
     /// How VMs whose memory needs a fault handler get one.
     pub pager: PagerConfig,
+    /// What the host runs, as status reports it. The runtime is the
+    /// engine's; whatever is set here is replaced.
+    pub about: About,
 }
 
 /// How VMs whose memory needs a fault handler get one: a pager process of
@@ -223,9 +263,18 @@ pub enum HostError {
     /// The sandbox is still being created.
     #[error("sandbox {0} is still being created")]
     Busy(Id),
-    /// The sandbox cannot be recovered on this host.
+    /// The sandbox failed in a way this host cannot retry.
     #[error("sandbox {0} is broken")]
     Broken(Id),
+    /// The host does not manage the sandbox until someone resolves why,
+    /// such as a record it cannot read or a VM it could not take back.
+    #[error("sandbox {id} is not managed on this host: {reason}")]
+    Blocked {
+        /// The sandbox.
+        id: Id,
+        /// Why.
+        reason: String,
+    },
     /// The sandbox was removed while the request waited.
     #[error("sandbox {0} was removed")]
     Removed(Id),
@@ -347,7 +396,7 @@ enum Command {
     Hold {
         id: Id,
         generation: Option<u64>,
-        hold: HoldId,
+        name: String,
         ttl: Option<Duration>,
         priority: Priority,
         reply: Reply<()>,
@@ -356,7 +405,7 @@ enum Command {
     Unhold {
         id: Id,
         generation: Option<u64>,
-        hold: HoldId,
+        name: String,
         reply: Reply<()>,
     },
     Acquire {
@@ -445,6 +494,9 @@ struct ActivityWindow {
     cpu: Option<Duration>,
     /// Traffic so far.
     io: Option<u64>,
+    /// Whether nothing the rule watches could be read over the window
+    /// before this one, so the sandbox counted as busy unseen.
+    unseen: bool,
 }
 
 #[derive(Debug)]
@@ -477,6 +529,8 @@ struct Slot<V> {
     /// The last step that failed and has not succeeded since, with its
     /// error, such as a save that could not be written.
     failed: Option<(Step, String)>,
+    /// Its named holds, kept on disk.
+    holds: holds::Holds,
 }
 
 /// A request waiting for a sandbox to run.
@@ -494,6 +548,8 @@ struct Waiter {
 struct Woke {
     vsock: PathBuf,
     during: Option<Step>,
+    /// The execution that is running.
+    generation: u64,
 }
 
 /// Talks to a running host agent. Cheap to clone.
@@ -513,8 +569,11 @@ pub struct Lease {
     waited: Duration,
     /// The step under way when the wake arrived.
     during: Option<Step>,
-    /// The generation the lease was asked for, if any.
-    generation: Option<u64>,
+    /// The execution the lease reaches: the one asked for, if any.
+    generation: u64,
+    /// Whether the caller asked for that execution. A lease that was not
+    /// asked for one follows the sandbox to a fresh boot.
+    pinned: bool,
     commands: mpsc::UnboundedSender<Command>,
 }
 
@@ -568,6 +627,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     next_incarnation: u64,
     stats: [StepStats; Step::COUNT],
     available_memory: Option<u64>,
+    /// Running sandboxes whose activity could not be read over their last
+    /// window, so they count as busy; see [`HostAgent::sample_busy`].
+    unseen_activity: usize,
     sample_every: Duration,
     pressure: bool,
     guest_ports: Arc<[GuestPort]>,
@@ -583,6 +645,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// share extents, otherwise also the merged image.
     save_copies: u64,
     pager: PagerConfig,
+    /// What the host runs, as status reports it.
+    about: About,
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
     commands_tx: mpsc::WeakUnboundedSender<Command>,
@@ -623,15 +687,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     ) -> Result<(Handle, JoinHandle<()>), HostError> {
         let core =
             Host::new(config.policy).map_err(|error| HostError::Invalid(format!("{error:?}")))?;
-        check_root(&config.root).map_err(HostError::Invalid)?;
-        if config.first_uid == 0 {
-            return Err(HostError::Invalid(
-                "first_uid must not be 0: VMMs run as unprivileged users".into(),
-            ));
-        }
-        if let Some(network) = &config.network {
-            network.check().map_err(HostError::Invalid)?;
-        }
+        check_config(&config)?;
         let host_lock = match config.host_lock.clone() {
             Some(path) => Some(claim(path, config.root.clone()).await?),
             None => None,
@@ -646,19 +702,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             first_uid: config.first_uid,
             network: config.network.clone(),
         };
-        // A sandbox keeps the user and addresses it was given; new ones
-        // are handed out by today's settings, which therefore must agree.
-        let misfits: Vec<String> = records
-            .all()
-            .iter()
-            .filter_map(|record| images.check(record).err())
-            .collect();
-        if !misfits.is_empty() {
-            return Err(HostError::Invalid(format!(
-                "this host's settings do not fit its sandboxes: {}",
-                misfits.join("; ")
-            )));
-        }
+        check_fit(&images, &records)?;
         let net = match config.network.clone() {
             Some(network) => Some(Arc::new(
                 tokio::task::spawn_blocking(move || Networks::prepare(&network))
@@ -674,11 +718,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let can_compress = config.can_compress && engine.memory_profile().compress;
         let reserve_whole = engine.memory_profile().pages == PageSize::Huge;
         let save_copies = save_copies(&config.root)?;
+        let about = About {
+            runtime: engine.runtime().to_owned(),
+            ..config.about
+        };
         let mut agent = Self {
             engine: Arc::new(engine),
             #[cfg(target_os = "linux")]
-            fetcher: (store.chunks())
-                .map(|chunks| Arc::new(crate::lazy::Fetcher::new(chunks.clone()))),
+            fetcher: (store.chunks()).map(|(chunks, lanes)| {
+                Arc::new(crate::lazy::Fetcher::new(chunks.clone(), Arc::clone(lanes)))
+            }),
             store: Arc::new(store),
             records: Arc::new(records),
             net,
@@ -706,6 +755,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             next_incarnation: 1,
             stats: [StepStats::default(); Step::COUNT],
             available_memory: None,
+            unseen_activity: 0,
             sample_every: config.sample_every,
             guest_ports: config.guest_ports.into(),
             restore_notice_port: config.restore_notice_port,
@@ -713,6 +763,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             can_compress,
             reserve_whole,
             save_copies,
+            about,
             commands_tx: commands_tx.downgrade(),
         };
         agent.recover(strays).await;
@@ -753,6 +804,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     None
                 }
             };
+        let holds = holds::Holds::new(paths.holds.clone(), self.records.ownership());
         self.slots.insert(
             id.0,
             Slot {
@@ -771,6 +823,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 activity: None,
                 compressed: None,
                 failed: None,
+                holds,
             },
         );
     }
@@ -805,31 +858,53 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     async fn run(mut self) {
         let mut sample = tokio::time::interval(self.sample_every);
         sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        #[cfg(target_os = "linux")]
+        let trimming = tokio::spawn(crate::logs::keep_trimmed(
+            self.root.clone(),
+            self.shutdown.clone(),
+        ));
         loop {
             let deadline = self
                 .core
                 .next_deadline()
-                .map(|at| self.origin + at.since_origin());
+                .map(|at| self.origin + at.since_origin().saturating_sub(CLOCK_BASE));
             tokio::select! {
                 biased;
+                // First, so a steady stream of events and requests cannot
+                // starve it: it is ready at most once per interval.
+                _ = sample.tick() => self.sample(),
                 Some(event) = self.events.recv() => self.on_event(event),
                 command = self.commands.recv() => match command {
                     Some(command) => self.on_command(command),
                     None => break,
                 },
                 () = sleep_until_some(deadline) => self.input(Input::Tick),
-                _ = sample.tick() => self.sample(),
             }
         }
         tracing::info!("every handle dropped; host agent stopping, VMs keep running");
         // Teardowns under way finish their current attempt; the next agent
         // retries any that failed.
         self.shutdown.cancel();
+        #[cfg(target_os = "linux")]
+        let _ = trimming.await;
         while self.teardowns.join_next().await.is_some() {}
     }
 
     fn now(&self) -> At {
-        At::from_duration(self.origin.elapsed())
+        At::from_duration(CLOCK_BASE + self.origin.elapsed())
+    }
+
+    /// `at` in milliseconds since the Unix epoch.
+    fn unix_ms(&self, at: At) -> u64 {
+        let ago = self.now().saturating_since(at);
+        unix_ms_now().saturating_sub(u64::try_from(ago.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    /// The time `unix_ms` milliseconds after the Unix epoch on the agent's
+    /// clock; one before the clock's start counts as its start.
+    fn at_unix_ms(&self, unix_ms: u64) -> At {
+        let ago = Duration::from_millis(unix_ms_now().saturating_sub(unix_ms));
+        At::from_duration(self.now().since_origin().saturating_sub(ago))
     }
 
     fn input(&mut self, input: Input) {

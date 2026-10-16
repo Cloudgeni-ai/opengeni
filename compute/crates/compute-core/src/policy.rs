@@ -329,24 +329,23 @@ impl Default for StepLimits {
     /// bandwidth, disk and network; incremental saves write little, so many
     /// can run at once.
     ///
-    /// Fetch stays at 8 because more concurrent fetches do not make the
-    /// host fetch faster. Measured on a 32-vCPU cloud host with 100 wakes
-    /// at once from object storage (each fetching about 85 MB compressed:
-    /// its working-set pack and the disk blocks the base image lacks), the
-    /// fetches together moved about 250 MB/s whether 8, 32 or 100 ran at
-    /// once, well below the host's network, disk and CPU limits, so
-    /// something shared inside the fetch path sets the pace. More at once
-    /// only spread that rate over more wakes: first byte p50 about 30 s at
-    /// 8, 37 s at 32, 36 to 53 s at 100, and no wake finished earlier. A
-    /// narrow limit serves wakes nearly first come first served, the best
-    /// median for a shared bottleneck. A single wake takes about 0.9 s to
-    /// first byte. Restore at 32 still fits: a remote restore waits only
-    /// for its pack, and its mean stayed below 2 s at 100 wide.
+    /// Fetch is 32. Measured on a 192-vCPU bare-metal cloud host waking 100
+    /// sandboxes at once from object storage (about 195 MB each: the
+    /// working-set pack and the disk blocks the base image lacks), once
+    /// background hydration gives way to waiting wakes: at 8, fetches
+    /// queued behind each other (first byte p50 21 s, p90 39 s; done p90
+    /// 43 s); at 32, first byte p50 18 s, p90 28 s, done p90 29 s and the
+    /// last at 31 s, against about 11 s for the host's network to carry
+    /// all 19.5 GB. Before that fix a bottleneck shared by every fetch set
+    /// the pace and width did not help. A single wake takes about 0.9 s to
+    /// first byte. Restore at 32 matches: a remote restore waits only for
+    /// its pack.
     fn default() -> Self {
         Self::uniform(8)
             .with(Step::Resume, 64)
             .with(Step::Pause, 64)
             .with(Step::Drop, 64)
+            .with(Step::Fetch, 32)
             .with(Step::Restore, 32)
             .with(Step::Boot, 16)
             .with(Step::Save, 16)

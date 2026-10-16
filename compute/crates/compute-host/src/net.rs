@@ -849,9 +849,15 @@ mod tests {
     static LAB: Mutex<()> = Mutex::new(());
 
     /// The lab and its prepared networking, or `None` without root and
-    /// `COMPUTE_TEST_LAB`.
+    /// `COMPUTE_TEST_LAB`: a skip, or a failure where
+    /// `COMPUTE_TEST_REQUIRE` lists `lab`, as on a gate.
     fn lab() -> Option<(MutexGuard<'static, ()>, NetworkConfig, Networks)> {
         if std::env::var_os("COMPUTE_TEST_LAB").is_none() || !rustix::process::geteuid().is_root() {
+            let required = std::env::var("COMPUTE_TEST_REQUIRE").unwrap_or_default();
+            assert!(
+                !required.split(',').any(|listed| listed.trim() == "lab"),
+                "a required test cannot run: it needs root and COMPUTE_TEST_LAB"
+            );
             eprintln!("skipped: needs root and COMPUTE_TEST_LAB");
             return None;
         }

@@ -22,7 +22,9 @@
 //! let sandbox = SandboxId(1);
 //! let mut actions = Vec::new();
 //! let size = Size::whole(1 << 30);
-//! host.handle(At::ZERO, Input::Add { sandbox, state: State::RUNNING, policy, size }, &mut actions);
+//! let last_activity = At::ZERO;
+//! let add = Input::Add { sandbox, state: State::RUNNING, policy, size, last_activity };
+//! host.handle(At::ZERO, add, &mut actions);
 //! // A VM found running has its balloon let go at once.
 //! assert!(matches!(actions[..], [Action::Balloon { bytes: 0, .. }]));
 //! actions.clear();
