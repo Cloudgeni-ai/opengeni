@@ -197,8 +197,11 @@ export default defineConfig({
               // the three icons Button states use) are startup code too; the
               // lazy settings shell as one more consumer otherwise splits
               // them into an extra startup request.
+              // The before-paint scrollbar probe is also startup code. Leaving
+              // that shared leaf to session grouping makes its main.tsx import
+              // pull the session workbench and lazy dependencies into startup.
               name: "ui-runtime",
-              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/)|clsx(?:@|\/)|tailwind-merge(?:@|\/)|class-variance-authority(?:@|\/))|apps[\\/]web[\\/]src[\\/]lib[\\/]utils\.ts$|apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:button|composer-menu|input)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:check|chevron-right|loader-circle)\.mjs$|packages[\\/]react[\\/]src[\\/]lib[\\/]cn\.ts$|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
+              test: /(?:(?:node_modules|\.bun)[\\/](?:@radix-ui(?:\+|\/)|radix-ui(?:@|\/)|clsx(?:@|\/)|tailwind-merge(?:@|\/)|class-variance-authority(?:@|\/))|apps[\\/]web[\\/]src[\\/]lib[\\/]utils\.ts$|apps[\\/]web[\\/]src[\\/]components[\\/]ui[\\/](?:button|composer-menu|input)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:check|chevron-right|loader-circle)\.mjs$|packages[\\/]react[\\/]src[\\/]lib[\\/](?:cn|scrollbars)\.ts$|[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:(?:createLucideIcon|Icon|context|defaultAttributes)\.mjs|shared[\\/]))/,
               priority: 15,
             },
             {
@@ -259,8 +262,11 @@ export default defineConfig({
               // soon as a lazy route imports only part of it (an extra startup
               // request for a few kilobytes). Vite's preload helper joins them
               // for the same reason.
+              // Boot and App also read the connect-return, Secrets and composer
+              // search parsers. Coalesce these small eager leaves here without
+              // recursively pulling their lazy route consumers into startup.
               name: "startup-sdk-runtime",
-              test: /(?:packages[\\/]sdk[\\/]src[\\/](?:errors|types|retained-artifacts|interaction)\.ts|packages[\\/]contracts[\\/]src[\\/]browser-storage\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:signup-attribution|analytics-observer)\.ts|vite[\\/]preload-helper\.js)$/,
+              test: /(?:packages[\\/]sdk[\\/]src[\\/](?:errors|types|retained-artifacts|interaction)\.ts|packages[\\/]contracts[\\/]src[\\/]browser-storage\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:signup-attribution|analytics-observer|integration-connect-return|secrets-route|composer-launch)\.ts|vite[\\/]preload-helper\.js)$/,
               includeDependenciesRecursively: false,
               priority: 5,
             },
@@ -315,16 +321,6 @@ export default defineConfig({
               test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|packages[\\/]sdk[\\/]src[\\/]transcription\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:dollars|format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-down|arrow-up|calendar-clock|chevron-up|gauge|git-branch|menu|message-square-text|plus|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
-            },
-            {
-              // App owns composer launch search parsing, while the active
-              // session route also consumes it. Keep this tiny entry helper
-              // independent so recursive session grouping cannot make the
-              // workbench an initial dependency.
-              name: "composer-launch",
-              test: /apps[\\/]web[\\/]src[\\/]lib[\\/]composer-launch\.ts$/,
-              includeDependenciesRecursively: false,
-              priority: 17,
             },
             {
               // Payment and organization-identity glyphs are lazy-only, but
