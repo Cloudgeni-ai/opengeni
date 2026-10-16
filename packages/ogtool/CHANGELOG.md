@@ -1,5 +1,13 @@
 # @opengeni/ogtool
 
+## 3.2.2
+
+### Patch Changes
+
+- Updated dependencies [a0c35a1]
+  - @opengeni/contracts@3.2.0
+  - @opengeni/codemode@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes
