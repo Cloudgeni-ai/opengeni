@@ -99,15 +99,17 @@ impl Process {
     }
 }
 
-/// Makes `command` start its process in a session of its own, away from
-/// the agent's terminal and process group, so signals aimed at the agent
-/// (such as Ctrl-C) never reach a VM or its pager.
+/// Makes `command` start its process in a process group of its own, so
+/// signals aimed at the agent's group (such as Ctrl-C) never reach a VM or
+/// its pager.
+///
+/// A process group, unlike a `setsid` hook run before exec, lets the
+/// standard library start the process with `posix_spawn`. A hook would make
+/// it `fork` the whole agent, which locks every allocator arena and the
+/// agent's address space while page tables are copied: under a burst of
+/// wakes, every other agent thread then waits.
 pub(crate) fn detach(command: &mut tokio::process::Command) {
-    // SAFETY: the closure runs in the forked child before exec and makes
-    // one setsid(2) call, which is async-signal-safe.
-    unsafe {
-        command.pre_exec(|| rustix::process::setsid().map(drop).map_err(io::Error::from));
-    }
+    command.process_group(0);
 }
 
 /// Whether process `pid` currently belongs to the cgroup at `relative`
@@ -145,6 +147,18 @@ mod tests {
         assert!(parse_pid("0").is_none());
         assert!(parse_pid("-3").is_none());
         assert!(parse_pid("12 13").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_detached_process_leads_a_group_of_its_own() {
+        let mut command = tokio::process::Command::new("sleep");
+        command.arg("30").kill_on_drop(true);
+        detach(&mut command);
+        let mut child = command.spawn().unwrap();
+        let pid = Pid::from_raw(i32::try_from(child.id().unwrap()).unwrap()).unwrap();
+        assert_eq!(rustix::process::getpgid(Some(pid)).unwrap(), pid);
+        assert_ne!(rustix::process::getpgrp(), pid);
+        child.kill().await.unwrap();
     }
 
     #[tokio::test]

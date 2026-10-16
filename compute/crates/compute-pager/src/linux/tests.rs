@@ -345,6 +345,37 @@ fn kernel_the_wake_waits_only_for_the_gated_prefix() {
 
 #[test]
 #[ignore = "requires Linux userfaultfd permission"]
+fn kernel_a_quiet_guest_reports_what_it_touched_before_the_window_closes() {
+    let (pager, memory, _sender) = live_pager();
+    // Declared after `memory`, so it is released first even when a failed
+    // assertion unwinds; otherwise the unmap waits for an UNMAP reader.
+    let mut pager = pager;
+    let stopped = AtomicBool::new(false);
+    let (report, reports) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let serving = scope.spawn(|| {
+            pager.run(&stopped, |progress| {
+                if let Progress::Recorded(touched) = progress {
+                    let _ = report.send(touched.to_vec());
+                }
+            })
+        });
+        let within = Duration::from_secs(5);
+        assert_eq!(memory[0], 0x5a);
+        assert_eq!(reports.recv_timeout(within).unwrap(), vec![0]);
+        assert_eq!(memory[8192], 0x5a);
+        assert_eq!(reports.recv_timeout(within).unwrap(), vec![0, 8192]);
+        // Nothing new touched, nothing new reported.
+        assert!(reports.recv_timeout(Duration::from_millis(1500)).is_err());
+        stopped.store(true, Ordering::Relaxed);
+        serving.join().unwrap().unwrap();
+    });
+    // The window was still open when serving ended: reported once more.
+    assert_eq!(reports.try_recv().unwrap(), vec![0, 8192]);
+}
+
+#[test]
+#[ignore = "requires Linux userfaultfd permission"]
 fn kernel_a_finished_pager_leaves_the_memory_to_the_kernel() {
     let (fd, mut memory, peer, _sender) = registered_memory();
     // Declared after `memory`, so it is released first even when a failed

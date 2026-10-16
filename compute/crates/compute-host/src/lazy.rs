@@ -172,9 +172,14 @@ struct Cache {
 }
 
 impl Cache {
-    fn insert(&mut self, key: String, chunk: Arc<Vec<u8>>) {
+    /// Adds `chunk` and returns the chunks it pushed out, for the caller to
+    /// free once the lock is released: freeing 256 KiB buffers can wait on
+    /// the allocator, and every fetch on the host waits for this lock.
+    #[must_use]
+    fn insert(&mut self, key: String, chunk: Arc<Vec<u8>>) -> Vec<Arc<Vec<u8>>> {
+        let mut evicted = Vec::new();
         if chunk.len() > CACHE_BYTES || self.chunks.contains_key(&key) {
-            return;
+            return evicted;
         }
         self.bytes += chunk.len();
         self.order.push_back(key.clone());
@@ -183,10 +188,12 @@ impl Cache {
             let Some(oldest) = self.order.pop_front() else {
                 break;
             };
-            if let Some(evicted) = self.chunks.remove(&oldest) {
-                self.bytes -= evicted.len();
+            if let Some(chunk) = self.chunks.remove(&oldest) {
+                self.bytes -= chunk.len();
+                evicted.push(chunk);
             }
         }
+        evicted
     }
 }
 
@@ -262,7 +269,8 @@ impl Fetcher {
                 ))),
             };
             if let Ok(chunk) = &fetched {
-                lock(&cache).insert(key.clone(), Arc::clone(chunk));
+                let evicted = lock(&cache).insert(key.clone(), Arc::clone(chunk));
+                drop(evicted);
             }
             let mut inflight = lock(&inflight);
             if inflight.get(&key).is_some_and(|entry| entry.id == id) {
