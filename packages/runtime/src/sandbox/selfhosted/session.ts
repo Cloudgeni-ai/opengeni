@@ -284,6 +284,9 @@ export interface SelfhostedBackgroundCommandAdoption {
   connectionInstanceId: string;
   opId: string;
   command: string;
+  /** The exec already failed because the machine stopped answering. Record it
+   * with a stop request instead of as a running background command. */
+  abandoned?: boolean;
 }
 
 /** Exact command-admission snapshot. A worker resolves this immediately before
@@ -1359,6 +1362,34 @@ export class SelfhostedSession {
               reason: null,
               retryable: false,
             });
+      if (
+        !terminalProof &&
+        !adoptedCommandId &&
+        !controlError.neverSent &&
+        machineStoppedAnswering(controlError) &&
+        this.adoptBackgroundCommand
+      ) {
+        // The machine went away mid-operation. The command may still run there,
+        // but only the machine can stop or report it, so this turn must not wait
+        // for it. Hand it to the session's command ledger with a stop request;
+        // the reconciler stops or settles it once the machine returns or its
+        // runner is retired. If recording fails, turn cleanup keeps ownership.
+        try {
+          notifyDurableOpOwnershipTransferStarted(opId);
+          const abandoned = await this.adoptBackgroundCommand({
+            controlWorkspaceId: admission.controlWorkspaceId,
+            enrollmentId: this.agentId,
+            connectionInstanceId: admission.connectionInstanceId,
+            opId,
+            command,
+            abandoned: true,
+          });
+          adoptedCommandId = abandoned.commandId;
+          notifyDurableOpOwnershipTransferred(opId);
+        } catch {
+          notifyDurableOpOwnershipTransferFailed(opId);
+        }
+      }
       this.emitOp({
         op: "exec",
         outcome: "failed",
@@ -2703,6 +2734,13 @@ function mediaTypeFromPath(path: string): string | undefined {
 
 /** A random uint64-safe numeric nonce (the wire `PingRequest.nonce` is a uint64,
  *  represented as a numeric string by ts-proto). */
+/** The machine itself stopped answering (offline, reconnecting past the hold
+ * window, or draining), as opposed to an answer that the operation failed. */
+function machineStoppedAnswering(error: SelfhostedControlError): boolean {
+  const faultClass = selfhostedFaultClass(error);
+  return faultClass === "offline" || faultClass === "reconnecting" || faultClass === "draining";
+}
+
 function randomNonce(): string {
   // 2^53-safe random integer as a decimal string.
   return String(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));

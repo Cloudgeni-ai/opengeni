@@ -1043,6 +1043,7 @@ import {
   settleConnectedMachineSessionBackgroundCommandWithMutation,
   settleSessionBackgroundCommandForRetainedProcessInTransaction,
   unobservableRetainedProcessOutcomeSql,
+  UNREACHABLE_MACHINE_STOP_REQUESTER,
   type ConnectedMachineBackgroundCommandClaim,
 } from "./session-background-commands";
 import {
@@ -38452,6 +38453,12 @@ export async function adoptConnectedMachineSessionBackgroundCommand(
     connectionInstanceId: string;
     opId: string;
     command: string;
+    /** Record an operation the turn already reported as failed because its
+     * machine stopped answering. It enters the ledger with a stop request and
+     * needs only proof that this exact attempt launched it: recording a stop
+     * grants nothing, so Pause, cancellation or a finished attempt must not
+     * leave the operation owned by a turn that can no longer stop it. */
+    abandoned?: boolean;
   },
 ) {
   return await withRlsContext(
@@ -38469,6 +38476,24 @@ export async function adoptConnectedMachineSessionBackgroundCommand(
           [input.workspaceId, input.controlWorkspaceId],
           "share",
         );
+        if (input.abandoned) {
+          const [attempt] = await tx
+            .select({ id: schema.sessionTurnAttempts.id })
+            .from(schema.sessionTurnAttempts)
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.accountId, input.accountId),
+                eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+                eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+                eq(schema.sessionTurnAttempts.turnId, input.turnId),
+                eq(schema.sessionTurnAttempts.executionGeneration, input.executionGeneration),
+                eq(schema.sessionTurnAttempts.id, input.attemptId),
+              ),
+            )
+            .limit(1);
+          if (!attempt) throw new SessionBackgroundCommandAdoptionFencedError("not_found");
+          return await insertConnectedMachineSessionBackgroundCommandInTransaction(tx, input);
+        }
         const fence = await lockTurnAttemptWriteFenceTx(tx, {
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
@@ -82564,6 +82589,21 @@ function backgroundCommandTerminalMutation(input: {
         )
         .limit(1);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+      // An operation abandoned on an unreachable machine already failed in the
+      // turn that launched it; its later stop is audit, not new model input.
+      const [stopRequest] = await tx
+        .select({ requestedBy: schema.sessionBackgroundCommands.cancelRequestedBy })
+        .from(schema.sessionBackgroundCommands)
+        .where(
+          and(
+            eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+            eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+            eq(schema.sessionBackgroundCommands.id, command.id),
+          ),
+        )
+        .limit(1);
+      const abandonedOnUnreachableMachine =
+        stopRequest?.requestedBy === UNREACHABLE_MACHINE_STOP_REQUESTER;
       const terminalOccurredAt = new Date(command.settledAt);
       const now = new Date();
       const reason = boundedSessionBackgroundCommandReason(
@@ -82610,7 +82650,8 @@ function backgroundCommandTerminalMutation(input: {
       if (
         session.status === "cancelled" ||
         session.status === "failed" ||
-        command.completionObservedAt
+        command.completionObservedAt ||
+        abandonedOnUnreachableMachine
       ) {
         await tx
           .update(schema.sessions)

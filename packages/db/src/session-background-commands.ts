@@ -549,7 +549,11 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
   return mapCommand(row);
 }
 
-/** @internal Caller must already hold the canonical exact-attempt fence. */
+/** Stop requester recorded for an operation abandoned on an unreachable machine. */
+export const UNREACHABLE_MACHINE_STOP_REQUESTER = "system:connected-machine-unreachable";
+
+/** @internal Caller must already hold the canonical exact-attempt fence, or for
+ * an abandoned operation, proof that the exact attempt launched it. */
 export async function insertConnectedMachineSessionBackgroundCommandInTransaction(
   db: Database,
   input: {
@@ -565,8 +569,13 @@ export async function insertConnectedMachineSessionBackgroundCommandInTransactio
     turnId?: string;
     attemptId?: string;
     executionGeneration?: number;
+    /** The turn already reported this operation as failed because its machine
+     * stopped answering. The row starts with a stop request, so the reconciler
+     * stops it when the machine returns; its settlement adds no model input. */
+    abandoned?: boolean;
   },
 ): Promise<SessionBackgroundCommand> {
+  const now = new Date();
   const [row] = await db
     .insert(schema.sessionBackgroundCommands)
     .values({
@@ -575,7 +584,14 @@ export async function insertConnectedMachineSessionBackgroundCommandInTransactio
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       provider: "connected_machine",
-      state: "running",
+      state: input.abandoned ? "stopping" : "running",
+      ...(input.abandoned
+        ? {
+            cancelRequestedAt: now,
+            cancelRequestedBy: UNREACHABLE_MACHINE_STOP_REQUESTER,
+            reconcileAfter: now,
+          }
+        : {}),
       controlWorkspaceId: input.controlWorkspaceId,
       enrollmentId: input.enrollmentId,
       connectionInstanceId: input.connectionInstanceId,
