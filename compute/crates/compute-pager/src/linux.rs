@@ -173,10 +173,11 @@ pub enum Progress<'a> {
     Prefetched,
     /// The image offsets the guest touched first, in order, so far. Reported
     /// whenever the guest has gone quiet after touching new pages (at most
-    /// once a second), so a VM that pauses soon after its wake has already
-    /// reported what it touched before anything archives it; and once more
-    /// when the recording window closes or the VMM goes. Each report holds
-    /// everything recorded until then.
+    /// once a second), and once more when the recording window closes or the
+    /// VMM goes. Each report holds everything recorded until then. Reporting
+    /// is best effort: a VM paused and archived within about a second of its
+    /// wake may be archived before its first report, and then wakes without
+    /// a working set, which is slower but still correct.
     Recorded(&'a [u64]),
     /// Every page is in place and the guest's memory is no longer
     /// registered with the UFFD (see [`Pager::finish_when_complete`]): the
