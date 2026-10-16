@@ -37,6 +37,7 @@
 
 mod backoff;
 mod browser_bridge;
+mod browser_control_http;
 mod browser_sidecar;
 mod capacity;
 mod cli;

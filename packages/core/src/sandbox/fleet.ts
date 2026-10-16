@@ -985,6 +985,7 @@ function runOnOperationAdmission(
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
     transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+    browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
   };
 }
 

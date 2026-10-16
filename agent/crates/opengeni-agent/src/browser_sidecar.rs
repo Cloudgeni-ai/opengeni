@@ -109,6 +109,10 @@ pub struct BrowserSidecarManager {
     update_drain: Arc<crate::uploads::update_drain::UpdateDrain>,
     /// The local attached-Chrome inventory, once the bridge is listening.
     attached: std::sync::OnceLock<crate::browser_bridge::BrowserBridgeInventory>,
+    /// Pooled loopback client for controller requests.
+    http_client: reqwest::Client,
+    /// Remainders of controller responses too large for one reply.
+    http_spool: std::sync::Mutex<crate::browser_control_http::ResponseSpool>,
 }
 
 impl BrowserSidecarManager {
@@ -144,6 +148,8 @@ impl BrowserSidecarManager {
             sidecars: Mutex::new(HashMap::new()),
             update_drain: Arc::default(),
             attached: std::sync::OnceLock::new(),
+            http_client: crate::browser_control_http::client()?,
+            http_spool: std::sync::Mutex::default(),
         })
     }
 
@@ -584,6 +590,47 @@ impl BrowserControlBackend for BrowserSidecarManager {
         recover_update_admission(sidecar, &self.update_drain).await?;
         sidecar.last_used = Instant::now();
         Ok(sidecar.endpoint.clone())
+    }
+
+    fn http_supported(&self) -> bool {
+        true
+    }
+
+    async fn http(
+        &self,
+        req: &v1::BrowserControlHttpRequest,
+        inline_limit: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpResponse> {
+        let checked = crate::browser_control_http::check(req)?;
+        // A replaced generation means the caller's controller is gone; like a
+        // missing one, nothing was sent, so it may ensure and send again.
+        let endpoint = self
+            .resolve(&req.scope_id, &req.scope_generation)
+            .await
+            .map_err(|error| match error {
+                PlatformError::Unsupported(message) => PlatformError::NotFound(message),
+                other => other,
+            })?;
+        crate::browser_control_http::send(
+            &self.http_client,
+            endpoint.port,
+            req,
+            checked,
+            inline_limit,
+            &self.http_spool,
+        )
+        .await
+    }
+
+    async fn http_read(
+        &self,
+        req: &v1::BrowserControlHttpReadRequest,
+        max_bytes: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpReadResponse> {
+        self.http_spool
+            .lock()
+            .map_err(|_| PlatformError::os("browser controller response spool is unavailable"))?
+            .read(req, max_bytes)
     }
 }
 
@@ -1277,6 +1324,69 @@ mod tests {
                 .is_some_and(|(_, rest)| rest.starts_with('Z')),
             Err(_) => true,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn http_resolves_the_exact_scope_and_never_guesses_a_port() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let manager = idle_fixture_manager(directory.path(), listener.local_addr().unwrap().port());
+        assert!(manager.http_supported());
+        let request = |scope: &str, generation: &str| v1::BrowserControlHttpRequest {
+            scope_id: scope.into(),
+            scope_generation: generation.into(),
+            method: "GET".into(),
+            path: "/v1/runtime".into(),
+            bearer_token: "p".repeat(32),
+            body: prost::bytes::Bytes::new(),
+            has_body: false,
+            timeout_ms: 5_000,
+            max_response_bytes: 4_096,
+        };
+        // Nothing ensured yet: the caller learns to ensure, and nothing is sent.
+        let absent = manager
+            .http(&request("scope-http", "fixture-generation"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(absent, PlatformError::NotFound(_)), "{absent:?}");
+
+        ensure_idle_fixture(&manager, "scope-http").await;
+        let stale = manager
+            .http(&request("scope-http", "older-generation"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, PlatformError::NotFound(_)), "{stale:?}");
+
+        let body = r#"{"protocolVersion":1,"ok":true,"data":{"idle":true}}"#;
+        let server = tokio::spawn(serve_idle_proofs(listener, vec![(200, body.into())]));
+        let response = manager
+            .http(&request("scope-http", "fixture-generation"), Some(16))
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.total_bytes, body.len() as u64);
+        assert_eq!(&response.body[..], &body.as_bytes()[..16]);
+        let rest = manager
+            .http_read(
+                &v1::BrowserControlHttpReadRequest {
+                    spool_id: response.spool_id,
+                    offset: 16,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(rest.done);
+        assert_eq!(&rest.data[..], &body.as_bytes()[16..]);
+        assert!(response
+            .headers
+            .iter()
+            .any(|header| header.name == "content-type" && header.value == "application/json"));
+        manager.shutdown().await;
     }
 
     #[cfg(unix)]

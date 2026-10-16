@@ -66,6 +66,20 @@ pub struct DispatchContext {
 /// best-effort first cut, not the sole guard.
 pub const REPLY_ENVELOPE_MARGIN: usize = 4 * 1024;
 
+/// Controller body bytes one reply may carry: the negotiated payload less the
+/// envelope and the bounded controller response headers. `None` when the
+/// transport reports no bound (a test/sync context).
+fn reply_body_budget(ctx: &DispatchContext) -> Option<usize> {
+    (ctx.max_reply_bytes != 0).then(|| {
+        ctx.max_reply_bytes
+            .saturating_sub(
+                REPLY_ENVELOPE_MARGIN
+                    + opengeni_agent_platform::BROWSER_CONTROL_HTTP_MAX_HEADER_BYTES,
+            )
+            .max(1)
+    })
+}
+
 impl DispatchContext {
     /// Milliseconds since the agent process started (the monotonic clock the
     /// ping/heartbeat reports for skew estimation).
@@ -219,6 +233,22 @@ async fn dispatch_future<P: Platform>(
             request_id,
             platform.browser_control_ensure(&req).await,
             RespResult::BrowserControlEnsure,
+        ),
+        // The reply carries the controller's body, so bound it by the same
+        // negotiated payload the transport can publish; the rest is spooled.
+        Op::BrowserControlHttp(req) => result(
+            request_id,
+            platform
+                .browser_control_http(&req, reply_body_budget(ctx))
+                .await,
+            RespResult::BrowserControlHttp,
+        ),
+        Op::BrowserControlHttpRead(req) => result(
+            request_id,
+            platform
+                .browser_control_http_read(&req, reply_body_budget(ctx))
+                .await,
+            RespResult::BrowserControlHttpRead,
         ),
         Op::BrowserFramesOpen(req) => result(
             request_id,
