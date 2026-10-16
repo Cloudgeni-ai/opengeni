@@ -91,9 +91,14 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
             generation,
             priority,
         } => done(handle.touch(id, generation, priority.into())),
-        Request::Sleep { id, level } => done(handle.sleep(id, level.into()).await),
+        Request::Sleep {
+            id,
+            generation,
+            level,
+        } => done(handle.sleep(id, generation, level.into()).await),
         Request::Hold {
             id,
+            generation,
             hold,
             ttl_ms,
             priority,
@@ -101,13 +106,18 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
             handle
                 .hold(
                     id,
+                    generation,
                     &hold,
                     ttl_ms.map(Duration::from_millis),
                     priority.into(),
                 )
                 .await,
         ),
-        Request::Release { id, hold } => done(handle.release(id, &hold).await),
+        Request::Release {
+            id,
+            generation,
+            hold,
+        } => done(handle.release(id, generation, &hold).await),
         Request::Wake {
             id,
             generation,

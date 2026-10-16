@@ -22,7 +22,8 @@ use std::time::Duration;
 use compute_core::SandboxId;
 use compute_host::client::Client;
 use compute_host::protocol::{
-    HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
+    DurabilityName, HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
+    SandboxStatus, SleepConfig,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
@@ -97,7 +98,10 @@ impl Host {
             .arg("/sys/fs/cgroup/compute-test")
             .args(["--limit", "boot=32", "--limit", "restore=32"])
             .args(&self.extra)
-            .env("RUST_LOG", "info")
+            .env(
+                "RUST_LOG",
+                std::env::var("COMPUTE_TEST_LOG").unwrap_or_else(|_| "info".into()),
+            )
             .stdout(Stdio::null())
             .stderr(log)
             .spawn()
@@ -112,6 +116,18 @@ impl Host {
             sleep(Duration::from_millis(20)).await;
         }
         Agent { child, client }
+    }
+
+    /// Keeps the agent's log with the results, then deletes the host's
+    /// files.
+    fn finish(self, name: &str) {
+        if let Some(dir) = std::env::var_os("COMPUTE_TEST_RESULTS") {
+            let _ = std::fs::copy(
+                self.root.join("agent.log"),
+                PathBuf::from(dir).join(format!("{name}-agent.log")),
+            );
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
@@ -129,7 +145,7 @@ impl Agent {
         }
     }
 
-    async fn create(&self, sandbox: Id, sleep: &[(LevelName, u64)]) {
+    async fn create(&self, sandbox: Id, sleep: SleepConfig) {
         create(&self.client, sandbox, sleep).await;
     }
 
@@ -160,33 +176,12 @@ impl Agent {
     }
 }
 
-/// The sleep config for a ladder of levels and idle milliseconds. Reaching
-/// `Saved` ends the VM process.
-fn sleep_config(ladder: &[(LevelName, u64)]) -> SleepConfig {
-    let mut config = SleepConfig::default();
-    for &(level, after) in ladder {
-        let after = Some(after);
-        match level {
-            LevelName::Running => {}
-            LevelName::Paused => config.pause_after_ms = after,
-            LevelName::Compressed => config.compress = true,
-            LevelName::Saved => {
-                config.save_after_ms = after;
-                config.drop_after_ms = after;
-            }
-            LevelName::Archived => config.archive_after_ms = after,
-            LevelName::Remote => config.evict_after_ms = after,
-        }
-    }
-    config
-}
-
-/// Creates `sandbox` with the sleep ladder `sleep`.
-async fn create(client: &Client, sandbox: Id, sleep: &[(LevelName, u64)]) {
+/// Creates `sandbox` with sleep settings `sleep`.
+async fn create(client: &Client, sandbox: Id, sleep: SleepConfig) {
     let config = SandboxConfig {
         vcpus: 1,
         memory_mib: 512,
-        sleep: sleep_config(sleep),
+        sleep,
     };
     let reply = client
         .call(&Request::Create {
@@ -274,28 +269,65 @@ fn firecrackers() -> usize {
 enum Kind {
     Running,
     Paused,
+    /// Paused, with a saved copy on disk.
+    SavedInPlace,
     Saved,
 }
 
+/// Never sleeps on its own.
+const NEVER: SleepConfig = SleepConfig {
+    pause_after_ms: None,
+    save_after_ms: None,
+    archive_after_ms: None,
+    drop_after_ms: None,
+    evict_after_ms: None,
+    forget_after_ms: None,
+    compress: false,
+};
+
+/// Pauses, saves and lets go of the VM soon after each use.
+const SAVE_SOON: SleepConfig = SleepConfig {
+    pause_after_ms: Some(300),
+    save_after_ms: Some(600),
+    drop_after_ms: Some(900),
+    ..NEVER
+};
+
 impl Kind {
     fn of(n: usize) -> Self {
-        [Self::Running, Self::Paused, Self::Saved][n % 3]
+        [Self::Running, Self::Paused, Self::SavedInPlace, Self::Saved][n % 4]
     }
 
-    fn ladder(self) -> &'static [(LevelName, u64)] {
+    fn sleep(self) -> SleepConfig {
         match self {
-            Self::Running => &[],
-            Self::Paused => &[(LevelName::Paused, 500)],
-            Self::Saved => &[(LevelName::Paused, 500), (LevelName::Saved, 1_000)],
+            Self::Running => NEVER,
+            Self::Paused => SleepConfig {
+                pause_after_ms: Some(500),
+                ..NEVER
+            },
+            Self::SavedInPlace => SleepConfig {
+                pause_after_ms: Some(500),
+                save_after_ms: Some(1_000),
+                ..NEVER
+            },
+            Self::Saved => SleepConfig {
+                pause_after_ms: Some(500),
+                save_after_ms: Some(1_000),
+                drop_after_ms: Some(1_500),
+                ..NEVER
+            },
         }
     }
 
-    fn level(self) -> LevelName {
-        match self {
-            Self::Running => LevelName::Running,
-            Self::Paused => LevelName::Paused,
-            Self::Saved => LevelName::Saved,
-        }
+    /// Whether `sandbox` has settled where this kind goes.
+    fn reached(self, sandbox: &SandboxStatus) -> bool {
+        let (level, durability) = match self {
+            Self::Running => (LevelName::Running, DurabilityName::Volatile),
+            Self::Paused => (LevelName::Paused, DurabilityName::Volatile),
+            Self::SavedInPlace => (LevelName::Paused, DurabilityName::Local),
+            Self::Saved => (LevelName::Saved, DurabilityName::Local),
+        };
+        sandbox.step.is_none() && sandbox.level == level && sandbox.durability == durability
     }
 }
 
@@ -316,7 +348,7 @@ async fn sandboxes_survive_the_agent_being_killed() {
     for (n, sandbox) in ids.iter().copied().enumerate() {
         let client = agent.client.clone();
         creates.spawn(async move {
-            create(&client, sandbox, Kind::of(n).ladder()).await;
+            create(&client, sandbox, Kind::of(n).sleep()).await;
             // A background process and a file in memory: both live only in
             // the guest's RAM.
             let script = format!(
@@ -335,7 +367,7 @@ async fn sandboxes_survive_the_agent_being_killed() {
                 .sandboxes
                 .iter()
                 .enumerate()
-                .all(|(n, sandbox)| sandbox.step.is_none() && sandbox.level == Kind::of(n).level())
+                .all(|(n, sandbox)| Kind::of(n).reached(sandbox))
         })
         .await;
     let before = agent.status().await;
@@ -359,8 +391,8 @@ async fn sandboxes_survive_the_agent_being_killed() {
     assert_eq!(after.sandboxes.len(), count);
     for (old, new) in before.sandboxes.iter().zip(&after.sandboxes) {
         assert_eq!(
-            (old.id, old.level, old.generation),
-            (new.id, new.level, new.generation),
+            (old.id, old.level, old.durability, old.generation),
+            (new.id, new.level, new.durability, new.generation),
             "the restart changed a sandbox"
         );
     }
@@ -387,7 +419,7 @@ async fn sandboxes_survive_the_agent_being_killed() {
     agent.remove_all().await;
     assert_eq!(firecrackers(), 0);
     agent.kill();
-    let _ = std::fs::remove_dir_all(&host.root);
+    host.finish(&format!("kill-restart-{count}"));
 }
 
 /// Wakes every sandbox at once and checks its guest kept the background
@@ -448,9 +480,8 @@ async fn restored_guests_reach_the_internet_at_once_and_nothing_else() {
     let host = Host::new(&lab, "net", &["--network"]);
     let agent = host.start().await;
     let ids: Vec<Id> = (0..count).map(id).collect();
-    let ladder = [(LevelName::Paused, 300), (LevelName::Saved, 600)];
     for sandbox in &ids {
-        agent.create(*sandbox, &ladder).await;
+        agent.create(*sandbox, SAVE_SOON).await;
     }
     let mut boots = JoinSet::new();
     for sandbox in ids.iter().copied() {
@@ -480,10 +511,12 @@ async fn restored_guests_reach_the_internet_at_once_and_nothing_else() {
     blocked.push(format!("198.18.0.3:{port}"));
     // The first command after the restore is the outbound connection, then
     // a second one to tell network latency from the restored guest's first
-    // page faults; then each forbidden destination must fail, and fast.
+    // page faults, then a name lookup; then each forbidden destination must
+    // fail, and fast.
     let script = format!(
         "s=$(date +%s%N); if exec 3<>/dev/tcp/1.1.1.1/80; then echo out $(( ($(date +%s%N) - s) / 1000 )); else echo out-failed; fi
 s=$(date +%s%N); if exec 4<>/dev/tcp/1.1.1.1/80; then echo again $(( ($(date +%s%N) - s) / 1000 )); else echo again-failed; fi
+if getent hosts example.com >/dev/null; then echo dns ok; else echo dns-failed; fi
 for t in {}; do s=$(date +%s%N); if timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*}}/${{t#*:}}\" 2>/dev/null; then r=open; else r=closed; fi; echo $t $r $(( ($(date +%s%N) - s) / 1000 )); done",
         blocked.join(" ")
     );
@@ -513,6 +546,7 @@ for t in {}; do s=$(date +%s%N); if timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*
         };
         #[allow(clippy::cast_precision_loss)]
         second_connect_ms.push(micros.trim().parse::<u64>().unwrap() as f64 / 1e3);
+        assert_eq!(lines.next(), Some("dns ok"), "{sandbox}: {output}");
         wake_ms.push(waited.as_secs_f64() * 1e3);
         for line in lines {
             let fields: Vec<&str> = line.split_whitespace().collect();
@@ -536,5 +570,36 @@ for t in {}; do s=$(date +%s%N); if timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*
     );
     agent.remove_all().await;
     agent.kill();
-    let _ = std::fs::remove_dir_all(&host.root);
+    host.finish(&format!("network-restore-{count}"));
+}
+
+/// On a trusted host guests reach the local network; on any other host the
+/// same address is blocked. Runs only when `COMPUTE_TEST_LAN_TARGET` names a
+/// listening `address:port` on the host's local network (not the host).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_trusted_hosts_let_guests_reach_the_local_network() {
+    let (Some(lab), Some(target)) = (lab(), std::env::var_os("COMPUTE_TEST_LAN_TARGET")) else {
+        eprintln!("skipped: set COMPUTE_TEST_LAB and COMPUTE_TEST_LAN_TARGET");
+        return;
+    };
+    let target = target.to_string_lossy().into_owned();
+    let (address, port) = target.rsplit_once(':').unwrap();
+    let script = format!(
+        "if timeout 3 bash -c 'exec 3<>/dev/tcp/{address}/{port}' 2>/dev/null; then echo open; else echo closed; fi"
+    );
+    for (trusted, expected) in [(false, "closed"), (true, "open")] {
+        let flags: &[&str] = if trusted {
+            &["--network", "--trusted"]
+        } else {
+            &["--network"]
+        };
+        let host = Host::new(&lab, "lan", flags);
+        let agent = host.start().await;
+        agent.create(id(0), NEVER).await;
+        let (output, _) = exec(&agent.client, id(0), &script).await;
+        assert_eq!(output.trim(), expected, "trusted={trusted}: {target}");
+        agent.remove_all().await;
+        agent.kill();
+        host.finish(&format!("lan-trusted-{trusted}"));
+    }
 }

@@ -368,22 +368,35 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .await?,
         ),
-        Command::Sleep { id, level } => {
-            expect_done(client.call(&Request::Sleep { id, level }).await?)
-        }
+        Command::Sleep { id, level } => expect_done(
+            client
+                .call(&Request::Sleep {
+                    id,
+                    generation: None,
+                    level,
+                })
+                .await?,
+        ),
         Command::Hold { id, name, ttl } => expect_done(
             client
                 .call(&Request::Hold {
                     id,
+                    generation: None,
                     hold: name,
                     ttl_ms: ttl.map(millis),
                     priority: PriorityName::Interactive,
                 })
                 .await?,
         ),
-        Command::Release { id, name } => {
-            expect_done(client.call(&Request::Release { id, hold: name }).await?)
-        }
+        Command::Release { id, name } => expect_done(
+            client
+                .call(&Request::Release {
+                    id,
+                    generation: None,
+                    hold: name,
+                })
+                .await?,
+        ),
         Command::Status => {
             let reply = client.call(&Request::Status).await?;
             println!("{}", serde_json::to_string_pretty(&reply)?);
@@ -713,7 +726,15 @@ async fn put_to_sleep(
     let mut requests = JoinSet::new();
     for id in ids {
         let (client, id) = (client.clone(), *id);
-        requests.spawn(async move { client.call(&Request::Sleep { id, level }).await });
+        requests.spawn(async move {
+            client
+                .call(&Request::Sleep {
+                    id,
+                    generation: None,
+                    level,
+                })
+                .await
+        });
     }
     while let Some(result) = requests.join_next().await {
         expect_done(result??)?;

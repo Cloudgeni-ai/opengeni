@@ -26,13 +26,15 @@
 //! the namespace, which the VMM joins without the privilege to change it,
 //! and again on the host.
 //!
-//! Setting up a namespace takes a few `ip` and `nft` runs, a few
-//! milliseconds each; it happens when a sandbox is created or the host
-//! restarts, never on a wake.
+//! Setting up a namespace takes two `ip` runs and one `nft` run, a few
+//! milliseconds each, when a sandbox is created; when the agent restarts,
+//! re-checking it takes one `nft` run. Neither happens on a wake.
 
 use std::fmt::{self, Write as _};
+use std::fs::File;
 use std::io::{self, Write as _};
 use std::net::Ipv4Addr;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
@@ -220,6 +222,10 @@ table inet {HOST_TABLE} {{
     /// A sandbox namespace's rules, replacing any earlier version
     /// atomically. TCP segments are clamped both ways to fit the host's
     /// uplink `mtu`, which guests (assuming 1500 bytes) cannot know.
+    ///
+    /// Refused TCP connections get a reset, which the kernel sends without
+    /// any rate limit, so a guest learns at once even when it probes many
+    /// blocked addresses; everything else gets ICMP admin-prohibited.
     fn sandbox_rules(&self, mtu: u32) -> String {
         let blocked = self.blocked().join(", ");
         let mss = mtu.saturating_sub(40);
@@ -230,6 +236,7 @@ table inet {SANDBOX_TABLE} {{
     chain input {{
         type filter hook input priority filter; policy drop;
         iifname \"lo\" accept
+        iifname \"{TAP}\" meta l4proto tcp reject with tcp reset
         iifname \"{TAP}\" reject with icmpx type admin-prohibited
     }}
     chain forward {{
@@ -237,11 +244,13 @@ table inet {SANDBOX_TABLE} {{
         tcp flags syn / syn,rst tcp option maxseg size > {mss} tcp option maxseg size set {mss}
         ct state {{ established, related }} accept
         iifname \"{TAP}\" oifname \"{UPLINK}\" ip saddr {GUEST_IP} ip daddr != {{ {blocked} }} accept
+        iifname \"{TAP}\" meta l4proto tcp reject with tcp reset
         iifname \"{TAP}\" reject with icmpx type admin-prohibited
     }}
     chain output {{
         type filter hook output priority filter; policy drop;
         ct state related accept
+        oifname \"{TAP}\" tcp flags rst accept
         oifname \"{TAP}\" ip protocol icmp accept
         oifname \"lo\" accept
     }}
@@ -408,13 +417,9 @@ impl Networks {
     /// network is left as it is, so a VM using it keeps running; a partial
     /// one, from a crash part way through setting up, is rebuilt.
     pub fn ensure(&self, link: &Link) -> Result<(), NetError> {
-        if link.namespace_path().exists() {
-            let complete = Command::new("ip")
-                .args(["-n", &link.namespace, "link", "show", "dev", TAP])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success());
+        let path = link.namespace_path();
+        if path.exists() {
+            let complete = in_namespace(&path, || Ok(has_interface(TAP)))?;
             if !complete {
                 self.remove(&link.namespace)?;
                 self.create(link)?;
@@ -429,11 +434,9 @@ impl Networks {
         // A host link left by a namespace that is gone would block the name.
         let _ = run("ip", &["link", "del", "dev", &link.host], None);
         run("ip", &["-batch", "-"], Some(&link.host_commands(self.mtu)))?;
-        run(
-            "ip",
-            &["-n", &link.namespace, "-batch", "-"],
-            Some(&link.namespace_commands()),
-        )
+        in_namespace(&link.namespace_path(), || {
+            run("ip", &["-batch", "-"], Some(&link.namespace_commands()))
+        })
     }
 
     /// Sets the namespace's kernel settings and rules to the current ones.
@@ -444,26 +447,14 @@ impl Networks {
     /// refusals arrive a second late, as timeouts. The namespace-wide cap
     /// (`icmp_msgs_per_sec`) still bounds them.
     fn configure(&self, link: &Link) -> Result<(), NetError> {
-        run(
-            "ip",
-            &[
-                "netns",
-                "exec",
-                &link.namespace,
-                "sysctl",
-                "-qw",
-                "net.ipv4.ip_forward=1",
-                "net.ipv4.icmp_ratelimit=0",
-                "net.ipv6.conf.all.disable_ipv6=1",
-                "net.ipv6.conf.default.disable_ipv6=1",
-            ],
-            None,
-        )?;
-        run(
-            "ip",
-            &["netns", "exec", &link.namespace, "nft", "-f", "-"],
-            Some(&self.sandbox_rules),
-        )
+        in_namespace(&link.namespace_path(), || {
+            for (setting, value) in NAMESPACE_SETTINGS {
+                let path = Path::new("/proc/sys/net").join(setting);
+                std::fs::write(&path, value)
+                    .map_err(|error| NetError::new(&path.display().to_string(), error))?;
+            }
+            run("nft", &["-f", "-"], Some(&self.sandbox_rules))
+        })
     }
 
     /// Deletes sandbox `id`'s network; succeeds when there is none. The
@@ -495,6 +486,49 @@ fn uplink_mtu() -> Result<u32, NetError> {
         .trim()
         .parse()
         .map_err(|error| NetError::new(&path, error))
+}
+
+/// Kernel settings of every sandbox namespace, under `/proc/sys/net`.
+const NAMESPACE_SETTINGS: [(&str, &str); 4] = [
+    ("ipv4/ip_forward", "1"),
+    ("ipv4/icmp_ratelimit", "0"),
+    ("ipv6/conf/all/disable_ipv6", "1"),
+    ("ipv6/conf/default/disable_ipv6", "1"),
+];
+
+/// Runs `work` on a new thread that has joined the network namespace at
+/// `path`. Programs it starts inherit the namespace and `/proc/sys/net`
+/// shows the namespace's settings. The thread ends with `work`, so nothing
+/// else ever runs in the namespace by mistake. This is what `ip netns exec`
+/// does, without its new mount namespace and remounted `/sys`, which cost
+/// milliseconds each and serialize on kernel locks.
+fn in_namespace<T: Send>(
+    path: &Path,
+    work: impl FnOnce() -> Result<T, NetError> + Send,
+) -> Result<T, NetError> {
+    use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
+
+    let namespace = File::open(path).map_err(|error| NetError::new("open namespace", error))?;
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                move_into_link_name_space(namespace.as_fd(), Some(LinkNameSpaceType::Network))
+                    .map_err(|error| NetError::new("join namespace", io::Error::from(error)))?;
+                work()
+            })
+            .join()
+            .unwrap_or_else(|_| Err(NetError::new("namespace thread", "panicked")))
+    })
+}
+
+/// Whether the calling thread's network namespace has interface `name`.
+fn has_interface(name: &str) -> bool {
+    std::fs::read_to_string("/proc/thread-self/net/dev").is_ok_and(|devices| {
+        devices
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .any(|(device, _)| device.trim() == name)
+    })
 }
 
 /// Runs `program` with `args`, feeding it `input`, and fails with its
@@ -602,7 +636,7 @@ mod tests {
         let untrusted = NetworkConfig::default();
         let trusted = NetworkConfig {
             trusted: true,
-            blocked: vec!["35.228.188.0/24".parse().unwrap()],
+            blocked: vec!["93.184.216.0/24".parse().unwrap()],
             ..NetworkConfig::default()
         };
         for config in [&untrusted, &trusted] {
@@ -620,9 +654,10 @@ mod tests {
             assert!(untrusted.blocked().iter().any(|net| net == local));
             assert!(!trusted.blocked().iter().any(|net| net == local));
         }
-        assert!(trusted.blocked().iter().any(|net| net == "35.228.188.0/24"));
+        assert!(trusted.blocked().iter().any(|net| net == "93.184.216.0/24"));
         let rules = untrusted.sandbox_rules(1460);
         assert!(rules.contains("policy drop"));
+        assert!(rules.contains("meta l4proto tcp reject with tcp reset"));
         assert!(rules.contains("10.0.0.0/8"));
         assert!(rules.contains("maxseg size set 1420"));
         assert!(rules.contains("oifname \"uplink\" masquerade"));

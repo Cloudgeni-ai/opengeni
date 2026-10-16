@@ -1,0 +1,13 @@
+Opengeni compute
+
+Parts of the design of compute-host follow ideas from SPACE (Sandboxed
+Platform for Agentic Code Execution), https://github.com/perplexityai/SPACE,
+Copyright 2026 Perplexity AI, licensed under the Apache License, Version 2.0:
+
+- VMs outlive the host agent and are taken back from durable per-VM records
+  when it starts again.
+- Every guest gets the same fixed address behind NAT in its own network
+  namespace, so a guest restored from a snapshot needs no reconfiguration.
+
+No SPACE source code is included. Where a file's design follows SPACE, its
+header says so.

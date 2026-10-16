@@ -329,7 +329,8 @@ impl<E: Engine, S: Store> Job<E, S> {
 
     /// Resumes a paused VM. A saved copy of it goes stale the moment the
     /// guest runs and its disk moves on, so it is unmarked first, and marked
-    /// again only if the resume was refused, as then the guest never ran.
+    /// again if the resume was refused: the guest never ran, and the core
+    /// counts on a transient failure having changed nothing.
     async fn resume(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
         // The image stays on disk as the base the VM's next save is a diff
         // against; only the record stops vouching for it.
@@ -339,36 +340,37 @@ impl<E: Engine, S: Store> Job<E, S> {
                 .commit(Change::new().image(false).archived(false))
                 .await
         {
-            // A record change either lands whole or not at all, and one that
-            // reached the disk unseen can only make a restart trust less.
             return (state_failure(&error), After::Kept(live));
         }
         let outcome = match self.engine.resume(&live.vm).await {
             Ok(()) => Outcome::Done,
-            Err(error) => self.after_failed_wake(image, archived, &error).await,
+            Err(error) => self.after_failed_wake(&error, image, archived).await,
         };
         (outcome, After::Kept(live))
     }
 
     /// The outcome of a wake that failed after the record stopped vouching
-    /// for the saved copies (`image`, `archived`). A refused wake never ran
-    /// the guest, so they are vouched for again; when that cannot be
-    /// recorded they are reported untrusted. Any other failure leaves them
-    /// unvouched, as the guest may have run.
+    /// for the saved copy (`image`, `archived`). A refused wake never ran
+    /// the guest, so the record vouches for the copy again; if it cannot,
+    /// the core can no longer count on nothing having changed and is told
+    /// the copy is untrusted. After any other failure the guest may have
+    /// run, so the copy stays unvouched.
     async fn after_failed_wake(
         &mut self,
+        error: &EngineError,
         image: bool,
         archived: bool,
-        refusal: &EngineError,
     ) -> Outcome {
-        if refusal.kind != ErrorKind::Transient || !(image || archived) {
-            return failure(refusal);
+        if error.kind != ErrorKind::Transient || !(image || archived) {
+            return failure(error);
         }
-        let kept = Change::new().image(image).archived(archived);
-        match self.commit(kept).await {
-            Ok(()) => failure(refusal),
-            Err(error) => {
-                tracing::error!(id = %self.id, %refusal, %error, "saved copies not vouched for again after a refused wake");
+        match self
+            .commit(Change::new().image(image).archived(archived))
+            .await
+        {
+            Ok(()) => failure(error),
+            Err(lost) => {
+                tracing::error!(id = %self.id, error = %lost, "saved copy not vouched for again after a refused wake");
                 Outcome::Failed(Failure::Untrusted)
             }
         }
@@ -437,19 +439,6 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
         live.stopping.store(true, Ordering::Release);
         (self.end(live.vm, Outcome::Done).await, After::NoVm)
-    }
-
-    /// Ends a VM process and reports `outcome`, or a fatal failure if the
-    /// process would not end: without proof that it did, nothing may
-    /// replace it.
-    async fn end(&self, vm: E::Vm, outcome: Outcome) -> Outcome {
-        match self.engine.stop(vm).await {
-            Ok(()) => outcome,
-            Err(error) => {
-                tracing::error!(id = %self.id, %error, "a VM process would not end");
-                Outcome::Failed(Failure::Fatal)
-            }
-        }
     }
 
     /// Snapshots the paused VM and publishes the result as a new image
@@ -535,10 +524,8 @@ impl<E: Engine, S: Store> Job<E, S> {
         Ok(published)
     }
 
-    /// Starts from the saved image, stops vouching for it before the guest
-    /// runs, then resumes. A VM that fails to resume is ended before the
-    /// image is reconsidered, so no second process ever runs from the same
-    /// files.
+    /// Starts from the saved image, marks the image stale before the guest
+    /// runs, then resumes.
     async fn restore(&mut self) -> (Outcome, After<E::Vm>) {
         const OP: &str = "restore";
         if !self.record.image || self.record.disk != Disk::Local {
@@ -580,20 +567,23 @@ impl<E: Engine, S: Store> Job<E, S> {
         let archived = self.record.archived;
         let running = Change::new().image(false).archived(false).execution();
         if let Err(error) = self.commit(running).await {
-            let outcome = state_failure(&error);
-            return (self.end(vm, outcome).await, After::NoVm);
+            return (self.end(vm, state_failure(&error)).await, After::NoVm);
         }
         #[cfg(target_os = "linux")]
         if let Some(paging) = &live_memory.paging {
             paging.prefetched(PREFETCH_LIMIT).await;
         }
         if let Err(error) = self.engine.resume(&vm).await {
+            // The VM ends before the image is reconsidered, so no second
+            // process ever runs from the same files.
             let ended = self.end(vm, Outcome::Done).await;
             if ended != Outcome::Done {
                 return (ended, After::NoVm);
             }
-            let outcome = self.after_failed_wake(true, archived, &error).await;
-            return (outcome, After::NoVm);
+            return (
+                self.after_failed_wake(&error, true, archived).await,
+                After::NoVm,
+            );
         }
         self.tell_guest_restored().await;
         (Outcome::Done, After::New(vm, live_memory))
@@ -759,6 +749,19 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
         if let Err(error) = self.commit(Change::new().image(false)).await {
             tracing::error!(id = %self.id, %error, "could not record a lost image");
+        }
+    }
+
+    /// Ends a VM process this step started and reports `outcome`, or a fatal
+    /// failure if the process would not end: without proof that it did,
+    /// nothing may replace it.
+    async fn end(&self, vm: E::Vm, outcome: Outcome) -> Outcome {
+        match self.engine.stop(vm).await {
+            Ok(()) => outcome,
+            Err(error) => {
+                tracing::error!(id = %self.id, %error, "a VM process would not end");
+                Outcome::Failed(Failure::Fatal)
+            }
         }
     }
 

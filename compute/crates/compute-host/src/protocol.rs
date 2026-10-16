@@ -303,6 +303,9 @@ pub enum Request {
     Sleep {
         /// Its id.
         id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
         /// The least depth to reach.
         level: LevelName,
     },
@@ -314,6 +317,9 @@ pub enum Request {
     Hold {
         /// Its id.
         id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
         /// The reason, unique within the sandbox.
         hold: String,
         /// Milliseconds until the hold lapses; omitted, it lasts until
@@ -328,6 +334,9 @@ pub enum Request {
     Release {
         /// Its id.
         id: Id,
+        /// Only while the sandbox is at this generation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
         /// The reason that ended.
         hold: String,
     },
@@ -447,6 +456,19 @@ pub struct HostStatus {
     /// without losing anything. Placement can count it as available.
     #[serde(default)]
     pub reclaimable_memory: u64,
+    /// Sandboxes whose record could not be read. Their ids are blocked and
+    /// their files and any VM left alone until an operator steps in.
+    #[serde(default)]
+    pub unreadable: Vec<UnreadableSandbox>,
+}
+
+/// A sandbox the host cannot manage because its record is unreadable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnreadableSandbox {
+    /// Its id, which the host refuses to reuse.
+    pub id: Id,
+    /// What was wrong with its record or directory.
+    pub problem: String,
 }
 
 /// A step's name on the wire.

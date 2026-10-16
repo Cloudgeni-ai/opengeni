@@ -93,8 +93,6 @@ struct World {
 /// What a fake VM process is, independent of any agent's handle to it.
 #[derive(Clone, Debug)]
 struct Process {
-    /// The sandbox's directory on the host.
-    sandbox_dir: PathBuf,
     vsock: PathBuf,
     memory: Arc<Mutex<String>>,
     paused: Arc<Mutex<bool>>,
@@ -125,6 +123,8 @@ struct Fake {
 #[derive(Debug)]
 struct FakeVm {
     name: String,
+    /// The sandbox's directory on the host.
+    sandbox_dir: PathBuf,
     process: Process,
 }
 
@@ -195,7 +195,6 @@ impl Fake {
             world.live.lock().unwrap().remove(&dead);
         });
         let process = Process {
-            sandbox_dir: spec.dir.parent().unwrap().to_owned(),
             vsock,
             memory,
             paused: Arc::default(),
@@ -209,7 +208,11 @@ impl Fake {
             .unwrap()
             .insert(name.clone(), process.clone());
         self.world.next_vm.fetch_add(1, Ordering::Relaxed);
-        FakeVm { name, process }
+        FakeVm {
+            name,
+            sandbox_dir: spec.dir.parent().unwrap().to_owned(),
+            process,
+        }
     }
 
     fn alive(vm: &FakeVm, op: &'static str) -> Result<(), EngineError> {
@@ -450,6 +453,7 @@ impl Engine for Fake {
             };
             let vm = FakeVm {
                 name: spec.name.clone(),
+                sandbox_dir: spec.dir.parent().unwrap().to_owned(),
                 process,
             };
             (vm, found)
@@ -593,7 +597,11 @@ impl Lab {
 
     async fn sleep_to(&self, id: Id, level: LevelName) -> Reply {
         self.client
-            .call(&Request::Sleep { id, level })
+            .call(&Request::Sleep {
+                id,
+                generation: None,
+                level,
+            })
             .await
             .unwrap()
     }
@@ -674,7 +682,7 @@ impl Lab {
         self.record(id)["image"].as_bool().unwrap()
     }
 
-    async fn view(&self, id: Id) -> SandboxStatus {
+    async fn current(&self, id: Id) -> SandboxStatus {
         self.status()
             .await
             .sandboxes
@@ -990,8 +998,8 @@ async fn a_refused_resume_that_cannot_vouch_again_trusts_no_copy() {
         .client
         .call(&Request::Touch {
             id: sandbox,
-            priority: PriorityName::Interactive,
             generation: None,
+            priority: PriorityName::Interactive,
         })
         .await
         .unwrap();
@@ -1016,7 +1024,7 @@ async fn a_refused_resume_that_cannot_vouch_again_trusts_no_copy() {
     assert_eq!(
         view.durability,
         DurabilityName::Volatile,
-        "no unvouched copy is trusted"
+        "no unmarked copy is trusted"
     );
     assert!(!lab.image(sandbox));
 
@@ -1090,6 +1098,7 @@ async fn a_named_hold_wakes_a_sandbox_and_keeps_it_awake_until_it_lapses() {
     lab.create(sandbox, PAUSE_SOON).await;
     let hold = |ttl_ms| Request::Hold {
         id: sandbox,
+        generation: None,
         hold: "turn".into(),
         ttl_ms,
         priority: PriorityName::Interactive,
@@ -1122,6 +1131,7 @@ async fn a_named_hold_wakes_a_sandbox_and_keeps_it_awake_until_it_lapses() {
     assert_eq!(Lab::sandbox(&status, sandbox).level, LevelName::Running);
     let release = Request::Release {
         id: sandbox,
+        generation: None,
         hold: "turn".into(),
     };
     assert_eq!(lab.client.call(&release).await.unwrap(), Reply::Done);
@@ -1129,6 +1139,7 @@ async fn a_named_hold_wakes_a_sandbox_and_keeps_it_awake_until_it_lapses() {
 
     let missing = Request::Release {
         id: id(98),
+        generation: None,
         hold: "turn".into(),
     };
     let reply = lab.client.call(&missing).await.unwrap();
@@ -1369,21 +1380,22 @@ async fn remove_waits_for_a_running_save_and_deletes_everything() {
 async fn a_restarted_agent_takes_back_running_vms_and_recovers_the_rest() {
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
     let (saved, running, paused) = (id(6), id(7), id(12));
+    let in_place = id(14);
     lab.create(saved, SAVE_QUICKLY).await;
     lab.create(running, NEVER).await;
-    lab.create(
-        paused,
-        SleepConfig {
-            pause_after_ms: Some(30),
-            ..NEVER
-        },
-    )
-    .await;
+    lab.create(paused, PAUSE_SOON).await;
+    lab.create(in_place, SAVE_IN_PLACE).await;
     lab.run(saved, &["set kept", "write saved-disk"]).await;
     lab.run(running, &["set alive", "write running-disk"]).await;
     lab.run(paused, &["set asleep"]).await;
+    lab.run(in_place, &["set copied"]).await;
     lab.wait_level(saved, LevelName::Saved).await;
     lab.wait_level(paused, LevelName::Paused).await;
+    lab.wait_until("the save in place", |status| {
+        let view = Lab::sandbox(status, in_place);
+        view.durability == DurabilityName::Local && view.step.is_none()
+    })
+    .await;
     let before = lab.status().await;
     let (root, world) = lab.stop().await;
 
@@ -1392,15 +1404,19 @@ async fn a_restarted_agent_takes_back_running_vms_and_recovers_the_rest() {
     assert!(world.live.lock().unwrap().contains(&vm_name(paused)));
     let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
     let after = lab.status().await;
-    assert_eq!(after.sandboxes.len(), 3);
+    assert_eq!(after.sandboxes.len(), 4);
     for (old, new) in before.sandboxes.iter().zip(&after.sandboxes) {
         assert_eq!(
-            (old.id, old.level, old.generation),
-            (new.id, new.level, new.generation),
+            (old.id, old.level, old.durability, old.generation),
+            (new.id, new.level, new.durability, new.generation),
             "a restart changed a sandbox"
         );
     }
-    assert_eq!(lab.world.adopted.load(Ordering::Relaxed), 2);
+    assert_eq!(lab.world.adopted.load(Ordering::Relaxed), 3);
+    assert!(
+        lab.image(in_place),
+        "a paused VM taken back keeps its saved copy"
+    );
     assert_eq!(
         lab.run(saved, &["get", "disk"]).await,
         ["kept", "saved-disk"]
@@ -1411,9 +1427,10 @@ async fn a_restarted_agent_takes_back_running_vms_and_recovers_the_rest() {
         "the running VM was taken back as it was"
     );
     assert_eq!(lab.run(paused, &["get"]).await, ["asleep"]);
+    assert_eq!(lab.run(in_place, &["get"]).await, ["copied"]);
     assert_eq!(
         lab.world.boots.load(Ordering::Relaxed),
-        3,
+        4,
         "nothing rebooted"
     );
     assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
@@ -1425,9 +1442,9 @@ async fn requests_for_a_replaced_execution_are_refused() {
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
     let sandbox = id(13);
     lab.create(sandbox, SAVE_QUICKLY).await;
-    assert_eq!(lab.view(sandbox).await.generation, 0, "not yet run");
+    assert_eq!(lab.current(sandbox).await.generation, 0, "not yet run");
     lab.run(sandbox, &["set first"]).await;
-    let first = lab.view(sandbox).await.generation;
+    let first = lab.current(sandbox).await.generation;
     assert_eq!(first, 1);
     let wake = |generation| Request::Wake {
         id: sandbox,
@@ -1443,7 +1460,7 @@ async fn requests_for_a_replaced_execution_are_refused() {
     // execution.
     lab.wait_level(sandbox, LevelName::Saved).await;
     assert_eq!(lab.run(sandbox, &["get"]).await, ["first"]);
-    let second = lab.view(sandbox).await.generation;
+    let second = lab.current(sandbox).await.generation;
     assert_eq!(second, first + 1);
     let reply = lab.client.call(&wake(first)).await.unwrap();
     assert!(
@@ -1521,6 +1538,106 @@ async fn a_removal_cut_short_finishes_on_the_next_start() {
     // Its id is free again.
     lab.create(doomed, NEVER).await;
     assert_eq!(lab.run(doomed, &["get"]).await, [""]);
+    lab.assert_clean();
+}
+
+/// A record the agent cannot read blocks its id: the sandbox is reported,
+/// its VM and files are left alone, the id cannot be created again, and
+/// no newcomer gets its ordinal (its VM's user and host link).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unreadable_record_blocks_its_id() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let (broken, other) = (id(40), id(41));
+    lab.create(broken, NEVER).await;
+    assert_eq!(lab.run(broken, &["set alive"]).await, ["ok"]);
+    let ordinal = lab.record(broken)["ordinal"].clone();
+    let (root, world) = lab.stop().await;
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    let mut record = lab.record(broken);
+    record["generation"] = "unreadable".into();
+    let path = lab.sandbox_dir(broken).join("sandbox.json");
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let (root, world) = lab.stop().await;
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+
+    let status = lab.status().await;
+    assert!(status.sandboxes.is_empty(), "{status:?}");
+    assert_eq!(status.unreadable.len(), 1);
+    assert_eq!(status.unreadable[0].id, broken);
+    assert!(
+        lab.world.live.lock().unwrap().contains(&vm_name(broken)),
+        "its VM is left running"
+    );
+    for request in [
+        Request::Create {
+            id: broken,
+            config: SandboxConfig {
+                vcpus: 1,
+                memory_mib: 256,
+                sleep: NEVER,
+            },
+        },
+        Request::Wake {
+            id: broken,
+            generation: None,
+            priority: PriorityName::Interactive,
+        },
+        Request::Remove {
+            id: broken,
+            generation: None,
+        },
+    ] {
+        let reply = lab.client.call(&request).await.unwrap();
+        assert!(
+            matches!(
+                reply,
+                Reply::Error {
+                    code: ErrorCode::Broken,
+                    ..
+                }
+            ),
+            "{request:?}: {reply:?}"
+        );
+    }
+    assert!(path.exists(), "its files are left alone");
+    lab.create(other, NEVER).await;
+    assert_ne!(lab.record(other)["ordinal"], ordinal);
+    lab.assert_clean();
+}
+
+/// Creating a sandbox whose directory is already there is refused, and the
+/// directory is left as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_refuses_an_existing_directory() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(42);
+    let dir = lab.sandbox_dir(sandbox);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("kept"), "kept").unwrap();
+    let reply = lab
+        .client
+        .call(&Request::Create {
+            id: sandbox,
+            config: SandboxConfig {
+                vcpus: 1,
+                memory_mib: 256,
+                sleep: NEVER,
+            },
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            reply,
+            Reply::Error {
+                code: ErrorCode::Exists,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    assert_eq!(std::fs::read_to_string(dir.join("kept")).unwrap(), "kept");
+    assert_eq!(lab.status().await.sandboxes.len(), 0, "nothing was created");
     lab.assert_clean();
 }
 

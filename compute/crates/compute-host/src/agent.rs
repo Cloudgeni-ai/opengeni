@@ -12,7 +12,7 @@
 //! still running, so restarting, upgrading or killing the agent costs the
 //! guests nothing.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,6 +24,7 @@ use compute_core::{
     Priority, SandboxId, SleepPolicy, State, Step,
 };
 use compute_engine::{CancellationToken, Engine, Found, VmSpec, vsock};
+use futures::StreamExt;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -32,7 +33,9 @@ use tokio::time::{Instant, sleep, sleep_until};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root, copy_sparse, link_kernel, vm_spec};
 use crate::net::{NetworkConfig, Networks};
-use crate::protocol::{HostStatus, Id, SandboxConfig, SandboxStatus, StepStats, step_name};
+use crate::protocol::{
+    HostStatus, Id, SandboxConfig, SandboxStatus, StepStats, UnreadableSandbox, step_name,
+};
 use crate::state::{Change, Disk, Fence, Record, Records, StateError, Stray, check_generation};
 use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::Store;
@@ -188,12 +191,14 @@ enum Command {
     },
     Sleep {
         id: Id,
+        generation: Option<u64>,
         level: Level,
         reply: Reply<()>,
     },
     /// A named hold from the API, with an optional expiry.
     Hold {
         id: Id,
+        generation: Option<u64>,
         hold: HoldId,
         ttl: Option<Duration>,
         priority: Priority,
@@ -202,6 +207,7 @@ enum Command {
     /// Ends a named hold from the API.
     Unhold {
         id: Id,
+        generation: Option<u64>,
         hold: HoldId,
         reply: Reply<()>,
     },
@@ -409,19 +415,32 @@ impl Handle {
 
     /// Puts a sandbox at least as deep as `level` now, whatever its sleep
     /// settings say. Returns once the request is accepted, not once the
-    /// sandbox is there; a later wake cancels it.
-    pub async fn sleep(&self, id: Id, level: Level) -> Result<(), HostError> {
-        self.ask(|reply| Command::Sleep { id, level, reply })
-            .await?
+    /// sandbox is there; a later wake cancels it. With a `generation`, only
+    /// while the sandbox is still at it.
+    pub async fn sleep(
+        &self,
+        id: Id,
+        generation: Option<u64>,
+        level: Level,
+    ) -> Result<(), HostError> {
+        self.ask(|reply| Command::Sleep {
+            id,
+            generation,
+            level,
+            reply,
+        })
+        .await?
     }
 
     /// Keeps a sandbox awake for a named reason, such as an agent turn in
     /// progress, waking it if it sleeps. Holding again under the same name
     /// refreshes the hold; with a `ttl` it lapses on its own unless
     /// refreshed, so a caller that dies cannot keep a sandbox awake forever.
+    /// With a `generation`, only while the sandbox is still at it.
     pub async fn hold(
         &self,
         id: Id,
+        generation: Option<u64>,
         name: &str,
         ttl: Option<Duration>,
         priority: Priority,
@@ -429,6 +448,7 @@ impl Handle {
         let hold = named_hold(name);
         self.ask(|reply| Command::Hold {
             id,
+            generation,
             hold,
             ttl,
             priority,
@@ -437,11 +457,22 @@ impl Handle {
         .await?
     }
 
-    /// Ends a named hold. Ending one that does not exist does nothing.
-    pub async fn release(&self, id: Id, name: &str) -> Result<(), HostError> {
+    /// Ends a named hold. Ending one that does not exist does nothing. With
+    /// a `generation`, only while the sandbox is still at it.
+    pub async fn release(
+        &self,
+        id: Id,
+        generation: Option<u64>,
+        name: &str,
+    ) -> Result<(), HostError> {
         let hold = named_hold(name);
-        self.ask(|reply| Command::Unhold { id, hold, reply })
-            .await?
+        self.ask(|reply| Command::Unhold {
+            id,
+            generation,
+            hold,
+            reply,
+        })
+        .await?
     }
 }
 
@@ -509,6 +540,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     slots: HashMap<SandboxId, Slot<E::Vm>>,
     preparing: HashSet<SandboxId>,
     ordinals: BTreeSet<u32>,
+    /// Sandboxes on disk the host cannot manage, with why: their ids are
+    /// refused and their files and VMs left alone.
+    unreadable: BTreeMap<SandboxId, String>,
     destroying: HashMap<SandboxId, Vec<Reply<()>>>,
     commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedReceiver<Event<E::Vm>>,
@@ -608,6 +642,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             slots: HashMap::new(),
             preparing: HashSet::new(),
             ordinals: BTreeSet::new(),
+            unreadable: BTreeMap::new(),
             destroying: HashMap::new(),
             commands,
             events,
@@ -643,15 +678,26 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     }
                     if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
                         tracing::warn!(id = %stray.id, %error, "could not tidy an unrecorded sandbox");
+                        self.unreadable.insert(
+                            stray.id.0,
+                            format!("unrecorded directory left behind: {error}"),
+                        );
                     }
                 }
                 Some(problem) => {
-                    tracing::error!(id = %stray.id, %problem, "unreadable record; leaving the sandbox on disk");
+                    // Its VM may still run as the user its ordinal names,
+                    // behind the host link its ordinal names: no other
+                    // sandbox may get that ordinal.
+                    let ordinal = self.unreadable_ordinal(stray.id).await;
+                    if let Some(ordinal) = ordinal {
+                        self.ordinals.insert(ordinal);
+                    }
+                    tracing::error!(id = %stray.id, %problem, ?ordinal, "unreadable record; blocking the id and leaving the sandbox alone");
+                    self.unreadable.insert(stray.id.0, problem.to_string());
                 }
             }
         }
-        self.ensure_networks().await;
-        let mut adopted = 0_usize;
+        let mut recovering = Vec::new();
         for record in self.records.all() {
             let id = record.id;
             if !self.ordinals.insert(record.ordinal) {
@@ -662,7 +708,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.remove_recorded(&record, None, Vec::new());
                 continue;
             }
-            match self.recover_one(record).await {
+            recovering.push(record);
+        }
+        // Finding VMs and checking networks touch only their own sandbox,
+        // so they run for every sandbox at once; the results are taken in
+        // one by one.
+        let (mut found, ()) = tokio::join!(self.find_vms(&recovering), self.ensure_networks());
+        let mut adopted = 0_usize;
+        for record in recovering {
+            let id = record.id;
+            let vm = found
+                .remove(&id.0)
+                .unwrap_or_else(|| Err(HostError::Io("no result from looking for the VM".into())));
+            match self.recover_one(record, vm).await {
                 Ok(true) => adopted += 1,
                 Ok(false) => {}
                 Err(error) => {
@@ -671,6 +729,40 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         }
         tracing::info!(sandboxes = self.slots.len(), adopted, "recovered");
+    }
+
+    /// Looks for every recorded sandbox's VM, taking back those still
+    /// running and clearing what dead ones left. Sandboxes whose disk is
+    /// remote have no VM to find.
+    async fn find_vms(
+        &self,
+        records: &[Record],
+    ) -> HashMap<SandboxId, Result<Option<(E::Vm, Found)>, HostError>> {
+        /// Enough to hide each lookup's round trip to its VMM without
+        /// opening thousands of descriptors at once.
+        const CONCURRENT: usize = 64;
+        futures::stream::iter(records)
+            .map(|record| async move {
+                let paths = Paths::new(&self.root, record.id);
+                let spec = vm_spec(
+                    record.id,
+                    record.ordinal,
+                    &record.config,
+                    &paths,
+                    &self.images,
+                );
+                let found = match record.disk {
+                    Disk::Local => self.engine.adopt(&spec).await,
+                    Disk::Remote => self.engine.clean_up(&spec).await.map(|()| None),
+                };
+                (
+                    record.id.0,
+                    found.map_err(|error| HostError::Io(error.to_string())),
+                )
+            })
+            .buffer_unordered(CONCURRENT)
+            .collect()
+            .await
     }
 
     /// Makes sure every recorded sandbox's network exists with the current
@@ -715,19 +807,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Brings one recorded sandbox back under management. Returns whether
     /// a VM was still running it.
-    async fn recover_one(&mut self, record: Record) -> Result<bool, HostError> {
+    async fn recover_one(
+        &mut self,
+        record: Record,
+        found: Result<Option<(E::Vm, Found)>, HostError>,
+    ) -> Result<bool, HostError> {
         let id = record.id;
         let policy = self
             .sleep_policy(&record.config)
             .map_err(HostError::Invalid)?;
         let paths = Paths::new(&self.root, id);
         let spec = vm_spec(id, record.ordinal, &record.config, &paths, &self.images);
-        let found = match record.disk {
-            Disk::Local => self.engine.adopt(&spec).await,
-            Disk::Remote => self.engine.clean_up(&spec).await.map(|()| None),
-        }
-        .map_err(|error| HostError::Io(error.to_string()))?;
-        let found = match found {
+        let found = match found? {
             Some((vm, _)) if crate::step::paged(&paths) => {
                 // The previous agent's pager served this VM's memory and
                 // went with it: the guest would stall on its next page
@@ -743,23 +834,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             found => found,
         };
         let (state, vm) = if let Some((vm, found)) = found {
-            let level = match found {
-                Found::Running => Level::Running,
-                Found::Paused => Level::Paused,
-            };
-            // A paused VM saved in place still matches its image. A running
-            // one may have run since any image was taken.
-            let saved = level == Level::Paused && record.image;
-            if !saved && (record.image || record.archived) {
-                let stale = Change::new().image(false).archived(false);
-                self.records.commit(id, record.fence(), stale).await?;
-            }
-            let durability = match (saved, record.archived) {
-                (false, _) => Durability::Volatile,
-                (true, false) => Durability::Local,
-                (true, true) => Durability::Remote,
-            };
-            (State::new(level, durability, saved), Some(vm))
+            (self.adopted_state(&record, found).await?, Some(vm))
         } else {
             // A kernel upgrade on the host reaches the sandbox on its next
             // boot.
@@ -786,6 +861,56 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             policy,
         });
         Ok(adopted)
+    }
+
+    /// Where a sandbox whose VM was found still running stands. A paused
+    /// VM keeps the saved copy its record vouches for: every step that lets
+    /// a guest run withdraws the record's word first. A running VM has
+    /// moved past any copy, and a paused one without a memory image has no
+    /// copy of its current state.
+    async fn adopted_state(&self, record: &Record, found: Found) -> Result<State, HostError> {
+        // The image itself is checked when a step relies on it, and set
+        // aside if it proves bad.
+        let keeps_copy = found == Found::Paused && record.image;
+        if !keeps_copy && (record.image || record.archived) {
+            let stale = Change::new().image(false).archived(false);
+            self.records
+                .commit(record.id, record.fence(), stale)
+                .await?;
+        }
+        Ok(match found {
+            Found::Running => State::RUNNING,
+            Found::Paused if keeps_copy => {
+                let durability = if record.archived {
+                    Durability::Remote
+                } else {
+                    Durability::Local
+                };
+                State::new(Level::Paused, durability, true)
+            }
+            Found::Paused => State::new(Level::Paused, Durability::Volatile, false),
+        })
+    }
+
+    /// The ordinal a sandbox with an unreadable record was given, from
+    /// what is left: the record's `ordinal` field if the file still parses
+    /// as JSON, else the owner of its disk, which every launch hands to
+    /// the VM's user. `None` if it never launched, when no VM or user can
+    /// clash with a newcomer's.
+    async fn unreadable_ordinal(&self, id: Id) -> Option<u32> {
+        use std::os::unix::fs::MetadataExt;
+        let paths = Paths::new(&self.root, id);
+        let from_record = tokio::fs::read(&paths.record)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|record| record.get("ordinal")?.as_u64())
+            .and_then(|ordinal| u32::try_from(ordinal).ok());
+        if from_record.is_some() {
+            return from_record;
+        }
+        let owner = tokio::fs::metadata(&paths.disk).await.ok()?.uid();
+        owner.checked_sub(self.images.first_uid)
     }
 
     /// Where a sandbox without a VM stands, from its record, checked
@@ -916,22 +1041,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 id,
                 generation,
                 reply,
-            } => {
-                if let Err(error) = self.check(id, generation) {
-                    let _ = reply.send(Err(error));
-                    return;
-                }
-                if let Some(slot) = self.slots.get_mut(&id.0) {
-                    slot.removers.push(reply);
-                    self.input(Input::Remove { sandbox: id.0 });
-                } else if let Some(removers) = self.destroying.get_mut(&id.0) {
-                    removers.push(reply);
-                } else if self.preparing.contains(&id.0) {
-                    let _ = reply.send(Err(HostError::Busy(id)));
-                } else {
-                    let _ = reply.send(Err(HostError::NotFound(id)));
-                }
-            }
+            } => self.remove(id, generation, reply),
             Command::Touch {
                 id,
                 generation,
@@ -944,28 +1054,39 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     });
                 }
             }
-            Command::Sleep { id, level, reply } => {
-                let _ = reply.send(self.request_sleep(id, level));
+            Command::Sleep {
+                id,
+                generation,
+                level,
+                reply,
+            } => {
+                let result = self
+                    .check(id, generation)
+                    .and_then(|()| self.request_sleep(id, level));
+                let _ = reply.send(result);
             }
             Command::Hold {
                 id,
+                generation,
                 hold,
                 ttl,
                 priority,
                 reply,
             } => {
-                let _ = reply.send(self.hold(id, hold, ttl, priority));
+                let result = self
+                    .check(id, generation)
+                    .and_then(|()| self.hold(id, hold, ttl, priority));
+                let _ = reply.send(result);
             }
-            Command::Unhold { id, hold, reply } => {
-                let result = if self.slots.contains_key(&id.0) {
-                    self.input(Input::Release {
-                        sandbox: id.0,
-                        hold,
-                    });
-                    Ok(())
-                } else {
-                    Err(HostError::NotFound(id))
-                };
+            Command::Unhold {
+                id,
+                generation,
+                hold,
+                reply,
+            } => {
+                let result = self
+                    .check(id, generation)
+                    .and_then(|()| self.unhold(id, hold));
                 let _ = reply.send(result);
             }
             Command::Acquire {
@@ -974,24 +1095,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 hold,
                 priority,
                 reply,
-            } => {
-                if let Err(error) = self.check(id, generation) {
-                    let _ = reply.send(Err(error));
-                    return;
-                }
-                let Some(slot) = self.slots.get_mut(&id.0).filter(|slot| !slot.destroy) else {
-                    let _ = reply.send(Err(HostError::NotFound(id)));
-                    return;
-                };
-                slot.waiters.push(reply);
-                self.input(Input::Hold {
-                    sandbox: id.0,
-                    hold,
-                    until: None,
-                    priority,
-                });
-                self.settle(id);
-            }
+            } => self.acquire(id, generation, hold, priority, reply),
             Command::Release { id, hold } => {
                 if self.slots.contains_key(&id.0) {
                     self.input(Input::Release {
@@ -1006,9 +1110,66 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
+    fn remove(&mut self, id: Id, generation: Option<u64>, reply: Reply<()>) {
+        if let Err(error) = self.check(id, generation) {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.removers.push(reply);
+            self.input(Input::Remove { sandbox: id.0 });
+        } else if let Some(removers) = self.destroying.get_mut(&id.0) {
+            removers.push(reply);
+        } else if self.preparing.contains(&id.0) {
+            let _ = reply.send(Err(HostError::Busy(id)));
+        } else {
+            let _ = reply.send(Err(HostError::NotFound(id)));
+        }
+    }
+
+    fn unhold(&mut self, id: Id, hold: HoldId) -> Result<(), HostError> {
+        if !self.slots.contains_key(&id.0) {
+            return Err(HostError::NotFound(id));
+        }
+        self.input(Input::Release {
+            sandbox: id.0,
+            hold,
+        });
+        Ok(())
+    }
+
+    fn acquire(
+        &mut self,
+        id: Id,
+        generation: Option<u64>,
+        hold: HoldId,
+        priority: Priority,
+        reply: Reply<PathBuf>,
+    ) {
+        if let Err(error) = self.check(id, generation) {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        let Some(slot) = self.slots.get_mut(&id.0).filter(|slot| !slot.destroy) else {
+            let _ = reply.send(Err(HostError::NotFound(id)));
+            return;
+        };
+        slot.waiters.push(reply);
+        self.input(Input::Hold {
+            sandbox: id.0,
+            hold,
+            until: None,
+            priority,
+        });
+        self.settle(id);
+    }
+
     /// Refuses a request that names an execution the sandbox no longer
     /// runs.
     fn check(&self, id: Id, generation: Option<u64>) -> Result<(), HostError> {
+        if self.unreadable.contains_key(&id.0) {
+            return Err(HostError::Broken(id));
+        }
         match self.records.get(id) {
             Some(record) => Ok(check_generation(&record, generation)?),
             None => Ok(()),
@@ -1057,6 +1218,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
+        if self.unreadable.contains_key(&id.0) {
+            let _ = reply.send(Err(HostError::Broken(id)));
+            return;
+        }
         if self.slots.contains_key(&id.0)
             || self.preparing.contains(&id.0)
             || self.destroying.contains_key(&id.0)
@@ -1099,6 +1264,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         tokio::spawn(async move {
             let networks = net.clone();
             let prepared = tokio::task::spawn_blocking(move || {
+                // The directory must be new: one already there belongs to a
+                // sandbox this agent does not know, and is left alone.
+                std::fs::create_dir(&paths.dir)?;
                 std::fs::create_dir_all(&paths.jail)?;
                 link_kernel(&kernel, &paths)?;
                 copy_sparse(&base, &paths.disk)?;
@@ -1113,6 +1281,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // unfinished creation and is cleaned up on recovery.
             let result = match prepared {
                 Ok(()) => records.insert(record).await.map_err(HostError::from),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    tracing::error!(%id, "a directory for a new sandbox already exists; refusing it");
+                    let _ = events.send(Event::Prepared {
+                        id,
+                        ordinal,
+                        result: Err(HostError::Exists(id)),
+                        reply,
+                    });
+                    return;
+                }
                 Err(error) => Err(HostError::Io(error.to_string())),
             };
             if result.is_err() {
@@ -1280,6 +1458,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     u64::try_from(running.started.elapsed().as_micros()).unwrap_or(u64::MAX);
                 stats.total_us = stats.total_us.saturating_add(micros);
                 stats.max_us = stats.max_us.max(micros);
+                tracing::debug!(%id, step = ?running.step, micros, ?outcome, "step finished");
                 match outcome {
                     Outcome::Done => stats.done += 1,
                     Outcome::Cancelled => stats.cancelled += 1,
@@ -1588,6 +1767,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             steps,
             available_memory: self.available_memory,
             reclaimable_memory: self.core.reclaimable_memory(),
+            unreadable: self
+                .unreadable
+                .iter()
+                .map(|(id, problem)| UnreadableSandbox {
+                    id: Id(*id),
+                    problem: problem.clone(),
+                })
+                .collect(),
         }
     }
 }
