@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use compute_host::protocol::Id;
-use compute_host::{CHUNK_BYTES, Chunked, FetchInto, FetchedMemory, SavedFiles, SavedImage, Store};
+use compute_host::{
+    CHUNK_BYTES, Chunked, FetchInto, FetchedMemory, JailedFile, SavedFiles, SavedImage, Store,
+};
 use compute_storage::manifest::{DiskManifest, ExtentSource};
 use compute_storage::store::ChunkStore;
 use object_store::StaticCredentialProvider;
@@ -68,7 +70,7 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
     let (store, chunks) = open(&url);
     let local = tempfile::tempdir().unwrap();
     let saved = SavedFiles {
-        disk: local.path().join("disk"),
+        disk: JailedFile::new(local.path().join("disk")),
         memory: Some(SavedImage {
             state: local.path().join("state"),
             memory: local.path().join("memory"),
@@ -80,7 +82,7 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
     let gib = 1 << 30;
     let disk_at: Vec<u64> = (0..64).map(|i| i * 4 * CHUNK_BYTES).collect();
     let memory_at: Vec<u64> = (0..256).map(|i| i * 3 * CHUNK_BYTES).collect();
-    sparse(&saved.disk, 4 * gib, &disk_at, 1);
+    sparse(saved.disk.path(), 4 * gib, &disk_at, 1);
     sparse(&memory.state, 40_000, &[0], 2);
     sparse(&memory.memory, 2 * gib, &memory_at, 3);
 
@@ -132,9 +134,9 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
     }
     let paged_in = started.elapsed();
     for (original, copy) in [
-        (&saved.disk, &into.disk),
-        (&memory.state, &state),
-        (&memory.memory, &paged),
+        (saved.disk.path(), into.disk.as_path()),
+        (memory.state.as_path(), state.as_path()),
+        (memory.memory.as_path(), paged.as_path()),
     ] {
         // Not assert_eq!: a mismatch would print gigabytes.
         let same = fs::read(original).unwrap() == fs::read(copy).unwrap();
