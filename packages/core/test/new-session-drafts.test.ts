@@ -107,6 +107,42 @@ function draftCreateDeps(): ApiRouteDeps {
 }
 
 describe("core new-session draft hydration", () => {
+  test("a saved model that left the catalog follows the default; a listed one is kept", async () => {
+    if (!available) return;
+    const { grant, subjectId } = await fixture();
+    const workspaceId = grant.workspaceId;
+    const save = (model: string, expectedRevision: number) =>
+      withWorkspaceSubjectRls(db, workspaceId, subjectId, (scoped) =>
+        saveNewSessionDraftInTransaction(scoped, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId,
+          expectedRevision,
+          text: "",
+          resources: [],
+          tools: [],
+          toolsProvided: false,
+          model,
+          modelProvided: true,
+          reasoningEffort: "low",
+          latencyMode: "standard",
+          selectedProjectChannelId: null,
+          options: {},
+        }),
+      );
+    await save("removed-provider/retired-free-model", 0);
+    const removed = await getActorNewSessionDraft({ db, settings }, grant, workspaceId);
+    expect(removed.modelProvided).toBe(false);
+    expect(removed.model).not.toBe("removed-provider/retired-free-model");
+    expect(removed.model).toBe(settings.openaiModel);
+
+    await save(settings.openaiModel, removed.revision);
+    const listed = await getActorNewSessionDraft({ db, settings }, grant, workspaceId);
+    expect(listed.modelProvided).toBe(true);
+    expect(listed.model).toBe(settings.openaiModel);
+    expect(listed.reasoningEffort).toBe("low");
+  }, 180_000);
+
   test.each(["organization", "user"] as const)(
     "preserves a visible %s rig selection from another same-organization workspace",
     async (scope) => {

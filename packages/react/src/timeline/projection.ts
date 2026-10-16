@@ -3924,7 +3924,10 @@ function stringList(value: unknown): string[] {
  * ("**Checking the workspace**", then "**Inspecting guidance**"). Joined
  * as-is the parts run together and their bold markers collide ("****"), so a
  * new part that opens bold right after one that closed bold starts a new
- * paragraph. Ordinary token deltas are joined unchanged.
+ * paragraph. Ordinary token deltas are joined unchanged. The worker's
+ * write-time merge and the read-side coalescer apply the same rule
+ * (`reasoningDeltaSeparator` in @opengeni/events), so stored, coalesced and
+ * live fragments render identically.
  */
 function reasoningDeltaJoiner(previous: string, next: string): string {
   return previous.endsWith("**") && next.startsWith("**") ? "\n\n" : "";

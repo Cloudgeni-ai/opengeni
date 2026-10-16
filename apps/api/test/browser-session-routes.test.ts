@@ -1118,11 +1118,17 @@ describe("BrowserSession route discipline", () => {
     );
     expect(route).toContain("texts: browserActionSecretTexts(request.action)");
     expect(route).toContain('surface: "browser"');
-    // Passkeys sync before (taking over the principal's lease) and after the
-    // action, never instead of it.
-    expect(route.match(/await passkeySync\((?:true|false)\)/g)?.length).toBe(2);
-    expect(route.indexOf("await passkeySync(true)")).toBeLessThan(
+    // Passkeys sync before (taking over the principal's lease, settled before
+    // dispatch) and after the action, never instead of it.
+    expect(route.match(/passkeySync\((?:true|false)\)/g)?.length).toBe(2);
+    expect(route.indexOf("const passkeyTakeover = passkeySync(true)")).toBeLessThan(
+      route.indexOf("await passkeyTakeover"),
+    );
+    expect(route.indexOf("await passkeyTakeover")).toBeLessThan(
       route.indexOf("sessionClient.action("),
+    );
+    expect(route.indexOf("sessionClient.action(")).toBeLessThan(
+      route.indexOf("void passkeySync(false)"),
     );
     // The response is the controller receipt; the side map is never echoed.
     expect(route).not.toContain("secretValues: request");
@@ -1439,6 +1445,9 @@ describe("BrowserSession route discipline", () => {
     expect(continuation).toContain("binding.placementInstanceId");
     expect(continuation).toContain("controllerGeneration: binding.controllerGeneration");
     expect(continuation).toContain("recoverExistingWorkingDirectory: true");
+    // Its operation is recorded only after adoption, so the heartbeat holds the
+    // expired resume itself rather than a not-yet-recorded operation.
+    expect(continuation).toContain("continuesExpiredBrowserResume: true");
     expect(continuation).not.toContain("restore:");
     expect(continuation).not.toContain("endSession");
     expect(continuation).not.toContain("removeState");

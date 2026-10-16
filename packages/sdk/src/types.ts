@@ -3445,6 +3445,24 @@ export type ScheduledTask = {
   policyDrift?: ScheduledTaskPolicyDrift | null | undefined;
   /** Read-only: which accounts a run would use if it started now, for a viewer who can act on it. */
   accountPlan?: ScheduledTaskAccountPlan | undefined;
+  /** Read-only: why it paused itself, or why its owner was told its runs keep failing. */
+  blocker?: ScheduledTaskBlocker | undefined;
+};
+
+/**
+ * What blocks a schedule. `paused`: no later run could start until a person
+ * acts, so it paused itself; resume it once the cause is fixed. `notified`:
+ * its scheduled runs kept failing or being skipped and its owner was told
+ * once; it keeps running. `message` says what would unblock it.
+ */
+export type ScheduledTaskBlocker = {
+  state: "paused" | "notified";
+  /** Stable machine reason, such as `scheduled_session_paused`; tolerate new ones. */
+  reason: string;
+  message: string;
+  /** The run that showed the blocker (the first of a failing streak). */
+  runId: string;
+  since: string;
 };
 
 /**

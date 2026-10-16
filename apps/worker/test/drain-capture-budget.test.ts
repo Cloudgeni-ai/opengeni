@@ -28,6 +28,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
+import * as workspaceArchives from "@opengeni/runtime/sandbox";
 import type { ObjectStorage } from "@opengeni/storage";
 import {
   acquireSharedTestDatabase,
@@ -466,7 +467,7 @@ function fileObjectStorage(directory: string): ObjectStorage {
  * one physical capture, which spends `captureMs` before reading (a slow disk);
  * like the real attachment, it re-proves the exact claim and refuses teardown
  * before durable publication. */
-function slowDockerHost(captureMs: number) {
+function slowDockerHost(captureMs: number, beforeSpool: (capture: number) => Promise<void>) {
   const stats = { started: 0, reading: 0, peakReading: 0, deletes: [] as boolean[] };
   const dockerClient = {
     backendId: "docker",
@@ -488,6 +489,7 @@ function slowDockerHost(captureMs: number) {
           if (started) return;
           started = true;
           stats.started += 1;
+          const capture = stats.started;
           stats.reading += 1;
           stats.peakReading = Math.max(stats.peakReading, stats.reading);
           try {
@@ -495,6 +497,7 @@ function slowDockerHost(captureMs: number) {
           } finally {
             stats.reading -= 1;
           }
+          await beforeSpool(capture);
         },
         persistWorkspace: async () => {
           throw new Error("whole-archive capture is not the host-spool drain path");
@@ -568,6 +571,42 @@ async function runSlowDockerDrain(workerCount: 1 | 2, label: string) {
   const context = spyOn(Context, "current").mockImplementation(
     () => ({ info: { attempt: currentAttempt }, heartbeat() {} }) as never,
   );
+  const secondCaptureReady = deferred();
+  const releaseSecondCapture = deferred();
+  const captureSettlements: Promise<void>[] = [];
+  const captureErrors: unknown[] = [];
+  const realCapture = workspaceArchives.captureWorkspaceArchiveForStorage;
+  // Track the actual archive lifecycle, including the gap after the fake slow
+  // read and before a spool exists. Neither reading===0 nor an empty directory
+  // proves a detached capture has settled.
+  const captureSpy = spyOn(
+    workspaceArchives,
+    "captureWorkspaceArchiveForStorage",
+  ).mockImplementation(async (...args) => {
+    const settled = deferred();
+    captureSettlements.push(settled.promise);
+    try {
+      const archive = await realCapture(...args);
+      if (archive.kind !== "host_spool") throw new Error("expected real host-spool capture");
+      const dispose = archive.spool.dispose.bind(archive.spool);
+      archive.spool.dispose = async () => {
+        try {
+          await dispose();
+        } catch (error) {
+          captureErrors.push(error);
+          throw error;
+        } finally {
+          settled.resolve();
+        }
+      };
+      return archive;
+    } catch (error) {
+      captureErrors.push(error);
+      settled.resolve();
+      throw error;
+    }
+  });
+  let sampler: ReturnType<typeof setInterval> | undefined;
   try {
     const settings = testSettings({
       sandboxBackend: "docker",
@@ -576,7 +615,12 @@ async function runSlowDockerDrain(workerCount: 1 | 2, label: string) {
       sandboxSnapshotTimeoutMs: DOCKER_BUDGET_MS,
     });
     const storage = fileObjectStorage(join(runDir, "objects"));
-    const docker = slowDockerHost(DOCKER_CAPTURE_MS);
+    const docker = slowDockerHost(DOCKER_CAPTURE_MS, async (capture) => {
+      if (workerCount === 2 && capture === 2) {
+        secondCaptureReady.resolve();
+        await releaseSecondCapture.promise;
+      }
+    });
     const dockerServices = async () =>
       ({
         settings,
@@ -620,7 +664,7 @@ async function runSlowDockerDrain(workerCount: 1 | 2, label: string) {
       operationId: crypto.randomUUID(),
     };
     let peakSpools = 0;
-    const sampler = setInterval(() => {
+    sampler = setInterval(() => {
       peakSpools = Math.max(peakSpools, spoolDirs(spoolBase));
     }, 10);
     const outcomes: string[] = [];
@@ -635,12 +679,24 @@ async function runSlowDockerDrain(workerCount: 1 | 2, label: string) {
         await sleep(DOCKER_RETRY_MS);
       }
     }
-    // Let any capture another worker started finish and remove its spool.
-    const settleBy = Date.now() + 4 * DOCKER_CAPTURE_MS;
-    while (Date.now() < settleBy && (docker.stats.reading > 0 || spoolDirs(spoolBase) > 0)) {
-      await sleep(20);
+    if (workerCount === 2) {
+      // Deterministically expose the old false-idle window: the first archive
+      // is disposed and the second read is done, but its spool has not started.
+      await within(secondCaptureReady.promise, 4 * DOCKER_CAPTURE_MS, "second capture ready");
+      await within(captureSettlements[0]!, 4 * DOCKER_CAPTURE_MS, "first archive disposed");
+      expect(docker.stats.reading).toBe(0);
+      expect(spoolDirs(spoolBase)).toBe(0);
+      expect(captureSettlements).toHaveLength(2);
     }
-    await sleep(50);
+    let settled = false;
+    const allSettled = Promise.all(captureSettlements).then(() => {
+      settled = true;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (workerCount === 2) expect(settled).toBe(false);
+    releaseSecondCapture.resolve();
+    await within(allSettled, 4 * DOCKER_CAPTURE_MS, "capture and spool disposal");
+    expect(captureErrors).toEqual([]);
     clearInterval(sampler);
     return {
       result,
@@ -651,9 +707,18 @@ async function runSlowDockerDrain(workerCount: 1 | 2, label: string) {
       lease: await readLease(db, ids.workspaceId, ids.groupId),
     };
   } finally {
-    context.mockRestore();
-    if (previousTemp === undefined) delete process.env.TMPDIR;
-    else process.env.TMPDIR = previousTemp;
+    releaseSecondCapture.resolve();
+    clearInterval(sampler);
+    // Never remove the workspace underneath a detached capture, even if an
+    // assertion above fails. A genuine stuck capture fails this bounded wait.
+    try {
+      await within(Promise.all(captureSettlements), 4 * DOCKER_CAPTURE_MS, "fixture cleanup");
+    } finally {
+      captureSpy.mockRestore();
+      context.mockRestore();
+      if (previousTemp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTemp;
+    }
     rmSync(runDir, { recursive: true, force: true });
   }
 }

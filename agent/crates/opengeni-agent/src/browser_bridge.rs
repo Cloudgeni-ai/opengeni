@@ -2456,7 +2456,7 @@ mod tests {
         );
         assert!(end.ended_at_unix_ms > 0);
         relay.join().expect("relay thread").expect("relay");
-        assert!(server.inventory().snapshot().devices.is_empty());
+        assert_eq!(server.inventory().snapshot().devices.len(), 0);
         server.shutdown().await.expect("shutdown");
     }
 
@@ -2513,7 +2513,7 @@ mod tests {
             v1::AttachedBrowserConnectionEndReason::AgentRejected as i32
         );
         assert!(end.detail.contains("unavailable reason"), "{}", end.detail);
-        assert!(server.inventory().snapshot().devices.is_empty());
+        assert_eq!(server.inventory().snapshot().devices.len(), 0);
         server.shutdown().await.expect("shutdown");
     }
 

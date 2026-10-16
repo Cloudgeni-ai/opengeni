@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,7 +24,11 @@ afterEach(() => {
   for (const path of folders.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-function computer(dataDir: string, onChange: () => void = () => undefined): ThisComputer {
+function computer(
+  dataDir: string,
+  onChange: () => void = () => undefined,
+  onScreenControlHandedOver?: () => void,
+): ThisComputer {
   const unused = () => {
     throw new Error("not used");
   };
@@ -30,8 +42,10 @@ function computer(dataDir: string, onChange: () => void = () => undefined): This
     dataDir,
     logDir: dataDir,
     mintEnrollToken: unused,
+    allowAgents: unused,
     openSystemSettings: () => undefined,
     trash: async () => undefined,
+    ...(onScreenControlHandedOver ? { onScreenControlHandedOver } : {}),
     onChange,
   });
 }
@@ -101,5 +115,34 @@ describe.skipIf(process.platform === "win32")("noticing a disconnect", () => {
     machine.invalidate();
     expect((await machine.summary()).connected).toBe(true);
     expect(changes).toBe(2);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("taking over the separate Mac agent app", () => {
+  test("carries screen control over and asks for its permissions again", async () => {
+    const home = folder();
+    const macApp = join(home, "Applications", "OpenGeni Agent.app");
+    const binary = join(macApp, "Contents", "MacOS", "opengeni-agent");
+    mkdirSync(join(macApp, "Contents", "MacOS"), { recursive: true });
+    // A stand-in agent: lists one connection and removes its service.
+    writeFileSync(
+      binary,
+      `#!/bin/sh\n[ "$1" = connections ] && printf 'Configured Opengeni connections (1):\\n  abc  https://server.example  workspace=w1  agent=a1\\n'\nexit 0\n`,
+    );
+    chmodSync(binary, 0o755);
+
+    let handedOver = 0;
+    const machine = computer(home, undefined, () => handedOver++);
+    // Taking over happens before the app's own agent downloads (not available here).
+    await machine.boot();
+
+    const state = JSON.parse(readFileSync(join(home, "this-computer.json"), "utf8"));
+    expect(state.adopted).toBe(true);
+    expect(state.screenControl).toBe(true);
+    expect(handedOver).toBe(1);
+
+    // Only once: a later launch has nothing to take over.
+    await computer(home, undefined, () => handedOver++).boot();
+    expect(handedOver).toBe(1);
   });
 });

@@ -12200,6 +12200,44 @@ export const scheduledTaskScheduleOutbox = pgTable(
 );
 
 /**
+ * Migration 0792: one review per schedule of its newest settled scheduled run.
+ * A blocked schedule tells its owner once (`notified`) or pauses itself when
+ * no later run can start until a person acts (`paused`). Owner-run lifecycle
+ * code writes it under the task lock; see `scheduled-task-blockers.ts`.
+ */
+export const scheduledTaskBlockerReviews = pgTable(
+  "scheduled_task_blocker_reviews",
+  {
+    taskId: uuid("task_id")
+      .primaryKey()
+      .references(() => scheduledTasks.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    reviewedRunId: uuid("reviewed_run_id"),
+    state: text("state").notNull().default("clear"),
+    reason: text("reason"),
+    message: text("message"),
+    blockedRunId: uuid("blocked_run_id"),
+    blockedSince: timestamp("blocked_since", { withTimezone: true }),
+    noticeSessionId: uuid("notice_session_id"),
+    noticeKey: text("notice_key"),
+    noticePending: text("notice_pending"),
+    noticePayload: jsonb("notice_payload"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspace: index("scheduled_task_blocker_reviews_workspace_idx").on(
+      table.workspaceId,
+      table.taskId,
+    ),
+  }),
+);
+
+/**
  * Durable ownership of Temporal schedules whose database owner was deleted.
  * No workspace/account foreign key: deletion cleanup survives the cascade.
  * Cross-workspace claim/settlement uses migration-owned lifecycle functions.

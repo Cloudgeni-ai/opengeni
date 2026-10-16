@@ -1,5 +1,18 @@
 # @opengeni/desktop
 
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies [9a15dda]
+- Updated dependencies [664368a]
+- Updated dependencies [2077293]
+- Updated dependencies [db3efc5]
+- Updated dependencies [957f6ee]
+- Updated dependencies [6339cec]
+- Updated dependencies [37169cd]
+  - @opengeni/sdk@3.0.0
+
 ## 0.1.2
 
 ### Patch Changes

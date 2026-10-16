@@ -247,4 +247,23 @@ describe("projection lifecycle audit regressions", () => {
       "**Checking the workspace first**\n\n**Inspecting guidance** and then **more**",
     );
   });
+
+  test("reasoning renders the same whether its parts arrive merged or as fragments", () => {
+    const expected =
+      "**Checking the workspace first**\n\n**Inspecting guidance** and then **more**";
+    // The worker stores adjacent fragments as one delta, joined with the same
+    // separator (`reasoningDeltaSeparator`); a row boundary may fall anywhere.
+    for (const rows of [
+      [expected],
+      ["**Checking the workspace first**\n\n**Inspecting guidance**", " and then **more**"],
+      ["**Checking the workspace first**", "**Inspecting guidance** and then **more**"],
+    ]) {
+      const items = buildTimeline(
+        rows.map((text, index) => event(index + 1, "agent.reasoning.delta", { text })),
+      );
+      const reasoning = items.filter((item) => item.kind === "reasoning");
+      expect(reasoning).toHaveLength(1);
+      expect(reasoning[0]!.kind === "reasoning" && reasoning[0]!.text).toBe(expected);
+    }
+  });
 });

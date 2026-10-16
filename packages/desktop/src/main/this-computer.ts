@@ -87,10 +87,20 @@ export interface ThisComputerDeps {
   logDir: string;
   /** A single-use personal enroll token for the account's workspace. */
   mintEnrollToken(accountId: string, workspaceId: string, screenControl: boolean): Promise<string>;
+  /**
+   * Lets the account's agents use this computer (its enrollment) in their
+   * chats in the workspace, without asking again in every chat.
+   */
+  allowAgents(accountId: string, workspaceId: string, enrollmentId: string): Promise<void>;
   /** Opens a page of the system settings, e.g. one Privacy & Security list. */
   openSystemSettings(url: string): void;
   /** Moves a file or folder to the Trash. */
   trash(path: string): Promise<void>;
+  /**
+   * The separate Mac agent app, which held the screen-control permissions,
+   * was handed over: the person has to allow them again for this app.
+   */
+  onScreenControlHandedOver?(): void;
   onChange(): void;
 }
 
@@ -299,6 +309,9 @@ export class ThisComputer {
       // A running agent reads its connections when it starts.
       if (this.agent.state === "stopped") this.agent.start(baseUrl);
       else await this.agent.restart();
+      const connection = connectionFor(await this.connections(true), baseUrl, workspaceId);
+      if (!connection) throw new Error("Couldn't connect this computer. Try again.");
+      await this.deps.allowAgents(accountId, workspaceId, connection.agentId);
     });
     return await this.status(baseUrl, workspaceId);
   }
@@ -501,7 +514,9 @@ export class ThisComputer {
   /**
    * Hands a separately installed agent over to the app, once: its background
    * service is removed (its connections stay), and on a Mac the separate agent
-   * app goes to the Trash with its entries in Privacy & Security.
+   * app goes to the Trash with its entries in Privacy & Security. That app was
+   * how agents used the screen, so screen control carries over and its
+   * permissions become part of setting up this app.
    */
   private async adoptStandalone(): Promise<string | null> {
     const macApp = this.deps.platform === "darwin" ? standaloneMacAgentApp(this.deps.home) : null;
@@ -520,12 +535,14 @@ export class ThisComputer {
         );
       }
     }
-    if (macApp && existsSync(macApp)) {
+    const handsOverScreen = macApp !== null && existsSync(macApp);
+    if (macApp && handsOverScreen) {
       if (isSymlink(this.hostedPath)) unlinkSync(this.hostedPath);
       await this.deps.trash(macApp);
       execFile("/usr/bin/tccutil", ["reset", "All", "ai.opengeni.agent"], () => undefined);
     }
-    this.saveState({ adopted: true });
+    this.saveState({ adopted: true, ...(handsOverScreen ? { screenControl: true } : {}) });
+    if (handsOverScreen) this.deps.onScreenControlHandedOver?.();
     return server;
   }
 

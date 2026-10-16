@@ -9,10 +9,15 @@ import {
   type AccessGrant,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
+import { mcpAccountRouteId } from "@opengeni/core";
+import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   appendSessionEvents,
   claimSessionWorkForAttempt,
   createDb,
+  createConnection,
+  encryptEnvironmentValue,
+  updateConnectorToolPermissionPolicies,
   createOrganizationApiKey,
   createSession,
   createSiteViewerSession,
@@ -34,6 +39,7 @@ import {
   acquireSharedTestDatabase,
   MemoryEventBus,
   testSettings,
+  startTestMcpServer,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp, type AppDependencies } from "../src/app";
@@ -252,12 +258,17 @@ async function fixture(overrides: Partial<Settings> = {}) {
       }),
     );
   const sites = `/v1/workspaces/${workspace.id}/published-artifacts`;
-  const publish = async (title: string, visibility: "private" | "workspace" = "workspace") => {
+  const publish = async (
+    title: string,
+    visibility: "private" | "workspace" = "workspace",
+    requestedTools: Array<{ serverId: string; toolName: string }> = [],
+  ) => {
     const created = await api(owner, "POST", sites, {
       title,
       html: `<!doctype html><h1>${title}</h1><a href="https://example.com/${encodeURIComponent(title)}">x</a>`,
       idempotencyKey: crypto.randomUUID(),
       visibility,
+      requestedTools,
     });
     expect(created.status, JSON.stringify(created.json)).toBe(201);
     return { id: String(created.json.artifact.id), versionId: String(created.json.version.id) };
@@ -703,7 +714,7 @@ test("site-runtime checks the gateway signature before anything else", async () 
   });
   expect(traversal.status).toBe(401);
 
-  // Minimal workspace and model views; tools are not available to published Sites.
+  // Minimal workspace and model views; guests have no workspace tools.
   const workspace = await f.gateway(site.host, "GET", "", { visitor });
   expect(workspace.json).toEqual({ id: f.workspace.id, name: "Signed" });
   // People outside the workspace see the one concrete model they would use.
@@ -714,6 +725,338 @@ test("site-runtime checks the gateway signature before anything else", async () 
   expect(tools.status).toBe(403);
   expect(code(tools)).toBe("not_available_for_viewer");
 }, 60_000);
+
+/** Real account expansion, encrypted credentials and HTTP MCP; no gateway mocks. */
+async function pageToolsFixture() {
+  const authorizations: string[] = [];
+  const callAuthorizations: string[] = [];
+  let atProvider: (() => Promise<void>) | undefined;
+  const provider = startTestMcpServer({
+    validateAuthorization: async (value) => {
+      authorizations.push(value ?? "missing");
+      const callback = atProvider;
+      atProvider = undefined;
+      await callback?.();
+      return value?.startsWith("Bearer page-") === true;
+    },
+  });
+  const proxy = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: async (request) => {
+      const body = (await request
+        .clone()
+        .json()
+        .catch(() => null)) as { method?: string } | null;
+      if (body?.method === "tools/call")
+        callAuthorizations.push(request.headers.get("authorization") ?? "missing");
+      return await fetch(new Request(provider.url, request));
+    },
+  });
+  try {
+    const f = await fixture({
+      environmentsEncryptionKey: randomBytes(32).toString("base64"),
+      mcpServers: [
+        {
+          id: "grafana",
+          url: `${proxy.url}mcp`,
+          cacheToolsList: false,
+          allowedTools: ["search_documents", "fetch_document"],
+          connectionRef: {
+            providerDomain: "127.0.0.1",
+            kind: "api_key",
+            accountSelection: "all_eligible",
+          },
+        },
+      ],
+    });
+    const connect = async (label: string, subjectId: string | null = null) => {
+      const connection = await createConnection(db.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspace.id,
+        subjectId,
+        providerDomain: "127.0.0.1",
+        kind: "api_key",
+        credentialEncrypted: encryptEnvironmentValue(
+          environmentsEncryptionKeyBytes(f.settings)!,
+          JSON.stringify({ headers: { authorization: `Bearer page-${label}` } }),
+        ),
+        metadata: { displayName: label },
+        createdBySubjectId: f.owner.subjectId,
+      });
+      const identity = {
+        serverId: mcpAccountRouteId("grafana", connection.id),
+        toolName: "search_documents",
+      };
+      await updateConnectorToolPermissionPolicies(db.db, {
+        accountId: f.accountId,
+        workspaceId: f.workspace.id,
+        subjectId: f.owner.subjectId,
+        connectionId: connection.id,
+        serverId: "grafana",
+        toolNames: [identity.toolName],
+        policy: "allow",
+      });
+      return { connection, identity, label };
+    };
+    const prod = await connect("prod");
+    const staging = await connect("staging");
+    const personal = await connect("personal", f.member.subjectId);
+    const foreign = await connect("foreign", f.owner.subjectId);
+    const accounts = [prod, staging, personal, foreign];
+    // Page declarations remain available with the assistant entirely disabled.
+    const site = await f.publish(
+      "Page tools",
+      "workspace",
+      accounts.map((entry) => entry.identity),
+    );
+    const publication = await f.publication(f.owner, site.id, "PUT", { agent: { enabled: false } });
+    expect(publication.status, JSON.stringify(publication.json)).toBe(201);
+    const host = String(publication.json.hostname);
+    const session = await f.signIn(f.member, host);
+    const post = (method: string, body: unknown = {}, token = session) =>
+      f.gateway(host, "POST", `/tools/${method}`, { session: token, body });
+    return {
+      ...f,
+      site,
+      host,
+      session,
+      post,
+      provider,
+      authorizations,
+      callAuthorizations,
+      prod,
+      staging,
+      personal,
+      foreign,
+      atProvider: (callback: () => Promise<void>) => {
+        atProvider = callback;
+      },
+      close: () => {
+        proxy.stop(true);
+        provider.close();
+      },
+    };
+  } catch (error) {
+    proxy.stop(true);
+    provider.close();
+    throw error;
+  }
+}
+
+test("published page tools: legacy catalog/declarations/call and targeted resolve/invoke retain exact viewer accounts without an agent", async () => {
+  const f = await pageToolsFixture();
+  try {
+    const config = await f.gateway(f.host, "GET", "/site/config", { session: f.session });
+    expect(config.json.capabilities).toMatchObject({ agent: false, workspaceTools: true });
+    const catalog = await f.post("catalog");
+    expect(catalog.status, JSON.stringify(catalog.json)).toBe(200);
+    expect(catalog.headers.get("cache-control")).toBe("no-store");
+    expect(catalog.json.entries.map((entry: any) => entry.identity)).toEqual(
+      expect.arrayContaining([f.prod.identity, f.staging.identity, f.personal.identity]),
+    );
+    expect(catalog.json.entries).toHaveLength(3);
+    expect(JSON.stringify(catalog.json)).not.toContain(f.foreign.identity.serverId);
+    const declarations = await f.post("declarations");
+    expect(declarations.status).toBe(200);
+    expect(declarations.json.catalogDigest).toBe(catalog.json.digest);
+    expect(declarations.json.source).toContain("search_documents");
+    for (const account of [f.prod, f.staging, f.personal]) {
+      f.callAuthorizations.length = 0;
+      const called = await f.post("call", {
+        catalogDigest: catalog.json.digest,
+        identity: account.identity,
+        arguments: { query: account.label },
+      });
+      expect(called.status, JSON.stringify(called.json)).toBe(200);
+      expect(called.json.result.content[0].text).toBe(`found document for ${account.label}`);
+      expect(f.callAuthorizations).toEqual([`Bearer page-${account.label}`]);
+      const entry = catalog.json.entries.find(
+        (item: any) => item.identity.serverId === account.identity.serverId,
+      );
+      const resolved = await f.post("resolve", { target: { path: entry.codemodePath } });
+      expect(resolved.status, JSON.stringify(resolved.json)).toBe(200);
+      expect(resolved.json.entry.identity).toEqual(account.identity);
+      f.authorizations.length = 0;
+      const invoked = await f.post("invoke", {
+        target: { identity: account.identity },
+        operationId: crypto.randomUUID(),
+        expectedDefinitionDigest: resolved.json.definitionDigest,
+        arguments: { query: account.label },
+      });
+      expect(invoked.status, JSON.stringify(invoked.json)).toBe(200);
+      expect(invoked.json.result.content[0].text).toBe(`found document for ${account.label}`);
+      expect(f.authorizations.length).toBeGreaterThan(0);
+      expect(f.authorizations.every((value) => value === `Bearer page-${account.label}`)).toBe(
+        true,
+      );
+      expect(f.callAuthorizations).toEqual([
+        `Bearer page-${account.label}`,
+        `Bearer page-${account.label}`,
+      ]);
+    }
+    expect(f.provider.calls).toHaveLength(6);
+  } finally {
+    f.close();
+  }
+}, 180_000);
+
+test("published page tools: declarations, audiences, live membership and approval failures never widen page authority", async () => {
+  const f = await pageToolsFixture();
+  try {
+    const catalog = (await f.post("catalog")).json;
+    for (const identity of [
+      { serverId: "grafana", toolName: "search_documents" },
+      { ...f.prod.identity, toolName: "fetch_document" },
+    ]) {
+      for (const [method, body] of [
+        ["call", { identity, catalogDigest: catalog.digest, arguments: { query: "no" } }],
+        ["resolve", { target: { identity } }],
+        [
+          "invoke",
+          { target: { identity }, operationId: crypto.randomUUID(), arguments: { query: "no" } },
+        ],
+      ] as const) {
+        const requests = f.provider.requests.length;
+        expect((await f.post(method, body)).status).toBe(403);
+        expect(f.provider.requests.length).toBe(requests);
+      }
+    }
+    expect((await f.post("resolve", { target: { identity: f.foreign.identity } })).status).toBe(
+      404,
+    );
+    const forgedApproval = `ogta_${"a".repeat(43)}`;
+    await updateConnectorToolPermissionPolicies(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      subjectId: f.owner.subjectId,
+      connectionId: f.prod.connection.id,
+      serverId: "grafana",
+      toolNames: [f.prod.identity.toolName],
+      policy: "ask",
+    });
+    const askedCatalog = (await f.post("catalog")).json;
+    for (const approvalToken of [undefined, forgedApproval]) {
+      const legacy = await f.post("call", {
+        catalogDigest: askedCatalog.digest,
+        identity: f.prod.identity,
+        arguments: { query: "no approval" },
+        approvalToken,
+      });
+      expect(legacy.status, JSON.stringify(legacy.json)).toBe(409);
+      expect(legacy.json.error.message).toBe("tool_gateway_approval_required");
+      const targeted = await f.post("invoke", {
+        target: { identity: f.prod.identity },
+        operationId: crypto.randomUUID(),
+        arguments: { query: "no approval" },
+        approvalToken,
+      });
+      expect(targeted.status, JSON.stringify(targeted.json)).toBe(409);
+      expect(targeted.json.error.message).toBe("tool_gateway_approval_required");
+    }
+    expect(f.provider.calls).toHaveLength(0);
+    const visitor = visitorId();
+    await f.publication(f.owner, f.site.id, "PUT", { access: "public", agent: { enabled: false } });
+    const outside = await fixture();
+    const outsider = await f.signIn(outside.owner, f.host);
+    const invited = randomBytes(32).toString("base64url");
+    await f.publication(f.owner, f.site.id, "PUT", { invitedEmails: ["page-guest@example.com"] });
+    await createSiteViewerSession(
+      db.db,
+      { accountId: f.accountId, workspaceId: f.workspace.id },
+      {
+        siteId: f.site.id,
+        tokenHash: createHash("sha256").update(invited).digest("hex"),
+        subjectId: outside.owner.subjectId,
+        kind: "invited",
+        email: "page-guest@example.com",
+        displayName: "Invited page viewer",
+        absoluteSeconds: 3_600,
+      },
+    );
+    expect(
+      (await f.gateway(f.host, "GET", "/site/config", { session: invited })).json.viewer.kind,
+    ).toBe("invited");
+    for (const method of ["catalog", "declarations", "resolve", "call", "invoke"]) {
+      expect(
+        (await f.gateway(f.host, "POST", `/tools/${method}`, { visitor, body: {} })).status,
+      ).toBe(403);
+      expect((await f.post(method, {}, outsider)).status).toBe(403);
+      expect((await f.post(method, {}, invited)).status).toBe(403);
+    }
+    const member = await f.signIn(f.member, f.host);
+    await shared.admin`delete from workspace_memberships where workspace_id = ${f.workspace.id} and subject_id = ${f.member.subjectId}`;
+    expect((await f.post("catalog", {}, member)).status).toBe(403);
+    expect(f.provider.calls).toHaveLength(0);
+  } finally {
+    f.close();
+  }
+}, 180_000);
+
+test("published page tools: current immutable version replaces old declarations without trusting page Site context", async () => {
+  const f = await pageToolsFixture();
+  try {
+    const catalog = (await f.post("catalog")).json;
+    const published = await f.api(f.owner, "POST", `${f.sites}/${f.site.id}/versions`, {
+      html: "<!doctype html><h1>No page tools</h1>",
+      expectedCurrentVersionId: f.site.versionId,
+      requestedTools: [],
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(published.status, JSON.stringify(published.json)).toBe(200);
+    const call = await f.post("call", {
+      catalogDigest: catalog.digest,
+      identity: f.prod.identity,
+      arguments: { query: "old page" },
+      siteArtifactId: f.site.id,
+      siteVersionId: f.site.versionId,
+    });
+    expect(call.status, JSON.stringify(call.json)).toBe(403);
+    expect((await f.post("catalog")).json.entries).toEqual([]);
+    expect(
+      (await f.gateway(f.host, "GET", "/site/config", { session: f.session })).json.capabilities
+        .workspaceTools,
+    ).toBe(false);
+    expect(f.provider.calls).toHaveLength(0);
+  } finally {
+    f.close();
+  }
+}, 180_000);
+
+test.each(["catalog", "declarations", "call", "resolve", "invoke"])(
+  "published page tools: %s rechecks membership between physical provider requests",
+  async (method) => {
+    const f = await pageToolsFixture();
+    try {
+      const catalog = method === "call" ? (await f.post("catalog")).json : null;
+      f.atProvider(async () => {
+        await shared.admin`delete from workspace_memberships where workspace_id = ${f.workspace.id} and subject_id = ${f.member.subjectId}`;
+      });
+      const result = await f.post(
+        method,
+        method === "catalog" || method === "declarations"
+          ? {}
+          : method === "call"
+            ? {
+                catalogDigest: catalog.digest,
+                identity: f.prod.identity,
+                arguments: { query: "revoked" },
+              }
+            : {
+                target: { identity: f.prod.identity },
+                ...(method === "invoke"
+                  ? { operationId: crypto.randomUUID(), arguments: { query: "revoked" } }
+                  : {}),
+              },
+      );
+      expect(result.status, JSON.stringify(result.json)).toBe(403);
+      expect(f.provider.calls).toHaveLength(0);
+    } finally {
+      f.close();
+    }
+  },
+  180_000,
+);
 
 test("viewer sign-in: one-time PKCE codes bound to their host, then revocable sessions", async () => {
   const f = await fixture();

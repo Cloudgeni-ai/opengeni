@@ -15,6 +15,13 @@ import {
 } from "./trace-context";
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
+import { projectErrorCauseAttributes } from "./error-cause";
+export {
+  errorCauseAttributes,
+  PUBLIC_ERROR_CAUSE_NAMES,
+  PUBLIC_INTERACTION_ERROR_CODES,
+  type ErrorCauseAttributes,
+} from "./error-cause";
 export type { FailureDiagnosticInput } from "./failure-diagnostic";
 export {
   AGENT_TOOL_CALL_OUTCOMES,
@@ -471,6 +478,22 @@ const PUBLIC_CHANNEL_A_OPERATIONS = new Set([
   "terminal.pty.write",
   "terminal.pty.resize",
   "terminal.pty.close",
+  "artifact.publish",
+  "browser.create",
+  "browser.resume",
+  "browser.suspend",
+  "browser.end",
+  "browser.read",
+  "browser.action",
+  "browser.control",
+  "browser.download.save",
+  "browser.attach",
+  "computer.create",
+  "computer.end",
+  "computer.read",
+  "computer.action",
+  "computer.control",
+  "computer.attach",
   "read",
   "mutation",
 ]);
@@ -1765,6 +1788,7 @@ function projectHttpDiagnosticAttributes(attributes: Attributes): Attributes {
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(diagnosticId)
       ? { diagnosticId }
       : {}),
+    ...projectErrorCauseAttributes(attributes),
   };
 }
 
@@ -1813,6 +1837,7 @@ function projectPublicChannelADiagnosticAttributes(attributes: Attributes): Attr
     PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get("sandboxLeaseKey")?.test(sandboxLeaseKey)
       ? { sandboxLeaseKey }
       : {}),
+    ...projectErrorCauseAttributes(attributes),
   };
 }
 

@@ -131,7 +131,7 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
   if (input.requestedTools > 0 || input.page?.workspaceTools)
     add({
       code: "workspace_tools_members_only",
-      message: `The page uses workspace tools, which work only inside Opengeni; ${who} on the published Site can't use them.`,
+      message: `The page uses workspace tools, which require workspace membership; ${who} on the published Site can't use them.`,
       suggestion: "Build the page on Site Data and Site SQL instead, or publish to members only.",
     });
   if (input.agent.enabled && (input.agent.tools?.length ?? 0) > 0)

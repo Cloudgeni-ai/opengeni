@@ -125,9 +125,14 @@ describe("migration 0264 connection authority runtime activation", () => {
       const [historicalRoutines] = await sql`
         select
           to_regprocedure('opengeni_private.capture_accepted_turn_connection_authorities()') as current_capture,
-          to_regprocedure('opengeni_private.capture_accepted_turn_connection_authorities_0264()') as retired_capture
+          to_regprocedure('opengeni_private.capture_accepted_turn_connection_authorities_0264()') as retired_capture,
+          to_regclass('public.scheduled_task_blocker_reviews') as blocker_reviews
       `;
-      expect(historicalRoutines).toMatchObject({ current_capture: null, retired_capture: null });
+      expect(historicalRoutines).toMatchObject({
+        current_capture: null,
+        retired_capture: null,
+        blocker_reviews: null,
+      });
       const [account] = await sql<{ id: string }[]>`
         insert into managed_accounts (name) values ('connection cutover drain') returning id
       `;
@@ -336,12 +341,24 @@ describe("migration 0264 connection authority runtime activation", () => {
         where oid = any(array[
           'sessions'::regclass, 'session_turns'::regclass,
           'session_system_updates'::regclass, 'session_system_update_outbox'::regclass,
-          'scheduled_tasks'::regclass, 'connections'::regclass
+          'scheduled_tasks'::regclass, 'connections'::regclass,
+          'scheduled_task_blocker_reviews'::regclass
         ])
       `;
       expect(posture.every((table) => table.relrowsecurity && table.relforcerowsecurity)).toBe(
         true,
       );
+      // 0792 is deferred, not discarded: after the real ordered replay its
+      // owner-only SELECT policy compiles against the restored 0345 helper.
+      const blockerPolicies = await sql`
+        select polcmd, pg_get_expr(polqual, polrelid) as predicate
+        from pg_policy
+        where polrelid = 'scheduled_task_blocker_reviews'::regclass
+          and polname = 'blocker_review_inventory_read'
+      `;
+      expect(blockerPolicies).toHaveLength(1);
+      expect(blockerPolicies[0]!.polcmd).toBe("r");
+      expect(blockerPolicies[0]!.predicate).toContain("session_tenancy_fence_owner_policy_active");
       const [capture] = await sql`
         select routine.proname, role.rolsuper, role.rolbypassrls
         from pg_trigger trigger

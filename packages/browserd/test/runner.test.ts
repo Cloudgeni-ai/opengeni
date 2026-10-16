@@ -8,6 +8,7 @@ import {
   open,
   readFile,
   readdir,
+  readlink,
   rm,
   stat,
   writeFile,
@@ -16,19 +17,51 @@ import {
 import { join } from "node:path";
 import {
   AgentBrowserJsonRunner,
+  assertManagedBrowserProfileUnused,
   browserLaunchArguments,
   browserProfileCryptoPolicy,
+  macosOffscreenChromeArguments,
+  MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT,
+  parseMacosDisplayGeometry,
   reapManagedBrowserProcesses,
   inspectOwnedManagedBrowserProcess,
 } from "../src/runner";
 
 describe("managed browser profile cryptography", () => {
+  test("offscreen macOS browsers present the host display and an ordinary User-Agent", async () => {
+    const geometry = parseMacosDisplayGeometry(
+      JSON.stringify({ w: 1920, h: 1080, x: 0, y: 88, vw: 1920, vh: 962, scale: 1 }),
+    );
+    expect(geometry).toEqual({
+      width: 1920,
+      height: 1080,
+      scale: 1,
+      insets: { left: 0, right: 0, top: 30, bottom: 88 },
+    });
+    expect(parseMacosDisplayGeometry("")).toBeNull();
+    expect(parseMacosDisplayGeometry(JSON.stringify({ w: 1920, h: 1080 }))).toBeNull();
+    expect(
+      parseMacosDisplayGeometry(
+        JSON.stringify({ w: 1920, h: 1080, x: 0, y: -5, vw: 1920, vh: 962, scale: 1 }),
+      ),
+    ).toBeNull();
+    expect(
+      await macosOffscreenChromeArguments("/Applications/Fixture", {
+        chromeMajorVersion: async () => 155,
+        mainDisplay: async () => geometry!,
+      }),
+    ).toEqual([
+      "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "--screen-info={1920x1080 devicePixelRatio=1 workAreaLeft=0 workAreaRight=0 workAreaTop=30 workAreaBottom=88}",
+    ]);
+  });
+
   test("declares only explicitly pinned portable policies", () => {
     expect(browserProfileCryptoPolicy("linux")).toBe("chromium_basic");
     expect(browserProfileCryptoPolicy("darwin")).toBe("chromium_mock_keychain");
     expect(browserProfileCryptoPolicy("win32")).toBe("platform_bound");
     expect(browserLaunchArguments("linux")).toBe(
-      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled,--test-type,--password-store=basic",
+      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled,--test-type,--ignore-gpu-blocklist,--enable-unsafe-swiftshader,--password-store=basic",
     );
     expect(browserLaunchArguments("darwin")).toBe(
       "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled,--use-mock-keychain",
@@ -45,6 +78,70 @@ describe("managed browser profile cryptography", () => {
     expect(browserLaunchArguments("darwin", [], true)).not.toContain(feature);
     expect(browserLaunchArguments("win32", [], true)).not.toContain(feature);
   });
+
+  test.skipIf(process.platform !== "darwin")(
+    "launches an offscreen managed browser as the real browser without a window",
+    async () => {
+      const root = await mkdtemp("/tmp/og-runner-offscreen-");
+      const contents = join(root, "Fixture Browser.app", "Contents");
+      const browserPath = join(contents, "MacOS", "Fixture Browser");
+      const helperPath = join(root, "opengeni-computer-native");
+      const binaryPath = join(root, "fixture-agent-browser");
+      await mkdir(join(contents, "MacOS"), { recursive: true });
+      await writeFile(browserPath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      await writeFile(
+        join(contents, "Info.plist"),
+        "<plist><dict><key>CFBundleShortVersionString</key>\n\t<string>155.0.8059.82</string></dict></plist>",
+      );
+      await writeFile(helperPath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      await writeFile(
+        binaryPath,
+        `#!/usr/bin/env bun\nconsole.log(JSON.stringify({ success: true, data: { executable: process.env.AGENT_BROWSER_EXECUTABLE_PATH, headed: process.env.AGENT_BROWSER_HEADED, backgroundExecutable: process.env.OPENGENI_BACKGROUND_BROWSER_EXECUTABLE ?? null }, error: null }));\n`,
+        { mode: 0o700 },
+      );
+      const runner = await AgentBrowserJsonRunner.create({
+        namespace: "og",
+        sessionName: "offscreen",
+        socketDirectory: join(root, "socket"),
+        profileDirectory: join(root, "profile"),
+        downloadDirectory: join(root, "downloads"),
+        screenshotDirectory: join(root, "screenshots"),
+        headed: true,
+        offscreen: true,
+        browserExecutablePath: browserPath,
+        browserLaunchHelperPath: helperPath,
+        binary: {
+          path: binaryPath,
+          name: "agent-browser-darwin-arm64",
+          version: "0.33.2",
+          sha256: "fixture",
+        },
+      });
+      try {
+        const result = await runner.run<{
+          executable: string;
+          headed: string;
+          backgroundExecutable: string | null;
+        }>(["open", "about:blank"]);
+        expect(result.headed).toBe("0");
+        expect(result.backgroundExecutable).toBeNull();
+        expect(result.executable).toStartWith(join(root, "chrome-launch"));
+        const wrapper = await readFile(result.executable, "utf8");
+        expect(wrapper).toContain(`exec '${browserPath}' '--user-agent=Mozilla/5.0 (Macintosh;`);
+        expect(wrapper).toContain("Chrome/155.0.0.0 Safari/537.36'");
+        expect(wrapper).toMatch(/'--screen-info=\{\d+x\d+ devicePixelRatio=\d+ /u);
+        expect(wrapper).not.toContain("HeadlessChrome");
+        // Chromium honors only the last --disable-features switch, so the
+        // complete list follows agent-browser's own arguments.
+        expect(wrapper).toContain(`"$@" '${MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT}' 2>`);
+        expect(MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT).toBe(
+          "--disable-features=Translate,OptimizationGuideOnDeviceModel,WebUIOmniboxPopup,WebUIOmniboxAimPopup",
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test.skipIf(process.platform !== "darwin")(
     "launches a managed browser through the lifecycle-preserving background helper",
@@ -438,7 +535,52 @@ console.log(JSON.stringify({ success: true, data: { argv: process.argv.slice(2),
   );
 });
 
-test("Linux directory relaunch requires complete absence of verified and unverified profile processes", async () => {
+test.skipIf(process.platform !== "linux" || process.getuid?.() === 0)(
+  "an unused profile is proven unused on a real host whose other-user processes hide their executables",
+  async () => {
+    // An unprivileged agent can't read the executable link of root's or other
+    // users' processes. Hosts without any such process can't exercise this.
+    let unreadableExecutables = 0;
+    for (const name of await readdir("/proc")) {
+      if (!/^[1-9][0-9]*$/u.test(name)) continue;
+      try {
+        await readlink(`/proc/${name}/exe`);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? "";
+        if (code === "EACCES" || code === "EPERM") unreadableExecutables += 1;
+      }
+    }
+    if (unreadableExecutables === 0) return;
+    const directory = await mkdtemp("/tmp/og-profile-unused-");
+    const profileDirectory = join(directory, "profile");
+    await mkdir(profileDirectory, { mode: 0o700 });
+    try {
+      await expect(assertManagedBrowserProfileUnused(profileDirectory)).resolves.toBeUndefined();
+      const holder = Bun.spawn(
+        [
+          process.execPath,
+          "-e",
+          "setInterval(()=>{},60000)",
+          `--user-data-dir=${profileDirectory}`,
+        ],
+        { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+      );
+      try {
+        // A process naming the exact profile still refuses.
+        await expect(assertManagedBrowserProfileUnused(profileDirectory)).rejects.toMatchObject({
+          code: "process_failed",
+        });
+      } finally {
+        holder.kill();
+        await holder.exited;
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test("Linux directory relaunch requires complete absence of verified and unverified profile processes, judged by command lines", async () => {
   const directory = await mkdtemp("/tmp/og-inventory-proof-");
   const profileDirectory = join(directory, "profile");
   await mkdir(profileDirectory);
@@ -462,12 +604,12 @@ test("Linux directory relaunch requires complete absence of verified and unverif
         if (scenario === "inaccessible") throw missing("EACCES");
         if (scenario === "forbidden") throw missing("EPERM");
         if (scenario === "exiting") throw missing("ENOENT");
-        const profile = ["rewritten", "unknown-executable"].includes(scenario) ? profileDirectory : "/synthetic/other";
+        const profile = ["rewritten", "unknown-executable", "inaccessible-executable-naming-profile"].includes(scenario) ? profileDirectory : "/synthetic/other";
         return Buffer.from("/synthetic/chromium --user-data-dir=" + profile + "\\0");
       },
       async readlink(path) {
         if (path !== "/proc/2002/exe") return await native.readlink(path);
-        if (scenario === "inaccessible-executable") throw missing("EACCES");
+        if (["inaccessible-executable", "inaccessible-executable-naming-profile"].includes(scenario)) throw missing("EACCES");
         if (scenario === "forbidden-executable") throw missing("EPERM");
         return scenario === "unknown-executable" ? "/synthetic/unrecognized" : "/synthetic/chromium";
       },
@@ -486,17 +628,19 @@ test("Linux directory relaunch requires complete absence of verified and unverif
       recoverOwnedProcess: receipt,
     };
     const results = [];
-    for (scenario of ["absent", "rewritten", "unknown-executable", "inaccessible", "forbidden", "inaccessible-executable", "forbidden-executable", "exiting"]) {
+    const proven = ["absent", "exiting", "inaccessible-executable", "forbidden-executable"];
+    for (scenario of ["absent", "rewritten", "unknown-executable", "inaccessible", "forbidden", "inaccessible-executable", "forbidden-executable", "inaccessible-executable-naming-profile", "exiting"]) {
       try { results.push({ scenario, result: await inspectOwnedManagedBrowserProcess(receipt) }); }
       catch (error) { results.push({ scenario, code: error.code, message: error.message }); }
-      if (["absent", "exiting"].includes(scenario)) {
+      if (proven.includes(scenario)) {
         await expect(AgentBrowserJsonRunner.create(options)).rejects.toThrow("outcome is unknown");
         await fs.mkdir(${JSON.stringify(join(directory, "socket", "namespaces", "og", "run"))}, { recursive: true });
         const permitted = await AgentBrowserJsonRunner.create({ ...options, allowOwnedProcessLaunch: true });
         expect(permitted.reattachedOwnedProcess).toBeNull();
       } else {
-        // Explicit launch permission cannot bypass a successor or any denied
-        // observation, including an unrelated process's executable.
+        // Explicit launch permission cannot bypass a successor or a denied
+        // command line. An unrelated process's unreadable executable (any
+        // root or other-user process) is not evidence about the profile.
         await expect(AgentBrowserJsonRunner.create({ ...options, allowOwnedProcessLaunch: true })).rejects.toThrow(results.at(-1).message);
       }
     }
@@ -531,11 +675,18 @@ test("Linux directory relaunch requires complete absence of verified and unverif
         code: "process_failed",
         message: "exact profile process inventory is incomplete",
       },
-      ...["forbidden", "inaccessible-executable", "forbidden-executable"].map((scenario) => ({
-        scenario,
+      {
+        scenario: "forbidden",
         code: "process_failed",
         message: "exact profile process inventory is incomplete",
-      })),
+      },
+      { scenario: "inaccessible-executable", result: "exited" },
+      { scenario: "forbidden-executable", result: "exited" },
+      {
+        scenario: "inaccessible-executable-naming-profile",
+        code: "process_failed",
+        message: "exact directory launch absence is unproven",
+      },
       { scenario: "exiting", result: "exited" },
     ]);
   } finally {

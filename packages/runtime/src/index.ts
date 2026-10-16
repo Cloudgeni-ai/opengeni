@@ -33,6 +33,7 @@ import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import {
+  mcpToolRecommendsApproval,
   normalizeCredentialProviderMcpUrl,
   toolPolicyActionName,
   toolReviewContextFromSchema,
@@ -3584,6 +3585,7 @@ function installMcpApprovalPolicy(
         inputSchema: unknown;
         title?: string;
         accountLabel?: string | undefined;
+        recommendsApproval: boolean;
         readReview: ToolReviewReader;
       }
     >();
@@ -3602,6 +3604,7 @@ function installMcpApprovalPolicy(
           serverId: server.registryId,
           toolName: await server.unprefixedToolName(descriptor.name),
           inputSchema: descriptor.inputSchema,
+          recommendsApproval: mcpToolRecommendsApproval(descriptor),
           readReview: (name, args) => server.reviewContext(name, args),
           ...(descriptor.title ? { title: descriptor.title } : {}),
           ...(accountLabel ? { accountLabel } : {}),
@@ -3622,8 +3625,12 @@ function installMcpApprovalPolicy(
       const unprefixed = identity?.toolName ?? tool.name.slice(policy.prefix.length);
       const originalNeedsApproval = tool.needsApproval.bind(tool);
       const originalInvoke = tool.invoke.bind(tool);
-      const legacyApproval =
-        !policy.connectorBacked && mcpToolRequiresApproval(policy.requireApproval, unprefixed);
+      // The recommendation: the session's requireApproval or the tool's own
+      // tools/list `_meta`. Either one asking makes Ask the default.
+      const recommendsApproval =
+        mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
+        identity?.recommendsApproval === true;
+      const legacyApproval = !policy.connectorBacked && recommendsApproval;
       if (!policy.connectorBacked && !legacyApproval && !connectorActionPolicy) {
         return tool;
       }
@@ -3645,9 +3652,7 @@ function installMcpApprovalPolicy(
           }),
           actionName: toolPolicyActionName(unprefixed, identity?.inputSchema, args),
           ...(legacyApproval ? { approvalMode: "session_mcp" as const } : {}),
-          defaultDecision: mcpToolRequiresApproval(policy.requireApproval, unprefixed)
-            ? "ask"
-            : "allow",
+          defaultDecision: recommendsApproval ? "ask" : "allow",
         };
       };
       return {
@@ -3659,8 +3664,7 @@ function installMcpApprovalPolicy(
         ) => {
           if (!connectorActionPolicy) {
             return (
-              mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
-              (await originalNeedsApproval(runContext, parsedInput, callId))
+              recommendsApproval || (await originalNeedsApproval(runContext, parsedInput, callId))
             );
           }
           if (!callId) {
@@ -3679,7 +3683,7 @@ function installMcpApprovalPolicy(
           // An explicit Allow is a decision, not an exemption from one of several floors.
           const requiresApproval = preparation.managed
             ? preparation.decision === "ask"
-            : mcpToolRequiresApproval(policy.requireApproval, unprefixed);
+            : recommendsApproval;
           if (requiresApproval) approvalRequiredCallIds.add(callId);
           else approvalRequiredCallIds.delete(callId);
           return requiresApproval;
@@ -3936,7 +3940,9 @@ function installInteractionInterventionPolicy(
 
 /**
  * Translate the canonical decision into the model SDK interruption protocol.
- * Legacy requireApproval is a recommendation only when no explicit choice exists.
+ * Legacy requireApproval and a tool's `opengeni/recommendedPermission` `_meta`
+ * are recommendations only when no explicit choice exists. Every external MCP
+ * server is wrapped so a tool's own recommendation holds even without hooks.
  * Standalone runtimes without policy hooks retain their configured behavior;
  * they cannot execute an approval-gated call without the durable authority.
  * Prepared server/tool identities take precedence over longest-prefix legacy
@@ -3953,7 +3959,7 @@ function applyMcpApprovalPolicy(
     .filter(
       (server) =>
         Boolean(server.connectionRef) ||
-        Boolean(connectorActionPolicy && attemptToolSource(server.id) === "mcp") ||
+        attemptToolSource(server.id) === "mcp" ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
@@ -5851,10 +5857,7 @@ function installAttemptConnectorActionGatewayLifecycle(
                 definition.inputSchema,
                 arguments_,
               ),
-              defaultDecision:
-                attemptToolApproval(config!, definition.identity.toolName) === "human"
-                  ? "ask"
-                  : "allow",
+              defaultDecision: definition.approval === "human" ? "ask" : "allow",
             };
           }
         : (approvalId: string, arguments_: unknown): ConnectorActionToolCall => ({
@@ -6163,7 +6166,7 @@ async function prepareToolGatewayDefinitionsFromServers(
           ...(tool.annotations ? { annotations: tool.annotations } : {}),
           ...(tool.icons ? { icons: tool.icons } : {}),
           source: attemptToolSource(server.registryId),
-          approval: attemptToolApproval(config, toolName),
+          approval: attemptToolApproval(config, toolName, tool),
           effectAuthorityDigest: digestCanonicalJson({
             version: 1,
             serverId: server.registryId,
@@ -6331,10 +6334,12 @@ function attemptToolSource(serverId: string): ToolGatewayDefinition["source"] {
 function attemptToolApproval(
   config: Settings["mcpServers"][number],
   toolName: string,
+  tool: object,
 ): ToolGatewayDefinition["approval"] {
   if (
     config.requireApproval === true ||
-    (Array.isArray(config.requireApproval) && config.requireApproval.includes(toolName))
+    (Array.isArray(config.requireApproval) && config.requireApproval.includes(toolName)) ||
+    (attemptToolSource(config.id) === "mcp" && mcpToolRecommendsApproval(tool))
   ) {
     return "human";
   }

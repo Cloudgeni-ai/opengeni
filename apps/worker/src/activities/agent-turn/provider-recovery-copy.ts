@@ -56,6 +56,8 @@ export function providerRecoverySubject(input: ProviderRecoveryCopyInput): strin
       return "A required MCP server is unreachable";
     case "sandbox_command_start_unavailable":
       return "The sandbox isn't ready yet";
+    case "retained_attachment_unavailable":
+      return "An image from earlier in this conversation can't be read from storage";
     case "turn_execution_policy_definition_mismatch":
       return "Opengeni is applying a configuration update";
     default:

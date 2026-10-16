@@ -264,4 +264,7 @@ export const embeddingMigrationTail = [
   // Reads subscription_connections and the owner-capability routine from
   // withheld 0645/0707 and later subscription-core migrations.
   "0777_workspace_admin_subscription_connections.sql",
+  // Installs an inventory read policy with the session-tenancy fence helper
+  // from withheld 0345; replay after it.
+  "0792_scheduled_task_blocker_reviews.sql",
 ];

@@ -1176,6 +1176,20 @@ export function registerBrowserSessionRoutes(
         "browser.action",
         async ({ sessionClient, binding, record, sourceAuthorization }) => {
           stages.mark("placement");
+          const passkeySync = (refresh: boolean) =>
+            syncBrowserPasskeys({
+              port: interactionSecrets,
+              grant,
+              browserSessionId,
+              controllerGeneration: binding.controllerGeneration,
+              client: sessionClient,
+              refresh,
+              log: (event, fields) => console.warn(event, { browserSessionId, ...fields }),
+            });
+          // Before the action this browser takes over the principal's passkeys.
+          // It is independent of the fence read, so both run together; the
+          // action is dispatched only after the takeover settles.
+          const passkeyTakeover = passkeySync(true);
           resolvedFences ??= await resolveBrowserActionFences(request, () =>
             sessionClient.targetState(request.targetId),
           );
@@ -1241,18 +1255,7 @@ export function registerBrowserSessionRoutes(
               });
             }
           }
-          const passkeySync = (refresh: boolean) =>
-            syncBrowserPasskeys({
-              port: interactionSecrets,
-              grant,
-              browserSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              client: sessionClient,
-              refresh,
-              log: (event, fields) => console.warn(event, { browserSessionId, ...fields }),
-            });
-          // Before the action this browser takes over the principal's passkeys.
-          await passkeySync(true);
+          await passkeyTakeover;
           stages.mark("passkey_pre");
           // Resolved last, right before dispatch, so TOTP codes are fresh (Q-33).
           const secretValues = await resolveInteractionSecretValues({
@@ -1281,8 +1284,10 @@ export function registerBrowserSessionRoutes(
             );
           } finally {
             stages.mark("dispatch");
-            await passkeySync(false);
-            stages.mark("passkey_post");
+            // Write back what the action did (new registrations, sign counts)
+            // without holding the response: unacknowledged events stay in
+            // browserd, and the session's next sync waits for this one.
+            void passkeySync(false);
           }
         },
         true,
@@ -3640,6 +3645,9 @@ export function registerBrowserSessionRoutes(
               sandboxGroupId: placement.controllerHostSandboxGroupId,
               holderId: interactionHolderId(browserSessionId),
               operationId,
+              // This operation is recorded only after the controller adopts
+              // the working copy; until then the expired resume holds authority.
+              continuesExpiredBrowserResume: true,
               resourceId: browserSessionId,
               controllerGeneration: binding.controllerGeneration,
             },

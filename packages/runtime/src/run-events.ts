@@ -37,6 +37,12 @@ export type NormalizedRuntimeEvent = {
 export type NormalizeSdkEventOptions = {
   /** Trusted worker replacement for one tool output (for example an artifact receipt). */
   toolOutputOverride?: unknown;
+  /**
+   * Trusted worker edit of one tool output before media normalization, for
+   * example replacing retained image blocks with their artifact receipts while
+   * keeping the result's text.
+   */
+  toolOutputTransform?: (output: unknown) => unknown;
   /** Separately trusted receipt for the event truncation boundary. */
   retainedOutputEvidence?: unknown;
   /** Per-stream phase memory; without it only a completion's own declared phase is known. */
@@ -604,7 +610,11 @@ export function normalizeSdkEvent(
         output:
           "toolOutputOverride" in options
             ? options.toolOutputOverride
-            : normalizeToolOutputForEvent(retainedMcpResult ?? item.output),
+            : normalizeToolOutputForEvent(
+                options.toolOutputTransform
+                  ? options.toolOutputTransform(retainedMcpResult ?? item.output)
+                  : (retainedMcpResult ?? item.output),
+              ),
       },
       ...(options.retainedOutputEvidence !== undefined
         ? { retainedOutputEvidence: options.retainedOutputEvidence }

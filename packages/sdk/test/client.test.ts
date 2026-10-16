@@ -2826,3 +2826,28 @@ test("Claude account disconnects send JSON for scoped browser mutation guards", 
     expect(request.body).toBe("{}");
   }
 });
+
+test("bodiless browser-guarded mutations still send JSON", async () => {
+  const organizationId = "22222222-2222-4222-8222-222222222222";
+  const { client, requests } = makeClient((request) =>
+    request.method === "POST"
+      ? jsonResponse({
+          userCode: "ABCD-EFGH",
+          verificationUri: "https://auth.example.test/codex/device",
+          intervalSeconds: 5,
+          state: "signed",
+        })
+      : new Response(null, { status: 204 }),
+  );
+  await client.codexConnectStart(WORKSPACE_ID);
+  await client.deleteOrganizationMcpConnection(
+    organizationId,
+    "11111111-1111-4111-8111-111111111111",
+  );
+  await client.revokePersonalApiKey(organizationId, "33333333-3333-4333-8333-333333333333");
+  expect(requests.map((request) => request.method)).toEqual(["POST", "DELETE", "DELETE"]);
+  for (const request of requests) {
+    expect(request.headers["content-type"]).toBe("application/json");
+    expect(request.body).toBe("{}");
+  }
+});

@@ -34,7 +34,7 @@ import {
   type ThisComputerPermissionId,
   type WelcomeState,
 } from "../contract";
-import { AccountStore, type StoredAccount } from "./accounts";
+import { AccountStore, readInstalledFrom, type StoredAccount } from "./accounts";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
 import { inboxItemPath } from "./inbox-model";
@@ -50,6 +50,7 @@ import { buildApplicationMenu } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
 import { computerName } from "./computer-name";
+import { allowAgentsOnComputer } from "./computer-grants";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
 import { ThisComputer } from "./this-computer";
 import { AppTray } from "./tray";
@@ -139,6 +140,8 @@ export class DesktopShell {
   private sdk: Promise<SdkModule> | null = null;
   private pending: PendingSignIn | null = null;
   private welcomeError: string | null = null;
+  /** Read once; "" when the app wasn't installed by a server's install script. */
+  private installedFrom: string | null = null;
   private readonly computer: ThisComputer;
   private readonly inbox: InboxNotifier;
   private tray: AppTray | null = null;
@@ -157,16 +160,25 @@ export class DesktopShell {
 
   constructor(private readonly config: DesktopAppConfig) {
     this.redirectUri = `${config.scheme}://auth/callback`;
-    // Linux desktops without a keyring (minimal window managers, remote
-    // desktops) still sign in: the credential is then protected by the
-    // owner-only file permissions alone, as command-line tools do.
-    if (process.platform === "linux" && !safeStorage.isEncryptionAvailable()) {
-      safeStorage.setUsePlainTextEncryption(true);
-    }
+    // Opened on first use, so a first launch with nothing to unlock doesn't
+    // ask for the keyring. Linux desktops without a keyring (minimal window
+    // managers, remote desktops) still sign in: the credential is then
+    // protected by the owner-only file permissions alone, as command-line
+    // tools do.
+    let keyringChecked = false;
+    const keyring = () => {
+      if (!keyringChecked) {
+        keyringChecked = true;
+        if (process.platform === "linux" && !safeStorage.isEncryptionAvailable()) {
+          safeStorage.setUsePlainTextEncryption(true);
+        }
+      }
+      return safeStorage;
+    };
     this.store = new AccountStore(app.getPath("userData"), {
-      available: () => safeStorage.isEncryptionAvailable(),
-      encrypt: (plain) => safeStorage.encryptString(plain),
-      decrypt: (sealed) => safeStorage.decryptString(sealed),
+      available: () => keyring().isEncryptionAvailable(),
+      encrypt: (plain) => keyring().encryptString(plain),
+      decrypt: (sealed) => keyring().decryptString(sealed),
     });
     this.computer = new ThisComputer({
       platform: process.platform as "darwin" | "linux" | "win32",
@@ -186,8 +198,19 @@ export class DesktopShell {
         });
         return minted.token;
       },
+      allowAgents: async (accountId, workspaceId, enrollmentId) => {
+        const client = await this.client(accountId);
+        if (!client) throw new Error("Sign in again to connect this computer.");
+        await allowAgentsOnComputer(client, workspaceId, enrollmentId);
+      },
       openSystemSettings: (url) => void shell.openExternal(url),
       trash: (path) => shell.trashItem(path),
+      onScreenControlHandedOver: () =>
+        showSimpleNotification(
+          `Allow ${config.productName} to use your screen`,
+          `Agents used your screen through the separate agent app, which ${config.productName} replaces. Allow Screen Recording and Accessibility to keep that working.`,
+          () => void this.allowNextPermission(),
+        ),
       onChange: () => {
         this.broadcast(DESKTOP_IPC.computerChanged);
         void this.refreshTray();
@@ -216,6 +239,11 @@ export class DesktopShell {
       return;
     }
     registerLocalScheme();
+    // GNOME and KDE show thin scrollbars only while scrolling; Chromium's
+    // default on Linux is a classic bar with arrow buttons.
+    if (process.platform === "linux") {
+      app.commandLine.appendSwitch("enable-features", "OverlayScrollbar");
+    }
     // Without it Windows shows no notifications for the installed app.
     if (process.platform === "win32") app.setAppUserModelId(config.appId);
     if (process.defaultApp && process.argv[1]) {
@@ -387,6 +415,12 @@ export class DesktopShell {
   reveal(): void {
     if (!this.window) this.openWindow();
     this.window?.reveal();
+  }
+
+  /** Asks for the first screen-control permission still missing, as the menu bar item does. */
+  private async allowNextPermission(): Promise<void> {
+    const next = (await this.computer.summary()).missingPermissions[0];
+    if (next) await this.computer.requestPermission(next).catch(() => undefined);
   }
 
   // --- Window -------------------------------------------------------------------------------------
@@ -792,12 +826,18 @@ export class DesktopShell {
   private welcomeState(): WelcomeState {
     return {
       productName: this.config.productName,
-      defaultServerUrl: this.config.defaultServerUrl,
+      defaultServerUrl: this.defaultServerUrl(),
       pendingServer: this.pending ? serverLabel(this.pending.baseUrl) : null,
       error: this.welcomeError,
       canCancel: this.store.snapshot().accounts.some((account) => !account.signedOut),
       unreachable: this.unreachableState(),
     };
+  }
+
+  /** The server whose install script installed the app, or the product's own. */
+  private defaultServerUrl(): string {
+    this.installedFrom ??= readInstalledFrom(app.getPath("userData"));
+    return this.installedFrom || this.config.defaultServerUrl;
   }
 
   private unreachableState(): WelcomeState["unreachable"] {

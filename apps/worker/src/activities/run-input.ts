@@ -219,6 +219,25 @@ export class RetainedAttachmentTransportLimitError extends Error {
   }
 }
 
+/**
+ * A retained image the conversation already sent could not be read from
+ * object storage, for example while a storage replica catches up after an
+ * outage. Its pixels are part of the accepted prompt, so the turn waits and
+ * retries rather than continuing without them. Integrity mismatches are not
+ * this error: retrying cannot repair different bytes.
+ */
+export class RetainedAttachmentUnavailableError extends Error {
+  readonly fileIds: readonly string[];
+
+  constructor(fileIds: readonly string[]) {
+    super("An image attached earlier in this conversation can't be read from storage right now.");
+    this.name = "RetainedAttachmentUnavailableError";
+    this.fileIds = [...fileIds];
+  }
+}
+
+export type ModelAttachmentReadFailure = "unavailable" | "integrity_mismatch";
+
 export type ModelAttachmentContent = {
   kind: "image" | "file";
   fileId: string;
@@ -286,7 +305,11 @@ function modelAttachmentDescriptor(
 export async function modelAttachmentContentForFiles(
   files: FileAsset[],
   readFileBytes: (file: FileAsset) => Promise<Uint8Array>,
-  options: { retainAll?: boolean } = {},
+  options: {
+    retainAll?: boolean;
+    /** Why a selected file produced no content; omitted files are not reported. */
+    onReadFailure?: (fileId: string, failure: ModelAttachmentReadFailure) => void;
+  } = {},
 ): Promise<ModelAttachmentContent[]> {
   const selected: Array<{
     file: FileAsset;
@@ -327,12 +350,14 @@ export async function modelAttachmentContentForFiles(
             expectedSizeBytes: file.sizeBytes,
             actualSizeBytes: bytes.byteLength,
           });
+          options.onReadFailure?.(file.id, "integrity_mismatch");
           continue;
         }
         if (createHash("sha256").update(bytes).digest("hex") !== checksum) {
           console.error("model attachment checksum did not match finalized metadata", {
             fileId: file.id,
           });
+          options.onReadFailure?.(file.id, "integrity_mismatch");
           continue;
         }
         attachments[index] = {
@@ -350,6 +375,7 @@ export async function modelAttachmentContentForFiles(
           fileId: file.id,
           errorType: safeErrorType(error),
         });
+        options.onReadFailure?.(file.id, "unavailable");
       }
     }
   };
@@ -475,21 +501,27 @@ export function createModelHistoryAttachmentProjector(
           return Boolean(descriptor && descriptor.kind === "image" && policy.supportsImageInput);
         });
       for (const file of readable) attemptedContentIds.add(file.id);
+      const readFailures = new Map<string, ModelAttachmentReadFailure>();
       const content = await modelAttachmentContentForFiles(readable, readFileBytes, {
         retainAll: true,
+        onReadFailure: (fileId, failure) => readFailures.set(fileId, failure),
       });
       const loadedIds = new Set(content.map((entry) => entry.fileId));
-      for (const file of readable) {
-        if (
+      const missing = readable.filter(
+        (file) =>
           file.status === "ready" &&
           file.sizeBytes <= MAX_INLINE_MODEL_ATTACHMENT_BYTES &&
           /^[a-f0-9]{64}$/i.test(file.sha256 ?? "") &&
-          !loadedIds.has(file.id)
-        ) {
-          // Do not let a retry silently proceed with pixels removed.
-          for (const candidate of readable) attemptedContentIds.delete(candidate.id);
-          throw new Error(`Retained attachment bytes unavailable or invalid: ${file.id}`);
+          !loadedIds.has(file.id),
+      );
+      if (missing.length > 0) {
+        // Do not let a retry silently proceed with pixels removed.
+        for (const candidate of readable) attemptedContentIds.delete(candidate.id);
+        const corrupt = missing.find((file) => readFailures.get(file.id) === "integrity_mismatch");
+        if (corrupt) {
+          throw new Error(`Retained attachment bytes unavailable or invalid: ${corrupt.id}`);
         }
+        throw new RetainedAttachmentUnavailableError(missing.map((file) => file.id));
       }
       for (const attachment of content) contentById.set(attachment.fileId, attachment);
     }

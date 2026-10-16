@@ -523,6 +523,60 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     expect(leaseCount?.count).toBe("0");
   }, 60_000);
 
+  test("a session without a home sandbox routes direct operations to its attached machine", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    const session = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "use the machine I attach",
+        sandboxBackend: "none",
+      },
+    );
+    expect(session.sandboxBackend).toBe("none");
+    const direct = async () =>
+      await withChannelA(
+        { db, settings, bus },
+        { accountId, workspaceId, session, subjectId: "subject" },
+        async ({ service, lease }) => {
+          expect(lease).toBeNull();
+          return await service.terminalExec({
+            command: "echo machine-home-ok",
+            cwd: "",
+            timeoutMs: 1_000,
+            emitStream: false,
+          });
+        },
+      );
+    // Nothing attached: there is no machine and no home sandbox to use.
+    await expect(direct()).rejects.toThrow("sandbox not available");
+
+    const attached = await swapActiveSandbox(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        sessionBackend: session.sandboxBackend,
+        sessionGroupId: session.sandboxGroupId,
+        subjectId: "subject",
+      },
+      sandboxId,
+    );
+    expect(attached).toMatchObject({ swapped: true, activeSandboxId: sandboxId });
+    // Attached: the operation reaches the machine (this fixture has no
+    // op-stream, so exec fails there) and never creates a cloud lease.
+    await expect(direct()).rejects.toThrow(/streaming command protocol required for exec/iu);
+    const [leaseCount] = await admin<{ count: string }[]>`
+      select count(*)::text as count
+      from sandbox_leases
+      where workspace_id = ${workspaceId}
+        and sandbox_group_id = ${session.sandboxGroupId}`;
+    expect(leaseCount?.count).toBe("0");
+  }, 60_000);
+
   test("a macOS machine target ⇒ home sandbox_os 'macos' (derived from the enrollment)", async () => {
     if (!available) return;
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine("macos");

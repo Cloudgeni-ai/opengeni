@@ -808,6 +808,7 @@ export { xtermThemeFromTokens } from "./lib/xterm-theme";
 
 // Utilities
 export { cn } from "./lib/cn";
+export { markClassicScrollbars } from "./lib/scrollbars";
 export {
   CREDIT_EXHAUSTION_MESSAGE,
   formatBytes,

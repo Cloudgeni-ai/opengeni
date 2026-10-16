@@ -45,7 +45,11 @@ import {
 } from "@opengeni/interaction";
 import { createAttachedChromeDriver, createAttachedChromeTransport } from "./attached-cdp";
 import { CdpConnection } from "./cdp";
-import { AgentBrowserDriver, type BrowserRuntimeSnapshot } from "./cdp-driver";
+import {
+  AgentBrowserDriver,
+  type BrowserRuntimeSnapshot,
+  type BrowserTabNavigationOptions,
+} from "./cdp-driver";
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
 import { uploadBrowserDownload } from "./download-upload";
 import type { ResolvedAgentBrowserBinary } from "./binary";
@@ -204,9 +208,9 @@ export type BrowserStateCaptureInput = BrowserSessionReference & {
 export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
   readonly focusedInputObservations?: boolean;
-  start(url?: string): Promise<BrowserObservation>;
+  start(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
   listTargets(): Promise<BrowserTarget[]>;
-  openTarget(url?: string): Promise<BrowserObservation>;
+  openTarget(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
   openTargetWithInventory?(url?: string): Promise<BrowserTarget[]>;
   selectTarget(targetId: string): Promise<BrowserObservation>;
   closeTarget(targetId: string): Promise<BrowserTarget[]>;
@@ -242,6 +246,9 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   ownedProcessIdentity?(): Promise<OwnedManagedBrowserProcess | null>;
   /** Release a failed reattach transport without closing its owned browser. */
   detach?(): Promise<void>;
+  /** Explicit end only (never shutdown or reattach): close tabs this session
+   * opened in a browser it does not own and left blank. */
+  closeUnusedOwnedTabs?(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -1011,6 +1018,16 @@ export class BrowserSupervisor {
         // Settle already-dispatched commands before their durable journals close.
         // lifecycle=ending fences queued/new dispatches without replaying input.
         await runtime.controller.waitForIdle();
+      }
+      if (
+        runtime.driver.closeUnusedOwnedTabs &&
+        !suspendForShutdown &&
+        !driverAlreadyClosed &&
+        !runtime.driver.isTerminal?.()
+      ) {
+        // Ending a session in the person's own Chrome must not leave behind the
+        // empty tab it opened. Best effort: the end itself must still succeed.
+        await runtime.driver.closeUnusedOwnedTabs?.().catch(() => undefined);
       }
       await this.disposeRuntime(
         runtime,
@@ -2351,6 +2368,13 @@ async function createBrowserDriver(
     downloadDirectory: context.downloadDirectory,
     screenshotDirectory: context.screenshotDirectory,
     headed: context.headed,
+    // A managed browser on macOS runs on the person's own desktop. A window
+    // would appear in front of them, take focus and intercept their typing;
+    // the agent and the person's live view work through CDP, so it stays
+    // offscreen. A linked ComputerSession drives the native window itself.
+    ...(process.platform === "darwin" && context.headed && !context.linkedComputer
+      ? { offscreen: true }
+      : {}),
     ...(route?.kind === "proxy" && route.proxyUrl ? { proxyUrl: route.proxyUrl } : {}),
     ...(launchArguments.length > 0 ? { launchArguments } : {}),
     ...(route?.consistency.timezone ? { timezone: route.consistency.timezone } : {}),
@@ -3276,7 +3300,10 @@ function profileManifest(
   };
 }
 
-/** Rebuild a checkpoint's tab set on a freshly launched restored profile. */
+/** Rebuild a checkpoint's tab set on a freshly launched restored profile. A
+ * saved tab whose page can't load right now (its host is down or no longer
+ * resolves) is still reopened on the browser's error page, so one unreachable
+ * site never makes the whole browser unrecoverable. */
 export async function restoreTabs(
   driver: BrowserSupervisorDriver,
   capturedTabs: BrowserRuntimeSnapshot["tabs"],
@@ -3290,7 +3317,8 @@ export async function restoreTabs(
     tabs.findIndex((tab) => tab.selected),
   );
   const ordered = [tabs[primaryIndex]!, ...tabs.filter((_, index) => index !== primaryIndex)];
-  const first = await driver.start(ordered[0]!.url);
+  const reopen = { keepTabOnLoadError: true } satisfies BrowserTabNavigationOptions;
+  const first = await driver.start(ordered[0]!.url, reopen);
   const available = (await driver.listTargets()).filter(
     (target) => target.kind === "page" || target.kind === "popup",
   );
@@ -3304,7 +3332,7 @@ export async function restoreTabs(
       index === 0
         ? first.target
         : (available.find((candidate) => !used.has(candidate.id) && candidate.url === tab.url) ??
-          (await driver.openTarget(tab.url)).target);
+          (await driver.openTarget(tab.url, reopen)).target);
     used.add(target.id);
     if (index === 0) selectedTargetId = target.id;
   }

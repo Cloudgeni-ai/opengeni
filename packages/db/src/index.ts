@@ -5,6 +5,7 @@ export {
   acknowledgeScheduledTaskScheduleReconciliation,
   deferScheduledTaskScheduleReconciliation,
 } from "./scheduled-task-lifecycle";
+export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./human-input-secret-answers";
 export * from "./connected-machine-audience";
@@ -85921,7 +85922,6 @@ export * from "./model-context-snapshots";
 export * from "./session-content-blobs";
 export * from "./session-content-compaction";
 export * from "./session-archive";
-export * from "./session-delta-folding";
 export * from "./codemode-operations";
 export * from "./codemode-approvals";
 export * from "./tool-action-reviews";

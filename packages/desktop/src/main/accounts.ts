@@ -5,6 +5,18 @@ import { join } from "node:path";
 import { normalizeServerUrl, type AppLinkAccount } from "@opengeni/sdk/app-links";
 
 /**
+ * The server address a server's install script left in the app's data folder
+ * (`default-server`) for the first sign-in, or "" when there is none.
+ */
+export function readInstalledFrom(dataDir: string): string {
+  try {
+    return normalizeServerUrl(readFileSync(join(dataDir, "default-server"), "utf8")) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/**
  * One signed-in identity on one server. The app keeps several (other servers,
  * other people) and shows one at a time. The credential is the app's own
  * revocable session from the server's native sign-in; it is stored encrypted

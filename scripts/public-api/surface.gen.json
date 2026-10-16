@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedBy": "bun run public-api:refresh",
-  "sdkMajor": 2,
+  "sdkMajor": 3,
   "routes": [
     {
       "method": "GET",
@@ -22881,6 +22881,7 @@
         "$.action|kind=knowledge_source_sync": "ref(KnowledgeSourceSyncAction)",
         "$.agentConfig": "ref(ScheduledTaskAgentConfig)!",
         "$.authorityRevision": "integer!",
+        "$.blocker": "ref(ScheduledTaskBlocker)?",
         "$.createdAt": "string!",
         "$.createdBy": "object!",
         "$.createdBy.kind": "enum!=[\"\\\"service\\\"\",\"\\\"subject\\\"\"]",
@@ -23070,6 +23071,19 @@
         "$.toolPolicy": "ref(ScheduledTaskToolPolicy)?",
         "$.tools": "array?",
         "$.tools[]": "ref(ToolRef)"
+      }
+    },
+    "ScheduledTaskBlocker": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.message": "string!",
+        "$.reason": "string!",
+        "$.runId": "string!",
+        "$.since": "string!",
+        "$.state": "enum!=[\"\\\"notified\\\"\",\"\\\"paused\\\"\"]"
       }
     },
     "ScheduledTaskDegradedAccount": {
@@ -33124,6 +33138,7 @@
       "MachineStatusPill": "value",
       "MachineStatusPillProps": "type",
       "MachineView": "type",
+      "markClassicScrollbars": "value",
       "Markdown": "value",
       "MarkdownInteractiveBlock": "type",
       "MarkdownProps": "type",

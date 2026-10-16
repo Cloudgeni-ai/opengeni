@@ -15,6 +15,7 @@ import {
   type AccessGrant,
 } from "@opengeni/contracts";
 import {
+  getScheduledTaskBlockers,
   getScheduledTaskIncludingDeleted,
   getScheduledTaskRevisionAuthoritySubject,
   listPrivateScheduledTaskSummaries,
@@ -173,6 +174,30 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     });
   }
 
+  // Why a schedule paused itself or why its owner was told about it. Like
+  // drift, this decorates a read and never fails it.
+  async function withBlockers(tasks: ScheduledTask[]): Promise<ScheduledTask[]> {
+    const workspaceId = tasks[0]?.workspaceId;
+    if (!workspaceId) return tasks;
+    try {
+      const blockers = await getScheduledTaskBlockers(
+        db,
+        workspaceId,
+        tasks.map((task) => task.id),
+      );
+      return tasks.map((task) => {
+        const blocker = blockers.get(task.id);
+        return blocker ? { ...task, blocker } : task;
+      });
+    } catch (error) {
+      deps.observability?.warn("Scheduled task blockers could not be read", {
+        errorClass: error instanceof Error ? error.name : "ScheduledTaskBlockerReadError",
+        origin: "api",
+      });
+      return tasks;
+    }
+  }
+
   // Registered before `/:taskId` so the literal segment is never read as an id.
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks/attention", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -270,7 +295,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       viewer.subjectId,
     );
     return c.json(
-      (await withPolicyDrift(authorization, tasks)).map((task) =>
+      (await withBlockers(await withPolicyDrift(authorization, tasks))).map((task) =>
         scheduledTaskForGrant(task, grant),
       ),
     );
@@ -322,8 +347,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     );
     const grant = authorization.grant;
     const task = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
-    const [withDrift] = await withPolicyDrift(authorization, [task]);
-    return c.json(scheduledTaskForGrant(withDrift ?? task, grant));
+    const [decorated] = await withBlockers(await withPolicyDrift(authorization, [task]));
+    return c.json(scheduledTaskForGrant(decorated ?? task, grant));
   });
 
   // The owner's explicit access refresh: re-freeze connectors, connector

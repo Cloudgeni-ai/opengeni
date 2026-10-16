@@ -45,6 +45,7 @@ import {
   reapStaleLeaseHoldersGlobal,
   settleExpiredBrowserSessionResume,
   touchBrowserSessionController,
+  touchExpiredBrowserSessionResume,
   touchInteractionOperation,
 } from "../src";
 import type { BrowserStateArtifactCommitInput } from "../src";
@@ -1570,6 +1571,30 @@ describe("durable BrowserSession lifecycle", () => {
     });
 
     const operationId = crypto.randomUUID();
+    // While the controller adopts the working copy, the continuation has no
+    // dispatched operation of its own; the expired resume is its authority.
+    expect(
+      await touchInteractionOperation(client.db, {
+        ...scope,
+        operationId,
+        resourceId: browserSessionId,
+        controllerGeneration: expiredGeneration,
+      }),
+    ).toBe(false);
+    expect(
+      await touchExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        controllerGeneration: expiredGeneration,
+      }),
+    ).toBe(true);
+    expect(
+      await touchExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        controllerGeneration: crypto.randomUUID(),
+      }),
+    ).toBe(false);
     const continued = await continueExpiredBrowserSessionResume(client.db, {
       ...scope,
       browserSessionId,
@@ -1583,6 +1608,14 @@ describe("durable BrowserSession lifecycle", () => {
       failureCode: null,
       controller: { controllerGeneration: expiredGeneration },
     });
+    // Once continued it is an ordinary active browser, no longer an expired resume.
+    expect(
+      await touchExpiredBrowserSessionResume(client.db, {
+        ...scope,
+        browserSessionId,
+        controllerGeneration: expiredGeneration,
+      }),
+    ).toBe(false);
     expect(continued.operation).toMatchObject({ operationId, kind: "resume", state: "completed" });
     // Same record, same durable checkpoint; the expired attempt stays settled.
     expect(

@@ -85,6 +85,8 @@ import {
 } from "../../observability-metrics";
 import {
   compactRetainedScreenshotHistory,
+  inlineImagesFromToolResultItem,
+  retainedToolImagesEventOutput,
   sdkEventContainsInlineImage,
   retainSessionScreenshot,
   typedScreenshotFromSdkEvent,
@@ -1346,8 +1348,16 @@ export async function runTurnStreamAttempt(
         const completedToolCall = completedToolCallFromSdkEvent(durableSdkEvent);
         if (completedToolCall) {
           toolsExecuted = true;
+          const priorReceipts = media.retainedScreenshotReceiptsByCallId.get(
+            completedToolCall.callId,
+          );
           retainedScreenshotMetadata =
-            media.retainedScreenshotReceiptsByCallId.get(completedToolCall.callId) ?? null;
+            priorReceipts && !Array.isArray(priorReceipts)
+              ? (priorReceipts as RetainedArtifactMetadata)
+              : null;
+          let toolImageReceipts = Array.isArray(priorReceipts)
+            ? (priorReceipts as ReadonlyArray<RetainedArtifactMetadata | null>)
+            : null;
           const typedScreenshot = retainedScreenshotMetadata
             ? null
             : typedScreenshotFromSdkEvent(durableSdkEvent);
@@ -1409,6 +1419,42 @@ export async function runTurnStreamAttempt(
               retainedScreenshotMetadata,
             );
           }
+          if (
+            !retainedScreenshotMetadata &&
+            !toolImageReceipts &&
+            !media.retainedSessionImageCallIds.has(completedToolCall.callId)
+          ) {
+            // Any other tool's images (for example an integration's capture)
+            // are stored once like screenshots, so history keeps a reference
+            // and the timeline can show them. An image that cannot be retained
+            // stays inline, exactly as before.
+            const images = inlineImagesFromToolResultItem(completedToolCall.resultItem);
+            if (images.some((image) => image !== null)) {
+              const receipts: Array<RetainedArtifactMetadata | null> = [];
+              for (const image of images) {
+                // Retention is an optimization here: any failure, expected or
+                // not, keeps that image inline as before.
+                const receipt = image
+                  ? await retainSessionScreenshot({
+                      db,
+                      objectStorage,
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: input.sessionId,
+                      turnId: activeTurnId,
+                      attemptId: input.attemptId,
+                      output: image,
+                    }).catch(() => null)
+                  : null;
+                receipts.push(receipt?.available ? receipt : null);
+              }
+              if (receipts.some((receipt) => receipt !== null)) {
+                toolImageReceipts = receipts;
+                media.retainedScreenshotReceiptsByCallId.set(completedToolCall.callId, receipts);
+              }
+            }
+          }
+          const retainedToolImages = toolImageReceipts;
           normalizedSdkEvents = normalizeSdkEvent(
             durableSdkEvent as typeof next.value,
             retainedScreenshotMetadata
@@ -1422,7 +1468,13 @@ export async function runTurnStreamAttempt(
                         reason: retainedScreenshotMetadata.reason,
                       },
                 }
-              : { messagePhases },
+              : retainedToolImages
+                ? {
+                    messagePhases,
+                    toolOutputTransform: (output) =>
+                      retainedToolImagesEventOutput(output, retainedToolImages),
+                  }
+                : { messagePhases },
           );
           const normalizedToolOutput = normalizedSdkEvents.find(
             (event) =>
@@ -1434,12 +1486,13 @@ export async function runTurnStreamAttempt(
               `Completed SDK tool call ${completedToolCall.callId} produced no durable output projection`,
             );
           }
-          const durableResultItem = retainedScreenshotMetadata
-            ? (compactRetainedScreenshotHistory(
-                [completedToolCall.resultItem],
-                media.retainedScreenshotReceiptsByCallId,
-              )[0] ?? completedToolCall.resultItem)
-            : completedToolCall.resultItem;
+          const durableResultItem =
+            retainedScreenshotMetadata || retainedToolImages
+              ? (compactRetainedScreenshotHistory(
+                  [completedToolCall.resultItem],
+                  media.retainedScreenshotReceiptsByCallId,
+                )[0] ?? completedToolCall.resultItem)
+              : completedToolCall.resultItem;
           // Keep every parallel result in the attempt ledger until the full
           // call batch has settled. The SDK's computed history is
           // non-monotonic while parallel calls complete (a later call may

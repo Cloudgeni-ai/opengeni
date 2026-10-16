@@ -22,6 +22,7 @@ import type {
   SessionMcpToolPermissionsResponse,
   UpdateSessionMcpToolPermissionsRequest,
 } from "@opengeni/contracts";
+import { mcpToolRecommendsApproval } from "@opengeni/contracts";
 import {
   buildConnectionTokenResolver,
   getConnectionMetadata,
@@ -76,6 +77,7 @@ type ListedTool = {
         title?: string | undefined;
       }
     | undefined;
+  _meta?: Record<string, unknown> | undefined;
 };
 
 export function connectorToolGroup(tool: ListedTool): "read" | "write" | "other" {
@@ -422,7 +424,8 @@ export async function getConnectorToolPermissions(
           defaultDecision:
             target.server.requireApproval === true ||
             (Array.isArray(target.server.requireApproval) &&
-              target.server.requireApproval.includes(tool.name))
+              target.server.requireApproval.includes(tool.name)) ||
+            mcpToolRecommendsApproval(tool)
               ? "ask"
               : "allow",
         }),

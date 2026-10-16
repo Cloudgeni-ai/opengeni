@@ -110,6 +110,15 @@ import {
   type WorkspaceToolGatewayCatalogAttestations,
 } from "./workspace-tool-gateway-attestations";
 import type { Observability } from "@opengeni/observability";
+import {
+  isPublishedSiteToolAuthorization,
+  publishedSiteToolAuthority,
+  type PublishedSiteToolAuthorization,
+} from "./site-publishing/page-tool-authority";
+
+export type WorkspaceToolGatewayAuthorization =
+  | AccessGrantAuthorization
+  | PublishedSiteToolAuthorization;
 
 export type PreparedWorkspaceToolGateway = Pick<
   PreparedWorkspaceToolGatewayTools,
@@ -150,8 +159,9 @@ export function requireWorkspaceToolGatewayGrant(grant: AccessGrant): void {
 }
 
 export function requireWorkspaceToolGatewayAuthorization(
-  authorization: AccessGrantAuthorization,
+  authorization: WorkspaceToolGatewayAuthorization,
 ): AccessGrant {
+  if (isPublishedSiteToolAuthorization(authorization)) return authorization.grant;
   const grant = requireResolvedAccessGrantAuthorization(
     authorization,
     authorization.grant.workspaceId,
@@ -177,7 +187,7 @@ export function requireWorkspaceToolGatewayAuthorization(
 
 export async function prepareWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
-  authorization: AccessGrantAuthorization,
+  authorization: WorkspaceToolGatewayAuthorization,
   options: {
     /**
      * Prepare only these exact (account-qualified) identities. Servers outside
@@ -188,6 +198,44 @@ export async function prepareWorkspaceToolGateway(
   } & WorkspaceToolGatewayPreparationOptions = {},
 ): Promise<PreparedWorkspaceToolGateway> {
   const grant = requireWorkspaceToolGatewayAuthorization(authorization);
+  if (isPublishedSiteToolAuthorization(authorization)) {
+    const site = publishedSiteToolAuthority(authorization);
+    const allowed = site.requestedTools.filter(
+      (identity) =>
+        !options.allowedIdentities ||
+        options.allowedIdentities.some(
+          (item) => item.serverId === identity.serverId && item.toolName === identity.toolName,
+        ),
+    );
+    // Targeted preparation replaces its allowlist with the target. It must be
+    // an exact declared identity first; paths are resolved by the Site adapter.
+    const target = options.target;
+    if (
+      target &&
+      (!("identity" in target) ||
+        !allowed.some(
+          (item) =>
+            item.serverId === target.identity.serverId &&
+            item.toolName === target.identity.toolName,
+        ))
+    )
+      throw new HTTPException(403, { message: "site_tool_not_authorized" });
+    await site.reauthorize();
+    const prepared = await prepareWorkspaceToolGatewayForGrantInternal(
+      routeDeps,
+      grant,
+      allowed,
+      site.reauthorize,
+      options,
+    );
+    try {
+      await site.reauthorize();
+    } catch (error) {
+      await prepared.close().catch(() => undefined);
+      throw error;
+    }
+    return { ...prepared, reauthorize: site.reauthorize };
+  }
   if (options.fence) {
     // The fence owns live caller authority for a targeted request: admission
     // ran before preparation, and each physical request evaluates it once.
@@ -1459,9 +1507,13 @@ export type WorkspaceSiteVersionResolver = (
   grant: AccessGrant,
   artifactId: string,
   versionId: string,
-) => Promise<
-  Pick<Awaited<ReturnType<typeof getWorkspaceArtifactContentRef>>, "status" | "version">
->;
+) => Promise<{
+  status: Awaited<ReturnType<typeof getWorkspaceArtifactContentRef>>["status"];
+  version: Pick<
+    Awaited<ReturnType<typeof getWorkspaceArtifactContentRef>>["version"],
+    "id" | "requestedTools"
+  >;
+}>;
 
 const resolveVisibleSiteVersion: WorkspaceSiteVersionResolver = async (
   db,

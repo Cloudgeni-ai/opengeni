@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { InteractionSemanticNode } from "@opengeni/contracts";
 import {
   namespaceCdpAccessibilityFrame,
   normalizeCdpAccessibilityTree,
@@ -244,4 +245,33 @@ test("focused document does not replace the focused descendant select", () => {
     ],
   });
   expect(snapshot.entriesByRef.get(snapshot.focusedRef!)?.backendDOMNodeId).toBe(2);
+});
+
+test("a page with document-sized accessible names still yields a valid snapshot", () => {
+  const snapshot = normalizeCdpAccessibilityTree({
+    controllerGeneration: "controller",
+    targetId: "target",
+    documentGeneration: "document",
+    nodes: [
+      {
+        nodeId: "root",
+        role: { value: "RootWebArea" },
+        name: { value: "Fingerprint report" },
+        childIds: ["cell"],
+        backendDOMNodeId: 1,
+      },
+      {
+        nodeId: "cell",
+        parentId: "root",
+        role: { value: "cell" },
+        name: { value: "x".repeat(20_000) },
+        description: { value: "y".repeat(9_000) },
+        backendDOMNodeId: 2,
+      },
+    ],
+  });
+  const cell = snapshot.roots[0]!.children![0]!;
+  expect(cell.name).toHaveLength(8_192);
+  expect(cell.description).toHaveLength(8_192);
+  expect(InteractionSemanticNode.safeParse(snapshot.roots[0]).success).toBe(true);
 });

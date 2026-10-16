@@ -2039,3 +2039,79 @@ for (const mode of ["start", "restore tabs"] as const) {
     60_000,
   );
 }
+
+chromiumE2e(
+  "restore tabs reopens saved tabs whose pages can't load instead of failing the browser",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-unreachable-restore-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `unreachrestore_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+    });
+    try {
+      // A real unreachable site in both common forms: a refused connection
+      // (a port that was just freed) and a host that doesn't resolve (.invalid
+      // is reserved and never resolves).
+      const freed = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+      const refusedPort = freed.port;
+      freed.stop(true);
+      const unreachableSelected = `http://127.0.0.1:${refusedPort}/selected`;
+      const unreachableOther = "https://saved-site.invalid/other";
+      const reachable = dataUrl("<!doctype html><h1>Reachable saved tab</h1>");
+      await restoreTabs(driver, [
+        { url: reachable, selected: false },
+        { url: unreachableSelected, selected: true },
+        { url: unreachableOther, selected: false },
+      ]);
+      const tabs = await driver.listTargets();
+      expect(tabs).toHaveLength(3);
+      const reachableTab = tabs.find((target) => target.url === reachable);
+      expect(names(await driver.observe(reachableTab!.id))).toContain("Reachable saved tab");
+      // The unreachable tabs stay open on the browser's error page, and the
+      // next checkpoint saves the pages they failed to load, not the error page.
+      const snapshot = await driver.runtimeSnapshot();
+      expect(snapshot.tabs).toHaveLength(3);
+      expect(snapshot.tabs).toContainEqual({ url: unreachableSelected, selected: true });
+      expect(snapshot.tabs).toContainEqual({ url: unreachableOther, selected: false });
+      expect(snapshot.tabs).toContainEqual({ url: reachable, selected: false });
+      // Opening a tab outside restore still reports a page that can't load.
+      await expect(
+        driver.openTarget(`http://127.0.0.1:${refusedPort}/opened`),
+      ).rejects.toMatchObject({ code: "resource_unavailable" });
+      // A failed open never leaves a tab behind, including the first one
+      // after a restore.
+      expect(await driver.listTargets()).toHaveLength(3);
+      await expect(
+        driver.openTarget(`http://127.0.0.1:${refusedPort}/opened-again`),
+      ).rejects.toMatchObject({ code: "resource_unavailable" });
+      expect(await driver.listTargets()).toHaveLength(3);
+      // A malformed URL is never kept, even when restoring: the browser has no
+      // page for it.
+      await expect(driver.openTarget("http://[::1/", { keepTabOnLoadError: true })).rejects.toThrow(
+        "Cannot navigate to invalid URL",
+      );
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);

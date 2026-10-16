@@ -20,6 +20,9 @@ import {
   SITE_TOOL_METHODS,
   SteerSessionQueueItemRequest,
   SubmitComposerDraftRequest,
+  ToolGatewayCallRequest,
+  ToolGatewayResolveRequest,
+  ToolGatewayInvokeRequest,
   type Permission,
   type SiteAuthExchangeResponse,
   type SiteEmbeddedAgent,
@@ -32,6 +35,7 @@ import {
   admissibleWorkspaceModel,
   loadWorkspaceModelSelectionInput,
   resolveWorkspaceModelSelection,
+  hasPermission,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -46,6 +50,7 @@ import {
   createSiteViewerSession,
   getOwnedSiteRuntimeConversation,
   getServableSiteVersion,
+  getPublishedSiteVersion,
   getSession,
   isSiteWorkspaceMember,
   listOwnedSiteRuntimeConversations,
@@ -80,6 +85,18 @@ import {
   sitePlatformBrakeEngaged,
 } from "../site-publishing/platform-usage";
 import { SiteSqlError } from "../site-sql/service";
+import {
+  authorizePublishedSiteTools,
+  publishedSiteToolAuthority,
+} from "../site-publishing/page-tool-authority";
+import {
+  callWorkspaceToolGateway,
+  prepareWorkspaceToolGateway,
+  requireWorkspaceSiteToolAuthorization,
+  workspaceToolGatewayDeclarations,
+} from "../workspace-tool-gateway";
+import { invokeWorkspaceToolTarget, resolveWorkspaceToolTarget } from "../workspace-tool-target";
+import { withSiteSecretContext } from "../workspace-tool-gateway-secrets";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { markLocalInternalDispatch } from "../http/local-browser-boundary";
@@ -834,20 +851,67 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     return request.context.json({ id: created.id, received: true }, 201);
   };
 
-  /**
-   * Workspace tools from a published Site. The tool gateway runs only for a
-   * person present in Opengeni (a canonical human session); a site-session is
-   * not one, so published Sites cannot call tools yet. Refused after the
-   * signature, host and viewer checks so the gateway sees a stable error.
-   */
+  /** Page tools use the signed-in member, not the Site's assistant or owner. */
   const tools = async (request: RuntimeRequest, method: string): Promise<Response> => {
     if (!(SITE_TOOL_METHODS as readonly string[]).includes(method)) throw unsupported();
     await viewing(request);
-    throw siteNotAvailableForViewer(
-      "workspace_tools",
-      "Workspace tools are not available on published Sites",
-      { reason: "site_tools_unavailable" },
-    );
+    const authorization = await authorizePublishedSiteTools(deps, request.domain, request.fields);
+    const authority = publishedSiteToolAuthority(authorization);
+    // Host-selected association overwrites any page-supplied Site context.
+    const site = {
+      siteArtifactId: authority.origin.siteId,
+      siteVersionId: authority.origin.versionId,
+    };
+    const authorizeSite: typeof requireWorkspaceSiteToolAuthorization = (db, grant, context) =>
+      requireWorkspaceSiteToolAuthorization(db, grant, context, authority.readVersion);
+    const options = { signal: request.context.req.raw.signal };
+    let result: unknown;
+    if (method === "resolve") {
+      result = await resolveWorkspaceToolTarget(
+        deps,
+        authorization,
+        { ...parseJson(request.body, ToolGatewayResolveRequest), ...site },
+        options,
+      );
+    } else if (method === "invoke") {
+      result = await withSiteSecretContext(
+        { siteId: site.siteArtifactId, siteVersion: site.siteVersionId },
+        () =>
+          invokeWorkspaceToolTarget(
+            deps,
+            authorization,
+            { ...parseJson(request.body, ToolGatewayInvokeRequest), ...site },
+            options,
+          ),
+      );
+    } else {
+      const call =
+        method === "call" ? { ...parseJson(request.body, ToolGatewayCallRequest), ...site } : null;
+      // Reject undeclared identities before any connector is prepared.
+      if (call)
+        await authorizeSite(deps.db, authorization.grant, { ...site, identity: call.identity });
+      const prepared = await prepareWorkspaceToolGateway(deps, authorization, options);
+      try {
+        result = call
+          ? await callWorkspaceToolGateway(
+              prepared,
+              authorization.grant,
+              call,
+              deps.db,
+              undefined,
+              deps.observability,
+              authorizeSite,
+              async () => authority.origin,
+            )
+          : method === "declarations"
+            ? workspaceToolGatewayDeclarations(prepared)
+            : prepared.toolGatewayCatalog;
+        if (!call) await authority.reauthorize();
+      } finally {
+        await prepared.close();
+      }
+    }
+    return Response.json(result, { headers: { "cache-control": "no-store" } });
   };
 
   /**
@@ -909,8 +973,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
    * What this viewer can use, from the same checks the routes enforce: the
    * agent also needs the platform brake open for people outside the
    * workspace who are not invited, and a credit-billed model for anyone
-   * outside the workspace; the assistant's workspace tools need a member who
-   * may use connections.
+   * outside the workspace. Page tools are independent of the assistant.
    */
   const viewerCapabilities = async (
     host: SiteRuntimeHost,
@@ -928,15 +991,17 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       }).catch(() => null);
       agent = choice !== null && choice.kind !== "unavailable";
     }
+    const version = host.site.currentVersionId
+      ? await getPublishedSiteVersion(deps.db, host.scope, host.site.id, host.site.currentVersionId)
+      : null;
     const workspaceTools =
       base.workspaceTools &&
+      (version?.requestedTools.length ?? 0) > 0 &&
       viewer.subjectId !== null &&
       viewer.subjectId !== undefined &&
-      siteViewerGetsTools(
-        viewer,
-        await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId).catch(
-          () => null,
-        ),
+      hasPermission(
+        (await getSiteWorkspaceMemberPermissions(deps.db, host.scope, viewer.subjectId)) ?? [],
+        "workspace:read",
       );
     return { ...base, agent, workspaceTools };
   };

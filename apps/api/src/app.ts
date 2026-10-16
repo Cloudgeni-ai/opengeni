@@ -120,6 +120,7 @@ import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
 import {
   createObservability,
+  errorCauseAttributes,
   failureDiagnostic,
   withTraceContext,
   withMcpTelemetry,
@@ -698,6 +699,7 @@ export function createAppComposition(deps: AppDependencies): {
         origin: "api",
         reasonKind: diagnostic?.causes[0]?.kind ?? "Response",
         ...(diagnostic ? { diagnosticId: diagnostic.diagnosticId } : {}),
+        ...(error === undefined ? {} : errorCauseAttributes(error)),
       });
       observability.incrementCounter({
         name: "opengeni_http_errors_total",
