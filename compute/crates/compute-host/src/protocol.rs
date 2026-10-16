@@ -246,11 +246,19 @@ impl SandboxConfig {
 /// it started inside the sandbox learns they are gone instead of acting on a
 /// different execution. Pausing, saving and restoring continue the same
 /// execution and keep the generation.
+///
+/// Every request may be retried after a lost reply. Create is idempotent:
+/// repeating it with the same settings succeeds, with other settings it is
+/// refused with [`ErrorCode::Exists`], and while the first attempt is still
+/// under way with [`ErrorCode::Busy`]. Remove reports
+/// [`ErrorCode::NotFound`] once the sandbox is gone, which a retrying
+/// caller takes as done. Waking, holding and connecting change nothing a
+/// repeat would undo.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    /// Create a sandbox. It costs nothing until first needed: the first
-    /// wake boots it.
+    /// Create a sandbox, or confirm one made with the same settings. It
+    /// costs nothing until first needed: the first wake boots it.
     Create {
         /// Its id.
         id: Id,
@@ -393,7 +401,8 @@ pub enum ErrorCode {
     Invalid,
     /// No such sandbox.
     NotFound,
-    /// The sandbox already exists.
+    /// A sandbox of that id exists with other settings, or is being
+    /// removed.
     Exists,
     /// The sandbox is still being created; try again.
     Busy,

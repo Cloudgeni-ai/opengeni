@@ -575,3 +575,69 @@ async fn create_refuses_an_existing_directory() {
     assert_eq!(lab.status().await.sandboxes.len(), 0, "nothing was created");
     lab.assert_clean();
 }
+
+/// A client that lost the reply to its create retries it: the same
+/// settings find the sandbox already made, other settings are refused, and
+/// either way there is one sandbox.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repeated_create_succeeds_only_with_the_same_settings() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(43);
+    let config = SandboxConfig {
+        vcpus: 1,
+        memory_mib: 256,
+        sleep: NEVER,
+    };
+    let create = |config: SandboxConfig| Request::Create {
+        id: sandbox,
+        config,
+    };
+    for _ in 0..2 {
+        let reply = lab.client.call(&create(config.clone())).await.unwrap();
+        assert!(matches!(reply, Reply::Done), "{reply:?}");
+    }
+    let other = SandboxConfig {
+        memory_mib: 512,
+        ..config.clone()
+    };
+    let reply = lab.client.call(&create(other)).await.unwrap();
+    assert!(
+        matches!(
+            reply,
+            Reply::Error {
+                code: ErrorCode::Exists,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    assert_eq!(lab.status().await.sandboxes.len(), 1);
+    let reply = lab
+        .client
+        .call(&Request::Remove {
+            id: sandbox,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(reply, Reply::Done), "{reply:?}");
+    let reply = lab
+        .client
+        .call(&Request::Remove {
+            id: sandbox,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            reply,
+            Reply::Error {
+                code: ErrorCode::NotFound,
+                ..
+            }
+        ),
+        "a repeated remove: {reply:?}"
+    );
+    lab.assert_clean();
+}

@@ -270,12 +270,26 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             ))));
             return;
         }
-        if self.slots.contains_key(&id.0)
-            || self.preparing.contains(&id.0)
-            || self.destroying.contains_key(&id.0)
-            || self.records.get(id).is_some()
+        if self.preparing.contains(&id.0) {
+            // Perhaps this very create's earlier attempt: retrying once it
+            // is done tells.
+            let _ = reply.send(Err(HostError::Busy(id)));
+            return;
+        }
+        let record = self.records.get(id);
+        if self.slots.contains_key(&id.0) || self.destroying.contains_key(&id.0) || record.is_some()
         {
-            let _ = reply.send(Err(HostError::Exists(id)));
+            // Creating is idempotent: a client retrying a create whose reply
+            // it lost finds the sandbox it asked for. One with other
+            // settings, or on its way out, is someone else's.
+            let same = self.slots.get(&id.0).is_some_and(|slot| !slot.destroy)
+                && !self.destroying.contains_key(&id.0)
+                && record.is_some_and(|record| !record.removing && record.config == config);
+            let _ = reply.send(if same {
+                Ok(())
+            } else {
+                Err(HostError::Exists(id))
+            });
             return;
         }
         if self.tearing_down.contains_key(&id.0) {
