@@ -109,6 +109,37 @@ impl LiveMemory {
         futures::future::Either::Right(std::future::pending())
     }
 
+    /// Waits until the image this VM's memory comes from is whole and its
+    /// pager, if it has one, holds every byte: until then the image must
+    /// stay the current one, unsealed and in place, so an agent that
+    /// restarts can still fill it by name. Saves and forgetting the image
+    /// wait for this.
+    pub async fn settled(&self, operation: &'static str) -> Result<(), EngineError> {
+        #[cfg(target_os = "linux")]
+        if let Some(paging) = &self.paging {
+            if let Some(hydration) = paging.hydration.clone() {
+                hydration.finished().await.map_err(|why| {
+                    let kind = if why.permanent {
+                        ErrorKind::MemoryLost
+                    } else {
+                        ErrorKind::Transient
+                    };
+                    EngineError::caused_by(kind, operation, why)
+                })?;
+            }
+            paging.complete().await.map_err(|why| {
+                let kind = match why {
+                    crate::paging::Incomplete::Failed => ErrorKind::MemoryLost,
+                    crate::paging::Incomplete::Stopped => ErrorKind::Transient,
+                };
+                EngineError::new(kind, operation, "the pager does not hold the whole image")
+            })?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = operation;
+        Ok(())
+    }
+
     /// For a VM that has ended and whose files are about to be deleted:
     /// stops serving and fetching its memory and returns once nothing more
     /// will be written for it.
@@ -521,37 +552,22 @@ impl<E: Engine, S: Store> Job<E, S> {
     async fn write_image(&self, live: &mut Live<E::Vm>) -> Result<Verified, EngineError> {
         const OP: &str = "save";
         let images = images_of(&self.paths);
-        // A lazily woken VM's image must be whole before a diff can be
-        // merged over it. Every save waits for it, whatever its base: the
-        // image a pager still reads must stay the current one.
+        // A lazily woken VM's image must be whole, and its pager hold all
+        // of it, before a diff can be merged over it or the image replaced.
+        live.memory.settled(OP).await?;
         #[cfg(target_os = "linux")]
-        if let Some(hydration) = live
-            .memory
-            .paging
-            .as_ref()
-            .and_then(|paging| paging.hydration.clone())
-        {
-            hydration.finished().await.map_err(|why| {
-                let kind = if why.permanent {
-                    ErrorKind::MemoryLost
-                } else {
-                    ErrorKind::Transient
-                };
-                EngineError::caused_by(kind, OP, why)
-            })?;
-            if let Base::Image(generation) = live.memory.base {
-                let images = images.clone();
-                blocking(move || {
-                    let image = images.verify(generation, crate::image::Depth::Light)?;
-                    if image.meta().remote {
-                        images.mark_local(&image)?;
-                    }
-                    Ok::<_, Suspect>(())
-                })
-                .await
-                .map_err(|error| EngineError::io(OP, error))?
-                .map_err(|suspect| suspect_error(OP, suspect))?;
-            }
+        if let (Some(_), Base::Image(generation)) = (&live.memory.paging, live.memory.base) {
+            let images = images.clone();
+            blocking(move || {
+                let image = images.verify(generation, crate::image::Depth::Light)?;
+                if image.meta().remote {
+                    images.mark_local(&image)?;
+                }
+                Ok::<_, Suspect>(())
+            })
+            .await
+            .map_err(|error| EngineError::io(OP, error))?
+            .map_err(|suspect| suspect_error(OP, suspect))?;
         }
         let base = live.memory.base;
         let kind = if base == Base::Unknown {
@@ -816,6 +832,8 @@ impl<E: Engine, S: Store> Job<E, S> {
                 learned: Some(wake_profile(paths)),
                 ready_bytes: READY_BYTES,
                 record_for: self.pager.record_for,
+                // The engine adds the VMM's API socket, which it places.
+                api_socket: None,
             };
             live.paging = Some(paging);
             let mut args = vec![std::ffi::OsString::from("pager")];

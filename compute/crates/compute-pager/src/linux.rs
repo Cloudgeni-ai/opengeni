@@ -4,6 +4,7 @@
 //! [`serve`] runs a pager as a process of its own, one per VM, so the VM's
 //! memory never depends on the host agent that started it.
 
+pub mod quiesce;
 pub mod serve;
 
 use crate::source::Source;
@@ -203,6 +204,34 @@ impl Run {
     }
 }
 
+/// A way for an exiting pager to prove that the VMM has no discard in
+/// flight whose event the pager has not read.
+///
+/// Unregistering the guest's memory stops new events, but not one from a
+/// discard that already looked at the registration: the kernel queues its
+/// event later, outside the address-space lock, and the discarding thread
+/// waits until the event is read. The VMM keeps its own reference to the
+/// UFFD, so after the pager exits nobody would read it and that thread
+/// would wait forever. A proof is an answer from whatever issues the
+/// discards, given after the unregistering; until it comes the pager
+/// keeps reading events.
+pub trait Quiesce: std::fmt::Debug + Send {
+    /// Asks for the proof and returns a descriptor that turns readable when
+    /// [`Quiesce::answered`] may have an answer.
+    ///
+    /// # Errors
+    ///
+    /// The question could not be asked; the pager asks again later.
+    fn ask(&mut self) -> io::Result<RawFd>;
+
+    /// `true` once the answer has come; `false` while it has not.
+    ///
+    /// # Errors
+    ///
+    /// No proof will come of this question; the pager asks again later.
+    fn answered(&mut self) -> io::Result<bool>;
+}
+
 /// One memory image served to one VMM through its UFFD. A single owner
 /// serializes demand faults, discard events and prefetch; nothing here
 /// blocks on the source.
@@ -238,6 +267,8 @@ pub struct Pager<S> {
     finish: bool,
     /// Whether every unsettled page has been queued.
     completing: bool,
+    /// How an exiting pager proves no discard is in flight.
+    quiesce: Option<Box<dyn Quiesce>>,
     pub stats: Stats,
 }
 
@@ -272,6 +303,7 @@ impl<S: Source> Pager<S> {
             prefetch_started: None,
             finish: false,
             completing: false,
+            quiesce: None,
             stats: Stats::default(),
         })
     }
@@ -279,12 +311,14 @@ impl<S: Source> Pager<S> {
     /// Makes [`Pager::run`] bring every page of the image in once the
     /// source is complete and the first-touch recording window has closed,
     /// leaving zero pages to the kernel, then unregister the guest's
-    /// memory from the UFFD and return with [`Progress::Settled`]. From
-    /// then on the kernel serves the VM's memory on its own: a page the
-    /// guest discards reads as zeros without anyone's help.
+    /// memory from the UFFD, read events until `quiesce` proves none is
+    /// still coming, and return with [`Progress::Settled`]. From then on
+    /// the kernel serves the VM's memory on its own: a page the guest
+    /// discards reads as zeros without anyone's help.
     #[must_use]
-    pub fn finish_when_complete(mut self) -> Self {
+    pub fn finish_when_complete(mut self, quiesce: Box<dyn Quiesce>) -> Self {
         self.finish = true;
+        self.quiesce = Some(quiesce);
         self
     }
 
@@ -712,8 +746,11 @@ impl<S: Source> Pager<S> {
                     self.complete()?;
                 }
                 if self.completing && self.settled() {
-                    self.stats.settled_ms = self.started.elapsed().as_secs_f64() * 1000.0;
                     self.unregister()?;
+                    if !self.quiet(stopped)? {
+                        return Ok(());
+                    }
+                    self.stats.settled_ms = self.started.elapsed().as_secs_f64() * 1000.0;
                     progress(Progress::Settled);
                     return Ok(());
                 }
@@ -784,15 +821,9 @@ impl<S: Source> Pager<S> {
     }
 
     /// Unregisters the guest's memory from the UFFD, which wakes any fault
-    /// still waiting so the kernel serves it, then reads what events were
-    /// already queued: a discard waits until its event is read, and the
-    /// VMM keeps its own reference to the UFFD, so an unread one would hold
-    /// the discarding VMM thread forever.
+    /// still waiting so the kernel serves it. Events may still come (see
+    /// [`Quiesce`]); [`Pager::quiet`] reads them.
     fn unregister(&mut self) -> io::Result<()> {
-        /// Events stop once nothing is registered; a discard that had
-        /// already looked at the registration queues its event within
-        /// moments, so the queue is read until it has been quiet this long.
-        const QUIET: Duration = Duration::from_millis(250);
         for region in self.layout.regions() {
             let mut range = [region.base_host_virt_addr, region.size];
             // SAFETY: repr-compatible uffdio_range over a region the VMM
@@ -807,12 +838,78 @@ impl<S: Source> Pager<S> {
                 return Err(error);
             }
         }
-        let deadline = Instant::now() + QUIET * 8;
-        while poll_in(self.fd.as_raw_fd(), QUIET)? && Instant::now() < deadline {
-            while self.read_event()?.is_some() {}
-        }
         Ok(())
     }
+
+    /// Reads events after [`Pager::unregister`] until the [`Quiesce`] proof
+    /// comes or the VMM has gone, asking again every second while a
+    /// question fails. `false` if `stopped` was set first: nothing is
+    /// proven then.
+    fn quiet(&mut self, stopped: &AtomicBool) -> io::Result<bool> {
+        const AGAIN: Duration = Duration::from_secs(1);
+        let mut quiesce = self
+            .quiesce
+            .take()
+            .ok_or_else(|| invalid("finishing without a way to quiesce"))?;
+        let mut asking: Option<RawFd> = None;
+        let mut ask_at = Instant::now();
+        while !stopped.load(Ordering::Relaxed) {
+            if asking.is_none() && Instant::now() >= ask_at {
+                match quiesce.ask() {
+                    Ok(fd) => asking = Some(fd),
+                    Err(error) => {
+                        eprintln!("pager: cannot ask the VMM yet: {error}");
+                        ask_at = Instant::now() + AGAIN;
+                    }
+                }
+            }
+            let ready = poll(
+                &[
+                    self.fd.as_raw_fd(),
+                    self.vmm.as_raw_fd(),
+                    asking.unwrap_or(-1),
+                ],
+                Duration::from_millis(100),
+            )?;
+            // Every event is read, whatever else happens: a discard waits
+            // until its event is. Faults no longer come, and any that
+            // were queued were woken by the unregistering.
+            self.drain_events()?;
+            self.faults.clear();
+            if ready[1] && vmm_gone(&self.vmm) {
+                return Ok(true);
+            }
+            if ready[2] && asking.is_some() {
+                match quiesce.answered() {
+                    Ok(true) => {
+                        self.drain_events()?;
+                        self.faults.clear();
+                        return Ok(true);
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!("pager: the VMM did not answer: {error}");
+                        asking = None;
+                        ask_at = Instant::now() + AGAIN;
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// Whether the VMM's handshake socket has hung up: the VMM has exited.
+fn vmm_gone(vmm: &UnixStream) -> bool {
+    let mut byte = [0_u8; 1];
+    matches!(
+        nix::sys::socket::recv(
+            vmm.as_raw_fd(),
+            &mut byte,
+            MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT
+        ),
+        Ok(0)
+    )
 }
 
 /// Waits up to `timeout` for `fd` to turn readable; returns whether it did.

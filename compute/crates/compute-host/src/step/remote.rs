@@ -232,8 +232,12 @@ impl<E: Engine, S: Store> Job<E, S> {
         {
             return state_failure(&error);
         }
-        // A paused VM loses the base its next diff would be merged over.
+        // A paused VM loses the base its next diff would be merged over;
+        // the image its pager reads stays until the pager holds all of it.
         if let Some(live) = self.live.as_mut() {
+            if let Err(error) = live.memory.settled(OP).await {
+                return failure(&error);
+            }
             live.memory.base = Base::Unknown;
         }
         let paths = self.paths.clone();

@@ -298,6 +298,40 @@ fn holds(dir: &Path, receipt: &str) -> std::io::Result<bool> {
     Ok(disk)
 }
 
+/// The hash the contents list of the copy in `dir` records for each file.
+fn listed(dir: &Path) -> std::io::Result<std::collections::HashMap<String, String>> {
+    let listed = fs::read_to_string(dir.join(CONTENTS))?;
+    Ok(listed
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(name, _)| *name != "made")
+        .map(|(name, hash)| (name.to_owned(), hash.to_owned()))
+        .collect())
+}
+
+/// Copies stored file `name` from `dir` to `to` and checks the copy against
+/// the hash `listed` records for it; a copy that differs is removed.
+fn copy_checked(
+    dir: &Path,
+    name: &str,
+    to: &Path,
+    listed: &std::collections::HashMap<String, String>,
+) -> std::io::Result<()> {
+    let differs = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("the stored {name} differs from what was archived"),
+        )
+    };
+    let expected = listed.get(name).ok_or_else(differs)?;
+    copy_sparse(&dir.join(name), to)?;
+    if hash_file(to)? != *expected {
+        let _ = fs::remove_file(to);
+        return Err(differs());
+    }
+    Ok(())
+}
+
 async fn blocking<T: Send + 'static>(
     operation: &'static str,
     work: impl FnOnce() -> std::io::Result<T> + Send + 'static,
@@ -380,11 +414,14 @@ impl Store for Directory {
         let stored = self.dir(id);
         let into = into.clone();
         blocking("fetch", move || {
+            // Every file is checked against the contents list before it is
+            // used: what comes back is what was archived, or nothing.
+            let listed = listed(&stored)?;
             let staging = crate::layout::Staging::beside(&into.disk)?;
-            copy_sparse(&stored.join("disk"), staging.path())?;
+            copy_checked(&stored, "disk", staging.path(), &listed)?;
             staging.publish()?;
-            if stored.join("profile").exists() {
-                copy_sparse(&stored.join("profile"), &into.profile)?;
+            if listed.contains_key("profile") {
+                copy_checked(&stored, "profile", &into.profile, &listed)?;
             }
             if !into.memory {
                 return Ok(FetchedMemory::None);
@@ -398,8 +435,8 @@ impl Store for Directory {
             fs::create_dir_all(&into.scratch)?;
             let state = into.scratch.join("state");
             let memory = into.scratch.join("memory");
-            copy_sparse(&stored.join("state"), &state)?;
-            copy_sparse(&stored.join("memory"), &memory)?;
+            copy_checked(&stored, "state", &state, &listed)?;
+            copy_checked(&stored, "memory", &memory, &listed)?;
             Ok(FetchedMemory::Local { state, memory })
         })
         .await
@@ -528,5 +565,56 @@ mod tests {
         let disk_only = store.forget_memory(id).await.unwrap().unwrap();
         assert!(!store.verify(id, &second).await.unwrap());
         assert!(store.verify(id, &disk_only).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_directory_fetch_brings_back_only_what_was_archived() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = SavedFiles {
+            disk: dir.path().join("disk"),
+            memory: Some(SavedImage {
+                state: dir.path().join("state"),
+                memory: dir.path().join("memory"),
+                chunks: None,
+            }),
+            profile: None,
+        };
+        fs::write(&files.disk, b"GOOD").unwrap();
+        fs::write(&files.memory.as_ref().unwrap().state, b"state").unwrap();
+        fs::write(&files.memory.as_ref().unwrap().memory, b"memory").unwrap();
+        let store = Directory::new(dir.path().join("store"));
+        let id: Id = "00000000000000000000000000000007".parse().unwrap();
+        store
+            .archive(id, &files, &CancellationToken::new())
+            .await
+            .unwrap();
+        let into = |name: &str| FetchInto {
+            disk: dir.path().join(name).join("disk"),
+            scratch: dir.path().join(name).join("scratch"),
+            profile: dir.path().join(name).join("profile"),
+            memory: true,
+            seed: None,
+        };
+        let good = into("good");
+        fs::create_dir_all(dir.path().join("good")).unwrap();
+        assert!(matches!(
+            store.fetch(id, &good).await.unwrap(),
+            FetchedMemory::Local { .. }
+        ));
+        assert_eq!(fs::read(&good.disk).unwrap(), b"GOOD");
+
+        // The same length, other bytes: refused, and nothing published.
+        fs::write(store.dir(id).join("disk"), b"BADD").unwrap();
+        let bad = into("bad");
+        fs::create_dir_all(dir.path().join("bad")).unwrap();
+        let error = store.fetch(id, &bad).await.unwrap_err();
+        assert!(error.to_string().contains("differs"), "{error}");
+        assert!(!bad.disk.exists());
+        fs::write(store.dir(id).join("disk"), b"GOOD").unwrap();
+        fs::write(store.dir(id).join("memory"), b"memorX").unwrap();
+        let worse = into("worse");
+        fs::create_dir_all(dir.path().join("worse")).unwrap();
+        assert!(store.fetch(id, &worse).await.is_err());
+        assert!(!worse.scratch.join("memory").exists());
     }
 }

@@ -314,6 +314,20 @@ impl Default for StepLimits {
     /// nearly free. Restores, saves and transfers compete for memory
     /// bandwidth, disk and network; incremental saves write little, so many
     /// can run at once.
+    ///
+    /// Fetch stays at 8 because a remote wake is bandwidth-bound, not
+    /// latency-bound: one wake fetches its working-set pack and its disk
+    /// (about 200 MiB for a typical guest) at roughly 80 MB/s per wake when
+    /// 8 run, which already fills a 32-vCPU cloud host's link. Measured with
+    /// 100 wakes at once from object storage, raising the limit to 32 or 100
+    /// left the aggregate rate unchanged and only spread it over more wakes,
+    /// so the median wake finished later (first byte p50 about 30 s at 8,
+    /// 37 s at 32 and 36 to 53 s at 100) and no wake finished earlier. A
+    /// narrow limit serves wakes nearly first come first served, the best
+    /// median for a shared bottleneck. A single wake is unaffected (about
+    /// 0.9 s to first byte). Restore at 32 still fits: a remote restore
+    /// waits only for its pack's first part, and its mean stayed below 2 s
+    /// at 100 wide with Fetch at 8.
     fn default() -> Self {
         Self::uniform(8)
             .with(Step::Resume, 64)

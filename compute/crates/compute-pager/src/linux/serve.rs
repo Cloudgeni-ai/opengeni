@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use super::quiesce::AskVmm;
 use super::{MAX_BATCH, Pager, Progress, poll};
 use crate::control::{self, ToHost, ToPager};
 use crate::source::Fill;
@@ -62,6 +63,10 @@ pub struct Options {
     pub ready_bytes: u64,
     /// How long first touches are recorded.
     pub record_for: Duration,
+    /// The VMM's API socket, which a finishing pager asks before it exits
+    /// (see [`super::quiesce`]). The engine adds it when it starts the
+    /// pager; the pager does not run without it.
+    pub api_socket: Option<PathBuf>,
 }
 
 impl Options {
@@ -86,6 +91,7 @@ impl Options {
             learned: None,
             ready_bytes: 0,
             record_for: Duration::ZERO,
+            api_socket: None,
         };
         while let Some(arg) = args.next() {
             let arg = arg.to_string_lossy().into_owned();
@@ -107,6 +113,7 @@ impl Options {
                 "--tag" => tag = Some(value.to_string_lossy().into_owned()),
                 "--profile" => options.profile = Some(PathBuf::from(&value)),
                 "--learned" => options.learned = Some(PathBuf::from(&value)),
+                "--api-socket" => options.api_socket = Some(PathBuf::from(&value)),
                 "--ready-bytes" => options.ready_bytes = number()?,
                 "--record-ms" => options.record_for = Duration::from_millis(number()?),
                 _ => return Err(format!("unknown argument {arg}")),
@@ -139,7 +146,11 @@ impl Options {
         if self.complete {
             args.push("--complete".into());
         }
-        for (name, path) in [("--profile", &self.profile), ("--learned", &self.learned)] {
+        for (name, path) in [
+            ("--profile", &self.profile),
+            ("--learned", &self.learned),
+            ("--api-socket", &self.api_socket),
+        ] {
             if let Some(path) = path {
                 args.extend([name.into(), path.clone().into()]);
             }
@@ -199,6 +210,12 @@ impl Status {
 }
 
 fn run(options: &Options) -> io::Result<()> {
+    let api_socket = options.api_socket.clone().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--api-socket is required: a pager cannot finish without it",
+        )
+    })?;
     let stopped = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stopped))?;
     let file = File::open(&options.memory)?;
@@ -223,7 +240,15 @@ fn run(options: &Options) -> io::Result<()> {
             .name("control".into())
             .spawn(move || talk(&control, &filling, &status, &hello))?;
     }
-    let result = serve(&vmm, &file, &filling, options, &status, &stopped);
+    let result = serve(
+        &vmm,
+        &file,
+        &filling,
+        options,
+        AskVmm::new(api_socket),
+        &status,
+        &stopped,
+    );
     if result.is_ok() && status.done.load(Ordering::Acquire) {
         filling.signal_tell();
         status.await_goodbye(GOODBYE);
@@ -273,6 +298,7 @@ fn serve(
     file: &File,
     filling: &Arc<Fill>,
     options: &Options,
+    quiesce: AskVmm,
     status: &Status,
     stopped: &AtomicBool,
 ) -> io::Result<()> {
@@ -298,7 +324,8 @@ fn serve(
     };
     peer.set_nonblocking(false)?;
     let source = crate::source::filled(file, Arc::clone(filling))?;
-    let mut pager = Pager::new(peer, source, options.record_for)?.finish_when_complete();
+    let mut pager =
+        Pager::new(peer, source, options.record_for)?.finish_when_complete(Box::new(quiesce));
     let profile = options
         .profile
         .as_deref()
@@ -370,6 +397,7 @@ struct Host {
     /// Bytes read but not yet a whole line.
     partial: Vec<u8>,
     told_prefetched: bool,
+    told_complete: bool,
 }
 
 impl Host {
@@ -474,6 +502,7 @@ fn greet(stream: UnixStream, filling: &Fill, status: &Status, hello: &Hello) -> 
         stream,
         partial: Vec::new(),
         told_prefetched: prefetched,
+        told_complete: false,
     };
     host.send(&ToHost::Hello {
         tag: hello.tag.clone(),
@@ -499,6 +528,10 @@ fn tell(host: &mut Host, filling: &Fill, status: &Status) -> io::Result<()> {
         host.told_prefetched = true;
         host.send(&ToHost::Prefetched)?;
     }
+    if !host.told_complete && filling.readable.complete() {
+        host.told_complete = true;
+        host.send(&ToHost::Complete)?;
+    }
     if status.done.load(Ordering::Acquire) {
         host.send(&ToHost::Done)?;
     }
@@ -521,6 +554,7 @@ mod tests {
             learned: Some("/s/wake.json".into()),
             ready_bytes: 1 << 27,
             record_for: Duration::from_secs(120),
+            api_socket: Some("/j/api.sock".into()),
         };
         assert_eq!(Options::parse(options.args()).unwrap(), options);
         assert!(Options::parse(["--tag".into()]).is_err());

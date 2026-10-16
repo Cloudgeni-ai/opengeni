@@ -166,10 +166,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Err(error) if error.kind == ErrorKind::MemoryLost => {
                     // Its pager runs but nothing it waits for can come.
                     tracing::warn!(%id, %error, "the VM's memory cannot be served; ending it");
-                    if let Some((vm, _)) = self.engine.adopt(spec).await? {
-                        self.engine.stop(vm).await?;
-                    }
-                    return Ok(None);
+                    return match self.engine.adopt(spec).await {
+                        Ok(Some((vm, _))) => self.engine.stop(vm).await.map(|()| None),
+                        Ok(None) => Ok(None),
+                        // The engine saw the same loss and ended the VM itself.
+                        Err(error) if error.kind == ErrorKind::MemoryLost => Ok(None),
+                        Err(error) => Err(error),
+                    };
                 }
                 Err(error) => return Err(error),
             }

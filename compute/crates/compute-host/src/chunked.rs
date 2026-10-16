@@ -388,6 +388,7 @@ impl Store for Chunked {
                 &self.chunks,
                 &self.transfers,
                 &image.memory,
+                image.chunks.clone(),
                 &profile,
                 cancel,
             )

@@ -14,6 +14,11 @@
 //! An agent that restarts reconnects ([`Paging::reconnect`]): the pager
 //! says what it still misses and the new agent goes on filling. Nothing is
 //! lost meanwhile; a fault on a missing page waits.
+//!
+//! The image a pager reads stays the VM's current one, untouched, until the
+//! pager says it holds every byte ([`Paging::complete`]): only then may a
+//! save seal it, replace it or retire it. So an agent that restarts at any
+//! point finds the image the pager still misses bytes of, by name.
 
 use std::io;
 use std::ops::Range;
@@ -149,7 +154,17 @@ pub(crate) struct Paging {
     cancel: CancellationToken,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     prefetched: watch::Receiver<bool>,
+    complete: watch::Receiver<bool>,
     failed: watch::Receiver<bool>,
+}
+
+/// Why a pager will never report its memory file complete.
+#[derive(Debug)]
+pub(crate) enum Incomplete {
+    /// The VM's memory can no longer be served.
+    Failed,
+    /// The agent stopped talking to the pager.
+    Stopped,
 }
 
 impl Paging {
@@ -178,11 +193,10 @@ impl Paging {
     /// restart, as `marker` (written before its launch) names it, and goes
     /// on filling what it still misses from `images`.
     ///
-    /// `None`: no pager listens. Either it finished, and the VM needs none,
-    /// or it died, and the VM can never run again; the engine tells which
-    /// when it adopts the VM. An error of kind
-    /// [`ErrorKind::MemoryLost`] means the pager runs but what it needs
-    /// can never be supplied; other errors prove nothing.
+    /// `None`: no pager listens because it finished, and the VM needs none.
+    /// An error of kind [`ErrorKind::MemoryLost`] means the pager exited
+    /// before it finished, or runs but what it needs can never be
+    /// supplied: the VM can never run again. Other errors prove nothing.
     pub async fn reconnect(
         marker: &Path,
         control: &Path,
@@ -208,7 +222,18 @@ impl Paging {
         };
         let connected = match connect(&link, None, RECONNECT_WITHIN).await {
             Ok(connected) => connected,
-            Err(Refused::Gone(_)) => return Ok(None),
+            // A pager leaves word once it has handed the memory to the
+            // kernel and nothing can wait on it any more.
+            Err(Refused::Gone(_)) if done_file(control).exists() => return Ok(None),
+            // It died without that word. Whether the VM can still run is
+            // the VMM's to show: memory still registered, or a thread
+            // waiting for an event reader, is established loss; a VMM that
+            // answers its API after the pager unregistered everything is
+            // whole. The engine looks when it adopts the VM.
+            Err(Refused::Gone(error)) => {
+                tracing::warn!(%error, "the pager exited before it said it was done");
+                return Ok(None);
+            }
             Err(Refused::Wrong(why)) => {
                 return Err(EngineError::new(ErrorKind::Transient, OP, why));
             }
@@ -241,10 +266,16 @@ impl Paging {
             crate::image::Suspect::Io(error) => EngineError::io(OP, error),
             suspect => EngineError::caused_by(ErrorKind::MemoryLost, OP, suspect),
         })?;
-        if connected.reads != identity || !image.meta().remote {
+        if connected.reads != identity {
             return Err(lost(format!(
                 "the pager misses bytes of a file other than image {generation}'s"
             )));
+        }
+        link.identity = identity;
+        if !image.meta().remote {
+            // A local image's file is whole: the pager only missed word.
+            let filled = connected.missing.clone();
+            return Ok(Some(Self::spawn(link, Some(connected), None, filled)));
         }
         let Some(fetcher) = fetcher else {
             return Err(lost(
@@ -258,7 +289,6 @@ impl Paging {
         let (filled, settled) = resumed(&connected.missing, len);
         let hydration = Hydration::start(fetcher, &memory, refs, hashes, filled, &settled, &[])
             .map_err(|error| EngineError::io(OP, error))?;
-        link.identity = identity;
         Ok(Some(Self::spawn(
             link,
             Some(connected),
@@ -274,6 +304,7 @@ impl Paging {
         filled: Vec<(u64, u64)>,
     ) -> Self {
         let (prefetched_tx, prefetched) = watch::channel(false);
+        let (complete_tx, complete) = watch::channel(false);
         let (failed_tx, failed) = watch::channel(false);
         let cancel = CancellationToken::new();
         let (hydration, arrivals) = hydration.map_or((None, None), |(hydration, arrivals)| {
@@ -285,6 +316,7 @@ impl Paging {
             arrivals,
             filled,
             prefetched: prefetched_tx,
+            complete: complete_tx,
             cancel: cancel.clone(),
         };
         let task = tokio::spawn(async move {
@@ -298,6 +330,7 @@ impl Paging {
             cancel,
             task: Mutex::new(Some(task)),
             prefetched,
+            complete,
             failed,
         }
     }
@@ -324,6 +357,34 @@ impl Paging {
     pub async fn prefetched(&self, limit: Duration) {
         let mut prefetched = self.prefetched.clone();
         let _ = timeout(limit, prefetched.wait_for(|done| *done)).await;
+    }
+
+    /// Waits until the pager holds every byte of its memory file, and so no
+    /// longer needs the image it reads by name.
+    pub async fn complete(&self) -> Result<(), Incomplete> {
+        let mut complete = self.complete.clone();
+        let mut failing = self.failed.clone();
+        let failed = || *self.failed.borrow();
+        tokio::select! {
+            reached = async { complete.wait_for(|complete| *complete).await.is_ok() } => {
+                // Without it the conversation ended: it failed, or the
+                // agent stopped it.
+                if reached {
+                    Ok(())
+                } else if failed() {
+                    Err(Incomplete::Failed)
+                } else {
+                    Err(Incomplete::Stopped)
+                }
+            }
+            gave_up = async { failing.wait_for(|failed| *failed).await.is_ok() } => {
+                if gave_up {
+                    Err(Incomplete::Failed)
+                } else {
+                    std::future::pending().await
+                }
+            }
+        }
     }
 
     /// Resolves if the VM's memory can no longer be served: the VM must
@@ -440,6 +501,7 @@ struct Talk {
     /// Ranges in place before hydration started.
     filled: Vec<(u64, u64)>,
     prefetched: watch::Sender<bool>,
+    complete: watch::Sender<bool>,
     cancel: CancellationToken,
 }
 
@@ -460,6 +522,7 @@ impl Talk {
             match self.converse(connection).await {
                 Ended::Done => {
                     let _ = self.prefetched.send(true);
+                    let _ = self.complete.send(true);
                     return Ok(());
                 }
                 Ended::Cancelled => return Ok(()),
@@ -481,6 +544,7 @@ impl Talk {
             // Gone without a word: done, if it left word.
             Err(Refused::Gone(_)) if done_file(&self.link.control).exists() => {
                 let _ = self.prefetched.send(true);
+                let _ = self.complete.send(true);
                 Ok(None)
             }
             Err(Refused::Gone(error)) => Err(format!("the pager has gone: {error}")),
@@ -499,6 +563,9 @@ impl Talk {
         } = connected;
         if prefetched {
             let _ = self.prefetched.send(true);
+        }
+        if missing.is_empty() {
+            let _ = self.complete.send(true);
         }
         // Whatever is in place that the pager may not know of.
         let mut ranges = self.filled.clone();
@@ -528,6 +595,9 @@ impl Talk {
                         Ok(ToHost::Want { offset, len, urgent }) => self.ask(offset, len, urgent),
                         Ok(ToHost::Prefetched) => {
                             let _ = self.prefetched.send(true);
+                        }
+                        Ok(ToHost::Complete) => {
+                            let _ = self.complete.send(true);
                         }
                         Ok(ToHost::Done) => return Ended::Done,
                         Ok(ToHost::Hello { .. }) | Err(_) => {
@@ -637,6 +707,110 @@ mod tests {
             coalesce(len, [3, 0, 1, 1].into_iter()),
             vec![(0, 2 * CHUNK_BYTES), (3 * CHUNK_BYTES, len)]
         );
+    }
+
+    /// A pager on `control` that greets with `missing` and passes on what
+    /// the agent first tells it, then says the file is complete and stays
+    /// connected until the agent goes.
+    fn fake_pager(
+        control: &Path,
+        tag: String,
+        identity: (u64, u64),
+        missing: Vec<(u64, u64)>,
+    ) -> tokio::sync::oneshot::Receiver<ToPager> {
+        let listener = tokio::net::UnixListener::bind(control).unwrap();
+        let (pass, told) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let hello = ToHost::Hello {
+                tag,
+                device: identity.0,
+                inode: identity.1,
+                missing,
+                prefetched: true,
+            };
+            write
+                .write_all(&control::line(&hello).unwrap())
+                .await
+                .unwrap();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let _ = pass.send(control::parse::<ToPager>(line.as_bytes()).unwrap());
+            write
+                .write_all(&control::line(&ToHost::Complete).unwrap())
+                .await
+                .unwrap();
+            while let Ok(Some(_)) = lines.next_line().await {}
+        });
+        told
+    }
+
+    /// A local image, its launch marker and the pager's control socket.
+    fn local_image(dir: &Path) -> (Images, Generation, PathBuf, PathBuf, String) {
+        let images = Images::new(dir.join("images"));
+        let (state, memory) = (dir.join("state"), dir.join("memory"));
+        std::fs::write(&state, b"s").unwrap();
+        std::fs::write(&memory, vec![7_u8; 3 * 4096]).unwrap();
+        let image = images
+            .publish(crate::image::Parts::Whole {
+                state: &state,
+                memory: &memory,
+            })
+            .unwrap();
+        let generation = image.generation();
+        let tag = tag(generation);
+        let marker = dir.join("paged");
+        std::fs::write(&marker, &tag).unwrap();
+        (images, generation, marker, dir.join("pager.sock"), tag)
+    }
+
+    #[tokio::test]
+    async fn a_pager_that_missed_word_of_a_local_image_is_told_it_is_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let (images, generation, marker, control, tag) = local_image(dir.path());
+        let identity = identity(&images.memory(generation)).unwrap();
+        // The last fill was written but never acknowledged before the
+        // agent died, and the image has since become local.
+        let pager = fake_pager(&control, tag, identity, vec![(4096, 3 * 4096)]);
+        let paging = Paging::reconnect(&marker, &control, images, None)
+            .await
+            .unwrap()
+            .expect("the pager runs");
+        let told = timeout(Duration::from_secs(5), pager)
+            .await
+            .expect("the pager is told")
+            .unwrap();
+        assert_eq!(
+            told,
+            ToPager::Filled {
+                ranges: vec![(4096, 3 * 4096)]
+            }
+        );
+        timeout(Duration::from_secs(5), paging.complete())
+            .await
+            .expect("the pager says it is complete")
+            .unwrap();
+        paging.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_pager_gone_without_word_leaves_the_verdict_to_the_vmm() {
+        let dir = tempfile::tempdir().unwrap();
+        let (images, _, marker, control, _) = local_image(dir.path());
+        // Nothing to reconnect to, done or not: the engine's adoption
+        // decides from the VMM whether its memory was lost.
+        for done in [false, true] {
+            if done {
+                std::fs::write(done_file(&control), b"").unwrap();
+            }
+            assert!(
+                Paging::reconnect(&marker, &control, images.clone(), None)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
 
     #[test]

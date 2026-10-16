@@ -131,6 +131,7 @@ async fn a_pack_brings_back_the_working_set_in_growing_parts() {
         &chunks,
         &transfers(),
         &memory,
+        None,
         &profile(offsets, PAGE),
         &CancellationToken::new(),
     )
@@ -176,6 +177,55 @@ async fn a_pack_brings_back_the_working_set_in_growing_parts() {
     }
 }
 
+/// The chunk map of the file at `path`, as an image records it.
+fn chunk_map_of(path: &Path) -> Vec<Hash> {
+    let bytes = std::fs::read(path).unwrap();
+    bytes
+        .chunks(usize::try_from(CHUNK_BYTES).unwrap())
+        .map(|chunk| {
+            if chunk.iter().all(|&byte| byte == 0) {
+                ZERO
+            } else {
+                *blake3::hash(chunk).as_bytes()
+            }
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn pages_the_file_holds_differently_from_the_stored_image_are_not_packed() {
+    let dir = tempfile::tempdir().unwrap();
+    // Chunk 0 (pages 0 to 63) is damaged after the image was stored, at
+    // the same length: its map entry still names the stored bytes.
+    let memory = image(dir.path(), 256, &[]);
+    let map = chunk_map_of(&memory);
+    File::options()
+        .write(true)
+        .open(&memory)
+        .unwrap()
+        .write_all_at(&[9; PAGE_LEN], 0)
+        .unwrap();
+    let order = vec![0, 5 * PAGE, 64 * PAGE, 130 * PAGE];
+    let (_backend, chunks) = store();
+    let index = put(
+        &chunks,
+        &transfers(),
+        &memory,
+        Some(Arc::new(map)),
+        &profile(order, PAGE),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+    .expect("pages outside the damaged chunk are packed");
+    let (fetched, filled) = fetch_into(&chunks, dir.path(), &index, 256 * PAGE).await;
+    assert_eq!(pages_of(&filled), vec![64 * PAGE, 130 * PAGE]);
+    let original = File::open(&memory).unwrap();
+    for offset in [64 * PAGE, 130 * PAGE] {
+        assert_eq!(page_bytes(&fetched, offset), page_bytes(&original, offset));
+    }
+}
+
 #[tokio::test]
 async fn a_damaged_part_is_left_out_and_the_rest_still_fills() {
     let dir = tempfile::tempdir().unwrap();
@@ -186,6 +236,7 @@ async fn a_damaged_part_is_left_out_and_the_rest_still_fills() {
         &chunks,
         &transfers(),
         &memory,
+        None,
         &profile(order, PAGE),
         &CancellationToken::new(),
     )
@@ -234,6 +285,7 @@ async fn a_bad_index_gives_no_pack() {
         &chunks,
         &transfers(),
         &memory,
+        None,
         &profile(vec![0, PAGE, 63 * PAGE], PAGE),
         &CancellationToken::new(),
     )
@@ -273,6 +325,7 @@ async fn a_part_with_data_in_a_chunk_of_zeros_is_left_out() {
         &chunks,
         &transfers(),
         &memory,
+        None,
         &profile(order, PAGE),
         &CancellationToken::new(),
     )
@@ -374,6 +427,7 @@ async fn a_cancelled_pack_stores_nothing() {
         &chunks,
         &transfers(),
         &memory,
+        None,
         &profile(order, PAGE),
         &cancel,
     )
@@ -387,6 +441,7 @@ async fn a_cancelled_pack_stores_nothing() {
         &chunks,
         &transfers(),
         &memory,
+        None,
         &outside,
         &CancellationToken::new(),
     )

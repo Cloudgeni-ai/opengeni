@@ -180,6 +180,26 @@ fn registered_anywhere() -> bool {
         .any(|flags| flags.split_whitespace().any(|flag| flag == "um"))
 }
 
+/// Stands in for the VMM's API: answers every request with 200, from a
+/// thread of this process, which issues the stand-in VMM's discards.
+fn api(path: &Path) {
+    let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 256];
+            while !request.ends_with(b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => request.extend_from_slice(&buffer[..count]),
+                }
+            }
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+        }
+    });
+}
+
 #[test]
 #[ignore = "requires Linux userfaultfd permission"]
 fn discards_survive_the_agent_and_a_finished_pager_leaves() {
@@ -188,9 +208,12 @@ fn discards_survive_the_agent_and_a_finished_pager_leaves() {
     let bytes: Vec<u8> = (0..PAGES).flat_map(|page| [pattern(page); PAGE]).collect();
     fs::write(&image, &bytes).unwrap();
     let (vmm_socket, control) = (dir.path().join("uffd.sock"), dir.path().join("pager.sock"));
+    let api_socket = dir.path().join("api.sock");
+    api(&api_socket);
     let mut pager = Command::new(env!("CARGO_BIN_EXE_compute-pager"))
         .arg("serve")
         .args(["--vmm-socket".as_ref(), vmm_socket.as_os_str()])
+        .args(["--api-socket".as_ref(), api_socket.as_os_str()])
         .args(["--control".as_ref(), control.as_os_str()])
         .args(["--memory".as_ref(), image.as_os_str()])
         .args(["--tag", "image-1", "--ready-bytes", "0", "--record-ms", "0"])
@@ -257,4 +280,48 @@ fn discards_survive_the_agent_and_a_finished_pager_leaves() {
     discard(&memory, 2);
     assert_eq!(memory[2 * PAGE], 0);
     drop(vmm_uffd);
+}
+
+#[test]
+#[ignore = "requires Linux userfaultfd permission"]
+fn a_discard_nobody_reads_shows_in_its_wait_channel() {
+    let (uffd, memory) = registered();
+    let address = memory.as_ptr() as usize;
+    let (told, tid) = std::sync::mpsc::channel();
+    let discarding = std::thread::spawn(move || {
+        // SAFETY: gettid has no preconditions.
+        told.send(unsafe { libc::gettid() }).unwrap();
+        // SAFETY: a page of a live mapping the test keeps until it joins.
+        unsafe { libc::madvise(address as *mut libc::c_void, PAGE, libc::MADV_DONTNEED) }
+    });
+    let tid = tid.recv().unwrap();
+    let started = Instant::now();
+    let wchan = loop {
+        let wchan = fs::read_to_string(format!("/proc/self/task/{tid}/wchan")).unwrap_or_default();
+        if wchan.contains("userfault") || started.elapsed() > Duration::from_secs(5) {
+            break wchan;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        !discarding.is_finished(),
+        "the discard did not wait for a reader"
+    );
+    // What the engine looks for in a VMM whose pager died mid-discard.
+    assert!(wchan.contains("userfault"), "wait channel {wchan:?}");
+    // Reading the event lets the discard finish.
+    let mut event = [0_u8; 32];
+    let read = loop {
+        // SAFETY: a valid buffer for the event; the descriptor stays open.
+        let count = unsafe { libc::read(uffd.as_raw_fd(), event.as_mut_ptr().cast(), event.len()) };
+        if count == 32 || started.elapsed() > Duration::from_secs(10) {
+            break count;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(read, 32);
+    assert_eq!(discarding.join().unwrap(), 0);
+    // The descriptor goes first, so unmapping waits for nobody.
+    drop(uffd);
+    drop(memory);
 }

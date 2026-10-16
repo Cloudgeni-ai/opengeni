@@ -1,6 +1,7 @@
 use super::*;
 use crate::source::MappedFile;
 use std::fs::File;
+use std::io::Write;
 use std::os::unix::fs::FileExt;
 
 #[test]
@@ -354,9 +355,11 @@ fn kernel_a_finished_pager_leaves_the_memory_to_the_kernel() {
     image.write_all_at(&[0; 4096], 8192).unwrap();
     // SAFETY: the image is private to this test and never changed.
     let source = unsafe { MappedFile::new(&image) }.unwrap();
+    let (answer, answering) = Answer::new();
+    answering.answer();
     let mut pager = Pager::new(peer, source, Duration::ZERO)
         .unwrap()
-        .finish_when_complete();
+        .finish_when_complete(Box::new(answer));
     let settled = std::sync::atomic::AtomicBool::new(false);
     pager
         .run(&AtomicBool::new(false), |progress| {
@@ -390,9 +393,11 @@ fn kernel_a_finished_pager_leaves_the_memory_to_the_kernel() {
 fn kernel_a_pager_does_not_finish_before_its_source_is_complete() {
     let (fd, _memory, peer, _sender) = registered_memory();
     let _vmm_uffd = fd;
+    let (answer, answering) = Answer::new();
+    answering.answer();
     let mut pager = Pager::new(peer, Delayed::new(3), Duration::ZERO)
         .unwrap()
-        .finish_when_complete();
+        .finish_when_complete(Box::new(answer));
     let stopped = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let timer = scope.spawn(|| {
@@ -409,4 +414,76 @@ fn kernel_a_pager_does_not_finish_before_its_source_is_complete() {
         assert!(!settled, "a pager missing bytes settled");
     });
     assert_eq!(pager.stats.copied_bytes, 0);
+}
+
+/// A [`Quiesce`] the test answers when it likes.
+#[derive(Debug)]
+struct Answer(UnixStream);
+
+/// The test's end of an [`Answer`].
+struct Answering(UnixStream);
+
+impl Answer {
+    fn new() -> (Self, Answering) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        ours.set_nonblocking(true).unwrap();
+        (Self(ours), Answering(theirs))
+    }
+}
+
+impl Answering {
+    fn answer(&self) {
+        (&self.0).write_all(&[1]).unwrap();
+    }
+}
+
+impl Quiesce for Answer {
+    fn ask(&mut self) -> io::Result<RawFd> {
+        Ok(self.0.as_raw_fd())
+    }
+
+    fn answered(&mut self) -> io::Result<bool> {
+        let mut byte = [0_u8; 1];
+        match (&self.0).read(&mut byte) {
+            Ok(1) => Ok(true),
+            Ok(_) => Err(io::ErrorKind::UnexpectedEof.into()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires Linux userfaultfd permission"]
+fn kernel_a_finished_pager_exits_only_once_the_vmm_has_answered() {
+    let (fd, memory, peer, _sender) = registered_memory();
+    let _vmm_uffd = fd;
+    let image = image_file(0x5a);
+    // SAFETY: the image is private to this test and never changed.
+    let source = unsafe { MappedFile::new(&image) }.unwrap();
+    let (answer, answering) = Answer::new();
+    let mut pager = Pager::new(peer, source, Duration::ZERO)
+        .unwrap()
+        .finish_when_complete(Box::new(answer));
+    let settled_at = std::sync::Mutex::new(None);
+    let answered_at = std::thread::scope(|scope| {
+        let answered = scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(400));
+            let at = Instant::now();
+            answering.answer();
+            at
+        });
+        pager
+            .run(&AtomicBool::new(false), |progress| {
+                if let Progress::Settled = progress {
+                    *settled_at.lock().unwrap() = Some(Instant::now());
+                }
+            })
+            .unwrap();
+        answered.join().unwrap()
+    });
+    let settled_at = settled_at.lock().unwrap().expect("the pager settled");
+    assert!(settled_at >= answered_at, "settled before the VMM answered");
+    // The memory was unregistered before the answer was asked for.
+    assert!(memory.iter().all(|byte| *byte == 0x5a));
 }

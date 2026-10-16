@@ -12,6 +12,12 @@
 //! and hash checked), and a small index chunk lists the pages in each part
 //! and the pages that are zeros.
 //!
+//! The pack's bytes are read from the local image, but the chunks a wake
+//! checks them against may be older copies the archive reused unread. So
+//! only pages whose every chunk still hashes to the image's chunk map go
+//! into the pack: a page the local file holds differently from the stored
+//! image is left out, and a pack never disagrees with the image it serves.
+//!
 //! A fetch writes the pack's pages into the new image's memory file and
 //! reports them as [`filled`](fetch); the restored guest gets them at once.
 //! The pack is only a cache: a part that cannot be fetched is skipped and
@@ -35,7 +41,7 @@ use futures::{StreamExt as _, stream};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, mpsc};
 
-use crate::image::CHUNK_BYTES;
+use crate::image::{CHUNK_BYTES, Hash, ZERO, chunk_range};
 
 /// How much of the learned working set a wake waits for before its guest
 /// resumes, and so how much of it is packed.
@@ -155,15 +161,21 @@ pub(crate) enum PackError {
 /// and stores the pack, uploading each part as soon as it is made. Returns
 /// the index chunk, or `None` when the profile names no page of the image.
 /// Uploads take a permit from `transfers` each.
+///
+/// `chunk_map`, when given, is the BLAKE3 of each of the image's chunks as
+/// stored ([`ZERO`] for a chunk of zeros): pages in a chunk the file no
+/// longer matches are left out of the pack.
 pub(crate) async fn put(
     chunks: &ChunkStore,
     transfers: &Arc<Semaphore>,
     memory: &Path,
+    chunk_map: Option<Arc<Vec<Hash>>>,
     profile: &WakeProfile,
     cancel: &CancellationToken,
 ) -> Result<Option<ChunkRef>, PackError> {
     let file = File::open(memory)?;
-    let pages = packed(profile, file.metadata()?.len());
+    let len = file.metadata()?.len();
+    let pages = packed(profile, len);
     if pages.is_empty() {
         return Ok(None);
     }
@@ -173,7 +185,10 @@ pub(crate) async fn put(
     let (made, mut parts) = mpsc::channel(PARTS_IN_FLIGHT);
     let packing = {
         let stop = stop.clone();
-        tokio::task::spawn_blocking(move || make_parts(&file, page_size, &pages, &made, &stop))
+        tokio::task::spawn_blocking(move || {
+            let mut canonical = Canonical::new(&file, len, chunk_map.as_deref().map(Vec::as_slice));
+            make_parts(&mut canonical, page_size, &pages, &made, &stop)
+        })
     };
     let uploads = stream::poll_fn(|context| parts.poll_recv(context))
         .map(|part: Result<(Vec<u64>, EncodedChunk), PackError>| {
@@ -222,10 +237,78 @@ pub(crate) async fn put(
     Ok(Some(chunk.reference))
 }
 
-/// Reads `pages` of `page_size` bytes from `file` and sends them on as
+/// Reads the image's pages, each only after the chunks holding it have
+/// been checked against the image's chunk map.
+struct Canonical<'a> {
+    file: &'a File,
+    len: u64,
+    map: Option<&'a [Hash]>,
+    /// Per chunk: whether the file matches the map there, once checked.
+    agrees: Vec<Option<bool>>,
+    buffer: Vec<u8>,
+    left_out: usize,
+}
+
+impl<'a> Canonical<'a> {
+    fn new(file: &'a File, len: u64, map: Option<&'a [Hash]>) -> Self {
+        let count = usize::try_from(len.div_ceil(CHUNK_BYTES)).unwrap_or(0);
+        Self {
+            file,
+            len,
+            map: map.filter(|map| map.len() == count),
+            agrees: vec![None; count],
+            buffer: Vec::new(),
+            left_out: 0,
+        }
+    }
+
+    /// Reads the page at `offset` into `page`; `false` (and nothing read)
+    /// if a chunk holding it differs from the chunk map.
+    fn read(&mut self, page: &mut [u8], offset: u64) -> io::Result<bool> {
+        if let Some(map) = self.map {
+            let first = usize::try_from(offset / CHUNK_BYTES).map_err(io::Error::other)?;
+            let last = usize::try_from((offset + page.len() as u64 - 1) / CHUNK_BYTES)
+                .map_err(io::Error::other)?;
+            for index in first..=last {
+                if !self.agrees(map, index)? {
+                    self.left_out += 1;
+                    return Ok(false);
+                }
+            }
+        }
+        self.file.read_exact_at(page, offset)?;
+        Ok(true)
+    }
+
+    /// Whether chunk `index` of the file holds what the chunk map says,
+    /// checked once per chunk.
+    fn agrees(&mut self, map: &[Hash], index: usize) -> io::Result<bool> {
+        if let Some(agrees) = self.agrees.get(index).copied().flatten() {
+            return Ok(agrees);
+        }
+        let expected = map
+            .get(index)
+            .ok_or_else(|| io::Error::other("page outside the chunk map"))?;
+        let range = chunk_range(index, self.len);
+        self.buffer.resize(
+            usize::try_from(range.end - range.start).map_err(io::Error::other)?,
+            0,
+        );
+        self.file.read_exact_at(&mut self.buffer, range.start)?;
+        let agrees = if *expected == ZERO {
+            self.buffer.iter().all(|&byte| byte == 0)
+        } else {
+            blake3::hash(&self.buffer).as_bytes() == expected
+        };
+        self.agrees[index] = Some(agrees);
+        Ok(agrees)
+    }
+}
+
+/// Reads `pages` of `page_size` bytes from the image and sends them on as
 /// encoded parts, keeping the zero pages out. Returns the zero pages.
 fn make_parts(
-    file: &File,
+    image: &mut Canonical<'_>,
     page_size: u64,
     pages: &[u64],
     made: &mpsc::Sender<Result<(Vec<u64>, EncodedChunk), PackError>>,
@@ -247,7 +330,9 @@ fn make_parts(
             .map_err(|_| PackError::Cancelled)
     };
     for &offset in pages {
-        file.read_exact_at(&mut page, offset)?;
+        if !image.read(&mut page, offset)? {
+            continue;
+        }
         if page.iter().all(|&byte| byte == 0) {
             zeros.push(offset);
             continue;
@@ -262,6 +347,12 @@ fn make_parts(
     }
     if !part_pages.is_empty() {
         send(part_pages, &part)?;
+    }
+    if image.left_out > 0 {
+        tracing::warn!(
+            pages = image.left_out,
+            "pages that differ from the stored image left out of the working-set pack"
+        );
     }
     Ok(zeros)
 }

@@ -53,6 +53,9 @@ pub(super) async fn start(
     let mut command = Command::new(&pager.program);
     command
         .args(&pager.args)
+        // A finishing pager asks the VMM before it exits.
+        .arg("--api-socket")
+        .arg(vm.api.socket())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(log);
@@ -98,18 +101,36 @@ pub(super) async fn start(
 }
 
 /// Whether the VM whose VMM is `vmm`, in `group`, lost its pager while
-/// the guest still needed it: guest memory is still registered for
-/// missing-page faults and nothing but the VMM runs in the group.
+/// the guest still needed it: nothing but the VMM runs in the group, and
+/// either guest memory is still registered for missing-page faults or a
+/// VMM thread waits for a userfaultfd event to be read.
 ///
-/// The group is read first: a pager unregisters the guest's memory before
-/// it exits, so a group without one and memory still registered can only
-/// mean a pager that died.
+/// The group is read first: a pager unregisters the guest's memory and
+/// reads every event still coming before it exits, so either state with
+/// no pager left can only mean a pager that died. A thread whose wait
+/// channel cannot be read proves nothing either way.
 pub(super) fn lost(vmm: Pid, group: &Cgroup) -> io::Result<bool> {
     let vmm = vmm.as_raw_pid().unsigned_abs();
     if group.processes()?.into_iter().any(|pid| pid != vmm) {
         return Ok(false);
     }
-    registered(vmm)
+    Ok(registered(vmm)? || waits_for_event_reader(vmm))
+}
+
+/// Whether a thread of process `pid` sleeps in the kernel's userfaultfd
+/// code: until someone reads the event it queued (a discard of registered
+/// memory, `userfaultfd_event_wait_completion` or the caller it is inlined
+/// into) or answers its fault (`handle_userfault`). With no pager left,
+/// nobody ever will. The kernel test `a_discard_nobody_reads_shows_in_its_wait_channel`
+/// in the pager crate checks the name on the host's kernel.
+fn waits_for_event_reader(pid: u32) -> bool {
+    let Ok(threads) = fs::read_dir(format!("/proc/{pid}/task")) else {
+        return false;
+    };
+    threads.flatten().any(|thread| {
+        fs::read_to_string(thread.path().join("wchan"))
+            .is_ok_and(|wchan| wchan.contains("userfault"))
+    })
 }
 
 /// Whether any of process `pid`'s memory is registered with a
@@ -129,5 +150,6 @@ mod tests {
     #[test]
     fn ordinary_memory_is_not_registered() {
         assert!(!registered(std::process::id()).unwrap());
+        assert!(!waits_for_event_reader(std::process::id()));
     }
 }

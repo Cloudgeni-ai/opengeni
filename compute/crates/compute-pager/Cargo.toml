@@ -13,7 +13,7 @@ workspace = true
 [dependencies]
 libc = "0.2"
 memmap2 = "0.9"
-nix = { version = "0.30", features = ["socket", "uio"] }
+nix = { version = "0.30", features = ["fs", "socket", "uio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 signal-hook = "0.3"

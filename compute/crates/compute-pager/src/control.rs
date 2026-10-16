@@ -31,6 +31,10 @@ pub enum ToHost {
     Want { offset: u64, len: u64, urgent: bool },
     /// The pages the wake waits for are in place.
     Prefetched,
+    /// Every byte of the memory file is filled: the pager needs nothing
+    /// more from the host, which may now seal, replace or remove the
+    /// image by name (the pager keeps the file it has open).
+    Complete,
     /// Every page is in place and the guest's memory no longer has a
     /// fault handler: the pager is exiting and the VM needs it no more.
     Done,
