@@ -6,9 +6,11 @@ import {
 } from "@opengeni/testing";
 import {
   createDb,
+  completeSelfServiceOrganizationSetup,
   ensureManagedAccessForUser,
   getBillingBalance,
   getBillingSubscriptionOperation,
+  maintainSubscriptionPlans,
   readSubscriptionPlanCatalog,
   upsertBillingCustomer,
   type DbClient,
@@ -48,15 +50,39 @@ async function* listed<T>(values: T[]) {
   yield* values;
 }
 
-async function fixture(fixtureOptions: { upgradePeriodShiftSeconds?: number } = {}) {
+async function fixture(
+  fixtureOptions: {
+    upgradePeriodShiftSeconds?: number;
+    eligibleAnniversaryAgoSeconds?: number;
+    initialPeriodAgeSeconds?: number;
+  } = {},
+) {
   const userId = crypto.randomUUID();
-  const accountId = (
-    await ensureManagedAccessForUser(client.db, {
-      userId,
-      email: `${userId}@example.test`,
-      name: "Independent Stripe review",
-    })
-  ).defaultAccountId!;
+  let accountId: string;
+  if (fixtureOptions.eligibleAnniversaryAgoSeconds !== undefined) {
+    await shared.admin`insert into auth_users(id,name,email,email_verified) values (${userId},'Trial owner',${`${userId}@example.test`},true)`;
+    accountId = (
+      await completeSelfServiceOrganizationSetup(client.db, {
+        authUserId: userId,
+        actorSubjectId: `user:${userId}`,
+        organizationName: "Subscription lifecycle fixture",
+        operationId: crypto.randomUUID(),
+        requestFingerprint: "b".repeat(64),
+        trialCreditsEnabled: true,
+      })
+    ).organizationId;
+    await shared.admin`update managed_accounts
+      set created_at = clock_timestamp() - interval '1 month' - make_interval(secs => ${fixtureOptions.eligibleAnniversaryAgoSeconds})
+      where id = ${accountId}`;
+  } else {
+    accountId = (
+      await ensureManagedAccessForUser(client.db, {
+        userId,
+        email: `${userId}@example.test`,
+        name: "Independent Stripe review",
+      })
+    ).defaultAccountId!;
+  }
   const customerId = `cus_${accountId}`;
   await upsertBillingCustomer(client.db, {
     accountId,
@@ -126,7 +152,10 @@ async function fixture(fixtureOptions: { upgradePeriodShiftSeconds?: number } = 
     invoiceFor(sub, `in_${name}_${accountId}`);
     return sub;
   };
-  const original = add("original", Math.floor(Date.now() / 1000) - 60);
+  const original = add(
+    "original",
+    Math.floor(Date.now() / 1000) - (fixtureOptions.initialPeriodAgeSeconds ?? 60),
+  );
   const stripe = {
     prices: { retrieve: async (id: string) => price(id.slice(6)) },
     subscriptions: {
@@ -246,6 +275,13 @@ async function fixture(fixtureOptions: { upgradePeriodShiftSeconds?: number } = 
     service,
     add,
     paid,
+    updated: (sub: any) =>
+      service.handleEvent({
+        id: `evt_updated_${crypto.randomUUID()}`,
+        type: "customer.subscription.updated",
+        livemode: false,
+        data: { object: structuredClone(sub) },
+      } as Stripe.Event),
     invoices,
     invoiceFor,
     payments,
@@ -293,6 +329,77 @@ test("a paid same-second upgrade replaces plan credit exactly once through the r
   expect(await f.service.upgrade(input)).toEqual(result);
   expect(f.updates()).toBe(1);
   expect((await getBillingBalance(client.db, f.accountId)).balanceMicros).toBe(2_000_000_000);
+}, 180_000);
+
+test("a delayed paid checkout replaces a newer Free anniversary without carryover", async () => {
+  const f = await fixture({ eligibleAnniversaryAgoSeconds: 30 });
+  await maintainSubscriptionPlans(client.db, { batchSize: 100 });
+  const before = await getBillingBalance(client.db, f.accountId);
+  expect(before.plan?.key).toBe("free");
+  expect(before.plan?.creditRemainingMicros).toBe(10_000_000);
+  await f.paid(f.original);
+  await f.paid(f.original);
+  const after = await getBillingBalance(client.db, f.accountId);
+  expect(after.plan?.key).toBe("pro");
+  expect(after.plan?.creditRemainingMicros).toBe(200_000_000);
+  expect(after.balanceMicros - before.balanceMicros).toBe(190_000_000);
+}, 180_000);
+
+test("reactivating an unpaid subscription replaces a newer maintenance Free period", async () => {
+  const f = await fixture({
+    eligibleAnniversaryAgoSeconds: 2 * 86_400,
+    initialPeriodAgeSeconds: 5 * 86_400,
+  });
+  f.original.status = "past_due";
+  await f.updated(f.original);
+  f.original.status = "unpaid";
+  await f.updated(f.original);
+  await maintainSubscriptionPlans(client.db, { batchSize: 100 });
+  const before = await getBillingBalance(client.db, f.accountId);
+  expect(before.plan?.key).toBe("free");
+  expect(before.plan?.creditRemainingMicros).toBe(10_000_000);
+  f.original.status = "active";
+  await f.paid(f.original);
+  await f.paid(f.original);
+  const after = await getBillingBalance(client.db, f.accountId);
+  expect(after.plan?.key).toBe("pro");
+  expect(after.plan?.creditRemainingMicros).toBe(200_000_000);
+  expect(after.balanceMicros - before.balanceMicros).toBe(190_000_000);
+}, 180_000);
+
+test("an abandoned incomplete checkout preserves Free credit and the five-seat cap", async () => {
+  const f = await fixture({ eligibleAnniversaryAgoSeconds: 3600 });
+  await maintainSubscriptionPlans(client.db, { batchSize: 100 });
+  const before = await getBillingBalance(client.db, f.accountId);
+  f.original.status = "incomplete";
+  await f.updated(f.original);
+  const pending = await getBillingBalance(client.db, f.accountId);
+  expect(pending.plan?.key).toBe("free");
+  expect(pending.plan?.seatLimit).toBe(5);
+  expect(pending.plan?.creditRemainingMicros).toBe(10_000_000);
+  f.original.status = "incomplete_expired";
+  await f.updated(f.original);
+  await maintainSubscriptionPlans(client.db, { batchSize: 100 });
+  const after = await getBillingBalance(client.db, f.accountId);
+  expect(after.plan?.key).toBe("free");
+  expect(after.plan?.creditRemainingMicros).toBe(10_000_000);
+  expect(after.balanceMicros).toBe(before.balanceMicros);
+}, 180_000);
+
+test("terminal subscription synchronization expires only that subscription's funding", async () => {
+  const f = await fixture({ eligibleAnniversaryAgoSeconds: 3600 });
+  await maintainSubscriptionPlans(client.db, { batchSize: 100 });
+  const before = await getBillingBalance(client.db, f.accountId);
+  // A provider state event can precede the invoice event. The still-open Free
+  // receipt is not funding owned by this subscription and must not be expired.
+  await f.updated(f.original);
+  f.original.status = "canceled";
+  await f.updated(f.original);
+  await maintainSubscriptionPlans(client.db, { batchSize: 100 });
+  const after = await getBillingBalance(client.db, f.accountId);
+  expect(after.plan?.key).toBe("free");
+  expect(after.plan?.creditRemainingMicros).toBe(10_000_000);
+  expect(after.balanceMicros).toBe(before.balanceMicros);
 }, 180_000);
 
 test("an old cancellation retry after Stripe key retention cannot cancel a replacement subscription", async () => {

@@ -621,11 +621,16 @@ export class StripeSubscriptions {
     if (terminal(subscription) || subscription.status === "unpaid") {
       if (state?.stripe_subscription_id === subscriptionId) {
         await tx.save({ planKey: "free", status: "active", stripeSubscriptionId: null });
-        await tx.expire();
+        // A canceled/failed checkout never owns the existing Free allowance.
+        await tx.expire(subscriptionId);
       }
       // Free eligibility/grants are owned by maintenance, never these events.
       return;
     }
+    // Stripe has not collected the first payment. Keep the existing Free
+    // entitlement and seat cap; no paid plan state is earned by an abandoned
+    // checkout. Later invoice.paid re-reads the active provider state normally.
+    if (subscription.status === "incomplete") return;
     const item = subscriptionItem(subscription);
     const plan = (await this.store.catalog()).plans.find(
       (candidate) => candidate.stripePriceId === item.price.id && selfServicePlan(candidate),

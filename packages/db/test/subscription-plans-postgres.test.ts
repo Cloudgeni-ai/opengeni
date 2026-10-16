@@ -863,6 +863,42 @@ test("catalog is owner-only, revisioned and immutable; changing credits only cha
   await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(initial.plans)}::jsonb,'test operator','Restore default catalog after test')`;
 }, 180_000);
 
+test("post-use charges consume covering promotions after a funding reversal removes general funds", async () => {
+  if (!client) return;
+  const { accountId } = await account();
+  await topup(accountId, 100 * M);
+  const period = await grantPlanCreditPeriod(client.db, await activate(accountId));
+  await applyCreditLedgerEntry(client.db, {
+    accountId,
+    type: "grant",
+    amountMicros: 100 * M,
+    eligibleModelIds: ["model-a"],
+    idempotencyKey: crypto.randomUUID(),
+  });
+  await applyCreditLedgerEntry(client.db, {
+    accountId,
+    type: "credit_dispute_hold",
+    amountMicros: -300 * M,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  await applyCreditDebitAfterUse(client.db, {
+    accountId,
+    type: "model_usage_debit",
+    amountMicros: 50 * M,
+    usage: "model-a",
+    sourceType: "model_response",
+    sourceId: crypto.randomUUID(),
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(await getBillingBalance(client.db, accountId)).toMatchObject({
+    balanceMicros: 50 * M,
+    generalBalanceMicros: 0,
+    promotionalCredits: [{ remainingMicros: 50 * M }],
+  });
+  await expirePlanCreditPeriod(client.db, { accountId, periodId: period.id, force: true });
+  expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(50 * M);
+}, 180_000);
+
 test("expiry does not consume scoped promotional funding when general credit already owes debt", async () => {
   if (!client) return;
   const { accountId } = await account();

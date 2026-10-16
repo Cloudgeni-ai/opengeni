@@ -168,5 +168,12 @@ export function planPostUseCreditAllocations(
   if (!Number.isSafeInteger(amountMicros) || amountMicros <= 0) {
     throw new Error("credit debit requires a positive, safe integer micro amount");
   }
-  return allocateToCoveringGrants(balance, amountMicros, usage);
+  // Funding reversals/dispute holds can remove general funds without reducing
+  // derived period usage. Do not preserve covering promotions by charging an
+  // allowance that is no longer backed by a positive general balance.
+  const planBudget = Math.min(
+    balance.plan?.creditRemainingMicros ?? 0,
+    Math.max(0, balance.generalBalanceMicros ?? balance.balanceMicros),
+  );
+  return allocateToCoveringGrants(balance, amountMicros, usage, planBudget);
 }

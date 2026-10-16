@@ -444,8 +444,13 @@ BEGIN
     RETURN grant_plan_credit_period(p_account_id, p_plan_key, p_period_start, p_period_end, p_stripe_subscription_id);
   END IF;
   FOR previous IN SELECT * FROM plan_credit_periods WHERE account_id = p_account_id AND expired_at IS NULL LOOP
-    IF previous.period_start > p_period_start OR
-      (previous.period_start = p_period_start AND previous.plan_key = p_plan_key) THEN
+    -- Free maintenance can run while a paid invoice is delayed or an unpaid
+    -- subscription is reactivated. Its anniversary may be newer than the paid
+    -- period's anchor; it must not prevent replacing Free with paid funding.
+    -- Keep the chronology guard between paid periods and replay check above.
+    IF NOT (previous.stripe_subscription_id IS NULL AND p_stripe_subscription_id IS NOT NULL)
+      AND (previous.period_start > p_period_start OR
+        (previous.period_start = p_period_start AND previous.plan_key = p_plan_key)) THEN
       RAISE EXCEPTION 'Upgrade cannot replace a newer plan period' USING ERRCODE = '55000';
     END IF;
     PERFORM expire_plan_credit_period(p_account_id, previous.id, true);

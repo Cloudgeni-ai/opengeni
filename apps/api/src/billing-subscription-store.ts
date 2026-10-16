@@ -43,7 +43,7 @@ export interface SubscriptionAccountStore {
   balance(): Promise<BillingPlanBalance | null>;
   save(input: Omit<OrganizationPlanStateInput, "accountId">): Promise<void>;
   replace(input: Omit<PlanCreditPeriodInput, "accountId">): Promise<void>;
-  expire(): Promise<void>;
+  expire(subscriptionId: string): Promise<void>;
 }
 
 export interface SubscriptionStore {
@@ -100,13 +100,14 @@ export function subscriptionStore(db: Database): SubscriptionStore {
           replace: async (input) => {
             await replacePlanCreditPeriod(tx, { ...input, accountId });
           },
-          expire: async () => {
+          expire: async (subscriptionId) => {
             const periods = await tx
               .select({ id: planCreditPeriods.id })
               .from(planCreditPeriods)
               .where(
                 and(
                   eq(planCreditPeriods.accountId, accountId),
+                  eq(planCreditPeriods.stripeSubscriptionId, subscriptionId),
                   isNull(planCreditPeriods.expiredAt),
                 ),
               );

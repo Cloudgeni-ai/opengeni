@@ -90,7 +90,11 @@ the frozen receipt and never recompute usage or remove a later top-up.
 It expires the old period and grants the full new amount atomically. Retries
 check the grant receipt before expiring anything, so a duplicated upgrade
 cannot expire its own or a successor period. A failed new grant rolls the
-expiry back. A replacement cannot move behind the open period. It also works
+expiry back. A paid replacement cannot move behind an open paid period. An
+open Free period is different: its anniversary can start while checkout events
+are delayed or an unpaid subscription is reactivated. Paid funding replaces
+that Free allowance even if the paid anchor is earlier; receipt replay still
+cannot refill or expire a successor. It also works
 even when Stripe retains the same integer-second anchor: a different plan has
 a distinct receipt at that anchor, but repeating that plan/anchor never refills.
 This refines the design's subscription/start-only key to reconcile paid
@@ -147,6 +151,9 @@ promotional-first order following Bendik's updated product decision. A single
 request can exhaust the plan and allocate only its excess to promotions. When
 pre-existing general debt has already absorbed the allowance, prepaid
 admission cannot recreate it by repeatedly preserving promotional balances.
+Both prepaid and post-use allocation cap the monthly budget at positive general
+funds; a funding reversal or dispute hold cannot preserve covering promotional
+credit by making usage charge an allowance no longer backed by general funds.
 All ledger helper writers and both video debit/refund paths share the account
 advisory lock and settle ended periods before new ledger writes, independently
 of maintenance timing. `beginPlanCreditSettlement` captures one server timestamp
@@ -236,6 +243,9 @@ comes from `invoice.parent.subscription_details.subscription`.
 Upgrade uses `billing_cycle_anchor=now`, `proration_behavior=always_invoice`
 and `payment_behavior=error_if_incomplete`, then synchronizes the paid invoice.
 Downgrade uses a period-end schedule; cancellation sets `cancel_at_period_end`.
+An initial `incomplete` subscription leaves existing Free credit and seats
+unchanged. Terminal/unpaid events expire only funding belonging to that Stripe
+subscription, never an unconsumed Free allowance from before checkout.
 Duplicate subscriptions are marked, canceled and their duplicate-period paid
 charges refunded idempotently. Historical legitimate invoices are excluded.
 Stripe products/prices, webhook activation and period-end portal configuration
