@@ -20,7 +20,7 @@ use compute_host::{
     BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, NoStore, Store, serve,
 };
 
-use crate::bench::{BenchArgs, bench, run_script};
+use crate::bench::{BenchArgs, bench, exec};
 
 #[derive(Parser)]
 #[command(about = "Run an Opengeni compute host agent, or talk to one")]
@@ -345,16 +345,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&reply)?);
             Ok(())
         }
-        Command::Exec { id, script, port } => {
-            let run = run_script(&client, id, port, &script, true).await?;
-            eprintln!(
-                "woke in {:?}, first byte {:?}, done {:?}",
-                Duration::from_micros(run.waited_us),
-                run.first_byte,
-                run.done
-            );
-            Ok(())
-        }
+        Command::Exec { id, script, port } => exec(&client, id, port, &script).await,
         Command::Bench(args) => bench(&client, &args).await,
     }
 }
