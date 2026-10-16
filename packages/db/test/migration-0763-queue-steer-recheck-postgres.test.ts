@@ -23,6 +23,7 @@ import {
 } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import { stageSiteSessionAudienceColumns } from "./vault-policy-column-fixture";
 
 const MIGRATION = "0763_queue_steer_admission_recheck_repair.sql";
 let database: OwnerMigratedTestDatabase;
@@ -40,6 +41,9 @@ beforeAll(async () => {
         await owner`insert into schema_migrations(name) values (${name})`;
     }
     await migrate(database.ownerUrl);
+    // The schema stops before 0763 for good (0793 stays marked applied), but
+    // the current session adapter names the 0793 Site audience columns.
+    await stageSiteSessionAudienceColumns(database.ownerUrl);
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await owner.end();
