@@ -112,6 +112,9 @@ export function createAttachedChromeDriver(
     controllerGeneration: session.controllerGeneration,
     runner: transport.runner,
     targetLifecycle: "cdp",
+    // The browser is the person's own: ending the session closes the tabs it
+    // opened and left blank.
+    closeUnusedOwnedTabsOnEnd: true,
     connect: async () => transport.connection,
     engine: "chrome",
     permissionControl: false,

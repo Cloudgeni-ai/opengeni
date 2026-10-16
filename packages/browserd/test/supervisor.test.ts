@@ -140,6 +140,32 @@ describe("BrowserSupervisor", () => {
     }
   });
 
+  test("only an explicit end closes the blank tabs a session opened, never a shutdown", async () => {
+    const directory = await mkdtemp("/tmp/ogb-end-blank-tabs-");
+    const cleaned: number[] = [];
+    const supervisor = await BrowserSupervisor.open({
+      rootDirectory: join(directory, "state"),
+      socketRootDirectory: join(directory, "sockets"),
+      createDriver: async (context) => ({
+        ...fakeDriver(context),
+        async closeUnusedOwnedTabs() {
+          cleaned.push(Number(context.browserSessionId.slice(-2)));
+        },
+      }),
+    });
+    try {
+      await supervisor.createSession({ ...reference(46), headed: false });
+      await supervisor.createSession({ ...reference(47), headed: false });
+      await supervisor.endSession(reference(46));
+      expect(cleaned).toEqual([46]);
+    } finally {
+      // Shutdown releases session 47 without touching its tabs.
+      await supervisor.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+    expect(cleaned).toEqual([46]);
+  });
+
   test.skipIf(process.platform === "win32")(
     "rejects a managed socket root before accepting sessions when Unix sockets cannot fit",
     async () => {

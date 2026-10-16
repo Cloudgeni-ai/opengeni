@@ -286,6 +286,9 @@ export type AgentBrowserDriverOptions = {
    * creates page targets. Remote and non-Chromium CDP engines commonly scope
    * targets to the connection that created them, so they require `cdp`. */
   targetLifecycle?: "runner" | "cdp";
+  /** The browser belongs to the person (attached Chrome): an explicit end
+   * closes the tabs this session opened that are still blank. */
+  closeUnusedOwnedTabsOnEnd?: boolean;
   tabControl?: boolean;
   /** Keep owned Chromium pages active without changing the foreground tab. */
   focusEmulation?: boolean;
@@ -375,6 +378,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private physicalGeneration: string;
   private readonly engine: "chromium" | "chrome" | "lightpanda";
   private readonly targetLifecycle: "runner" | "cdp";
+  private readonly closeUnusedOwnedTabsOnEnd: boolean;
+  /** Tabs this session created, in a browser it does not own. */
+  private readonly createdTargetIds = new Set<string>();
   private readonly tabControl: boolean;
   /** Cleared once the browser refuses focus emulation, so later targets keep
    * working without it instead of each paying the refusal. */
@@ -455,6 +461,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       ? validateHeadlessSessionCookies(options.headlessSessionCookies)
       : null;
     this.targetLifecycle = options.targetLifecycle ?? "runner";
+    this.closeUnusedOwnedTabsOnEnd = options.closeUnusedOwnedTabsOnEnd ?? false;
     this.tabControl = options.tabControl ?? true;
     this.focusEmulation = options.focusEmulation ?? false;
     this.frameStreaming = options.frameStreaming ?? true;
@@ -497,6 +504,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (typeof created.targetId !== "string" || !created.targetId) {
         throw new Error("browser did not return its initial page target");
       }
+      if (this.closeUnusedOwnedTabsOnEnd) this.createdTargetIds.add(created.targetId);
       // Attached Chrome's tab inventory may lag the creation receipt. Never
       // substitute another tab (even another blank tab) for the exact target
       // we created: the initial navigation would overwrite the user's page.
@@ -622,6 +630,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       background: true,
     });
     if (typeof result.targetId !== "string") throw new Error("CDP did not return a target id");
+    if (this.closeUnusedOwnedTabsOnEnd) this.createdTargetIds.add(result.targetId);
     const previousSelection = this.selectedTargetId;
     const createdTarget = await this.waitForCreatedTargetInfo(connection, result.targetId);
     const createdState = await this.ensureTargetState(createdTarget);
@@ -650,6 +659,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     targetId: string,
   ): Promise<void> {
     this.removeState(targetId);
+    this.createdTargetIds.delete(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
     try {
       await this.closeTargetAndSettle(connection, targetId);
@@ -693,8 +703,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     await this.requireTargetInfo(connection, targetId);
     await this.closeTargetAndSettle(connection, targetId);
     this.removeState(targetId);
+    this.createdTargetIds.delete(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
     return await this.listTargets();
+  }
+
+  /** Close the tabs this session opened in the person's browser that are
+   * still blank, so ending the session does not leave empty tabs behind.
+   * Tabs that show a page stay: the person may still want what the agent
+   * left there. */
+  async closeUnusedOwnedTabs(): Promise<void> {
+    if (!this.closeUnusedOwnedTabsOnEnd || this.createdTargetIds.size === 0 || !this.connection)
+      return;
+    const connection = this.connection;
+    const infos = await this.targetInfos(connection);
+    for (const info of infos) {
+      if (!this.createdTargetIds.has(info.targetId) || !isBlankTabUrl(info.url)) continue;
+      try {
+        await this.closeTargetAndSettle(connection, info.targetId);
+      } catch {
+        // Best effort per tab; the session end itself still proceeds.
+      }
+      this.createdTargetIds.delete(info.targetId);
+    }
   }
 
   async close(): Promise<void> {
@@ -5061,6 +5092,18 @@ function normalizeTargetInfo(value: unknown): TargetInfo {
     attached: value.attached === true,
     openerId: typeof value.openerId === "string" ? value.openerId : null,
   };
+}
+
+/** A tab with no page: the blank document a new tab starts on (attached
+ * Chrome creates it as an empty data URL) or the browser's new-tab page. */
+function isBlankTabUrl(url: string): boolean {
+  return (
+    url === "" ||
+    url === "about:blank" ||
+    url === "data:text/html," ||
+    url === "chrome://newtab/" ||
+    url === "chrome://new-tab-page/"
+  );
 }
 
 function absoluteTargetUrl(value: unknown): string | null {
