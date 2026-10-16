@@ -561,6 +561,69 @@ class GuestInternals(unittest.TestCase):
         self.assertIn(root / "back" / "inner2", watcher.watched().values())
         self.assertNotIn(root / "back" / "inner", watcher.watched().values())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_child_that_returns_while_its_parent_is_away_keeps_its_watch(self) -> None:
+        # The parent's departure took the child's watch; the child coming
+        # back on its own makes it the tree's again, so the parent's
+        # departure must not take it along when it settles.
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        outside = self.scratch / "elsewhere"
+        os.rename(root / "old", outside)
+        watcher.read_events()
+        os.rename(outside / "inner", root / "rescued")
+        watcher.read_events()
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        watcher.read_events()
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertEqual(sorted(watcher.watched().values()), [root, root / "rescued"])
+        (outside / "ignored").touch()
+        (root / "rescued" / "file").touch()
+        names = [event["name"] for event in watcher.read_events()]
+        self.assertTrue(names)
+        self.assertTrue(all(name == "rescued/file" for name in names), names)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_child_renamed_inside_a_parent_that_stays_away_goes_with_it(self) -> None:
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        outside = self.scratch / "elsewhere"
+        os.rename(root / "old", outside)
+        watcher.read_events()
+        os.rename(outside / "inner", outside / "inner2")
+        watcher.read_events()
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        watcher.read_events()
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertEqual(list(watcher.watched().values()), [root])
+        (outside / "inner2" / "ignored").touch()
+        (root / "fence").touch()
+        names = [event["name"] for event in watcher.read_events()]
+        self.assertTrue(names)
+        self.assertTrue(all(name == "fence" for name in names), names)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_directory_moved_into_one_that_is_away_goes_with_it(self) -> None:
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        outside = self.scratch / "elsewhere"
+        (root / "other" / "deep").mkdir(parents=True)
+        watcher.read_events()
+        self.assertIn(root / "other" / "deep", watcher.watched().values())
+        os.rename(root / "old", outside)
+        watcher.read_events()
+        os.rename(root / "other", outside / "other")
+        watcher.read_events()
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        watcher.read_events()
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertEqual(list(watcher.watched().values()), [root])
+        (outside / "other" / "deep" / "ignored").touch()
+        (root / "fence").touch()
+        names = [event["name"] for event in watcher.read_events()]
+        self.assertTrue(names)
+        self.assertTrue(all(name == "fence" for name in names), names)
+
 
 if __name__ == "__main__":
     unittest.main()

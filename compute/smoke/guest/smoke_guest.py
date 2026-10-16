@@ -395,12 +395,20 @@ class Inotify:
     new directory made at the old path in the meantime keeps its own. Each
     watch belongs to at most one pending departure, the earliest: a parent
     moving while its child's departure is pending leaves the child's watch
-    to the child's departure. A watch the tree takes back before then, as
-    when the same directory returns under another name (a move with a
-    cookie of its own), belongs to the tree again and is left alone when the
-    departure settles. An arrival rewrites the paths of every watch below
-    the old path, and the old paths of departures pending below it, so
-    later moves start from where things are now.
+    to the child's departure. A move whose arrival is seen rewrites the
+    paths of every watch below the old path, and the old paths of
+    departures pending below it, so later moves start from where things are
+    now.
+
+    Every directory that arrives in the tree, paired with its departure or
+    not, is walked and watched again. Asking the kernel to watch a directory
+    it already watches hands back the same watch, so a watch the walk finds
+    belongs to the tree again and is left alone when the departure that
+    took it settles: a directory that returns under another name, or a
+    child that comes back on its own while its parent is still away. The
+    walk sees only what is in the tree now, so it never takes back a watch
+    that is still outside. A directory arriving inside one that is away is
+    not walked; it goes or returns with that one.
     """
 
     def __init__(
@@ -457,6 +465,15 @@ class Inotify:
                 with contextlib.suppress(OSError):
                     self._watch(Path(directory) / name)
 
+    def _watch_tree(self, top: Path) -> None:
+        """Watches `top` and everything below it as they are now. Anything
+        inside may predate the watch: a directory moved in arrives full, and
+        a new one fills fast."""
+
+        with contextlib.suppress(OSError):
+            self._watch(top)
+        self._watch_below(top)
+
     def _below(self, top: Path) -> list[tuple[int, Path]]:
         return [
             (descriptor, path)
@@ -500,6 +517,14 @@ class Inotify:
         for descriptor in held:
             del self._departing[descriptor]
         return old, held
+
+    def _join(self, cookie: int, descriptors: list[int]) -> None:
+        """Gives `descriptors` to the pending departure `cookie`: they moved
+        into a directory that is away, so they go or return with it."""
+
+        self._departed[cookie][2].extend(descriptors)
+        for descriptor in descriptors:
+            self._departing[descriptor] = cookie
 
     def read_events(self) -> list[dict[str, str]]:
         """The events waiting now, possibly none. Call it again within
@@ -547,14 +572,15 @@ class Inotify:
                 if mask & IN_MOVED_FROM:
                     self._depart(cookie, path)
                 elif mask & IN_MOVED_TO and cookie in self._departed:
-                    old, _ = self._settle(cookie)
+                    old, held = self._settle(cookie)
                     self._moved_within(old, path)
-                elif mask & (IN_CREATE | IN_MOVED_TO):
-                    # Anything inside may predate the watch: a directory
-                    # moved in arrives full, and a new one fills fast.
-                    with contextlib.suppress(OSError):
-                        self._watch(path)
-                    self._watch_below(path)
+                    away = self._departing.get(descriptor)
+                    if away is None:
+                        self._watch_tree(path)
+                    else:
+                        self._join(away, held)
+                elif mask & (IN_CREATE | IN_MOVED_TO) and descriptor not in self._departing:
+                    self._watch_tree(path)
             events.append(
                 {
                     "name": path.relative_to(self._root).as_posix(),

@@ -96,9 +96,10 @@ pub struct HostConfig {
 /// `io_bytes_per_second` on average through its network and disk (see
 /// [`Engine::io_bytes`]).
 ///
-/// Vsock traffic is not measured here: the traffic counters see only part
-/// of it, and no rule depends on them for it. Streams the host opens into
-/// the guest hold the sandbox awake while they are open. Connections the
+/// Vsock traffic is not reliably measured here: some of it reaches the
+/// traffic counters and can count toward the rule, but no keep-awake
+/// guarantee rests on it. Streams the host opens into the guest hold the
+/// sandbox awake while they are open. Connections the
 /// guest opens to its host (see [`crate::guest_ports`]) deliberately do
 /// not: a control link carries keepalives for as long as the guest lives,
 /// so its traffic alone must not keep a sandbox awake. Data arriving on one
