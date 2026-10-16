@@ -209,7 +209,7 @@ test("spends plan before promotional and top-up credit; refunds reduce usage and
     ).grantDebitedMicros,
   ).toBe(0);
   expect(
-    (await getBillingBalance(client.db, accountId)).promotionalCredits[0]?.remainingMicros,
+    (await getBillingBalance(client.db, accountId)).promotionalCredits?.[0]?.remainingMicros,
   ).toBe(100 * M);
   const videoSource = crypto.randomUUID();
   await applyCreditDebitAfterUse(client.db, {
