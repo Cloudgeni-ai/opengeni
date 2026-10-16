@@ -89,6 +89,9 @@ struct BaseBaselineFile {
 pub enum BaseBaseline {
     #[default]
     NotGiven,
+    /// The base branch has no `ARCHITECTURE.toml` at the merge base: this
+    /// branch introduces archcheck, so there is nothing to compare with.
+    NotIntroduced(String),
     /// Not TOML, so no table can be compared.
     Unusable(UnusableBase),
     Loaded(BaseTables),
@@ -123,6 +126,8 @@ pub struct UnusableBase {
 #[derive(Debug)]
 pub enum BaseSkip<'a> {
     NotGiven,
+    /// Where the base branch was read, such as `origin/main at 1a2b3c`.
+    NotIntroduced(&'a str),
     Unusable(&'a UnusableBase),
     /// [`Baseline::load_base`] does not read the rule's tables, which it
     /// only allows for a rule whose [`rules::Rule::baseline_rule`] is `None`,
@@ -138,6 +143,9 @@ impl BaseSkip<'_> {
             Self::NotGiven => format!(
                 "{behaviours} (--no-base given, or no [base] branch in ARCHITECTURE.toml and no \
                  --base-baseline)"
+            ),
+            Self::NotIntroduced(base) => format!(
+                "{behaviours} ({base} has no ARCHITECTURE.toml: this branch introduces archcheck)"
             ),
             Self::NotRead => {
                 format!("{behaviours} (archcheck does not read these tables from a base baseline)")
@@ -198,6 +206,7 @@ impl BaseBaseline {
     fn tables(&self) -> Result<&BaseTables, BaseSkip<'_>> {
         match self {
             Self::NotGiven => Err(BaseSkip::NotGiven),
+            Self::NotIntroduced(base) => Err(BaseSkip::NotIntroduced(base)),
             Self::Unusable(unusable) => Err(BaseSkip::Unusable(unusable)),
             Self::Loaded(tables) => Ok(tables),
         }

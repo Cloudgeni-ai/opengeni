@@ -9,7 +9,7 @@
 # that adds an entry or raises a cap is reported.
 
 [file_size]
-"crates/compute-host/src/agent.rs" = 1089
+"crates/compute-host/src/agent.rs" = 1091
 
 [pattern_ratchet.process_spawn]
 

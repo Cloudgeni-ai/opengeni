@@ -61,7 +61,9 @@ the baseline, so that the baseline is no way around the limit. By default
 archcheck reads that copy with git: the `[base] branch` in
 `ARCHITECTURE.toml`, at its merge base with `HEAD`, so a cap the base branch
 lowered after this branch forked is not taken for one this branch raised. A
-base without a baseline file tolerates nothing. A branch that cannot be
+base with `ARCHITECTURE.toml` but no baseline file tolerates nothing; a base
+without `ARCHITECTURE.toml` has not adopted archcheck, so the branch that
+introduces it skips these comparisons and says so. A branch that cannot be
 resolved exits 2, saying to fetch it, give `--base-baseline <path>`, or skip
 the comparison with `--no-base`.
 Lowered caps and removed entries are silent. Only that copy's `[file_size]`

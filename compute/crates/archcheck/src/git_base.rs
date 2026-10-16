@@ -2,8 +2,10 @@
 //!
 //! Comparing with the merge base rather than the branch's tip means a cap the
 //! base branch lowered after this branch forked is not mistaken for one this
-//! branch raised. A base without a baseline file tolerates nothing, so every
-//! entry counts as new.
+//! branch raised. A base that has archcheck's `ARCHITECTURE.toml` but no
+//! baseline file tolerates nothing, so every entry counts as new. A base
+//! without `ARCHITECTURE.toml` has not adopted archcheck yet: the branch
+//! introduces it, and there is nothing to compare with.
 
 use std::{
     path::{Path, PathBuf},
@@ -15,6 +17,7 @@ use thiserror::Error;
 use crate::{
     BASELINE_FILE,
     baseline::{BaseBaseline, Baseline},
+    config::CONFIG_FILE,
     context::LoadError,
 };
 
@@ -46,7 +49,12 @@ pub fn base_baseline_from_git(root: &Path, branch: &str) -> Result<BaseBaseline,
     let revision = String::from_utf8_lossy(&merge_base.stdout)
         .trim()
         .to_owned();
-    // `./` makes the path relative to `root`, wherever it sits in the repository.
+    // `./` makes the paths relative to `root`, wherever it sits in the repository.
+    let config = format!("{revision}:./{CONFIG_FILE}");
+    if !git(root, &["cat-file", "-e", &config])?.status.success() {
+        let short = revision.get(..12).unwrap_or(&revision);
+        return Ok(BaseBaseline::NotIntroduced(format!("{branch} at {short}")));
+    }
     let object = format!("{revision}:./{BASELINE_FILE}");
     let origin = PathBuf::from(format!("{branch} at {revision}: {BASELINE_FILE}"));
     if !git(root, &["cat-file", "-e", &object])?.status.success() {
@@ -91,8 +99,9 @@ mod tests {
     }
 
     /// A repository whose `compute/` holds the baseline, with one commit on
-    /// `base` and `HEAD` one commit ahead of it.
-    fn repository(baseline: Option<&str>) -> tempfile::TempDir {
+    /// `base` and `HEAD` one commit ahead of it. `base` has archcheck's
+    /// configuration unless `introduced` is false.
+    fn repository_with(baseline: Option<&str>, introduced: bool) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let root = dir.path();
         let workspace = root.join("compute");
@@ -101,12 +110,16 @@ mod tests {
         run(root, &["config", "user.name", "archcheck"]);
         run(root, &["config", "user.email", "archcheck@example.invalid"]);
         fs::write(workspace.join("README"), "base\n").expect("a file");
+        if introduced {
+            fs::write(workspace.join(CONFIG_FILE), "").expect("the configuration");
+        }
         if let Some(text) = baseline {
             fs::write(workspace.join(BASELINE_FILE), text).expect("the baseline");
         }
         run(root, &["add", "-A"]);
         run(root, &["commit", "-q", "-m", "base"]);
         run(root, &["branch", "base"]);
+        fs::write(workspace.join(CONFIG_FILE), "").expect("the branch's configuration");
         fs::write(
             workspace.join(BASELINE_FILE),
             "[file_size]\n\"later.rs\" = 9\n",
@@ -115,6 +128,10 @@ mod tests {
         run(root, &["add", "-A"]);
         run(root, &["commit", "-q", "-m", "work"]);
         dir
+    }
+
+    fn repository(baseline: Option<&str>) -> tempfile::TempDir {
+        repository_with(baseline, true)
     }
 
     #[test]
@@ -133,6 +150,21 @@ mod tests {
         let dir = repository(None);
         let base = base_baseline_from_git(&dir.path().join("compute"), "base").expect("read");
         assert!(base.table("file_size").expect("a usable table").is_empty());
+    }
+
+    #[test]
+    fn a_base_without_archcheck_is_reported_as_not_introduced() {
+        let dir = repository_with(Some("[file_size]\n\"a.rs\" = 7\n"), false);
+        let base = base_baseline_from_git(&dir.path().join("compute"), "base").expect("read");
+        assert!(
+            matches!(&base, BaseBaseline::NotIntroduced(at) if at.starts_with("base at ")),
+            "{base:?}"
+        );
+        let skip = base.table("file_size").expect_err("nothing to compare");
+        assert!(
+            skip.message("file_size.no_new_entries skipped")
+                .contains("this branch introduces archcheck"),
+        );
     }
 
     #[test]

@@ -11,7 +11,11 @@ use compute_archcheck::{Context, check};
 fn repository_config_and_baseline_pass_every_required_rule() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let ctx = Context::load(&root).unwrap();
-    assert!(!ctx.files.is_empty());
+    assert!(
+        !ctx.files.is_empty(),
+        "no production Rust files under {}",
+        root.display()
+    );
 
     let required: Vec<_> = check(&ctx)
         .into_iter()
