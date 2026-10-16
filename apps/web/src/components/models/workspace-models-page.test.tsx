@@ -419,7 +419,7 @@ test("the pool notice names this workspace's kept people-limited copies, in ever
       keptForPeople: ["A"],
     }),
   ).toEqual({
-    text: "New work uses this workspace's Codex accounts. A, kept as this workspace's own, serves only the people chosen for it. The organization's other accounts are set aside while this workspace has its own.",
+    text: "New work uses this workspace's Codex accounts together with the organization's other accounts. A, kept as this workspace's own, serves only the people chosen for it.",
     blocked: false,
   });
 });
@@ -891,6 +891,14 @@ describe("Models list", () => {
   });
 
   test("one flat Accounts list: no provider group headers, no unconnected providers", async () => {
+    // Picked automatically, the server lists the organization's accounts beside this workspace's.
+    accounts = {
+      ...accounts,
+      accounts: [
+        ...accounts.accounts,
+        codexAccount({ id: "org-1", label: "Company plan", source: "organization" }),
+      ],
+    };
     const view = await render();
     try {
       const text = view.container.textContent ?? "";
@@ -903,9 +911,9 @@ describe("Models list", () => {
       expect(text).not.toContain("ChatGPT plan");
       expect(button(view.container, "More actions for Codex")).toBeUndefined();
       expect(button(view.container, "Edit")).toBeUndefined();
-      // This workspace's account, then the organization's pool, muted.
+      // The organization's account and this workspace's, both in use.
       expect(view.container.querySelectorAll("[data-slot=list-row]")).toHaveLength(2);
-      expect(text).toContain("Not in use");
+      expect(text).not.toContain("Not in use");
       // Every account says who it is for. Without organization rights the
       // organization's "Available in" can't be read, so it says who shares it.
       expect(text).toContain("Design preview only");
@@ -1063,7 +1071,7 @@ describe("Codex pool controls", () => {
     try {
       expect(view.container.querySelector('[role="radiogroup"]')).toBeNull();
       expect(view.container.textContent).toContain(
-        "New work uses this workspace's Codex account. The organization's accounts are set aside while this workspace has its own.",
+        "New work uses this workspace's Codex account together with the organization's accounts.",
       );
       expect(button(view.container, "Use automatically")).toBeUndefined();
     } finally {
@@ -1099,10 +1107,10 @@ describe("Codex pool controls", () => {
     const view = await render();
     try {
       expect(view.container.textContent).toContain(
-        "New work uses the organization's Codex account. Connect an account here to use your own instead.",
+        "New work uses the organization's Codex account. Accounts connected here are used together with it.",
       );
       await act(async () =>
-        button(view.container, "Always use the organization's accounts")!.click(),
+        button(view.container, "Use only the organization's accounts")!.click(),
       );
       await flush();
       expect(client.requestJson).toHaveBeenCalledWith(
@@ -1332,7 +1340,7 @@ describe("Codex account page", () => {
     expect(await setAside(undefined)).toBe(true);
   });
 
-  test("the pool notice counts only the workspace's own accounts", async () => {
+  test("picked automatically, the pool notice says both pools are used", async () => {
     accounts = {
       ...accounts,
       accounts: [
@@ -1344,8 +1352,11 @@ describe("Codex account page", () => {
     const view = await render();
     try {
       const text = view.container.textContent ?? "";
-      expect(text).toContain("New work uses this workspace's Codex account.");
-      expect(text).toContain("while this workspace has its own");
+      // Counts only the workspace's own, and sets nothing aside.
+      expect(text).toContain(
+        "New work uses this workspace's Codex account together with the organization's accounts.",
+      );
+      expect(text).not.toContain("Set aside");
     } finally {
       await cleanup(view);
     }
@@ -1353,47 +1364,103 @@ describe("Codex account page", () => {
 });
 
 describe("Connect Codex", () => {
-  for (const mode of ["automatic", "organization"] as const) {
-    test(`asks which subscriptions to use while the organization's are in use (${mode})`, async () => {
+  test("picked automatically, a new account joins the organization's without asking", async () => {
+    accounts = {
+      ...accounts,
+      accounts: [],
+      source: {
+        ...source,
+        mode: "automatic",
+        effectiveSource: "organization",
+        workspaceAvailable: false,
+      },
+    };
+    asOrganizationAdmin();
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect:codex" }));
+      await flush();
+      expect(view.container.textContent).not.toContain("Use this account for new work?");
+      expect(view.container.querySelector('[role="radio"]')).toBeNull();
+      await act(async () => button(view.container, "Sign in with ChatGPT")!.click());
+      await flush();
+      expect(client.codexConnectStart).toHaveBeenCalledWith("workspace-a");
+      // Connecting never pins the source.
+      expect(client.requestJson.mock.calls.filter(([method]) => method === "PATCH")).toEqual([]);
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  for (const choice of ["together", "organization"] as const) {
+    test(`set to only the organization's accounts, asks whether to use the new one (${choice})`, async () => {
       accounts = {
         ...accounts,
         accounts: [],
-        source: { ...source, mode, effectiveSource: "organization", workspaceAvailable: false },
+        source: {
+          ...source,
+          mode: "organization",
+          effectiveSource: "organization",
+          workspaceAvailable: false,
+        },
       };
+      const originalOpen = window.open;
+      window.open = (() => null) as typeof window.open;
+      client.codexConnectStart.mockImplementationOnce(async () => ({
+        userCode: "ABCD-EFGH",
+        verificationUri: "https://auth.example.test/device",
+        state: "device-state",
+        intervalSeconds: 2,
+      }));
+      client.codexConnectPoll.mockImplementation(async () => ({
+        status: "connected",
+        plan: "pro",
+        accountId: null,
+      }));
       // An account owned by this workspace is connected by an owner or admin, in context.
       asOrganizationAdmin();
       const view = await render();
       try {
         await act(async () => navigateTo({ view: "connect:codex" }));
         await flush();
-        expect(view.container.textContent).toContain(
-          "Use this account instead of the organization's subscriptions?",
-        );
+        expect(view.container.textContent).toContain("Use this account for new work?");
         const submit = button(view.container, "Sign in with ChatGPT")!;
         await act(async () => submit.click());
         await flush();
         expect(client.codexConnectStart).not.toHaveBeenCalled();
         expect(view.container.textContent).toContain(
-          "Choose which subscriptions new work should use.",
+          "Choose whether new work should use this account.",
         );
-        const keep = [...view.container.querySelectorAll<HTMLElement>('[role="radio"]')].find(
-          (radio) => radio.textContent?.includes("Keep the organization's subscriptions"),
+        const pick = [...view.container.querySelectorAll<HTMLElement>('[role="radio"]')].find(
+          (radio) =>
+            radio.textContent?.includes(
+              choice === "together"
+                ? "Use it with the organization's subscriptions"
+                : "Keep using only the organization's",
+            ),
         )!;
-        await act(async () => keep.click());
+        await act(async () => pick.click());
         await act(async () => button(view.container, "Sign in with ChatGPT")!.click());
         await flush();
         expect(client.codexConnectStart).toHaveBeenCalledWith("workspace-a");
-        // Keeping the organization's pins an automatic source first; an explicit one stays.
+        // Nothing changes before the account exists.
+        expect(client.requestJson.mock.calls.filter(([method]) => method === "PATCH")).toEqual([]);
+        await act(async () => new Promise((resolve) => setTimeout(resolve, 2_300)));
+        await flush();
+        expect(client.codexConnectPoll).toHaveBeenCalledWith("workspace-a", "device-state");
+        // Using it returns to the automatic choice, which uses both; keeping changes nothing.
         const patches = client.requestJson.mock.calls.filter(([method]) => method === "PATCH");
         expect(patches).toEqual(
-          mode === "automatic"
-            ? [["PATCH", "/v1/workspaces/workspace-a/codex/source", { mode: "organization" }]]
+          choice === "together"
+            ? [["PATCH", "/v1/workspaces/workspace-a/codex/source", { mode: "automatic" }]]
             : [],
         );
       } finally {
+        window.open = originalOpen;
+        client.codexConnectPoll.mockImplementation(async () => ({ status: "pending" }));
         await cleanup(view);
       }
-    });
+    }, 10_000);
   }
 
   test("a sign-in that finishes after leaving Settings refreshes every Codex list for the workspace", async () => {
@@ -1542,6 +1609,8 @@ describe("One Models page for the organization and the workspace", () => {
 
   test("owners and admins see the organization's accounts, set aside here, and open their page", async () => {
     organizationAdmin = true;
+    // Set to use only its own accounts: the organization's are set aside.
+    accounts = { ...accounts, source: { ...source, mode: "workspace" } };
     routeOrganizationReads();
     client.getModelConnectionAccess.mockImplementation(async () => ({
       policy: openPolicy,
@@ -1711,9 +1780,9 @@ describe("One Models page for the organization and the workspace", () => {
     const view = await render();
     try {
       const text = () => view.container.textContent ?? "";
-      // One organization account besides its own: "account is".
+      // One organization account besides its own: "account".
       expect(text()).toContain(
-        "New work uses this workspace's Codex account. The organization's account is set aside while this workspace has its own.",
+        "New work uses this workspace's Codex account together with the organization's account.",
       );
       const ownRow = () =>
         [...view.container.querySelectorAll<HTMLElement>("[data-slot=list-row]")].find((row) =>
@@ -2815,7 +2884,7 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         await flush();
         expect(automatic.container.textContent).toContain(
-          "New work uses this workspace's Codex account. Team plan, kept as this workspace's own, serves only the people chosen for it. The organization's other accounts are set aside while this workspace has its own.",
+          "New work uses this workspace's Codex account together with the organization's other accounts. Team plan, kept as this workspace's own, serves only the people chosen for it.",
         );
       } finally {
         await cleanup(automatic);
@@ -3125,6 +3194,7 @@ describe("One Models page for the organization and the workspace", () => {
 
     test("another workspace's own account isn't available here and sets nothing aside", async () => {
       organizationAdmin = true;
+      accounts = { ...accounts, source: { ...source, mode: "workspace" } };
       const research = {
         ...codexAccount({ id: "acct-r", label: "Research plan", source: "organization" }),
         ownInWorkspaceIds: ["workspace-b"],
@@ -3165,7 +3235,7 @@ describe("One Models page for the organization and the workspace", () => {
         expect(company.querySelector('[aria-label^="More actions"]')).not.toBeNull();
         // The notice counts only the organization's account known to reach here.
         expect(view.container.textContent).toContain(
-          "The organization's account is set aside while this workspace has its own.",
+          "The organization's account is never used here, even if none are connected.",
         );
       } finally {
         await cleanup(view);
@@ -3203,6 +3273,7 @@ describe("One Models page for the organization and the workspace", () => {
 
     test("no set-aside reason while an organization account's reach loads", async () => {
       organizationAdmin = true;
+      accounts = { ...accounts, source: { ...source, mode: "workspace" } };
       client.requestJson.mockImplementation(async (method: string, path: string) => {
         if (method === "GET" && path === "/v1/organizations/organization-a/codex/accounts") {
           return {
@@ -3295,7 +3366,7 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         await flush();
         expect(older.container.textContent).toContain(
-          "The organization's accounts are set aside while this workspace has its own.",
+          "New work uses this workspace's Codex account together with the organization's accounts.",
         );
       } finally {
         await cleanup(older);
@@ -3306,7 +3377,7 @@ describe("One Models page for the organization and the workspace", () => {
       try {
         await flush();
         expect(current.container.textContent).toContain(
-          "The organization's account is set aside while this workspace has its own.",
+          "New work uses this workspace's Codex account together with the organization's account.",
         );
       } finally {
         await cleanup(current);
@@ -3543,7 +3614,7 @@ describe("One Models page for the organization and the workspace", () => {
     accounts = {
       ...accounts,
       accounts: [own],
-      source: { ...source, organizationAvailable: true },
+      source: { ...source, mode: "workspace", organizationAvailable: true },
     };
     const older = await render();
     try {
