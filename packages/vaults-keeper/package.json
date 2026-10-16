@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/vaults-keeper",
-  "version": "2.0.1",
+  "version": "3.0.0",
   "description": "Keeper Secrets Manager provider for Opengeni vaults on the pinned official SDK, with one SDK instance per operation. Load it only through dynamic import() from the API and worker.",
   "license": "Apache-2.0",
   "repository": {

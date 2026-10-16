@@ -949,7 +949,7 @@
     },
     "packages/vaults-keeper": {
       "name": "@opengeni/vaults-keeper",
-      "version": "2.0.1",
+      "version": "3.0.0",
       "dependencies": {
         "@keeper-security/secrets-manager-core": "17.6.0",
         "@opengeni/contracts": "workspace:*",
@@ -975,7 +975,7 @@
     },
     "packages/vaults-protonpass": {
       "name": "@opengeni/vaults-protonpass",
-      "version": "2.0.1",
+      "version": "3.0.0",
       "dependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/vaults": "workspace:*",
