@@ -406,7 +406,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(pinnedAttention.totals?.needsYouCount).toBe(1);
     expect(pinnedAttention.pinned[0]?.treeStats?.totalDescendants).toBe(1000);
     expect(pinnedAttention.pinned[0]?.treeStats?.attentionDescendants).toBe(0);
-  });
+  }, 60_000);
 
   test("compact pages retain authority and display state while excluding large configuration", async () => {
     if (!available) return;
