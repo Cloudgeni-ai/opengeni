@@ -5155,7 +5155,7 @@ describe("worker activities integration", () => {
       });
     }
 
-    test("included exhaustion rotates before opted-in credits without consuming the refusal budget", async () => {
+    test("included exhaustion reported by response headers moves the next turn before opted-in credits", async () => {
       const ids = ["acct-credit-first", "acct-included-second"];
       fakeAccounts[ids[0]!] = {
         responses: "ok",
@@ -5189,27 +5189,27 @@ describe("worker activities integration", () => {
         bus,
         runtime: createProductionAgentRuntime(),
       });
-      expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({
-        status: "recovering",
-      });
-      expect(callsFor("responses", [ids[0]!])).toEqual([]);
+      // Nothing is known about usage before the first request, so it is
+      // admitted without a usage read; its own headers report the exhaustion.
       expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({ status: "idle" });
-      expect(callsFor("responses", [ids[1]!]).length).toBeGreaterThan(0);
-      fakeAccounts[ids[1]!]!.usagePercent = 100;
+      const servedByExhausted = callsFor("responses", [ids[0]!]).length;
+      expect(servedByExhausted).toBeGreaterThan(0);
+      expect(callsFor("responses", [ids[1]!])).toEqual([]);
+      expect(callsFor("usage", ids)).toEqual([]);
+      // The observed exhaustion is stored, so the next turn uses the account
+      // that still has included usage instead of spending credits.
       await appendOwnedEvents(dbClient.db, grant, session.id, [
         { type: "user.message", payload: { text: "Continue the synthetic task" } },
       ]);
-      expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({
-        status: "recovering",
-      });
       expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({ status: "idle" });
-      expect(callsFor("responses", [ids[0]!]).length).toBeGreaterThan(0);
+      expect(callsFor("responses", [ids[1]!]).length).toBeGreaterThan(0);
+      expect(callsFor("responses", [ids[0]!])).toHaveLength(servedByExhausted);
       const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
       expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     });
 
     for (const scenario of ["unverifiable", "model_unavailable"] as const)
-      test(`${scenario} allowance candidate does not trap credit routing`, async () => {
+      test(`${scenario} allowance candidate does not block or trap credit routing`, async () => {
         const first = `acct-${scenario}-first`;
         const second = `acct-${scenario}-second`;
         fakeAccounts[first] = {
@@ -5247,14 +5247,13 @@ describe("worker activities integration", () => {
           runtime: createProductionAgentRuntime(),
         });
         if (scenario === "unverifiable") {
-          const initial = await runCodexTurn(activities, grant, session.id);
-          expect(initial).toMatchObject({ status: "recovering" });
-          expect(callsFor("responses", [first])).toEqual([]);
+          // Unknown usage never refuses: the request is admitted on the bound
+          // account without waiting for the unavailable usage endpoint.
           expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({
             status: "idle",
-            turnId: initial.turnId,
           });
-          expect(callsFor("responses", [second]).length).toBeGreaterThan(0);
+          expect(callsFor("responses", [first]).length).toBeGreaterThan(0);
+          expect(callsFor("responses", [second])).toEqual([]);
         } else {
           expect(await runCodexTurn(activities, grant, session.id)).toMatchObject({
             status: "idle",
@@ -5751,7 +5750,20 @@ function installFakeCodexBackend(accounts: Record<string, FakeCodexAccountBehavi
         .join("");
       return new Response(sse, {
         status: 200,
-        headers: { "content-type": "text/event-stream" },
+        headers: {
+          "content-type": "text/event-stream",
+          // Every real Codex response reports both included-usage windows.
+          ...(behavior.usagePercent === undefined
+            ? {}
+            : {
+                "x-codex-primary-used-percent": String(behavior.usagePercent),
+                "x-codex-primary-limit-window-seconds": "18000",
+                "x-codex-primary-reset-after-seconds": "3600",
+                "x-codex-secondary-used-percent": "20",
+                "x-codex-secondary-limit-window-seconds": "604800",
+                "x-codex-secondary-reset-after-seconds": "86400",
+              }),
+        },
       });
     }
     if (url.startsWith("https://chatgpt.com/backend-api/codex/models")) {
