@@ -1,5 +1,19 @@
 # @opengeni/documents
 
+## 3.4.0
+
+### Patch Changes
+
+- Updated dependencies [28844d8]
+- Updated dependencies [cac0334]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+  - @opengeni/contracts@3.4.0
+  - @opengeni/db@3.4.0
+  - @opengeni/config@3.4.0
+  - @opengeni/storage@3.4.0
+
 ## 3.3.0
 
 ### Patch Changes

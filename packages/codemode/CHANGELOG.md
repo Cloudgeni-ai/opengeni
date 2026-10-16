@@ -1,5 +1,17 @@
 # @opengeni/codemode
 
+## 3.4.0
+
+### Patch Changes
+
+- Updated dependencies [28844d8]
+- Updated dependencies [60191f6]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+  - @opengeni/contracts@3.4.0
+  - @opengeni/sdk@3.4.0
+  - @opengeni/tool-gateway@3.4.0
+
 ## 3.3.0
 
 ### Patch Changes
