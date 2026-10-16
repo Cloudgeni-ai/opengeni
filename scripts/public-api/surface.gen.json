@@ -32696,6 +32696,7 @@
       "MachineStatusPill": "value",
       "MachineStatusPillProps": "type",
       "MachineView": "type",
+      "markClassicScrollbars": "value",
       "Markdown": "value",
       "MarkdownInteractiveBlock": "type",
       "MarkdownProps": "type",
@@ -33883,6 +33884,10 @@
       "NO_SANDBOX_LABEL": "value",
       "sessionComputeLabel": "value",
       "sessionSandboxLabel": "value"
+    },
+    "@opengeni/react/scrollbars": {
+      "CLASSIC_SCROLLBARS_ATTRIBUTE": "value",
+      "markClassicScrollbars": "value"
     },
     "@opengeni/react/session": {
       "ActivityItem": "type",
