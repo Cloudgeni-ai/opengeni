@@ -1,5 +1,9 @@
 import type { AccessGrant } from "@opengeni/contracts";
-import { touchInteractionOperation, touchLeaseHolder } from "@opengeni/db";
+import {
+  touchExpiredBrowserSessionResume,
+  touchInteractionOperation,
+  touchLeaseHolder,
+} from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
 
 const MAX_HEARTBEAT_INTERVAL_MS = 10_000;
@@ -20,6 +24,11 @@ export async function withInteractionHolderHeartbeat<T>(
     operationId: string;
     resourceId: string;
     controllerGeneration: string;
+    /** Continuing an expired browser resume on its retained generation: its
+     * operation is recorded only once the controller adopts the working copy,
+     * so the expired resume itself (still lost, still bound to this
+     * generation) is the authority until then. */
+    continuesExpiredBrowserResume?: true;
   },
   run: () => Promise<T>,
 ): Promise<T> {
@@ -38,13 +47,20 @@ export async function withInteractionHolderHeartbeat<T>(
   const pulse = async (): Promise<void> => {
     try {
       const [operationAlive, holderAlive] = await Promise.all([
-        touchInteractionOperation(deps.db, {
-          accountId: input.grant.accountId,
-          workspaceId: input.workspaceId,
-          operationId: input.operationId,
-          resourceId: input.resourceId,
-          controllerGeneration: input.controllerGeneration,
-        }),
+        input.continuesExpiredBrowserResume
+          ? touchExpiredBrowserSessionResume(deps.db, {
+              accountId: input.grant.accountId,
+              workspaceId: input.workspaceId,
+              browserSessionId: input.resourceId,
+              controllerGeneration: input.controllerGeneration,
+            })
+          : touchInteractionOperation(deps.db, {
+              accountId: input.grant.accountId,
+              workspaceId: input.workspaceId,
+              operationId: input.operationId,
+              resourceId: input.resourceId,
+              controllerGeneration: input.controllerGeneration,
+            }),
         input.sandboxGroupId
           ? touchLeaseHolder(deps.db, {
               accountId: input.grant.accountId,

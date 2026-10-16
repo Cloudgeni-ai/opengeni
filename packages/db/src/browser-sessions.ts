@@ -2139,6 +2139,30 @@ export async function getExpiredBrowserSessionResume(
   );
 }
 
+/** Controller authority of an in-flight continuation of an expired resume.
+ * That continuation has no dispatched operation of its own (its operation is
+ * recorded only once the controller adopts the working copy), so its authority
+ * is the expired resume itself: the browser is still lost from that resume and
+ * still bound to the same retained controller generation. */
+export async function touchExpiredBrowserSessionResume(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    browserSessionId: string;
+    controllerGeneration: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const row = await loadBrowserSessionRow(tx, input.workspaceId, input.browserSessionId);
+      if (!row || row.controllerGeneration !== input.controllerGeneration) return false;
+      return await expiredResumeEligible(tx, row);
+    }, CONSISTENT_READ),
+  );
+}
+
 /** Return an expired resume to an ordinary suspended browser once its retained
  * controller generation was ended. The next resume restores the same durable
  * state under a fresh controller generation; nothing durable is deleted. */

@@ -3645,6 +3645,9 @@ export function registerBrowserSessionRoutes(
               sandboxGroupId: placement.controllerHostSandboxGroupId,
               holderId: interactionHolderId(browserSessionId),
               operationId,
+              // This operation is recorded only after the controller adopts
+              // the working copy; until then the expired resume holds authority.
+              continuesExpiredBrowserResume: true,
               resourceId: browserSessionId,
               controllerGeneration: binding.controllerGeneration,
             },
