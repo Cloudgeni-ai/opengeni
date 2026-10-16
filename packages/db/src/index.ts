@@ -1012,6 +1012,7 @@ import {
   workspaceControlLockBudget,
   workspaceControlRequestLockTimeoutMs,
   lockWorkspaceInferenceControl,
+  mutateSessionControlInTransaction,
   registerInternalUpdateWakeInTransaction,
   registerSessionWorkflowWakeInTransaction,
   SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS,
@@ -1246,6 +1247,7 @@ export * from "./model-catalog";
 
 import {
   dbBindingFor,
+  isTransactionHandle,
   rawRows,
   retryRlsPersistence,
   retryWorkspacePersistence,
@@ -36842,6 +36844,104 @@ export async function getSessionEvent(
       .limit(1);
     return row ? mapEvent(row) : null;
   });
+}
+
+/**
+ * Trusted Site lifecycle only: cancel an exact published root using native
+ * controls. No request/agent endpoint exposes this adapter or its transaction.
+ * The host has authorized the Site mutation; its actor stays unchanged.
+ * Only the receipt and events written by this command leave the capability.
+ */
+export async function cancelSiteRuntimeConversation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    siteId: string;
+    sessionId: string;
+    operationKey: string;
+    reason: string;
+  },
+) {
+  // Own the complete transaction, including activity finalization. A nested
+  // activity gate could otherwise outlive the exact-root visibility witness.
+  if (isTransactionHandle(db)) throw new Error("Site cancellation requires its own transaction");
+  return await runIdempotentPersistenceTransaction(
+    {
+      stage: "site_lifecycle.cancel",
+      eventTypes: ["session.control.paused", "turn.cancelled"],
+      maxAttempts: 3,
+    },
+    () =>
+      withRlsContext(db, input, async (scopedDb) => {
+        const [opened] = await rawRows<{ token: string | null }>(
+          scopedDb,
+          sql`
+        select opengeni_private.begin_site_session_cancellation(
+          ${input.accountId}::uuid,${input.workspaceId}::uuid,${input.siteId}::uuid,${input.sessionId}::uuid
+        ) as token`,
+        );
+        if (!opened?.token) return null;
+        const value = await withRestoredSessionActivityRlsContext(scopedDb, input, async (tx) => {
+          const [context] = await rawRows<{ actor: string | null }>(
+            tx,
+            sql`
+          select nullif(current_setting('opengeni.subject_id',true),'') as actor`,
+          );
+          // Serialize the active-state decision with native admission/control.
+          // Replays still enter the native receipt path after terminal settlement.
+          await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+          const [candidate] = await rawRows<{ needed: boolean }>(
+            tx,
+            sql`
+          select exists(select 1 from sessions s
+            where s.workspace_id=${input.workspaceId} and s.site_access_root_id=${input.sessionId}::uuid
+              and s.status in ('queued','running','requires_action','recovering','waiting_capacity'))
+          or exists(select 1 from session_command_receipts r
+            where r.workspace_id=${input.workspaceId} and r.target_session_id=${input.sessionId}::uuid
+              and r.operation_key=${input.operationKey} and r.actor_type='service'
+              and r.actor_subject_id=${context?.actor ?? "site-lifecycle"}) as needed`,
+          );
+          if (!candidate?.needed) return null;
+          const result = await mutateSessionControlInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            actor: { type: "service", subjectId: context?.actor ?? "site-lifecycle" },
+            operationKey: input.operationKey,
+            action: "cancel",
+            reason: input.reason,
+          });
+          const events: SessionEvent[] = [];
+          for (const affected of result.affectedSessionEvents) {
+            for (const eventId of affected.eventIds) {
+              const event = await getSessionEvent(tx, input.workspaceId, eventId);
+              if (!event || event.sessionId !== affected.sessionId)
+                throw new Error("Site cancellation lost its committed event");
+              events.push(event);
+            }
+          }
+          const workspaceEvent = result.workspaceControlEventId
+            ? await getWorkspaceControlEvent(tx, input.workspaceId, result.workspaceControlEventId)
+            : null;
+          return {
+            receiptId: result.receipt.id,
+            replay: result.replay,
+            cancelledSessionCount: result.cancelledSessionCount,
+            cancelledTurnCount: result.cancelledTurnCount,
+            wakeCount: result.wakeCount,
+            events,
+            workspaceEvent,
+          };
+        });
+        // Also covers activity-revision stamping. On error the outer transaction
+        // rolls the witness back, without masking the original SQL diagnostic.
+        await scopedDb.execute(
+          sql`select opengeni_private.end_site_session_cancellation(${opened.token}::uuid)`,
+        );
+        return value;
+      }),
+  );
 }
 
 /** Read one durable event under the exact human subject visibility projection. */

@@ -32,6 +32,7 @@ import {
   type ToolRef,
 } from "@opengeni/contracts";
 import {
+  cancelPublishedSiteSession,
   withHostSessionUsageLimit,
   withSiteSessionOrigin,
   admissibleWorkspaceModel,
@@ -148,7 +149,7 @@ import {
   configuredSitesDomain,
   healSiteEdgeIfStale,
   notifySiteAbuse,
-  setSitePublishingDispatch,
+  setSitePublishingCancellation,
   siteHostMapRecord,
   sitePublishingError,
 } from "../site-publishing/service";
@@ -503,8 +504,8 @@ type RuntimeRequest = {
 export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   const dispatch = async (request: Request): Promise<Response> =>
     await app.fetch(markLocalInternalDispatch(request));
-  // Publication changes cancel a Site's conversations through this dispatch.
-  setSitePublishingDispatch(deps.settings, dispatch);
+  // Lifecycle cancellation is a native internal command, never viewer dispatch.
+  setSitePublishingCancellation(deps.settings, (input) => cancelPublishedSiteSession(deps, input));
 
   const handler = async (context: Context): Promise<Response> => {
     const domain = configuredSitesDomain(deps.settings);

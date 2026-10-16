@@ -1705,6 +1705,41 @@ export async function listActiveSiteRuntimeConversations(
   );
 }
 
+/** Keyset-paged lifecycle inventory; no viewer transcript or age/count cutoff. */
+export async function listSiteRuntimeCancellationCandidates(
+  db: Database,
+  scope: SitePublishingScope,
+  input: {
+    siteId: string;
+    after?: string;
+    limit: number;
+    startedBefore: Date;
+    toolsNarrowedTo?: { tools: readonly string[]; everyoneTools: boolean };
+  },
+): Promise<string[]> {
+  const narrowed = input.toolsNarrowedTo;
+  return withRlsContext(db, scope, async (tx) =>
+    (
+      await rawRows<{ session_id: string }>(
+        tx,
+        sql`
+      select c.session_id from site_runtime_conversations c
+      where c.account_id=${scope.accountId} and c.workspace_id=${scope.workspaceId}
+        and c.site_id=${input.siteId} and c.created_at <= ${input.startedBefore.toISOString()}::timestamptz
+        ${input.after ? sql`and c.session_id > ${input.after}::uuid` : sql``}
+        ${
+          narrowed
+            ? sql`and (not (c.tool_ids <@ ${JSON.stringify(narrowed.tools)}::jsonb)
+          or (${!narrowed.everyoneTools} and jsonb_array_length(c.tool_ids)>0 and c.viewer_kind in ('user','guest')))`
+            : sql``
+        }
+      order by c.session_id limit ${Math.max(1, Math.min(input.limit, 200))}
+    `,
+      )
+    ).map((row) => row.session_id),
+  );
+}
+
 export type SiteRuntimeUsageSnapshot = {
   visitorDay: { conversations: number; agentMicros: number; reservedMicros: number };
   visitorMonth: { conversations: number; agentMicros: number; reservedMicros: number };

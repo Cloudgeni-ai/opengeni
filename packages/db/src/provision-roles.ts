@@ -2520,6 +2520,18 @@ BEGIN
     IF to_regprocedure('opengeni_private.insights_site_usage(uuid,uuid,timestamptz,timestamptz,text)') IS NOT NULL THEN
       REVOKE ALL ON FUNCTION opengeni_private.insights_site_usage(uuid,uuid,timestamptz,timestamptz,text) FROM PUBLIC;
     END IF;
+    IF to_regclass('opengeni_private.site_session_cancellation_capabilities') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.site_session_cancellation_capabilities FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.site_session_cancellation_capabilities FROM %I',
+        (SELECT string_agg(quote_ident(attname),',' ORDER BY attnum) FROM pg_attribute
+          WHERE attrelid='opengeni_private.site_session_cancellation_capabilities'::regclass AND attnum>0 AND NOT attisdropped), ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.site_session_cancellation_capabilities FROM PUBLIC;
+      EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.site_session_cancellation_capabilities FROM PUBLIC',
+        (SELECT string_agg(quote_ident(attname),',' ORDER BY attnum) FROM pg_attribute
+          WHERE attrelid='opengeni_private.site_session_cancellation_capabilities'::regclass AND attnum>0 AND NOT attisdropped));
+      REVOKE ALL ON FUNCTION opengeni_private.begin_site_session_cancellation(uuid,uuid,uuid,uuid),
+        opengeni_private.end_site_session_cancellation(uuid) FROM PUBLIC;
+    END IF;
     IF to_regclass('opengeni_private.usage_allowance_capabilities') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.usage_allowance_capabilities FROM %I', ${literal(role)});
       EXECUTE format('REVOKE ALL (backend_pid,transaction_id,data_schema,account_id,workspace_id) ON TABLE opengeni_private.usage_allowance_capabilities FROM %I', ${literal(role)});
