@@ -1,4 +1,5 @@
 import { type CSSProperties, type RefObject, useLayoutEffect, useEffect, useState } from "react";
+import { markClassicScrollbars } from "./scrollbars";
 
 /* ----------------------------------------------------------------------------
    Host theme
@@ -456,6 +457,10 @@ export function useHostTheme(
     inherited: boolean;
     style: Record<string, string> | null;
   }>({ theme: preference === "auto" ? undefined : preference, inherited: false, style: null });
+
+  useIsomorphicLayoutEffect(() => {
+    markClassicScrollbars(ref.current?.ownerDocument);
+  }, [ref]);
 
   useIsomorphicLayoutEffect(() => {
     const element = ref.current;
