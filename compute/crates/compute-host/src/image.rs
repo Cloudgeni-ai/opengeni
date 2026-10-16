@@ -188,6 +188,14 @@ pub(crate) enum Parts<'a> {
         state: &'a Path,
         diff: &'a Path,
     },
+    /// Another directory's verified generation, such as a template's.
+    /// Published files are never modified, so memory and state are shared
+    /// by hard link where both directories are on one filesystem (one page
+    /// cache serves every VM restored from them), and copied otherwise.
+    Shared {
+        from: &'a Images,
+        image: &'a Verified,
+    },
     /// Device state only; memory stays in object storage under `manifest`
     /// (its JSON), to be paged in on demand.
     Remote {
@@ -353,7 +361,11 @@ impl Images {
                 let len = file.metadata()?.len();
                 let all: Vec<usize> = (0..chunk_count(len)).collect();
                 let chunks = ChunkMap(hash_chunks(&file, len, &all)?);
-                (None, state, len, chunks, None)
+                (None, Some(state), len, chunks, None)
+            }
+            Parts::Shared { from, image } => {
+                let chunks = share_image(from, image, &staging)?;
+                (None, None, image.meta.memory_len, chunks, None)
             }
             Parts::Diff { base, state, diff } => {
                 let parent = self.verify(base, Depth::Light)?;
@@ -371,7 +383,7 @@ impl Images {
                     chunks.0[*index] = hash;
                 }
                 fs::remove_file(diff)?;
-                (Some(base), state, len, chunks, None)
+                (Some(base), Some(state), len, chunks, None)
             }
             Parts::Remote {
                 state,
@@ -381,10 +393,12 @@ impl Images {
             } => {
                 let file = File::create(&memory)?;
                 file.set_len(memory_len)?;
-                (None, state, memory_len, chunks, Some(manifest))
+                (None, Some(state), memory_len, chunks, Some(manifest))
             }
         };
-        move_in(state, &staging.join(STATE))?;
+        if let Some(state) = state {
+            move_in(state, &staging.join(STATE))?;
+        }
         let state_bytes = fs::read(staging.join(STATE))?;
         let chunk_bytes = chunks.encode();
         if chunk_bytes.len() != chunk_count(memory_len) * 32 {
@@ -408,20 +422,7 @@ impl Images {
             &staging.join(META),
             &serde_json::to_vec_pretty(&meta).map_err(io::Error::other)?,
         )?;
-        // Memory still being filled from the store stays writable until
-        // [`Images::mark_local`].
-        let sealed: &[&str] = if remote.is_some() {
-            &[STATE]
-        } else {
-            &[STATE, MEMORY]
-        };
-        for name in sealed {
-            seal(&staging.join(name))?;
-        }
-        for name in [STATE, MEMORY] {
-            File::open(staging.join(name))?.sync_all()?;
-        }
-        sync_dir(&staging)?;
+        seal_staged(&staging, remote.is_some())?;
         failpoint("staged")?;
         let published = self.path(generation);
         fs::rename(&staging, &published)?;
@@ -745,6 +746,47 @@ fn move_in(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+/// Puts `image`, published in `from`, into `staging` as shared files and
+/// returns its chunk map.
+fn share_image(from: &Images, image: &Verified, staging: &Path) -> Result<ChunkMap, Suspect> {
+    if image.meta.remote {
+        return Err(Suspect::Damaged {
+            generation: image.generation(),
+            reason: "a shared image must be fully in local memory".into(),
+        });
+    }
+    let generation = image.generation();
+    share(&from.memory(generation), &staging.join(MEMORY))?;
+    share(&from.state(generation), &staging.join(STATE))?;
+    Ok(from.chunk_map(image)?)
+}
+
+/// Seals a staged generation's files and makes them and their directory
+/// durable. Memory still being filled from the store (`remote`) stays
+/// writable until [`Images::mark_local`].
+fn seal_staged(staging: &Path, remote: bool) -> io::Result<()> {
+    let sealed: &[&str] = if remote { &[STATE] } else { &[STATE, MEMORY] };
+    for name in sealed {
+        seal(&staging.join(name))?;
+    }
+    for name in [STATE, MEMORY] {
+        File::open(staging.join(name))?.sync_all()?;
+    }
+    sync_dir(staging)
+}
+
+/// Makes `to` the same file as the published `from`: a hard link where
+/// both are on one filesystem, otherwise a copy.
+fn share(from: &Path, to: &Path) -> io::Result<()> {
+    match fs::hard_link(from, to) {
+        Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(rustix::io::Errno::XDEV.raw_os_error()) => {
+            crate::layout::copy_sparse(from, to)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Makes a published file read-only and owned by the host agent, so a VMM
 /// that maps it (through a hard link in its jail) cannot change it.
 fn seal(path: &Path) -> io::Result<()> {
@@ -940,6 +982,61 @@ mod tests {
                 .is_err()
         );
         assert_eq!(images.current().unwrap(), Some(base.generation()));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A sandbox started from a template publishes the template's image as
+    /// its own: the same memory file, and a later save merges over it
+    /// without touching the template.
+    #[test]
+    fn a_shared_image_is_the_same_file_and_survives_its_source() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = scratch("shared");
+        let template = Images::new(dir.join("template"));
+        let (memory, state) = (dir.join("memory"), dir.join("state"));
+        write_diff(&memory, &[(1, 7), (40, 9)]);
+        write_state(&state, b"template state");
+        let source = template
+            .publish(Parts::Whole {
+                state: &state,
+                memory: &memory,
+            })
+            .unwrap();
+        let before = content(&template, source.generation());
+
+        let sandbox = Images::new(dir.join("sandbox"));
+        let image = sandbox
+            .publish(Parts::Shared {
+                from: &template,
+                image: &source,
+            })
+            .unwrap();
+        assert_eq!(sandbox.current().unwrap(), Some(image.generation()));
+        sandbox.verify(image.generation(), Depth::Deep).unwrap();
+        let inode = |path: PathBuf| fs::metadata(path).unwrap().ino();
+        assert_eq!(
+            inode(sandbox.memory(image.generation())),
+            inode(template.memory(source.generation())),
+            "one file, one page cache"
+        );
+
+        let diff = dir.join("diff");
+        write_diff(&diff, &[(2, 5)]);
+        write_state(&state, b"sandbox state");
+        let saved = sandbox
+            .publish(Parts::Diff {
+                base: image.generation(),
+                state: &state,
+                diff: &diff,
+            })
+            .unwrap();
+        sandbox.retire(&saved, &[]).unwrap();
+        assert_eq!(content(&template, source.generation()), before);
+        template.verify(source.generation(), Depth::Deep).unwrap();
+
+        fs::remove_dir_all(dir.join("template")).unwrap();
+        sandbox.verify(saved.generation(), Depth::Deep).unwrap();
         fs::remove_dir_all(&dir).unwrap();
     }
 
