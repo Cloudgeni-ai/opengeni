@@ -6,6 +6,7 @@ const testFiles =
     ? requestedTestFiles
     : [
         "./test/e2e/annotation-scroll.browser.e2e.ts",
+        "./test/e2e/artifact-desktop.browser.e2e.ts",
         "./test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
         "./test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
         "./test/e2e/artifact-static-renderer.browser.e2e.ts",
