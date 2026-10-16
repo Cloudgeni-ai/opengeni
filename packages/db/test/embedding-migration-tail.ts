@@ -93,6 +93,9 @@ export const embeddingMigrationTail = [
   "0598_claude_subscription_account_pools.sql",
   // Uses the existing session inventory/capability routines withheld by these fixtures.
   "0604_insights_raw_usage_api.sql",
+  // Patches 0604's two scoped analytical readers and requires the complete
+  // nine-reader family; replay only after the withheld reader definitions.
+  "0794_site_ai_insights.sql",
   // Patches the sender-owned capture from withheld 0478 and reads the frozen
   // subscription authority installed by withheld 0598; replay after both.
   "0608_receiver_execution_context.sql",
