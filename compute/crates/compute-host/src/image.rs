@@ -228,6 +228,18 @@ pub(crate) struct Images {
     dir: PathBuf,
 }
 
+/// A new generation's memory, in staging, and what describes it.
+struct Staged<'a> {
+    parent: Option<Generation>,
+    state: &'a Path,
+    memory_len: u64,
+    chunks: ChunkMap,
+    /// The manifest of memory still in object storage.
+    remote: Option<&'a [u8]>,
+    /// Which chunks of remote memory are already filled in.
+    filled: Option<Vec<u8>>,
+}
+
 impl Images {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
@@ -397,48 +409,14 @@ impl Images {
             fs::remove_dir_all(&staging)?;
         }
         fs::create_dir(&staging)?;
-        let memory = staging.join(MEMORY);
-        let (parent, state, memory_len, chunks, remote, filled) = match parts {
-            Parts::Whole {
-                state,
-                memory: whole,
-            } => {
-                move_in(whole, &memory)?;
-                let file = File::open(&memory)?;
-                let len = file.metadata()?.len();
-                let all: Vec<usize> = (0..chunk_count(len)).collect();
-                let chunks = ChunkMap(hash_chunks(&file, len, &all)?);
-                (None, state, len, chunks, None, None)
-            }
-            Parts::Diff { base, state, diff } => {
-                let parent = self.verify(base, Depth::Light)?;
-                if parent.meta.remote {
-                    return Err(Suspect::Damaged {
-                        generation: base,
-                        reason: "merge base is not fully in local memory".into(),
-                    });
-                }
-                let mut chunks = self.chunk_map(&parent)?;
-                let len = parent.meta.memory_len;
-                let touched = merge(&self.memory(base), diff, &memory, len)?;
-                let file = File::open(&memory)?;
-                for (index, hash) in touched.iter().zip(hash_chunks(&file, len, &touched)?) {
-                    chunks.0[*index] = hash;
-                }
-                fs::remove_file(diff)?;
-                (Some(base), state, len, chunks, None, None)
-            }
-            Parts::Remote {
-                state,
-                memory_len,
-                chunks,
-                manifest,
-                prefilled,
-            } => {
-                let filled = remote_memory(&memory, memory_len, prefilled)?;
-                (None, state, memory_len, chunks, Some(manifest), filled)
-            }
-        };
+        let Staged {
+            parent,
+            state,
+            memory_len,
+            chunks,
+            remote,
+            filled,
+        } = self.stage_memory(parts, &staging.join(MEMORY))?;
         move_in(state, &staging.join(STATE))?;
         let state_bytes = fs::read(staging.join(STATE))?;
         let chunk_bytes = chunks.encode();
@@ -495,6 +473,71 @@ impl Images {
         )?;
         failpoint("pointed")?;
         Ok(verified)
+    }
+
+    /// Puts the memory of `parts` at `memory` and hashes what is new.
+    fn stage_memory<'a>(&self, parts: Parts<'a>, memory: &Path) -> Result<Staged<'a>, Suspect> {
+        Ok(match parts {
+            Parts::Whole {
+                state,
+                memory: whole,
+            } => {
+                move_in(whole, memory)?;
+                let file = File::open(memory)?;
+                let memory_len = file.metadata()?.len();
+                let all: Vec<usize> = (0..chunk_count(memory_len)).collect();
+                Staged {
+                    parent: None,
+                    state,
+                    memory_len,
+                    chunks: ChunkMap(hash_chunks(&file, memory_len, &all)?),
+                    remote: None,
+                    filled: None,
+                }
+            }
+            Parts::Diff { base, state, diff } => {
+                let parent = self.verify(base, Depth::Light)?;
+                if parent.meta.remote {
+                    return Err(Suspect::Damaged {
+                        generation: base,
+                        reason: "merge base is not fully in local memory".into(),
+                    });
+                }
+                let mut chunks = self.chunk_map(&parent)?;
+                let memory_len = parent.meta.memory_len;
+                let touched = merge(&self.memory(base), diff, memory, memory_len)?;
+                let file = File::open(memory)?;
+                for (index, hash) in touched
+                    .iter()
+                    .zip(hash_chunks(&file, memory_len, &touched)?)
+                {
+                    chunks.0[*index] = hash;
+                }
+                fs::remove_file(diff)?;
+                Staged {
+                    parent: Some(base),
+                    state,
+                    memory_len,
+                    chunks,
+                    remote: None,
+                    filled: None,
+                }
+            }
+            Parts::Remote {
+                state,
+                memory_len,
+                chunks,
+                manifest,
+                prefilled,
+            } => Staged {
+                parent: None,
+                state,
+                memory_len,
+                chunks,
+                remote: Some(manifest),
+                filled: remote_memory(memory, memory_len, prefilled)?,
+            },
+        })
     }
 
     /// Records that `image`'s memory file is now complete, after hydration

@@ -371,7 +371,7 @@ impl Engine for Fake {
         MemoryProfile::bare_metal()
     }
 
-    fn runtime(&self) -> &str {
+    fn runtime(&self) -> &'static str {
         "fake"
     }
 

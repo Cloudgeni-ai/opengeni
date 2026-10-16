@@ -321,6 +321,88 @@ impl Chunked {
         })
     }
 
+    /// Brings the memory image `head` names into `into.scratch`: the state
+    /// whole, and the memory as the chunk list a pager fetches from, with
+    /// the working-set pack already filled in, or whole when the manifest
+    /// is not laid out in chunks.
+    async fn fetch_memory(
+        &self,
+        head: &Head,
+        into: &FetchInto,
+    ) -> Result<FetchedMemory, EngineError> {
+        const OP: &str = "fetch";
+        if !into.memory {
+            return Ok(FetchedMemory::None);
+        }
+        let Some(stored) = &head.memory else {
+            return Err(EngineError::new(
+                ErrorKind::MemoryLost,
+                OP,
+                "the stored copy has no memory image",
+            ));
+        };
+        tokio::fs::create_dir_all(&into.scratch)
+            .await
+            .map_err(|error| EngineError::io(OP, error))?;
+        let state = into.scratch.join("state");
+        // The working set follows the manifest, which gives the image's
+        // length, while the state comes in beside both.
+        let memory = async {
+            let manifest = self
+                .chunks
+                .get_manifest(&stored.memory)
+                .await
+                .map_err(|error| storage_error(OP, error))?;
+            let refs = chunk_refs(&manifest);
+            let prefilled = match (&head.pack, &refs) {
+                (Some(index), Some(refs)) => {
+                    let zero_chunks = refs.iter().map(Option::is_none).collect();
+                    self.fetch_pack(index, &into.scratch, manifest.disk_len, &zero_chunks)
+                        .await
+                }
+                _ => None,
+            };
+            Ok::<_, EngineError>((manifest, refs, prefilled))
+        };
+        // Both run to the end, so neither is still writing when the other
+        // fails.
+        let (state_fetched, memory) =
+            tokio::join!(self.get_file(&stored.state, &state, None), memory);
+        state_fetched?;
+        let (manifest, refs, prefilled) = memory?;
+        let Some(refs) = refs else {
+            // A manifest not laid out in whole chunks cannot be paged in;
+            // bring the memory back whole instead.
+            let memory = into.scratch.join("memory");
+            self.get_file(&stored.memory, &memory, None).await?;
+            return Ok(FetchedMemory::Local {
+                state,
+                memory,
+                runtime: stored.runtime.clone(),
+            });
+        };
+        let chunks = refs
+            .iter()
+            .map(|reference| {
+                reference
+                    .as_ref()
+                    .map_or(Ok(ZERO), |reference| hash_from_hex(&reference.hash))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|()| EngineError::new(ErrorKind::Fatal, OP, "bad chunk hash in manifest"))?;
+        let manifest_bytes = manifest
+            .encode()
+            .map_err(|error| storage_error(OP, error))?;
+        Ok(FetchedMemory::Remote {
+            state,
+            memory_len: manifest.disk_len,
+            chunks,
+            manifest: manifest_bytes,
+            prefilled,
+            runtime: stored.runtime.clone(),
+        })
+    }
+
     /// Stores the learned wake profile `learned`, if there is one, and
     /// returns its reference.
     async fn put_profile(
@@ -565,83 +647,9 @@ impl Store for Chunked {
             }
             Ok::<_, EngineError>(())
         };
-        let memory = async {
-            if !into.memory {
-                return Ok(FetchedMemory::None);
-            }
-            let Some(stored) = &head.memory else {
-                return Err(EngineError::new(
-                    ErrorKind::MemoryLost,
-                    OP,
-                    "the stored copy has no memory image",
-                ));
-            };
-            tokio::fs::create_dir_all(&into.scratch)
-                .await
-                .map_err(|error| EngineError::io(OP, error))?;
-            let state = into.scratch.join("state");
-            // The working set follows the manifest, which gives the image's
-            // length, while the state comes in beside both.
-            let memory = async {
-                let manifest = self
-                    .chunks
-                    .get_manifest(&stored.memory)
-                    .await
-                    .map_err(|error| storage_error(OP, error))?;
-                let refs = chunk_refs(&manifest);
-                let prefilled = match (&head.pack, &refs) {
-                    (Some(index), Some(refs)) => {
-                        let zero_chunks = refs.iter().map(Option::is_none).collect();
-                        self.fetch_pack(index, &into.scratch, manifest.disk_len, &zero_chunks)
-                            .await
-                    }
-                    _ => None,
-                };
-                Ok::<_, EngineError>((manifest, refs, prefilled))
-            };
-            // Both run to the end, so neither is still writing when the
-            // other fails.
-            let (state_fetched, memory) =
-                tokio::join!(self.get_file(&stored.state, &state, None), memory);
-            state_fetched?;
-            let (manifest, refs, prefilled) = memory?;
-            if let Some(refs) = refs {
-                let chunks = refs
-                    .iter()
-                    .map(|reference| {
-                        reference
-                            .as_ref()
-                            .map_or(Ok(ZERO), |reference| hash_from_hex(&reference.hash))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|()| {
-                        EngineError::new(ErrorKind::Fatal, OP, "bad chunk hash in manifest")
-                    })?;
-                let manifest_bytes = manifest
-                    .encode()
-                    .map_err(|error| storage_error(OP, error))?;
-                return Ok(FetchedMemory::Remote {
-                    state,
-                    memory_len: manifest.disk_len,
-                    chunks,
-                    manifest: manifest_bytes,
-                    prefilled,
-                    runtime: stored.runtime.clone(),
-                });
-            }
-            // A manifest not laid out in whole chunks cannot be paged in;
-            // bring the memory back whole instead.
-            let memory = into.scratch.join("memory");
-            self.get_file(&stored.memory, &memory, None).await?;
-            Ok(FetchedMemory::Local {
-                state,
-                memory,
-                runtime: stored.runtime.clone(),
-            })
-        };
         // Each runs to the end: a failure returns only once nothing of this
         // fetch writes into the sandbox's files any more.
-        let (disk, profile, memory) = tokio::join!(disk, profile, memory);
+        let (disk, profile, memory) = tokio::join!(disk, profile, self.fetch_memory(&head, into));
         disk?;
         profile?;
         memory
