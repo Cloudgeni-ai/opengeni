@@ -455,7 +455,11 @@ export function createSecretResolver(
           maxAgeMs: LINKED_VAULT_MISS_MAX_AGE_MS,
         });
         refreshing = new Set(report.pending);
-        if (report.changed.length > 0) ({ meta, outcomes } = await choose());
+        if (
+          report.changed.length > 0 ||
+          report.outcomes.some((outcome) => outcome.result?.status === "superseded")
+        )
+          ({ meta, outcomes } = await choose());
         if (
           report.outcomes.some((outcome) => outcome.state === "done" || outcome.state === "failed")
         ) {

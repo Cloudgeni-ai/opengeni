@@ -215,6 +215,18 @@ vaults with `POST /v1/workspaces/:workspaceId/vaults/link` (read-only or
 read-write) or create a managed vault with
 `POST /v1/workspaces/:workspaceId/connections/:connectionId/managed-vaults`.
 
+- Managed creation checks the exact local link policy before creating upstream:
+  name conflicts, quota and authority refusals leave no upstream vault. The
+  preflight reserves nothing, so a racing change may still refuse the link.
+  If creation succeeded but a later step fails, the error carries
+  `details.created: true`, `connectionId`, `externalVaultId`, and `linked`
+  (true, false for a known refusal, null when the link outcome is uncertain),
+  plus `vaultId` when known. Link that existing vault under an available name,
+  or refresh its existing link; do not create it again. A failed optional group
+  grant still links the created vault and reports `groupGrantConfirmed: false`;
+  check sharing in 1Password. Neither failure triggers automatic retries or
+  upstream deletion. If the create itself has an unknown outcome, inspect the
+  provider vault list first; a lost response cannot guarantee exactly-once creation.
 - A connection belongs to one person (Only me), the workspace or the
   organization, and the vaults linked through it carry the same owner. In the
   web app, Settings › Secrets lists each connection under 1Password; its page
@@ -239,6 +251,11 @@ read-write) or create a managed vault with
   `vaults.list` call and lists items only when the vault changed; a vault that
   failed to sync is retried at most once per period, and a rate limit is waited
   out.
+- Concurrent refreshes compare the cache epoch captured before provider I/O.
+  Mirror and status/freshness settle together; a late result cannot overwrite
+  another completed refresh, even an unchanged check or a failure. The first
+  settlement wins without comparing opaque provider versions. A superseded
+  refresh does not retry automatically; subsequent checks use the settled state.
 - A personal (Only me) connection's token is used for its owner in every
   workspace their Only-me vaults reach, and an organization connection serves
   its organization vaults in every workspace they are available in, whichever

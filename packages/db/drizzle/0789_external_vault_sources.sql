@@ -21,6 +21,9 @@
 --     vault row lock from before it reads the mirror until it commits, so an
 --     older listing cannot re-add an item that a newer one just removed and
 --     leave it under the newer content version.
+--   * Core refresh settlement compares the epoch read before provider I/O,
+--     committing inventory and status together. Every settlement advances it;
+--     late results cannot overwrite a newer completed check, even unchanged.
 -- Existing rows keep their meaning: the new columns are NULL or 0 and the
 -- Only-me availability default of 0780 is unchanged.
 SET LOCAL lock_timeout = '5s';
@@ -246,6 +249,50 @@ $new$]
 ]);
 
 -- What a sync, a read and a resolution need to key provider value caches.
+-- Settle a refresh under one compare-and-set fence. Provider versions are
+-- opaque: the cache epoch observed before I/O is the only ordering token.
+-- Every settlement advances it, including unchanged checks and failures.
+-- A late result changes neither the mirror nor the newer status/freshness.
+-- The optional mirror uses the same canonical writer in this transaction;
+-- its capability closes on return, so reopen ours before the status UPDATE.
+SELECT pg_temp.patch_vault_routine_0786('set_vault_sync_status(uuid,jsonb,jsonb)'::regprocedure, ARRAY[
+  ARRAY[$old$  IF p ? 'operations' AND (
+$old$,
+    $new$  SELECT locked.* INTO vault_row FROM vaults locked
+  WHERE locked.id = vault_row.id FOR NO KEY UPDATE OF locked;
+  IF vault_row.id IS NULL THEN
+    PERFORM opengeni_private.vault_raise('vault_not_found', 'vault not found');
+  END IF;
+  IF p ? 'expectedCacheEpoch'
+    AND (p ->> 'expectedCacheEpoch')::bigint IS DISTINCT FROM vault_row.provider_cache_epoch THEN
+    PERFORM opengeni_private.vault_raise('provider_conflict',
+      'another refresh settled first; this late inventory was not applied',
+      pg_catalog.jsonb_build_object('vaultId', vault_row.id, 'superseded', true));
+  END IF;
+  IF p ? 'operations' AND (
+$new$],
+  ARRAY[$old$  UPDATE vaults SET
+    sync_status = p ->> 'status',
+$old$,
+    $new$  IF p ? 'mirror' THEN
+    IF NOT (p ? 'expectedCacheEpoch') THEN
+      PERFORM opengeni_private.vault_raise('provider_conflict',
+        'atomic refresh settlement requires its pre-I/O cache epoch');
+    END IF;
+    IF p ->> 'status' IS DISTINCT FROM 'ok' OR pg_catalog.jsonb_typeof(p -> 'mirror') <> 'object' THEN
+      PERFORM opengeni_private.vault_raise('provider_inventory_incomplete',
+        'only a successful refresh may replace the inventory');
+    END IF;
+    PERFORM upsert_provider_vault_items(p_vault, p #>> '{mirror,contentVersion}',
+      p #> '{mirror,items}', p_principal);
+    PERFORM opengeni_private.vault_capability_open('write');
+  END IF;
+  UPDATE vaults SET
+    provider_cache_epoch = provider_cache_epoch + CASE WHEN p ? 'mirror' THEN 0 ELSE 1 END,
+    sync_status = p ->> 'status',
+$new$]
+]);
+
 SELECT pg_temp.patch_vault_routine_0786('provider_vault_sync_target(uuid,jsonb)'::regprocedure, ARRAY[
   ARRAY[$old$    'providerContentVersion', vault_row.provider_content_version,
 $old$,

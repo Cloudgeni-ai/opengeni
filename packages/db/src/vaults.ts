@@ -797,7 +797,10 @@ export async function upsertProviderVaultItems(
 
 /**
  * Record a connected vault's sync state. `operations` and `freshness` are
- * optional (0789): absent keeps the stored value, null clears it.
+ * optional (0789): absent keeps the stored value, null clears it. The optional
+ * mirror and status settle atomically, comparing `expectedCacheEpoch` under
+ * the vault lock; a mismatch raises provider_conflict with superseded=true.
+ * Every applied settlement advances the epoch, even unchanged or failed checks.
  */
 export async function setVaultSyncStatus(
   db: Database,
@@ -812,6 +815,10 @@ export async function setVaultSyncStatus(
     operations?: VaultProviderOperations | null;
     /** The provider's own upstream freshness observation (never Opengeni's check time). */
     freshness?: StoredProviderFreshness | null;
+    /** Reject a late refresh when another settlement advanced this epoch. */
+    expectedCacheEpoch?: string;
+    /** Complete inventory committed atomically with this successful status. */
+    mirror?: { contentVersion: string | null; items: ProviderVaultItemMirror[] };
   },
 ): Promise<void> {
   const { vaultId, ...status } = input;
@@ -854,6 +861,32 @@ export async function linkProviderVault(
       sql`select link_provider_vault(${json(input)}::jsonb, ${principal}::jsonb) as value`,
     ),
   );
+}
+
+/**
+ * Exercise the exact link policy before an irreversible provider create. The
+ * temporary link, personal authority and audit rows are all rolled back. This
+ * is a preflight, not a reservation: a race after it must return the confirmed
+ * upstream identity so the caller can link that vault instead of creating again.
+ * No database transaction is held open across provider I/O.
+ */
+export async function preflightProviderVaultLink(
+  db: Database,
+  context: VaultDbContext,
+  input: Omit<Parameters<typeof linkProviderVault>[2], "providerVaultRef">,
+): Promise<void> {
+  const passed = new Error("vault link preflight passed");
+  try {
+    await db.transaction(async (tx) => {
+      await linkProviderVault(tx as unknown as Database, context, {
+        ...input,
+        providerVaultRef: `preflight:${crypto.randomUUID()}`,
+      });
+      throw passed;
+    });
+  } catch (error) {
+    if (error !== passed) throw error;
+  }
 }
 
 export type ProviderVaultSyncTargetRow = {

@@ -41,6 +41,20 @@ export const ONEPASSWORD_GET_ALL_BATCH = 50;
  */
 export const ONEPASSWORD_MANAGED_GROUP_PERMISSIONS = 32 | 16 | 1024 | 128 | 64 | 256 | 512;
 
+/** Creation succeeded; only the subsequent sharing step failed or is unknown. */
+export class OnePasswordVaultCreatedError extends VaultProviderError {
+  constructor(
+    readonly createdVault: ProviderVault,
+    failure: VaultProviderError,
+  ) {
+    super(
+      failure.code,
+      "The vault was created, but its group access could not be confirmed. Do not create it again.",
+      failure.retryAfterMs,
+    );
+  }
+}
+
 /**
  * 1Password vault and item IDs are short lowercase alphanumerics (26 chars).
  * Anything else cannot exist, so refuse it as not found before spending a
@@ -152,7 +166,11 @@ export function createOnePasswordVaultProvider(
             integrationVersion: options.integrationVersion ?? "1",
           }),
         );
-        sent = op === "write";
+        sent =
+          op === "write" ||
+          operation === "vaultsCreate" ||
+          operation === "vaultsDelete" ||
+          operation === "grantGroupPermissions";
         return await fn(client);
       } catch (error) {
         const mapped = mapOnePasswordError(error, classes);
@@ -385,20 +403,28 @@ export function createOnePasswordVaultProvider(
           allowAdminsAccess: input.allowAdminsAccess,
         }),
       );
-      if (input.groupId) {
-        const groupId = input.groupId;
-        await call(ctx, "admin", "grantGroupPermissions", (client) =>
-          client.vaults.grantGroupPermissions(vault.id, [
-            { groupId, permissions: ONEPASSWORD_MANAGED_GROUP_PERMISSIONS },
-          ]),
-        );
-      }
-      return {
+      const created: ProviderVault = {
         externalVaultId: vault.id,
         name: vault.title,
         contentVersion: vault.contentVersion === undefined ? null : String(vault.contentVersion),
         itemCount: typeof vault.activeItemCount === "number" ? vault.activeItemCount : 0,
       };
+      if (input.groupId) {
+        const groupId = input.groupId;
+        try {
+          await call(ctx, "admin", "grantGroupPermissions", (client) =>
+            client.vaults.grantGroupPermissions(vault.id, [
+              { groupId, permissions: ONEPASSWORD_MANAGED_GROUP_PERMISSIONS },
+            ]),
+          );
+        } catch (error) {
+          throw new OnePasswordVaultCreatedError(
+            created,
+            error instanceof VaultProviderError ? error : mapOnePasswordError(error),
+          );
+        }
+      }
+      return created;
     },
 
     async deleteVault(ctx, externalVaultId) {

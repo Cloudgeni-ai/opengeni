@@ -10,8 +10,8 @@ import {
 } from "@opengeni/contracts";
 import {
   getProviderVaultSyncTarget,
+  isVaultError,
   setVaultSyncStatus,
-  upsertProviderVaultItems,
   type Database,
   type StoredProviderFreshness,
   type VaultDbContext,
@@ -104,9 +104,8 @@ export interface ProviderSyncStatusUpdate {
 }
 
 export interface ProviderMirrorStore {
-  /** Replace the mirror for this vault in one transaction (upsert by external id, drop missing). */
-  replaceMirror(plan: ProviderMirrorPlan): Promise<void>;
-  setSyncStatus(update: ProviderSyncStatusUpdate): Promise<void>;
+  /** Atomically commit mirror and status if the pre-I/O epoch still matches. */
+  settleRefresh(update: ProviderSyncStatusUpdate, plan?: ProviderMirrorPlan): Promise<boolean>;
 }
 
 export interface ProviderVaultSyncTarget {
@@ -121,6 +120,8 @@ export interface ProviderVaultSyncTarget {
 export type ProviderVaultSyncResult =
   | { status: "synced"; contentVersion: string | null; itemCount: number; truncated: number }
   | { status: "unchanged"; contentVersion: string | null }
+  /** Another refresh settled after this one's read; no state was overwritten. */
+  | { status: "superseded" }
   | { status: "skipped_rate_limited"; rateLimitedUntil: Date }
   | {
       status: "failed";
@@ -392,7 +393,9 @@ async function providerStep<T>(call: () => Promise<T>): Promise<T> {
  * `force` re-lists items even when `contentVersion` is unchanged and asks the
  * provider to bypass its caches (`forceRefresh`). Every successful check
  * records the provider's effective operations and its own freshness
- * observation, whether or not the mirror changed.
+ * observation, whether or not the mirror changed. Mirror and status settle
+ * together against the pre-I/O epoch; an intervening settlement returns
+ * `superseded` without overwriting it or retrying provider calls.
  */
 export async function syncProviderVault(input: {
   provider: VaultProvider;
@@ -449,7 +452,7 @@ export async function syncProviderVault(input: {
           : unprovenInventory("vaults"),
         now(),
       );
-      await input.store.setSyncStatus(failure);
+      if (!(await input.store.settleRefresh(failure))) return { status: "superseded" };
       return {
         status: "failed",
         syncStatus: failure.syncStatus,
@@ -463,7 +466,8 @@ export async function syncProviderVault(input: {
       vault.contentVersion !== null &&
       vault.contentVersion === target.mirroredContentVersion
     ) {
-      await input.store.setSyncStatus({ ...succeeded(), operations });
+      if (!(await input.store.settleRefresh({ ...succeeded(), operations })))
+        return { status: "superseded" };
       return { status: "unchanged", contentVersion: vault.contentVersion };
     }
     const inventory = await providerStep(() =>
@@ -473,8 +477,8 @@ export async function syncProviderVault(input: {
     // inconsistent listing may lack items that still exist.
     if (!inventory.consistent) throw unprovenInventory("items");
     const plan = planProviderMirror(inventory.items, vault.contentVersion);
-    await input.store.replaceMirror(plan);
-    await input.store.setSyncStatus({ ...succeeded(), operations });
+    if (!(await input.store.settleRefresh({ ...succeeded(), operations }, plan)))
+      return { status: "superseded" };
     return {
       status: "synced",
       contentVersion: plan.contentVersion,
@@ -484,7 +488,7 @@ export async function syncProviderVault(input: {
   } catch (error) {
     if (!isVaultProviderError(error)) throw error;
     const failure = providerSyncFailure(error, now());
-    await input.store.setSyncStatus(failure);
+    if (!(await input.store.settleRefresh(failure))) return { status: "superseded" };
     return {
       status: "failed",
       syncStatus: failure.syncStatus,
@@ -494,45 +498,58 @@ export async function syncProviderVault(input: {
   }
 }
 
-/** Binds the mirror store to the 0739 routines for one connected vault. */
+/** Binds atomic settlement to the epoch read before provider I/O (0789). */
 export function databaseProviderMirrorStore(
   db: Database,
   context: VaultDbContext,
   vaultId: string,
+  expectedCacheEpoch: string,
 ): ProviderMirrorStore {
   return {
-    async replaceMirror(plan) {
-      await upsertProviderVaultItems(db, context, {
-        vaultId,
-        contentVersion: plan.contentVersion,
-        items: plan.items.map((item) => ({
-          providerItemRef: item.externalItemId,
-          providerVersion: item.version,
-          // Passkeys live only in hosted vaults (D20); providers never mirror them.
-          type: item.type === "passkey" ? "login" : item.type,
-          // The base name: the routine de-duplicates against the stored mirror
-          // so names stay sticky per provider item.
-          name: providerSecretName(item.providerName),
-          websites: item.websites,
-          primaryFieldRef: item.primaryExternalFieldId,
-          fields: item.fields.map((field) => ({
-            providerFieldRef: field.externalFieldId,
-            name: field.name,
-            kind: field.kind,
-          })),
-        })),
-      });
-    },
-    async setSyncStatus(update) {
-      await setVaultSyncStatus(db, context, {
-        vaultId,
-        status: update.syncStatus,
-        errorCode: update.syncErrorCode,
-        errorMessage: update.syncErrorMessage,
-        rateLimitedUntil: update.rateLimitedUntil?.toISOString() ?? null,
-        ...(update.operations !== undefined ? { operations: update.operations } : {}),
-        ...(update.freshness !== undefined ? { freshness: update.freshness } : {}),
-      });
+    async settleRefresh(update, plan) {
+      const mirror = plan
+        ? {
+            contentVersion: plan.contentVersion,
+            items: plan.items.map((item) => ({
+              providerItemRef: item.externalItemId,
+              providerVersion: item.version,
+              // Passkeys live only in hosted vaults (D20); providers never mirror them.
+              type: item.type === "passkey" ? "login" : item.type,
+              // The base name: the routine de-duplicates against the stored mirror
+              // so names stay sticky per provider item.
+              name: providerSecretName(item.providerName),
+              websites: item.websites,
+              primaryFieldRef: item.primaryExternalFieldId,
+              fields: item.fields.map((field) => ({
+                providerFieldRef: field.externalFieldId,
+                name: field.name,
+                kind: field.kind,
+              })),
+            })),
+          }
+        : undefined;
+      try {
+        await setVaultSyncStatus(db, context, {
+          vaultId,
+          expectedCacheEpoch,
+          ...(mirror ? { mirror } : {}),
+          status: update.syncStatus,
+          errorCode: update.syncErrorCode,
+          errorMessage: update.syncErrorMessage,
+          rateLimitedUntil: update.rateLimitedUntil?.toISOString() ?? null,
+          ...(update.operations !== undefined ? { operations: update.operations } : {}),
+          ...(update.freshness !== undefined ? { freshness: update.freshness } : {}),
+        });
+        return true;
+      } catch (error) {
+        if (
+          isVaultError(error) &&
+          error.code === "provider_conflict" &&
+          error.details?.superseded === true
+        )
+          return false;
+        throw error;
+      }
     },
   };
 }
@@ -557,7 +574,12 @@ export async function syncLinkedProviderVault(input: {
   onFreshness?: VaultProviderContext["onFreshness"];
 }): Promise<ProviderVaultSyncResult> {
   const target = await getProviderVaultSyncTarget(input.db, input.context, input.vaultId);
-  const store = databaseProviderMirrorStore(input.db, input.context, input.vaultId);
+  const store = databaseProviderMirrorStore(
+    input.db,
+    input.context,
+    input.vaultId,
+    target.providerCacheEpoch ?? "0",
+  );
   const now = input.now ?? (() => new Date());
   const rateLimitedUntil = target.rateLimitedUntil ? new Date(target.rateLimitedUntil) : null;
   // Do not even load a provider (and its credential) while the provider asked us to wait.
@@ -573,7 +595,7 @@ export async function syncLinkedProviderVault(input: {
   } catch (error) {
     if (!isVaultProviderError(error)) throw error;
     const failure = providerSyncFailure(error, now());
-    await store.setSyncStatus(failure);
+    if (!(await store.settleRefresh(failure))) return { status: "superseded" };
     return {
       status: "failed",
       syncStatus: failure.syncStatus,

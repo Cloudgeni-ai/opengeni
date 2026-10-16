@@ -439,4 +439,42 @@ describe("1Password adapter", () => {
       "vaults.grantGroupPermissions",
     ]);
   });
+
+  test("a managed vault create with an unconfirmed answer is never retried", async () => {
+    const { provider, ctx, fake } = world();
+    fake.failNext("vaults.create", () => new Error("connection reset by peer"));
+    await expect(
+      provider.createVault!(ctx(), { name: "Maybe created", allowAdminsAccess: true }),
+    ).rejects.toMatchObject({ code: "provider_outcome_unknown" });
+    expect(fake.calls.filter((call) => call.op === "vaults.create")).toHaveLength(1);
+  });
+
+  test("a failed group grant preserves the successfully created vault identity", async () => {
+    const { fake, ctx } = world();
+    const provider = createOnePasswordVaultProvider({
+      token: fakeServiceAccountToken(),
+      planTier: "teams",
+      sdk: fake.sdk,
+      clientCache: new OnePasswordClientCache(),
+    });
+    fake.failNext("vaults.grantGroupPermissions", () => new Error("connection reset by peer"));
+    let failure: unknown;
+    try {
+      await provider.createVault!(ctx(), {
+        name: "Created but unshared",
+        allowAdminsAccess: true,
+        groupId: "g1",
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      createdVault: { name: "Created but unshared", externalVaultId: expect.any(String) },
+    });
+    expect(
+      (await provider.listVaults(ctx())).filter((v) => v.name === "Created but unshared"),
+    ).toHaveLength(1);
+    expect(fake.calls.filter((call) => call.op === "vaults.create")).toHaveLength(1);
+    expect(fake.calls.filter((call) => call.op === "vaults.delete")).toHaveLength(0);
+  });
 });

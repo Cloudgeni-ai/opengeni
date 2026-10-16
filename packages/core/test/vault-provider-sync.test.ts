@@ -28,11 +28,10 @@ function memoryStore() {
   const plans: ProviderMirrorPlan[] = [];
   const statuses: ProviderSyncStatusUpdate[] = [];
   const store: ProviderMirrorStore = {
-    async replaceMirror(plan) {
-      plans.push(plan);
-    },
-    async setSyncStatus(update) {
+    async settleRefresh(update, plan) {
+      if (plan) plans.push(plan);
       statuses.push(update);
+      return true;
     },
   };
   return { store, plans, statuses };

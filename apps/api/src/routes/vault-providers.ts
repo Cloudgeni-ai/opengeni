@@ -68,6 +68,7 @@ import {
   getConnectionMetadata,
   getVault,
   linkProviderVault,
+  preflightProviderVaultLink,
   listConnectionsMetadata,
   listVaultsForSubject,
   revokeConnection,
@@ -636,6 +637,9 @@ export function registerVaultProviderRoutes(
       throw new HTTPException(403, { message: "missing permission: account:admin" });
     }
     const context = vaultContextFor(authorization, workspaceId);
+    let created: ProviderVault | undefined;
+    let linked: VaultRow | undefined;
+    let sharingFailure: VaultProviderError | undefined;
     try {
       // Match link_provider_vault's ownership gate before making a remote
       // vault. A refused local link must not leave a newly created vault behind.
@@ -656,6 +660,17 @@ export function registerVaultProviderRoutes(
           { connectionId, connectionOwnership: ownership, ownerKind: payload.ownerKind },
         );
       }
+      const link = {
+        ownerKind: payload.ownerKind,
+        name: payload.name,
+        source: "onepassword" as const,
+        providerConnectionId: connectionId,
+        mode: "read_write" as const,
+        allowOrganization: isAccountAdmin(authorization),
+      };
+      // Exact SQL policy, including names, quotas and personal authority; all
+      // effects roll back. This is not a reservation over the provider call.
+      await preflightProviderVaultLink(db, context, link);
       const { provider } = await onePasswordProviderForConnection(deps, {
         workspaceId,
         connectionId,
@@ -667,33 +682,70 @@ export function registerVaultProviderRoutes(
           "this 1Password connection cannot create vaults",
         );
       }
-      const created = await provider.createVault(routeProviderContext(connectionId), {
-        name: payload.name,
-        description: "Managed by Opengeni",
-        allowAdminsAccess: true,
-        ...(payload.groupId ? { groupId: payload.groupId } : {}),
-      });
-      const row = await linkProviderVault(db, context, {
-        ownerKind: payload.ownerKind,
-        name: payload.name,
-        source: "onepassword",
-        providerConnectionId: connectionId,
+      const { OnePasswordVaultCreatedError } = await loadOnePasswordModule();
+      try {
+        created = await provider.createVault(routeProviderContext(connectionId), {
+          name: payload.name,
+          description: "Managed by Opengeni",
+          allowAdminsAccess: true,
+          ...(payload.groupId ? { groupId: payload.groupId } : {}),
+        });
+      } catch (error) {
+        if (error instanceof OnePasswordVaultCreatedError) {
+          created = error.createdVault;
+          sharingFailure = error;
+        } else if (isVaultProviderError(error)) {
+          throw error;
+        } else {
+          throw new VaultProviderError(
+            "provider_outcome_unknown",
+            "1Password did not confirm vault creation; it may have been applied. Check the connection's vault list before creating again.",
+          );
+        }
+      }
+      linked = await linkProviderVault(db, context, {
+        ...link,
         providerVaultRef: created.externalVaultId,
-        mode: "read_write",
-        allowOrganization: isAccountAdmin(authorization),
       });
       await syncLinkedProviderVault({
         db,
         context,
-        vaultId: row.id,
+        vaultId: linked.id,
         providers: vaultProviderRegistryFor(deps, {
           workspaceId,
           subjectId: authorization.grant.subjectId,
         }),
         force: true,
       });
-      return c.json(await vaultSummaryFor(deps, authorization, workspaceId, row.id), 201);
+      if (sharingFailure) throw sharingFailure;
+      return c.json(await vaultSummaryFor(deps, authorization, workspaceId, linked.id), 201);
     } catch (error) {
+      if (created) {
+        const local = isVaultError(error) ? error : vaultErrorFromDatabase(error);
+        const code =
+          local?.code ??
+          (isVaultProviderError(error)
+            ? vaultErrorCodeForProvider(error.code, "write")
+            : "provider_unavailable");
+        const message = linked
+          ? sharingFailure
+            ? "The vault was created and linked, but its group access could not be confirmed. Check sharing in 1Password. Do not create it again."
+            : "The vault was created and linked, but its refresh could not be confirmed. Refresh the linked vault. Do not create it again."
+          : "The vault was created in 1Password, but its local link could not be confirmed. Use Link on the existing provider vault after resolving the local refusal. Do not create it again.";
+        return vaultRouteError(
+          c,
+          new VaultError(code, message, {
+            created: true,
+            // A lost DB acknowledgement is not proof that the link rolled back.
+            linked: linked ? true : local ? false : null,
+            connectionId,
+            externalVaultId: created.externalVaultId,
+            ...(linked ? { vaultId: linked.id } : {}),
+            ...(sharingFailure ? { groupGrantConfirmed: false } : {}),
+          }),
+          true,
+        );
+      }
       return vaultRouteError(c, error, true);
     }
   });

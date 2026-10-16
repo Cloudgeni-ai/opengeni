@@ -26,6 +26,7 @@ import {
   getVaultItem,
   isVaultError,
   linkProviderVault,
+  preflightProviderVaultLink,
   listVaultItems,
   readVaultFieldCiphertext,
   resolveSecretReferenceCandidates,
@@ -778,6 +779,113 @@ describe.skipIf(!realDb)("0789 external vault sources", () => {
         operations: OPERATIONS,
       }),
       "vault_permission_denied",
+    );
+  });
+
+  test("link preflight rolls back rows, authority and audit, and uses the real authority and name policy", async () => {
+    const t = await tenant("preflight");
+    const connection = await onePasswordConnection(t, { personal: true, ownership: "user" });
+    const input = {
+      ownerKind: "user" as const,
+      name: "Preflight personal",
+      source: "onepassword" as const,
+      providerConnectionId: connection.id,
+      mode: "read_write" as const,
+    };
+    const counts = async () => {
+      const [row] = await database!.admin`
+        select (select count(*)::int from vaults where account_id = ${t.accountId}::uuid) as vaults,
+          (select count(*)::int from organization_user_resource_authorities where account_id = ${t.accountId}::uuid) as authorities,
+          (select count(*)::int from audit_events where account_id = ${t.accountId}::uuid) as audits`;
+      return row;
+    };
+    const other = await member(t);
+    const before = await counts();
+    await preflightProviderVaultLink(t.db, t.context, input);
+    expect(await counts()).toEqual(before);
+    await expectVaultError(
+      preflightProviderVaultLink(t.db, { ...t.context, subjectId: other }, input),
+      "vault_permission_denied",
+    );
+    expect(await counts()).toEqual(before);
+    await linkProviderVault(t.db, t.context, { ...input, providerVaultRef: "created" });
+    await expectVaultError(
+      preflightProviderVaultLink(t.db, t.context, input),
+      "vault_name_conflict",
+    );
+  });
+
+  test("refresh settlement fences late mirror/status and rolls back both if the final status fails", async () => {
+    const t = await tenant("settlement");
+    const linked = await linkProviderVault(t.db, t.context, {
+      ownerKind: "workspace",
+      name: "Settled",
+      source: "host",
+      providerVaultRef: "settled",
+      mode: "read_only",
+    });
+    const mirror = (version: string) => ({
+      contentVersion: version,
+      items: [{ providerItemRef: version, name: version, type: "api_key" as const, fields: [] }],
+    });
+    await expectVaultError(
+      setVaultSyncStatus(t.db, t.context, {
+        vaultId: linked.id,
+        status: "ok",
+        mirror: mirror("unfenced"),
+      }),
+      "provider_conflict",
+    );
+    await setVaultSyncStatus(t.db, t.context, {
+      vaultId: linked.id,
+      expectedCacheEpoch: "0",
+      status: "ok",
+      mirror: mirror("new"),
+    });
+    expect(await getProviderVaultSyncTarget(t.db, t.context, linked.id)).toMatchObject({
+      providerCacheEpoch: "1",
+      providerContentVersion: "new",
+    });
+    for (const status of ["ok", "error"] as const) {
+      await expectVaultError(
+        setVaultSyncStatus(t.db, t.context, {
+          vaultId: linked.id,
+          expectedCacheEpoch: "0",
+          status,
+          ...(status === "ok" ? { mirror: mirror("old") } : {}),
+        }),
+        "provider_conflict",
+      );
+    }
+    // This reaches the mirror writer, then fails the final status constraint:
+    // neither half of that settlement may persist.
+    await expect(
+      setVaultSyncStatus(t.db, t.context, {
+        vaultId: linked.id,
+        expectedCacheEpoch: "1",
+        status: "ok",
+        mirror: mirror("rolled back"),
+        rateLimitedUntil: "not a timestamp",
+      }),
+    ).rejects.toThrow();
+    expect(await getProviderVaultSyncTarget(t.db, t.context, linked.id)).toMatchObject({
+      providerCacheEpoch: "1",
+      providerContentVersion: "new",
+    });
+    expect(
+      (await listVaultItems(t.db, t.context, { vaultId: linked.id })).items.map(
+        (item) => item.name,
+      ),
+    ).toEqual(["new"]);
+    const foreign = await tenant("foreign-settlement");
+    await expectVaultError(
+      setVaultSyncStatus(foreign.db, foreign.context, {
+        vaultId: linked.id,
+        expectedCacheEpoch: "1",
+        status: "ok",
+        mirror: mirror("foreign"),
+      }),
+      "vault_not_found",
     );
   });
 

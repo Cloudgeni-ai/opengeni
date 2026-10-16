@@ -156,9 +156,16 @@ cut down to fit. The native 2,000-item vault limit remains explicit; never
 describe the first 2,000 items of a larger provider vault as its complete
 contents. Agent discovery retains its 1,000-row scan budget and next-cursor
 behavior. Mirror replacements of one vault are serialized on the vault row
-lock, taken before the old mirror is read, so overlapping syncs apply whole
-inventories one after the other: an older listing never re-adds an item a
-newer one removed while the newer content version is recorded.
+lock, taken before the old mirror is read. Refresh settlement also compares
+the durable cache epoch captured before provider I/O and commits the complete
+mirror, status, operations and freshness together. If another refresh settled
+first, the late result returns `superseded` without changing any of them.
+Unchanged checks and failures advance the fence too, so a late inventory or
+failure cannot overwrite a newer completed check. Reference resolution rereads
+candidates when its refresh was superseded. This is first-settlement-wins,
+not ordering of opaque provider versions: a superseded refresh never retries
+automatically, and a subsequent deliberate or stale refresh can check again.
+No database lock spans provider I/O.
 
 ## 9. Freshness and deliberate refresh
 
@@ -200,6 +207,22 @@ retry of a provider mutation after an ambiguous timeout. A successful remote
 write followed by failed mirror refresh is reported as saved-but-not-yet-
 listed, not as a safe invitation to create it again. Request IDs and explicit
 idempotency support allow hosts to reconcile retries without exposing values.
+
+Managed 1Password vault creation runs the canonical local link operation in
+a rollback-only preflight before calling the provider. This checks the same
+name, owner, quota, connection and authority policy without leaving a local
+placeholder, personal authority or audit row. The preflight is not a reservation;
+a racing local change can still refuse linking after creation. A confirmed
+upstream creation followed by link/refresh failure returns `details.created`,
+`connectionId` and `externalVaultId`, plus `linked` (true, false for a known
+refusal, or null for an unconfirmed link outcome) and `vaultId` when known.
+Recover through the ordinary existing-vault Link or Refresh path, never by
+repeating Create or deleting the upstream vault as compensation. A failed
+group grant carries the created vault identity through the adapter; linking
+still proceeds, with `groupGrantConfirmed: false` and instructions to check
+sharing in 1Password. An unconfirmed create reports `provider_outcome_unknown`
+and is not retried. This does not provide crash-proof or exactly-once creation:
+after a lost response, inspect the provider's vault list before any new create.
 
 ## 11. Proton Pass adapter
 

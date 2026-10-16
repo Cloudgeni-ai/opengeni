@@ -359,10 +359,11 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       const listed = (id: string) => first.vaults!.find((vault) => vault.id === id)!;
       expect(listed(w.company.id).freshness).toMatchObject({ state: "current" });
       expect(listed(w.team.id).freshness).toBeUndefined();
-      // An unchanged check records its time and the provider's observation, not a new epoch.
+      // Even an unchanged check advances the settlement fence, so a late
+      // overlapping inventory cannot overwrite this successful observation.
       const checked = await w.reload(w.company);
       expect(checked.providerFreshness).toEqual({ source: "cache", sourceSyncedAt: upstream });
-      expect(checked.providerCacheEpoch).toBe(epoch);
+      expect(BigInt(checked.providerCacheEpoch!)).toBe(BigInt(epoch!) + 1n);
       expect(Date.parse(checked.lastSyncedAt!)).toBeGreaterThan(Date.now() - 60_000);
 
       const second = await w.search({ limit: 1, cursor: first.nextCursor });
@@ -1071,14 +1072,14 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       release();
       const finished = await Promise.all([refresh(asAgent), refresh(w.context)]);
       for (const report of finished) {
-        expect(report.outcomes).toEqual([
-          {
-            vaultId: stale.id,
-            state: "done",
-            result: { status: "unchanged", contentVersion: "1" },
-          },
-        ]);
+        expect(report.outcomes).toHaveLength(1);
+        expect(report.outcomes[0]).toMatchObject({ vaultId: stale.id, state: "done" });
       }
+      expect(
+        finished
+          .map((report) => report.outcomes[0]!.result)
+          .sort((a, b) => a!.status.localeCompare(b!.status)),
+      ).toEqual([{ status: "superseded" }, { status: "unchanged", contentVersion: "1" }]);
       // One provider call per principal, not one per caller.
       expect(w.calls("listVaults")).toBe(lists + 2);
       w.controls.gate = null;
@@ -1180,9 +1181,11 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         [bridge, remote, "bridge", ["Bridge token", "Deploy key"]],
       ] as const) {
         expect(await mirrored(vault)).toEqual([...before]);
-        const epoch = await epochOf(vault);
+        let epoch = await epochOf(vault);
         const expectKept = async () => {
           expect(await mirrored(vault)).toEqual([...before]);
+          // Failure retains the mirror but advances the refresh fence.
+          epoch += 1n;
           expect(await epochOf(vault)).toBe(epoch);
           const row = await w.reload(vault);
           expect(row.syncStatus).toBe("error");
