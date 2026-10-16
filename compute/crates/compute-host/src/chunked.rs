@@ -39,15 +39,21 @@ use compute_storage::manifest::{DiskManifest, Extent, ExtentSource};
 use compute_storage::store::ChunkStore;
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 pub use crate::image::CHUNK_BYTES;
 use crate::image::{Hash, ZERO, chunk_count, chunk_range, data_ranges, hash_chunks, overlaps};
 use crate::protocol::Id;
 use crate::store::{FetchInto, FetchedMemory, Receipt, SavedFiles, Store};
 
-/// Chunk transfers in flight per file.
-const IN_FLIGHT: usize = 16;
+/// Chunk uploads in flight per file.
+const UPLOADS_PER_FILE: usize = 32;
+/// Chunk downloads in flight per file: a wake waits for them, and each one
+/// is mostly store latency.
+const DOWNLOADS_PER_FILE: usize = 64;
+/// Chunk transfers in flight on the whole host, so a hundred sandboxes
+/// sleeping or waking at once share a bounded set of connections.
+const TRANSFERS_PER_HOST: usize = 512;
 /// zstd level 1: measured nearly as small as higher levels at a fraction of
 /// the time, which matters because sleeping waits for it.
 const ZSTD_LEVEL: i32 = 1;
@@ -93,6 +99,8 @@ pub struct Chunked {
     /// The chunk hashes of the base image disks are fetched over, computed
     /// once per version of that file.
     seed: Arc<Mutex<Option<Arc<Seed>>>>,
+    /// Permits for chunk transfers, shared by every sandbox.
+    transfers: Arc<Semaphore>,
 }
 
 /// What identifies one version of a local file: if any of it changes, the
@@ -160,6 +168,7 @@ impl Chunked {
         Self {
             chunks,
             seed: Arc::default(),
+            transfers: Arc::new(Semaphore::new(TRANSFERS_PER_HOST)),
         }
     }
 
@@ -279,6 +288,7 @@ impl Chunked {
                 let file = Arc::clone(&file);
                 let earlier = Arc::clone(&earlier);
                 let chunks = self.chunks.clone();
+                let transfers = Arc::clone(&self.transfers);
                 let expected = known.as_ref().map(|known| known[index]);
                 async move {
                     let range = chunk_range(index, length);
@@ -294,6 +304,9 @@ impl Chunked {
                         Prepared::Zero => None,
                         Prepared::Known(reference) => Some(reference),
                         Prepared::New(chunk) => {
+                            let _permit = transfers.acquire_owned().await.map_err(|error| {
+                                EngineError::caused_by(ErrorKind::Transient, OP, error)
+                            })?;
                             chunks
                                 .put_chunk(&chunk)
                                 .await
@@ -304,7 +317,7 @@ impl Chunked {
                     Ok::<_, EngineError>((range, reference))
                 }
             })
-            .buffered(IN_FLIGHT)
+            .buffered(UPLOADS_PER_FILE)
             .try_collect()
             .await?;
         let manifest = DiskManifest {
@@ -376,11 +389,17 @@ impl Chunked {
             .map(|(at, length, reference, within)| {
                 let file = Arc::clone(&file);
                 let chunks = self.chunks.clone();
+                let transfers = Arc::clone(&self.transfers);
                 async move {
-                    let plain = chunks
-                        .get_chunk(&reference)
-                        .await
-                        .map_err(|error| storage_error(OP, error))?;
+                    let plain = {
+                        let _permit = transfers.acquire_owned().await.map_err(|error| {
+                            EngineError::caused_by(ErrorKind::Transient, OP, error)
+                        })?;
+                        chunks
+                            .get_chunk(&reference)
+                            .await
+                            .map_err(|error| storage_error(OP, error))?
+                    };
                     tokio::task::spawn_blocking(move || {
                         let start = usize::try_from(within).unwrap_or(usize::MAX);
                         let bytes = usize::try_from(length)
@@ -394,7 +413,7 @@ impl Chunked {
                     .map_err(|error| EngineError::io(OP, error))
                 }
             })
-            .buffer_unordered(IN_FLIGHT)
+            .buffer_unordered(DOWNLOADS_PER_FILE)
             .try_collect::<()>()
             .await?;
         let target = path.to_owned();
