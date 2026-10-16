@@ -52,7 +52,12 @@ records an error regardless. It never triggers a model retry. The canonical
 attempt fence still rejects a late publication after settlement.
 
 Only exact known injected provider bearer/API-key and Git/Codemode credentials (including renewals) are
-registered for redaction, including JSON-escaped occurrences. No credential-name
+registered for redaction, including nested JSON-escaped occurrences. Buffered
+public delta streams are checked as ordered fragments of the same output item,
+content/summary index and event type within one physical response. Only exact
+matching spans are replaced before the separate events are persisted; fragments
+from concurrent responses or separate output items are not concatenated. This
+also applies to the available prefix of a failed or cancelled response. No credential-name
 heuristics or blanket environment/task-text removal is used. Authorization
 headers are never captured. This does not discover unregistered secrets supplied
 by arbitrary user content or external tools; those remain deployment/export
@@ -75,7 +80,9 @@ attempt has quiesced for a stable audit.
 consistency, entire missing attempts and record-local scope/request/response/usage
 joins. `assessModelRequestEvidence` alone checks only the supplied record set;
 it is not proof that a session tree or a campaign was fully collected. Null
-required token totals, ambiguous response IDs, a failed physical attempt without
+required token totals, invalid integer counts or impossible known cached/cache-write
+and reasoning subsets, ambiguous response IDs (including disagreement between
+per-event `response_id` and nested `response.id`), a failed physical attempt without
 complete usage, or any missing record deny strict completeness. Optional token
 classes can remain unknown: a successful record check does not turn them into
 known zero or certify an invoice. Child coverage, provider custody/account

@@ -170,10 +170,28 @@ export function assessModelRequestEvidence(records: readonly ModelRequestEvidenc
         payload?.sourceKey !== response.responseId ||
         payload?.purpose !== request.purpose ||
         ![payload?.inputTokens, payload?.outputTokens].every(
-          (value) => typeof value === "number" && Number.isFinite(value) && value >= 0,
+          (value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0,
         )
       )
         issues.add(`${scopeId}:${physicalKey}:usage_identity_or_token_totals_unknown`);
+      const knownTokens = (value: unknown): value is number =>
+        typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+      const cached = payload?.cachedTokens;
+      const written = payload?.cacheWriteTokens;
+      const reasoning = payload?.reasoningTokens;
+      if ([cached, written, reasoning].some((value) => value != null && !knownTokens(value)))
+        issues.add(`${scopeId}:${physicalKey}:invalid_optional_token_count`);
+      // Unknown categories stay unknown. Known components still lower-bound the
+      // subset; don't require both cache fields to detect an impossible one.
+      if (
+        (knownTokens(payload?.inputTokens) &&
+          (knownTokens(cached) ? cached : 0) + (knownTokens(written) ? written : 0) >
+            payload.inputTokens) ||
+        (knownTokens(payload?.outputTokens) &&
+          knownTokens(reasoning) &&
+          reasoning > payload.outputTokens)
+      )
+        issues.add(`${scopeId}:${physicalKey}:token_subsets_exceed_totals`);
     }
     for (const record of scope) {
       if (

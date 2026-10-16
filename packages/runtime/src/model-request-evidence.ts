@@ -10,6 +10,120 @@ type Draft = Omit<ModelRequestEvidence, "version" | "scopeId" | "ordinal" | "pur
 type Store = { recorder: EvidenceRecorder; purpose: ModelEvidencePurpose };
 const storage = new AsyncLocalStorage<Store>();
 const hash = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+const REDACTED = "[REDACTED:injected-credential]";
+
+/** Exact registered values and their JSON string encodings, not content heuristics. */
+function credentialSpans(text: string, secrets: ReadonlySet<string>) {
+  const spans: Array<{ start: number; end: number }> = [];
+  const needles = new Set<string>();
+  for (const secret of secrets) {
+    // A tool result can itself contain JSON serialized into a request JSON string.
+    // Stop at the bounded source length (or a stable encoding), not one escape layer.
+    for (let needle = secret; needle && needle.length <= text.length;) {
+      if (needles.has(needle)) break;
+      needles.add(needle);
+      needle = JSON.stringify(needle).slice(1, -1);
+    }
+  }
+  for (const needle of needles) {
+    let start = text.indexOf(needle);
+    while (start !== -1) {
+      spans.push({ start, end: start + needle.length });
+      start = text.indexOf(needle, start + 1);
+    }
+  }
+  spans.sort((a, b) => a.start - b.start || b.end - a.end);
+  const merged: typeof spans = [];
+  for (const span of spans) {
+    const prior = merged.at(-1);
+    if (prior && span.start <= prior.end) prior.end = Math.max(prior.end, span.end);
+    else merged.push({ ...span });
+  }
+  return merged;
+}
+
+/** Preserve fragment/event boundaries and all bytes outside exact matching spans. */
+function redactFragments(fragments: string[], spans: ReturnType<typeof credentialSpans>) {
+  const joined = fragments.join("");
+  let offset = 0;
+  let index = 0;
+  return fragments.map((fragment) => {
+    const end = offset + fragment.length;
+    let position = offset;
+    let result = "";
+    while (index < spans.length && spans[index]!.start < end) {
+      const span = spans[index]!;
+      if (span.end <= position) {
+        index++;
+        continue;
+      }
+      result += joined.slice(position, Math.max(position, span.start));
+      if (span.start >= offset) result += REDACTED;
+      position = Math.min(end, span.end);
+      if (span.end <= end) index++;
+      else break;
+    }
+    result += joined.slice(position, end);
+    offset = end;
+    return result;
+  });
+}
+
+/** Bounded response capture is already buffered; redact each actual public stream
+ * before persisting its separate deltas. Never join concurrent physical calls. */
+function redactResponseDeltas(content: unknown, secrets: ReadonlySet<string>, changed: () => void) {
+  if (
+    !secrets.size ||
+    !content ||
+    typeof content !== "object" ||
+    !Array.isArray((content as any).events)
+  )
+    return content;
+  const events = (content as { events: Record<string, any>[] }).events.map((event) => ({
+    ...event,
+  }));
+  const itemIndices = new Map<string, number>();
+  const associate = (id: unknown, index: unknown) => {
+    if (typeof id !== "string" || typeof index !== "number") return;
+    if (itemIndices.has(id) && itemIndices.get(id) !== index)
+      throw new Error("Ambiguous public output stream identity");
+    itemIndices.set(id, index);
+  };
+  for (const event of events) {
+    associate(event.item_id ?? event.item?.id, event.output_index);
+    if (Array.isArray(event.response?.output))
+      event.response.output.forEach((item: any, index: number) => associate(item?.id, index));
+  }
+  const groups = new Map<string, typeof events>();
+  for (const event of events) {
+    if (
+      typeof event.type !== "string" ||
+      !event.type.endsWith(".delta") ||
+      typeof event.delta !== "string"
+    )
+      continue;
+    const output = event.output_index ?? itemIndices.get(event.item_id) ?? event.item_id ?? null;
+    const key = JSON.stringify([
+      event.type,
+      output,
+      event.content_index ?? null,
+      event.summary_index ?? null,
+    ]);
+    const group = groups.get(key) ?? [];
+    group.push(event);
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) {
+    const fragments = group.map((event) => event.delta as string);
+    const spans = credentialSpans(fragments.join(""), secrets);
+    if (!spans.length) continue;
+    changed();
+    redactFragments(fragments, spans).forEach((text, index) => {
+      group[index]!.delta = text;
+    });
+  }
+  return { ...content, events };
+}
 
 /** Register only actual injected credential values, never name/content heuristics. */
 export function registerModelEvidenceSecrets(values: readonly (string | null | undefined)[]) {
@@ -86,16 +200,10 @@ class EvidenceRecorder {
       let changed = false;
       const redact = (value: unknown): unknown => {
         if (typeof value === "string") {
-          let result = value;
-          for (const secret of [...this.secrets].sort((a, b) => b.length - a.length)) {
-            for (const needle of new Set([secret, JSON.stringify(secret).slice(1, -1)])) {
-              if (needle && result.includes(needle)) {
-                result = result.split(needle).join("[REDACTED:injected-credential]");
-                changed = true;
-              }
-            }
-          }
-          return result;
+          const spans = credentialSpans(value, this.secrets);
+          if (!spans.length) return value;
+          changed = true;
+          return redactFragments([value], spans)[0];
         }
         if (Array.isArray(value)) return value.map(redact);
         if (value && typeof value === "object")
@@ -104,7 +212,13 @@ class EvidenceRecorder {
           );
         return value;
       };
-      const content = redact(record.content);
+      const content = redact(
+        record.kind === "response"
+          ? redactResponseDeltas(record.content, this.secrets, () => {
+              changed = true;
+            })
+          : record.content,
+      );
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
@@ -230,6 +344,13 @@ function publicResponse(value: Record<string, any>) {
 /** Retain source event order, not a second model-output graph or invented history. */
 export function publicResponsesEvidence(text: string): PublicResponse {
   const result: PublicResponse = { events: [], terminal: "unknown", unsupported: false };
+  let observedResponseId: string | undefined;
+  const observeIdentity = (id: unknown) => {
+    if (id === undefined) return;
+    if (typeof id !== "string" || !id || (observedResponseId && observedResponseId !== id))
+      result.unsupported = true;
+    else observedResponseId = id;
+  };
   const analysisItems = new Set<string>();
   const analysisIndices = new Set<number>();
   const normalized = text
@@ -253,6 +374,7 @@ export function publicResponsesEvidence(text: string): PublicResponse {
     if (!raw || typeof raw !== "object") throw new Error("Invalid provider event");
     const event = raw as Record<string, any>;
     if (typeof event.type !== "string") throw new Error("Missing provider event type");
+    observeIdentity(event.response_id);
     // Raw/hidden reasoning text and encrypted material are never public summaries.
     if (event.type.startsWith("response.reasoning_text.")) continue;
     if (event.item?.type === "message" && event.item.channel === "analysis") {
@@ -316,6 +438,7 @@ export function publicResponsesEvidence(text: string): PublicResponse {
           }
         }
       projected.response = publicResponse(r);
+      observeIdentity(r.id);
       if (typeof r.id === "string") {
         if (result.responseId && result.responseId !== r.id) result.unsupported = true;
         result.responseId = r.id;
