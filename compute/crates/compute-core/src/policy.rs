@@ -315,19 +315,19 @@ impl Default for StepLimits {
     /// bandwidth, disk and network; incremental saves write little, so many
     /// can run at once.
     ///
-    /// Fetch stays at 8 because a remote wake is bandwidth-bound, not
-    /// latency-bound: one wake fetches its working-set pack and its disk
-    /// (about 200 MiB for a typical guest) at roughly 80 MB/s per wake when
-    /// 8 run, which already fills a 32-vCPU cloud host's link. Measured with
-    /// 100 wakes at once from object storage, raising the limit to 32 or 100
-    /// left the aggregate rate unchanged and only spread it over more wakes,
-    /// so the median wake finished later (first byte p50 about 30 s at 8,
-    /// 37 s at 32 and 36 to 53 s at 100) and no wake finished earlier. A
+    /// Fetch stays at 8 because more concurrent fetches do not make the
+    /// host fetch faster. Measured on a 32-vCPU cloud host with 100 wakes
+    /// at once from object storage (each fetching about 85 MB compressed:
+    /// its working-set pack and the disk blocks the base image lacks), the
+    /// fetches together moved about 250 MB/s whether 8, 32 or 100 ran at
+    /// once, well below the host's network, disk and CPU limits, so
+    /// something shared inside the fetch path sets the pace. More at once
+    /// only spread that rate over more wakes: first byte p50 about 30 s at
+    /// 8, 37 s at 32, 36 to 53 s at 100, and no wake finished earlier. A
     /// narrow limit serves wakes nearly first come first served, the best
-    /// median for a shared bottleneck. A single wake is unaffected (about
-    /// 0.9 s to first byte). Restore at 32 still fits: a remote restore
-    /// waits only for its pack's first part, and its mean stayed below 2 s
-    /// at 100 wide with Fetch at 8.
+    /// median for a shared bottleneck. A single wake takes about 0.9 s to
+    /// first byte. Restore at 32 still fits: a remote restore waits only
+    /// for its pack, and its mean stayed below 2 s at 100 wide.
     fn default() -> Self {
         Self::uniform(8)
             .with(Step::Resume, 64)

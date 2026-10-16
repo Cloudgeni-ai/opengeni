@@ -15,6 +15,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -53,8 +54,9 @@ pub(super) async fn start(
     let mut command = Command::new(&pager.program);
     command
         .args(&pager.args)
-        // A finishing pager asks the VMM before it exits.
-        .arg("--api-socket")
+        // A finishing pager asks the VMM before it exits; the argument also
+        // marks the process as this VM's pager (see `lost`).
+        .arg(API_SOCKET_ARG)
         .arg(vm.api.socket())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -100,21 +102,54 @@ pub(super) async fn start(
     Err(error)
 }
 
-/// Whether the VM whose VMM is `vmm`, in `group`, lost its pager while
-/// the guest still needed it: nothing but the VMM runs in the group, and
-/// either guest memory is still registered for missing-page faults or a
-/// VMM thread waits for a userfaultfd event to be read.
+/// The argument that hands a pager its VMM's API socket.
+const API_SOCKET_ARG: &str = "--api-socket";
+
+/// Whether the VM whose VMM is `vmm` and whose API listens at `api`, in
+/// `group`, lost its pager while the guest still needed it: no pager of
+/// this VM runs in the group, and either guest memory is still registered
+/// for missing-page faults or a VMM thread waits for a userfaultfd event
+/// to be read.
 ///
 /// The group is read first: a pager unregisters the guest's memory and
 /// reads every event still coming before it exits, so either state with
 /// no pager left can only mean a pager that died. A thread whose wait
-/// channel cannot be read proves nothing either way.
-pub(super) fn lost(vmm: Pid, group: &Cgroup) -> io::Result<bool> {
+/// channel cannot be read proves nothing either way. A pager is known by
+/// the API socket the engine passed it, so other helpers in the group do
+/// not hide its death; a process whose command line cannot be read counts
+/// as a pager, which keeps the VM.
+pub(super) fn lost(vmm: Pid, group: &Cgroup, api: &Path) -> io::Result<bool> {
     let vmm = vmm.as_raw_pid().unsigned_abs();
-    if group.processes()?.into_iter().any(|pid| pid != vmm) {
+    if group
+        .processes()?
+        .into_iter()
+        .any(|pid| pid != vmm && is_pager(pid, api))
+    {
         return Ok(false);
     }
     Ok(registered(vmm)? || waits_for_event_reader(vmm))
+}
+
+/// Whether process `pid` is the pager of the VM whose API listens at
+/// `api`, or cannot be told apart from one.
+fn is_pager(pid: u32, api: &Path) -> bool {
+    let Ok(cmdline) = fs::read(format!("/proc/{pid}/cmdline")) else {
+        // Gone since the group was read, or unreadable: only a process
+        // that is certainly gone is certainly not the pager.
+        return Path::new(&format!("/proc/{pid}")).exists();
+    };
+    names_pager(&cmdline, api)
+}
+
+/// Whether a NUL-separated command line passes `api` as the API socket.
+fn names_pager(cmdline: &[u8], api: &Path) -> bool {
+    let mut args = cmdline.split(|&byte| byte == 0);
+    while let Some(arg) = args.next() {
+        if arg == API_SOCKET_ARG.as_bytes() {
+            return args.next() == Some(api.as_os_str().as_bytes());
+        }
+    }
+    false
 }
 
 /// Whether a thread of process `pid` sleeps in the kernel's userfaultfd
@@ -151,5 +186,20 @@ mod tests {
     fn ordinary_memory_is_not_registered() {
         assert!(!registered(std::process::id()).unwrap());
         assert!(!waits_for_event_reader(std::process::id()));
+    }
+
+    #[test]
+    fn a_pager_is_known_by_its_vms_api_socket() {
+        let api = Path::new("/srv/jail/vm/run/api.socket");
+        assert!(names_pager(
+            b"/bin/host\0pager\0--vmm-socket\0/x\0--api-socket\0/srv/jail/vm/run/api.socket\0",
+            api
+        ));
+        assert!(!names_pager(
+            b"/bin/host\0pager\0--api-socket\0/srv/jail/other/run/api.socket\0",
+            api
+        ));
+        assert!(!names_pager(b"sleep\0infinity\0", api));
+        assert!(!names_pager(b"/bin/host\0pager\0--api-socket\0", api));
     }
 }

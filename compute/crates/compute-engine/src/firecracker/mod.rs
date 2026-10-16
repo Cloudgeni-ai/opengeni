@@ -856,8 +856,12 @@ impl Engine for Firecracker {
         };
         // The pager comes first: a VMM whose pager died can be stuck on
         // guest memory and never answer its API, which alone proves nothing.
-        let (vmm, group) = (vm.process.pid(), vm.cgroup.clone());
-        let lost = tokio::task::spawn_blocking(move || pager::lost(vmm, &group))
+        let (vmm, group, api) = (
+            vm.process.pid(),
+            vm.cgroup.clone(),
+            vm.api.socket().to_owned(),
+        );
+        let lost = tokio::task::spawn_blocking(move || pager::lost(vmm, &group, &api))
             .await
             .map_err(io::Error::other)
             .and_then(|lost| lost);

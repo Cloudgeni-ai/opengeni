@@ -15,9 +15,11 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use nix::fcntl::{OFlag, open};
+use nix::sys::socket::{
+    AddressFamily, SockFlag, SockType, UnixAddr, connect as connect_to, socket,
+};
 use nix::sys::stat::{Mode, SFlag, fstat};
 
 use super::Quiesce;
@@ -46,13 +48,22 @@ impl AskVmm {
 }
 
 impl Quiesce for AskVmm {
+    /// Never blocks: the caller is the thread that reads the VMM's
+    /// events, and a VMM waiting for one of them cannot accept or read.
+    /// A full accept queue or socket buffer fails the question, to be
+    /// asked again later.
     fn ask(&mut self) -> io::Result<RawFd> {
         self.asking = None;
         self.reply.clear();
         let mut stream = connect(&self.socket)?;
-        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
-        stream.write_all(REQUEST)?;
-        stream.set_nonblocking(true)?;
+        // An empty socket's buffer takes the whole request at once.
+        let written = stream.write(REQUEST)?;
+        if written != REQUEST.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the VMM's socket took only part of the question",
+            ));
+        }
         let fd = stream.as_raw_fd();
         self.asking = Some(stream);
         Ok(fd)
@@ -98,7 +109,9 @@ impl Quiesce for AskVmm {
 
 /// Connects to the socket at `path` without following a link: the jail
 /// the socket lives in belongs to the VMM, and the pager is not to be sent
-/// anywhere else.
+/// anywhere else. The connection is non-blocking from the start, so a
+/// listener whose queue is full refuses at once (`EAGAIN`) instead of
+/// holding the caller.
 fn connect(path: &Path) -> io::Result<UnixStream> {
     let fd = open(
         path,
@@ -112,14 +125,26 @@ fn connect(path: &Path) -> io::Result<UnixStream> {
             format!("{} is not a socket", path.display()),
         ));
     }
-    // The descriptor stays open until the connection is made.
-    UnixStream::connect(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+    let stream = socket(
+        AddressFamily::Unix,
+        SockType::Stream,
+        SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+        None,
+    )?;
+    // The descriptor stays open until the connection is made. A Unix
+    // socket connects at once or not at all; it is never in progress.
+    let address = UnixAddr::new(format!("/proc/self/fd/{}", fd.as_raw_fd()).as_str())?;
+    connect_to(stream.as_raw_fd(), &address)?;
+    Ok(UnixStream::from(stream))
 }
 
 #[cfg(test)]
 mod tests {
     use std::os::unix::net::UnixListener;
     use std::thread;
+    use std::time::{Duration, Instant};
+
+    use nix::sys::socket::{Backlog, bind, listen};
 
     use super::*;
 
@@ -177,5 +202,37 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert!(AskVmm::new(link).ask().is_err());
         assert!(AskVmm::new(real).ask().is_ok());
+    }
+
+    #[test]
+    fn a_vmm_that_accepts_nothing_never_holds_the_asker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api.sock");
+        let listener = socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::SOCK_CLOEXEC,
+            None,
+        )
+        .unwrap();
+        bind(listener.as_raw_fd(), &UnixAddr::new(&path).unwrap()).unwrap();
+        listen(&listener, Backlog::new(0).unwrap()).unwrap();
+        // Nobody accepts: the queue fills, and then every question fails
+        // at once instead of waiting for room.
+        let started = Instant::now();
+        let mut askers: Vec<AskVmm> = Vec::new();
+        let refused = (0..16).find_map(|_| {
+            let mut ask = AskVmm::new(path.clone());
+            match ask.ask() {
+                Ok(_) => {
+                    askers.push(ask);
+                    None
+                }
+                Err(error) => Some(error),
+            }
+        });
+        let refused = refused.expect("a full queue refuses");
+        assert_eq!(refused.kind(), io::ErrorKind::WouldBlock, "{refused}");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }
