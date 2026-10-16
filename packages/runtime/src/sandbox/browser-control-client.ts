@@ -465,7 +465,7 @@ export type PlacementBrowserWorkingCopyInspection = PlacementBrowserSessionRefer
   platformSupported: boolean;
   refusal: PlacementBrowserWorkingCopyRefusal | null;
   /** Exact digest of the bytes an adoption would take; null when refused. */
-  manifest: { digest: string; entries: number; bytes: number } | null;
+  manifest: { digest: string; entries: number; bytes: number; excluded: string[] } | null;
   profileIdentityMatches: boolean;
   /** false only when no process provably uses the profile. */
   profileInUse: boolean | null;
@@ -968,7 +968,9 @@ export class BrowserControlClient {
   }
 
   /** Adopt the exact inspected bytes of a preserved working copy. A lost reply
-   * is reconciled with {@link workingCopyAdoption}, never by sending again. */
+   * is checked with {@link workingCopyAdoption}. Sending the same operation id
+   * again never repeats a side effect: it only settles what that operation
+   * already did, under the authority that approved it. */
   async adoptWorkingCopy(
     input: PlacementBrowserWorkingCopyAuthority & { operationId: string; manifestDigest: string },
   ): Promise<PlacementBrowserWorkingCopyAdoption> {
@@ -992,7 +994,7 @@ export class BrowserControlClient {
     return adoption;
   }
 
-  /** The recorded state of one adoption, reconciled by the controller. */
+  /** The recorded state of one adoption, read without changing it. */
   async workingCopyAdoption(
     reference: PlacementBrowserSessionReference,
     operationId: string,
@@ -3109,6 +3111,7 @@ function parseWorkingCopyInspection(
       digest: sha256(value.manifest.digest, "working copy manifest digest"),
       entries: nonnegativeSafeInteger(value.manifest.entries, "working copy entries"),
       bytes: nonnegativeSafeInteger(value.manifest.bytes, "working copy bytes"),
+      excluded: excludedWorkingCopyEntries(value.manifest.excluded),
     };
   }
   let receipt: PlacementBrowserWorkingCopyInspection["receipt"] = null;
@@ -3962,6 +3965,21 @@ function nonnegativeSafeInteger(value: unknown, label: string): number {
     throw new RangeError(`${label} is invalid`);
   }
   return value;
+}
+
+function excludedWorkingCopyEntries(value: unknown): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > 16 ||
+    !value.every(
+      (entry) => typeof entry === "string" && entry.length > 0 && entry.length <= 256,
+    )
+  ) {
+    throw new BrowserControlProtocolError(
+      "browser controller returned malformed working copy exclusions",
+    );
+  }
+  return [...value];
 }
 
 function parseUnsignedInteger(value: string, label: string): number {

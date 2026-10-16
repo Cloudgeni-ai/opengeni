@@ -2666,7 +2666,7 @@ test("inspects and adopts a preserved working copy with its exact authority, nev
           browserSessionId,
           controllerGeneration,
           platformSupported: true,
-          manifest: { digest, entries: 12, bytes: 4096 },
+          manifest: { digest, entries: 12, bytes: 4096, excluded: ["chrome-launch"] },
           currentProfile: { device: 1, inode: 2 },
           receipt: {
             operationId: randomUUID(),
@@ -2718,7 +2718,7 @@ test("inspects and adopts a preserved working copy with its exact authority, nev
       controllerGeneration,
       platformSupported: true,
       refusal: null,
-      manifest: { digest, entries: 12, bytes: 4096 },
+      manifest: { digest, entries: 12, bytes: 4096, excluded: ["chrome-launch"] },
       profileIdentityMatches: false,
       profileInUse: false,
       receipt: expect.objectContaining({ launchedFromCheckpoint: true, adoption: null }),

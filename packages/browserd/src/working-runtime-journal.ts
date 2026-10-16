@@ -431,7 +431,7 @@ const UNAVAILABLE_EXPLANATIONS: Record<BrowserWorkingRuntimeUnavailableReason, s
     "it cannot be proven that its last browser process has stopped, so its working copy is left untouched",
   working_copy_invalid: "its working directory is incomplete or is not a plain directory",
   adoption_unresolved:
-    "a working copy adoption for it is unresolved; check it with getBrowserSessionWorkingCopyAdoption",
+    "a working copy adoption for it is unresolved; check it with getBrowserSessionWorkingCopyAdoption, then retry that same adoption with the same operationId to settle it",
   adoption_conflict: "a different working copy adoption already used this operation",
 };
 

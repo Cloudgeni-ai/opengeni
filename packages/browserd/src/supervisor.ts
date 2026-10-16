@@ -88,13 +88,17 @@ import {
   type BrowserWorkingRuntimeReceipt,
 } from "./working-runtime-journal";
 import {
+  ADOPTION_IN_FLIGHT,
+  ADOPTION_UNRECORDED,
   WorkingCopyAdoptionError,
+  adoptionAuthority,
+  adoptionLocked,
   adoptWorkingCopy,
   adoptionPaths,
   assertWorkingCopyJournalsIntact,
   emptyWorkingCopyEvidence,
+  observeActiveAdoption,
   readAdoptionRecord,
-  reconcileAdoption,
   settleActiveAdoption,
   workingCopyAdoptionStatus,
   workingCopyManifest,
@@ -103,6 +107,7 @@ import {
   type BrowserWorkingCopyAuthorityInput,
   type BrowserWorkingCopyInspection,
   type BrowserWorkingCopyRefusal,
+  type WorkingCopyAdoptionPhase,
 } from "./working-copy-adoption";
 import { SqliteBrowserOperationJournal } from "./journal";
 import { BrowserWorkspaceFileStager } from "./workspace-files";
@@ -327,6 +332,9 @@ export type BrowserSupervisorOptions = {
   /** Proves no process runs a browser on an exact private profile before an
    * interrupted launch is set aside; tests supply the outcome. */
   assertProfileUnused?: typeof assertManagedBrowserProfileUnused;
+  /** Called after each durable phase of a working copy adoption; tests use
+   * it to stop an adoption at an exact boundary, as a crash would. */
+  afterAdoptionPhase?: (phase: WorkingCopyAdoptionPhase) => Promise<void>;
 };
 
 type Runtime = {
@@ -394,10 +402,16 @@ export class BrowserSupervisor {
   private readonly inspectOwnedProcess: typeof inspectOwnedManagedBrowserProcess;
   private readonly stopEndedProcess: typeof stopEndedManagedBrowserProcess;
   private readonly assertProfileUnused: typeof assertManagedBrowserProfileUnused;
+  private readonly afterAdoptionPhase:
+    | ((phase: WorkingCopyAdoptionPhase) => Promise<void>)
+    | undefined;
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
   /** Browsers whose working copy is being adopted by this process. */
   private readonly adopting = new Set<string>();
+  /** Browsers whose preserved working copy is being ended, retired or set
+   * aside by this process; an adoption may not start meanwhile. */
+  private readonly endingWorkingCopies = new Set<string>();
   private readonly creationRequests = new Set<Promise<BrowserSupervisorSession>>();
   private readonly ending = new Map<string, Promise<void>>();
   private readonly stateTransferTails = new Map<string, Promise<void>>();
@@ -439,6 +453,7 @@ export class BrowserSupervisor {
     this.inspectOwnedProcess = options.inspectOwnedProcess ?? inspectOwnedManagedBrowserProcess;
     this.stopEndedProcess = options.stopEndedProcess ?? stopEndedManagedBrowserProcess;
     this.assertProfileUnused = options.assertProfileUnused ?? assertManagedBrowserProfileUnused;
+    this.afterAdoptionPhase = options.afterAdoptionPhase;
   }
 
   private async createEphemeralDriver(
@@ -574,20 +589,23 @@ export class BrowserSupervisor {
 
   /** Read-only evidence about a preserved working copy that this controller
    * holds no runtime for: its manifest digest, latest receipt and whether it
-   * can be adopted. Nothing is written except SQLite's own shared-memory
-   * index, which is not part of the working copy. */
+   * can be adopted. Inspection never settles or changes an adoption, and
+   * writes nothing except SQLite's own shared-memory index of the
+   * controller journal, which is not part of the working copy. */
   async inspectWorkingCopy(
     input: BrowserWorkingCopyAuthorityInput,
   ): Promise<BrowserWorkingCopyInspection> {
     this.assertOpen();
     const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
-    const blocking = await this.unresolvedAdoption(input.browserSessionId);
+    const blocking = this.adopting.has(input.browserSessionId)
+      ? ("in_flight" as const)
+      : await observeActiveAdoption(paths);
     const evidence = await this.workingCopyEvidence(input);
     return {
       ...evidence,
       platformSupported: process.platform === "linux",
       activeAdoption:
-        blocking && blocking !== "in_flight"
+        blocking && typeof blocking !== "string"
           ? await workingCopyAdoptionStatus(paths, blocking)
           : null,
       refusal:
@@ -614,6 +632,12 @@ export class BrowserSupervisor {
     const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
     if (this.adopting.has(input.browserSessionId))
       throw workingCopyRefusalError("adoption_unresolved");
+    if (
+      this.endingWorkingCopies.has(input.browserSessionId) ||
+      this.sessions.has(input.browserSessionId) ||
+      this.creating.has(input.browserSessionId)
+    )
+      throw workingCopyRefusalError("browser_running");
     this.adopting.add(input.browserSessionId);
     try {
       const existing = await readAdoptionRecord(paths, input.operationId);
@@ -634,8 +658,9 @@ export class BrowserSupervisor {
     return await adoptWorkingCopy(paths, {
       operationId: input.operationId,
       browserSessionId: input.browserSessionId,
-      controllerGeneration: input.controllerGeneration,
+      authority: adoptionAuthority(input),
       manifestDigest: input.manifestDigest,
+      ...(this.afterAdoptionPhase ? { afterPhase: this.afterAdoptionPhase } : {}),
       appendReceipt: async (stagingDirectory) => {
         await assertWorkingCopyJournalsIntact(stagingDirectory);
         const writer = await SqliteBrowserWorkingRuntimeJournal.open({
@@ -670,41 +695,72 @@ export class BrowserSupervisor {
     });
   }
 
-  /** Status of one adoption by its operation id. A missing record proves the
-   * operation changed nothing here, because the record precedes every side
-   * effect; any recorded state is reconciled first and reported as found.
-   * An adoption still running here is reported as in flight, unreconciled. */
+  /** Status of one adoption by its operation id, read without changing
+   * anything. A missing record proves the operation changed nothing here,
+   * because the record precedes every side effect. A recorded adoption that
+   * stopped part way is reported in its recorded phase; retrying the same
+   * adoption under the same authority, or a launch under that authority,
+   * settles it. An adoption still running anywhere is reported in flight. */
   async workingCopyAdoptionStatus(input: {
     browserSessionId: string;
     operationId: string;
   }): Promise<{ inFlight: boolean; adoption: BrowserWorkingCopyAdoptionStatus | null }> {
     this.assertOpen();
     const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
+    const inFlight = this.adopting.has(input.browserSessionId) || (await adoptionLocked(paths));
     const record = await readAdoptionRecord(paths, input.operationId);
-    if (this.adopting.has(input.browserSessionId)) {
-      return {
-        inFlight: true,
-        adoption: record ? await workingCopyAdoptionStatus(paths, record) : null,
-      };
-    }
-    if (!record) return { inFlight: false, adoption: null };
-    let reconciled: typeof record;
-    try {
-      reconciled = await reconcileAdoption(paths, record);
-    } catch (error) {
-      // Still running in another controller process: report it unreconciled.
-      if (!(error instanceof WorkingCopyAdoptionError && error.reason === "adoption_in_progress"))
-        throw error;
-      return { inFlight: true, adoption: await workingCopyAdoptionStatus(paths, record) };
-    }
-    return { inFlight: false, adoption: await workingCopyAdoptionStatus(paths, reconciled) };
+    return {
+      inFlight,
+      adoption: record ? await workingCopyAdoptionStatus(paths, record) : null,
+    };
   }
 
-  /** The adoption that still owns a browser's directory: one running here, or
-   * a recorded one that reconciliation could not bring to a terminal phase. */
-  private async unresolvedAdoption(browserSessionId: string) {
-    if (this.adopting.has(browserSessionId)) return "in_flight" as const;
-    return await settleActiveAdoption(adoptionPaths(this.rootDirectory, browserSessionId));
+  /** The adoption that still owns a browser's directory, for a launch: one
+   * running anywhere, or a recorded one that settlement under the launch's
+   * own authority could not bring to a terminal phase. Without a working
+   * runtime authority nothing is settled, only observed. */
+  private async unresolvedAdoption(options: {
+    browserSessionId: string;
+    controllerGeneration: string;
+    workingRuntimeAuthority?: BrowserWorkingRuntimeAuthority;
+  }) {
+    if (this.adopting.has(options.browserSessionId)) return "in_flight" as const;
+    const paths = adoptionPaths(this.rootDirectory, options.browserSessionId);
+    if (!options.workingRuntimeAuthority) return await observeActiveAdoption(paths);
+    return await settleActiveAdoption(
+      paths,
+      adoptionAuthority({
+        controllerGeneration: options.controllerGeneration,
+        authority: options.workingRuntimeAuthority,
+      }),
+    );
+  }
+
+  /** Run an end, retire or set-aside of a preserved working copy only while
+   * no adoption owns its directory. The browser is marked first, so an
+   * adoption that starts afterwards in this process refuses. An adoption
+   * running here or in another process, or a recorded one not yet settled
+   * (its original or staged copy may be about to move), makes this refuse
+   * instead; retrying that adoption, or a launch under its authority,
+   * settles it first. A claim with no record changed nothing, so it does not
+   * block. */
+  private async whileNoAdoption(browserSessionId: string, body: () => Promise<void>) {
+    const marked = !this.endingWorkingCopies.has(browserSessionId);
+    this.endingWorkingCopies.add(browserSessionId);
+    try {
+      const paths = adoptionPaths(this.rootDirectory, browserSessionId);
+      const blocking = this.adopting.has(browserSessionId)
+        ? ADOPTION_IN_FLIGHT
+        : (await adoptionLocked(paths))
+          ? ADOPTION_IN_FLIGHT
+          : await observeActiveAdoption(paths);
+      if (blocking !== null && blocking !== ADOPTION_UNRECORDED) {
+        throw workingRuntimeUnavailable("adoption_unresolved");
+      }
+      await body();
+    } finally {
+      if (marked) this.endingWorkingCopies.delete(browserSessionId);
+    }
   }
 
   private async workingCopyEvidence(
@@ -1206,27 +1262,27 @@ export class BrowserSupervisor {
       // unless this generation's latest launch provably never completed, or
       // the person explicitly ends this exact generation and discards it.
       if (workingRuntimePresent) {
-        if (
-          options.removeState === true &&
-          options.discardWorkingRuntime === true &&
-          !suspendForShutdown
-        ) {
-          await this.retireNonResidentWorkingRuntime(reference, sessionDirectory);
-          return;
-        }
-        if (
-          options.removeState === true &&
-          options.setAsideInterruptedLaunch === true &&
-          !suspendForShutdown
-        ) {
-          await this.setAsideInterruptedLaunch(reference, sessionDirectory);
-          return;
-        }
-        await this.cleanupAbandonedLaunch(
-          reference,
-          sessionDirectory,
-          options.removeState === true,
-        );
+        await this.whileNoAdoption(reference.browserSessionId, async () => {
+          if (
+            options.removeState === true &&
+            options.discardWorkingRuntime === true &&
+            !suspendForShutdown
+          ) {
+            await this.retireNonResidentWorkingRuntime(reference, sessionDirectory);
+          } else if (
+            options.removeState === true &&
+            options.setAsideInterruptedLaunch === true &&
+            !suspendForShutdown
+          ) {
+            await this.setAsideInterruptedLaunch(reference, sessionDirectory);
+          } else {
+            await this.cleanupAbandonedLaunch(
+              reference,
+              sessionDirectory,
+              options.removeState === true,
+            );
+          }
+        });
         return;
       }
     }
@@ -1331,7 +1387,7 @@ export class BrowserSupervisor {
     const screenshotDirectory = join(sessionDirectory, "screenshots");
     // An adoption running here or left unresolved owns this directory; no
     // launch of any kind may use it until that adoption is reconciled.
-    if (await this.unresolvedAdoption(options.browserSessionId))
+    if (await this.unresolvedAdoption(options))
       throw workingRuntimeUnavailable("adoption_unresolved");
     if (
       !options.recoverExistingWorkingDirectory &&

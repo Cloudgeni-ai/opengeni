@@ -12,9 +12,11 @@ import {
   copyWorkingCopy,
   readActiveAdoption,
   readAdoptionRecord,
-  reconcileAdoption,
+  observeActiveAdoption,
   settleActiveAdoption,
   workingCopyManifest,
+  writeAdoptionRecord,
+  type AdoptionAuthority,
   type AdoptionPaths,
   type WorkingCopyAdoptionPhase,
 } from "../src/working-copy-adoption";
@@ -25,6 +27,20 @@ import {
 
 const BROWSER = "11111111-1111-4111-8111-000000000777";
 const GENERATION = "controller-777";
+/** The authority that approved an adoption, and a stale one: the same
+ * controller generation after its token authority moved on. */
+const AUTHORITY: AdoptionAuthority = {
+  controllerGeneration: GENERATION,
+  authorityDigest: "a".repeat(64),
+};
+const STALE: AdoptionAuthority = {
+  controllerGeneration: GENERATION,
+  authorityDigest: "b".repeat(64),
+};
+const STALE_GENERATION: AdoptionAuthority = {
+  controllerGeneration: "controller-778",
+  authorityDigest: "a".repeat(64),
+};
 const operation = (sequence: number) =>
   `22222222-2222-4222-8222-${sequence.toString().padStart(12, "0")}`;
 
@@ -67,12 +83,13 @@ async function adopt(
   options: {
     failAfter?: WorkingCopyAdoptionPhase;
     receipts?: string[];
+    authority?: AdoptionAuthority;
   } = {},
 ) {
   return await adoptWorkingCopy(paths, {
     operationId: operation(sequence),
     browserSessionId: BROWSER,
-    controllerGeneration: GENERATION,
+    authority: options.authority ?? AUTHORITY,
     manifestDigest: digest,
     appendReceipt: async (staging) => {
       options.receipts?.push(staging);
@@ -88,6 +105,7 @@ describe("working copy manifest", () => {
   test("is exact, excludes derived entries and never follows links", async () => {
     const { paths } = await fixture();
     const first = await workingCopyManifest(paths.live);
+    expect(first.excluded).toEqual(["chrome-launch", "working-runtime.sqlite-shm"]);
     await writeFile(join(paths.live, "working-runtime.sqlite-shm"), "derived-2");
     await writeFile(join(paths.live, "chrome-launch", "other.sh"), "#!/bin/sh");
     expect((await workingCopyManifest(paths.live)).digest).toBe(first.digest);
@@ -97,6 +115,46 @@ describe("working copy manifest", () => {
     );
     await writeFile(join(paths.live, "profile", "Default", "Cookies"), "cookie-bytez");
     expect((await workingCopyManifest(paths.live)).digest).not.toBe(first.digest);
+  });
+
+  test("excludes only the controller's own indexes and launcher, never user entries", async () => {
+    const { root, paths } = await fixture();
+    // User data whose names merely look like derived entries.
+    await mkdir(join(paths.live, "downloads", "files"), { recursive: true });
+    await writeFile(join(paths.live, "downloads", "files", "report-shm"), "user report");
+    await mkdir(join(paths.live, "profile", "notes-shm"));
+    await writeFile(join(paths.live, "profile", "notes-shm", "note.txt"), "user note");
+    await mkdir(join(paths.live, "profile", "chrome-launch"));
+    await writeFile(join(paths.live, "profile", "chrome-launch", "kept"), "nested, not ours");
+    await writeFile(join(paths.live, "profile", "Cookies-shm"), "browser-owned index");
+    // A link at an excluded path is not the controller's index: it is kept.
+    await symlink("elsewhere", join(paths.live, "operations.sqlite-shm"));
+    const before = await workingCopyManifest(paths.live);
+    expect(before.excluded).toEqual(["chrome-launch", "working-runtime.sqlite-shm"]);
+    await writeFile(join(paths.live, "downloads", "files", "report-shm"), "user report v2");
+    expect((await workingCopyManifest(paths.live)).digest).not.toBe(before.digest);
+    await writeFile(join(paths.live, "downloads", "files", "report-shm"), "user report");
+    await writeFile(join(paths.live, "profile", "notes-shm", "note.txt"), "user note v2");
+    expect((await workingCopyManifest(paths.live)).digest).not.toBe(before.digest);
+    await writeFile(join(paths.live, "profile", "notes-shm", "note.txt"), "user note");
+    const copy = join(root, "copy");
+    expect((await copyWorkingCopy(paths.live, copy)).digest).toBe(before.digest);
+    expect(await readFile(join(copy, "downloads", "files", "report-shm"), "utf8")).toBe(
+      "user report",
+    );
+    expect(await readFile(join(copy, "profile", "notes-shm", "note.txt"), "utf8")).toBe(
+      "user note",
+    );
+    expect(await readFile(join(copy, "profile", "chrome-launch", "kept"), "utf8")).toBe(
+      "nested, not ours",
+    );
+    expect(await readFile(join(copy, "profile", "Cookies-shm"), "utf8")).toBe(
+      "browser-owned index",
+    );
+    expect((await lstat(join(copy, "operations.sqlite-shm"))).isSymbolicLink()).toBe(true);
+    // Only the controller's own entries are left out of the copy.
+    await expect(lstat(join(copy, "working-runtime.sqlite-shm"))).rejects.toThrow();
+    await expect(lstat(join(copy, "chrome-launch"))).rejects.toThrow();
   });
 
   test("refuses special files", async () => {
@@ -166,7 +224,7 @@ describe("working copy adoption", () => {
       adoptWorkingCopy(paths, {
         operationId: operation(3),
         browserSessionId: BROWSER,
-        controllerGeneration: GENERATION,
+        authority: AUTHORITY,
         manifestDigest: "f".repeat(64),
         appendReceipt: async () => {},
       }),
@@ -185,7 +243,7 @@ describe("working copy adoption", () => {
       // The claim blocks ordinary use until reconciled; reconciliation proves
       // the original is still live and records the interruption.
       expect(await readActiveAdoption(paths)).toBe(operation(4));
-      expect(await settleActiveAdoption(paths)).toBeNull();
+      expect(await settleActiveAdoption(paths, AUTHORITY)).toBeNull();
       const record = await readAdoptionRecord(paths, operation(4));
       expect(record).toMatchObject({ phase: "interrupted", failureCode: "adoption_interrupted" });
       expect(await identity(paths.live)).toEqual(before);
@@ -204,7 +262,7 @@ describe("working copy adoption", () => {
       "synthetic crash",
     );
     expect(await identity(paths.live)).toEqual(original);
-    expect(await settleActiveAdoption(paths)).toBeNull();
+    expect(await settleActiveAdoption(paths, AUTHORITY)).toBeNull();
     const record = await readAdoptionRecord(paths, operation(6));
     expect(record?.phase).toBe("adopted");
     expect(await identity(paths.live)).toEqual(record!.staging!.session);
@@ -222,7 +280,8 @@ describe("working copy adoption", () => {
     // Simulate the process dying right after preserving the original, before
     // that step was journaled: the live path is empty.
     await rename(paths.live, join(paths.sessionsDirectory, record.preservedName));
-    const settled = await reconcileAdoption(paths, record);
+    // Retrying the same adoption settles it.
+    const settled = await adopt(paths, 7, digest);
     expect(settled.phase).toBe("adopted");
     expect(await identity(paths.live)).toEqual(record.staging!.session);
     expect(await identity(join(paths.sessionsDirectory, record.preservedName))).toEqual(original);
@@ -238,7 +297,7 @@ describe("working copy adoption", () => {
     // Someone else replaced the live directory meanwhile.
     await rename(paths.live, join(paths.sessionsDirectory, "elsewhere"));
     await mkdir(join(paths.live, "profile"), { recursive: true });
-    const blocking = await settleActiveAdoption(paths);
+    const blocking = await settleActiveAdoption(paths, AUTHORITY);
     expect(blocking).toMatchObject({ phase: "collision", failureCode: "live_directory_changed" });
     expect(await lstat(join(paths.sessionsDirectory, record.stagingName))).toBeTruthy();
     expect(await lstat(join(paths.sessionsDirectory, "elsewhere"))).toBeTruthy();
@@ -256,14 +315,117 @@ describe("working copy adoption", () => {
     const record = (await readAdoptionRecord(paths, operation(10)))!;
     const staged = join(paths.sessionsDirectory, record.stagingName);
     await writeFile(join(staged, "profile", "Default", "Cookies"), "not the approved bytes");
-    expect(await settleActiveAdoption(paths)).toMatchObject({
-      phase: "collision",
+    // Nothing had moved, so the adoption fails: the original stays live and
+    // the changed copy is kept for inspection.
+    expect(await settleActiveAdoption(paths, AUTHORITY)).toBeNull();
+    expect(await readAdoptionRecord(paths, operation(10))).toMatchObject({
+      phase: "failed",
       failureCode: "staged_copy_changed",
     });
-    // Nothing moved: the original is still live and the changed copy is kept.
     expect(await identity(paths.live)).toEqual(original);
     expect(await identity(staged)).toEqual(record.staging!.session);
-    expect(await readActiveAdoption(paths)).toBe(operation(10));
+    expect(await readActiveAdoption(paths)).toBeNull();
+  });
+
+  test("an original that changed after the receipt crash is never replaced by the stale copy", async () => {
+    const { paths } = await fixture();
+    const original = await identity(paths.live);
+    const { digest } = await workingCopyManifest(paths.live);
+    await expect(adopt(paths, 14, digest, { failAfter: "receipt" })).rejects.toThrow(
+      "synthetic crash",
+    );
+    const record = (await readAdoptionRecord(paths, operation(14)))!;
+    // The original keeps its directory identity but its bytes move on.
+    await writeFile(join(paths.live, "profile", "Default", "Cookies"), "newer cookie bytes");
+    const settled = await adopt(paths, 14, digest);
+    expect(settled).toMatchObject({ phase: "failed", failureCode: "working_copy_changed" });
+    expect(await identity(paths.live)).toEqual(original);
+    expect(await readFile(join(paths.live, "profile", "Default", "Cookies"), "utf8")).toBe(
+      "newer cookie bytes",
+    );
+    const staged = join(paths.sessionsDirectory, record.stagingName);
+    expect(await identity(staged)).toEqual(record.staging!.session);
+    expect(await readFile(join(staged, "profile", "Default", "Cookies"), "utf8")).toBe(
+      "cookie-bytes",
+    );
+    await expect(lstat(join(paths.sessionsDirectory, record.preservedName))).rejects.toThrow();
+    expect(await readActiveAdoption(paths)).toBeNull();
+  });
+
+  test.each([
+    ["token authority", STALE],
+    ["controller generation", STALE_GENERATION],
+  ] as const)(
+    "a changed %s cannot carry an adoption forward before the original moves",
+    async (_label, stale) => {
+      const { paths } = await fixture();
+      const original = await identity(paths.live);
+      const { digest } = await workingCopyManifest(paths.live);
+      await expect(adopt(paths, 15, digest, { failAfter: "receipt" })).rejects.toThrow(
+        "synthetic crash",
+      );
+      const record = (await readAdoptionRecord(paths, operation(15)))!;
+      // Neither a launch's settlement nor a retry under the stale authority
+      // makes the staged copy live.
+      expect(await settleActiveAdoption(paths, stale)).toBeNull();
+      expect(await readAdoptionRecord(paths, operation(15))).toMatchObject({
+        phase: "failed",
+        failureCode: "authority_changed",
+      });
+      expect(await identity(paths.live)).toEqual(original);
+      expect(await lstat(join(paths.sessionsDirectory, record.stagingName))).toBeTruthy();
+      // The approving authority can no longer revive it either.
+      expect((await adopt(paths, 15, digest)).phase).toBe("failed");
+      expect(await identity(paths.live)).toEqual(original);
+    },
+  );
+
+  test.each([
+    ["before that step was journaled", "receipt"],
+    ["after that step was journaled", "source_preserved"],
+  ] as const)(
+    "a stale authority after the original moved aside (%s) is a collision that keeps every copy",
+    async (_label, phase) => {
+      const { paths } = await fixture();
+      const original = await identity(paths.live);
+      const { digest } = await workingCopyManifest(paths.live);
+      await expect(adopt(paths, 16, digest, { failAfter: "receipt" })).rejects.toThrow(
+        "synthetic crash",
+      );
+      const record = (await readAdoptionRecord(paths, operation(16)))!;
+      // The process died right after preserving the original.
+      await rename(paths.live, join(paths.sessionsDirectory, record.preservedName));
+      if (phase === "source_preserved") await writeAdoptionRecord(paths, { ...record, phase });
+      expect(await adopt(paths, 16, digest, { authority: STALE })).toMatchObject({
+        phase: "collision",
+        failureCode: "authority_changed",
+      });
+      // Nothing moved further: the original stays preserved, the copy staged.
+      await expect(lstat(paths.live)).rejects.toThrow();
+      expect(await identity(join(paths.sessionsDirectory, record.preservedName))).toEqual(original);
+      expect(await identity(join(paths.sessionsDirectory, record.stagingName))).toEqual(
+        record.staging!.session,
+      );
+      expect(await readActiveAdoption(paths)).toBe(operation(16));
+      // A launch under the stale authority stays blocked by it.
+      expect(await settleActiveAdoption(paths, STALE)).toMatchObject({ phase: "collision" });
+    },
+  );
+
+  test("observing an unsettled adoption changes nothing", async () => {
+    const { paths } = await fixture();
+    const original = await identity(paths.live);
+    const { digest } = await workingCopyManifest(paths.live);
+    await expect(adopt(paths, 17, digest, { failAfter: "receipt" })).rejects.toThrow(
+      "synthetic crash",
+    );
+    const recorded = await readAdoptionRecord(paths, operation(17));
+    for (let read = 0; read < 3; read += 1) {
+      expect(await observeActiveAdoption(paths)).toEqual(recorded!);
+    }
+    expect(await readAdoptionRecord(paths, operation(17))).toEqual(recorded);
+    expect(await identity(paths.live)).toEqual(original);
+    expect(await readActiveAdoption(paths)).toBe(operation(17));
   });
 
   test("a running adoption cannot be settled or reconciled by another holder", async () => {
@@ -276,7 +438,7 @@ describe("working copy adoption", () => {
     const running = adoptWorkingCopy(paths, {
       operationId: operation(11),
       browserSessionId: BROWSER,
-      controllerGeneration: GENERATION,
+      authority: AUTHORITY,
       manifestDigest: digest,
       appendReceipt: async (staging) => await writeFile(join(staging, "adopt-receipt"), "11"),
       afterPhase: async (phase) => {
@@ -286,9 +448,9 @@ describe("working copy adoption", () => {
       },
     });
     await copied;
-    expect(await settleActiveAdoption(paths)).toBe(ADOPTION_IN_FLIGHT);
-    const record = (await readAdoptionRecord(paths, operation(11)))!;
-    await expect(reconcileAdoption(paths, record)).rejects.toMatchObject({
+    expect(await settleActiveAdoption(paths, AUTHORITY)).toBe(ADOPTION_IN_FLIGHT);
+    expect(await observeActiveAdoption(paths)).toBe(ADOPTION_IN_FLIGHT);
+    await expect(adopt(paths, 11, digest)).rejects.toMatchObject({
       reason: "adoption_in_progress",
     });
     await expect(adopt(paths, 12, digest)).rejects.toMatchObject({

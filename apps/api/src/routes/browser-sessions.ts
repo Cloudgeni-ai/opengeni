@@ -5605,7 +5605,7 @@ const WORKING_COPY_REFUSAL_EXPLANATIONS: Record<BrowserWorkingCopyRefusalValue, 
   unsupported_browser:
     "Only a managed Chromium browser with a private profile keeps a working copy that can be adopted. Nothing was changed.",
   browser_running:
-    "The browser is running on its controller, so there is no preserved working copy to adopt. Use the browser normally.",
+    "The browser is running, starting or being ended on its controller, so there is no stopped working copy to adopt now. If it is running, use it normally; otherwise inspect again once it has stopped.",
   working_copy_invalid:
     "The browser's working directory on its machine is missing, incomplete or not a plain directory, so it cannot be adopted. Nothing was changed.",
   receipt_not_adoptable:
@@ -5617,7 +5617,7 @@ const WORKING_COPY_REFUSAL_EXPLANATIONS: Record<BrowserWorkingCopyRefusalValue, 
   adoption_not_needed:
     "The working copy is the same directory the browser was launched in, so it needs no adoption; the browser continues from it when it is next used.",
   adoption_unresolved:
-    "An earlier adoption for this browser has not finished. Check it with getBrowserSessionWorkingCopyAdoption and its operation id (see activeAdoption) instead of starting another.",
+    "An earlier adoption for this browser has not finished. Check it with getBrowserSessionWorkingCopyAdoption and its operation id (see activeAdoption). Inspecting and checking never change it; retrying that same adoption with the same operationId and manifestDigest settles it. Do not start another.",
 };
 
 function workingCopyInspectionExplanation(
@@ -5628,6 +5628,9 @@ function workingCopyInspectionExplanation(
   const manifest = inspection.manifest!;
   return [
     `This working copy can be adopted: ${manifest.entries} entries, ${manifest.bytes} bytes, manifest digest ${manifest.digest}.`,
+    manifest.excluded.length > 0
+      ? `Left out because the controller rebuilds them: ${manifest.excluded.join(", ")}. Everything else is in the digest.`
+      : "Every entry is in the digest.",
     "It is not the directory the browser was launched in (it was moved, copied or restored), so the browser refuses to continue from it until it is adopted.",
     latestCheckpointAt
       ? `How recent its contents are is not proven; the browser's latest saved checkpoint is from ${latestCheckpointAt}.`
@@ -5673,7 +5676,7 @@ function workingCopyAdoptionExplanation(
     case "collision":
       return `The adoption found the browser's directories in an unexpected state (${adoption.failureCode ?? "unknown"}) and stopped without moving or removing anything more. The browser stays unavailable until a person inspects its machine.${kept}`;
     default:
-      return "The adoption has not finished. Check again with getBrowserSessionWorkingCopyAdoption; do not start another.";
+      return "The adoption stopped part way and is not running. Checking it never changes it; retry the same adoption with the same operationId and manifestDigest to settle it. A retry repeats nothing already done. Do not start another.";
   }
 }
 

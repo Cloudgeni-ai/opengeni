@@ -1889,6 +1889,24 @@ end/capture, unconfirmed process shutdown, and older retirement receipts do not 
 Cleanup retains its exact holder and directory until retirement and journal
 closure settle. See [`packages/browserd`](../packages/browserd/README.md).
 
+A working directory that was copied or restored (new directory identity, same
+bytes) is refused by that recovery and continues only through explicit
+adoption ([`working-copy-adoption.ts`](../packages/browserd/src/working-copy-adoption.ts)),
+Linux controllers only. Inspection reports the exact-byte manifest digest and
+the few controller-owned derived entries it leaves out; freshness stays unknown.
+Adoption under the browser's current control authority writes an intent record
+before any effect, copies through held directory descriptors without following
+links, refuses unless both copy and original still hold the approved digest,
+appends an adopt receipt naming the staged profile's own identity, then makes
+two journaled renames (original to a preserved name, staged copy into place).
+Only the approving authority carries a stopped adoption forward, by retrying
+the same operation or launching under that authority; inspection and status
+never settle anything. Before the original moves, any doubt fails the adoption
+with the original live; afterwards it is a collision that keeps every copy and
+blocks launches. Ends refuse while an adoption is running or unsettled. Nothing
+is deleted automatically, and an adopted copy never falls back to an older
+checkpoint.
+
 Undispatched creates settle under the operation lock; dispatched bindings survive for reconciliation.
 
 Typing batches: [React](../packages/react/README.md).

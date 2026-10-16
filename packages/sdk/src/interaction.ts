@@ -1038,7 +1038,9 @@ export type BrowserWorkingCopyInspection = {
   adoptable: boolean;
   refusal: BrowserWorkingCopyRefusal | null;
   explanation: string;
-  manifest: { digest: string; entries: number; bytes: number } | null;
+  /** `excluded` lists the controller-owned derived entries left out of the
+   * copy (journal shared-memory indexes and the per-launch launcher folder). */
+  manifest: { digest: string; entries: number; bytes: number; excluded: string[] } | null;
   platformSupported: boolean;
   profileIdentityMatches: boolean;
   profileInUse: boolean | null;

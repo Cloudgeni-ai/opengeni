@@ -2897,6 +2897,9 @@ export const BrowserWorkingCopyInspection = /* @__PURE__ */ defineSchema(() =>
           digest: sha256Hex,
           entries: z.number().int().nonnegative(),
           bytes: z.number().int().nonnegative(),
+          /** Controller-owned derived entries left out of the copy (journal
+           * shared-memory indexes and the per-launch launcher folder). */
+          excluded: z.array(z.string().min(1).max(256)).max(16),
         })
         .strict()
         .nullable(),

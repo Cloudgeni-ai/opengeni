@@ -25,7 +25,12 @@ import {
   type BrowserWorkingRuntimeReceipt,
 } from "../src/working-runtime-journal";
 import type { SqliteInteractionOperationJournal } from "../src/operation-journal";
-import { workingCopyManifest } from "../src/working-copy-adoption";
+import {
+  adoptionPaths,
+  readActiveAdoption,
+  readAdoptionRecord,
+  workingCopyManifest,
+} from "../src/working-copy-adoption";
 import { UnsettledCleanupError } from "../src/cleanup-error";
 
 describe("BrowserSupervisor", () => {
@@ -3269,6 +3274,265 @@ describe("adopting a verified copy of a preserved working directory", () => {
         ).rejects.toMatchObject({ reason: "browser_running" });
       } finally {
         await supervisor.close();
+      }
+    });
+  });
+
+  /** Adopt the restored copy with a controller that dies right after the
+   * adopt receipt, before anything was moved. */
+  async function adoptionCutAfterReceipt(
+    rootDirectory: string,
+    socketRootDirectory: string,
+    exact: {
+      browserSessionId: string;
+      controllerGeneration: string;
+      authority: typeof workingAuthority;
+    },
+    operationId: string,
+  ) {
+    const crashing = await BrowserSupervisor.open({
+      rootDirectory,
+      socketRootDirectory,
+      inspectOwnedProcess: async () => "exited",
+      createDriver: async (context) => fakeDriver(context),
+      afterAdoptionPhase: async (phase) => {
+        if (phase === "receipt") throw new Error("synthetic crash after receipt");
+      },
+    });
+    try {
+      const { manifest } = await crashing.inspectWorkingCopy(exact);
+      await expect(
+        crashing.adoptWorkingCopy({ ...exact, operationId, manifestDigest: manifest!.digest }),
+      ).rejects.toThrow("synthetic crash");
+      return manifest!.digest;
+    } finally {
+      await crashing.close();
+    }
+  }
+
+  test("after a restart, inspection, status and end never settle an interrupted adoption", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const live = await restoreAsCopy(rootDirectory, options.browserSessionId);
+      const restored = await stat(live);
+      const exact = {
+        browserSessionId: options.browserSessionId,
+        controllerGeneration: options.controllerGeneration,
+        authority: workingAuthority,
+      };
+      const operationId = "33333333-3333-4333-8333-000000000010";
+      await adoptionCutAfterReceipt(rootDirectory, socketRootDirectory, exact, operationId);
+      const paths = adoptionPaths(rootDirectory, options.browserSessionId);
+      const recorded = await readAdoptionRecord(paths, operationId);
+      expect(recorded?.phase).toBe("receipt");
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "exited",
+        createDriver: async (context) => fakeDriver(context),
+      });
+      try {
+        for (let read = 0; read < 2; read += 1) {
+          expect(await supervisor.inspectWorkingCopy(exact)).toMatchObject({
+            refusal: "adoption_unresolved",
+            activeAdoption: { operationId, phase: "receipt" },
+          });
+          expect(
+            await supervisor.workingCopyAdoptionStatus({
+              browserSessionId: options.browserSessionId,
+              operationId,
+            }),
+          ).toMatchObject({ inFlight: false, adoption: { operationId, phase: "receipt" } });
+        }
+        // Ending cannot remove or set aside a directory an adoption may move.
+        await expect(supervisor.endSession(exact, { removeState: true })).rejects.toThrow(
+          "adoption",
+        );
+        await expect(
+          supervisor.endSession(exact, { removeState: true, setAsideInterruptedLaunch: true }),
+        ).rejects.toThrow("adoption");
+        expect(await readAdoptionRecord(paths, operationId)).toEqual(recorded);
+        expect(await readActiveAdoption(paths)).toBe(operationId);
+        expect((await stat(live)).ino).toBe(restored.ino);
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("after a restart, only a launch under the approving authority finishes an interrupted adoption", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const live = await restoreAsCopy(rootDirectory, options.browserSessionId);
+      const exact = {
+        browserSessionId: options.browserSessionId,
+        controllerGeneration: options.controllerGeneration,
+        authority: workingAuthority,
+      };
+      const operationId = "33333333-3333-4333-8333-000000000011";
+      const digest = await adoptionCutAfterReceipt(
+        rootDirectory,
+        socketRootDirectory,
+        exact,
+        operationId,
+      );
+      const paths = adoptionPaths(rootDirectory, options.browserSessionId);
+      const staging = (await readAdoptionRecord(paths, operationId))!.staging!;
+      const launched: BrowserSupervisorDriverContext[] = [];
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "exited",
+        createDriver: async (context) => {
+          launched.push(context);
+          return {
+            ...fakeDriver(context),
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+          };
+        },
+      });
+      try {
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        expect(launched).toHaveLength(1);
+        expect(await readAdoptionRecord(paths, operationId)).toMatchObject({ phase: "adopted" });
+        const profile = await stat(join(live, "profile"));
+        expect({ device: profile.dev, inode: profile.ino }).toEqual(staging.profile);
+        expect(launched[0]!.profileDirectory).toBe(join(live, "profile"));
+        expect(launched[0]!.restoredProfile).toBe(false);
+        expect(
+          (
+            await workingCopyManifest(
+              join(
+                rootDirectory,
+                "sessions",
+                `${options.browserSessionId}.preserved-${operationId}`,
+              ),
+            )
+          ).digest,
+        ).toBe(digest);
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  for (const stale of [
+    ["token generation", { controllerGeneration: undefined, tokenGeneration: 2 }],
+    ["controller generation", { controllerGeneration: "controller-other", tokenGeneration: 1 }],
+  ] as const) {
+    test(`after a restart, a launch under a changed ${stale[0]} ends an interrupted adoption without moving anything`, async () => {
+      await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+        const live = await restoreAsCopy(rootDirectory, options.browserSessionId);
+        const restored = await stat(live);
+        const exact = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+          authority: workingAuthority,
+        };
+        const operationId = "33333333-3333-4333-8333-000000000012";
+        await adoptionCutAfterReceipt(rootDirectory, socketRootDirectory, exact, operationId);
+        const paths = adoptionPaths(rootDirectory, options.browserSessionId);
+        const record = (await readAdoptionRecord(paths, operationId))!;
+        const launched: BrowserSupervisorDriverContext[] = [];
+        const supervisor = await BrowserSupervisor.open({
+          rootDirectory,
+          socketRootDirectory,
+          inspectOwnedProcess: async () => "exited",
+          createDriver: async (context) => {
+            launched.push(context);
+            return fakeDriver(context);
+          },
+        });
+        try {
+          await expect(
+            supervisor.createSession({
+              ...options,
+              controllerGeneration: stale[1].controllerGeneration ?? options.controllerGeneration,
+              workingRuntimeAuthority: {
+                ...workingAuthority,
+                tokenGeneration: stale[1].tokenGeneration,
+              },
+              recoverExistingWorkingDirectory: true,
+            }),
+          ).rejects.toThrow();
+          expect(launched).toHaveLength(0);
+          expect(await readAdoptionRecord(paths, operationId)).toMatchObject({
+            phase: "failed",
+            failureCode: "authority_changed",
+          });
+          // The original stays live; the staged copy is kept, never made live.
+          expect((await stat(live)).ino).toBe(restored.ino);
+          const staged = await stat(join(rootDirectory, "sessions", record.stagingName));
+          expect({ device: staged.dev, inode: staged.ino }).toEqual(record.staging!.session);
+        } finally {
+          await supervisor.close();
+        }
+      });
+    });
+  }
+
+  test("an end or launch in this or another controller is refused while an adoption is running", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const live = await restoreAsCopy(rootDirectory, options.browserSessionId);
+      const exact = {
+        browserSessionId: options.browserSessionId,
+        controllerGeneration: options.controllerGeneration,
+        authority: workingAuthority,
+      };
+      let release!: () => void;
+      let reached!: () => void;
+      const barrier = new Promise<void>((resolve) => (release = resolve));
+      const copied = new Promise<void>((resolve) => (reached = resolve));
+      const adopting = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "exited",
+        createDriver: async (context) => fakeDriver(context),
+        afterAdoptionPhase: async (phase) => {
+          if (phase !== "copied") return;
+          reached();
+          await barrier;
+        },
+      });
+      const other = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory: `${socketRootDirectory}-other`,
+        inspectOwnedProcess: async () => "exited",
+        createDriver: async (context) => fakeDriver(context),
+      });
+      try {
+        const { manifest } = await adopting.inspectWorkingCopy(exact);
+        const operationId = "33333333-3333-4333-8333-000000000013";
+        const running = adopting.adoptWorkingCopy({
+          ...exact,
+          operationId,
+          manifestDigest: manifest!.digest,
+        });
+        await copied;
+        for (const controller of [adopting, other]) {
+          await expect(controller.endSession(exact, { removeState: true })).rejects.toThrow(
+            "adoption",
+          );
+          await expect(
+            controller.endSession(exact, { removeState: true, discardWorkingRuntime: true }),
+          ).rejects.toThrow("adoption");
+          // Nor can a resume launch from the directory meanwhile.
+          await expect(
+            controller.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+          ).rejects.toThrow("adoption");
+        }
+        expect(
+          await other.workingCopyAdoptionStatus({
+            browserSessionId: options.browserSessionId,
+            operationId,
+          }),
+        ).toMatchObject({ inFlight: true, adoption: { phase: "copied" } });
+        expect((await other.inspectWorkingCopy(exact)).refusal).toBe("adoption_unresolved");
+        release();
+        expect((await running).phase).toBe("adopted");
+        expect((await stat(live)).isDirectory()).toBe(true);
+      } finally {
+        release();
+        await other.close();
+        await adopting.close();
       }
     });
   });

@@ -1609,3 +1609,348 @@ describe("BrowserSession route discipline", () => {
     );
   });
 });
+
+test("working copy routes carry the browser record's exact authority, and only adoption changes anything", async () => {
+  const directory = await mkdtemp("/tmp/og-api-working-copy-");
+  const script = join(directory, "synthetic-working-copy-route.ts");
+  await writeFile(script, `(${workingCopyRoutesFixture.toString()})()`, { mode: 0o600 });
+  const child = Bun.spawn([process.execPath, "--no-env-file", script, routeUrl.href], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual([
+      {
+        scenario: "inspect",
+        status: 200,
+        calls: ["POST /working-copy/inspection"],
+        exactAuthority: true,
+        audits: [],
+        adoptable: true,
+        explainsExclusions: true,
+      },
+      {
+        scenario: "status",
+        status: 200,
+        calls: ["GET /working-copy/adoptions/:operationId"],
+        exactAuthority: true,
+        audits: [],
+        phase: "receipt",
+      },
+      {
+        scenario: "adopt",
+        status: 200,
+        calls: ["POST /working-copy/adoptions"],
+        exactAuthority: true,
+        audits: [
+          "browserSession.working_copy.adoption_requested",
+          "controller",
+          "browserSession.working_copy.adoption_settled",
+        ],
+        phase: "adopted",
+      },
+      {
+        scenario: "adopt-token-rotated",
+        status: 200,
+        calls: ["POST /working-copy/adoptions"],
+        exactAuthority: true,
+        audits: [
+          "browserSession.working_copy.adoption_requested",
+          "controller",
+          "browserSession.working_copy.adoption_settled",
+        ],
+        phase: "adopted",
+      },
+      ...["holder-lost", "machine-moved", "access-revoked"].map((scenario) => ({
+        scenario,
+        // A revoked source session hides the browser instead of refusing it.
+        status: scenario === "access-revoked" ? 404 : 409,
+        calls: [],
+        exactAuthority: true,
+        audits: [],
+      })),
+    ]);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 30_000);
+
+/** Drives the three working copy routes in a separate process against a fake
+ * controller, recording every controller request and audit write. */
+async function workingCopyRoutesFixture() {
+  const routeHref = process.argv[2]!;
+  const apiDirectory = new URL("..", routeHref).pathname;
+  const resolveFromApi = (name: string) => Bun.resolveSync(name, apiDirectory);
+  const { mock } = await import("bun:test");
+  const { randomUUID } = await import("node:crypto");
+  const { Hono } = (await import(resolveFromApi("hono"))) as typeof import("hono");
+  const { HTTPException: FixtureHTTPException } = (await import(
+    resolveFromApi("hono/http-exception")
+  )) as typeof import("hono/http-exception");
+  const db = (await import(resolveFromApi("@opengeni/db"))) as typeof import("@opengeni/db");
+  const core = (await import(resolveFromApi("@opengeni/core"))) as typeof import("@opengeni/core");
+  const { testSettings: fixtureSettings } = (await import(
+    resolveFromApi("@opengeni/testing")
+  )) as typeof import("@opengeni/testing");
+  const authority = await import(new URL("../browser-controller-authority.ts", routeHref).href);
+  const accountId = randomUUID(),
+    workspaceId = randomUUID(),
+    browserSessionId = randomUUID(),
+    sourceSessionId = randomUUID(),
+    machineId = randomUUID(),
+    instanceId = randomUUID(),
+    controllerGeneration = randomUUID(),
+    operationId = randomUUID(),
+    rootSecret = "synthetic-controller-authority",
+    digest = "d".repeat(64);
+  const grant = {
+    accountId,
+    workspaceId,
+    subjectId: "synthetic-user",
+    permissions: ["sessions:control"],
+  };
+  const placement = { kind: "connected_machine", sandboxId: machineId };
+  let scenario = "inspect";
+  let calls: string[] = [];
+  let audits: string[] = [];
+  let exactAuthority = true;
+  const tokenGeneration = () => (scenario === "adopt-token-rotated" ? 2 : 1);
+  mock.module(resolveFromApi("@opengeni/db"), () => ({
+    ...db,
+    getBrowserSessionControlRecord: async () => ({
+      sourceSessionId,
+      tokenGeneration: tokenGeneration(),
+      controllerHostSandboxGroupId: null,
+      networkRouteAuthority: null,
+      session: {
+        id: browserSessionId,
+        workspaceId,
+        lifecycle: "active",
+        placement,
+        controller: {
+          controllerId: "opengeni-browserd",
+          controllerGeneration,
+          placementInstanceId: instanceId,
+        },
+        driverId: "opengeni.cdp.v1",
+        engine: "chromium",
+        headless: true,
+        linkedComputerSessionId: null,
+        networkRouteId: null,
+      },
+    }),
+    getSession: async () => ({
+      id: sourceSessionId,
+      workspaceId,
+      activeSandboxId: scenario === "machine-moved" ? randomUUID() : machineId,
+    }),
+    touchBrowserSessionController: async () => scenario !== "holder-lost",
+    terminalizeStaleConnectedInteractionPlacement: async () => ({ sourcePlacementChanged: false }),
+    getBrowserPrivateCheckpointAuthority: async () => null,
+    recordAuditEvent: async (_db: unknown, event: { action: string }) => {
+      audits.push(event.action);
+    },
+  }));
+  mock.module(resolveFromApi("@opengeni/core"), () => ({
+    ...core,
+    requireAccessGrant: async () => grant,
+    requireSessionAuthorization: async (
+      _deps: unknown,
+      _grant: unknown,
+      input: { operation: string },
+    ) => {
+      if (input.operation !== "session.control") throw new Error("synthetic operation mismatch");
+      if (scenario === "access-revoked") throw new core.SessionAuthorizationDeniedError("revoked");
+      return {};
+    },
+  }));
+  const success = (data: unknown) => Response.json({ protocolVersion: 1, ok: true, data });
+  const expectedAdmin = authority.deriveBrowserControllerAdminToken({
+    rootSecret,
+    accountId,
+    workspaceId,
+    placement,
+    placementInstanceId: instanceId,
+  });
+  const adoption = (phase: string) => ({
+    operationId,
+    browserSessionId,
+    controllerGeneration,
+    manifestDigest: digest,
+    phase,
+    failureCode: null,
+    retainedDirectories: [],
+    createdAt: "2026-10-16T10:00:00.000Z",
+    updatedAt: "2026-10-16T10:00:01.000Z",
+  });
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      const prefix = `/v1/browser-sessions/${browserSessionId}`;
+      const route = path.startsWith(prefix)
+        ? path.slice(prefix.length).replace(operationId, ":operationId")
+        : path;
+      calls.push(`${request.method} ${route}`);
+      audits.push("controller");
+      if (request.headers.get("authorization") !== `Bearer ${expectedAdmin}`)
+        exactAuthority = false;
+      if (request.method === "POST") {
+        const tokens = authority.deriveBrowserSessionControllerTokens({
+          rootSecret,
+          accountId,
+          workspaceId,
+          placement,
+          placementInstanceId: instanceId,
+          browserSessionId,
+          controllerGeneration,
+          tokenGeneration: tokenGeneration(),
+        });
+        const body = (await request.json()) as Record<string, unknown>;
+        const { operationId: requestedOperation, manifestDigest, ...authorityBody } = body;
+        if (
+          JSON.stringify(authorityBody) !==
+          JSON.stringify({
+            controllerGeneration,
+            tokenGeneration: tokenGeneration(),
+            controlToken: tokens.controlToken,
+            viewToken: tokens.viewToken,
+          })
+        )
+          exactAuthority = false;
+        if (route === "/working-copy/adoptions") {
+          if (requestedOperation !== operationId || manifestDigest !== digest)
+            exactAuthority = false;
+          return success(adoption("adopted"));
+        }
+        return success({
+          browserSessionId,
+          controllerGeneration,
+          platformSupported: true,
+          manifest: {
+            digest,
+            entries: 12,
+            bytes: 4096,
+            excluded: ["chrome-launch", "working-runtime.sqlite-shm"],
+          },
+          currentProfile: { device: 1, inode: 2 },
+          receipt: {
+            operationId: randomUUID(),
+            intent: "launch",
+            state: "completed",
+            recordedProfile: { device: 1, inode: 3 },
+            restoreAuthorityDigest: "e".repeat(64),
+            directoryLaunchAllowed: true,
+            authorityMatches: true,
+            adoption: null,
+          },
+          profileIdentityMatches: false,
+          profileInUse: false,
+          activeAdoption: null,
+          refusal: null,
+        });
+      }
+      return success({ inFlight: false, adoption: adoption("receipt") });
+    },
+  });
+  const channelHref = new URL("../sandbox/channel-a.ts", routeHref).href;
+  const channel = await import(channelHref);
+  const routed = async (
+    _services: unknown,
+    _context: unknown,
+    callback: (handle: unknown) => Promise<unknown>,
+  ) =>
+    await callback({
+      routingSession: {
+        prime: async () => ({
+          kind: "selfhosted",
+          sandboxId: machineId,
+          providerInstanceId: instanceId,
+          session: {
+            resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+          },
+        }),
+      },
+    });
+  mock.module(channelHref, () => ({ ...channel, withChannelARead: routed, withChannelA: routed }));
+  const { registerBrowserSessionRoutes } = await import(routeHref);
+  const app = new Hono();
+  app.onError((error, context) =>
+    context.json(
+      { message: error.message },
+      (error instanceof FixtureHTTPException
+        ? error.status
+        : ((error as { status?: number }).status ?? 500)) as never,
+    ),
+  );
+  registerBrowserSessionRoutes(app, {
+    settings: fixtureSettings({ delegationSecret: rootSecret }),
+    db: {},
+    bus: {},
+  } as never);
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const base = `https://api.example.test/v1/workspaces/${workspaceId}/browser-sessions/${browserSessionId}/working-copy`;
+    const results = [];
+    for (const next of [
+      "inspect",
+      "status",
+      "adopt",
+      "adopt-token-rotated",
+      "holder-lost",
+      "machine-moved",
+      "access-revoked",
+    ]) {
+      scenario = next;
+      calls = [];
+      audits = [];
+      exactAuthority = true;
+      const response =
+        next === "inspect"
+          ? await app.request(`${base}/inspection`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: "{}",
+            })
+          : next === "status"
+            ? await app.request(`${base}/adoptions/${operationId}`)
+            : await app.request(`${base}/adoptions`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ operationId, manifestDigest: digest }),
+              });
+      const body = (await response.json()) as Record<string, any>;
+      const result: Record<string, unknown> = {
+        scenario: next,
+        status: response.status,
+        calls,
+        exactAuthority,
+        audits: audits.filter((entry) => entry !== "controller" || next.startsWith("adopt")),
+      };
+      if (response.status === 200 && next === "inspect") {
+        result.adoptable = body.adoptable;
+        result.explainsExclusions = String(body.explanation).includes(
+          "chrome-launch, working-runtime.sqlite-shm",
+        );
+      } else if (response.status === 200) {
+        result.phase = body.adoption?.phase;
+      }
+      results.push(result);
+    }
+    console.log(JSON.stringify(results));
+  } finally {
+    console.error = originalError;
+    await server.stop(true);
+  }
+}
