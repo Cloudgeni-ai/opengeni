@@ -291,6 +291,11 @@ export const WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_WEB_SEARCH_PROVIDER_MODE",
 ];
 
+/** Optional deployment-wide margin for provider-rate credit charges. */
+export const CREDIT_MARGIN_BPS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE",
+];
+
 /** Public workspace MCP OAuth rollout settings. The enable switch is
  * deployment-sensitive because OAuth needs a canonical managed/local human
  * session and one stable public issuer origin. */
@@ -3051,6 +3056,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of CREDIT_MARGIN_BPS_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 

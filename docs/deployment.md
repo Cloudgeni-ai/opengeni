@@ -1941,6 +1941,11 @@ Select the source-named artifact from the successful canonical publisher run.
 Environment approval and ordinary image/CI/deployment checks remain mandatory.
 Split-source failed receipts use V2 and cannot use the existing V1 receipt-only
 reconciliation lane; stop for reviewed recovery rather than relabel or replay them.
+The publisher runs its bundled controller on pinned native Node while keeping
+package builds on Bun. Retained signed provenance and sanitized diagnostics help
+investigate failed writes but are not registry acknowledgements. Never reuse an
+unknown version; any explicitly authorized replacement must use a fresh run and
+version after diagnosis and review.
 See `CONTRIBUTING.md` for the admission and provenance contract. The runtime includes these pins beside
 the Sites skill. Never use a mutable dist-tag as the deployment pin. Production
 sandbox images do not include Site package archives; the local development
@@ -2794,6 +2799,20 @@ The runtime secret must provide values such as:
   admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
   those keys in Helm values, catalog JSON, or the deployment runtime Secret.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`; model pricing is also required when `OPENGENI_USAGE_LIMITS_MODE=managed` and any credits model lacks a reviewed built-in price
+- `OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE` optionally replaces the margin used for every provider-rate credit price (built-in and operator model rates, web search, transcription, and live voice). Set an integer from `0` through `10000`; `0` bills the configured provider API rates without an added margin. Unset preserves current pricing behavior. It does not change provider-cost reporting or direct fixed customer credit prices (such as video-generation tariffs). Set the same value on both API and worker processes. For Helm, configure both:
+
+  ```yaml
+  api:
+    extraEnv:
+      - name: OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE
+        value: "0"
+  worker:
+    extraEnv:
+      - name: OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE
+        value: "0"
+  ```
+
+  This is a code/configuration capability only; deployments should opt in separately.
 - Promotional codes are entered and reviewed in the app; paid Stripe top-ups have no promotion-code field.
   Configure `OPENGENI_WEB_BASE_URL` when the browser and API use different
   origins; Checkout and billing-portal return URLs may use that configured web

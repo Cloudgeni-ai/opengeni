@@ -26,6 +26,12 @@ test("both images ship the 1Password SDK as a package, so its WASM core travels 
   expect(WORKER_RUNTIME_EXTERNALS).toContain("@1password/sdk");
 });
 
+test("both images ship the Keeper SDK as a package; its adapter reads the installed build", () => {
+  expect(PACKAGE_ASSET_RUNTIME_EXTERNALS).toContain("@keeper-security/secrets-manager-core");
+  expect(API_RUNTIME_EXTERNALS).toContain("@keeper-security/secrets-manager-core");
+  expect(WORKER_RUNTIME_EXTERNALS).toContain("@keeper-security/secrets-manager-core");
+});
+
 describe("finalizeCommandEntry", () => {
   test("keeps an entry whose own output still carries its guard", () => {
     const output = 'import"./runtime-a.js";if(import.meta.main)await main();\n';

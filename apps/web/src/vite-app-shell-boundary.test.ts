@@ -4,6 +4,83 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 describe("web app-shell chunk boundary", () => {
+  test("coalesces eager route parsers and the scrollbar entry without promoting lazy implementations", async () => {
+    const config = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
+    const group = config.match(/name: "startup-sdk-runtime",[\s\S]*?priority: (\d+),/u);
+    const pattern = group?.[0].match(/test: \/(.+)\/,/u)?.[1];
+    expect(pattern).toBeDefined();
+    expect(group?.[0]).toContain("includeDependenciesRecursively: false");
+    const runtimeTest = new RegExp(pattern!);
+    for (const separator of ["/", "\\"]) {
+      const moduleId = (relative: string) =>
+        `/repo/apps/web/src/${relative}`.replaceAll("/", separator);
+      for (const helper of ["integration-connect-return", "secrets-route", "composer-launch"]) {
+        expect(runtimeTest.test(moduleId(`lib/${helper}.ts`))).toBe(true);
+      }
+      for (const relative of ["scrollbars.ts", "lib/scrollbars.ts"]) {
+        expect(
+          runtimeTest.test(`/repo/packages/react/src/${relative}`.replaceAll("/", separator)),
+        ).toBe(true);
+      }
+      for (const relative of [
+        "routes/secrets.tsx",
+        "routes/session.tsx",
+        "lib/integration-connect-analytics.ts",
+        "components/secrets/vault-model.ts",
+        "components/secrets/vault-chooser.tsx",
+      ]) {
+        expect(runtimeTest.test(moduleId(relative))).toBe(false);
+      }
+    }
+    for (const name of ["session", "workspace-settings", "workspace-members"]) {
+      const routePriority = config.match(
+        new RegExp(`name: "${name}",[\\s\\S]*?priority: (\\d+),`, "u"),
+      )?.[1];
+      expect(Number(group?.[1])).toBeGreaterThan(Number(routePriority));
+    }
+    const uiPriority = config.match(/name: "ui-runtime",[\s\S]*?priority: (\d+),/u)?.[1];
+    // The entry uses this group, while the shared probe keeps the stronger
+    // existing UI-runtime placement even though both regexes match it.
+    expect(Number(uiPriority)).toBeGreaterThan(Number(group?.[1]));
+    expect(config).not.toContain('name: "composer-launch"');
+  });
+
+  test("keeps the before-paint scrollbar probe in the eager UI runtime", async () => {
+    const config = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
+    const group = config.match(/name: "ui-runtime",[\s\S]*?priority: (\d+),/u);
+    const pattern = group?.[0].match(/test: \/(.+)\/,/u)?.[1];
+    expect(pattern).toBeDefined();
+    const runtimeTest = new RegExp(pattern!);
+    for (const separator of ["/", "\\"]) {
+      const moduleId = (relative: string) => `/repo/${relative}`.replaceAll("/", separator);
+      expect(runtimeTest.test(moduleId("packages/react/src/lib/scrollbars.ts"))).toBe(true);
+      for (const relative of [
+        "packages/react/src/index.ts",
+        "packages/react/src/provider.tsx",
+        "packages/react/src/components/session-conversation.tsx",
+        "apps/web/src/routes/session.tsx",
+      ]) {
+        expect(runtimeTest.test(moduleId(relative))).toBe(false);
+      }
+    }
+    const sessionPriority = config.match(/name: "session",[\s\S]*?priority: (\d+),/u)?.[1];
+    expect(Number(group?.[1])).toBeGreaterThan(Number(sessionPriority));
+
+    // Pin the small shared probe, not the package barrel or its lazy consumers.
+    const probe = await readFile(
+      new URL("../../../packages/react/src/lib/scrollbars.ts", import.meta.url),
+      "utf8",
+    );
+    expect(probe).not.toMatch(/^\s*import\s+(?!type\b)/mu);
+    expect(probe).not.toMatch(/\b(?:import|require)\s*\(/u);
+    expect(probe).not.toMatch(/^\s*export\s+.*\bfrom\s+["']/mu);
+    const main = await readFile(new URL("./main.tsx", import.meta.url), "utf8");
+    expect(main.indexOf("markClassicScrollbars(document)")).toBeGreaterThan(-1);
+    expect(main.indexOf("markClassicScrollbars(document)")).toBeLessThan(
+      main.indexOf("createRoot("),
+    );
+  });
+
   test("keeps shared search intent in the shell without matching lazy search implementations", async () => {
     const viteConfig = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
     const appShellBlock = viteConfig.match(/name: "app-shell",[\s\S]*?priority: (\d+),/u);

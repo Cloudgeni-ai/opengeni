@@ -56070,6 +56070,11 @@ export async function claimWorkspaceArchiveCapture(
      * exact box are recorded in deadline_forced_admission_ids, captured
      * around, and settled with the box after termination. */
     deadlineMandatoryCaptureLeadMs?: number;
+    /** Draining only: unsettled setup requests whose provider Start outcome
+     * is unknown, owned by a turn attempt closed at least this long ago with
+     * no active retained process, are captured around exactly like the
+     * mandatory pre-deadline save instead of pinning the box until then. */
+    abandonedSetupCaptureAfterMs?: number;
     /** Warm point-in-time checkpoint of a box no turn holds, kept warm by
      * viewers, browser/computer interactions or active background commands
      * (supervised or not) (e.g. while the session waits for one or for input). Requires
@@ -56372,27 +56377,86 @@ export async function claimWorkspaceArchiveCapture(
           order by admission.id
       `);
       if (unsettled.length > 0) {
-        // Any requested rotation counts: an earlier operator rotation keeps the
-        // due provider-deadline rotation from being stamped separately.
+        // Close to the provider deadline a drain must save now. Due rotations
+        // are only stamped on warm leases, so a lease that was already
+        // draining (no holder left) never gets one; requiring it let such a
+        // box be killed uncaptured at the deadline. This branch is draining
+        // only, so the deadline alone decides.
         const lead = input.deadlineMandatoryCaptureLeadMs;
         const [deadline] =
           input.liveness === "draining" && lead !== undefined && Number.isSafeInteger(lead)
             ? await scopedDb.execute<{ mandatory: boolean }>(sql`
                 select (
-                  ${row.rotation_requested_at !== null}
-                  and ${row.provider_deadline_at ?? null}::timestamptz is not null
+                  ${row.provider_deadline_at ?? null}::timestamptz is not null
                   and ${row.provider_deadline_at ?? null}::timestamptz
                     <= now() + (${lead}::bigint * interval '1 millisecond')
                 ) as mandatory
               `)
             : [];
-        if (deadline?.mandatory !== true) {
+        // A setup request whose provider Start outcome is unknown can never
+        // settle on a live box: no exit can be observed for it, and its turn
+        // waits (recovering) for the box to be gone. Waiting for the deadline
+        // kept a box with no holder running for a day. Once its owner attempt
+        // has been closed for the abandonment window, with no retained process
+        // of that attempt, capture around exactly these setup requests;
+        // termination then settles them and the turn's ended-epoch recovery
+        // resumes it on the saved workspace. Only a point-in-time (Modal
+        // snapshot) capture may run around a request that might still be
+        // writing; a file-by-file tar read keeps waiting for the deadline.
+        const abandonAfterMs = input.abandonedSetupCaptureAfterMs;
+        const [abandoned] =
+          deadline?.mandatory !== true &&
+          input.liveness === "draining" &&
+          input.pointInTimeCapture === true &&
+          abandonAfterMs !== undefined &&
+          Number.isSafeInteger(abandonAfterMs) &&
+          abandonAfterMs > 0
+            ? await scopedDb.execute<{ abandoned: boolean }>(sql`
+                select coalesce(bool_and(coalesce(
+                  admission.actor_kind = 'turn'
+                  and admission.actor_id = attempt.id
+                  and admission.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
+                  and admission.route_kind = 'home'
+                  and admission.route_target_id is null
+                  and attempt.state = 'closed'
+                  and attempt.closed_at
+                    <= now() - (${abandonAfterMs}::bigint * interval '1 millisecond')
+                  and turn.status = 'recovering'
+                  and turn.active_attempt_id is null
+                  and turn.execution_generation = attempt.execution_generation
+                  and turn.metadata -> 'sandboxSetupOutcomeUnknown' @> jsonb_build_object(
+                    'version', 1, 'turnId', turn.id::text, 'attemptId', attempt.id::text,
+                    'reason', 'sandbox_command_start_outcome_unknown')
+                  and not exists (select 1 from sandbox_retained_processes process
+                    where process.workspace_id = attempt.workspace_id
+                      and process.session_id = attempt.session_id
+                      and process.owner_attempt_id = attempt.id
+                      and process.state = 'active'),
+                  false)), false) as abandoned
+                from sandbox_workspace_mutation_admissions admission
+                left join session_turn_attempts attempt
+                  on attempt.account_id = admission.account_id
+                 and attempt.workspace_id = admission.workspace_id
+                 and attempt.session_id = admission.session_id
+                 and attempt.turn_id = admission.turn_id
+                 and attempt.id = admission.attempt_id
+                 and attempt.execution_generation = admission.execution_generation
+                left join session_turns turn
+                  on turn.workspace_id = attempt.workspace_id
+                 and turn.session_id = attempt.session_id
+                 and turn.id = attempt.turn_id
+                where admission.id = any(${`{${unsettled
+                  .map((admission: { id: string }) => admission.id)
+                  .join(",")}}`}::uuid[])
+              `)
+            : [];
+        if (deadline?.mandatory !== true && abandoned?.abandoned !== true) {
           return { status: "mutation_in_progress" as const };
         }
-        // Mandatory pre-deadline save: no holder is left on the box (checked
-        // above), so these requests cannot finish into a capture in time.
-        // Record exactly them; publication excludes them, and the cold commit
-        // settles them only after the box is terminated.
+        // Mandatory save: no holder is left on the box (checked above), so
+        // these requests cannot finish into a capture in time. Record exactly
+        // them; publication excludes them, and the cold commit settles them
+        // only after the box is terminated.
         await scopedDb.execute(sql`
           update sandbox_leases set deadline_forced_admission_ids = ${`{${[
             ...forcedAdmissionIds,

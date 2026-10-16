@@ -794,6 +794,19 @@ resolves values from it live when a `{{secret:…}}` reference runs, so the host
 never returns secret plaintext through the credential port. See
 [`secrets.md`](secrets.md#providers).
 
+For a product whose secret store lives behind another service, use a remote
+`external` vault connection instead. One connection can expose multiple vaults;
+separate user-owned connections keep user-specific inventories isolated. The
+host verifies the signed request, maps the native account/workspace/subject to
+its own tenant/user, and authorizes each metadata, read or supported write
+operation. The same references work in tools, shells, browsers and Sites.
+See [external-vaults.md](external-vaults.md) for setup, pending verification,
+capabilities and freshness. Native secret ask cards remain hosted-only.
+
+This is not a replacement for the renewable run-credential callback: that port
+still owns short-lived per-attempt credentials, Git/MCP bindings, renewal and
+cleanup. A vault read does not establish those lifecycle guarantees.
+
 A standalone product can supply the same material without embedding: a
 workspace credential provider ([`workspace-integrations.md`](workspace-integrations.md))
 is a signed HTTP endpoint that Opengeni uses as that workspace's `runCredentials`

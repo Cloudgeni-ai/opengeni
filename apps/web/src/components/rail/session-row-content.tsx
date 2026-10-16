@@ -224,7 +224,7 @@ export function SessionRowContent({
           including the creator. Kept as-is so this change regresses nothing. */}
       <span className="sr-only">{stateLabel}. </span>
       <span className="flex min-w-0 flex-1 flex-col leading-tight">
-        <span data-session-row-title className="block min-w-0 truncate">
+        <span data-session-row-title className="block min-w-0 overflow-hidden whitespace-nowrap">
           {title}
         </span>
         {mobile ? (

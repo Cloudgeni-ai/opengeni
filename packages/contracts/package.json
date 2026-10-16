@@ -198,6 +198,10 @@
       "types": "./src/workspace-integration-wire.ts",
       "default": "./src/workspace-integration-wire.ts"
     },
+    "./vault-provider-wire": {
+      "types": "./src/vault-provider-wire.ts",
+      "default": "./src/vault-provider-wire.ts"
+    },
     "./code-search": {
       "types": "./src/code-search.ts",
       "default": "./src/code-search.ts"

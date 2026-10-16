@@ -493,6 +493,18 @@ const SettingsSchema = z.object({
   // 1Password tokens, backed by the in-memory fake provider. The managed
   // product posture refuses to start with it set (OP-7).
   onePasswordFakeTokens: EnvBoolean.default(false),
+  // Operator-installed official pass-cli; never auto-download or resolve an
+  // agent-controlled executable from PATH. The adapter verifies its version.
+  protonPassCliPath: z
+    .string()
+    .trim()
+    .min(1)
+    .max(1_024)
+    .refine(
+      (value) => value.startsWith("/") || /^[a-z]:[\\/]/i.test(value),
+      "Proton Pass CLI path must be absolute",
+    )
+    .optional(),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
@@ -831,6 +843,8 @@ const SettingsSchema = z.object({
   // this flag. Set false and omit codex-subscription from PROVIDER_ORDER to
   // keep subscription model routing while disabling Codex voice input.
   voiceInputCodexExperimentalEnabled: EnvBoolean.default(false),
+  /** Deployment-wide override for every credit price calculated from a provider rate. */
+  creditMarginBpsOverride: z.coerce.number().int().min(0).max(10_000).optional(),
   modelPricingJson: z.string().default("{}"),
   // Supported-model membership source. Database mode is resolved by the async
   // core overlay; getSettings remains synchronous and env-only.
@@ -2562,6 +2576,14 @@ export function voiceInputPricingHasTokenRates(pricing: VoiceInputPricing): bool
   );
 }
 
+/** Resolve the deployment override without changing unset per-price behavior. */
+function effectiveCreditMarginBps(
+  settings: Pick<Settings, "creditMarginBpsOverride">,
+  configuredMarginBps: number | undefined,
+): number {
+  return settings.creditMarginBpsOverride ?? configuredMarginBps ?? 0;
+}
+
 /**
  * Exact integer credit math. Token usage needs token rates; duration usage
  * uses `microsPerMinute` at millisecond resolution. Both round up once, after
@@ -2570,6 +2592,7 @@ export function voiceInputPricingHasTokenRates(pricing: VoiceInputPricing): bool
 export function calculateVoiceInputCost(
   pricing: VoiceInputPricing,
   usage: VoiceInputUsage,
+  marginBpsOverride?: number,
 ): VoiceInputCost {
   let numerator: bigint;
   let denominator: bigint;
@@ -2609,7 +2632,7 @@ export function calculateVoiceInputCost(
     numerator = BigInt(Math.ceil(usage.seconds * 1_000)) * BigInt(pricing.microsPerMinute);
     denominator = 60_000n;
   }
-  const margin = BigInt(10_000 + (pricing.marginBps ?? 0));
+  const margin = BigInt(10_000 + (marginBpsOverride ?? pricing.marginBps ?? 0));
   const provider = (numerator + denominator - 1n) / denominator;
   const scaled = denominator * 10_000n;
   const credit = (numerator * margin + scaled - 1n) / scaled;
@@ -4701,6 +4724,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     onePasswordFakeTokens: optional("OPENGENI_ONEPASSWORD_FAKE_TOKENS"),
+    protonPassCliPath: optional("OPENGENI_PROTON_PASS_CLI_PATH"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsAllowPrivateNetworkTargets: optional(
@@ -4838,6 +4862,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputOpenaiPricingJson: optional("OPENGENI_VOICE_INPUT_OPENAI_PRICING_JSON"),
     voiceInputAzurePricingJson: optional("OPENGENI_VOICE_INPUT_AZURE_PRICING_JSON"),
     voiceInputCodexExperimentalEnabled: optional("OPENGENI_VOICE_INPUT_CODEX_EXPERIMENTAL"),
+    creditMarginBpsOverride: optional("OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE"),
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelCatalogSource,
     modelCostPolicyJson,
@@ -8660,7 +8685,8 @@ export function calculateModelListUsageCostSnapshot(
   let providerCostMicros = sumListCostClasses(classes);
   let creditCostMicros = 0;
   for (const [pricing, raw] of rawCostByPricing) {
-    creditCostMicros += Math.ceil((raw * (10_000 + (pricing.marginBps ?? 0))) / 10_000);
+    const marginBps = effectiveCreditMarginBps(settings, pricing.marginBps);
+    creditCostMicros += Math.ceil((raw * (10_000 + marginBps)) / 10_000);
   }
   let listByClassApprox = false;
   const latencyMode = options.latencyMode ?? "standard";
@@ -8898,7 +8924,7 @@ function calculateUsageCostBreakdown(
   let providerCostMicros = 0;
   let creditCostMicros = 0;
   for (const [pricing, rawCost] of rawCostByPricing) {
-    const marginBps = pricing.marginBps ?? 0;
+    const marginBps = effectiveCreditMarginBps(settings, pricing.marginBps);
     providerCostMicros += rawCost;
     creditCostMicros += Math.ceil((rawCost * (10_000 + marginBps)) / 10_000);
   }
@@ -8979,7 +9005,7 @@ export function calculateGatewayReportedCostBreakdown(
   const pricing = selectModelPricing(schedule, positiveInt(options?.inputTokens));
   const { providerNumerator, decimalScale, providerCostMicros } =
     parseGatewayReportedCostDecimal(inferenceCostUsd);
-  const marginBps = BigInt(10_000 + (pricing.marginBps ?? 0));
+  const marginBps = BigInt(10_000 + effectiveCreditMarginBps(settings, pricing.marginBps));
   const numerator = providerNumerator * marginBps;
   const denominator = decimalScale * 10_000n;
   const creditMicros = (numerator + denominator - 1n) / denominator;

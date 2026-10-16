@@ -4105,6 +4105,9 @@ async function terminateDrainableBox(
         minIntervalMs: 0,
         pointInTimeCapture: providerWorkspaceCaptureIsPointInTime(backend, lease.resumeState),
         deadlineMandatoryCaptureLeadMs: sandboxDeadlineMandatoryCaptureLeadMs(settings),
+        // An unknown-outcome setup request of a closed attempt never settles
+        // on a live box; after the idle grace it no longer pins the drain.
+        abandonedSetupCaptureAfterMs: Math.max(settings.sandboxIdleGraceMs, 60_000),
         providerReplaySafe: capturePolicy?.takeover === "same_request",
         takeoverSafe: capturePolicy !== null && capturePolicy.takeover !== "exclusive",
       });
