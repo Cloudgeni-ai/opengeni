@@ -35,7 +35,7 @@ class SmokeServices:
     """The host agent under test and how to reach the guest service."""
 
     host: HostAgent
-    guest_port: int = 53
+    guest_port: int = 55
     # Restarts the host agent, for scenarios that prove sandboxes survive it.
     restart_command: Sequence[str] | None = None
 
