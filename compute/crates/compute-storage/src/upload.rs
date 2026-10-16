@@ -230,7 +230,7 @@ fn encode(name: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -242,8 +242,8 @@ mod tests {
     /// A GCS stand-in that verifies `x-goog-hash` as the real service does,
     /// optionally after corrupting the first `corrupt` uploads in transit.
     #[derive(Debug, Default)]
-    struct Fake {
-        objects: Mutex<HashMap<String, Bytes>>,
+    pub(crate) struct Fake {
+        pub(crate) objects: Mutex<HashMap<String, Bytes>>,
         corrupt: Mutex<u32>,
         puts: Mutex<u32>,
     }
@@ -304,7 +304,7 @@ mod tests {
         }
     }
 
-    fn gcs(fake: &Arc<Fake>) -> Gcs {
+    pub(crate) fn gcs(fake: &Arc<Fake>) -> Gcs {
         let credentials = Arc::new(StaticCredentialProvider::new(GcpCredential {
             bearer: "token".to_owned(),
         }));

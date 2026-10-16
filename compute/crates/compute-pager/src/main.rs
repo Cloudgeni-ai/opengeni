@@ -1,4 +1,6 @@
-//! Minimal supervised lab runner. The embedding host owns pager/VMM lifetimes.
+//! `compute-pager serve ...` runs one VM's pager process (see
+//! `compute_pager::linux::serve`); anything else is the minimal phase 1 lab
+//! runner, whose embedding host owns pager and VMM lifetimes.
 
 #[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -12,6 +14,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         time::{Duration, Instant},
     };
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "serve") {
+        let code = compute_pager::linux::serve::main(std::env::args_os().skip(2));
+        std::process::exit(i32::from(code != std::process::ExitCode::SUCCESS));
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
         return Err("usage: compute-pager SOCKET SNAPSHOT SNAPSHOT_ID OUTPUT_PREFIX [lazy|eager|PROFILE] [record_ms] [ordered|sorted]".into());

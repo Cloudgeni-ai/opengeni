@@ -547,4 +547,16 @@ async fn a_copy_missing_a_chunk_fails_verification_until_archived_again() {
     let second = archive(&store).await;
     assert!(store.verify(sandbox, &second).await.unwrap());
     backend.head(&key).await.unwrap();
+
+    // Same-length damage: the length is right, the bytes are not. It must
+    // block eviction, and archiving again must repair the shared chunk from
+    // the local copy rather than keep naming the damaged one.
+    let mut damaged = memory_chunk.bytes.clone();
+    damaged[2] ^= 0x01;
+    backend.put(&key, damaged.into()).await.unwrap();
+    assert!(!store.verify(sandbox, &second).await.unwrap());
+    let third = archive(&store).await;
+    assert!(store.verify(sandbox, &third).await.unwrap());
+    let stored = backend.get(&key).await.unwrap().bytes().await.unwrap();
+    assert_eq!(stored.as_ref(), memory_chunk.bytes.as_slice());
 }

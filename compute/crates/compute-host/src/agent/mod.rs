@@ -89,6 +89,38 @@ pub struct HostConfig {
     /// agent at a time may hand them out. `None` only where no two agents
     /// can meet, as in tests with fake VMs.
     pub host_lock: Option<PathBuf>,
+    /// How VMs whose memory needs a fault handler get one.
+    pub pager: PagerConfig,
+}
+
+/// How VMs whose memory needs a fault handler get one: a pager process of
+/// their own, which the engine starts with the VM (see `compute-pager`).
+#[derive(Clone, Debug)]
+pub struct PagerConfig {
+    /// The program each pager runs as, with `pager` as its first argument:
+    /// normally the agent's own binary.
+    pub program: PathBuf,
+    /// How long after a wake a pager records the order the guest touches
+    /// memory in, for the next wake to prefetch. A pager exits no sooner,
+    /// even once every page is in place. The window is wall-clock time, and
+    /// a first wake on a busy host may take tens of seconds to reach the
+    /// working set the next wake should prefetch, so the default is
+    /// generous; the profile's order keeps the earliest pages first.
+    pub record_for: Duration,
+}
+
+impl PagerConfig {
+    /// The default recording window.
+    pub const RECORD_FOR: Duration = Duration::from_secs(120);
+
+    /// Pagers run as `program`, recording for [`Self::RECORD_FOR`].
+    #[must_use]
+    pub fn new(program: PathBuf) -> Self {
+        Self {
+            program,
+            record_for: Self::RECORD_FOR,
+        }
+    }
 }
 
 /// When a running sandbox counts as busy: its VM used at least
@@ -418,6 +450,7 @@ pub struct HostAgent<E: Engine, S: Store> {
     fetcher: Option<Arc<crate::lazy::Fetcher>>,
     busy: Option<BusyRule>,
     can_compress: bool,
+    pager: PagerConfig,
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
     commands_tx: mpsc::WeakUnboundedSender<Command>,
@@ -509,23 +542,21 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let (commands_tx, commands) = mpsc::unbounded_channel();
         let (events_tx, events) = mpsc::unbounded_channel();
-        #[cfg(target_os = "linux")]
-        let fetcher = store
-            .chunks()
-            .map(|chunks| Arc::new(crate::lazy::Fetcher::new(chunks.clone())));
         // Huge-page profiles cannot compress, whatever the host says.
         let can_compress = config.can_compress && engine.memory_profile().compress;
         let mut agent = Self {
             engine: Arc::new(engine),
-            store: Arc::new(store),
             #[cfg(target_os = "linux")]
-            fetcher,
+            fetcher: (store.chunks())
+                .map(|chunks| Arc::new(crate::lazy::Fetcher::new(chunks.clone()))),
+            store: Arc::new(store),
             records: Arc::new(records),
             net,
             images,
             root: config.root,
             base_image: config.base_image,
             pressure: config.policy.memory.is_some(),
+            pager: config.pager,
             core,
             origin: Instant::now(),
             slots: HashMap::new(),

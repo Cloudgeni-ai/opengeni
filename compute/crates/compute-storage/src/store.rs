@@ -192,6 +192,14 @@ impl ChunkStore {
     pub async fn put_chunk(&self, chunk: &EncodedChunk) -> Result<bool> {
         // Public structs may have been modified since encoding.
         decode(&chunk.reference, &chunk.bytes)?;
+        if chunk
+            .reference
+            .checksums
+            .as_ref()
+            .is_some_and(|checksums| *checksums != crate::upload::checksums(&chunk.bytes))
+        {
+            return Err(Error::Integrity);
+        }
         self.put_immutable(&chunk.object_key(), Bytes::copy_from_slice(&chunk.bytes))
             .await
     }
@@ -304,16 +312,29 @@ impl ChunkStore {
         }
     }
 
-    /// Whether the chunk `reference` names is stored at its full length.
-    /// Its bytes were verified when they were stored and are checked again
-    /// by every read; this finds what removing, truncating or failing to
-    /// store it would leave, without downloading it.
+    /// Whether the chunk `reference` names is stored with exactly the bytes
+    /// it names. A local copy may be deleted on this answer, so a stored
+    /// length is not enough: same-length damage must be found too.
+    ///
+    /// GCS keeps the CRC32C and MD5 it computed when the object was stored;
+    /// matching them against the checksums recorded in `reference` proves
+    /// the bytes without downloading them, and any write that changed the
+    /// bytes changed them. Other stores, and references recorded without
+    /// checksums, are read and hashed in full.
     pub async fn has_chunk(&self, reference: &ChunkRef) -> Result<bool> {
         reference.validate()?;
-        match self.backend.head(&self.path(&reference.key())).await {
-            Ok(meta) => Ok(meta.size == u64::from(reference.stored_len)),
-            Err(object_store::Error::NotFound { .. }) => Ok(false),
-            Err(error) => Err(error.into()),
+        let path = self.path(&reference.key());
+        if let (Uploader::Gcs(gcs), Some(expected)) = (&self.uploader, &reference.checksums) {
+            return Ok(gcs.stored(&path).await?.as_deref() == Some(expected.as_str()));
+        }
+        match self.read_chunk(&path, reference).await {
+            Ok(_) => Ok(true),
+            Err(
+                Error::Integrity
+                | Error::Truncated { .. }
+                | Error::Object(object_store::Error::NotFound { .. }),
+            ) => Ok(false),
+            Err(error) => Err(error),
         }
     }
 
@@ -495,12 +516,9 @@ mod tests {
             assert!(matches!(error, Error::Truncated { .. } | Error::Integrity));
             // A copy is kept for inspection.
             assert!(quarantined(&backend).await.contains(&bad));
-            // The object itself stays until the right bytes replace it: a
-            // short one is not held, a damaged one is caught by every read.
-            assert_eq!(
-                store.has_chunk(&chunk.reference).await.unwrap(),
-                !truncation
-            );
+            // The object itself stays until the right bytes replace it, and
+            // neither a short nor a same-length damaged copy counts as held.
+            assert!(!store.has_chunk(&chunk.reference).await.unwrap());
             // The next upload of the same content repairs the shared chunk.
             assert!(store.put_chunk(&chunk).await.unwrap());
             assert!(store.has_chunk(&chunk.reference).await.unwrap());
@@ -527,6 +545,42 @@ mod tests {
         assert!(!store.has_chunk(&chunk.reference).await.unwrap());
         backend.delete(&path).await.unwrap();
         assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn gcs_checksums_prove_a_chunk_without_reading_it() {
+        use crate::upload::tests::{Fake, gcs};
+        let fake = Arc::new(Fake::default());
+        let store = ChunkStore {
+            // Never read: GCS answers from the checksums it keeps.
+            backend: Arc::new(InMemory::new()),
+            prefix: Path::from("p"),
+            uploader: Uploader::Gcs(gcs(&fake)),
+        };
+        let chunk = EncodedChunk::encode(&[9; 16384], 1).unwrap();
+        assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+        assert!(store.put_chunk(&chunk).await.unwrap());
+        assert!(store.has_chunk(&chunk.reference).await.unwrap());
+        // Same-length damage under the chunk's name is not held...
+        let key = format!("/bucket/p/{}", chunk.object_key());
+        let mut damaged = chunk.bytes.clone();
+        damaged[1] ^= 0x10;
+        fake.objects
+            .lock()
+            .unwrap()
+            .insert(key.clone(), Bytes::from(damaged));
+        assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+        // ...and the next upload of the same content replaces it.
+        assert!(store.put_chunk(&chunk).await.unwrap());
+        assert_eq!(fake.objects.lock().unwrap()[&key], chunk.bytes);
+        assert!(store.has_chunk(&chunk.reference).await.unwrap());
+        // A reference whose checksums disagree with its bytes is refused.
+        let mut forged = chunk.clone();
+        forged.reference.checksums = Some(crate::upload::checksums(b"other"));
+        assert!(matches!(
+            store.put_chunk(&forged).await,
+            Err(Error::Integrity)
+        ));
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use compute_core::{Durability, Input, Level, SandboxId, State};
-use compute_engine::{Engine, EngineError, ErrorKind, Found, PagedMemory, VmSpec};
+use compute_engine::{Engine, EngineError, ErrorKind, Found, VmSpec};
 use futures::StreamExt;
 
 use crate::layout::{Images, Paths, vm_spec};
@@ -17,7 +17,7 @@ use crate::store::Store;
 use super::{HostAgent, HostError};
 
 /// A VM found still running after an agent restart, with what it is doing
-/// and, if its memory is paged, the pager now serving it.
+/// and, if its memory is paged, the agent's side of its pager.
 type FoundVm<E> = (<E as Engine>::Vm, Found, Option<LiveMemory>);
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
@@ -125,15 +125,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let paths = Paths::new(&self.root, record.id);
                 let spec = vm_spec(record, &paths, &self.images);
                 let found = match record.disk {
-                    Disk::Local if crate::step::paged(&paths) => self
-                        .adopt_paged(record.id, &spec, &paths)
-                        .await
-                        .map_err(|error| HostError::Io(error.to_string())),
                     Disk::Local => self
-                        .engine
-                        .adopt(&spec)
+                        .adopt_local(record.id, &spec, &paths)
                         .await
-                        .map(|found| found.map(|(vm, how)| (vm, how, None)))
                         .map_err(|error| HostError::Io(error.to_string())),
                     // An eviction that could not delete everything left
                     // files nothing relies on.
@@ -152,53 +146,68 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .await
     }
 
-    /// Takes back a VM whose memory the previous agent's pager served,
-    /// starting a new pager before anything asks the VMM, which may itself
-    /// be waiting on a page. One whose pager cannot be taken over is ended;
-    /// its record still says whether a saved image stands in for it.
-    async fn adopt_paged(
+    /// Takes back the VM left running for a sandbox whose disk is local.
+    ///
+    /// A VM whose memory a pager serves keeps that pager, a process of its
+    /// own; the agent reconnects to it first, so filling resumes before
+    /// anything asks the VMM. A VM whose pager died while the guest still
+    /// needed it can never run again: the engine ends it, and the record
+    /// still says whether a saved image stands in for it. Anything less
+    /// certain leaves the VM as it is.
+    async fn adopt_local(
         &self,
         id: Id,
         spec: &VmSpec,
         paths: &Paths,
     ) -> Result<Option<FoundVm<E>>, EngineError> {
-        let found = self
-            .engine
-            .adopt_paged(spec, |handed| self.take_over_paging(handed, paths))
-            .await;
+        let memory = if crate::step::paged(paths) {
+            match self.reconnect_paging(paths).await {
+                Ok(memory) => memory,
+                Err(error) if error.kind == ErrorKind::MemoryLost => {
+                    // Its pager runs but nothing it waits for can come.
+                    tracing::warn!(%id, %error, "the VM's memory cannot be served; ending it");
+                    if let Some((vm, _)) = self.engine.adopt(spec).await? {
+                        self.engine.stop(vm).await?;
+                    }
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        let found = self.engine.adopt(spec).await;
         match found {
-            Ok(Some((vm, how, memory))) => {
-                tracing::info!(%id, "took over the VM's memory pager");
-                Ok(Some((vm, how, Some(memory))))
+            Ok(Some((vm, how))) => {
+                if memory.is_some() {
+                    tracing::info!(%id, "reconnected to the VM's memory pager");
+                }
+                Ok(Some((vm, how, memory)))
             }
-            Ok(None) => Ok(None),
-            Err(error) if error.kind == ErrorKind::MemoryLost => {
-                tracing::warn!(%id, %error, "the VM's memory pager cannot be taken over; the VM was ended");
-                Ok(None)
+            other => {
+                if let Some(memory) = memory {
+                    memory.close().await;
+                }
+                match other {
+                    Err(error) if error.kind == ErrorKind::MemoryLost => {
+                        tracing::warn!(%id, %error, "the VM's memory pager died; the VM was ended");
+                        Ok(None)
+                    }
+                    other => other.map(|found| found.map(|(vm, how)| (vm, how, None))),
+                }
             }
-            Err(error) => Err(error),
         }
     }
 
-    /// Serves the memory `handed` over by a VM found running whose pager
-    /// went with the previous agent; see [`crate::step::take_over_paging`].
-    async fn take_over_paging(
-        &self,
-        handed: PagedMemory,
-        paths: &Paths,
-    ) -> Result<LiveMemory, EngineError> {
+    async fn reconnect_paging(&self, paths: &Paths) -> Result<Option<LiveMemory>, EngineError> {
         #[cfg(target_os = "linux")]
         {
-            crate::step::take_over_paging(handed, paths, self.fetcher.as_ref()).await
+            crate::step::reconnect_paging(paths, self.fetcher.as_ref()).await
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (handed, paths);
-            Err(EngineError::new(
-                ErrorKind::Fatal,
-                "take over paging",
-                "paged memory needs Linux",
-            ))
+            let _ = paths;
+            Ok(None)
         }
     }
 

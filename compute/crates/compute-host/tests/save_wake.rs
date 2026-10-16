@@ -27,11 +27,19 @@ use compute_host::client::Client;
 use compute_host::protocol::{
     Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
 };
-use compute_host::{Chunked, Directory, HostAgent, HostConfig, NoStore, Store, serve};
+use compute_host::{Chunked, Directory, HostAgent, HostConfig, NoStore, PagerConfig, Store, serve};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 
 const SHELL_PORT: u32 = 52;
+
+/// How long pagers record first touches here: short, so a pager that has
+/// put every page in place exits within the test.
+const RECORD_FOR: Duration = Duration::from_secs(3);
+
+/// A recording window long enough that a pager is still there when a test
+/// wants to end it.
+const RECORD_LONG: Duration = Duration::from_secs(90);
 
 fn lab() -> Option<PathBuf> {
     let lab = std::env::var_os("COMPUTE_TEST_LAB").map(PathBuf::from);
@@ -108,6 +116,10 @@ async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> 
         busy: None,
         can_compress: true,
         host_lock: None,
+        pager: PagerConfig {
+            program: env!("CARGO_BIN_EXE_compute-host").into(),
+            record_for: RECORD_FOR,
+        },
     };
     let socket = root.join("agent.sock");
     let _ = std::fs::remove_file(&socket);
@@ -133,9 +145,10 @@ async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> 
 }
 
 /// An agent running as its own process, as in production: killing it runs
-/// no destructor, so its pager thread dies wherever it was.
+/// no destructor, so whatever it was doing stops wherever it was.
 struct Process {
     client: Client,
+    socket: PathBuf,
     child: std::process::Child,
 }
 
@@ -148,8 +161,15 @@ impl Drop for Process {
 
 impl Process {
     /// Starts `compute-host serve` on the state root `name`, keeping what
-    /// it holds, with `store` if given.
-    async fn start(lab: &Path, name: &str, first_uid: u32, store: Option<&str>) -> Self {
+    /// it holds, with `store` if given, its pagers recording first touches
+    /// for `record_for`.
+    async fn start(
+        lab: &Path,
+        name: &str,
+        first_uid: u32,
+        store: Option<&str>,
+        record_for: Duration,
+    ) -> Self {
         let root = lab.join("ht").join(name);
         std::fs::create_dir_all(&root).unwrap();
         let socket = root.join("agent.sock");
@@ -178,7 +198,9 @@ impl Process {
             .arg("--memory-profile")
             .arg(profile().to_string())
             .arg("--busy-cpu-percent")
-            .arg("0");
+            .arg("0")
+            .arg("--pager-record-ms")
+            .arg(record_for.as_millis().to_string());
         if let Some(store) = store {
             command.arg("--store").arg(store);
         }
@@ -193,6 +215,7 @@ impl Process {
         }
         Self {
             client: Client::new(&socket),
+            socket,
             child,
         }
     }
@@ -393,16 +416,19 @@ async fn guest_processes_survive_waking_from_object_storage() {
     }
 }
 
-/// Wakes the sandbox through a pager, then kills the agent process (and
-/// with it the pager) while the guest is about to read memory it has not
-/// touched since the wake. The guest must wait rather than read zeros, and
-/// a new agent process on the same state must take the pager over so the
-/// guest goes on.
+/// Wakes the sandbox through a pager, then kills the agent process while
+/// the guest is about to read memory it has not touched since the wake.
+/// The pager is a process of its own and stays: the guest must read its
+/// memory exactly as saved (waiting, if it lives in the store, until a new
+/// agent fills it in), and a new agent process on the same state must
+/// reconnect to the pager so the guest goes on. Once every page is in
+/// place the pager must hand the guest's memory to the kernel and exit,
+/// leaving the VM running without it.
 async fn survive_restart(lab: &Path, name: &str, deepest: LevelName, store: Option<&str>) {
     const UID: u32 = (1 << 30) + 2000;
     let id: Id = "00000000-0000-4000-8000-0000000000b3".parse().unwrap();
     let _ = std::fs::remove_dir_all(lab.join("ht").join(name));
-    let agent = Process::start(lab, name, UID, store).await;
+    let agent = Process::start(lab, name, UID, store, RECORD_FOR).await;
     let config = SandboxConfig {
         vcpus: 2,
         memory_mib: 512,
@@ -432,7 +458,7 @@ echo started=yes"
     agent.kill();
     tokio::time::sleep(Duration::from_secs(4)).await;
 
-    let agent = Process::start(lab, name, UID, store).await;
+    let agent = Process::start(lab, name, UID, store, RECORD_FOR).await;
     let read = "\
 for _ in $(seq 100); do [ -s /dev/shm/later ] && break; sleep 0.1; done
 echo later=$(cat /dev/shm/later)";
@@ -442,7 +468,21 @@ echo later=$(cat /dev/shm/later)";
         sum,
         "memory read while no pager ran differs"
     );
-    // Saving and waking still work under the new pager.
+    // Kept awake meanwhile, the VM ends up without a pager.
+    let awake = {
+        let client = Client::new(&agent.socket);
+        tokio::spawn(async move { exec(&client, id, "sleep 100").await })
+    };
+    vmm_unpaged(id).await;
+    awake.abort();
+    let output = exec(
+        &agent.client,
+        id,
+        &format!("kill -0 {pid} && echo alive=yes"),
+    )
+    .await;
+    assert_eq!(field(&output, "alive"), "yes", "{output}");
+    // Saving and waking still work.
     wait_for(&agent.client, id, deepest).await;
     let output = exec(&agent.client, id, &check(&pid)).await;
     assert_eq!(field(&output, "alive"), "yes", "{output}");
@@ -462,23 +502,144 @@ echo later=$(cat /dev/shm/later)";
     assert!(matches!(removed, Reply::Done), "{removed:?}");
 }
 
+/// Waits until VM `id` runs without a pager, its memory no longer
+/// registered with a fault handler.
+async fn vmm_unpaged(id: Id) {
+    let group = PathBuf::from("/sys/fs/cgroup/compute-host-test").join(id.to_string());
+    let started = Instant::now();
+    loop {
+        let procs = std::fs::read_to_string(group.join("cgroup.procs")).unwrap_or_default();
+        let pids: Vec<u32> = procs.lines().filter_map(|line| line.parse().ok()).collect();
+        if let [vmm] = pids[..] {
+            let maps = std::fs::read_to_string(format!("/proc/{vmm}/smaps")).unwrap_or_default();
+            let registered = maps
+                .lines()
+                .filter_map(|line| line.strip_prefix("VmFlags:"))
+                .any(|flags| flags.split_whitespace().any(|flag| flag == "um"));
+            if !registered {
+                eprintln!("the pager left after {:?}", started.elapsed());
+                return;
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(90),
+            "the pager never finished: processes {pids:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_paged_guest_survives_its_agent_restarting() {
     let Some(lab) = lab() else { return };
     let name = format!("p{}", short());
+    if let Some((deepest, store)) = paged_wake("restart") {
+        survive_restart(&lab, &name, deepest, store.as_deref()).await;
+    }
+}
+
+/// The deepest level whose wake goes through a pager on this host, and the
+/// store it needs (under `prefix`), or `None` when the test cannot run.
+fn paged_wake(prefix: &str) -> Option<(LevelName, Option<String>)> {
     if profile().needs_pager() {
         // Every restore on a huge-page host goes through a pager.
-        survive_restart(&lab, &name, LevelName::Saved, None).await;
-        return;
+        return Some((LevelName::Saved, None));
     }
     let Ok(url) = std::env::var("COMPUTE_TEST_STORE") else {
         eprintln!("skipped: 4 KiB pages page only from a store; set COMPUTE_TEST_STORE");
-        return;
+        return None;
     };
-    let url = format!("{url}/restart");
+    let url = format!("{url}/{prefix}");
     if Chunked::from_url(&url).unwrap().is_none() {
         eprintln!("skipped: only a chunked store pages memory in");
-        return;
+        return None;
     }
-    survive_restart(&lab, &name, LevelName::Remote, Some(&url)).await;
+    Some((LevelName::Remote, Some(url)))
+}
+
+/// The processes of VM `id`'s cgroup other than its VMM: its pager, while
+/// it has one.
+fn pagers(id: Id) -> Vec<u32> {
+    let group = PathBuf::from("/sys/fs/cgroup/compute-host-test").join(id.to_string());
+    std::fs::read_to_string(group.join("cgroup.procs"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.parse().ok())
+        .filter(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .is_ok_and(|comm| comm.trim() != "firecracker")
+        })
+        .collect()
+}
+
+/// A pager that dies while its VM still needs it leaves a guest that can
+/// never run again. With no agent around when it dies, the next agent
+/// must find that out, end the VM rather than adopt it, and boot the
+/// sandbox afresh: its guest ran after the last save, so no image stands
+/// in for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guest_whose_pager_died_boots_afresh() {
+    const UID: u32 = (1 << 30) + 2100;
+    let Some(lab) = lab() else { return };
+    let Some((deepest, store)) = paged_wake("pager-death") else {
+        return;
+    };
+    let store = store.as_deref();
+    let name = format!("d{}", short());
+    let id: Id = "00000000-0000-4000-8000-0000000000b4".parse().unwrap();
+    let _ = std::fs::remove_dir_all(lab.join("ht").join(&name));
+    let agent = Process::start(&lab, &name, UID, store, RECORD_LONG).await;
+    let config = SandboxConfig {
+        vcpus: 2,
+        memory_mib: 512,
+        sleep: ladder(deepest),
+    };
+    let created = agent
+        .client
+        .call(&Request::Create { id, config })
+        .await
+        .unwrap();
+    assert!(matches!(created, Reply::Done), "{created:?}");
+    let setup = exec(&agent.client, id, SETUP).await;
+    let pid = field(&setup, "pid").to_owned();
+    wait_for(&agent.client, id, deepest).await;
+    let output = exec(
+        &agent.client,
+        id,
+        &format!("kill -0 {pid} && echo alive=yes"),
+    )
+    .await;
+    assert_eq!(field(&output, "alive"), "yes", "{output}");
+    agent.kill();
+    let pager = pagers(id);
+    assert_eq!(pager.len(), 1, "the woken VM has no pager: {pager:?}");
+    let killed = std::process::Command::new("kill")
+        .args(["-KILL", &pager[0].to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+
+    let agent = Process::start(&lab, &name, UID, store, RECORD_FOR).await;
+    let output = exec(
+        &agent.client,
+        id,
+        &format!(
+            "kill -0 {pid} 2>/dev/null && echo alive=yes; [ -e /dev/shm/blob ] || echo fresh=yes"
+        ),
+    )
+    .await;
+    assert_eq!(
+        field(&output, "fresh"),
+        "yes",
+        "the old guest went on: {output}"
+    );
+    let removed = agent
+        .client
+        .call(&Request::Remove {
+            id,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(removed, Reply::Done), "{removed:?}");
 }

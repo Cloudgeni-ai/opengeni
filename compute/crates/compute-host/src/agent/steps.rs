@@ -183,6 +183,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             kernel: self.images.kernel.clone(),
             #[cfg(target_os = "linux")]
             fetcher: self.fetcher.clone(),
+            pager: self.pager.clone(),
             launches: 0,
         };
         let events = self.events_tx.clone();
@@ -551,8 +552,8 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
             .await
             .map_err(|error| HostError::Io(error.to_string()))?;
         self.records.remove(id, record.fence()).await?;
-        // A pager thread of a VM that ended on its own may still be writing
-        // its last file here; a moment later the directory is quiet.
+        // The pager of a VM that ended on its own may still be writing its
+        // last file here; a moment later the directory is quiet.
         let mut tries = 0;
         loop {
             match tokio::fs::remove_dir_all(dir).await {

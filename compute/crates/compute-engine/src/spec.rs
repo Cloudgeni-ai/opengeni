@@ -1,5 +1,6 @@
 //! What a VM looks like: processors, memory, kernel, disks and channels.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// A block device attached to the VM.
@@ -104,19 +105,22 @@ pub enum MemorySource {
     /// Map this complete memory image file copy-on-write; the page cache
     /// supplies pages as the guest touches them. Only for 4 KiB pages.
     File(PathBuf),
-    /// A page-fault handler listening on this Unix socket supplies every
-    /// page; see the `compute-pager` crate.
-    Pager(PathBuf),
+    /// A page-fault handler supplies every page: a process the engine
+    /// starts beside the VM, which lives as long as the VM needs it and
+    /// no longer than the VM; see the `compute-pager` crate.
+    Pager(PagerSpec),
 }
 
-/// A running VM's page-fault handling, handed over to a new handler.
-#[derive(Debug)]
-pub struct PagedMemory {
-    /// A duplicate of the VMM's userfaultfd. The VMM keeps its own, so a
-    /// fault waits for a handler instead of reading zeros.
-    pub uffd: std::os::fd::OwnedFd,
-    /// A pidfd of the VMM process: readable once it has exited.
-    pub vmm: std::os::fd::OwnedFd,
+/// The page-fault handler process of a [`MemorySource::Pager`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PagerSpec {
+    /// The Unix socket it listens on for the VMM, inside the VM's jail.
+    pub socket: PathBuf,
+    /// The program to run, with its arguments. It must print `ready` on a
+    /// line of its own once `socket` listens, and nothing else on standard
+    /// output; it must exit once the VMM has gone.
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
 }
 
 /// What a VM is restored from.

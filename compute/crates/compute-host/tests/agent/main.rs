@@ -19,7 +19,7 @@ use compute_host::protocol::{
     HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SandboxStatus,
     SleepConfig,
 };
-use compute_host::{BusyRule, HostAgent, HostConfig, NoStore, serve};
+use compute_host::{BusyRule, HostAgent, HostConfig, NoStore, PagerConfig, serve};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::watch;
@@ -567,6 +567,8 @@ impl Lab {
             }),
             can_compress: true,
             host_lock: None,
+            // Fake VMs never start one.
+            pager: PagerConfig::new(root.join("no-pager")),
         };
         configure(&mut config);
         let engine = Fake {

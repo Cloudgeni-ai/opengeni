@@ -100,6 +100,24 @@ impl Cgroup {
         }
     }
 
+    /// Moves process `pid` into the group, with every thread it has.
+    pub fn add(&self, pid: u32) -> io::Result<()> {
+        fs::write(self.path.join("cgroup.procs"), pid.to_string())
+    }
+
+    /// The processes in the group, as this host's PID namespace numbers
+    /// them; none if the group is gone.
+    pub fn processes(&self) -> io::Result<Vec<u32>> {
+        match fs::read_to_string(self.path.join("cgroup.procs")) {
+            Ok(text) => text
+                .lines()
+                .map(|line| line.trim().parse().map_err(io::Error::other))
+                .collect(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Whether any process is still in the group.
     pub fn is_populated(&self) -> io::Result<bool> {
         match fs::read_to_string(self.path.join("cgroup.events")) {

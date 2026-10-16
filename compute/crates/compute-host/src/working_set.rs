@@ -40,8 +40,6 @@ use crate::image::CHUNK_BYTES;
 /// How much of the learned working set a wake waits for before its guest
 /// resumes, and so how much of it is packed.
 pub(crate) const READY_BYTES: u64 = 128 << 20;
-/// Most pages a learned profile keeps.
-const PROFILE_PAGES: usize = 1 << 16;
 /// The first part's size: small, so the first pages arrive quickly.
 const FIRST_PART: u64 = 1 << 20;
 /// Parts double in size up to this, so a pack is a handful of large reads.
@@ -55,74 +53,29 @@ const LARGEST_PAGE: u64 = 2 << 20;
 /// As for the memory image's own chunks: fast, and nearly as small.
 const ZSTD_LEVEL: i32 = 1;
 
-/// The pages a guest touched first after a wake, in order, as image
-/// offsets. Prefetched before the next wake.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct WakeProfile {
-    pub version: u32,
-    pub offsets: Vec<u64>,
-    /// Bytes per page; 0 in profiles recorded before it was kept.
-    #[serde(default)]
-    pub page_size: u64,
+pub(crate) use compute_pager::WakeProfile;
+
+/// `profile`'s page size, assuming the smallest for profiles without one.
+fn page_of(profile: &WakeProfile) -> u64 {
+    if valid_page(profile.page_size) {
+        profile.page_size
+    } else {
+        SMALLEST_PAGE
+    }
 }
 
-impl WakeProfile {
-    /// Reads a profile, or an empty one if there is none or it is unusable.
-    pub fn load(path: &Path) -> Self {
-        std::fs::read(path).map_or_else(|_| Self::default(), |bytes| Self::parse(&bytes))
-    }
-
-    /// Decodes a stored profile, or an empty one if it is unusable.
-    pub fn parse(bytes: &[u8]) -> Self {
-        serde_json::from_slice::<Self>(bytes)
-            .ok()
-            .filter(|profile| profile.version == 1)
-            .unwrap_or_default()
-    }
-
-    /// The profile after a wake that prefetched `self` and then faulted on
-    /// `touched`, pages of `page_size` bytes: pages prefetched never fault,
-    /// so the old order is kept and new pages follow it, up to a bound.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    #[must_use]
-    pub fn learn(&self, touched: &[u64], page_size: u64) -> Self {
-        let mut seen = HashSet::new();
-        let offsets = self
-            .offsets
-            .iter()
-            .chain(touched)
-            .copied()
-            .filter(|offset| seen.insert(*offset))
-            .take(PROFILE_PAGES)
-            .collect();
-        Self {
-            version: 1,
-            offsets,
-            page_size,
-        }
-    }
-
-    /// The page size, assuming the smallest for profiles without one.
-    fn page(&self) -> u64 {
-        if valid_page(self.page_size) {
-            self.page_size
-        } else {
-            SMALLEST_PAGE
-        }
-    }
-
-    /// The pages to pack from an image of `memory_len` bytes: the profile's
-    /// first pages, each once, up to [`READY_BYTES`].
-    fn packed(&self, memory_len: u64) -> Vec<u64> {
-        let page = self.page();
-        let mut seen = HashSet::new();
-        self.offsets
-            .iter()
-            .map(|offset| offset / page * page)
-            .filter(|offset| offset + page <= memory_len && seen.insert(*offset))
-            .take(usize::try_from(READY_BYTES / page).unwrap_or(usize::MAX))
-            .collect()
-    }
+/// The pages to pack from an image of `memory_len` bytes: `profile`'s
+/// first pages, each once, up to [`READY_BYTES`].
+fn packed(profile: &WakeProfile, memory_len: u64) -> Vec<u64> {
+    let page = page_of(profile);
+    let mut seen = HashSet::new();
+    profile
+        .offsets
+        .iter()
+        .map(|offset| offset / page * page)
+        .filter(|offset| offset + page <= memory_len && seen.insert(*offset))
+        .take(usize::try_from(READY_BYTES / page).unwrap_or(usize::MAX))
+        .collect()
 }
 
 fn valid_page(size: u64) -> bool {
@@ -210,11 +163,11 @@ pub(crate) async fn put(
     cancel: &CancellationToken,
 ) -> Result<Option<ChunkRef>, PackError> {
     let file = File::open(memory)?;
-    let pages = profile.packed(file.metadata()?.len());
+    let pages = packed(profile, file.metadata()?.len());
     if pages.is_empty() {
         return Ok(None);
     }
-    let page_size = profile.page();
+    let page_size = page_of(profile);
     // Stops the packing on a cancel or a failed upload.
     let stop = cancel.child_token();
     let (made, mut parts) = mpsc::channel(PARTS_IN_FLIGHT);

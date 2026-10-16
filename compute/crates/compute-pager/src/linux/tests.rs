@@ -1,6 +1,7 @@
 use super::*;
 use crate::source::MappedFile;
 use std::fs::File;
+use std::os::unix::fs::FileExt;
 
 #[test]
 fn event_decoding_is_strict() {
@@ -343,134 +344,69 @@ fn kernel_the_wake_waits_only_for_the_gated_prefix() {
 
 #[test]
 #[ignore = "requires Linux userfaultfd permission"]
-fn kernel_a_new_pager_takes_over_a_fault_its_predecessor_dropped() {
-    // `fd` stands for the VMM's own reference to its UFFD.
-    let (fd, memory, peer, _sender) = registered_memory();
-    // Declared after `memory`, so it is released first even when a
-    // failed assertion unwinds; otherwise the unmap waits for an UNMAP
-    // reader forever.
-    let vmm_uffd = fd;
+fn kernel_a_finished_pager_leaves_the_memory_to_the_kernel() {
+    let (fd, mut memory, peer, _sender) = registered_memory();
+    // Declared after `memory`, so it is released first even when a failed
+    // assertion unwinds; otherwise the unmap waits for an UNMAP reader.
+    let _vmm_uffd = fd;
+    // An image whose third page is all zeros.
     let image = image_file(0x5a);
+    image.write_all_at(&[0; 4096], 8192).unwrap();
     // SAFETY: the image is private to this test and never changed.
     let source = unsafe { MappedFile::new(&image) }.unwrap();
-    let mut first = Pager::new(peer, source, Duration::from_secs(60)).unwrap();
-    let regions = first.layout().regions().to_vec();
-    std::thread::scope(|scope| {
-        // The first pager serves one fault in full...
-        let served = scope.spawn(|| memory[0]);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !served.is_finished() {
-            assert!(Instant::now() < deadline, "first fault never served");
-            first.turn().unwrap();
-            std::thread::yield_now();
-        }
-        assert_eq!(served.join().unwrap(), 0x5a);
-        // ...then reads another and goes without serving it.
-        let reader = scope.spawn(|| memory[4096]);
-        while first.faults.is_empty() {
-            assert!(Instant::now() < deadline, "fault never arrived");
-            first.drain_events().unwrap();
-            std::thread::yield_now();
-        }
-        drop(first);
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(
-            !reader.is_finished(),
-            "a fault without a handler waits rather than reading zeros"
-        );
-        // SAFETY: pidfd_open of this very process, without flags.
-        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0) };
-        assert!(raw >= 0, "{}", io::Error::last_os_error());
-        // SAFETY: pidfd_open returned a new owned descriptor.
-        let pidfd = unsafe { OwnedFd::from_raw_fd(i32::try_from(raw).unwrap()) };
-        // SAFETY: as above.
-        let source = unsafe { MappedFile::new(&image) }.unwrap();
-        let uffd = vmm_uffd.try_clone().unwrap();
-        let mut second =
-            Pager::adopt(uffd, regions, pidfd, source, Duration::from_secs(60)).unwrap();
-        while !reader.is_finished() {
-            assert!(
-                Instant::now() < deadline,
-                "the woken fault was never served"
-            );
-            second.turn().unwrap();
-            std::thread::yield_now();
-        }
-        assert_eq!(reader.join().unwrap(), 0x5a);
-        // The page the first pager put in place counts as done.
-        let plan = second.layout.plan(&[0, 4096, 8192, 12288]).unwrap();
-        second.prefetch(&plan, 4096).unwrap();
-        assert_eq!(second.stats.existing_pages, 1);
-        assert!(!second.wait(Duration::ZERO).unwrap(), "the VMM is alive");
-        drop(second);
-    });
-    assert!(memory.iter().all(|byte| *byte == 0x5a));
+    let mut pager = Pager::new(peer, source, Duration::ZERO)
+        .unwrap()
+        .finish_when_complete();
+    let settled = std::sync::atomic::AtomicBool::new(false);
+    pager
+        .run(&AtomicBool::new(false), |progress| {
+            if let Progress::Settled = progress {
+                settled.store(true, Ordering::Relaxed);
+            }
+        })
+        .unwrap();
+    assert!(settled.load(Ordering::Relaxed), "run ended before settling");
+    assert_eq!(pager.stats.zero_pages, 1);
+    assert_eq!(pager.stats.prefetched_pages, 3);
+    // No pager serves this memory any more: the copied pages are in place,
+    // the zero page comes from the kernel, and a discarded page reads as
+    // zeros without a REMOVE event anyone has to read.
+    drop(pager);
+    assert!(memory[..8192].iter().all(|byte| *byte == 0x5a));
+    assert!(memory[8192..12288].iter().all(|byte| *byte == 0));
+    assert!(memory[12288..].iter().all(|byte| *byte == 0x5a));
+    // SAFETY: live mapping, page-aligned range, valid advice.
+    assert_eq!(
+        unsafe { libc::madvise(memory.as_mut_ptr().cast(), 4096, libc::MADV_DONTNEED) },
+        0
+    );
+    assert!(memory[..4096].iter().all(|byte| *byte == 0));
+    memory[4096] = 7;
+    assert_eq!(memory[4096], 7);
 }
 
 #[test]
 #[ignore = "requires Linux userfaultfd permission"]
-fn kernel_a_new_pager_zero_fills_what_its_predecessor_saw_discarded() {
-    let (fd, memory, peer, _sender) = registered_memory();
-    let vmm_uffd = fd;
-    let image = image_file(0x5a);
-    // An empty record for the VM's first pager, shared with its next.
-    let record = image_file(0);
-    record.set_len(0).unwrap();
-    // SAFETY: the image is private to this test and never changed.
-    let source = unsafe { MappedFile::new(&image) }.unwrap();
-    let mut first = Pager::new(peer, source, Duration::from_secs(60))
+fn kernel_a_pager_does_not_finish_before_its_source_is_complete() {
+    let (fd, _memory, peer, _sender) = registered_memory();
+    let _vmm_uffd = fd;
+    let mut pager = Pager::new(peer, Delayed::new(3), Duration::ZERO)
         .unwrap()
-        .keep_discards(record.try_clone().unwrap())
-        .unwrap();
-    let regions = first.layout().regions().to_vec();
-    let plan = first.layout.plan(&[0, 4096, 8192, 12288]).unwrap();
-    first.prefetch(&plan, 16384).unwrap();
-    assert!(memory.iter().all(|byte| *byte == 0x5a));
+        .finish_when_complete();
+    let stopped = AtomicBool::new(false);
     std::thread::scope(|scope| {
-        let discard = scope.spawn(|| {
-            // SAFETY: live mapping, page-aligned range, valid advice.
-            assert_eq!(
-                unsafe {
-                    libc::madvise(memory.as_ptr().cast_mut().cast(), 4096, libc::MADV_DONTNEED)
-                },
-                0
-            );
+        let timer = scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(300));
+            stopped.store(true, Ordering::Relaxed);
         });
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while first.stats.remove_events == 0 {
-            assert!(Instant::now() < deadline, "REMOVE notification timed out");
-            first.turn().unwrap();
-            std::thread::yield_now();
-        }
-        discard.join().unwrap();
-        drop(first);
-        // SAFETY: pidfd_open of this very process, without flags.
-        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0) };
-        assert!(raw >= 0, "{}", io::Error::last_os_error());
-        // SAFETY: pidfd_open returned a new owned descriptor.
-        let pidfd = unsafe { OwnedFd::from_raw_fd(i32::try_from(raw).unwrap()) };
-        // SAFETY: as above.
-        let source = unsafe { MappedFile::new(&image) }.unwrap();
-        let mut second = Pager::adopt(
-            vmm_uffd.try_clone().unwrap(),
-            regions,
-            pidfd,
-            source,
-            Duration::from_secs(60),
-        )
-        .unwrap()
-        .keep_discards(record)
-        .unwrap();
-        // The discarded page faults and must read as zeros, not as the
-        // image's bytes.
-        let reader = scope.spawn(|| memory[0]);
-        while !reader.is_finished() {
-            assert!(Instant::now() < deadline, "the fault was never served");
-            second.turn().unwrap();
-            std::thread::yield_now();
-        }
-        assert_eq!(reader.join().unwrap(), 0);
-        drop(second);
+        let mut settled = false;
+        pager
+            .run(&stopped, |progress| {
+                settled |= matches!(progress, Progress::Settled);
+            })
+            .unwrap();
+        timer.join().unwrap();
+        assert!(!settled, "a pager missing bytes settled");
     });
-    assert!(memory[4096..].iter().all(|byte| *byte == 0x5a));
+    assert_eq!(pager.stats.copied_bytes, 0);
 }

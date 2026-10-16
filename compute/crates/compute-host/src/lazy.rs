@@ -1,58 +1,55 @@
-//! Serving a restored VM's memory through a page-fault handler.
+//! Filling a remote image's memory file from the store.
 //!
-//! A VM restored with [`MemorySource::Pager`](compute_engine::MemorySource)
-//! gets every page of guest memory from a [`compute_pager::linux::Pager`]
-//! running on its own thread here. The pager reads either a local image
-//! ([`compute_pager::MappedFile`]: huge-page hosts, whose memory Firecracker
-//! can only fill through a handler) or a [`ChunkSource`]: an image whose
-//! memory is still in object storage, fetched chunk by chunk as the guest
-//! touches it.
-//!
-//! A remote wake runs in three overlapping phases, after the fetch has
-//! brought in the image's working-set pack (see [`crate::working_set`]):
+//! A VM restored from an image whose memory is still in object storage gets
+//! every page from its pager process ([`crate::paging`]), which reads the
+//! image's own memory file once the bytes it needs are there. This module
+//! puts them there: a [`Hydration`] fetches the image's chunks into the
+//! file and reports each chunk once it is in place, which the agent passes
+//! on to the pager. A remote wake runs in three overlapping phases, after
+//! the fetch has brought in the image's working-set pack (see
+//! [`crate::working_set`]):
 //!
 //! 1. **Prefetch.** The pages the guest touched after its previous wake
-//!    (its learned profile, in first-touch order) are installed as soon as
-//!    the VMM connects: those the pack filled at once, the rest fetched.
-//!    The guest resumes once the first [`READY_BYTES`] of them are in
-//!    place; the rest stream in behind it, still ahead of hydration.
+//!    (its learned profile, in first-touch order) are asked for first:
+//!    those the pack filled are in place at once, the rest fetched. The
+//!    pager installs them and the guest resumes once the first
+//!    [`READY_BYTES`](crate::working_set::READY_BYTES) of them are in place.
 //! 2. **Demand.** Any other page the guest touches is fetched at once,
 //!    ahead of everything else, with a few chunks after it; the fault
 //!    waits only for its own chunk.
 //! 3. **Hydration.** Alongside, the remaining chunks are fetched in the
-//!    background into the image's memory file, a few at a time per VM and
-//!    a bounded number on the whole host, so the image becomes a complete
-//!    local copy that the next save can merge over.
+//!    background into the memory file, a few at a time per VM and a
+//!    bounded number on the whole host, so the image becomes a complete
+//!    local copy that the next save can merge over, and the pager can
+//!    hand the guest's memory to the kernel and exit.
 //!
-//! Fetched chunks land in the image's own memory file, which is also the
-//! source's cache. Every chunk read from the store is checked against its
-//! content hash (see [`compute_storage::store::ChunkStore::get_chunk`]) and
-//! against the image's chunk map. Pages the pack filled are never written
-//! again: every one is compared with the chunk that holds it when that
-//! chunk arrives, and a chunk the pack filled entirely is hashed in place
-//! instead of fetched, so a pack that disagrees with the image is caught.
+//! Every chunk read from the store is checked against its content hash
+//! (see [`compute_storage::store::ChunkStore::get_chunk`]) and against the
+//! image's chunk map. Bytes already in place (filled by the pack, or by an
+//! earlier agent for the same pager) are never written again, since the
+//! pager may have read them: each is compared with the chunk that holds it
+//! when that chunk arrives, and a chunk the pack filled entirely is hashed
+//! in place instead of fetched, so a pack that disagrees with the image is
+//! caught.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::FileExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use compute_pager::{MappedFile, Source};
 use compute_storage::chunk::ChunkRef;
 use compute_storage::store::ChunkStore;
 use futures::FutureExt as _;
 use futures::future::{BoxFuture, Shared};
 use futures::stream::{FuturesUnordered, StreamExt as _};
-use memmap2::{Mmap, MmapOptions};
 use tokio::sync::{Semaphore, mpsc, watch};
 
 use crate::image::{CHUNK_BYTES, Hash, ZERO, chunk_count, chunk_range};
-use crate::working_set::{PageSet, READY_BYTES, WakeProfile};
+use crate::working_set::PageSet;
 
 /// Chunk fetches in flight per VM for demand and prefetch.
 const FOREGROUND_PER_VM: usize = 64;
@@ -85,14 +82,6 @@ const FETCH_DEADLINE: Duration = Duration::from_secs(30);
 /// Blocking writes into one memory file that can be under way at once:
 /// more than one VM's fetches can ever start.
 const WRITERS: u32 = 1024;
-/// How long a pager waits for its VMM to connect.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long the first-touch order is recorded after a wake. A VM that
-/// sleeps sooner reports what it touched when its VMM goes. The window is
-/// wall-clock time, and a first wake on a busy host may take tens of
-/// seconds to reach the working set the next wake should prefetch, so it
-/// is generous; the profile's order keeps the earliest pages first.
-const RECORD_FOR: Duration = Duration::from_secs(120);
 
 type Fetched = Result<Arc<Vec<u8>>, Arc<compute_storage::Error>>;
 
@@ -336,8 +325,8 @@ pub(crate) struct Hydration {
     /// Pages the working-set pack filled before the VM started: readable
     /// at once and never written again.
     filled: PageSet,
-    /// Signalled whenever chunks arrive; the pager waits on it.
-    arrived: OwnedFd,
+    /// Told the index of each chunk once it is in place.
+    arrivals: mpsc::UnboundedSender<usize>,
     requests: mpsc::UnboundedSender<Request>,
     failure: Mutex<Option<Unavailable>>,
     done: watch::Sender<Option<Result<(), Unavailable>>>,
@@ -353,37 +342,42 @@ pub(crate) struct Hydration {
 impl Hydration {
     /// Starts filling `memory` (a sparse file of the image's full length)
     /// from `refs`, the chunk at each position, checked against `hashes`,
-    /// the image's chunk map. `filled` are the pages already in the file;
-    /// `first` are image offsets to fetch at once, in order.
+    /// the image's chunk map. `filled` are the pages already in the file,
+    /// and `settled` (empty, or one entry per chunk) the chunks known to be
+    /// complete in it already; `first` are image offsets to fetch at once,
+    /// in order. Returns the hydration and the index of each chunk once it
+    /// is in place, zero chunks and settled ones excepted.
     pub fn start(
         fetcher: Arc<Fetcher>,
         memory: &Path,
         refs: Vec<Option<ChunkRef>>,
         hashes: Vec<Hash>,
         filled: PageSet,
+        settled: &[bool],
         first: &[u64],
-    ) -> io::Result<Arc<Self>> {
+    ) -> io::Result<(Arc<Self>, mpsc::UnboundedReceiver<usize>)> {
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(memory)?;
         let len = file.metadata()?.len();
         let count = chunk_count(len);
-        if refs.len() != count || hashes.len() != count {
+        if refs.len() != count
+            || hashes.len() != count
+            || !(settled.is_empty() || settled.len() == count)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "chunk list does not cover the memory image",
             ));
         }
-        let present: Vec<AtomicBool> = refs
-            .iter()
-            .map(|reference| AtomicBool::new(reference.is_none()))
+        let in_place =
+            |index: usize| refs[index].is_none() || settled.get(index).copied().unwrap_or(false);
+        let present: Vec<AtomicBool> = (0..count)
+            .map(|index| AtomicBool::new(in_place(index)))
             .collect();
-        let missing = refs.iter().filter(|reference| reference.is_some()).count();
-        let arrived = rustix::event::eventfd(
-            0,
-            rustix::event::EventfdFlags::CLOEXEC | rustix::event::EventfdFlags::NONBLOCK,
-        )?;
+        let missing = (0..count).filter(|index| !in_place(*index)).count();
+        let (arrivals, arrived) = mpsc::unbounded_channel();
         let (requests, receiver) = mpsc::unbounded_channel();
         let (done, _) = watch::channel(None);
         let hydration = Arc::new(Self {
@@ -396,7 +390,7 @@ impl Hydration {
             missing: AtomicUsize::new(missing),
             claimed: (0..count).map(|_| AtomicBool::new(false)).collect(),
             filled,
-            arrived,
+            arrivals,
             requests,
             failure: Mutex::new(None),
             done,
@@ -414,12 +408,27 @@ impl Hydration {
         }
         let task = tokio::spawn(fill(fetcher, Arc::clone(&hydration), receiver));
         *lock(&hydration.task) = Some(task);
-        Ok(hydration)
+        Ok((hydration, arrived))
     }
 
-    fn ask(&self, index: usize, urgent: bool) {
+    /// The memory file's length.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether chunk `index` is in place.
+    pub fn present(&self, index: usize) -> bool {
+        self.present
+            .get(index)
+            .is_some_and(|present| present.load(Ordering::Acquire))
+    }
+
+    /// Asks for chunk `index` ahead of the background sweep; `urgent` when
+    /// a guest processor waits for it.
+    pub fn ask(&self, index: usize, urgent: bool) {
         let wanted = if urgent { URGENT } else { ASKED };
-        if self.present[index].load(Ordering::Acquire)
+        if index >= self.present.len()
+            || self.present[index].load(Ordering::Acquire)
             || self.requested[index].fetch_max(wanted, Ordering::AcqRel) >= wanted
         {
             return;
@@ -546,21 +555,16 @@ impl Hydration {
 
     fn arrived(&self, index: usize) {
         self.present[index].store(true, Ordering::Release);
+        let _ = self.arrivals.send(index);
         if self.missing.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.done.send_replace(Some(Ok(())));
         }
-        self.signal();
     }
 
     fn fail(&self, why: Unavailable) {
         tracing::error!(reason = %why.reason, permanent = why.permanent, "remote memory unavailable");
         lock(&self.failure).get_or_insert(why.clone());
         self.done.send_replace(Some(Err(why)));
-        self.signal();
-    }
-
-    fn signal(&self) {
-        let _ = rustix::io::write(&self.arrived, &1_u64.to_ne_bytes());
     }
 }
 
@@ -734,338 +738,6 @@ where
     }
 }
 
-/// A remote image's memory as a pager source: the image's memory file,
-/// read where chunks have arrived, fetched where they have not.
-#[derive(Debug)]
-pub(crate) struct ChunkSource {
-    hydration: Arc<Hydration>,
-    map: Mmap,
-}
-
-impl ChunkSource {
-    pub fn new(hydration: Arc<Hydration>) -> io::Result<Self> {
-        // SAFETY: a byte of the memory file is read only once it is filled
-        // or its chunk is present, and never written after that: chunks are
-        // written once, around the filled pages. So no byte is read while
-        // it changes, and the file's length never changes.
-        let map = unsafe { MmapOptions::new().map(&hydration.file)? };
-        Ok(Self { hydration, map })
-    }
-}
-
-impl Source for ChunkSource {
-    fn len(&self) -> u64 {
-        self.hydration.len
-    }
-
-    fn get(&mut self, offset: u64, len: u64, urgent: bool) -> io::Result<Option<&[u8]>> {
-        let hydration = &self.hydration;
-        if let Some(why) = lock(&hydration.failure).as_ref() {
-            return Err(io::Error::other(why.clone()));
-        }
-        let end = offset
-            .checked_add(len)
-            .filter(|end| *end <= hydration.len && len > 0)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "range outside image"))?;
-        let start = usize::try_from(offset).map_err(io::Error::other)?;
-        let stop = usize::try_from(end).map_err(io::Error::other)?;
-        if hydration.filled.covers(offset..end) {
-            return Ok(self.map.get(start..stop));
-        }
-        let first = usize::try_from(offset / CHUNK_BYTES).unwrap_or(usize::MAX);
-        let last = usize::try_from((end - 1) / CHUNK_BYTES).unwrap_or(usize::MAX);
-        let mut ready = true;
-        for index in first..=last {
-            if !hydration.present[index].load(Ordering::Acquire) {
-                hydration.ask(index, urgent);
-                ready = false;
-            }
-        }
-        if !ready {
-            return Ok(None);
-        }
-        Ok(self.map.get(start..stop))
-    }
-
-    fn ready_fd(&self) -> Option<BorrowedFd<'_>> {
-        Some(self.hydration.arrived.as_fd())
-    }
-
-    fn acknowledge(&mut self) -> io::Result<()> {
-        let mut count = [0_u8; 8];
-        match rustix::io::read(&self.hydration.arrived, &mut count) {
-            Ok(_) | Err(rustix::io::Errno::AGAIN) => Ok(()),
-            Err(error) => Err(error.into()),
-        }
-    }
-}
-
-/// Either kind of memory a pager serves.
-#[derive(Debug)]
-pub(crate) enum Memory {
-    Local(MappedFile),
-    Remote(ChunkSource),
-}
-
-impl Source for Memory {
-    fn len(&self) -> u64 {
-        match self {
-            Self::Local(source) => source.len(),
-            Self::Remote(source) => source.len(),
-        }
-    }
-
-    fn get(&mut self, offset: u64, len: u64, urgent: bool) -> io::Result<Option<&[u8]>> {
-        match self {
-            Self::Local(source) => source.get(offset, len, urgent),
-            Self::Remote(source) => source.get(offset, len, urgent),
-        }
-    }
-
-    fn ready_fd(&self) -> Option<BorrowedFd<'_>> {
-        match self {
-            Self::Local(source) => source.ready_fd(),
-            Self::Remote(source) => source.ready_fd(),
-        }
-    }
-
-    fn acknowledge(&mut self) -> io::Result<()> {
-        match self {
-            Self::Local(source) => source.acknowledge(),
-            Self::Remote(source) => source.acknowledge(),
-        }
-    }
-}
-
-/// A pager thread serving one VM's memory.
-#[derive(Debug)]
-pub(crate) struct Paging {
-    stop: Arc<AtomicBool>,
-    failed: watch::Receiver<bool>,
-    prefetched: watch::Receiver<bool>,
-    /// Set once the pager thread has ended and written all it will write.
-    ended: watch::Receiver<bool>,
-    /// For remote images: the filling of the memory file.
-    pub hydration: Option<Arc<Hydration>>,
-}
-
-impl Paging {
-    /// Listens on `socket` (which the VMM must be able to open) and serves
-    /// `memory` to the first VMM that connects, prefetching `profile`'s
-    /// pages first. The order the guest then touches pages is learned into
-    /// `learned`. Once the VMM has connected, its memory layout is written
-    /// to `layout`, so another pager can take over if this one goes, and
-    /// the pages the VM discards are recorded in `discards` for that pager.
-    pub fn start(
-        socket: &Path,
-        memory: Memory,
-        hydration: Option<Arc<Hydration>>,
-        profile: WakeProfile,
-        learned: PathBuf,
-        layout: PathBuf,
-        discards: PathBuf,
-    ) -> io::Result<Self> {
-        let _ = std::fs::remove_file(socket);
-        let listener = std::os::unix::net::UnixListener::bind(socket)?;
-        listener.set_nonblocking(true)?;
-        let socket = socket.to_owned();
-        Self::spawn(hydration, move |stop, prefetched| {
-            let files = Files {
-                learned: &learned,
-                layout: &layout,
-                discards: &discards,
-            };
-            let result = serve(&listener, memory, &profile, &files, stop, prefetched);
-            let _ = std::fs::remove_file(&socket);
-            result
-        })
-    }
-
-    /// Takes over serving `memory` to a running VM whose pager has gone,
-    /// through what its engine handed over and the `regions` its first
-    /// pager recorded, honouring the discards recorded in `discards`.
-    /// Nothing is learned: what this VM touches next is no wake's working
-    /// set.
-    pub fn adopt(
-        handed: compute_engine::PagedMemory,
-        regions: Vec<compute_pager::Mapping>,
-        discards: &Path,
-        memory: Memory,
-        hydration: Option<Arc<Hydration>>,
-    ) -> io::Result<Self> {
-        use compute_pager::linux::Pager;
-
-        // Without the record, which pages must read as zeros is unknown.
-        let record = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(discards)?;
-        let mut pager = Pager::adopt(handed.uffd, regions, handed.vmm, memory, RECORD_FOR)?
-            .keep_discards(record)?;
-        Self::spawn(hydration, move |stop, prefetched| {
-            let result = pager.run(stop, |progress| {
-                if let compute_pager::linux::Progress::Prefetched = progress {
-                    let _ = prefetched.send(true);
-                }
-            });
-            tracing::debug!(stats = ?pager.stats, "pager finished");
-            result
-        })
-    }
-
-    /// Runs `body` on a pager thread of its own and reports how it ends.
-    fn spawn(
-        hydration: Option<Arc<Hydration>>,
-        body: impl FnOnce(&AtomicBool, &watch::Sender<bool>) -> io::Result<()> + Send + 'static,
-    ) -> io::Result<Self> {
-        let stop = Arc::new(AtomicBool::new(false));
-        let (failed_tx, failed) = watch::channel(false);
-        let (prefetched_tx, prefetched) = watch::channel(false);
-        let (ended_tx, ended) = watch::channel(false);
-        let stopping = Arc::clone(&stop);
-        std::thread::Builder::new()
-            .name("pager".into())
-            .spawn(move || {
-                if let Err(error) = body(&stopping, &prefetched_tx) {
-                    tracing::error!(%error, "pager failed; the VM cannot continue");
-                    let _ = failed_tx.send(true);
-                }
-                // Never leave a wake waiting on a prefetch that will not come.
-                let _ = prefetched_tx.send(true);
-                let _ = ended_tx.send(true);
-            })?;
-        Ok(Self {
-            stop,
-            failed,
-            prefetched,
-            ended,
-            hydration,
-        })
-    }
-
-    /// Stops serving and filling for good, for a VM that has ended and whose
-    /// files are about to go (or whose image another wake will serve), and
-    /// returns once the pager thread and hydration have ended, so nothing
-    /// writes into the sandbox's directory any more.
-    pub async fn close(&self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(hydration) = &self.hydration {
-            hydration.stop().await;
-        }
-        let mut ended = self.ended.clone();
-        // An error means the thread is gone, which is just as good.
-        let _ = ended.wait_for(|ended| *ended).await;
-    }
-
-    /// Waits until the prefetch plan is in place, for at most `limit`.
-    pub async fn prefetched(&self, limit: Duration) {
-        let mut prefetched = self.prefetched.clone();
-        let _ = tokio::time::timeout(limit, prefetched.wait_for(|done| *done)).await;
-    }
-
-    /// Resolves if the pager fails: the VM must then be stopped, since its
-    /// next fault would wait forever.
-    pub fn failed(&self) -> impl Future<Output = ()> + Send + 'static {
-        let mut failed = self.failed.clone();
-        async move {
-            if failed.wait_for(|failed| *failed).await.is_err() {
-                // The pager ended normally; never resolve.
-                std::future::pending::<()>().await;
-            }
-        }
-    }
-}
-
-impl Drop for Paging {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-    }
-}
-
-/// Where a pager keeps what the next wake, or another pager of the same
-/// VM, needs.
-struct Files<'a> {
-    learned: &'a Path,
-    layout: &'a Path,
-    discards: &'a Path,
-}
-
-fn serve(
-    listener: &std::os::unix::net::UnixListener,
-    memory: Memory,
-    profile: &WakeProfile,
-    files: &Files<'_>,
-    stop: &AtomicBool,
-    prefetched: &watch::Sender<bool>,
-) -> io::Result<()> {
-    use compute_pager::linux::{MAX_BATCH, Pager, Progress};
-
-    let started = std::time::Instant::now();
-    let peer = loop {
-        match listener.accept() {
-            Ok((peer, _)) => break peer,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                if stop.load(Ordering::Relaxed) || started.elapsed() > CONNECT_TIMEOUT {
-                    return Ok(());
-                }
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            Err(error) => return Err(error),
-        }
-    };
-    peer.set_nonblocking(false)?;
-    // Fresh for this VM, and in place before the layout that lets another
-    // pager take over.
-    let record = std::fs::File::create(files.discards)?;
-    let mut pager = Pager::new(peer, memory, RECORD_FOR)?.keep_discards(record)?;
-    match serde_json::to_vec(pager.layout().regions()) {
-        Ok(regions) => {
-            if let Err(error) = crate::layout::write_atomic(files.layout, &regions) {
-                tracing::warn!(%error, "memory layout not recorded; a restarted agent cannot take this VM over");
-            }
-        }
-        Err(error) => tracing::warn!(%error, "memory layout not encodable"),
-    }
-    let plan: Vec<_> = profile
-        .offsets
-        .iter()
-        .filter_map(|offset| pager.layout().offset(*offset))
-        .collect();
-    let (ready, rest) = plan.split_at(ready_prefix(&plan, READY_BYTES));
-    pager.queue_prefetch(ready, MAX_BATCH)?;
-    pager.queue_background(rest)?;
-    let page_size = pager
-        .layout()
-        .regions()
-        .first()
-        .map_or(0, |region| region.page_size);
-    let result = pager.run(stop, |progress| match progress {
-        Progress::Prefetched => {
-            let _ = prefetched.send(true);
-        }
-        Progress::Recorded(touched) => {
-            let next = profile.learn(touched, page_size);
-            if let Ok(bytes) = serde_json::to_vec(&next) {
-                let _ = crate::layout::write_atomic(files.learned, &bytes);
-            }
-        }
-    });
-    tracing::debug!(stats = ?pager.stats, "pager finished");
-    result
-}
-
-/// How many pages from the front of `plan` fit in `budget` bytes, and at
-/// least one if there are any, so a wake always waits for its first page.
-fn ready_prefix(plan: &[compute_pager::Page], budget: u64) -> usize {
-    let mut bytes = 0_u64;
-    plan.iter()
-        .position(|page| {
-            bytes = bytes.saturating_add(page.size);
-            bytes > budget
-        })
-        .map_or(plan.len(), |over| over.max(1))
-}
-
 /// The chunk map entry for chunk bytes, as [`crate::image`] records it.
 #[allow(dead_code)]
 pub(crate) fn chunk_hash(plain: &[u8]) -> Hash {
@@ -1079,34 +751,6 @@ pub(crate) fn chunk_hash(plain: &[u8]) -> Hash {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn pages(sizes: &[u64]) -> Vec<compute_pager::Page> {
-        let mut offset = 0;
-        sizes
-            .iter()
-            .enumerate()
-            .map(|(index, &size)| {
-                let page = compute_pager::Page {
-                    address: offset,
-                    offset,
-                    size,
-                    index,
-                };
-                offset += size;
-                page
-            })
-            .collect()
-    }
-
-    #[test]
-    fn a_wake_waits_for_the_profile_prefix_that_fits_its_budget() {
-        assert_eq!(ready_prefix(&[], 4096), 0);
-        assert_eq!(ready_prefix(&pages(&[4096; 10]), 4 * 4096), 4);
-        assert_eq!(ready_prefix(&pages(&[4096; 3]), 1 << 20), 3);
-        // A huge page larger than the budget is still waited for.
-        assert_eq!(ready_prefix(&pages(&[2 << 20; 4]), 1 << 20), 1);
-        assert_eq!(ready_prefix(&pages(&[2 << 20; 4]), 4 << 20), 2);
-    }
 
     const PAGE: u64 = 4096;
 
@@ -1139,7 +783,7 @@ mod tests {
             .unwrap();
         file.set_len(3 * CHUNK_BYTES).unwrap();
         prefill(&file, &plain);
-        let hydration = Hydration::start(
+        let (hydration, _arrivals) = Hydration::start(
             Arc::new(Fetcher::new(chunks)),
             &path,
             encoded
@@ -1148,6 +792,7 @@ mod tests {
                 .collect(),
             plain.iter().map(|bytes| chunk_hash(bytes)).collect(),
             PageSet::new(filled),
+            &[],
             &[],
         )
         .unwrap();

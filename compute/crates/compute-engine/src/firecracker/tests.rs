@@ -197,7 +197,7 @@ fn the_profile_decides_page_size_and_dirty_tracking() {
     let jail = Jail::new(&spec()).unwrap();
     let paged = RestoreFiles {
         state: "/lab/vm/firecracker/a/root/vm.state".into(),
-        memory: MemorySource::Pager("/lab/vm/firecracker/a/root/uffd.sock".into()),
+        memory: paged_source(),
     };
     let body = load_request(&spec(), &jail, &paged, MemoryProfile::nested()).unwrap();
     assert_eq!(body["mem_backend"]["backend_type"], "Uffd");
@@ -217,7 +217,7 @@ fn huge_pages_are_never_restored_from_a_mapped_file() {
         Err(ProfileError::FileBackedHugePages)
     );
     assert_eq!(check_source(&mapped, MemoryProfile::bare_metal()), Ok(()));
-    let paged = MemorySource::Pager("/lab/vm/firecracker/a/root/uffd.sock".into());
+    let paged = paged_source();
     assert_eq!(check_source(&paged, MemoryProfile::nested()), Ok(()));
 }
 
@@ -236,4 +236,12 @@ fn snapshots_are_durable_and_name_their_kind() {
         create_request(&jail, &files, SnapshotKind::Full).unwrap()["snapshot_type"],
         "Full"
     );
+}
+
+fn paged_source() -> MemorySource {
+    MemorySource::Pager(crate::PagerSpec {
+        socket: "/lab/vm/firecracker/a/root/uffd.sock".into(),
+        program: "/usr/bin/compute-host".into(),
+        args: vec!["pager".into()],
+    })
 }

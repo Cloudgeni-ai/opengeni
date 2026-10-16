@@ -82,40 +82,16 @@ impl Process {
         let mut exit = self.exit.clone();
         let _ = exit.wait_for(|exit| *exit == Exit::Exited).await;
     }
+}
 
-    /// A duplicate of the process's only userfaultfd, and a new pidfd for
-    /// it. Needs the right to trace the process.
-    pub fn paged_memory(&self) -> io::Result<(OwnedFd, OwnedFd)> {
-        let pid = self.pid.as_raw_pid();
-        let mut found = None;
-        for entry in fs::read_dir(format!("/proc/{pid}/fd"))? {
-            let entry = entry?;
-            // Descriptors close between listing and reading; skip those.
-            let Ok(target) = fs::read_link(entry.path()) else {
-                continue;
-            };
-            if target.as_os_str() != "anon_inode:[userfaultfd]" {
-                continue;
-            }
-            let number: i32 = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse().ok())
-                .ok_or_else(|| io::Error::other("unexpected descriptor name"))?;
-            if found.replace(number).is_some() {
-                return Err(io::Error::other("the VMM holds more than one userfaultfd"));
-            }
-        }
-        let number = found.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "the VMM holds no userfaultfd")
-        })?;
-        let uffd = rustix::process::pidfd_getfd(
-            self.pidfd.get_ref(),
-            number,
-            rustix::process::PidfdGetfdFlags::empty(),
-        )?;
-        let vmm = rustix::process::pidfd_open(self.pid, PidfdFlags::empty())?;
-        Ok((uffd, vmm))
+/// Makes `command` start its process in a session of its own, away from
+/// the agent's terminal and process group, so signals aimed at the agent
+/// (such as Ctrl-C) never reach a VM or its pager.
+pub(crate) fn detach(command: &mut tokio::process::Command) {
+    // SAFETY: the closure runs in the forked child before exec and makes
+    // one setsid(2) call, which is async-signal-safe.
+    unsafe {
+        command.pre_exec(|| rustix::process::setsid().map(drop).map_err(io::Error::from));
     }
 }
 

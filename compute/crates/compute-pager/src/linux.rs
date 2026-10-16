@@ -1,5 +1,10 @@
 //! Linux UFFD transport and serialized pager. The owner must keep the image
 //! immutable and supervise both the pager and VMM: a dead pager stalls the VM.
+//!
+//! [`serve`] runs a pager as a process of its own, one per VM, so the VM's
+//! memory never depends on the host agent that started it.
+
+pub mod serve;
 
 use crate::source::Source;
 use crate::{Layout, Mapping, Page, Profile};
@@ -8,10 +13,8 @@ use nix::sys::socket::{ControlMessageOwned, MsgFlags, recvmsg};
 use serde::Serialize;
 use std::{
     collections::VecDeque,
-    fs::File,
     io::{self, IoSliceMut, Read},
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
-    os::unix::fs::FileExt,
     os::unix::net::UnixStream,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
@@ -19,12 +22,18 @@ use std::{
 
 const COPY: libc::c_ulong = 0xc028_aa03;
 const WAKE: libc::c_ulong = 0x8010_aa02;
+const UNREGISTER: libc::c_ulong = 0x8010_aa01;
 const PRESENT: u8 = 1;
 const REMOVED: u8 = 2;
 const UNMAPPED: u8 = 4;
 const RECORDED: u8 = 8;
 /// Queued for prefetch and waiting on the source.
 const WAITING: u8 = 16;
+/// Never copied in because the image holds zeros there: once the range is
+/// unregistered, the kernel's own zero page serves it.
+const ZERO: u8 = 32;
+/// Needs nothing more from the pager.
+const SETTLED: u8 = PRESENT | REMOVED | UNMAPPED | ZERO;
 /// Largest single copy, and largest range asked of a source.
 pub const MAX_BATCH: u64 = 2 << 20;
 /// Prefetch runs waiting on the source at once. Each one asks the source
@@ -143,6 +152,10 @@ pub struct Stats {
     /// [`Pager::queue_prefetch`] being in place: how long a wake that waits
     /// for [`Progress::Prefetched`] waited.
     pub ready_ms: f64,
+    /// Pages left to the kernel's zero page rather than copied.
+    pub zero_pages: u64,
+    /// Time from the pager starting to every page being settled.
+    pub settled_ms: f64,
 }
 
 /// Something the caller of [`Pager::run`] may want to act on.
@@ -155,6 +168,10 @@ pub enum Progress<'a> {
     /// The first-touch recording window closed; these are the image offsets
     /// the guest touched first, in order.
     Recorded(&'a [u64]),
+    /// Every page is in place and the guest's memory is no longer
+    /// registered with the UFFD (see [`Pager::finish_when_complete`]): the
+    /// VM needs no pager any more, and [`Pager::run`] returns.
+    Settled,
 }
 
 /// How one copy attempt went.
@@ -186,42 +203,15 @@ impl Run {
     }
 }
 
-/// How the pager learns that the VMM has gone. The UFFD cannot say: the
-/// VMM shares it with the pager.
-#[derive(Debug)]
-enum Vmm {
-    /// The socket the VMM's handshake arrived on, which hangs up when the
-    /// VMM exits.
-    Socket(UnixStream),
-    /// A pidfd of the VMM process, which turns readable when it exits.
-    Process(OwnedFd),
-}
-
-impl Vmm {
-    fn raw_fd(&self) -> RawFd {
-        match self {
-            Self::Socket(socket) => socket.as_raw_fd(),
-            Self::Process(pidfd) => pidfd.as_raw_fd(),
-        }
-    }
-
-    /// Whether `revents` from polling [`Self::raw_fd`] for input say the
-    /// VMM has gone.
-    fn gone(&self, revents: libc::c_short) -> bool {
-        match self {
-            Self::Socket(_) => revents & libc::POLLHUP != 0,
-            Self::Process(_) => revents & (libc::POLLIN | libc::POLLHUP) != 0,
-        }
-    }
-}
-
 /// One memory image served to one VMM through its UFFD. A single owner
 /// serializes demand faults, discard events and prefetch; nothing here
 /// blocks on the source.
 #[derive(Debug)]
 pub struct Pager<S> {
     fd: OwnedFd,
-    vmm: Vmm,
+    /// The socket the VMM's handshake arrived on, which hangs up when the
+    /// VMM exits. The UFFD cannot say: the VMM shares it with the pager.
+    vmm: UnixStream,
     source: S,
     zero: MmapMut,
     layout: Layout,
@@ -244,9 +234,10 @@ pub struct Pager<S> {
     record_for: Duration,
     recorded: bool,
     prefetch_started: Option<Instant>,
-    /// Where discards are recorded for a pager that takes over, one byte
-    /// per page (see [`Pager::keep_discards`]).
-    discards: Option<File>,
+    /// Whether to settle every page once the source is complete.
+    finish: bool,
+    /// Whether every unsettled page has been queued.
+    completing: bool,
     pub stats: Stats,
 }
 
@@ -257,58 +248,12 @@ impl<S: Source> Pager<S> {
     pub fn new(peer: UnixStream, source: S, record_for: Duration) -> io::Result<Self> {
         peer.set_read_timeout(Some(Duration::from_secs(10)))?;
         let (fd, regions) = handshake(&peer)?;
-        Self::serving(fd, Vmm::Socket(peer), regions, source, record_for)
-    }
-
-    /// Takes over serving a VMM whose previous pager has gone (the process
-    /// that ran it restarted, say). `uffd` is a duplicate of the VMM's
-    /// UFFD, `regions` the layout its handshake announced, and `vmm` a
-    /// pidfd of the VMM process. The VMM kept its own reference to the
-    /// UFFD, so its faults waited for a handler rather than reading zeros;
-    /// those the previous pager had read but not served are woken to fault
-    /// again. Which pages are present is unknown: copying over one that is
-    /// counts as done.
-    pub fn adopt(
-        uffd: OwnedFd,
-        regions: Vec<Mapping>,
-        vmm: OwnedFd,
-        source: S,
-        record_for: Duration,
-    ) -> io::Result<Self> {
-        // SAFETY: a flag query on a descriptor we own.
-        let flags = unsafe { libc::fcntl(uffd.as_raw_fd(), libc::F_GETFL) };
-        if flags < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: a flag update on a descriptor we own.
-        if unsafe { libc::fcntl(uffd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let pager = Self::serving(uffd, Vmm::Process(vmm), regions, source, record_for)?;
-        for region in pager.layout.regions() {
-            let mut range = [region.base_host_virt_addr, region.size];
-            // SAFETY: repr-compatible uffdio_range over a region the VMM
-            // registered; waking a range nobody waits on does nothing.
-            if unsafe { libc::ioctl(pager.fd.as_raw_fd(), WAKE, range.as_mut_ptr()) } < 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-        Ok(pager)
-    }
-
-    fn serving(
-        fd: OwnedFd,
-        vmm: Vmm,
-        regions: Vec<Mapping>,
-        source: S,
-        record_for: Duration,
-    ) -> io::Result<Self> {
         let layout = Layout::new(regions, source.len())?;
         let zero = MmapMut::map_anon(usize::try_from(MAX_BATCH).map_err(|_| invalid("batch"))?)?;
         let state = vec![0; layout.page_count()];
         Ok(Self {
             fd,
-            vmm,
+            vmm: peer,
             source,
             zero,
             layout,
@@ -325,41 +270,22 @@ impl<S: Source> Pager<S> {
             record_for,
             recorded: false,
             prefetch_started: None,
-            discards: None,
+            finish: false,
+            completing: false,
             stats: Stats::default(),
         })
     }
 
-    /// Records every page discarded from now on in `file`, and treats the
-    /// pages it already records as discarded. A pager that takes over a VM
-    /// cannot learn from the kernel which pages were discarded before: once
-    /// read, a REMOVE event is gone, and without the record the new pager
-    /// would serve the image's bytes where the guest must read zeros. Give
-    /// a new VM's first pager an empty file and every later pager of the
-    /// same VM the same file.
-    ///
-    /// A pager that dies between reading a discard event and recording it
-    /// still loses that event; the window is the few instructions between
-    /// the two, with nothing in between that can block or fail.
-    pub fn keep_discards(mut self, file: File) -> io::Result<Self> {
-        let pages = self.state.len();
-        let length = file.metadata()?.len();
-        if length == 0 {
-            file.set_len(pages as u64)?;
-        } else if length != pages as u64 {
-            return Err(invalid("discard record does not match the memory layout"));
-        } else {
-            let mut kept = vec![0; pages];
-            file.read_exact_at(&mut kept, 0)?;
-            for (state, kept) in self.state.iter_mut().zip(kept) {
-                let discarded = kept & (REMOVED | UNMAPPED);
-                if discarded != 0 {
-                    *state = (*state & !PRESENT) | discarded;
-                }
-            }
-        }
-        self.discards = Some(file);
-        Ok(self)
+    /// Makes [`Pager::run`] bring every page of the image in once the
+    /// source is complete and the first-touch recording window has closed,
+    /// leaving zero pages to the kernel, then unregister the guest's
+    /// memory from the UFFD and return with [`Progress::Settled`]. From
+    /// then on the kernel serves the VM's memory on its own: a page the
+    /// guest discards reads as zeros without anyone's help.
+    #[must_use]
+    pub fn finish_when_complete(mut self) -> Self {
+        self.finish = true;
+        self
     }
 
     #[must_use]
@@ -426,7 +352,7 @@ impl<S: Source> Pager<S> {
     /// checked in plan order and each is passed once.
     pub fn ready(&mut self) -> bool {
         while let Some(&index) = self.gate.get(self.gate_done) {
-            if self.state[index] & (PRESENT | REMOVED | UNMAPPED) == 0 {
+            if self.state[index] & SETTLED == 0 {
                 return false;
             }
             self.gate_done += 1;
@@ -488,14 +414,8 @@ impl<S: Source> Pager<S> {
             if address != page.address || end - address < page.size {
                 return Err(invalid("unaligned discard range"));
             }
-            self.state[page.index] &= !PRESENT;
+            self.state[page.index] &= !(PRESENT | ZERO);
             self.state[page.index] |= if unmapped { UNMAPPED } else { REMOVED };
-            if let Some(file) = &self.discards {
-                file.write_all_at(
-                    &[self.state[page.index] & (REMOVED | UNMAPPED)],
-                    page.index as u64,
-                )?;
-            }
             address += page.size;
         }
         Ok(())
@@ -597,7 +517,7 @@ impl<S: Source> Pager<S> {
             let Some(first) = self.plan.pop_front() else {
                 break;
             };
-            if self.state[first.index] & (PRESENT | UNMAPPED | WAITING) != 0 {
+            if self.state[first.index] & (PRESENT | UNMAPPED | WAITING | ZERO) != 0 {
                 continue;
             }
             let region_end = self
@@ -614,7 +534,7 @@ impl<S: Source> Pager<S> {
                 if length > self.max_batch
                     || first.address + length > region_end
                     || next != expected
-                    || self.state[next.index] & (PRESENT | REMOVED | UNMAPPED | WAITING) != 0
+                    || self.state[next.index] & (SETTLED | WAITING) != 0
                 {
                     break;
                 }
@@ -727,7 +647,7 @@ impl<S: Source> Pager<S> {
                 revents: 0,
             },
             libc::pollfd {
-                fd: self.vmm.raw_fd(),
+                fd: self.vmm.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -750,7 +670,7 @@ impl<S: Source> Pager<S> {
         if poll[0].revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
             return Err(invalid("UFFD disconnected"));
         }
-        Ok(self.vmm.gone(poll[1].revents))
+        Ok(poll[1].revents & libc::POLLHUP != 0)
     }
 
     /// Serves the VMM until `stopped` is set or the VMM disconnects,
@@ -787,6 +707,17 @@ impl<S: Source> Pager<S> {
                 self.recorded = true;
                 progress(Progress::Recorded(&self.trace));
             }
+            if self.finish && self.recorded {
+                if !self.completing && self.source.complete() {
+                    self.complete()?;
+                }
+                if self.completing && self.settled() {
+                    self.stats.settled_ms = self.started.elapsed().as_secs_f64() * 1000.0;
+                    self.unregister()?;
+                    progress(Progress::Settled);
+                    return Ok(());
+                }
+            }
             let busy = !self.faults.is_empty()
                 || (!self.plan.is_empty() && self.waiting.len() < LOOKAHEAD);
             let timeout = if !self.faults.is_empty() {
@@ -808,19 +739,119 @@ impl<S: Source> Pager<S> {
     }
 }
 
+impl<S: Source> Pager<S> {
+    /// Queues every page that is neither in place nor discarded, after
+    /// everything already queued, except pages the image holds zeros for:
+    /// those are left to the kernel's zero page. Call once the source is
+    /// complete.
+    fn complete(&mut self) -> io::Result<()> {
+        self.completing = true;
+        let regions = self.layout.regions().to_vec();
+        for region in regions {
+            let mut offset = region.offset;
+            while offset < region.offset + region.size {
+                let page = self
+                    .layout
+                    .offset(offset)
+                    .ok_or_else(|| invalid("page outside the memory layout"))?;
+                offset += region.page_size;
+                if self.state[page.index] & (SETTLED | WAITING) != 0 {
+                    continue;
+                }
+                let zero = matches!(
+                    self.source.get(page.offset, page.size, false)?,
+                    Some(bytes) if bytes.iter().all(|byte| *byte == 0)
+                );
+                if zero {
+                    self.state[page.index] |= ZERO;
+                    self.stats.zero_pages += 1;
+                } else {
+                    self.plan.push_back(page);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether nothing is left to do and every page is in place, discarded
+    /// or zero in the image.
+    fn settled(&self) -> bool {
+        self.faults.is_empty()
+            && self.parked.is_empty()
+            && self.plan.is_empty()
+            && self.waiting.is_empty()
+            && self.state.iter().all(|state| state & SETTLED != 0)
+    }
+
+    /// Unregisters the guest's memory from the UFFD, which wakes any fault
+    /// still waiting so the kernel serves it, then reads what events were
+    /// already queued: a discard waits until its event is read, and the
+    /// VMM keeps its own reference to the UFFD, so an unread one would hold
+    /// the discarding VMM thread forever.
+    fn unregister(&mut self) -> io::Result<()> {
+        /// Events stop once nothing is registered; a discard that had
+        /// already looked at the registration queues its event within
+        /// moments, so the queue is read until it has been quiet this long.
+        const QUIET: Duration = Duration::from_millis(250);
+        for region in self.layout.regions() {
+            let mut range = [region.base_host_virt_addr, region.size];
+            // SAFETY: repr-compatible uffdio_range over a region the VMM
+            // registered. Unregistering acts on the UFFD's own address
+            // space, whichever process asks.
+            if unsafe { libc::ioctl(self.fd.as_raw_fd(), UNREGISTER, range.as_mut_ptr()) } < 0 {
+                let error = io::Error::last_os_error();
+                // The VMM's address space is gone with it: nothing to do.
+                if error.raw_os_error() == Some(libc::ESRCH) {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        }
+        let deadline = Instant::now() + QUIET * 8;
+        while poll_in(self.fd.as_raw_fd(), QUIET)? && Instant::now() < deadline {
+            while self.read_event()?.is_some() {}
+        }
+        Ok(())
+    }
+}
+
+/// Waits up to `timeout` for `fd` to turn readable; returns whether it did.
+fn poll_in(fd: RawFd, timeout: Duration) -> io::Result<bool> {
+    Ok(poll(&[fd], timeout)?[0])
+}
+
+/// Waits up to `timeout` for any of `fds` to turn readable or hang up, and
+/// says which did. Negative descriptors are ignored. An interrupted wait
+/// reports every descriptor, which costs a look but misses nothing.
+pub(crate) fn poll(fds: &[RawFd], timeout: Duration) -> io::Result<Vec<bool>> {
+    let mut poll: Vec<libc::pollfd> = fds
+        .iter()
+        .map(|&fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    let millis = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
+    let count = libc::nfds_t::try_from(poll.len()).map_err(|_| invalid("too many descriptors"))?;
+    // SAFETY: a valid pollfd array and its element count.
+    let result = unsafe { libc::poll(poll.as_mut_ptr(), count, millis) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            return Ok(fds.iter().map(|fd| *fd >= 0).collect());
+        }
+        return Err(error);
+    }
+    Ok(poll
+        .iter()
+        .map(|entry| entry.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0)
+        .collect())
+}
+
 /// Whether `fd` is readable right now.
 fn readable(fd: RawFd) -> io::Result<bool> {
-    let mut poll = [libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    }];
-    // SAFETY: one valid pollfd; a zero timeout never blocks.
-    let result = unsafe { libc::poll(poll.as_mut_ptr(), 1, 0) };
-    if result < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(poll[0].revents & libc::POLLIN != 0)
+    poll_in(fd, Duration::ZERO)
 }
 
 #[cfg(test)]

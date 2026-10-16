@@ -19,6 +19,8 @@ mod layout;
 #[cfg(target_os = "linux")]
 mod lazy;
 pub mod net;
+#[cfg(target_os = "linux")]
+mod paging;
 pub mod protocol;
 pub mod restore_notice;
 mod server;
@@ -27,7 +29,7 @@ mod step;
 mod store;
 mod working_set;
 
-pub use agent::{BusyRule, Handle, HostAgent, HostConfig, HostError, Lease};
+pub use agent::{BusyRule, Handle, HostAgent, HostConfig, HostError, Lease, PagerConfig};
 pub use chunked::{CHUNK_BYTES, Chunked};
 pub use guest_ports::{GuestPort, Route};
 pub use server::serve;

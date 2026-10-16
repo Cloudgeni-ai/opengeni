@@ -398,30 +398,11 @@ async fn a_cancelled_pack_stores_nothing() {
 fn packing_follows_the_page_size_and_stops_at_the_ready_bytes() {
     let huge = 2 << 20;
     let pages = profile(vec![huge + 5, huge, 0, 7 * huge, 3 * huge + PAGE], huge);
-    assert_eq!(pages.packed(4 * huge), vec![huge, 0, 3 * huge]);
+    assert_eq!(packed(&pages, 4 * huge), vec![huge, 0, 3 * huge]);
     // Profiles from before the page size was kept count small pages.
-    assert_eq!(profile(vec![PAGE + 1], 0).packed(4 * huge), vec![PAGE]);
+    assert_eq!(packed(&profile(vec![PAGE + 1], 0), 4 * huge), vec![PAGE]);
     let all = profile((0..10_000).map(|page| page * huge).collect(), huge);
-    assert_eq!(all.packed(u64::MAX / 2).len() as u64, READY_BYTES / huge);
-}
-
-#[test]
-fn learning_keeps_the_old_order_first_and_bounds_the_profile() {
-    let old = profile(vec![8192, 0], 0);
-    let next = old.learn(&[4096, 0, 12288], PAGE);
-    assert_eq!(next.offsets, vec![8192, 0, 4096, 12288]);
-    assert_eq!(next.page_size, PAGE);
-    let many: Vec<u64> = (0..2 * PROFILE_PAGES as u64)
-        .map(|page| page * PAGE)
-        .collect();
-    assert_eq!(
-        WakeProfile::default().learn(&many, PAGE).offsets.len(),
-        PROFILE_PAGES
-    );
-    // Profiles stored before the page size was kept still load.
-    let parsed = WakeProfile::parse(br#"{"version":1,"offsets":[4096]}"#);
-    assert_eq!(parsed, profile(vec![4096], 0));
-    assert_eq!(WakeProfile::parse(b"[1,2,3]"), WakeProfile::default());
+    assert_eq!(packed(&all, u64::MAX / 2).len() as u64, READY_BYTES / huge);
 }
 
 #[test]

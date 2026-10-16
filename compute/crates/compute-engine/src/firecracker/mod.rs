@@ -9,6 +9,7 @@
 
 mod api;
 mod jail;
+mod pager;
 mod process;
 
 use std::fs::{self, File};
@@ -31,7 +32,7 @@ use self::process::{Process, in_cgroup, parse_pid};
 use crate::cgroup::Cgroup;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
-use crate::spec::{MemorySource, PagedMemory, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
+use crate::spec::{MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
 use crate::{CancellationToken, Completion, Engine, Found};
 
 /// Memory pushed to compressed RAM per reclaim request. Small enough that a
@@ -108,8 +109,8 @@ fn load_request(
         MemorySource::File(path) => {
             json!({ "backend_type": "File", "backend_path": jail.inside(path)? })
         }
-        MemorySource::Pager(socket) => {
-            json!({ "backend_type": "Uffd", "backend_path": jail.inside(socket)? })
+        MemorySource::Pager(pager) => {
+            json!({ "backend_type": "Uffd", "backend_path": jail.inside(&pager.socket)? })
         }
     };
     let mut body = json!({
@@ -280,14 +281,7 @@ impl Firecracker {
             .stdin(Stdio::null())
             .stdout(console)
             .stderr(log);
-        // SAFETY: the closure runs in the forked child before exec and makes
-        // one setsid(2) call, which is async-signal-safe. A new session keeps
-        // the jailer, and through it Firecracker, away from the agent's
-        // terminal and process group, so signals aimed at the agent (such as
-        // Ctrl-C) never reach a VM.
-        unsafe {
-            command.pre_exec(|| rustix::process::setsid().map(drop).map_err(io::Error::from));
-        }
+        process::detach(&mut command);
         let mut jailer = command
             .spawn()
             .map_err(|error| EngineError::io(operation, error))?;
@@ -370,14 +364,12 @@ impl Firecracker {
             .kill()
             .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
         vm.process.exited().await;
+        // A pager may still run in the group; it goes with the VM.
         let (cgroup, jail) = (vm.cgroup.clone(), vm.jail.clone());
-        tokio::task::spawn_blocking(move || {
-            cgroup.remove()?;
-            tidy(&jail)
-        })
-        .await
-        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
-        .map_err(|error| EngineError::io(OP, error))
+        tokio::task::spawn_blocking(move || release(&cgroup, Some(&jail)))
+            .await
+            .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
+            .map_err(|error| EngineError::io(OP, error))
     }
 
     /// Ends a VM whose start failed with `error` and returns that error, or
@@ -399,21 +391,9 @@ impl Firecracker {
     async fn discard(&self, spec: &VmSpec) -> io::Result<()> {
         let cgroup = self.cgroup_of(spec);
         let jail = Jail::new(spec).ok();
-        tokio::task::spawn_blocking(move || {
-            cgroup.kill_all()?;
-            let mut delay = Duration::from_millis(1);
-            for _ in 0..12 {
-                if !cgroup.is_populated()? {
-                    break;
-                }
-                std::thread::sleep(delay);
-                delay *= 2;
-            }
-            cgroup.remove()?;
-            jail.map_or(Ok(()), |jail| tidy(&jail))
-        })
-        .await
-        .map_err(io::Error::other)?
+        tokio::task::spawn_blocking(move || release(&cgroup, jail.as_ref()))
+            .await
+            .map_err(io::Error::other)?
     }
 
     /// Runs `body` and, if it fails, kills the half-started VM.
@@ -427,6 +407,22 @@ impl Firecracker {
             Err(error) => Err(self.ended(vm, error).await),
         }
     }
+}
+
+/// Kills whatever still runs in a VM's `cgroup`, waits briefly for it to
+/// go, and removes the group and the jailer's per-launch files.
+fn release(cgroup: &Cgroup, jail: Option<&Jail>) -> io::Result<()> {
+    cgroup.kill_all()?;
+    let mut delay = Duration::from_millis(1);
+    for _ in 0..12 {
+        if !cgroup.is_populated()? {
+            break;
+        }
+        std::thread::sleep(delay);
+        delay *= 2;
+    }
+    cgroup.remove()?;
+    jail.map_or(Ok(()), tidy)
 }
 
 /// The cgroup v2 mount point.
@@ -764,19 +760,24 @@ impl Engine for Firecracker {
             Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
         let body = load_request(spec, &jail, files, self.memory)
             .map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        let mut owned: Vec<PathBuf> = spec
+        let owned: Vec<PathBuf> = spec
             .drives
             .iter()
             .filter(|drive| !drive.read_only)
             .map(|drive| drive.path.clone())
             .collect();
         // Saved state and memory are only read; they stay the host's, so the
-        // VMM cannot change an image it restores from. A pager's socket must
-        // be the VMM's to connect to.
-        if let MemorySource::Pager(socket) = &files.memory {
-            owned.push(socket.clone());
-        }
+        // VMM cannot change an image it restores from.
         let vm = self.launch(spec, OP, owned).await?;
+        if let MemorySource::Pager(pager) = &files.memory {
+            // The host's own failure: the image is not in question.
+            let started = async {
+                pager::start(pager, &vm, &spec.logs, spec.uid, spec.gid)
+                    .await
+                    .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))
+            };
+            self.or_kill(&vm, started).await?;
+        }
         // A rejected image means the memory state is unusable; the disk is not
         // involved.
         let load = vm.call(OP, ErrorKind::MemoryLost, "PUT", "/snapshot/load", &body);
@@ -849,51 +850,35 @@ impl Engine for Firecracker {
     }
 
     async fn adopt(&self, spec: &VmSpec) -> Result<Option<(FirecrackerVm, Found)>, EngineError> {
-        let Some(vm) = self.attached(spec).await? else {
-            return Ok(None);
-        };
-        self.answering(vm).await
-    }
-
-    async fn adopt_paged<T, F, Fut>(
-        &self,
-        spec: &VmSpec,
-        serve: F,
-    ) -> Result<Option<(FirecrackerVm, Found, T)>, EngineError>
-    where
-        T: Send,
-        F: FnOnce(PagedMemory) -> Fut + Send,
-        Fut: Future<Output = Result<T, EngineError>> + Send,
-    {
         const OP: &str = "adopt";
         let Some(vm) = self.attached(spec).await? else {
             return Ok(None);
         };
-        let served = match vm.process.paged_memory() {
-            Ok((uffd, vmm)) => serve(PagedMemory { uffd, vmm }).await,
-            Err(error) => Err(EngineError::io(OP, error)),
-        };
-        let served = match served {
-            Ok(served) => served,
-            Err(error) if matches!(error.kind, ErrorKind::MemoryLost | ErrorKind::Fatal) => {
-                // Established that nothing can serve its memory: the guest
-                // would stall on its next fault.
+        // The pager comes first: a VMM whose pager died can be stuck on
+        // guest memory and never answer its API, which alone proves nothing.
+        let (vmm, group) = (vm.process.pid(), vm.cgroup.clone());
+        let lost = tokio::task::spawn_blocking(move || pager::lost(vmm, &group))
+            .await
+            .map_err(io::Error::other)
+            .and_then(|lost| lost);
+        match lost {
+            Ok(false) => self.answering(vm).await,
+            Ok(true) => {
+                // Established: its next missing page would wait forever.
                 self.kill(&vm).await?;
-                return Err(EngineError::caused_by(ErrorKind::MemoryLost, OP, error));
+                Err(EngineError::new(
+                    ErrorKind::MemoryLost,
+                    OP,
+                    "the VM's memory pager died while the guest still needed it",
+                ))
             }
-            Err(error) => {
-                // The handover may work next time. Until then the VMM keeps
-                // its own fault descriptor and its faults wait: blocked,
-                // not lost.
-                return Err(EngineError::caused_by(ErrorKind::Transient, OP, error));
+            Err(_) if !vm.is_running() => {
+                self.kill(&vm).await?;
+                Ok(None)
             }
-        };
-        // A VMM left be because it did not answer keeps its own fault
-        // descriptor, so the next start can take its memory over again.
-        Ok(self
-            .answering(vm)
-            .await?
-            .map(|(vm, found)| (vm, found, served)))
+            // Nothing established: the VM is left as it is.
+            Err(error) => Err(EngineError::caused_by(ErrorKind::Transient, OP, error)),
+        }
     }
 
     async fn clean_up(&self, spec: &VmSpec) -> Result<(), EngineError> {

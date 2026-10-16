@@ -77,7 +77,7 @@ impl fmt::Display for Generation {
 }
 
 impl Generation {
-    fn parse(name: &str) -> Option<Self> {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
         if name.len() != 16 {
             return None;
         }
@@ -245,18 +245,6 @@ impl Images {
     /// The memory file of `generation`.
     pub fn memory(&self, generation: Generation) -> PathBuf {
         self.path(generation).join(MEMORY)
-    }
-
-    /// Maps the memory file of `generation`, a published image held on this
-    /// host, for the pager to serve.
-    #[cfg(target_os = "linux")]
-    pub fn map_memory(&self, generation: Generation) -> io::Result<compute_pager::MappedFile> {
-        let file = File::open(self.memory(generation))?;
-        // SAFETY: a published image is sealed read-only and never modified
-        // or truncated: a new save always writes a new generation, merges
-        // write into a copy, and removing a generation only unlinks its
-        // files, which leaves a live mapping intact.
-        unsafe { compute_pager::MappedFile::new(&file) }
     }
 
     /// The manifest the rest of `generation`'s memory comes from.
