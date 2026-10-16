@@ -494,6 +494,9 @@ pub struct TemplateStatus {
     /// for a create to claim one.
     #[serde(default)]
     pub ready: u32,
+    /// What the ready sandboxes of the shape hold in memory.
+    #[serde(default)]
+    pub ready_resident_bytes: u64,
     /// How many ready sandboxes the host keeps of the shape.
     #[serde(default)]
     pub target: u32,

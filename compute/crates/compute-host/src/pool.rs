@@ -591,6 +591,7 @@ impl Pool {
                     Entry::Failed { .. } => TemplateState::Failed,
                 },
                 ready: 0,
+                ready_resident_bytes: 0,
                 target: 0,
                 filling: 0,
             })

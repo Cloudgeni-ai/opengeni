@@ -67,6 +67,15 @@ pub(super) struct Idle<V> {
     live: Live<V>,
 }
 
+/// What the ready sandboxes of one shape hold.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct ReadyUsage {
+    pub count: u32,
+    /// Their resident memory; a whole guest's memory for one that cannot
+    /// be read.
+    pub resident_bytes: u64,
+}
+
 /// The host's ready sandboxes.
 #[derive(Debug)]
 pub(super) struct Ready<V> {
@@ -112,26 +121,20 @@ impl<V> Ready<V> {
             + self.filling.values().filter(|each| **each == shape).count()
     }
 
-    /// Adds the ready pool's numbers to each shape's template status.
-    pub fn status(&self, templates: &mut [TemplateStatus]) {
-        let count = |shape: Shape, filling: bool| {
-            let n = if filling {
-                self.filling.values().filter(|each| **each == shape).count()
-            } else {
-                self.idle
-                    .iter()
-                    .filter(|idle| Shape::of(&idle.record.config) == shape)
-                    .count()
-            };
-            u32::try_from(n).unwrap_or(u32::MAX)
-        };
+    /// Adds the ready pool's numbers, with what its ready sandboxes hold
+    /// (`usage`, see [`HostAgent::ready_usage`]), to each shape's template
+    /// status.
+    pub fn status(&self, templates: &mut [TemplateStatus], usage: &BTreeMap<Shape, ReadyUsage>) {
         for status in templates.iter_mut() {
             let shape = Shape {
                 vcpus: status.vcpus,
                 memory_mib: status.memory_mib,
             };
-            status.ready = count(shape, false);
-            status.filling = count(shape, true);
+            let held = usage.get(&shape).copied().unwrap_or_default();
+            status.ready = held.count;
+            status.ready_resident_bytes = held.resident_bytes;
+            let filling = self.filling.values().filter(|each| **each == shape).count();
+            status.filling = u32::try_from(filling).unwrap_or(u32::MAX);
             status.target = self.targets.get(&shape).copied().unwrap_or(0);
         }
     }
@@ -501,6 +504,27 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         true
     }
 
+    /// What the ready sandboxes hold, by shape: how many and their
+    /// resident memory. They are disposable, so they are the first memory
+    /// given back when the host runs low.
+    pub(super) fn ready_usage(&self) -> BTreeMap<Shape, ReadyUsage> {
+        let mut usage = BTreeMap::<Shape, ReadyUsage>::new();
+        for idle in &self.ready.idle {
+            let held = usage.entry(Shape::of(&idle.record.config)).or_default();
+            held.count = held.count.saturating_add(1);
+            held.resident_bytes = held
+                .resident_bytes
+                .saturating_add(self.ready_resident(idle));
+        }
+        usage
+    }
+
+    fn ready_resident(&self, idle: &Idle<E::Vm>) -> u64 {
+        self.engine
+            .resident_bytes(&idle.live.vm)
+            .unwrap_or_else(|_| u64::from(idle.record.config.memory_mib) << 20)
+    }
+
     /// When memory is low, removes ready sandboxes, oldest first, until
     /// what they free would lift available memory to the high watermark.
     /// Returns the memory that removals under way will free, which the
@@ -517,11 +541,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .ready
             .idle
             .iter()
-            .map(|idle| {
-                self.engine
-                    .resident_bytes(&idle.live.vm)
-                    .unwrap_or_else(|_| u64::from(idle.record.config.memory_mib) << 20)
-            })
+            .map(|idle| self.ready_resident(idle))
             .collect();
         let count = to_free(available, self.ready.freeing(), &sizes, memory);
         for bytes in sizes.into_iter().take(count) {

@@ -102,6 +102,7 @@ Description=Restore notices from the host agent on vsock port 53
 After=local-fs.target
 
 [Service]
+OOMScoreAdjust=-1000
 ExecStart=/usr/local/bin/lab-notice
 Restart=always
 
@@ -134,7 +135,22 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 UNIT
-  for unit in lab-notice lab-identity lab-ready; do
+  # The exec agent outlasts the commands it runs when the guest runs out of
+  # memory; each command resets the inherited setting to the default.
+  sudo tee "$root/etc/systemd/system/lab-agent.service" >/dev/null <<'UNIT'
+[Unit]
+Description=Experiment exec agent on vsock port 52
+After=local-fs.target
+
+[Service]
+OOMScoreAdjust=-1000
+ExecStart=/usr/bin/socat VSOCK-LISTEN:52,reuseaddr,fork "SYSTEM:echo 0 > /proc/self/oom_score_adj; exec /bin/bash,stderr"
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  for unit in lab-notice lab-identity lab-ready lab-agent; do
     sudo ln -sf "/etc/systemd/system/$unit.service" "$root/etc/systemd/system/multi-user.target.wants/$unit.service"
   done
 }
@@ -209,7 +225,8 @@ fi
 if [ -f base.ext4 ] && {
   ! sudo debugfs -R "cat /etc/systemd/system/lab-identity.service" base.ext4 2>/dev/null | grep -q Before=lab-agent ||
     ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q "ok seeded" ||
-    ! sudo debugfs -R "stat /etc/systemd/system/lab-ready.service" base.ext4 2>/dev/null | grep -q Inode
+    ! sudo debugfs -R "stat /etc/systemd/system/lab-ready.service" base.ext4 2>/dev/null | grep -q Inode ||
+    ! sudo debugfs -R "cat /etc/systemd/system/lab-agent.service" base.ext4 2>/dev/null | grep -q OOMScoreAdjust
 }; then
   log "guest services"
   sudo mkdir -p /mnt/lab-base
@@ -248,19 +265,6 @@ if [ ! -f base.ext4 ]; then
     printf "%s\n" "document.getElementById(\"app\").textContent = \"hello\";" > main.js
     npm install --no-audit --no-fund --loglevel=error vite >/dev/null
   '
-  sudo tee rootfs/etc/systemd/system/lab-agent.service >/dev/null <<'UNIT'
-[Unit]
-Description=Experiment exec agent on vsock port 52
-After=local-fs.target
-
-[Service]
-ExecStart=/usr/bin/socat VSOCK-LISTEN:52,reuseaddr,fork EXEC:/bin/bash,stderr
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-  sudo ln -sf /etc/systemd/system/lab-agent.service rootfs/etc/systemd/system/multi-user.target.wants/lab-agent.service
   install_guest_services rootfs
   for m in proc sys dev; do sudo umount -l "rootfs/$m"; done
   trap - EXIT

@@ -127,6 +127,14 @@ async fn a_create_claims_a_ready_sandbox_that_learns_its_id_before_use() {
     assert_eq!(lab.world.restores.load(Ordering::Relaxed), 3, "the fills");
     let filled = ready_dirs(&lab);
     assert_eq!(filled.len(), 3);
+    let held: Vec<u64> = lab
+        .status()
+        .await
+        .templates
+        .iter()
+        .map(|template| template.ready_resident_bytes)
+        .collect();
+    assert_eq!(held, [3 * (100 << 20)], "what the ready sandboxes hold");
 
     lab.create(id(1), NEVER).await;
     assert_eq!(

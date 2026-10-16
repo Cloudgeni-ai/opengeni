@@ -461,7 +461,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     .as_ref()
                     .map(|warm| warm.pool.status())
                     .unwrap_or_default();
-                self.ready.status(&mut templates);
+                self.ready.status(&mut templates, &self.ready_usage());
                 templates
             },
         }

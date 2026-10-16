@@ -860,11 +860,14 @@ async fn only_trusted_hosts_let_guests_reach_the_local_network() {
 }
 
 /// What a sandbox's first command reports: who it is, sixteen random bytes,
-/// and how often its random number generator was reseeded since boot, by
-/// its kernel for a VM fork or by the guest for a restore notice.
+/// how often its random number generator was reseeded since boot (by its
+/// kernel for a VM fork or by the guest for a restore notice), and the
+/// out-of-memory killer's view of the command and of the guest agent that
+/// runs it.
 const FIRST_COMMAND: &str = "cat /run/sandbox-id 2>/dev/null || echo none
 head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \\n'; echo
-dmesg | grep -c 'crng reseeded'";
+dmesg | grep -c 'crng reseeded'
+echo $(cat /proc/self/oom_score_adj) $(cat /proc/$PPID/oom_score_adj)";
 
 /// Shows why a guest may have missed its restore notice.
 const GUEST_NOTICE_STATUS: &str = "systemctl status lab-notice --no-pager 2>&1 | head -20
@@ -930,6 +933,12 @@ async fn start_batch(agent: &Agent, count: usize) -> (Started, Vec<Started>, f64
             "{}: the guest does not know who it is: {:?}",
             started.sandbox,
             started.output
+        );
+        assert_eq!(
+            started.output.get(3).map(String::as_str),
+            Some("0 -1000"),
+            "{}: the guest agent must outlast its commands when memory runs out",
+            started.sandbox
         );
     }
     (single, all, wall_s)

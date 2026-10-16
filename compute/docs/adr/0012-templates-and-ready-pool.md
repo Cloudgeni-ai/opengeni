@@ -27,7 +27,8 @@ sandboxes created at once all pay it at the same time.
   user's programs when the guest runs out of memory: it sets its own
   `oom_score_adj` to -1000, and each command it starts resets it to 0 (the
   setting is inherited). The balloon already gives memory back on a guest
-  OOM (`deflate_on_oom`). The reference smoke guest does both.
+  OOM (`deflate_on_oom`). The reference smoke guest and the lab guest do
+  both.
 - A ready pool (`--template SHAPE:COUNT`) keeps COUNT clones per shape
   restored, warmed until the guest accepts connections, and paused, outside
   the decision core. A create takes the oldest with one compare-and-set
@@ -37,8 +38,10 @@ sandboxes created at once all pay it at the same time.
   first wake is a resume that sends the notice.
 - Ready clones are disposable: never saved, and removed when their template
   goes stale, when memory runs low (before any sandbox is evicted), and when
-  the agent starts. They fill a few at a time, only while memory stays above
-  a reserve.
+  the agent starts. Being the cheapest memory to give back, they go first,
+  ahead of any idle sandbox. They fill a few at a time, only while memory
+  stays above a reserve. The agent knows their count and resident memory per
+  shape (also in status), for the admission budget to count.
 
 ## Consequences
 
