@@ -3,15 +3,29 @@
 //! The API is a handful of small JSON requests on a local Unix socket, so a
 //! full HTTP stack would only add weight. Each request uses its own
 //! connection, which costs microseconds on a Unix socket.
+//!
+//! Every request has a deadline. The VMM answers one request at a time, so a
+//! VMM that stops answering would otherwise hold up every step on its VM for
+//! good, including the one that would notice and end it.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::time::{Instant, timeout_at};
 
 /// Responses larger than this are refused; real ones are a few hundred bytes.
 const MAX_RESPONSE: usize = 1 << 20;
+
+/// How long a quick control request may take. The VMM answers these in
+/// milliseconds, even on a loaded host; one that takes this long is stuck.
+const CONTROL_LIMIT: Duration = Duration::from_secs(10);
+
+/// How long a snapshot request may take. It moves a VM's memory to or from
+/// disk, which can take minutes when many VMs save at once.
+const SNAPSHOT_LIMIT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -21,6 +35,10 @@ pub enum ApiError {
     /// The request may have been sent and its answer lost.
     #[error("API socket I/O: {0}")]
     Io(#[from] io::Error),
+    /// The request was sent and no answer came in time. It may have taken
+    /// effect, or may still.
+    #[error("no answer from the VMM within {0:?}")]
+    Timeout(Duration),
     #[error("malformed API response: {0}")]
     Malformed(&'static str),
     /// The VMM answered and refused the request.
@@ -36,12 +54,26 @@ pub enum ApiError {
 #[derive(Clone, Debug)]
 pub struct Api {
     socket: PathBuf,
+    control_limit: Duration,
+    snapshot_limit: Duration,
 }
 
 impl Api {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
             socket: socket.into(),
+            control_limit: CONTROL_LIMIT,
+            snapshot_limit: SNAPSHOT_LIMIT,
+        }
+    }
+
+    /// The same client with other deadlines, for tests.
+    #[cfg(test)]
+    pub fn with_limits(self, control: Duration, snapshot: Duration) -> Self {
+        Self {
+            control_limit: control,
+            snapshot_limit: snapshot,
+            ..self
         }
     }
 
@@ -49,24 +81,42 @@ impl Api {
         &self.socket
     }
 
-    /// Sends one request and returns the response body on a 2xx status.
+    /// How long a request to `path` may take.
+    fn limit(&self, path: &str) -> Duration {
+        if path.starts_with("/snapshot/") {
+            self.snapshot_limit
+        } else {
+            self.control_limit
+        }
+    }
+
+    /// Sends one request and returns the response body on a 2xx status,
+    /// within the deadline for its kind of request.
     pub async fn call(
         &self,
         method: &'static str,
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> Result<Vec<u8>, ApiError> {
+        let limit = self.limit(path);
+        let deadline = Instant::now() + limit;
         let body = body.map(serde_json::Value::to_string).unwrap_or_default();
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n\
              Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        let mut stream = UnixStream::connect(&self.socket)
+        let mut stream = timeout_at(deadline, UnixStream::connect(&self.socket))
             .await
+            .map_err(|_| ApiError::Connect(io::ErrorKind::TimedOut.into()))?
             .map_err(ApiError::Connect)?;
-        stream.write_all(request.as_bytes()).await?;
-        let (status, response) = read_response(&mut stream).await?;
+        let exchange = async {
+            stream.write_all(request.as_bytes()).await?;
+            read_response(&mut stream).await
+        };
+        let (status, response) = timeout_at(deadline, exchange)
+            .await
+            .map_err(|_| ApiError::Timeout(limit))??;
         if (200..300).contains(&status) {
             Ok(response)
         } else {
