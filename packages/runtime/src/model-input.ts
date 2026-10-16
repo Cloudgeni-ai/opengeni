@@ -17,6 +17,7 @@ import {
   repairHistoryProtocolItems,
 } from "./history-sanitizer";
 import {
+  expandInteractionFamilyDisclosures,
   restoreGenericDispatchHistoryItem,
   restoreGenericDispatchHistoryItems,
 } from "./lazy-tool-transport";
@@ -500,7 +501,7 @@ export function callModelInputFilterForSettings(
 /** Rules that normalize history but do not impose final bounds/accounting. */
 export function baseModelInputFilterForSettings(settings: Settings): CallModelInputFilter {
   const stripProviderIds = settings.openaiProviderItemIds === "strip";
-  return memoizedInputItemProjectionFilter(
+  const projectItems = memoizedInputItemProjectionFilter(
     (source) => {
       let item = restoreGenericDispatchHistoryItem(source);
       item = normalizeComputerCallAction(
@@ -519,4 +520,14 @@ export function baseModelInputFilterForSettings(settings: Settings): CallModelIn
     // latest model/tool step instead of walking a six-figure history again.
     { appendOnlyInput: true },
   );
+  return composeCallModelInputFilters([interactionFamilyDisclosureFilter, projectItems]);
 }
+
+/**
+ * Show an entry-tool call's frozen family disclosure after its result. Runs
+ * before the item projection, which removes the marker from the call.
+ */
+const interactionFamilyDisclosureFilter: CallModelInputFilter = ({ modelData }) => {
+  const input = expandInteractionFamilyDisclosures(modelData.input);
+  return input === modelData.input ? modelData : { ...modelData, input };
+};

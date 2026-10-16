@@ -112,7 +112,7 @@ function flattenTaggedUnion(members: unknown[]): JsonSchemaNode | null {
   for (const [field, schemas] of properties) {
     merged[field] = schemas.length === 1 ? schemas[0] : mergeAlternatives(schemas);
   }
-  const summary = variants
+  const summary = mergeSameTagVariants(variants)
     .map(([value, fields]) => (fields.length > 0 ? `${value}: ${fields.join(", ")}` : value))
     .join("; ");
   const flattened: JsonSchemaNode = {
@@ -123,6 +123,34 @@ function flattenTaggedUnion(members: unknown[]): JsonSchemaNode | null {
   };
   flattenedVariants.set(flattened, variants);
   return flattened;
+}
+
+/**
+ * One summary entry per tag value. Several members can share a value (for
+ * example one variant with an optional id and one without); a field is then
+ * required only when every such member requires it.
+ */
+function mergeSameTagVariants(variants: Array<[string, string[]]>): Array<[string, string[]]> {
+  const byValue = new Map<string, Array<string[]>>();
+  for (const [value, fields] of variants) {
+    const seen = byValue.get(value) ?? [];
+    seen.push(fields);
+    byValue.set(value, seen);
+  }
+  return [...byValue].map(([value, members]) => {
+    if (members.length === 1) return [value, members[0]!];
+    const names: string[] = [];
+    for (const fields of members) {
+      for (const field of fields) {
+        const name = field.endsWith("?") ? field.slice(0, -1) : field;
+        if (!names.includes(name)) names.push(name);
+      }
+    }
+    return [
+      value,
+      names.map((name) => (members.every((fields) => fields.includes(name)) ? name : `${name}?`)),
+    ];
+  });
 }
 
 function mergeAlternatives(schemas: unknown[]): unknown {
