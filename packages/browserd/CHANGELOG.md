@@ -1,5 +1,18 @@
 # @opengeni/browserd
 
+## 0.2.19
+
+### Patch Changes
+
+- 1739e1c: Returning an expired browser resume to its checkpoint now works on ordinary Linux machines. Before moving an interrupted launch aside, the controller proves that no process uses the browser's profile, and that proof also required reading every process's executable link. An agent running as a normal user can't read that link for root's or other users' processes, so the proof always failed and the browser stayed stuck with "Current browser is unavailable". The proof now relies on each process's command line, which is the only part that names the profile. A process whose command line names the profile, or whose command line can't be read, still blocks the move.
+- 7304410: A browser restored from its checkpoint no longer fails to resume when one of its saved tabs can't load, for example because the site is down or its address no longer resolves. Before, the first tab whose page failed to load aborted the whole restore with "browser could not navigate to the requested URL", so the browser could never be resumed. Restored tabs now reopen on the browser's error page, as the browser's own session restore does. A tab showing an error page is also saved under the page it was trying to load instead of the error page, so a later restore retries it. Opening or navigating a tab outside restore still reports a page that can't load, and navigation policy refusals and invalid addresses still fail restore.
+- Updated dependencies [17d61c6]
+- Updated dependencies [1e67711]
+- Updated dependencies [79af429]
+- Updated dependencies [877c70d]
+  - @opengeni/contracts@3.1.0
+  - @opengeni/interaction@3.1.0
+
 ## 0.2.18
 
 ### Patch Changes

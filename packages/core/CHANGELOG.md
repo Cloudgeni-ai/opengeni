@@ -1,5 +1,34 @@
 # @opengeni/core
 
+## 3.1.0
+
+### Minor Changes
+
+- 1e67711: An MCP server can recommend Ask for a tool with `_meta: { "opengeni/recommendedPermission": "ask" }` in `tools/list` (`MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY`). It applies on model and Codemode calls from the next attempt of every session, and only when the workspace has saved no choice for the tool. A tool asks when either this or the session's `requireApproval` says so. Connector permission settings show the same recommendation.
+
+### Patch Changes
+
+- 3f3b476: A new chat no longer starts on a model that was removed from the deployment catalog. When the model a person last picked for new chats is no longer listed for the workspace (its provider was removed or the model retired), the new-chat form follows the workspace default again until they pick another model. A model that is still listed but temporarily unavailable keeps the person's choice, and a catalog read failure never discards it.
+- Updated dependencies [17d61c6]
+- Updated dependencies [0b164a9]
+- Updated dependencies [2bdc71f]
+- Updated dependencies [1e67711]
+- Updated dependencies [79af429]
+- Updated dependencies [877c70d]
+- Updated dependencies [86df483]
+  - @opengeni/db@3.1.0
+  - @opengeni/contracts@3.1.0
+  - @opengeni/observability@3.1.0
+  - @opengeni/runtime@3.1.0
+  - @opengeni/events@3.1.0
+  - @opengeni/documents@3.1.0
+  - @opengeni/capabilities@3.1.0
+  - @opengeni/codex@3.1.0
+  - @opengeni/config@3.1.0
+  - @opengeni/storage@3.1.0
+  - @opengeni/vaults@3.1.0
+  - @opengeni/network@3.1.0
+
 ## 3.0.0
 
 ### Minor Changes

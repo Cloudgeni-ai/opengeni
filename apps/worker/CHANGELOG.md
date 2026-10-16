@@ -1,5 +1,43 @@
 # @opengeni/worker-bundle
 
+## 3.1.0
+
+### Patch Changes
+
+- e332bc1: A turn no longer fails for good when an image sent earlier in the conversation is briefly unreadable from object storage, for example while a storage replica catches up after an outage. The same turn now retries with the usual short backoff, shows "An image from earlier in this conversation can't be read from storage" while it waits, and sends the same pixels once the image is readable. Bytes that no longer match the stored checksum still fail the turn, because retrying cannot fix them.
+- Updated dependencies [17d61c6]
+- Updated dependencies [74a259d]
+- Updated dependencies [0b164a9]
+- Updated dependencies [3f3b476]
+- Updated dependencies [2bdc71f]
+- Updated dependencies [1e67711]
+- Updated dependencies [79af429]
+- Updated dependencies [877c70d]
+- Updated dependencies [86df483]
+  - @opengeni/db@3.1.0
+  - @opengeni/contracts@3.1.0
+  - @opengeni/sdk@3.1.0
+  - @opengeni/observability@3.1.0
+  - @opengeni/core@3.1.0
+  - @opengeni/runtime@3.1.0
+  - @opengeni/events@3.1.0
+  - @opengeni/documents@3.1.0
+  - @opengeni/capabilities@3.1.0
+  - @opengeni/codemode@3.1.0
+  - @opengeni/codex@3.1.0
+  - @opengeni/config@3.1.0
+  - @opengeni/github@3.1.0
+  - @opengeni/interaction@3.1.0
+  - @opengeni/storage@3.1.0
+  - @opengeni/tool-gateway@3.1.0
+  - @opengeni/vaults@3.1.0
+  - @opengeni/vaults-onepassword@3.1.0
+  - @opengeni/agent-proto@3.1.0
+  - @opengeni/jev@3.1.0
+  - @opengeni/network@3.1.0
+  - @opengeni/subscriptions@3.1.0
+  - @opengeni/xai-subscription@3.1.0
+
 ## 3.0.0
 
 ### Minor Changes

@@ -1,5 +1,19 @@
 # @opengeni/react
 
+## 3.1.0
+
+### Patch Changes
+
+- e332bc1: A turn no longer fails for good when an image sent earlier in the conversation is briefly unreadable from object storage, for example while a storage replica catches up after an outage. The same turn now retries with the usual short backoff, shows "An image from earlier in this conversation can't be read from storage" while it waits, and sends the same pixels once the image is readable. Bytes that no longer match the stored checksum still fail the turn, because retrying cannot fix them.
+- 86df483: Streamed text deltas are now merged when they are written instead of folded afterwards. The turn writer flushes model fragments at most 100 ms apart, sends the first fragment of each item at once, and stores each flush's adjacent plain text fragments as one `session_events` row, so a stream writes about a fifth of the rows it used to and nothing is deleted later. The settled-turn folding pass and its `foldSessionTurnDeltas`, `listSessionDeltaFoldCandidates` and `unfoldSessionEventDeltas` helpers are removed; rows folded by earlier versions stay readable through `coalescedUntil`.
+
+  Reasoning summary parts keep their paragraph breaks wherever fragments are merged: `@opengeni/events` exports `reasoningDeltaSeparator`, and the read-side coalescer now uses it, so consecutive bold headings no longer render glued together after a reload.
+
+- Updated dependencies [17d61c6]
+- Updated dependencies [74a259d]
+  - @opengeni/sdk@3.1.0
+  - @opengeni/connect@3.1.0
+
 ## 3.0.0
 
 ### Major Changes

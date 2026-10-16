@@ -1,5 +1,16 @@
 # @opengeni/observability
 
+## 3.1.0
+
+### Patch Changes
+
+- 0b164a9: Unexpected request and Channel-A failures now say which component refused them. The failure logs carry the reviewed class of the underlying error, plus the browser or computer controller's closed error code and status, the connected machine's error number, or the database SQLSTATE when there is one. Browser and computer operations are now named in Channel-A failure logs too. Messages, paths and identifiers are still never logged.
+- Updated dependencies [17d61c6]
+- Updated dependencies [1e67711]
+- Updated dependencies [79af429]
+- Updated dependencies [877c70d]
+  - @opengeni/contracts@3.1.0
+
 ## 3.0.0
 
 ### Patch Changes

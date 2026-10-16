@@ -1,5 +1,18 @@
 # @opengeni/sdk
 
+## 3.1.0
+
+### Patch Changes
+
+- 17d61c6: Schedules no longer stay stuck without anyone knowing. When no later run can start until a person acts (its chat is paused or gone, a pinned account or machine is unavailable, or the run is refused for good), the schedule pauses itself and its owner gets one inbox notice saying why and what would unblock it. When runs keep failing or being skipped for a reason that may clear by itself, the owner is told once after three in a row. The notice goes away when a run succeeds or the schedule is resumed, paused or deleted, and the schedule page and API show the current blocker.
+- 74a259d: People signed in to the web app can again start a Codex sign-in from a workspace's Models page, disconnect a connected agent, and revoke a personal API key. These requests carried no JSON body, so the browser guard on their routes refused them with "You don't have permission". A contract test now fails when any client call to a browser-guarded route omits the JSON body.
+- Updated dependencies [17d61c6]
+- Updated dependencies [1e67711]
+- Updated dependencies [79af429]
+- Updated dependencies [877c70d]
+  - @opengeni/contracts@3.1.0
+  - @opengeni/connect@3.1.0
+
 ## 3.0.0
 
 ### Major Changes
