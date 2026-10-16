@@ -136,13 +136,14 @@ Proportional set size of the agent, in MiB:
 | 100 sandboxes running | 151 | 57 |
 | 100 Remote sandboxes, 100 s after they got there | 138 | 109 |
 | Right after a restart with 100 Remote sandboxes | 101 | 50 |
-| 2 s after removing all 100 | 384 | 302 |
-| 100 s after removing all 100 | 95 | 46 |
+| 2 s after one remote wake and removing all 100 | 384 | 302 |
+| 100 s after that | 95 | 46 |
 
 The bare-metal host has 192 processors, and the agent keeps a worker and
 some buffers per processor. With 100 Remote sandboxes most of the rest is
-pooled connections to object storage, which close within minutes. Removing
-them deletes their objects in storage, which briefly takes more.
+pooled connections to object storage, which close within minutes. After
+the restart the run woke one sandbox from object storage and then removed
+all 100; the agent held more 2 s later and was back down 100 s later.
 
 Two changes got it here, both found with 10 sandboxes on bare metal. With
 glibc's allocator the agent held about 730 MiB after waking them from Saved
@@ -153,7 +154,8 @@ of blocking threads that hash and compress chunks. jemalloc, also used for
 the C code the agent links, brought the same run to 123 MiB. And chunks
 fetched for remote wakes stayed in a cache (capped at 1 GiB) for the
 agent's lifetime; they now expire 60 s after arrival, which took the
-agent's memory 100 s after removal from 279 MiB to 54 MiB.
+agent's memory 100 s after the last remote wake and removal from 279 MiB
+to 54 MiB.
 
 ## Cost per sleeping sandbox
 
@@ -165,17 +167,22 @@ GiB-month. A sleeping sandbox runs no guest code; the host's own work for
 it (sampling, saves, uploads) is small and not priced here.
 
 Sizes come from the bare-metal run's manifests. The memory image is
-512 MiB, of which 231 MiB is not zero; stored compressed it is 59 MiB. The
-base disk is 324 MiB stored and shared by every sandbox of the store; in a
-sample of ten, each sandbox's own disk changes were 23 to 36 MiB, 1.2 to
-3.3 MiB stored. The working-set pack holds at most 128 MiB of memory
-before compression; at the image's ratio that is about 33 MiB stored.
+512 MiB; its manifest maps 234.5 MiB to chunks (231.5 MiB of distinct
+content) and the rest to zeros, and stored compressed it is 59 MiB. On
+local disk the image file can take the whole 512 MiB, because zeros the
+guest wrote stay allocated. Across a sample of ten sandboxes' disks,
+324 MiB stored was common to all ten (mostly the base image), another
+6.8 MiB was shared by some of them, and each disk referenced 5.1 to
+5.2 MiB stored (47 MiB before compression) beyond the common part; the ten
+together came to 348 MiB stored. The working-set pack holds at most
+128 MiB of memory before compression; at the image's ratio that is about
+33 MiB stored.
 
 | Level | What it holds | About per month |
 | --- | --- | --- |
 | Paused | 0.26 to 0.30 GiB of RAM | $0.81 to $0.92 |
 | Compressed | 0.11 GiB of RAM | $0.34 |
-| Saved | its memory image (0.23 GiB not zero) and what it wrote to its disk, on local SSD; the base disk is shared | $0.02 plus its writes |
-| Remote | its compressed memory image, working-set pack and own disk changes (about 0.1 GiB together), plus older copies until they are collected | under $0.01 |
+| Saved | its memory image (up to 0.5 GiB) and what it wrote to its disk, on local SSD; the base disk is shared | up to $0.04 plus its writes |
+| Remote | its compressed memory image, working-set pack and disk chunks beyond the common part (about 0.1 GiB together) | about $0.002 for this live footprint; older copies until they are collected and a share of the common part come on top |
 
 A running sandbox costs what its memory and processors use.
