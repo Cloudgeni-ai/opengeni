@@ -418,6 +418,11 @@ enum Event<V> {
         id: Id,
         bytes: u64,
     },
+    /// The VM of `id` took a balloon setting of `bytes`.
+    BalloonSet {
+        id: Id,
+        bytes: u64,
+    },
 }
 
 #[derive(Debug)]

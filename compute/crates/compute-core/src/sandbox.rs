@@ -76,6 +76,9 @@ pub(crate) struct Sandbox {
     /// as after a step that may have left the balloon as it was, or for a
     /// VM found running: it is then set once the VM runs again.
     pub balloon_sent: Option<u64>,
+    /// Bytes its VM confirmed its balloon takes, for the setting last
+    /// sent; `None` until it does.
+    pub balloon_taken: Option<u64>,
     /// When a balloon setting the VM did not take is asked again, and how
     /// many in a row it did not take.
     pub balloon_retry: Option<(At, u32)>,
@@ -119,6 +122,7 @@ impl Sandbox {
             room: WakeRoom::Open,
             balloon: None,
             balloon_sent: None,
+            balloon_taken: None,
             balloon_retry: None,
             squeeze: Squeeze::None,
             in_flight: None,
@@ -271,6 +275,7 @@ impl Sandbox {
         self.resident = None;
         self.balloon = None;
         self.balloon_sent = None;
+        self.balloon_taken = None;
         self.balloon_retry = None;
     }
 

@@ -31,26 +31,44 @@ pub(super) fn make_dir(dir: &Path) -> io::Result<()> {
 
 /// Moves the profile a pager wrote at `learned` to `profile`, the copy the
 /// agent keeps and archives, if it fits memory of `memory_len` bytes (none:
-/// there is no memory image for it to describe); drops it either way.
-pub(super) fn take(learned: &Path, profile: &Path, memory_len: Option<u64>) -> io::Result<()> {
+/// there is no memory image for it to describe); drops it either way. Best
+/// effort: a profile is only a hint, so what goes wrong here is logged and
+/// never fails the wake or archive taking it.
+pub(super) fn take(learned: &Path, profile: &Path, memory_len: Option<u64>) {
     let bytes = match read_untrusted(learned) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
         Err(error) => {
             tracing::warn!(%error, path = %learned.display(), "learned profile ignored");
-            return remove_if_present(learned);
+            discard(learned);
+            return;
         }
     };
     let parsed = WakeProfile::parse(&bytes);
     if memory_len.is_some_and(|len| parsed.fits(len)) {
-        write_atomic(
-            profile,
-            &serde_json::to_vec(&parsed).map_err(io::Error::other)?,
-        )?;
+        let kept = serde_json::to_vec(&parsed)
+            .map_err(io::Error::other)
+            .and_then(|bytes| write_atomic(profile, &bytes));
+        if let Err(error) = kept {
+            tracing::warn!(%error, path = %profile.display(), "learned profile not kept");
+        }
     } else {
         tracing::warn!(path = %learned.display(), "learned profile does not fit the memory; ignored");
     }
-    remove_if_present(learned)
+    discard(learned);
+}
+
+/// Removes whatever a pager left at `learned`, a file or not, without
+/// following a link; a failure is only logged.
+fn discard(learned: &Path) {
+    let removed = match fs::symlink_metadata(learned) {
+        // Removing a tree never follows a link inside it.
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(learned),
+        _ => remove_if_present(learned),
+    };
+    if let Err(error) = removed {
+        tracing::warn!(%error, path = %learned.display(), "could not remove a learned profile");
+    }
 }
 
 /// Reads the regular file at `path`, if it has no other name and holds at
@@ -101,7 +119,7 @@ mod tests {
             dir.path().join("learned.json"),
             dir.path().join("wake.json"),
         );
-        take(&learned, &kept, LEN).unwrap();
+        take(&learned, &kept, LEN);
         assert!(!kept.exists(), "nothing learned, nothing kept");
 
         fs::write(
@@ -109,7 +127,7 @@ mod tests {
             serde_json::to_vec(&profile(vec![0, 4096])).unwrap(),
         )
         .unwrap();
-        take(&learned, &kept, LEN).unwrap();
+        take(&learned, &kept, LEN);
         assert_eq!(WakeProfile::load(&kept), profile(vec![0, 4096]));
         assert!(!learned.exists());
 
@@ -122,7 +140,7 @@ mod tests {
             (&serde_json::to_vec(&profile(vec![0])).unwrap()[..], None),
         ] {
             fs::write(&learned, bytes).unwrap();
-            take(&learned, &kept, memory).unwrap();
+            take(&learned, &kept, memory);
             assert_eq!(WakeProfile::load(&kept), profile(vec![0, 4096]));
             assert!(!learned.exists());
         }
@@ -139,18 +157,31 @@ mod tests {
         fs::write(&host, serde_json::to_vec(&profile(vec![8192])).unwrap()).unwrap();
 
         std::os::unix::fs::symlink(&host, &learned).unwrap();
-        take(&learned, &kept, LEN).unwrap();
+        take(&learned, &kept, LEN);
         assert!(!kept.exists(), "read through a link");
         assert!(!learned.exists() && host.exists());
 
         fs::hard_link(&host, &learned).unwrap();
-        take(&learned, &kept, LEN).unwrap();
+        take(&learned, &kept, LEN);
         assert!(!kept.exists(), "read a host file's second name");
         assert!(host.exists());
 
         let large = File::create(&learned).unwrap();
         large.set_len(MOST + 1).unwrap();
-        take(&learned, &kept, LEN).unwrap();
+        take(&learned, &kept, LEN);
         assert!(!kept.exists(), "read a file without bound");
+        assert!(!learned.exists());
+
+        // A directory in its place, with a link out of it, goes without
+        // touching what the link names.
+        fs::create_dir(&learned).unwrap();
+        std::os::unix::fs::symlink(&host, learned.join("inner")).unwrap();
+        take(&learned, &kept, LEN);
+        assert!(!kept.exists() && !learned.exists() && host.exists());
+
+        // A profile that cannot be kept is only logged.
+        fs::write(&learned, serde_json::to_vec(&profile(vec![0])).unwrap()).unwrap();
+        take(&learned, &dir.path().join("missing").join("wake.json"), LEN);
+        assert!(!learned.exists());
     }
 }

@@ -921,7 +921,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         );
         learned::make_dir(&pager_dir(paths)).map_err(io)?;
         // What the last pager learned, the one this pager starts from.
-        learned::take(&pager_learned(paths), &wake_profile(paths), Some(file.1)).map_err(io)?;
+        learned::take(&pager_learned(paths), &wake_profile(paths), Some(file.1));
         remove_if_present(&crate::paging::done_file(&control)).map_err(io)?;
         // Written before the pager starts, so an agent that restarts knows
         // the VM's memory may need it, and which launch to look for.

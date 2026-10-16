@@ -65,8 +65,9 @@ pick a VM.
      (`balloon_grace`, 3 s) for a balloon to fill before going further,
      and lets balloons go, oldest first, once memory is back above the
      high watermark. A balloon let go claims the room it will take back,
-     like a wake, until a reading shows it, so the two never spend the
-     same free memory;
+     like a wake, until its VM confirms the setting and a later reading
+     shows it, so the two never spend the same free memory; a setting
+     still pending or refused keeps its claim;
   3. if that is still not enough, the sandbox furthest above its request
      is paused and saved, held or not. It loses nothing: once its recorded
      footprint fits above the high watermark, next to the footprints of
@@ -75,9 +76,10 @@ pick a VM.
   Sandboxes within their request are never touched by any of these.
   A VM's balloon is let go again once it runs after any step and after
   adoption, since a restored image or an earlier agent may have left it
-  set. A setting the VM did not take is sent again after a backoff. Each
-  request goes only to the VMM it was made for: the agent checks the
-  process answering on the API socket before sending anything.
+  set. A setting the VM did not take is sent again after a backoff that
+  grows with each failure in a row and starts over once a setting is
+  taken. Each request goes only to the VMM it was made for: the agent
+  checks the process answering on the API socket before sending anything.
 - Congestion is visible: the status shows `balloon_bytes` for a sandbox
   whose balloon is out and `paused_for_memory` (the bytes it held) for one
   saved for host memory, with `waiting_for_room` while it waits; refused

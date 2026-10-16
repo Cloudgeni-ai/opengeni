@@ -113,6 +113,13 @@ pub enum Input {
         /// What it was asked to take.
         bytes: u64,
     },
+    /// The sandbox's VM took an [`Action::Balloon`] of `bytes`.
+    BalloonSet {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// What it was asked to take.
+        bytes: u64,
+    },
     /// The VM process ended unexpectedly. Files survive, and so do running
     /// programs if a current copy was saved.
     Lost {
@@ -539,6 +546,7 @@ impl Host {
             } => self.finish(now, sandbox, op, outcome, out),
             Input::Lost { sandbox } => self.lost(sandbox, out),
             Input::BalloonFailed { sandbox, bytes } => self.balloon_failed(now, sandbox, bytes),
+            Input::BalloonSet { sandbox, bytes } => self.balloon_set(sandbox, bytes),
             Input::Unsavable { sandbox } => {
                 if self
                     .sandboxes
@@ -906,6 +914,7 @@ impl Host {
         // is set again once the VM runs.
         slot.balloon = None;
         slot.balloon_sent = None;
+        slot.balloon_taken = None;
         if admission::needs_memory(step) {
             slot.room = WakeRoom::Admitted;
         }

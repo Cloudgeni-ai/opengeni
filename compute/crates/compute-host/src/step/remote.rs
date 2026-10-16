@@ -65,11 +65,9 @@ impl<E: Engine, S: Store> Job<E, S> {
         // The order the last wake learned, if its pager wrote one.
         let (written, kept) = (pager_learned(&self.paths), profile.clone());
         let memory_len = memory.as_ref().map(|(image, _)| image.meta().memory_len);
-        if let Err(error) = blocking(move || learned::take(&written, &kept, memory_len))
-            .await
-            .and_then(|taken| taken)
-        {
-            return io_failure(OP, error);
+        // Only a hint: the archive goes on without it.
+        if let Err(error) = blocking(move || learned::take(&written, &kept, memory_len)).await {
+            tracing::warn!(id = %self.id, %error, "learned profile not taken");
         }
         let files = SavedFiles {
             disk: JailedFile::new(&self.paths.disk),

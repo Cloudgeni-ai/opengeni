@@ -100,6 +100,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 sandbox: id.0,
                 bytes,
             }),
+            Event::BalloonSet { id, bytes } => self.input(Input::BalloonSet {
+                sandbox: id.0,
+                bytes,
+            }),
         }
     }
 
@@ -162,7 +166,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         tokio::spawn(async move {
             match set.await {
-                Ok(()) => tracing::info!(%id, mib = bytes >> 20, "balloon set"),
+                Ok(()) => {
+                    tracing::info!(%id, mib = bytes >> 20, "balloon set");
+                    let _ = events.send(Event::BalloonSet { id, bytes });
+                }
                 Err(error) => {
                     tracing::warn!(%id, %error, "could not set the balloon");
                     let _ = events.send(Event::BalloonFailed { id, bytes });

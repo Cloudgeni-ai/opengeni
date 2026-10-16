@@ -46,8 +46,9 @@ pub(crate) enum Squeeze {
     },
     /// It was let through to wake, or its balloon was let go, and it claims
     /// `bytes` of the room above the high watermark, what it may take back,
-    /// until a reading taken while it runs shows them. Wakes and balloons
-    /// thus never spend the same room.
+    /// until its VM has confirmed its balloon is let go and a reading
+    /// taken after that, while it runs, shows them. Wakes and balloons
+    /// thus never spend the same room, however long a balloon takes to go.
     Returning {
         /// Host memory its VM held.
         bytes: u64,
@@ -89,19 +90,31 @@ impl Sandbox {
         if self.state.level != Level::Running || self.in_flight.is_some() {
             return None;
         }
-        let bytes = self.balloon.map_or(0, |balloon| balloon.bytes);
+        let bytes = self.balloon_wanted();
         let held = self.balloon_retry.is_some_and(|(at, _)| at > now);
         if self.balloon_sent == Some(bytes) || held {
             return None;
         }
         self.balloon_sent = Some(bytes);
+        self.balloon_taken = None;
         Some(bytes)
+    }
+
+    /// Bytes the host wants its balloon to take: none unless asked.
+    fn balloon_wanted(&self) -> u64 {
+        self.balloon.map_or(0, |balloon| balloon.bytes)
+    }
+
+    /// Whether its VM confirmed the balloon setting the host wants now.
+    fn balloon_settled(&self) -> bool {
+        self.balloon_taken == Some(self.balloon_wanted())
     }
 }
 
 impl Host {
     /// `id`'s VM did not take a balloon setting of `bytes`: it is asked
     /// again after the sleep backoff, longer after each failure in a row.
+    /// What the balloon takes meanwhile is not known.
     pub(super) fn balloon_failed(&mut self, now: At, id: SandboxId, bytes: u64) {
         let backoff = self.policy.sleep_backoff;
         let Some(slot) = self.sandboxes.get_mut(&id) else {
@@ -113,7 +126,24 @@ impl Host {
         }
         let failures = slot.balloon_retry.map_or(0, |(_, failures)| failures) + 1;
         slot.balloon_sent = None;
+        slot.balloon_taken = None;
         slot.balloon_retry = Some((now + backoff.delay(failures), failures));
+        self.mark(id);
+    }
+
+    /// `id`'s VM took the balloon setting of `bytes`: if that is the one
+    /// last sent, it is known to hold, and failures before it are
+    /// forgotten.
+    pub(super) fn balloon_set(&mut self, id: SandboxId, bytes: u64) {
+        let Some(slot) = self.sandboxes.get_mut(&id) else {
+            return;
+        };
+        if slot.balloon_sent != Some(bytes) {
+            // An older request; a newer one stands.
+            return;
+        }
+        slot.balloon_taken = Some(bytes);
+        slot.balloon_retry = None;
         self.mark(id);
     }
 
@@ -251,14 +281,16 @@ impl Host {
             .sum()
     }
 
-    /// Ends the claims of sandboxes that run and were measured: a reading
-    /// of available memory taken now shows what they hold.
+    /// Ends the claims of sandboxes that run, were measured and whose VM
+    /// confirmed the balloon setting wanted of it: a reading of available
+    /// memory taken now, after that confirmation, shows what they hold.
     pub(super) fn measured_returns(&mut self) {
         for slot in self.sandboxes.values_mut() {
             if matches!(slot.squeeze, Squeeze::Returning { .. })
                 && slot.state.level == Level::Running
                 && slot.in_flight.is_none()
                 && slot.resident.is_some()
+                && slot.balloon_settled()
             {
                 slot.squeeze = Squeeze::None;
             }
