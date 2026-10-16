@@ -45,7 +45,11 @@ import {
 } from "@opengeni/interaction";
 import { createAttachedChromeDriver, createAttachedChromeTransport } from "./attached-cdp";
 import { CdpConnection } from "./cdp";
-import { AgentBrowserDriver, type BrowserRuntimeSnapshot } from "./cdp-driver";
+import {
+  AgentBrowserDriver,
+  type BrowserRuntimeSnapshot,
+  type BrowserTabNavigationOptions,
+} from "./cdp-driver";
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
 import { uploadBrowserDownload } from "./download-upload";
 import type { ResolvedAgentBrowserBinary } from "./binary";
@@ -204,9 +208,9 @@ export type BrowserStateCaptureInput = BrowserSessionReference & {
 export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
   readonly focusedInputObservations?: boolean;
-  start(url?: string): Promise<BrowserObservation>;
+  start(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
   listTargets(): Promise<BrowserTarget[]>;
-  openTarget(url?: string): Promise<BrowserObservation>;
+  openTarget(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
   openTargetWithInventory?(url?: string): Promise<BrowserTarget[]>;
   selectTarget(targetId: string): Promise<BrowserObservation>;
   closeTarget(targetId: string): Promise<BrowserTarget[]>;
@@ -3276,7 +3280,10 @@ function profileManifest(
   };
 }
 
-/** Rebuild a checkpoint's tab set on a freshly launched restored profile. */
+/** Rebuild a checkpoint's tab set on a freshly launched restored profile. A
+ * saved tab whose page can't load right now (its host is down or no longer
+ * resolves) is still reopened on the browser's error page, so one unreachable
+ * site never makes the whole browser unrecoverable. */
 export async function restoreTabs(
   driver: BrowserSupervisorDriver,
   capturedTabs: BrowserRuntimeSnapshot["tabs"],
@@ -3290,7 +3297,8 @@ export async function restoreTabs(
     tabs.findIndex((tab) => tab.selected),
   );
   const ordered = [tabs[primaryIndex]!, ...tabs.filter((_, index) => index !== primaryIndex)];
-  const first = await driver.start(ordered[0]!.url);
+  const reopen = { keepTabOnLoadError: true } satisfies BrowserTabNavigationOptions;
+  const first = await driver.start(ordered[0]!.url, reopen);
   const available = (await driver.listTargets()).filter(
     (target) => target.kind === "page" || target.kind === "popup",
   );
@@ -3304,7 +3312,7 @@ export async function restoreTabs(
       index === 0
         ? first.target
         : (available.find((candidate) => !used.has(candidate.id) && candidate.url === tab.url) ??
-          (await driver.openTarget(tab.url)).target);
+          (await driver.openTarget(tab.url, reopen)).target);
     used.add(target.id);
     if (index === 0) selectedTargetId = target.id;
   }
