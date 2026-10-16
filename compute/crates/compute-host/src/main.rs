@@ -404,15 +404,13 @@ fn expect_done(reply: Reply) -> anyhow::Result<()> {
 }
 
 async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
-    let memory_profile = match args.memory_profile {
-        Some(profile) => profile,
-        None => {
-            let cpuinfo =
-                std::fs::read_to_string("/proc/cpuinfo").context("reading /proc/cpuinfo")?;
-            let profile = MemoryProfile::for_cpuinfo(&cpuinfo);
-            tracing::info!(%profile, "memory profile chosen from the CPU's hypervisor flag");
-            profile
-        }
+    let memory_profile = if let Some(profile) = args.memory_profile {
+        profile
+    } else {
+        let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").context("reading /proc/cpuinfo")?;
+        let profile = MemoryProfile::for_cpuinfo(&cpuinfo);
+        tracing::info!(%profile, "memory profile chosen from the CPU's hypervisor flag");
+        profile
     };
     let engine = Firecracker::new(FirecrackerConfig {
         firecracker: args.firecracker,
