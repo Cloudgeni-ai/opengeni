@@ -63,7 +63,7 @@ mock.module("@opengeni/db", () => ({
   ...realDb,
   getWorkspaceControlEvent: async (db: unknown, workspaceId: string, eventId: string) => {
     if (db !== fakeDb) return realGetWorkspaceControlEvent(db as never, workspaceId, eventId);
-    return durableControlEvents.find((event) => event.id === eventId) ?? null;
+    return durableControlEvents.find((entry) => entry.id === eventId) ?? null;
   },
   readSessionEventStorageGapEnd: async (
     db: unknown,
@@ -1052,7 +1052,7 @@ test("workspace-control live fanout rechecks durable actor visibility and never 
   durableControlEvents = [controlEvent(2)];
   publish!(controlEvent(2));
   const received = await readControlEvents(reader, 1);
-  expect(received.map((event) => event.sequence)).toEqual([2]);
+  expect(received.map((entry) => entry.sequence)).toEqual([2]);
   expect(JSON.stringify(received)).not.toContain("Private visitor content");
   expect(JSON.stringify(received)).not.toContain("guest-secret");
   await reader.cancel();

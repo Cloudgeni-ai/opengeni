@@ -698,8 +698,11 @@ workspace first.
   `rate_limited`, `site_budget_exhausted` and retryable `site_budget_busy` (429), and
   `site_platform_brake_engaged` (503) as normal UI states.
 - The same Site HTML and Site Data work there; no rebuild is needed.
-- Every published-host agent gets this Site's `site_data_query` and `site_data_write`,
+- Published-host agents get this Site's `site_data_query` and `site_data_write`,
   plus `site_sql_run` when SQL is enabled; members also get read-only `site_sql_query`.
+  Member tools are intersected with live permissions: a member without artifact
+  publishing can still use AI without write tools, and without data-read permission
+  can use plain AI without data tools. Never request extra permission just to chat.
   The server pins the Site and binds calls to the conversation's viewer, including
   collection ownership and query audiences. No management tools or sandbox are
   supplied; publication settings have no sandbox opt-in. Members get no Site

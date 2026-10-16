@@ -205,9 +205,12 @@ the workspace, and the limits of the viewer's audience
 
 ## Agent defaults
 
-Every published-host conversation gets this Site's `site_data_query` and
+Published-host conversations get this Site's `site_data_query` and
 `site_data_write`; enabled SQL adds `site_sql_run`, and members also get read-only
-`site_sql_query`. Calls act as the conversation's viewer and refuse other Site ids
+`site_sql_query`, each intersected with the member's live permissions. A member
+without artifact-publishing permission can still use AI, without unavailable
+write tools; a member without data-read permission can use plain AI without data
+tools. Calls act as the conversation's viewer and refuse other Site ids
 and management operations. There is no sandbox, and publication settings offer no
 sandbox opt-in. Members get no Site budget or stamped session usage limit, even
 after a previous conversation; they retain normal model selection and subscriptions.

@@ -21,7 +21,7 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     for (const name of (await readdir(join(import.meta.dir, "../drizzle"))).filter(
-      (name) => name.endsWith(".sql") && name >= migrations[0]!,
+      (entry) => entry.endsWith(".sql") && entry >= migrations[0]!,
     ))
       await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(database.ownerUrl);

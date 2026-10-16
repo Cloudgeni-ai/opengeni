@@ -49,6 +49,7 @@ import { buildOrganizationMcpServer } from "../src/organization-mcp";
 import { sha256Hex, signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import type { SiteContentScanner } from "../src/site-publishing/content-scanner";
 import { siteRuntimeBudgetLimits } from "../src/site-publishing/runtime";
+import { SITE_AGENT_DEFAULTS_VERSION } from "../src/site-publishing/agent-session";
 import { moderateSiteAsPlatform } from "../src/site-publishing/platform";
 import {
   evaluateSitePlatformLimit,
@@ -220,6 +221,46 @@ test("Site execution respects member control permission and explicitly refuses d
   }
   const [count] = await shared.admin`select count(*)::int n from sessions where site_id=${site.id}`;
   expect(count!.n).toBe(1);
+});
+
+test("member Site AI needs session authority, not artifact publishing; data tools follow the live ceiling", async () => {
+  const f = await fixture();
+  const site = await f.live("Member capabilities", { access: "members", agent: { enabled: true } });
+  for (const canReadData of [true, false]) {
+    const permissions = memberPermissions.filter(
+      (permission) =>
+        permission !== "artifacts:publish" && (canReadData || permission !== "artifacts:read"),
+    );
+    const who = await f.person(permissions);
+    const session = await f.signIn(who, site.host);
+    const created = await f.gateway(site.host, "POST", "/sessions", {
+      session,
+      body: { initialMessage: "Answer from this app context" },
+    });
+    expect(created.status, JSON.stringify(created.json)).toBe(202);
+    const inspect = async () =>
+      (
+        await shared.admin`select first_party_mcp_tools tools,
+      first_party_mcp_permissions permissions from sessions where id=${created.json.id}`
+      )[0]!;
+    expect((await inspect()).tools).toEqual(canReadData ? ["site_data_query"] : []);
+    expect((await inspect()).permissions).not.toContain("artifacts:publish");
+    if (canReadData) {
+      // A later request must not retain even a read tool after the live ceiling narrows.
+      await shared.admin`update workspace_memberships set permissions=${shared.admin.json(
+        permissions.filter((permission) => permission !== "artifacts:read"),
+      )} where workspace_id=${f.workspace.id} and subject_id=${who.subjectId}`;
+    }
+    await finishConversation(String(created.json.id));
+    const continued = await f.gateway(site.host, "POST", `/sessions/${created.json.id}/events`, {
+      session,
+      body: { type: "user.message", payload: { text: "Continue without a data write" } },
+    });
+    expect(continued.status, JSON.stringify(continued.json)).toBe(202);
+    expect((await inspect()).tools).toEqual([]);
+    expect((await inspect()).permissions).not.toContain("artifacts:publish");
+    expect((await inspect()).permissions).not.toContain("artifacts:read");
+  }
 });
 
 test("Site Insights reconciles actual debits and frozen estimates without private viewer or Site identity leaks", async () => {
@@ -3550,7 +3591,7 @@ test("legacy Site continuations restore only viewer-bound data tools and no sand
     const before = await snapshot();
     const fault = `site_defaults_${id.replaceAll("-", "")}`;
     await shared.admin.unsafe(`create function ${fault}() returns trigger language plpgsql as $f$
-      begin if new.id='${id}'::uuid and new.metadata #>> '{opengeniPublishedSite,agentDefaultsVersion}' = '1'
+      begin if new.id='${id}'::uuid and new.metadata #>> '{opengeniPublishedSite,agentDefaultsVersion}' = '${SITE_AGENT_DEFAULTS_VERSION}'
       then raise exception 'injected defaults failure'; end if; return new; end $f$`);
     await shared.admin.unsafe(
       `create trigger ${fault} before update on sessions for each row execute function ${fault}()`,

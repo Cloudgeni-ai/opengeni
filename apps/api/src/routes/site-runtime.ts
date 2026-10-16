@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import {
   ReasoningEffort,
   LatencyMode,
+  permissionsRequiredByFirstPartyTools,
   DeleteSessionQueueItemRequest,
   EditSessionQueueItemRequest,
   matchSiteOperation,
@@ -69,7 +70,6 @@ import {
   type SiteRuntimeConversationRecord,
 } from "@opengeni/db";
 import {
-  SITE_AGENT_DATA_TOOL_PERMISSIONS,
   siteAgentDataToolsForStart,
   siteAgentInstructions,
   sitePublishedDataViewer,
@@ -1239,7 +1239,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     throw unsupported();
   };
 
-  /** The viewer's own agent conversations on this Site, run as `site:<siteId>`. */
+  /** The viewer's own conversations, with native member or viewer-bound outsider authority. */
   const sessions = async (
     request: RuntimeRequest,
     id: string,
@@ -1490,7 +1490,9 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         host.scope,
         host.site.id,
         viewer.kind,
+        viewer.kind === "member" ? (memberPermissions ?? []) : undefined,
       );
+      const dataToolPermissions = permissionsRequiredByFirstPartyTools(dataTools);
       // One transaction counts the start and reserves a per-turn estimate
       // against the visitor's and the Site's windows; only the funded allowance
       // becomes the session's usage limit, set in the create transaction. The
@@ -1533,9 +1535,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         rigId: null,
         // Only this Site's data tools; never management or workspace tools.
         firstPartyMcpTools: dataTools,
-        ...(dataTools.length > 0
-          ? { firstPartyMcpPermissions: [...SITE_AGENT_DATA_TOOL_PERMISSIONS] }
-          : {}),
+        ...(dataTools.length > 0 ? { firstPartyMcpPermissions: dataToolPermissions } : {}),
         agent: {
           capabilities: {
             from: "none",
@@ -1567,8 +1567,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         },
         ...(input.idempotencyKey ? { idempotencyKey: `site-runtime:${requestedSessionId}` } : {}),
       };
-      const start = () =>
-        send("POST", base, body, dataTools.length > 0 ? SITE_AGENT_DATA_TOOL_PERMISSIONS : []);
+      const start = () => send("POST", base, body, dataToolPermissions);
       // Workspace members get no Site budget at all: their conversation is an
       // ordinary session under the workspace's normal limits, so no session
       // usage limit is stamped on it, whatever the Site's limits say.
@@ -1736,6 +1735,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         viewer,
         conversation.sessionId,
         conversation.toolIds,
+        viewer.kind === "member" ? (memberPermissions ?? []) : undefined,
       );
       const usage = await settleSiteRuntimeSpend(deps, host, conversation);
       // Clear the stamped session cap before dropping the durable conversation
