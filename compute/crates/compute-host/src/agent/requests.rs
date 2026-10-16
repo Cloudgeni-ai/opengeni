@@ -1,7 +1,7 @@
 //! Requests from handles, checked against each sandbox's generation.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
