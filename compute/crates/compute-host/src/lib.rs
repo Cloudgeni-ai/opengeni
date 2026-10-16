@@ -31,5 +31,5 @@ pub use chunked::{CHUNK_BYTES, Chunked};
 pub use guest_ports::{GuestPort, Route};
 pub use server::serve;
 pub use store::{
-    Directory, FetchInto, FetchedMemory, NoStore, Receipt, SavedFiles, SavedImage, Store,
+    Archive, Directory, FetchInto, FetchedMemory, NoStore, Receipt, SavedFiles, SavedImage, Store,
 };

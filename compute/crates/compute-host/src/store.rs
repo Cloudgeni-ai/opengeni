@@ -14,7 +14,7 @@ use std::future::ready;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use compute_engine::{EngineError, ErrorKind};
+use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_storage::store::ChunkStore;
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,27 @@ pub struct SavedFiles {
 /// Names one stored copy of a sandbox.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Receipt(pub String);
+
+/// What an archive came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Archive {
+    /// The copy is durable in the store and named by the receipt.
+    Stored(Receipt),
+    /// Cancelled before anything was published: the store's earlier copy,
+    /// if any, is still the one it names.
+    Cancelled,
+}
+
+impl Archive {
+    /// The receipt, unless the archive was cancelled.
+    #[must_use]
+    pub fn stored(self) -> Option<Receipt> {
+        match self {
+            Self::Stored(receipt) => Some(receipt),
+            Self::Cancelled => None,
+        }
+    }
+}
 
 /// Where a fetch puts what it brings back.
 #[derive(Clone, Debug)]
@@ -96,11 +117,18 @@ pub trait Store: Send + Sync + 'static {
 
     /// Copies `files` to the store, replacing any older copy, and returns
     /// only once the copy is durable.
+    ///
+    /// `cancel` is checked between pieces of work. Once it is seen, nothing
+    /// more is started, nothing is published, and [`Archive::Cancelled`] is
+    /// returned after the work already under way has finished, so nothing
+    /// is still writing when the call returns. A cancel that comes after the
+    /// copy was published is too late and changes nothing.
     fn archive(
         &self,
         id: Id,
         files: &SavedFiles,
-    ) -> impl Future<Output = Result<Receipt, EngineError>> + Send;
+        cancel: &CancellationToken,
+    ) -> impl Future<Output = Result<Archive, EngineError>> + Send;
 
     /// Whether the store still holds, intact, exactly the copy `receipt`
     /// names. Only `Ok(true)` permits deleting the local files.
@@ -156,7 +184,8 @@ impl Store for NoStore {
         &self,
         _: Id,
         _: &SavedFiles,
-    ) -> impl Future<Output = Result<Receipt, EngineError>> + Send {
+        _: &CancellationToken,
+    ) -> impl Future<Output = Result<Archive, EngineError>> + Send {
         ready(unconfigured("archive"))
     }
 
@@ -215,8 +244,14 @@ async fn blocking<T: Send + 'static>(
 }
 
 impl Store for Directory {
-    async fn archive(&self, id: Id, files: &SavedFiles) -> Result<Receipt, EngineError> {
+    async fn archive(
+        &self,
+        id: Id,
+        files: &SavedFiles,
+        cancel: &CancellationToken,
+    ) -> Result<Archive, EngineError> {
         let stored = self.dir(id);
+        let cancel = cancel.clone();
         let mut pairs = vec![(files.disk.clone(), "disk")];
         if let Some(memory) = &files.memory {
             pairs.push((memory.state.clone(), "state"));
@@ -238,6 +273,10 @@ impl Store for Directory {
             fs::create_dir_all(&staging)?;
             let mut summary = blake3::Hasher::new();
             for (local, name) in &pairs {
+                if cancel.is_cancelled() {
+                    fs::remove_dir_all(&staging)?;
+                    return Ok(Archive::Cancelled);
+                }
                 copy_sparse(local, &staging.join(name))?;
                 summary.update(name.as_bytes());
             }
@@ -249,6 +288,10 @@ impl Store for Directory {
             fs::write(staging.join(RECEIPT), &receipt)?;
             sync_file(&staging.join(RECEIPT))?;
             sync_file(&staging)?;
+            if cancel.is_cancelled() {
+                fs::remove_dir_all(&staging)?;
+                return Ok(Archive::Cancelled);
+            }
             if stored.exists() {
                 fs::rename(&stored, &old)?;
             }
@@ -257,7 +300,7 @@ impl Store for Directory {
             if old.exists() {
                 fs::remove_dir_all(&old)?;
             }
-            Ok(Receipt(receipt))
+            Ok(Archive::Stored(Receipt(receipt)))
         })
         .await
     }
@@ -337,5 +380,38 @@ impl Store for Directory {
             }
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_cancelled_directory_archive_keeps_the_earlier_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("disk");
+        fs::write(&disk, b"first").unwrap();
+        let files = SavedFiles {
+            disk: disk.clone(),
+            memory: None,
+            profile: None,
+        };
+        let store = Directory::new(dir.path().join("store"));
+        let id: Id = "00000000000000000000000000000004".parse().unwrap();
+        let first = store
+            .archive(id, &files, &CancellationToken::new())
+            .await
+            .unwrap()
+            .stored()
+            .unwrap();
+        fs::write(&disk, b"second").unwrap();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let outcome = store.archive(id, &files, &cancelled).await.unwrap();
+        assert_eq!(outcome, Archive::Cancelled);
+        assert!(store.verify(id, &first).await.unwrap());
+        assert_eq!(fs::read(store.dir(id).join("disk")).unwrap(), b"first");
+        assert!(!store.dir(id).with_extension("staging").exists());
     }
 }

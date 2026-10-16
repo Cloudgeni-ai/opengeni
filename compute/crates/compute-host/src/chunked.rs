@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use compute_engine::{EngineError, ErrorKind};
+use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_storage::Error as StorageError;
 use compute_storage::chunk::{ChunkRef, EncodedChunk};
 use compute_storage::manifest::{DiskManifest, Extent, ExtentSource};
@@ -44,7 +44,7 @@ use tokio::sync::{Mutex, Semaphore};
 pub use crate::image::CHUNK_BYTES;
 use crate::image::{Hash, ZERO, chunk_count, chunk_range, data_ranges, hash_chunks, overlaps};
 use crate::protocol::Id;
-use crate::store::{FetchInto, FetchedMemory, Receipt, SavedFiles, Store};
+use crate::store::{Archive, FetchInto, FetchedMemory, Receipt, SavedFiles, Store};
 
 /// Chunk uploads in flight per file.
 const UPLOADS_PER_FILE: usize = 32;
@@ -59,6 +59,10 @@ const TRANSFERS_PER_HOST: usize = 512;
 const ZSTD_LEVEL: i32 = 1;
 /// Version 2 added the learned wake profile.
 const HEAD_VERSION: u32 = 2;
+
+/// One chunk-sized piece of a stored file: where it is, and the chunk
+/// holding it (`None` for zeros).
+type Piece = (Range<u64>, Option<ChunkRef>);
 
 /// The manifests that make up one sandbox's stored copy.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,12 +258,18 @@ impl Chunked {
     /// file's per-chunk hashes, chunks equal to the earlier copy's are taken
     /// from it without being read, and every chunk read is checked against
     /// its hash.
+    ///
+    /// Once `cancel` fires, or a chunk fails, no further chunk is started;
+    /// the call returns after the chunks under way have finished, so nothing
+    /// is still writing. A cancelled file returns `None` and stores no
+    /// manifest.
     async fn put_file(
         &self,
         path: &Path,
         earlier: HashMap<u64, ChunkRef>,
         known: Option<Arc<Vec<Hash>>>,
-    ) -> Result<String, EngineError> {
+        cancel: &CancellationToken,
+    ) -> Result<Option<String>, EngineError> {
         const OP: &str = "archive";
         let file = File::open(path).map_err(|error| EngineError::io(OP, error))?;
         let length = file
@@ -279,47 +289,75 @@ impl Chunked {
         let data = data_ranges(&file, length).map_err(|error| EngineError::io(OP, error))?;
         let file = Arc::new(file);
         let earlier = Arc::new(earlier);
+        // Stops new chunks on a cancel or on the first failure.
+        let stop = cancel.child_token();
         let wanted = (0..chunk_count(length)).filter(|&index| match &known {
             Some(known) => known[index] != ZERO,
             None => overlaps(&data, &chunk_range(index, length)),
         });
-        let pieces: Vec<(Range<u64>, Option<ChunkRef>)> = stream::iter(wanted)
+        let results: Vec<Result<Option<Piece>, EngineError>> = stream::iter(wanted)
             .map(|index| {
                 let file = Arc::clone(&file);
                 let earlier = Arc::clone(&earlier);
                 let chunks = self.chunks.clone();
                 let transfers = Arc::clone(&self.transfers);
                 let expected = known.as_ref().map(|known| known[index]);
+                let stop = stop.clone();
                 async move {
+                    if stop.is_cancelled() {
+                        return Ok(None);
+                    }
                     let range = chunk_range(index, length);
                     let at = range.start;
                     let read = range.clone();
-                    let prepared = tokio::task::spawn_blocking(move || {
-                        prepare(&file, read, earlier.get(&at), expected)
-                    })
-                    .await
-                    .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
-                    .map_err(|error| storage_error(OP, error))?;
-                    let reference = match prepared {
-                        Prepared::Zero => None,
-                        Prepared::Known(reference) => Some(reference),
-                        Prepared::New(chunk) => {
-                            let _permit = transfers.acquire_owned().await.map_err(|error| {
-                                EngineError::caused_by(ErrorKind::Transient, OP, error)
-                            })?;
-                            chunks
-                                .put_chunk(&chunk)
-                                .await
-                                .map_err(|error| storage_error(OP, error))?;
-                            Some(chunk.reference)
+                    let stored = async {
+                        let prepared = tokio::task::spawn_blocking(move || {
+                            prepare(&file, read, earlier.get(&at), expected)
+                        })
+                        .await
+                        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
+                        .map_err(|error| storage_error(OP, error))?;
+                        Ok::<_, EngineError>(match prepared {
+                            Prepared::Zero => None,
+                            Prepared::Known(reference) => Some(reference),
+                            Prepared::New(chunk) => {
+                                let _permit = transfers.acquire_owned().await.map_err(|error| {
+                                    EngineError::caused_by(ErrorKind::Transient, OP, error)
+                                })?;
+                                chunks
+                                    .put_chunk(&chunk)
+                                    .await
+                                    .map_err(|error| storage_error(OP, error))?;
+                                Some(chunk.reference)
+                            }
+                        })
+                    }
+                    .await;
+                    match stored {
+                        Ok(reference) => Ok(Some((range, reference))),
+                        Err(error) => {
+                            stop.cancel();
+                            Err(error)
                         }
-                    };
-                    Ok::<_, EngineError>((range, reference))
+                    }
                 }
             })
             .buffered(UPLOADS_PER_FILE)
-            .try_collect()
-            .await?;
+            .collect()
+            .await;
+        // A failure outranks a cancel: chunks skipped after it are not a
+        // cancel.
+        let mut pieces = Vec::with_capacity(results.len());
+        let mut skipped = false;
+        for result in results {
+            match result? {
+                Some(piece) => pieces.push(piece),
+                None => skipped = true,
+            }
+        }
+        if skipped || cancel.is_cancelled() {
+            return Ok(None);
+        }
         let manifest = DiskManifest {
             version: 1,
             disk_len: length,
@@ -330,6 +368,7 @@ impl Chunked {
         self.chunks
             .put_manifest(&manifest)
             .await
+            .map(Some)
             .map_err(|error| storage_error(OP, error))
     }
 
@@ -432,7 +471,12 @@ impl Chunked {
 }
 
 impl Store for Chunked {
-    async fn archive(&self, id: Id, files: &SavedFiles) -> Result<Receipt, EngineError> {
+    async fn archive(
+        &self,
+        id: Id,
+        files: &SavedFiles,
+        cancel: &CancellationToken,
+    ) -> Result<Archive, EngineError> {
         const OP: &str = "archive";
         let earlier = match self.head(OP, id).await {
             Ok(head) => head,
@@ -447,16 +491,21 @@ impl Store for Chunked {
             self.earlier(memory_before.map(|memory| memory.state.as_str())),
             self.earlier(memory_before.map(|memory| memory.memory.as_str())),
         );
-        let disk = self.put_file(&files.disk, disk_before, None);
+        let disk = self.put_file(&files.disk, disk_before, None, cancel);
         let memory = async {
             let Some(image) = &files.memory else {
-                return Ok(None);
+                return Ok(Some(None));
             };
-            let (state, memory) = tokio::try_join!(
-                self.put_file(&image.state, state_before, None),
-                self.put_file(&image.memory, memory_before, image.chunks.clone()),
-            )?;
-            Ok(Some(MemoryHead { state, memory }))
+            // Both run to the end, so neither is still writing when the
+            // other fails.
+            let (state, memory) = tokio::join!(
+                self.put_file(&image.state, state_before, None, cancel),
+                self.put_file(&image.memory, memory_before, image.chunks.clone(), cancel),
+            );
+            Ok(match (state?, memory?) {
+                (Some(state), Some(memory)) => Some(Some(MemoryHead { state, memory })),
+                _ => None,
+            })
         };
         let profile = async {
             let Some(path) = &files.profile else {
@@ -476,7 +525,13 @@ impl Store for Chunked {
                 .map_err(|error| storage_error(OP, error))?;
             Ok(Some(chunk.reference))
         };
-        let (disk, memory, profile) = tokio::try_join!(disk, memory, profile)?;
+        let (disk, memory, profile) = tokio::join!(disk, memory, profile);
+        let (Some(disk), Some(memory), profile) = (disk?, memory?, profile?) else {
+            return Ok(Archive::Cancelled);
+        };
+        if cancel.is_cancelled() {
+            return Ok(Archive::Cancelled);
+        }
         let head = Head {
             version: HEAD_VERSION,
             disk,
@@ -490,7 +545,7 @@ impl Store for Chunked {
             .put_pointer(&id.to_string(), bytes)
             .await
             .map_err(|error| storage_error(OP, error))?;
-        Ok(receipt)
+        Ok(Archive::Stored(receipt))
     }
 
     async fn verify(&self, id: Id, receipt: &Receipt) -> Result<bool, EngineError> {
@@ -1025,8 +1080,14 @@ mod tests {
         let mut base_files = files(dir.path(), false);
         base_files.disk.clone_from(&base);
         store
-            .archive(id("00000000000000000000000000000001"), &base_files)
+            .archive(
+                id("00000000000000000000000000000001"),
+                &base_files,
+                &CancellationToken::new(),
+            )
             .await
+            .unwrap()
+            .stored()
             .unwrap();
         let base_chunks: Vec<_> = backend
             .list(Some(&ObjectPath::from("t/chunks")))
@@ -1048,7 +1109,12 @@ mod tests {
             ],
         );
         let sandbox = id("00000000000000000000000000000002");
-        store.archive(sandbox, &saved).await.unwrap();
+        store
+            .archive(sandbox, &saved, &CancellationToken::new())
+            .await
+            .unwrap()
+            .stored()
+            .unwrap();
         // Only the base's copy of the unchanged chunks remains, locally.
         for location in &base_chunks {
             backend.delete(location).await.unwrap();
@@ -1108,7 +1174,12 @@ mod tests {
         let backend = Arc::new(InMemory::new());
         let store = Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")));
         let sandbox = id("0123456789abcdef0123456789abcdef");
-        let first = store.archive(sandbox, &saved).await.unwrap();
+        let first = store
+            .archive(sandbox, &saved, &CancellationToken::new())
+            .await
+            .unwrap()
+            .stored()
+            .unwrap();
         let chunks = objects(&backend, "t/chunks").await;
         assert_eq!(
             chunks, 5,
@@ -1124,7 +1195,12 @@ mod tests {
             big,
             &[(5, b"disk"), (2 * CHUNK_BYTES + 7, b"far")],
         );
-        let second = store.archive(sandbox, &saved).await.unwrap();
+        let second = store
+            .archive(sandbox, &saved, &CancellationToken::new())
+            .await
+            .unwrap()
+            .stored()
+            .unwrap();
         assert_eq!(objects(&backend, "t/chunks").await, chunks + 1);
         assert!(!store.verify(sandbox, &first).await.unwrap());
         assert!(store.verify(sandbox, &second).await.unwrap());
@@ -1186,7 +1262,12 @@ mod tests {
             ObjectPath::from("t"),
         ));
         let sandbox = id("00000000000000000000000000000002");
-        store.archive(sandbox, &saved).await.unwrap();
+        store
+            .archive(sandbox, &saved, &CancellationToken::new())
+            .await
+            .unwrap()
+            .stored()
+            .unwrap();
         // Unchanged per the map: archived again without reading, so even an
         // unreadable memory file does not matter.
         fs::remove_file(&image.memory).unwrap();
@@ -1195,10 +1276,18 @@ mod tests {
         stale[3] = [7; 32];
         saved.memory.as_mut().unwrap().chunks = Some(Arc::new(stale));
         // ...but a chunk the map says changed is read and must match it.
-        let error = store.archive(sandbox, &saved).await.unwrap_err();
+        let error = store
+            .archive(sandbox, &saved, &CancellationToken::new())
+            .await
+            .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Fatal);
         saved.memory.as_mut().unwrap().chunks = Some(map);
-        store.archive(sandbox, &saved).await.unwrap();
+        store
+            .archive(sandbox, &saved, &CancellationToken::new())
+            .await
+            .unwrap()
+            .stored()
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1211,7 +1300,12 @@ mod tests {
             ObjectPath::from("t"),
         ));
         let sandbox = id("00000000000000000000000000000001");
-        store.archive(sandbox, &saved).await.unwrap();
+        store
+            .archive(sandbox, &saved, &CancellationToken::new())
+            .await
+            .unwrap()
+            .stored()
+            .unwrap();
         let restored = tempfile::tempdir().unwrap();
         let error = store
             .fetch(sandbox, &into(restored.path(), true))
@@ -1225,5 +1319,49 @@ mod tests {
         let hash = blake3::hash(b"x");
         assert_eq!(hash_from_hex(hash.to_hex().as_str()), Ok(*hash.as_bytes()));
         assert!(hash_from_hex("zz").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_archive_publishes_nothing_and_keeps_the_earlier_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = files(dir.path(), true);
+        sparse(&saved.disk, 4 * CHUNK_BYTES, &[(0, b"disk")]);
+        let image = saved.memory.clone().unwrap();
+        sparse(&image.state, 10, &[(0, b"s")]);
+        sparse(&image.memory, 2 * CHUNK_BYTES, &[(0, b"one")]);
+        let backend = Arc::new(InMemory::new());
+        let store = Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")));
+        let sandbox = id("00000000000000000000000000000003");
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+
+        // Nothing stored yet: a cancelled archive writes nothing at all.
+        let outcome = store.archive(sandbox, &saved, &cancelled).await.unwrap();
+        assert_eq!(outcome, Archive::Cancelled);
+        assert_eq!(objects(&backend, "t").await, 0);
+
+        let first = store
+            .archive(sandbox, &saved, &CancellationToken::new())
+            .await
+            .unwrap()
+            .stored()
+            .unwrap();
+        let before = objects(&backend, "t").await;
+        // A changed sandbox whose archive is cancelled leaves the store
+        // naming, and holding, the earlier copy.
+        sparse(&saved.disk, 4 * CHUNK_BYTES, &[(3 * CHUNK_BYTES, b"new")]);
+        let outcome = store.archive(sandbox, &saved, &cancelled).await.unwrap();
+        assert_eq!(outcome, Archive::Cancelled);
+        assert_eq!(objects(&backend, "t").await, before);
+        assert!(store.verify(sandbox, &first).await.unwrap());
+
+        let second = store
+            .archive(sandbox, &saved, &CancellationToken::new())
+            .await
+            .unwrap()
+            .stored()
+            .unwrap();
+        assert_ne!(first, second);
+        assert!(store.verify(sandbox, &second).await.unwrap());
     }
 }

@@ -39,7 +39,7 @@ use crate::lazy::{ChunkSource, Fetcher, Hydration, Memory, Paging, WakeProfile};
 use crate::protocol::Id;
 use crate::restore_notice::tell_restored;
 use crate::state::{Change, Disk, Record, Records, StateError};
-use crate::store::{FetchInto, FetchedMemory, Receipt, SavedFiles, SavedImage, Store};
+use crate::store::{Archive, FetchInto, FetchedMemory, Receipt, SavedFiles, SavedImage, Store};
 
 /// How long a restore waits for the guest to acknowledge the restore notice.
 /// A guest that listens answers in about a millisecond.
@@ -950,8 +950,12 @@ impl<E: Engine, S: Store> Job<E, S> {
             }),
             profile: profile.exists().then_some(profile),
         };
-        let receipt = match self.store.archive(self.id, &files).await {
-            Ok(receipt) => receipt,
+        // The VM stays paused and owned by this step until it returns, and a
+        // cancelled archive returns only once nothing is still reading the
+        // files, so the disk read here is the disk as it was saved.
+        let receipt = match self.store.archive(self.id, &files, &self.cancel).await {
+            Ok(Archive::Stored(receipt)) => receipt,
+            Ok(Archive::Cancelled) => return Outcome::Cancelled,
             Err(error) => return failure(&error),
         };
         let marker = Archived {
