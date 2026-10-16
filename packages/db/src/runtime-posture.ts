@@ -1397,7 +1397,13 @@ export const SUBSCRIPTION_PLAN_RUNTIME_ROUTINES = [
   "begin_plan_credit_settlement(uuid)",
 ] as const;
 
+export const BILLING_SUBSCRIPTION_OPERATION_ROUTINES = [
+  "begin_billing_subscription_operation(uuid, uuid, text, jsonb, jsonb)",
+  "complete_billing_subscription_operation(uuid, uuid, jsonb)",
+] as const;
+
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  ...BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
   ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
   "scheduled_task_is_exhausted(uuid)",
   "lock_live_native_original_origin_v2(jsonb)",
@@ -1538,6 +1544,7 @@ export const FORCE_RLS_TABLES = [
   "automation_trigger_revisions",
   "automation_triggers",
   "billing_customers",
+  "billing_subscription_operations",
   "browser_identities",
   "browser_revision_components",
   "browser_revisions",
@@ -2265,6 +2272,7 @@ export const SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES: Readonly<Record<string, read
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
+  "billing_subscription_operations",
   "codex_turn_source_bindings",
   "company_profile_activation_events",
   "company_profile_heads",
@@ -3720,6 +3728,15 @@ export function evaluateRuntimeDatabasePosture(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
           );
         }
+      }
+    } else if (
+      (BILLING_SUBSCRIPTION_OPERATION_ROUTINES as readonly string[]).includes(routine.name)
+    ) {
+      const table = tableByName.get("billing_subscription_operations");
+      if ((!options.protectedTables || table) && (!table || table.owner !== routine.owner)) {
+        violations.push(
+          `subscription operation capability ${routine.name} authority table owner does not match`,
+        );
       }
     } else if ((SUBSCRIPTION_PLAN_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)) {
       const authorityTables = [

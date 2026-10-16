@@ -1,8 +1,9 @@
 import { describe, expect, mock, test } from "bun:test";
-import type Stripe from "stripe";
+import Stripe from "stripe";
 import { Hono } from "hono";
 import { testSettings } from "@opengeni/testing";
 import type { SubscriptionPlan } from "@opengeni/contracts";
+import type { BillingSubscriptionOperation } from "@opengeni/db";
 import {
   StripeSubscriptions,
   subscriptionCheckoutParams,
@@ -107,6 +108,7 @@ function invoice(subscriptionId = "sub_main", invoiceId = "in_main"): Stripe.Inv
     created: 1000,
     customer: "cus_org",
     status: "paid",
+    status_transitions: { paid_at: 1000 },
     billing_reason: "subscription_cycle",
     parent: { subscription_details: { subscription: subscriptionId } },
   } as Stripe.Invoice;
@@ -141,6 +143,7 @@ function fixture(enabled = true) {
   let state: StoredSubscriptionPlan | null = { plan_key: "free", stripe_subscription_id: null };
   let openPeriod: string | null = "free-period";
   const receipts = new Set<string>();
+  const operations = new Map<string, BillingSubscriptionOperation>();
   const timeline: string[] = [];
   let queue = Promise.resolve();
   let updateFails = false;
@@ -171,6 +174,26 @@ function fixture(enabled = true) {
       onLock = undefined;
       try {
         return await run({
+          operation: async (key) => structuredClone(operations.get(key) ?? null),
+          beginOperation: async (input) => {
+            if ([...operations.values()].some((operation) => !operation.result))
+              throw new Error("pending subscription operation");
+            const operation: BillingSubscriptionOperation = {
+              account_id: accountId,
+              operation_key: input.operationKey,
+              kind: input.kind,
+              request: input.request,
+              intent: input.intent,
+              result: null,
+              created_at: new Date().toISOString(),
+              completed_at: null,
+            };
+            operations.set(input.operationKey, operation);
+            return structuredClone(operation);
+          },
+          completeOperation: async (key, result) => {
+            Object.assign(operations.get(key)!, { result, completed_at: new Date().toISOString() });
+          },
           exists: async () => true,
           state: async () => state,
           customer: async () => "cus_org",
@@ -203,7 +226,8 @@ function fixture(enabled = true) {
       ),
       list: mock(() => listed([...subscriptions.values()].map((s) => structuredClone(s)))),
       update: mock(async (subscriptionId: string, input: Stripe.SubscriptionUpdateParams) => {
-        if (updateFails) throw new Error("card declined");
+        if (updateFails)
+          throw new Stripe.errors.StripeCardError({ message: "card declined", type: "card_error" });
         const sub = subscriptions.get(subscriptionId)!;
         if (input.metadata) Object.assign(sub.metadata, input.metadata);
         if (input.items) {
@@ -235,6 +259,7 @@ function fixture(enabled = true) {
       ),
     },
     subscriptionSchedules: {
+      list: mock(() => listed([])),
       create: mock(async () => {
         subscriptions.get("sub_main")!.schedule = "sub_sched";
         return { id: "sub_sched", current_phase: { start_date: 1000, end_date: 2000 } };
@@ -280,6 +305,7 @@ function fixture(enabled = true) {
     payments,
     charges,
     receipts,
+    operations,
     timeline,
     save,
     replace,
@@ -523,7 +549,7 @@ describe("upgrade, period-end downgrade and cancellation", () => {
     expect(f.receipts.size).toBe(2);
     await expect(
       f.service.upgrade({ accountId, planKey: "pro", idempotencyKey: requestKey }),
-    ).rejects.toThrow("already used for a different plan");
+    ).rejects.toThrow("already used for a different request");
     await expect(
       f.service.upgrade({ accountId, planKey: "max", idempotencyKey: crypto.randomUUID() }),
     ).rejects.toThrow("higher-priced");
@@ -540,6 +566,11 @@ describe("upgrade, period-end downgrade and cancellation", () => {
     ).rejects.toThrow("card declined");
     expect(f.save.mock.calls).toHaveLength(before);
     expect(f.receipts.size).toBe(1);
+    expect(f.operations.get(requestKey)?.result).toEqual({ error: "card declined", status: 422 });
+    await expect(
+      f.service.upgrade({ accountId, planKey: "max", idempotencyKey: requestKey }),
+    ).rejects.toThrow("card declined");
+    expect(f.stripe.subscriptions.update).toHaveBeenCalledTimes(1);
   });
 
   test("downgrade schedules next period and cancellation preserves the paid period", async () => {
@@ -572,10 +603,10 @@ describe("upgrade, period-end downgrade and cancellation", () => {
       proration_behavior: "none",
     });
     expect(f.replace).not.toHaveBeenCalled();
-    const canceled = await f.service.cancel({ accountId, idempotencyKey: requestKey });
+    const canceled = await f.service.cancel({ accountId, idempotencyKey: crypto.randomUUID() });
     expect(canceled.cancelAtPeriodEnd).toBe(true);
     expect(f.stripe.subscriptionSchedules.release).toHaveBeenCalledTimes(1);
-    expect(f.stripe.subscriptions.update.mock.calls.at(-1)![1]).toEqual({
+    expect(f.stripe.subscriptions.update.mock.calls.at(-1)![1]).toMatchObject({
       cancel_at_period_end: true,
     });
     expect(f.timeline).not.toContain("expire");
@@ -629,7 +660,11 @@ describe("duplicate subscriptions", () => {
     f.add(subscription({ created: 200 }));
     f.setState({ plan_key: "pro", stripe_subscription_id: "sub_main" });
     const old = f.add(subscription({ id: "sub_old_active", created: 1 }));
-    f.invoices.set("in_historical", { ...invoice(old.id, "in_historical"), created: 100 });
+    f.invoices.set("in_historical", {
+      ...invoice(old.id, "in_historical"),
+      created: 100,
+      status_transitions: { ...invoice().status_transitions, paid_at: 100 },
+    });
     f.payments.set("in_historical", [
       {
         payment: { type: "payment_intent", payment_intent: "pi_historical" },
@@ -648,6 +683,51 @@ describe("duplicate subscriptions", () => {
     const old = f.add(subscription({ id: "sub_old", status: "canceled" }));
     await f.service.handleEvent(event("customer.subscription.deleted", old));
     expect(f.save).not.toHaveBeenCalled();
+    expect(f.stripe.refunds.create).not.toHaveBeenCalled();
+  });
+
+  test("funding timestamps, not invoice creation, separate historical payments from late duplicate funding", async () => {
+    const f = fixture();
+    f.add(subscription({ created: 200 }));
+    f.setState({ plan_key: "pro", stripe_subscription_id: "sub_main" });
+    const old = f.add(subscription({ id: "sub_old_active", created: 1 }));
+    const paidInvoice = invoice(old.id, "in_mixed");
+    paidInvoice.created = 100;
+    paidInvoice.status_transitions.paid_at = 300;
+    f.invoices.set(paidInvoice.id, paidInvoice);
+    f.payments.set(paidInvoice.id, [
+      {
+        payment: { type: "charge", charge: "ch_historical" },
+        status_transitions: { paid_at: 150 },
+      },
+      { payment: { type: "charge", charge: "ch_late" }, status_transitions: { paid_at: 300 } },
+    ] as Stripe.InvoicePayment[]);
+    for (const chargeId of ["ch_historical", "ch_late"])
+      f.charges.set(chargeId, {
+        id: chargeId,
+        amount: 2000,
+        amount_refunded: 0,
+      } as Stripe.Charge);
+    await f.service.handleEvent(event("invoice.paid", paidInvoice));
+    expect(f.charges.get("ch_historical")?.amount_refunded).toBe(0);
+    expect(f.charges.get("ch_late")?.amount_refunded).toBe(2000);
+    await f.service.handleEvent(event("invoice.paid", paidInvoice));
+    expect(f.stripe.refunds.create).toHaveBeenCalledTimes(1);
+  });
+
+  test("missing funding timestamps never turn invoice.created into payment evidence", async () => {
+    const f = fixture();
+    f.add();
+    const loser = f.add(subscription({ id: "sub_duplicate", created: 200 }));
+    const paidInvoice = f.invoices.get("in_sub_duplicate")!;
+    paidInvoice.status_transitions.paid_at = null;
+    f.payments.set(paidInvoice.id, [
+      { payment: { type: "charge", charge: "ch_duplicate" } } as Stripe.InvoicePayment,
+    ]);
+    await expect(f.service.handleEvent(event("invoice.paid", paidInvoice))).rejects.toThrow(
+      "authoritative funding timestamp",
+    );
+    expect(loser.status).toBe("canceled");
     expect(f.stripe.refunds.create).not.toHaveBeenCalled();
   });
 });

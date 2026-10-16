@@ -13301,6 +13301,30 @@ export const subscriptionPlanCatalogRevisions = opengeniPrivateSchema.table(
   },
 );
 
+export const billingSubscriptionOperations = pgTable(
+  "billing_subscription_operations",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    operationKey: uuid("operation_key").notNull(),
+    kind: text("kind").notNull(),
+    request: jsonb("request").$type<Record<string, unknown>>().notNull(),
+    intent: jsonb("intent").$type<Record<string, unknown>>().notNull(),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.accountId, table.operationKey] }),
+    pending: uniqueIndex("billing_subscription_operations_pending_idx")
+      .on(table.accountId)
+      .where(sql`${table.completedAt} is null`),
+  }),
+);
+
 export const organizationPlans = pgTable("organization_plans", {
   accountId: uuid("account_id")
     .primaryKey()

@@ -4,7 +4,8 @@ import type {
   SubscriptionPlan,
 } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
-import type Stripe from "stripe";
+import Stripe from "stripe";
+import type { BillingSubscriptionOperationKind } from "@opengeni/db";
 import type { SubscriptionAccountStore, SubscriptionStore } from "./billing-subscription-store";
 
 const terminal = (subscription: Stripe.Subscription) =>
@@ -13,6 +14,24 @@ const liveSubscription = (subscription: Stripe.Subscription) =>
   !terminal(subscription) && subscription.status !== "unpaid";
 const id = (value: string | { id: string } | null | undefined) =>
   typeof value === "string" ? value : value?.id;
+
+type MutationIntent = {
+  subscriptionId: string;
+  customerId: string;
+  itemId: string;
+  priceId: string;
+  periodStart: number;
+  periodEnd: number;
+  scheduleId: string | null;
+  phaseStart: number;
+  planKey: string;
+  targetPriceId: string | null;
+};
+type MutationResult =
+  | { response: BillingSubscriptionChange }
+  | { error: string; status: 409 | 422 };
+
+class SubscriptionMutationRejected extends Error {}
 
 /** Enterprise is assigned only by operators, never inferred from an embedder. */
 export function selfServicePlan(plan: SubscriptionPlan): boolean {
@@ -182,6 +201,133 @@ export class StripeSubscriptions {
     return subscription;
   }
 
+  /** Two independent commits are essential: provider success cannot roll back
+   * the immutable target when local reconciliation fails. Replays resolve the
+   * receipt before looking at the organization's current subscription/catalog. */
+  private async mutate(
+    kind: BillingSubscriptionOperationKind,
+    input: { accountId: string; idempotencyKey: string; planKey?: string },
+    prepare: (tx: SubscriptionAccountStore) => Promise<MutationIntent>,
+    execute: (
+      tx: SubscriptionAccountStore,
+      intent: MutationIntent,
+      key: string,
+    ) => Promise<BillingSubscriptionChange>,
+  ): Promise<BillingSubscriptionChange> {
+    this.requireEnabled();
+    const request = input.planKey === undefined ? {} : { planKey: input.planKey };
+    await this.store.locked(input.accountId, async (tx) => {
+      const existing = await tx.operation(input.idempotencyKey);
+      if (existing) {
+        if (existing.kind !== kind || JSON.stringify(existing.request) !== JSON.stringify(request))
+          throw new HTTPException(409, {
+            message: "idempotency key was already used for a different request",
+          });
+        return;
+      }
+      await tx.beginOperation({
+        operationKey: input.idempotencyKey,
+        kind,
+        request,
+        intent: await prepare(tx),
+      });
+    });
+    const outcome = await this.store.locked(
+      input.accountId,
+      async (tx): Promise<MutationResult> => {
+        const receipt = await tx.operation(input.idempotencyKey);
+        if (!receipt) throw new Error("Committed subscription operation intent is missing");
+        if (receipt.result) return receipt.result as MutationResult;
+        let result: MutationResult;
+        try {
+          result = {
+            response: await execute(
+              tx,
+              receipt.intent as MutationIntent,
+              `subscription-${kind}:${input.accountId}:${input.idempotencyKey}`,
+            ),
+          };
+        } catch (error) {
+          // Only definitive provider rejection or a pre-mutation conflict can
+          // finish an unsuccessful intent. Transport/DB errors remain pending.
+          if (error instanceof HTTPException && (error.status === 409 || error.status === 422))
+            result = { error: error.message, status: error.status };
+          else if (error instanceof SubscriptionMutationRejected)
+            result = { error: error.message, status: 422 };
+          else throw error;
+        }
+        await tx.completeOperation(input.idempotencyKey, result);
+        return result;
+      },
+    );
+    if ("error" in outcome) throw new HTTPException(outcome.status, { message: outcome.error });
+    return outcome.response;
+  }
+
+  private async providerMutation<T>(run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      if (
+        error instanceof Stripe.errors.StripeCardError ||
+        error instanceof Stripe.errors.StripeInvalidRequestError
+      )
+        throw new SubscriptionMutationRejected(error.message);
+      throw error;
+    }
+  }
+
+  private intent(
+    subscription: Stripe.Subscription,
+    planKey: string,
+    targetPriceId: string | null,
+  ): MutationIntent {
+    const item = subscriptionItem(subscription);
+    return {
+      subscriptionId: subscription.id,
+      customerId: id(subscription.customer)!,
+      itemId: item.id,
+      priceId: item.price.id,
+      periodStart: item.current_period_start,
+      periodEnd: item.current_period_end,
+      scheduleId: id(subscription.schedule) ?? null,
+      phaseStart: item.current_period_start,
+      planKey,
+      targetPriceId,
+    };
+  }
+
+  private async target(accountId: string, intent: MutationIntent) {
+    const subscription = await this.stripe.subscriptions.retrieve(intent.subscriptionId);
+    if (
+      subscription.metadata.opengeni_account_id !== accountId ||
+      id(subscription.customer) !== intent.customerId
+    )
+      throw new Error("Subscription operation target ownership changed");
+    return subscription;
+  }
+
+  private async unchanged(
+    tx: SubscriptionAccountStore,
+    subscription: Stripe.Subscription,
+    intent: MutationIntent,
+  ) {
+    const item = subscriptionItem(subscription);
+    const state = await tx.state();
+    if (
+      state?.plan_key === "enterprise" ||
+      state?.stripe_subscription_id !== intent.subscriptionId ||
+      !liveSubscription(subscription) ||
+      item.id !== intent.itemId ||
+      item.price.id !== intent.priceId ||
+      item.current_period_start !== intent.periodStart ||
+      item.current_period_end !== intent.periodEnd
+    )
+      throw new HTTPException(409, {
+        message: "original subscription changed; start a new operation",
+      });
+  }
+
   /** Stripe fails the entire update for an incomplete immediate payment. Only
    * its paid invoice may replace the old allowance, never the update itself. */
   async upgrade(input: {
@@ -189,57 +335,72 @@ export class StripeSubscriptions {
     planKey: string;
     idempotencyKey: string;
   }): Promise<BillingSubscriptionChange> {
-    this.requireEnabled();
-    const target = await this.paidPlan(input.planKey);
-    return await this.store.locked(input.accountId, async (tx) => {
-      const subscription = await this.current(tx, input.accountId);
-      const item = subscriptionItem(subscription);
-      const previous = (await this.store.catalog()).plans.find(
-        (plan) => plan.stripePriceId === item.price.id,
-      );
-      const key = `subscription-upgrade:${input.accountId}:${input.idempotencyKey}`;
-      const replay = subscription.metadata.opengeni_last_upgrade_key === key;
-      if (replay && item.price.id !== target.stripePriceId) {
-        throw new HTTPException(409, {
-          message: "idempotency key was already used for a different plan",
-        });
-      }
-      if (!previous || (!replay && target.monthlyPriceMicros! <= previous.monthlyPriceMicros!)) {
-        throw new HTTPException(422, { message: "upgrade requires a higher-priced plan" });
-      }
-      if (
-        !replay &&
-        (subscription.schedule ||
+    return await this.mutate(
+      "upgrade",
+      input,
+      async (tx) => {
+        const target = await this.paidPlan(input.planKey);
+        const subscription = await this.current(tx, input.accountId);
+        const item = subscriptionItem(subscription);
+        const previous = (await this.store.catalog()).plans.find(
+          (plan) => plan.stripePriceId === item.price.id,
+        );
+        if (!previous || target.monthlyPriceMicros! <= previous.monthlyPriceMicros!) {
+          throw new HTTPException(422, { message: "upgrade requires a higher-priced plan" });
+        }
+        if (
+          subscription.schedule ||
           subscription.cancel_at_period_end ||
-          subscription.status !== "active")
-      ) {
-        throw new HTTPException(409, {
-          message: "manage the pending change or payment in the billing portal first",
-        });
-      }
-      // Provider metadata also prevents a retry after Stripe's 24h request-key
-      // cache expires from resetting the billing anchor and buying twice.
-      const updated = replay
-        ? subscription
-        : await this.stripe.subscriptions.update(
-            subscription.id,
-            {
-              items: [{ id: item.id, price: target.stripePriceId!, quantity: 1 }],
-              billing_cycle_anchor: "now",
-              proration_behavior: "always_invoice",
-              payment_behavior: "error_if_incomplete",
-              metadata: { opengeni_last_upgrade_key: key },
-            },
-            { idempotencyKey: key },
-          );
-      await this.synchronize(tx, input.accountId, subscription.id, id(updated.latest_invoice));
-      return {
-        subscriptionId: subscription.id,
-        planKey: target.key,
-        effectiveAt: new Date(subscriptionItem(updated).current_period_start * 1000).toISOString(),
-        cancelAtPeriodEnd: false,
-      };
-    });
+          subscription.status !== "active"
+        ) {
+          throw new HTTPException(409, {
+            message: "manage the pending change or payment in the billing portal first",
+          });
+        }
+        return this.intent(subscription, target.key, target.stripePriceId!);
+      },
+      async (tx, intent, key) => {
+        const subscription = await this.target(input.accountId, intent);
+        const replay = subscription.metadata.opengeni_last_upgrade_key === key;
+        if (!replay) {
+          await this.unchanged(tx, subscription, intent);
+          if (
+            subscription.schedule ||
+            subscription.cancel_at_period_end ||
+            subscription.status !== "active"
+          )
+            throw new HTTPException(409, {
+              message: "original subscription has a pending change or payment",
+            });
+        }
+        // Provider metadata also prevents a retry after Stripe's 24h request-key
+        // cache expires from resetting the billing anchor and buying twice.
+        const updated = replay
+          ? subscription
+          : await this.providerMutation(() =>
+              this.stripe.subscriptions.update(
+                subscription.id,
+                {
+                  items: [{ id: intent.itemId, price: intent.targetPriceId!, quantity: 1 }],
+                  billing_cycle_anchor: "now",
+                  proration_behavior: "always_invoice",
+                  payment_behavior: "error_if_incomplete",
+                  metadata: { opengeni_last_upgrade_key: key },
+                },
+                { idempotencyKey: key },
+              ),
+            );
+        await this.synchronize(tx, input.accountId, subscription.id, id(updated.latest_invoice));
+        return {
+          subscriptionId: subscription.id,
+          planKey: intent.planKey,
+          effectiveAt: new Date(
+            subscriptionItem(updated).current_period_start * 1000,
+          ).toISOString(),
+          cancelAtPeriodEnd: false,
+        };
+      },
+    );
   }
 
   async change(input: {
@@ -247,94 +408,150 @@ export class StripeSubscriptions {
     planKey: string;
     idempotencyKey: string;
   }): Promise<BillingSubscriptionChange> {
-    this.requireEnabled();
-    const target = await this.paidPlan(input.planKey);
-    return await this.store.locked(input.accountId, async (tx) => {
-      const subscription = await this.current(tx, input.accountId);
-      const item = subscriptionItem(subscription);
-      const previous = (await this.store.catalog()).plans.find(
-        (plan) => plan.stripePriceId === item.price.id,
-      );
-      if (
-        !previous ||
-        target.monthlyPriceMicros! >= previous.monthlyPriceMicros! ||
-        subscription.cancel_at_period_end
-      ) {
-        throw new HTTPException(422, {
-          message: "only a lower-priced plan can be scheduled at period end",
-        });
-      }
-      const key = `subscription-change:${input.accountId}:${input.idempotencyKey}`;
-      const schedule = subscription.schedule
-        ? await this.stripe.subscriptionSchedules.retrieve(id(subscription.schedule)!)
-        : await this.stripe.subscriptionSchedules.create(
-            { from_subscription: subscription.id },
+    return await this.mutate(
+      "change",
+      input,
+      async (tx) => {
+        const target = await this.paidPlan(input.planKey);
+        const subscription = await this.current(tx, input.accountId);
+        const item = subscriptionItem(subscription);
+        const previous = (await this.store.catalog()).plans.find(
+          (plan) => plan.stripePriceId === item.price.id,
+        );
+        if (
+          !previous ||
+          target.monthlyPriceMicros! >= previous.monthlyPriceMicros! ||
+          subscription.cancel_at_period_end
+        ) {
+          throw new HTTPException(422, {
+            message: "only a lower-priced plan can be scheduled at period end",
+          });
+        }
+        const intent = this.intent(subscription, target.key, target.stripePriceId!);
+        if (intent.scheduleId) {
+          const schedule = await this.stripe.subscriptionSchedules.retrieve(intent.scheduleId);
+          if (!schedule.current_phase)
+            throw new HTTPException(409, { message: "subscription schedule has no current phase" });
+          intent.phaseStart = schedule.current_phase.start_date;
+        }
+        return intent;
+      },
+      async (tx, intent, key) => {
+        const subscription = await this.target(input.accountId, intent);
+        const response = {
+          subscriptionId: intent.subscriptionId,
+          planKey: intent.planKey,
+          effectiveAt: new Date(intent.periodEnd * 1000).toISOString(),
+          cancelAtPeriodEnd: false,
+        };
+        let schedule: Stripe.SubscriptionSchedule | undefined;
+        const scheduleId = intent.scheduleId ?? id(subscription.schedule);
+        if (scheduleId) schedule = await this.stripe.subscriptionSchedules.retrieve(scheduleId);
+        // A successful schedule update can complete/release before a DB retry.
+        // Its marker is durable even after Stripe's request-key cache expires.
+        if (!schedule) {
+          for await (const candidate of this.stripe.subscriptionSchedules.list({
+            customer: intent.customerId,
+            limit: 100,
+          })) {
+            if (
+              candidate.metadata?.opengeni_last_change_key === key &&
+              (id(candidate.subscription) === intent.subscriptionId ||
+                id(candidate.released_subscription) === intent.subscriptionId)
+            ) {
+              schedule = candidate;
+              break;
+            }
+          }
+        }
+        if (schedule?.metadata?.opengeni_last_change_key === key) return response;
+        await this.unchanged(tx, subscription, intent);
+        if (
+          subscription.cancel_at_period_end ||
+          (intent.scheduleId && id(subscription.schedule) !== intent.scheduleId)
+        )
+          throw new HTTPException(409, { message: "original subscription schedule changed" });
+        schedule ??= await this.providerMutation(() =>
+          this.stripe.subscriptionSchedules.create(
+            { from_subscription: intent.subscriptionId },
             { idempotencyKey: `${key}:create` },
-          );
-      if (!schedule.current_phase)
-        throw new HTTPException(409, { message: "subscription schedule has no current phase" });
-      await this.stripe.subscriptionSchedules.update(
-        schedule.id,
-        {
-          end_behavior: "release",
-          proration_behavior: "none",
-          phases: [
+          ),
+        );
+        if (!schedule.current_phase)
+          throw new HTTPException(409, { message: "subscription schedule has no current phase" });
+        await this.providerMutation(() =>
+          this.stripe.subscriptionSchedules.update(
+            schedule.id,
             {
-              start_date: schedule.current_phase.start_date,
-              end_date: item.current_period_end,
-              items: [{ price: item.price.id, quantity: 1 }],
+              end_behavior: "release",
               proration_behavior: "none",
+              metadata: { opengeni_last_change_key: key },
+              phases: [
+                {
+                  start_date: intent.phaseStart,
+                  end_date: intent.periodEnd,
+                  items: [{ price: intent.priceId, quantity: 1 }],
+                  proration_behavior: "none",
+                },
+                {
+                  start_date: intent.periodEnd,
+                  duration: { interval: "month", interval_count: 1 },
+                  items: [{ price: intent.targetPriceId!, quantity: 1 }],
+                  proration_behavior: "none",
+                  automatic_tax: { enabled: true },
+                  metadata: { opengeni_account_id: input.accountId },
+                },
+              ],
             },
-            {
-              start_date: item.current_period_end,
-              duration: { interval: "month", interval_count: 1 },
-              items: [{ price: target.stripePriceId!, quantity: 1 }],
-              proration_behavior: "none",
-              automatic_tax: { enabled: true },
-              metadata: { opengeni_account_id: input.accountId },
-            },
-          ],
-        },
-        { idempotencyKey: key },
-      );
-      return {
-        subscriptionId: subscription.id,
-        planKey: target.key,
-        effectiveAt: new Date(item.current_period_end * 1000).toISOString(),
-        cancelAtPeriodEnd: false,
-      };
-    });
+            { idempotencyKey: key },
+          ),
+        );
+        return response;
+      },
+    );
   }
 
   async cancel(input: {
     accountId: string;
     idempotencyKey: string;
   }): Promise<BillingSubscriptionChange> {
-    this.requireEnabled();
-    return await this.store.locked(input.accountId, async (tx) => {
-      const subscription = await this.current(tx, input.accountId);
-      const item = subscriptionItem(subscription);
-      const key = `subscription-cancel:${input.accountId}:${input.idempotencyKey}`;
-      // Release, not cancel, the schedule: preserve the current paid period.
-      if (subscription.schedule)
-        await this.stripe.subscriptionSchedules.release(
-          id(subscription.schedule)!,
-          {},
-          { idempotencyKey: `${key}:release` },
-        );
-      await this.stripe.subscriptions.update(
-        subscription.id,
-        { cancel_at_period_end: true },
-        { idempotencyKey: key },
-      );
-      await this.synchronize(tx, input.accountId, subscription.id);
-      return {
-        subscriptionId: subscription.id,
-        planKey: "free",
-        effectiveAt: new Date(item.current_period_end * 1000).toISOString(),
-        cancelAtPeriodEnd: true,
-      };
-    });
+    return await this.mutate(
+      "cancel",
+      input,
+      async (tx) => this.intent(await this.current(tx, input.accountId), "free", null),
+      async (tx, intent, key) => {
+        const subscription = await this.target(input.accountId, intent);
+        const replay = subscription.metadata.opengeni_last_cancel_key === key;
+        if (!replay && !terminal(subscription) && !subscription.cancel_at_period_end) {
+          await this.unchanged(tx, subscription, intent);
+          if (subscription.schedule && id(subscription.schedule) !== intent.scheduleId)
+            throw new HTTPException(409, { message: "original subscription schedule changed" });
+          // Release, not cancel, the schedule: preserve the current paid period.
+          if (subscription.schedule)
+            await this.providerMutation(() =>
+              this.stripe.subscriptionSchedules.release(
+                id(subscription.schedule)!,
+                {},
+                { idempotencyKey: `${key}:release` },
+              ),
+            );
+          await this.providerMutation(() =>
+            this.stripe.subscriptions.update(
+              subscription.id,
+              { cancel_at_period_end: true, metadata: { opengeni_last_cancel_key: key } },
+              { idempotencyKey: key },
+            ),
+          );
+        }
+        await this.synchronize(tx, input.accountId, subscription.id);
+        return {
+          subscriptionId: subscription.id,
+          planKey: "free",
+          effectiveAt: new Date(intent.periodEnd * 1000).toISOString(),
+          cancelAtPeriodEnd: true,
+        };
+      },
+    );
   }
 
   async handleEvent(event: Stripe.Event): Promise<boolean> {
@@ -505,12 +722,15 @@ export class StripeSubscriptions {
     })) {
       // An old, previously legitimate subscription can become a live loser
       // after a later subscription takes over. Never refund its prior history.
-      if (invoice.created < refundFrom) continue;
       for await (const payment of this.stripe.invoicePayments.list({
         invoice: invoice.id,
         status: "paid",
         limit: 100,
       })) {
+        const fundedAt = payment.status_transitions?.paid_at ?? invoice.status_transitions?.paid_at;
+        if (!Number.isSafeInteger(fundedAt) || !fundedAt || fundedAt < 0)
+          throw new Error(`Paid invoice ${invoice.id} has no authoritative funding timestamp`);
+        if (fundedAt < refundFrom) continue;
         let chargeId = id(payment.payment.charge);
         const paymentIntentId = id(payment.payment.payment_intent);
         if (paymentIntentId)

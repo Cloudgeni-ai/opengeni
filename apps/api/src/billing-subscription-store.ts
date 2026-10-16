@@ -1,5 +1,10 @@
 import type { BillingPlanBalance, SubscriptionPlan } from "@opengeni/contracts";
 import {
+  assertBillingSubscriptionOperationRoot,
+  beginBillingSubscriptionOperation,
+  completeBillingSubscriptionOperation,
+  getBillingSubscriptionOperation,
+  nestedPostgresSqlState,
   expirePlanCreditPeriod,
   getBillingCustomer,
   getManagedAccount,
@@ -11,7 +16,10 @@ import {
   type Database,
   type OrganizationPlanStateInput,
   type PlanCreditPeriodInput,
+  type BillingSubscriptionOperation,
+  type BillingSubscriptionOperationKind,
 } from "@opengeni/db";
+import { HTTPException } from "hono/http-exception";
 import { organizationPlans, planCreditPeriods } from "@opengeni/db/schema";
 import { and, eq, isNull, sql } from "drizzle-orm";
 
@@ -21,6 +29,14 @@ export type StoredSubscriptionPlan = {
 };
 
 export interface SubscriptionAccountStore {
+  operation(key: string): Promise<BillingSubscriptionOperation | null>;
+  beginOperation(input: {
+    operationKey: string;
+    kind: BillingSubscriptionOperationKind;
+    request: Record<string, unknown>;
+    intent: Record<string, unknown>;
+  }): Promise<BillingSubscriptionOperation>;
+  completeOperation(key: string, result: Record<string, unknown>): Promise<void>;
   exists(): Promise<boolean>;
   state(): Promise<StoredSubscriptionPlan | null>;
   customer(provider: string): Promise<string | null>;
@@ -39,6 +55,7 @@ export interface SubscriptionStore {
  * the credit-account lock. Stripe reads also run under this fence: concurrent
  * deliveries cannot commit an older provider snapshot after a newer one. */
 export function subscriptionStore(db: Database): SubscriptionStore {
+  assertBillingSubscriptionOperationRoot(db);
   return {
     catalog: () => readSubscriptionPlanCatalog(db),
     locked: (accountId, run) =>
@@ -47,6 +64,21 @@ export function subscriptionStore(db: Database): SubscriptionStore {
           sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${accountId}`}, 0))`,
         );
         return await run({
+          operation: (key) => getBillingSubscriptionOperation(tx, accountId, key),
+          beginOperation: async (input) => {
+            try {
+              return await beginBillingSubscriptionOperation(tx, { ...input, accountId });
+            } catch (error) {
+              if (nestedPostgresSqlState(error) === "P0S02")
+                throw new HTTPException(409, {
+                  message: "Retry the pending subscription operation before starting another",
+                });
+              throw error;
+            }
+          },
+          completeOperation: async (operationKey, result) => {
+            await completeBillingSubscriptionOperation(tx, { accountId, operationKey, result });
+          },
           exists: async () => Boolean(await getManagedAccount(tx, accountId)),
           state: async () => {
             const [row] = await tx

@@ -16,6 +16,7 @@ import {
   SUBSCRIPTION_RETIRED_ROUTINES,
   SUBSCRIPTION_RENAMED_ROUTINES,
   SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
+  BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
 } from "./runtime-posture";
 import {
   classifyRoleRelationships,
@@ -1739,7 +1740,7 @@ BEGIN
       EXECUTE format('REVOKE ALL ON FUNCTION %I.set_subscription_plan_catalog(jsonb,text,text) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.set_subscription_plan_catalog(jsonb,text,text) FROM %I', ${literal(schema)}, ${literal(role)});
     END IF;
-    FOREACH routine_signature IN ARRAY ARRAY[${SUBSCRIPTION_PLAN_RUNTIME_ROUTINES.map(literal).join(", ")}] LOOP
+    FOREACH routine_signature IN ARRAY ARRAY[${[...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES, ...BILLING_SUBSCRIPTION_OPERATION_ROUTINES].map(literal).join(", ")}] LOOP
       IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
         EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, routine_signature);
         EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I', ${literal(schema)}, routine_signature, ${literal(role)});

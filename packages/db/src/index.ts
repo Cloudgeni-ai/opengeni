@@ -1245,6 +1245,7 @@ export {
 // Workspace Memory V1 pure domain surface (gates, render, canonical prompt text).
 export * from "./memory-domain";
 export * from "./model-catalog";
+export * from "./billing-subscription-operations";
 
 import {
   dbBindingFor,
