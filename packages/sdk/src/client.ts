@@ -202,6 +202,9 @@ import {
   type BrowserSessionMutationResponse,
   type BrowserTargetState,
   type BrowserTargetListResponse,
+  type BrowserWorkingCopyAdoptionRequest,
+  type BrowserWorkingCopyAdoptionResponse,
+  type BrowserWorkingCopyInspection,
   type BrowserRevisionListResponse,
   type ComputerActionReceipt,
   type ComputerActionRequest,
@@ -4857,6 +4860,56 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/end`,
       request,
+      {},
+      options,
+    );
+  }
+
+  /** Inspect an active browser's preserved working copy after its controller
+   * lost it, for example when its machine's disk was restored from a copy.
+   * Read-only; returns the exact manifest digest an adoption must name. */
+  async inspectBrowserSessionWorkingCopy(
+    workspaceId: string,
+    browserSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserWorkingCopyInspection> {
+    return await this.requestJson<BrowserWorkingCopyInspection>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/working-copy/inspection`,
+      {},
+      {},
+      options,
+    );
+  }
+
+  /** Adopt the exact inspected bytes of a preserved working copy as the
+   * browser's state. If the reply is lost, read the recorded outcome of the
+   * same operationId instead of sending again. */
+  async adoptBrowserSessionWorkingCopy(
+    workspaceId: string,
+    browserSessionId: string,
+    request: BrowserWorkingCopyAdoptionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserWorkingCopyAdoptionResponse> {
+    return await this.requestJson<BrowserWorkingCopyAdoptionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/working-copy/adoptions`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async getBrowserSessionWorkingCopyAdoption(
+    workspaceId: string,
+    browserSessionId: string,
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserWorkingCopyAdoptionResponse> {
+    return await this.requestJson<BrowserWorkingCopyAdoptionResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/working-copy/adoptions/${encodeURIComponent(operationId)}`,
+      undefined,
       {},
       options,
     );

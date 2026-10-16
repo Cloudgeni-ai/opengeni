@@ -43,6 +43,9 @@ import {
   type BrowserTarget,
   BrowserTargetListResponse,
   BrowserTargetState,
+  BrowserWorkingCopyAdoptionRequest,
+  BrowserWorkingCopyAdoptionResponse,
+  BrowserWorkingCopyInspection,
   CreateBrowserSessionRequest,
   ExternalAuthInteractiveRequest,
   ExternalAuthInteractiveResponse,
@@ -58,6 +61,8 @@ import {
   type BrowserActionRequest as BrowserActionRequestValue,
   type BrowserDownload as BrowserDownloadValue,
   type BrowserSession as BrowserSessionValue,
+  type BrowserWorkingCopyAdoption as BrowserWorkingCopyAdoptionValue,
+  type BrowserWorkingCopyRefusal as BrowserWorkingCopyRefusalValue,
   type FileAsset,
   type CreateBrowserSessionRequest as CreateBrowserSessionRequestValue,
   type InteractionPlacement,
@@ -144,6 +149,7 @@ import {
   verifyAuthRun,
   settleBrowserDownloadSaveFailure,
   terminalizeStaleConnectedInteractionPlacement,
+  recordAuditEvent,
   type BrowserSessionControlRecord,
   type BrowserPrivateCheckpointAuthority,
   type BrowserRevisionArtifactAuthority,
@@ -183,6 +189,9 @@ import {
   type BrowserControlScreenshotOptions,
   type BrowserControlFrame,
   type PlacementBrowserStateCaptureReceipt,
+  type PlacementBrowserWorkingCopyAdoption,
+  type PlacementBrowserWorkingCopyAuthority,
+  type PlacementBrowserWorkingCopyInspection,
   type PlacementBrowserNetworkRoute,
   type PlacementBrowserTransport,
   type RestorePlacementBrowserStateInput,
@@ -2626,6 +2635,175 @@ export function registerBrowserSessionRoutes(
         restore?.dataKey.fill(0);
         restore?.aad.fill(0);
       }
+    },
+  );
+
+  /** Run one working-copy request against an active browser's own controller
+   * generation, with the same session.control and placement authority as any
+   * browser control. The controller binds every request to the exact
+   * controller authority the copy was launched under. Never replayed. */
+  async function withPreservedWorkingCopy<T>(
+    context: Context,
+    callback: (input: {
+      grant: AccessGrant;
+      workspaceId: string;
+      browserSessionId: string;
+      client: BrowserControlClient;
+      authority: PlacementBrowserWorkingCopyAuthority;
+    }) => Promise<T>,
+  ): Promise<T> {
+    const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+      context,
+      "sessions:control",
+    );
+    return await withActiveBrowserController(
+      context,
+      grant,
+      workspaceId,
+      browserSessionId,
+      "session.control",
+      "browser.control",
+      async ({ client, record, binding, placement }) => {
+        const transport = browserRuntimeTransport(record.session, placement.transport);
+        if (
+          transport.kind !== "managed" ||
+          transport.engine !== "chromium" ||
+          transport.ephemeralPartition ||
+          browserSessionStorageMode(record.session) !== "private_profile"
+        ) {
+          throw new BrowserSessionStateError(WORKING_COPY_REFUSAL_EXPLANATIONS.unsupported_browser);
+        }
+        const tokens = deriveBrowserSessionControllerTokens({
+          rootSecret: browserAuthorityRoot(deps),
+          accountId: grant.accountId,
+          workspaceId,
+          placement: record.session.placement,
+          placementInstanceId: placement.placementInstanceId,
+          browserSessionId,
+          controllerGeneration: binding.controllerGeneration,
+          tokenGeneration: record.tokenGeneration,
+        });
+        return await callback({
+          grant,
+          workspaceId,
+          browserSessionId,
+          client,
+          authority: {
+            browserSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            tokenGeneration: record.tokenGeneration,
+            ...tokens,
+          },
+        });
+      },
+      // A missing controller session is the state being inspected; never
+      // launch anything to "recover" it here.
+      false,
+    );
+  }
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/inspection",
+    async (context) => {
+      await parseEmptyJsonBody(context);
+      const result = await withPreservedWorkingCopy(
+        context,
+        async ({ grant, workspaceId, browserSessionId, client, authority }) => {
+          const inspection = await client.inspectWorkingCopy(authority);
+          const checkpoint = await getBrowserPrivateCheckpointAuthority(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+          }).catch(() => null);
+          return BrowserWorkingCopyInspection.parse({
+            browserSessionId,
+            controllerGeneration: authority.controllerGeneration,
+            adoptable: inspection.refusal === null && inspection.manifest !== null,
+            refusal: inspection.refusal,
+            explanation: workingCopyInspectionExplanation(
+              inspection,
+              checkpoint?.createdAt ?? null,
+            ),
+            manifest: inspection.manifest,
+            platformSupported: inspection.platformSupported,
+            profileIdentityMatches: inspection.profileIdentityMatches,
+            profileInUse: inspection.profileInUse,
+            receipt: inspection.receipt,
+            freshness: { status: "unknown", latestCheckpointAt: checkpoint?.createdAt ?? null },
+            activeAdoption: inspection.activeAdoption,
+          });
+        },
+      );
+      return context.json(result);
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions",
+    async (context) => {
+      const request = await parseJsonBody(context, BrowserWorkingCopyAdoptionRequest);
+      const result = await withPreservedWorkingCopy(
+        context,
+        async ({ grant, workspaceId, browserSessionId, client, authority }) => {
+          // Durable attribution before any effect: who selected which exact
+          // bytes as this browser's state. Freshness stays unproven.
+          await recordAuditEvent(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            action: "browserSession.working_copy.adoption_requested",
+            targetType: "browser_session",
+            targetId: browserSessionId,
+            metadata: {
+              operationId: request.operationId,
+              manifestDigest: request.manifestDigest,
+              controllerGeneration: authority.controllerGeneration,
+            },
+          });
+          const adoption = await client.adoptWorkingCopy({
+            ...authority,
+            operationId: request.operationId,
+            manifestDigest: request.manifestDigest,
+          });
+          await recordAuditEvent(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            action: "browserSession.working_copy.adoption_settled",
+            targetType: "browser_session",
+            targetId: browserSessionId,
+            metadata: {
+              operationId: adoption.operationId,
+              manifestDigest: adoption.manifestDigest,
+              controllerGeneration: adoption.controllerGeneration,
+              phase: adoption.phase,
+              failureCode: adoption.failureCode,
+            },
+          }).catch(() => undefined);
+          return BrowserWorkingCopyAdoptionResponse.parse({
+            inFlight: false,
+            adoption: publicWorkingCopyAdoption(adoption),
+            explanation: workingCopyAdoptionExplanation(false, adoption),
+          });
+        },
+      );
+      return context.json(result);
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId",
+    async (context) => {
+      const operationId = requireUuidParam(context, "operationId");
+      const result = await withPreservedWorkingCopy(context, async ({ client, authority }) => {
+        const status = await client.workingCopyAdoption(authority, operationId);
+        return BrowserWorkingCopyAdoptionResponse.parse({
+          inFlight: status.inFlight,
+          adoption: status.adoption ? publicWorkingCopyAdoption(status.adoption) : null,
+          explanation: workingCopyAdoptionExplanation(status.inFlight, status.adoption),
+        });
+      });
+      return context.json(result);
     },
   );
 
@@ -5418,6 +5596,84 @@ function recordAttachedBrowserUnavailable(
     });
   } catch {
     // Telemetry never changes the refusal.
+  }
+}
+
+const WORKING_COPY_REFUSAL_EXPLANATIONS: Record<BrowserWorkingCopyRefusalValue, string> = {
+  unsupported_platform:
+    "Adopting a working copy is supported only for browsers on Linux machines, where the controller can prove no process uses the copy. Nothing was changed.",
+  unsupported_browser:
+    "Only a managed Chromium browser with a private profile keeps a working copy that can be adopted. Nothing was changed.",
+  browser_running:
+    "The browser is running on its controller, so there is no preserved working copy to adopt. Use the browser normally.",
+  working_copy_invalid:
+    "The browser's working directory on its machine is missing, incomplete or not a plain directory, so it cannot be adopted. Nothing was changed.",
+  receipt_not_adoptable:
+    "The working copy has no completed record of a browser launch, so it cannot be adopted. Its record and recovery state are preserved.",
+  authority_changed:
+    "The working copy was launched under a different controller authority than this browser now has, so it cannot be adopted for it. Nothing was changed.",
+  process_state_unknown:
+    "It cannot be proven that no process uses the copy's browser profile. Close any browser using it, then inspect again. Nothing was changed.",
+  adoption_not_needed:
+    "The working copy is the same directory the browser was launched in, so it needs no adoption; the browser continues from it when it is next used.",
+  adoption_unresolved:
+    "An earlier adoption for this browser has not finished. Check it with getBrowserSessionWorkingCopyAdoption and its operation id (see activeAdoption) instead of starting another.",
+};
+
+function workingCopyInspectionExplanation(
+  inspection: PlacementBrowserWorkingCopyInspection,
+  latestCheckpointAt: string | null,
+): string {
+  if (inspection.refusal) return WORKING_COPY_REFUSAL_EXPLANATIONS[inspection.refusal];
+  const manifest = inspection.manifest!;
+  return [
+    `This working copy can be adopted: ${manifest.entries} entries, ${manifest.bytes} bytes, manifest digest ${manifest.digest}.`,
+    "It is not the directory the browser was launched in (it was moved, copied or restored), so the browser refuses to continue from it until it is adopted.",
+    latestCheckpointAt
+      ? `How recent its contents are is not proven; the browser's latest saved checkpoint is from ${latestCheckpointAt}.`
+      : "How recent its contents are is not proven.",
+    "Adopting selects exactly these bytes as the browser's state and is never replaced by an older checkpoint afterwards; the directory it replaces is kept.",
+    "To adopt, call adoptBrowserSessionWorkingCopy with this manifestDigest and a new operationId. If the bytes change first, the adoption is refused.",
+  ].join(" ");
+}
+
+function publicWorkingCopyAdoption(
+  adoption: PlacementBrowserWorkingCopyAdoption,
+): BrowserWorkingCopyAdoptionValue {
+  return {
+    operationId: adoption.operationId,
+    browserSessionId: adoption.browserSessionId,
+    controllerGeneration: adoption.controllerGeneration,
+    manifestDigest: adoption.manifestDigest,
+    phase: adoption.phase,
+    failureCode: adoption.failureCode,
+    retainedDirectories: adoption.retainedDirectories,
+    createdAt: adoption.createdAt,
+    updatedAt: adoption.updatedAt,
+  };
+}
+
+function workingCopyAdoptionExplanation(
+  inFlight: boolean,
+  adoption: PlacementBrowserWorkingCopyAdoption | null,
+): string {
+  const kept = adoption?.retainedDirectories.length
+    ? ` Kept on the machine for separate cleanup: ${adoption.retainedDirectories.join(", ")}.`
+    : "";
+  if (inFlight)
+    return "The adoption is still running on the controller. Check again with getBrowserSessionWorkingCopyAdoption; do not start another.";
+  if (!adoption)
+    return "The controller has no record of this adoption, which proves it changed nothing there.";
+  switch (adoption.phase) {
+    case "adopted":
+      return `Adopted. The browser continues from the copy with manifest digest ${adoption.manifestDigest} the next time it is used, and is never replaced by an older checkpoint.${kept}`;
+    case "interrupted":
+    case "failed":
+      return `The adoption stopped before the copy took the browser's place${adoption.failureCode ? ` (${adoption.failureCode})` : ""}; the browser's own directory is unchanged.${kept}`;
+    case "collision":
+      return `The adoption found the browser's directories in an unexpected state (${adoption.failureCode ?? "unknown"}) and stopped without moving or removing anything more. The browser stays unavailable until a person inspects its machine.${kept}`;
+    default:
+      return "The adoption has not finished. Check again with getBrowserSessionWorkingCopyAdoption; do not start another.";
   }
 }
 

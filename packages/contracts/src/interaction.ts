@@ -2831,6 +2831,132 @@ export const BrowserSessionLifecycleRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type BrowserSessionLifecycleRequest = z.infer<typeof BrowserSessionLifecycleRequest>;
 
+/** Why a preserved working copy cannot be adopted as it is. */
+export const BrowserWorkingCopyRefusal = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "unsupported_platform",
+    "unsupported_browser",
+    "browser_running",
+    "working_copy_invalid",
+    "receipt_not_adoptable",
+    "authority_changed",
+    "process_state_unknown",
+    "adoption_not_needed",
+    "adoption_unresolved",
+  ]),
+);
+export type BrowserWorkingCopyRefusal = z.infer<typeof BrowserWorkingCopyRefusal>;
+
+/** One adoption of a copied working directory, as its controller recorded it.
+ * `adopted` is the only phase in which the browser runs from the copy; the
+ * other terminal phases left the browser's own directory untouched or
+ * restored, and every directory kept is listed for separate cleanup. */
+export const BrowserWorkingCopyAdoption = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: z.string().uuid(),
+      browserSessionId: z.string().uuid(),
+      controllerGeneration: opaqueGeneration,
+      manifestDigest: sha256Hex,
+      phase: z.enum([
+        "intent",
+        "copied",
+        "receipt",
+        "source_preserved",
+        "adopted",
+        "interrupted",
+        "failed",
+        "collision",
+      ]),
+      failureCode: z.string().min(1).max(64).nullable(),
+      retainedDirectories: z.array(z.string().min(1).max(256)).max(64),
+      createdAt: z.string().datetime({ offset: true }),
+      updatedAt: z.string().datetime({ offset: true }),
+    })
+    .strict(),
+);
+export type BrowserWorkingCopyAdoption = z.infer<typeof BrowserWorkingCopyAdoption>;
+
+/** Evidence about a browser's preserved working copy after its controller
+ * lost it, for example after the machine's disk was restored from a copy.
+ * Machine evidence (receipt, profile identity, process proof, exact byte
+ * digest) is kept separate from freshness, which is never proven: whoever
+ * adopts the copy selects it as the browser's state. */
+export const BrowserWorkingCopyInspection = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      browserSessionId: z.string().uuid(),
+      controllerGeneration: opaqueGeneration,
+      adoptable: z.boolean(),
+      refusal: BrowserWorkingCopyRefusal.nullable(),
+      /** Plain explanation of the state and the next action. */
+      explanation: z.string().min(1).max(2_048),
+      /** Exact digest of the bytes an adoption would take; pass it to adopt. */
+      manifest: z
+        .object({
+          digest: sha256Hex,
+          entries: z.number().int().nonnegative(),
+          bytes: z.number().int().nonnegative(),
+        })
+        .strict()
+        .nullable(),
+      platformSupported: z.boolean(),
+      profileIdentityMatches: z.boolean(),
+      profileInUse: z.boolean().nullable(),
+      receipt: z
+        .object({
+          operationId: z.string().uuid(),
+          intent: z.enum(["launch", "suspend", "retire", "adopt"]),
+          state: z.string().min(1).max(64),
+          directoryLaunchAllowed: z.boolean(),
+          authorityMatches: z.boolean(),
+          launchedFromCheckpoint: z.boolean(),
+          adoption: z
+            .object({ operationId: z.string().uuid(), manifestDigest: sha256Hex })
+            .strict()
+            .nullable(),
+        })
+        .strict()
+        .nullable(),
+      freshness: z
+        .object({
+          /** How recent the copy's contents are is not machine-proven. */
+          status: z.literal("unknown"),
+          /** When the browser's latest saved checkpoint was taken, if any. */
+          latestCheckpointAt: z.string().datetime({ offset: true }).nullable(),
+        })
+        .strict(),
+      activeAdoption: BrowserWorkingCopyAdoption.nullable(),
+    })
+    .strict(),
+);
+export type BrowserWorkingCopyInspection = z.infer<typeof BrowserWorkingCopyInspection>;
+
+export const BrowserWorkingCopyAdoptionRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      operationId: z.string().uuid(),
+      /** The manifest digest from an inspection of the exact bytes to adopt. */
+      manifestDigest: sha256Hex,
+    })
+    .strict(),
+);
+export type BrowserWorkingCopyAdoptionRequest = z.infer<typeof BrowserWorkingCopyAdoptionRequest>;
+
+export const BrowserWorkingCopyAdoptionResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** True while the controller is still running this adoption. */
+      inFlight: z.boolean(),
+      /** Null when the controller has no record of the operation, which
+       * proves it changed nothing there. */
+      adoption: BrowserWorkingCopyAdoption.nullable(),
+      explanation: z.string().min(1).max(2_048),
+    })
+    .strict(),
+);
+export type BrowserWorkingCopyAdoptionResponse = z.infer<typeof BrowserWorkingCopyAdoptionResponse>;
+
 export const BrowserOpenTargetRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({

@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -2915,3 +2916,319 @@ async function withInterruptedLaunchFixture(
     await rm(directory, { recursive: true, force: true });
   }
 }
+
+describe("adopting a verified copy of a preserved working directory", () => {
+  /** Replace the preserved directory with a byte-identical copy, as a restore
+   * after disk loss does: same path and bytes, new directory identities. */
+  async function restoreAsCopy(rootDirectory: string, browserSessionId: string) {
+    const live = join(rootDirectory, "sessions", browserSessionId);
+    const copy = `${live}.restore`;
+    execFileSync("cp", ["-a", live, copy]);
+    await rm(live, { recursive: true, force: true });
+    await rename(copy, live);
+    return live;
+  }
+
+  async function latestReceipt(
+    rootDirectory: string,
+    options: { browserSessionId: string; controllerGeneration: string },
+  ) {
+    const reader = await SqliteBrowserWorkingRuntimeJournal.open(
+      {
+        ...options,
+        sessionDirectory: join(rootDirectory, "sessions", options.browserSessionId),
+      },
+      true,
+    );
+    try {
+      return reader.latest();
+    } finally {
+      reader.close();
+    }
+  }
+
+  test("a restored copy is refused with its reason, adopted by exact digest and launched from its own directory", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const live = await restoreAsCopy(rootDirectory, options.browserSessionId);
+      const launched: BrowserSupervisorDriverContext[] = [];
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "exited",
+        createDriver: async (context) => {
+          launched.push(context);
+          return {
+            ...fakeDriver(context),
+            ownedProcessIdentity: async () => ({ ...syntheticOwnedProcess(context), pid: 3001 }),
+          };
+        },
+      });
+      try {
+        const exact = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+          authority: workingAuthority,
+        };
+        await expect(
+          supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+        ).rejects.toMatchObject({ reason: "profile_identity_changed" });
+        expect(launched).toHaveLength(0);
+
+        const inspection = await supervisor.inspectWorkingCopy(exact);
+        expect(inspection).toMatchObject({
+          platformSupported: true,
+          refusal: null,
+          profileIdentityMatches: false,
+          profileInUse: false,
+          receipt: { intent: "launch", state: "completed", authorityMatches: true },
+        });
+        const digest = inspection.manifest!.digest;
+        // Another authority cannot adopt it.
+        await expect(
+          supervisor.adoptWorkingCopy({
+            ...exact,
+            authority: { ...workingAuthority, tokenGeneration: 2 },
+            operationId: "33333333-3333-4333-8333-000000000001",
+            manifestDigest: digest,
+          }),
+        ).rejects.toMatchObject({ reason: "authority_changed" });
+        // Bytes that changed after inspection are not adopted.
+        await writeFile(join(live, "profile", "Preferences"), "changed after approval");
+        await expect(
+          supervisor.adoptWorkingCopy({
+            ...exact,
+            operationId: "33333333-3333-4333-8333-000000000002",
+            manifestDigest: digest,
+          }),
+        ).rejects.toMatchObject({ reason: "digest_mismatch" });
+        const approved = (await supervisor.inspectWorkingCopy(exact)).manifest!.digest;
+        const adoption = await supervisor.adoptWorkingCopy({
+          ...exact,
+          operationId: "33333333-3333-4333-8333-000000000003",
+          manifestDigest: approved,
+        });
+        expect(adoption.phase).toBe("adopted");
+        expect(adoption.retainedDirectories).toContain(
+          `${options.browserSessionId}.preserved-33333333-3333-4333-8333-000000000003`,
+        );
+        const adopted = await latestReceipt(rootDirectory, options);
+        const profile = await stat(join(live, "profile"));
+        expect(adopted).toMatchObject({
+          intent: "adopt",
+          state: "completed",
+          directoryLaunchAllowed: true,
+          profile: { device: profile.dev, inode: profile.ino },
+          adoption: {
+            operationId: "33333333-3333-4333-8333-000000000003",
+            manifestDigest: approved,
+          },
+        });
+
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        expect(launched).toHaveLength(1);
+        // A fresh process in the adopted directory, never a reattach.
+        expect(launched[0]!.recoverOwnedProcess).toBeUndefined();
+        expect(launched[0]!.restoredProfile).toBe(false);
+        expect(launched[0]!.profileDirectory).toBe(join(live, "profile"));
+        const running = await latestReceipt(rootDirectory, options);
+        expect(running).toMatchObject({
+          intent: "launch",
+          state: "completed",
+          process: { pid: 3001 },
+          adoption: { operationId: "33333333-3333-4333-8333-000000000003" },
+        });
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("a failed launch from an adopted copy keeps that copy as the next launch", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      await restoreAsCopy(rootDirectory, options.browserSessionId);
+      let attempts = 0;
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "exited",
+        createDriver: async (context) => {
+          attempts++;
+          const driver = {
+            ...fakeDriver(context),
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+          };
+          if (attempts === 1)
+            return {
+              ...driver,
+              start: async () => {
+                throw new Error("synthetic launch failure");
+              },
+            };
+          return driver;
+        },
+      });
+      try {
+        const exact = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+          authority: workingAuthority,
+        };
+        const { manifest } = await supervisor.inspectWorkingCopy(exact);
+        await supervisor.adoptWorkingCopy({
+          ...exact,
+          operationId: "33333333-3333-4333-8333-000000000004",
+          manifestDigest: manifest!.digest,
+        });
+        await expect(
+          supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+        ).rejects.toThrow("synthetic launch failure");
+        expect(await latestReceipt(rootDirectory, options)).toMatchObject({
+          intent: "adopt",
+          state: "completed",
+          adoption: { operationId: "33333333-3333-4333-8333-000000000004" },
+        });
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        expect(attempts).toBe(2);
+        expect(await latestReceipt(rootDirectory, options)).toMatchObject({
+          intent: "launch",
+          state: "completed",
+          adoption: { operationId: "33333333-3333-4333-8333-000000000004" },
+        });
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  for (const crash of ["launch_dispatched", "launch_failed", "readopt_prepared"] as const) {
+    test(`a controller restart during an adopted copy's launch (${crash}) resumes that copy and never sets it aside`, async () => {
+      await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+        const live = await restoreAsCopy(rootDirectory, options.browserSessionId);
+        const exact = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+          authority: workingAuthority,
+        };
+        const adopting = await BrowserSupervisor.open({
+          rootDirectory,
+          socketRootDirectory,
+          inspectOwnedProcess: async () => "exited",
+          createDriver: async (context) => fakeDriver(context),
+        });
+        try {
+          const { manifest } = await adopting.inspectWorkingCopy(exact);
+          await adopting.adoptWorkingCopy({
+            ...exact,
+            operationId: "33333333-3333-4333-8333-000000000006",
+            manifestDigest: manifest!.digest,
+          });
+        } finally {
+          await adopting.close();
+        }
+        // The launch from the adopted copy was cut short by a restart: its
+        // receipt never completed (or settled failed, or its re-adoption
+        // never completed) and no process was recorded.
+        const writer = await SqliteBrowserWorkingRuntimeJournal.open({
+          ...options,
+          sessionDirectory: live,
+        });
+        try {
+          const adopted = writer.latest()!;
+          const { version: _v, operationId: _o, state: _s, launchAttemptId: _l, ...base } = adopted;
+          const launch = writer.begin(
+            { ...base, intent: "launch", process: null },
+            adopted.operationId,
+          );
+          if (crash !== "launch_dispatched") {
+            const failed = writer.fail(launch, "synthetic_launch_failure");
+            if (crash === "readopt_prepared") {
+              // The re-adoption stops after its first write, as a crash would.
+              const journal = writer as unknown as { write(receipt: unknown): void };
+              const write = journal.write.bind(writer);
+              let writes = 0;
+              journal.write = (receipt) => {
+                if (++writes > 1) throw new Error("synthetic crash");
+                write(receipt);
+              };
+              expect(() => writer.readopt(adopted, failed)).toThrow("synthetic crash");
+              expect(writer.latest()).toMatchObject({ intent: "adopt", state: "prepared" });
+            }
+          }
+        } finally {
+          writer.close();
+        }
+
+        const launched: BrowserSupervisorDriverContext[] = [];
+        const supervisor = await BrowserSupervisor.open({
+          rootDirectory,
+          socketRootDirectory,
+          inspectOwnedProcess: async () => "exited",
+          createDriver: async (context) => {
+            launched.push(context);
+            return {
+              ...fakeDriver(context),
+              ownedProcessIdentity: async () => ({ ...syntheticOwnedProcess(context), pid: 3002 }),
+            };
+          },
+        });
+        try {
+          // Cleanup of an expired resume cannot set the adopted copy aside.
+          // Neither a plain end nor a set-aside removes or moves the copy.
+          await expect(supervisor.endSession(exact, { removeState: true })).rejects.toThrow(
+            "preserved",
+          );
+          await expect(
+            supervisor.endSession(exact, { removeState: true, setAsideInterruptedLaunch: true }),
+          ).rejects.toThrow("preserved");
+          expect((await stat(live)).isDirectory()).toBe(true);
+          await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+          expect(launched).toHaveLength(1);
+          expect(launched[0]!.recoverOwnedProcess).toBeUndefined();
+          expect(launched[0]!.restoredProfile).toBe(false);
+          expect(launched[0]!.profileDirectory).toBe(join(live, "profile"));
+          expect(await latestReceipt(rootDirectory, options)).toMatchObject({
+            intent: "launch",
+            state: "completed",
+            process: { pid: 3002 },
+            adoption: { operationId: "33333333-3333-4333-8333-000000000006" },
+          });
+        } finally {
+          await supervisor.close();
+        }
+      });
+    });
+  }
+
+  test("an adoption is refused while the browser runs here or its copy is still identical", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "exited",
+        createDriver: async (context) => ({
+          ...fakeDriver(context),
+          ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+        }),
+      });
+      try {
+        const exact = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+          authority: workingAuthority,
+        };
+        expect((await supervisor.inspectWorkingCopy(exact)).refusal).toBe("adoption_not_needed");
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        expect((await supervisor.inspectWorkingCopy(exact)).refusal).toBe("browser_running");
+        await expect(
+          supervisor.adoptWorkingCopy({
+            ...exact,
+            operationId: "33333333-3333-4333-8333-000000000005",
+            manifestDigest: "a".repeat(64),
+          }),
+        ).rejects.toMatchObject({ reason: "browser_running" });
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+});

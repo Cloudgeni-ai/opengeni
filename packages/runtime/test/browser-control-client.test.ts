@@ -2632,3 +2632,143 @@ describe("agent-native controller transport", () => {
     expect(native.execs()).toBe(0);
   });
 });
+
+test("inspects and adopts a preserved working copy with its exact authority, never replaying", async () => {
+  const browserSessionId = randomUUID();
+  const controllerGeneration = "synthetic-adoption";
+  const operationId = randomUUID();
+  const digest = "d".repeat(64);
+  const requests: Array<{ method: string; path: string; body: unknown }> = [];
+  let refuse = false;
+  const adoption = {
+    operationId,
+    browserSessionId,
+    controllerGeneration,
+    manifestDigest: digest,
+    phase: "adopted",
+    failureCode: null,
+    retainedDirectories: [`${browserSessionId}.preserved-${operationId}`],
+    createdAt: "2026-10-16T10:00:00.000Z",
+    updatedAt: "2026-10-16T10:00:01.000Z",
+  };
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      requests.push({
+        method: request.method,
+        path,
+        body: request.method === "POST" ? await request.json() : null,
+      });
+      if (path.endsWith("/working-copy/inspection")) {
+        return success({
+          browserSessionId,
+          controllerGeneration,
+          platformSupported: true,
+          manifest: { digest, entries: 12, bytes: 4096 },
+          currentProfile: { device: 1, inode: 2 },
+          receipt: {
+            operationId: randomUUID(),
+            intent: "launch",
+            state: "completed",
+            recordedProfile: { device: 1, inode: 3 },
+            restoreAuthorityDigest: "e".repeat(64),
+            directoryLaunchAllowed: true,
+            authorityMatches: true,
+            adoption: null,
+          },
+          profileIdentityMatches: false,
+          profileInUse: false,
+          activeAdoption: null,
+          refusal: null,
+        });
+      }
+      if (path.endsWith("/working-copy/adoptions") && refuse) {
+        return Response.json(
+          {
+            protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+            ok: false,
+            error: {
+              code: "resource_unavailable",
+              message: "the copy changed after it was inspected",
+              retryable: false,
+              details: { reason: "digest_mismatch" },
+            },
+          },
+          { status: 409 },
+        );
+      }
+      if (path.endsWith("/working-copy/adoptions")) return success(adoption);
+      return success({ inFlight: false, adoption: null });
+    },
+  });
+  try {
+    const client = hostFetchClient(server.port);
+    const authority = {
+      browserSessionId,
+      controllerGeneration,
+      tokenGeneration: 3,
+      controlToken,
+      viewToken,
+    };
+    const inspection = await client.inspectWorkingCopy(authority);
+    expect(inspection).toEqual({
+      browserSessionId,
+      controllerGeneration,
+      platformSupported: true,
+      refusal: null,
+      manifest: { digest, entries: 12, bytes: 4096 },
+      profileIdentityMatches: false,
+      profileInUse: false,
+      receipt: expect.objectContaining({ launchedFromCheckpoint: true, adoption: null }),
+      activeAdoption: null,
+    });
+    // Device and inode numbers stay inside the controller.
+    expect(JSON.stringify(inspection)).not.toContain("inode");
+    expect(requests[0]).toEqual({
+      method: "POST",
+      path: `/v1/browser-sessions/${browserSessionId}/working-copy/inspection`,
+      body: { controllerGeneration, tokenGeneration: 3, controlToken, viewToken },
+    });
+
+    expect(
+      await client.adoptWorkingCopy({ ...authority, operationId, manifestDigest: digest }),
+    ).toEqual(adoption);
+    expect(requests[1]!.body).toEqual({
+      controllerGeneration,
+      tokenGeneration: 3,
+      controlToken,
+      viewToken,
+      operationId,
+      manifestDigest: digest,
+    });
+    // A refusal keeps its typed reason; it is sent once and not retried.
+    refuse = true;
+    const before = requests.length;
+    await expect(
+      client.adoptWorkingCopy({ ...authority, operationId: randomUUID(), manifestDigest: digest }),
+    ).rejects.toMatchObject({
+      name: "BrowserControlRequestError",
+      status: 409,
+      error: { details: { reason: "digest_mismatch" } },
+    });
+    expect(requests.length - before).toBe(1);
+    // Another operation's record is never accepted as this one.
+    refuse = false;
+    await expect(
+      client.adoptWorkingCopy({ ...authority, operationId: randomUUID(), manifestDigest: digest }),
+    ).rejects.toBeInstanceOf(BrowserControlProtocolError);
+
+    expect(await client.workingCopyAdoption(authority, operationId)).toEqual({
+      inFlight: false,
+      adoption: null,
+    });
+    expect(requests.at(-1)).toMatchObject({
+      method: "GET",
+      path: `/v1/browser-sessions/${browserSessionId}/working-copy/adoptions/${operationId}`,
+    });
+  } finally {
+    await server.stop(true);
+  }
+});

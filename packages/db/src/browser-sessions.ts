@@ -195,6 +195,8 @@ export type BrowserPrivateCheckpointAuthority = {
   manifestDigest: string;
   sizeBytes: number;
   materialization: BrowserRevisionMaterializationValue;
+  /** When this checkpoint was taken. */
+  createdAt: string;
 };
 
 /** Internal executor view of one BrowserSession. Plaintext controller
@@ -679,6 +681,7 @@ export async function getBrowserPrivateCheckpointAuthority(
         manifestDigest: artifact.manifestDigest,
         sizeBytes: safeInteger(artifact.sizeBytes, "browser checkpoint artifact size"),
         materialization: BrowserRevisionMaterialization.parse(artifact.materialization),
+        createdAt: artifact.createdAt.toISOString(),
       };
     },
     CONSISTENT_READ,

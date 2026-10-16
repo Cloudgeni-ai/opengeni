@@ -92,6 +92,11 @@ const agentInteractionMethods = [
   "getBrowserTargetState",
   "readBrowserDom",
   "openBrowserTargetWithInventory",
+  // Recovering a browser from a copied working directory is an operator or
+  // agent action; the web console has no adoption screen yet.
+  "inspectBrowserSessionWorkingCopy",
+  "adoptBrowserSessionWorkingCopy",
+  "getBrowserSessionWorkingCopyAdoption",
 ];
 
 // Server-side integrations replace the Skills a session carries, and hosts that

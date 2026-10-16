@@ -75,15 +75,35 @@ import {
 } from "./runner";
 import {
   SqliteBrowserWorkingRuntimeJournal,
+  adoptableSourceReceipt,
+  adoptedCopyNeedsResettle,
   assertDirectory,
   assertWorkingRuntimeReceipt,
   boundedFailureCode,
   isAbandonedLaunchReceipt,
   isInterruptedLaunchReceipt,
   unavailable as workingRuntimeUnavailable,
+  BrowserWorkingRuntimeUnavailableError,
   type BrowserWorkingRuntimeAuthority,
   type BrowserWorkingRuntimeReceipt,
 } from "./working-runtime-journal";
+import {
+  WorkingCopyAdoptionError,
+  adoptWorkingCopy,
+  adoptionPaths,
+  assertWorkingCopyJournalsIntact,
+  emptyWorkingCopyEvidence,
+  readAdoptionRecord,
+  reconcileAdoption,
+  settleActiveAdoption,
+  workingCopyAdoptionStatus,
+  workingCopyManifest,
+  workingCopyRefusalError,
+  type BrowserWorkingCopyAdoptionStatus,
+  type BrowserWorkingCopyAuthorityInput,
+  type BrowserWorkingCopyInspection,
+  type BrowserWorkingCopyRefusal,
+} from "./working-copy-adoption";
 import { SqliteBrowserOperationJournal } from "./journal";
 import { BrowserWorkspaceFileStager } from "./workspace-files";
 import {
@@ -376,6 +396,8 @@ export class BrowserSupervisor {
   private readonly assertProfileUnused: typeof assertManagedBrowserProfileUnused;
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
+  /** Browsers whose working copy is being adopted by this process. */
+  private readonly adopting = new Set<string>();
   private readonly creationRequests = new Set<Promise<BrowserSupervisorSession>>();
   private readonly ending = new Map<string, Promise<void>>();
   private readonly stateTransferTails = new Map<string, Promise<void>>();
@@ -548,6 +570,216 @@ export class BrowserSupervisor {
       options.restore?.dataKey.fill(0);
       options.restore?.aad.fill(0);
     }
+  }
+
+  /** Read-only evidence about a preserved working copy that this controller
+   * holds no runtime for: its manifest digest, latest receipt and whether it
+   * can be adopted. Nothing is written except SQLite's own shared-memory
+   * index, which is not part of the working copy. */
+  async inspectWorkingCopy(
+    input: BrowserWorkingCopyAuthorityInput,
+  ): Promise<BrowserWorkingCopyInspection> {
+    this.assertOpen();
+    const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
+    const blocking = await this.unresolvedAdoption(input.browserSessionId);
+    const evidence = await this.workingCopyEvidence(input);
+    return {
+      ...evidence,
+      platformSupported: process.platform === "linux",
+      activeAdoption:
+        blocking && blocking !== "in_flight"
+          ? await workingCopyAdoptionStatus(paths, blocking)
+          : null,
+      refusal:
+        process.platform !== "linux"
+          ? "unsupported_platform"
+          : blocking
+            ? "adoption_unresolved"
+            : evidence.refusal,
+    };
+  }
+
+  /** Adopt the exact approved bytes of a preserved working copy. See
+   * working-copy-adoption.ts for the durable protocol. */
+  async adoptWorkingCopy(
+    input: BrowserWorkingCopyAuthorityInput & { operationId: string; manifestDigest: string },
+  ): Promise<BrowserWorkingCopyAdoptionStatus> {
+    this.assertOpen();
+    if (process.platform !== "linux") {
+      throw new WorkingCopyAdoptionError(
+        "unsupported_platform",
+        "working copy adoption is supported only on Linux controllers",
+      );
+    }
+    const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
+    if (this.adopting.has(input.browserSessionId))
+      throw workingCopyRefusalError("adoption_unresolved");
+    this.adopting.add(input.browserSessionId);
+    try {
+      const existing = await readAdoptionRecord(paths, input.operationId);
+      if (!existing) {
+        const evidence = await this.workingCopyEvidence(input);
+        if (evidence.refusal) throw workingCopyRefusalError(evidence.refusal);
+      }
+      return await workingCopyAdoptionStatus(paths, await this.performAdoption(paths, input));
+    } finally {
+      this.adopting.delete(input.browserSessionId);
+    }
+  }
+
+  private async performAdoption(
+    paths: ReturnType<typeof adoptionPaths>,
+    input: BrowserWorkingCopyAuthorityInput & { operationId: string; manifestDigest: string },
+  ) {
+    return await adoptWorkingCopy(paths, {
+      operationId: input.operationId,
+      browserSessionId: input.browserSessionId,
+      controllerGeneration: input.controllerGeneration,
+      manifestDigest: input.manifestDigest,
+      appendReceipt: async (stagingDirectory) => {
+        await assertWorkingCopyJournalsIntact(stagingDirectory);
+        const writer = await SqliteBrowserWorkingRuntimeJournal.open({
+          browserSessionId: input.browserSessionId,
+          controllerGeneration: input.controllerGeneration,
+          sessionDirectory: stagingDirectory,
+        });
+        try {
+          const latest = writer.latest();
+          if (!latest) throw workingCopyRefusalError("receipt_not_adoptable");
+          const source =
+            latest.intent === "adopt" && latest.adoption?.operationId === input.operationId
+              ? null
+              : latest;
+          if (source && !adoptableSourceReceipt(source))
+            throw workingCopyRefusalError("receipt_not_adoptable");
+          if (source && JSON.stringify(source.authority) !== JSON.stringify(input.authority))
+            throw workingCopyRefusalError("authority_changed");
+          writer.adopt({
+            source: source ?? latest,
+            operationId: input.operationId,
+            manifestDigest: input.manifestDigest,
+            sourceProfile: await assertDirectory(
+              join(this.rootDirectory, "sessions", input.browserSessionId, "profile"),
+            ),
+            profile: await assertDirectory(join(stagingDirectory, "profile")),
+          });
+        } finally {
+          writer.close();
+        }
+      },
+    });
+  }
+
+  /** Status of one adoption by its operation id. A missing record proves the
+   * operation changed nothing here, because the record precedes every side
+   * effect; any recorded state is reconciled first and reported as found.
+   * An adoption still running here is reported as in flight, unreconciled. */
+  async workingCopyAdoptionStatus(input: {
+    browserSessionId: string;
+    operationId: string;
+  }): Promise<{ inFlight: boolean; adoption: BrowserWorkingCopyAdoptionStatus | null }> {
+    this.assertOpen();
+    const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
+    const record = await readAdoptionRecord(paths, input.operationId);
+    if (this.adopting.has(input.browserSessionId)) {
+      return {
+        inFlight: true,
+        adoption: record ? await workingCopyAdoptionStatus(paths, record) : null,
+      };
+    }
+    if (!record) return { inFlight: false, adoption: null };
+    return {
+      inFlight: false,
+      adoption: await workingCopyAdoptionStatus(paths, await reconcileAdoption(paths, record)),
+    };
+  }
+
+  /** The adoption that still owns a browser's directory: one running here, or
+   * a recorded one that reconciliation could not bring to a terminal phase. */
+  private async unresolvedAdoption(browserSessionId: string) {
+    if (this.adopting.has(browserSessionId)) return "in_flight" as const;
+    return await settleActiveAdoption(adoptionPaths(this.rootDirectory, browserSessionId));
+  }
+
+  private async workingCopyEvidence(
+    input: BrowserWorkingCopyAuthorityInput,
+  ): Promise<Omit<BrowserWorkingCopyInspection, "platformSupported" | "activeAdoption">> {
+    if (this.sessions.has(input.browserSessionId) || this.creating.has(input.browserSessionId)) {
+      return emptyWorkingCopyEvidence(input, "browser_running");
+    }
+    const sessionDirectory = join(this.rootDirectory, "sessions", input.browserSessionId);
+    const profileDirectory = join(sessionDirectory, "profile");
+    let profile: { device: number; inode: number };
+    try {
+      await assertDirectory(sessionDirectory);
+      profile = await assertDirectory(profileDirectory);
+    } catch {
+      return emptyWorkingCopyEvidence(input, "working_copy_invalid");
+    }
+    let receipt: BrowserWorkingRuntimeReceipt | null;
+    try {
+      const reader = await SqliteBrowserWorkingRuntimeJournal.open(
+        { ...input, sessionDirectory },
+        true,
+      );
+      try {
+        receipt = reader.latest();
+      } finally {
+        reader.close();
+      }
+    } catch {
+      return {
+        ...emptyWorkingCopyEvidence(input, "working_copy_invalid"),
+        currentProfile: profile,
+      };
+    }
+    let profileInUse: boolean | null;
+    try {
+      await this.assertProfileUnused(profileDirectory);
+      profileInUse = false;
+    } catch {
+      profileInUse = process.platform === "linux" ? true : null;
+    }
+    const authorityMatches =
+      receipt !== null && JSON.stringify(receipt.authority) === JSON.stringify(input.authority);
+    const identityMatches =
+      receipt !== null &&
+      receipt.profile.device === profile.device &&
+      receipt.profile.inode === profile.inode;
+    const refusal: BrowserWorkingCopyRefusal | null = !receipt
+      ? "receipt_not_adoptable"
+      : !adoptableSourceReceipt(receipt) ||
+          receipt.process?.profileDirectory !== resolve(profileDirectory)
+        ? "receipt_not_adoptable"
+        : !authorityMatches
+          ? "authority_changed"
+          : profileInUse !== false
+            ? "process_state_unknown"
+            : identityMatches
+              ? "adoption_not_needed"
+              : null;
+    const manifest = refusal === null ? await workingCopyManifest(sessionDirectory) : null;
+    return {
+      browserSessionId: input.browserSessionId,
+      controllerGeneration: input.controllerGeneration,
+      manifest,
+      currentProfile: profile,
+      receipt: receipt
+        ? {
+            operationId: receipt.operationId,
+            intent: receipt.intent,
+            state: receipt.state,
+            recordedProfile: receipt.profile,
+            restoreAuthorityDigest: receipt.restoreAuthorityDigest,
+            directoryLaunchAllowed: receipt.directoryLaunchAllowed,
+            authorityMatches,
+            adoption: receipt.adoption ?? null,
+          }
+        : null,
+      profileIdentityMatches: identityMatches,
+      profileInUse,
+      refusal,
+    };
   }
 
   private async createValidatedSession(
@@ -1091,6 +1323,10 @@ export class BrowserSupervisor {
     const downloadDirectory = join(sessionDirectory, "downloads");
     const uploadDirectory = join(sessionDirectory, "uploads");
     const screenshotDirectory = join(sessionDirectory, "screenshots");
+    // An adoption running here or left unresolved owns this directory; no
+    // launch of any kind may use it until that adoption is reconciled.
+    if (await this.unresolvedAdoption(options.browserSessionId))
+      throw workingRuntimeUnavailable("adoption_unresolved");
     if (
       !options.recoverExistingWorkingDirectory &&
       !options.restore &&
@@ -1112,28 +1348,66 @@ export class BrowserSupervisor {
         await assertDirectory(this.rootDirectory);
         await assertDirectory(join(this.rootDirectory, "sessions"));
         await assertDirectory(sessionDirectory);
-        const profile = await assertDirectory(profileDirectory);
+        const profile = await assertDirectory(profileDirectory).catch(() => {
+          throw workingRuntimeUnavailable("working_copy_invalid");
+        });
         const reader = await SqliteBrowserWorkingRuntimeJournal.open(
           { ...options, sessionDirectory },
           true,
         );
+        let receipt: BrowserWorkingRuntimeReceipt | null;
         try {
-          const receipt = reader.latest();
-          assertWorkingRuntimeReceipt(
-            receipt,
-            options.workingRuntimeAuthority!,
-            workingLaunchDigest(options),
-            profile,
-          );
-          if (receipt.process.profileDirectory !== resolve(profileDirectory))
-            throw workingRuntimeUnavailable();
-          const state = await this.inspectOwnedProcess(receipt.process);
-          if (state === "exited" && !receipt.directoryLaunchAllowed)
-            throw workingRuntimeUnavailable();
-          recoveredReceipt = receipt;
+          receipt = reader.latest();
         } finally {
           reader.close();
         }
+        if (
+          adoptedCopyNeedsResettle(receipt) &&
+          JSON.stringify(receipt.authority) === JSON.stringify(options.workingRuntimeAuthority) &&
+          receipt.launchDigest === workingLaunchDigest(options) &&
+          receipt.profile.device === profile.device &&
+          receipt.profile.inode === profile.inode
+        ) {
+          // A launch from an adopted copy was cut short by a controller
+          // restart. Once no process provably uses the profile, the same
+          // adopted copy becomes launchable again; it is never set aside for
+          // an older checkpoint.
+          await this.assertProfileUnused(profileDirectory).catch(() => {
+            throw workingRuntimeUnavailable("process_state_unknown");
+          });
+          const writer = await SqliteBrowserWorkingRuntimeJournal.open({
+            ...options,
+            sessionDirectory,
+          });
+          try {
+            receipt = writer.resettleAdoptedCopy(receipt);
+          } finally {
+            writer.close();
+          }
+        }
+        assertWorkingRuntimeReceipt(
+          receipt,
+          options.workingRuntimeAuthority!,
+          workingLaunchDigest(options),
+          profile,
+        );
+        if (receipt.process.profileDirectory !== resolve(profileDirectory))
+          throw workingRuntimeUnavailable("profile_identity_changed");
+        if (receipt.intent === "adopt") {
+          // An adopted copy is launched fresh in its own directory. The
+          // process it was copied from is history, never reattached; the
+          // exact profile must be unused by any process.
+          await this.assertProfileUnused(profileDirectory).catch(() => {
+            throw workingRuntimeUnavailable("process_state_unknown");
+          });
+        } else {
+          const state = await this.inspectOwnedProcess(receipt.process).catch(() => {
+            throw workingRuntimeUnavailable("process_state_unknown");
+          });
+          if (state === "exited" && !receipt.directoryLaunchAllowed)
+            throw workingRuntimeUnavailable("receipt_not_adoptable");
+        }
+        recoveredReceipt = receipt;
         // Validate every path consumed by the existing writers before opening
         // any journal RW or creating a driver. Missing adjunct directories may
         // be recreated only after the exact profile/receipt proof above.
@@ -1148,14 +1422,21 @@ export class BrowserSupervisor {
         for (const path of ["operations.sqlite", "state-transfers.sqlite"])
           await assertOptionalRegularFile(join(sessionDirectory, path));
         await assertOptionalRegularFile(join(downloadDirectory, "downloads.sqlite"));
-      } catch {
-        throw workingRuntimeUnavailable();
+      } catch (error) {
+        throw error instanceof BrowserWorkingRuntimeUnavailableError && error.reason
+          ? error
+          : workingRuntimeUnavailable(
+              error instanceof BrowserWorkingRuntimeUnavailableError
+                ? undefined
+                : "working_copy_invalid",
+            );
       }
     }
     if (
       options.networkRoute?.kind === "proxy" &&
       !options.networkRoute.proxyUrl &&
       (!recoveredReceipt ||
+        recoveredReceipt.intent === "adopt" ||
         (await this.inspectOwnedProcess(recoveredReceipt.process!)) === "exited")
     ) {
       throw new InteractionControllerError(
@@ -1249,7 +1530,7 @@ export class BrowserSupervisor {
       socketDirectory,
       profileDirectory,
       restoredProfile: restoredProfileMaterialized,
-      ...(recoveredReceipt
+      ...(recoveredReceipt && recoveredReceipt.intent !== "adopt"
         ? {
             recoverOwnedProcess: recoveredReceipt.process!,
             allowOwnedProcessLaunch: recoveredReceipt.directoryLaunchAllowed,
@@ -1308,6 +1589,7 @@ export class BrowserSupervisor {
             profile: await assertDirectory(profileDirectory),
             process: null,
             directoryLaunchAllowed: recoveredReceipt?.directoryLaunchAllowed ?? false,
+            ...(recoveredReceipt?.adoption ? { adoption: recoveredReceipt.adoption } : {}),
           },
           recoveredReceipt?.operationId,
         );
@@ -1383,8 +1665,11 @@ export class BrowserSupervisor {
       const failures: unknown[] = [error];
       let driverClosed = driver === null;
       let restoredProfileRemoved = false;
+      // A launch from an adopted copy started a new process; it is closed,
+      // never detached, so the copy is provably unused again.
+      const adoptedLaunch = recoveredReceipt?.intent === "adopt";
       try {
-        if (recoveredReceipt) await driver?.detach?.();
+        if (recoveredReceipt && !adoptedLaunch) await driver?.detach?.();
         else await driver?.close();
         driverClosed = true;
       } catch (cleanupError) {
@@ -1413,6 +1698,26 @@ export class BrowserSupervisor {
         try {
           workingReceipt = workingJournal.fail(workingReceipt, launchFailureCode(error));
           launchReceiptSettled = true;
+        } catch (cleanupError) {
+          failures.push(cleanupError);
+        }
+      }
+      // A failed launch from an adopted copy keeps the copy: once its driver
+      // closed, the launch is settled failed and the adopt receipt becomes the
+      // latest again, so the next attempt uses the same copy and never an
+      // older checkpoint. An unsettled close leaves the launch receipt as the
+      // honest unknown state.
+      if (
+        adoptedLaunch &&
+        workingJournal &&
+        workingReceipt &&
+        !workingReceiptCompleted &&
+        driverClosed
+      ) {
+        try {
+          workingReceipt = workingJournal.fail(workingReceipt, launchFailureCode(error));
+          launchReceiptSettled = true;
+          workingJournal.readopt(recoveredReceipt!, workingReceipt);
         } catch (cleanupError) {
           failures.push(cleanupError);
         }
@@ -2020,7 +2325,10 @@ export class BrowserSupervisor {
     } catch {
       throw workingRuntimeUnavailable();
     }
-    if (!isInterruptedLaunchReceipt(latest)) throw workingRuntimeUnavailable();
+    // A launch from an adopted copy is never set aside: the adopted copy is
+    // the browser's chosen state, and setting it aside would let an older
+    // checkpoint replace it. Its next recovery re-settles it instead.
+    if (!isInterruptedLaunchReceipt(latest) || latest.adoption) throw workingRuntimeUnavailable();
     try {
       await this.assertProfileUnused(join(sessionDirectory, "profile"));
     } catch {

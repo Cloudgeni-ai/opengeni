@@ -1395,6 +1395,39 @@ describe("BrowserSession route discipline", () => {
     expect(source).not.toContain("discardWorkingRuntime");
   });
 
+  test("adopts a preserved working copy only under existing control authority, attributed before any effect", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    for (const route of [
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/inspection"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId"',
+    ]) {
+      expect(source).toContain(route);
+    }
+    const helperStart = source.indexOf("async function withPreservedWorkingCopy");
+    const helper = source.slice(helperStart, source.indexOf("app.post(", helperStart));
+    // The same session.control + placement authority as any browser control;
+    // no extra role gate, and a missing controller session is never relaunched.
+    expect(helper).toContain('"sessions:control"');
+    expect(helper).toContain('"session.control"');
+    expect(helper).toContain('"browser.control"');
+    expect(helper).toMatch(/\/\/ A missing controller session[\s\S]*false,\n {4}\);/u);
+    expect(helper).toContain('browserSessionStorageMode(record.session) !== "private_profile"');
+    const adoptStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions",',
+    );
+    const adopt = source.slice(adoptStart, source.indexOf("app.get(", adoptStart));
+    expect(adopt.indexOf("parseJsonBody(context, BrowserWorkingCopyAdoptionRequest)")).toBeLessThan(
+      adopt.indexOf("withPreservedWorkingCopy("),
+    );
+    expect(adopt.indexOf('"browserSession.working_copy.adoption_requested"')).toBeLessThan(
+      adopt.indexOf("client.adoptWorkingCopy("),
+    );
+    expect(adopt.split("client.adoptWorkingCopy(").length - 1).toBe(1);
+    // Freshness is reported as unknown, never inferred.
+    expect(source).toContain('freshness: { status: "unknown"');
+  });
+
   test("suspends only after encrypted capture and resumes only from durable authority", async () => {
     const source = await readFile(routeUrl, "utf8");
     const suspendStart = source.indexOf(

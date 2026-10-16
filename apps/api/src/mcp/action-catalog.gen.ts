@@ -192,6 +192,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "adoptBrowserSessionWorkingCopy",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions",
+    "request": [
+      "BrowserWorkingCopyAdoptionRequest"
+    ],
+    "response": [
+      "BrowserWorkingCopyAdoptionResponse"
+    ]
+  },
+  {
     "id": "advanceConnectAttempt",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/connect/attempts/:attemptId/advance",
@@ -2640,6 +2651,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getBrowserSessionWorkingCopyAdoption",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId",
+    "request": [],
+    "response": [
+      "BrowserWorkingCopyAdoptionResponse"
+    ]
+  },
+  {
     "id": "getBrowserTargetState",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/state",
@@ -3913,6 +3933,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SiteSqlImportRequest"
     ],
     "response": []
+  },
+  {
+    "id": "inspectBrowserSessionWorkingCopy",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/inspection",
+    "request": [],
+    "response": [
+      "BrowserWorkingCopyInspection"
+    ]
   },
   {
     "id": "inspectMcpAuthentication",

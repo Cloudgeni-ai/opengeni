@@ -996,6 +996,73 @@ export type BrowserSessionMutationResponse = {
 };
 
 export type BrowserSessionLifecycleRequest = { operationId: string };
+
+/** Why a browser's preserved working copy cannot be adopted as it is. */
+export type BrowserWorkingCopyRefusal =
+  | "unsupported_platform"
+  | "unsupported_browser"
+  | "browser_running"
+  | "working_copy_invalid"
+  | "receipt_not_adoptable"
+  | "authority_changed"
+  | "process_state_unknown"
+  | "adoption_not_needed"
+  | "adoption_unresolved";
+
+/** One adoption of a copied working directory, as its controller recorded it. */
+export type BrowserWorkingCopyAdoption = {
+  operationId: string;
+  browserSessionId: string;
+  controllerGeneration: string;
+  manifestDigest: string;
+  phase:
+    | "intent"
+    | "copied"
+    | "receipt"
+    | "source_preserved"
+    | "adopted"
+    | "interrupted"
+    | "failed"
+    | "collision";
+  failureCode: string | null;
+  retainedDirectories: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** Evidence about a browser's preserved working copy after its controller lost
+ * it. Freshness is never machine-proven. */
+export type BrowserWorkingCopyInspection = {
+  browserSessionId: string;
+  controllerGeneration: string;
+  adoptable: boolean;
+  refusal: BrowserWorkingCopyRefusal | null;
+  explanation: string;
+  manifest: { digest: string; entries: number; bytes: number } | null;
+  platformSupported: boolean;
+  profileIdentityMatches: boolean;
+  profileInUse: boolean | null;
+  receipt: {
+    operationId: string;
+    intent: "launch" | "suspend" | "retire" | "adopt";
+    state: string;
+    directoryLaunchAllowed: boolean;
+    authorityMatches: boolean;
+    launchedFromCheckpoint: boolean;
+    adoption: { operationId: string; manifestDigest: string } | null;
+  } | null;
+  freshness: { status: "unknown"; latestCheckpointAt: string | null };
+  activeAdoption: BrowserWorkingCopyAdoption | null;
+};
+
+export type BrowserWorkingCopyAdoptionRequest = { operationId: string; manifestDigest: string };
+
+export type BrowserWorkingCopyAdoptionResponse = {
+  inFlight: boolean;
+  adoption: BrowserWorkingCopyAdoption | null;
+  explanation: string;
+};
+
 export type BrowserOpenTargetRequest = { url?: string | undefined };
 
 export type BrowserTargetListResponse = {
