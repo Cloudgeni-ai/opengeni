@@ -61,6 +61,13 @@ export {
   linkCurrentSpanToAdmission,
   type TraceContext,
 } from "./trace-context";
+export {
+  analyzeCpuSamples,
+  captureCpuSamplingProfile,
+  installCpuSamplingSignal,
+  type CpuSampleTrace,
+  type CpuSamplingSummary,
+} from "./cpu-sampling";
 
 export type AttributeValue = string | number | boolean | null | undefined;
 export type Attributes = Record<string, AttributeValue>;
