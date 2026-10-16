@@ -518,31 +518,91 @@ async fn a_pause_and_wake_between_two_readings_is_not_guest_activity() {
     )
     .await;
     assert_eq!(lab.run(sandbox, &["quiet"]).await, ["ok"]);
+    // Never asleep and never in a step, so every sampling pass reads its
+    // traffic: its readings mark each pass, including one that finds the
+    // other sandbox in a step and reads nothing of it.
+    let witness = id(22);
+    lab.create(witness, NEVER).await;
+    assert_eq!(lab.run(witness, &["quiet"]).await, ["ok"]);
     lab.world.transition_traffic.store(true, Ordering::SeqCst);
 
-    // Right after a reading, pause and wake again well before the next.
-    let seen = lab.world.samples.load(Ordering::SeqCst);
-    while lab.world.samples.load(Ordering::SeqCst) == seen {
-        sleep(Duration::from_millis(1)).await;
-    }
-    let window = Instant::now();
-    assert_eq!(lab.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
-    lab.wait_level(sandbox, LevelName::Paused).await;
-    assert_eq!(lab.run(sandbox, &["quiet"]).await, ["ok"]);
-    let woke = Instant::now();
-    assert!(
-        woke - window < EVERY / 2,
-        "the pause and wake took {:?}, too long to fall between readings",
-        woke - window
-    );
+    // Right after the sandbox is read, pause and wake again well before
+    // its next reading. The pause writes its record first, so on a slow,
+    // busy disk that can take too long; such an attempt proves nothing,
+    // and is tried again. Times are those of the readings themselves, not
+    // of when this test noticed them.
+    let (subject, marker) = (vm_name(sandbox), vm_name(witness));
+    let readings = || lab.world.readings.lock().unwrap().clone();
+    let reads = |vm: &str| readings().iter().filter(|(name, _)| name == vm).count();
+    let mut tried = Vec::new();
+    let (woke, next) = loop {
+        // Its idle allowance may have paused it since a rejected attempt:
+        // wake it, and its allowance starts again, longer than an interval,
+        // so a reading comes before it pauses.
+        assert_eq!(lab.run(sandbox, &["quiet"]).await, ["ok"]);
+        let give_up = Instant::now() + 10 * EVERY;
+        let seen = reads(&subject);
+        while reads(&subject) == seen {
+            assert!(Instant::now() < give_up, "the sandbox was not read");
+            sleep(Duration::from_millis(1)).await;
+        }
+        // The reading that opened the sandbox's window, and its place
+        // among all readings.
+        let open = readings()
+            .iter()
+            .rposition(|(name, _)| *name == subject)
+            .unwrap();
+        let start = readings()[open].1;
+        assert_eq!(lab.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+        lab.wait_level(sandbox, LevelName::Paused).await;
+        assert_eq!(lab.run(sandbox, &["quiet"]).await, ["ok"]);
+        let woke = Instant::now();
+        // The sandbox's next reading, which judges the pause's traffic.
+        let (judge, all) = loop {
+            let all = readings();
+            if let Some(after) = all[open + 1..]
+                .iter()
+                .position(|(name, _)| *name == subject)
+            {
+                break (open + 1 + after, all);
+            }
+            assert!(Instant::now() < give_up, "the woken sandbox was not read");
+            sleep(Duration::from_millis(1)).await;
+        };
+        let next = all[judge].1;
+        // Each pass reads the witness exactly once, and visits the two
+        // sandboxes in the same order while neither is added or removed.
+        // So exactly one witness reading between the two means their
+        // passes were adjacent: no pass came between to find the sandbox
+        // paused or mid-step and start its window afresh. (Were the order
+        // to change, the count would be 0 or 2, and the attempt is tried
+        // again.) Room enough between the wake and the judging reading
+        // tells an idle time counted from either apart.
+        let passes = all[open + 1..judge]
+            .iter()
+            .filter(|(name, _)| *name == marker)
+            .count();
+        if passes == 1 && next >= woke + EVERY / 2 {
+            break (woke, next);
+        }
+        tried.push(woke - start);
+        assert!(
+            tried.len() < 5,
+            "no pause and wake fell well between two readings; they took {tried:?}"
+        );
+    };
 
-    // Had the pause's traffic counted, the next reading would have found
-    // the guest busy and put its pause off past this.
+    // Had that reading counted the pause's traffic, the guest's idle time
+    // would start again from it, and it would pause no sooner than its
+    // idle allowance after it.
     lab.wait_level(sandbox, LevelName::Paused).await;
-    let idle = woke.elapsed();
+    let paused = Instant::now();
     assert!(
-        idle < PAUSE_AFTER + EVERY / 2,
-        "paused {idle:?} after the wake, later than its {PAUSE_AFTER:?} idle allowance"
+        paused < next + PAUSE_AFTER,
+        "paused {:?} after the wake and {:?} after the next reading: its idle time \
+         started again at that reading",
+        paused - woke,
+        paused - next
     );
     lab.assert_clean();
 }
