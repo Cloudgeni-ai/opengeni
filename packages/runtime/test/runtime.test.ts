@@ -2592,6 +2592,42 @@ describe("runtime event normalization", () => {
       });
     });
 
+    test("a recommendation added to a server's tools/list applies from the session's next attempt", async () => {
+      // The host changes its tools/list between attempts of one session, as when
+      // it ships a new Ask tool; nothing about the session is re-created or patched.
+      const toolMeta: Record<string, Record<string, unknown>> = {};
+      const mcp = startTestMcpServer({ toolMeta });
+      const serverConfig = { id: "host", name: "Host", url: mcp.url, cacheToolsList: true };
+      const settings = testSettings({ sandboxBackend: "none", mcpServers: [serverConfig] });
+      const attempt = async () => {
+        const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "host" }]);
+        const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
+        return { prepared, agent };
+      };
+      const first = await attempt();
+      try {
+        expect(await approvalMapForAgent(first.agent)).toEqual({
+          host__search_documents: false,
+          host__fetch_document: false,
+        });
+        toolMeta.fetch_document = { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" };
+        // A running attempt keeps the list it started with.
+        expect((await approvalMapForAgent(first.agent)).host__fetch_document).toBe(false);
+        const second = await attempt();
+        try {
+          expect(await approvalMapForAgent(second.agent)).toEqual({
+            host__search_documents: false,
+            host__fetch_document: true,
+          });
+        } finally {
+          await second.prepared.close();
+        }
+      } finally {
+        await first.prepared.close();
+        mcp.close();
+      }
+    });
+
     test("connection-backed MCP with requireApproval false builds without requesting approval", async () => {
       const map = await mcpToolApprovalMap(false, true);
       expect(map).toEqual({

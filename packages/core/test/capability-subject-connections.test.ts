@@ -230,6 +230,11 @@ describe("subject-owned capability connection references", () => {
                       inputSchema: { type: "object" },
                       annotations: { readOnlyHint: true },
                     },
+                    {
+                      name: "change_fixture",
+                      inputSchema: { type: "object" },
+                      _meta: { "opengeni/recommendedPermission": "ask" },
+                    },
                   ],
                 };
           return Response.json({ jsonrpc: "2.0", id: request.id, result });
@@ -257,6 +262,16 @@ describe("subject-owned capability connection references", () => {
         if (!reviewed) {
           expect(authorization.length).toBeGreaterThan(0);
           expect(new Set(authorization)).toEqual(new Set(["Bearer synthetic-origin"]));
+          // A tool's own tools/list recommendation is its default when nothing is saved.
+          const byName = new Map(before.tools.map((tool) => [tool.name, tool]));
+          expect(byName.get("inspect_fixture")).toMatchObject({
+            permission: "allow",
+            source: "recommended",
+          });
+          expect(byName.get("change_fixture")).toMatchObject({
+            permission: "ask",
+            source: "recommended",
+          });
         }
         await updateConnectorToolPermissions({
           ...input,
