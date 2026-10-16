@@ -276,6 +276,8 @@ export type WebSearchProviderConfig = {
   fetch: WebSearchProviderEndpoint[];
   /** Explicit operator prices by provider, overriding list prices. */
   pricingOverrides: Partial<Record<WebSearchProviderId, WebSearchPricing>>;
+  /** Deployment-wide margin override for provider-rate credit billing. */
+  creditMarginBpsOverride?: number | undefined;
   timeoutMs: number;
 };
 
@@ -297,6 +299,7 @@ export type WebSearchSettings = {
   /** Credit billing is active for this deployment (see webSearchCreditBillingActive). */
   billingMode?: string | undefined;
   usageLimitsMode?: string | undefined;
+  creditMarginBpsOverride?: number | undefined;
 };
 
 export type WebSearchProviderResolution =
@@ -489,6 +492,9 @@ export function resolveWebSearchProvider(settings: WebSearchSettings): WebSearch
         search,
         fetch,
         pricingOverrides: pricingOverrides(settings.webSearchPricingJson),
+        ...(settings.creditMarginBpsOverride !== undefined
+          ? { creditMarginBpsOverride: settings.creditMarginBpsOverride }
+          : {}),
         timeoutMs: settings.webSearchRequestTimeoutMs ?? 20_000,
       },
     };
@@ -570,7 +576,7 @@ export function webSearchToolSpendsCredits(
 
 /** Upstream price for one call to one provider, before any provider-reported cost. */
 export function webSearchCallPricing(
-  config: Pick<WebSearchProviderConfig, "pricingOverrides">,
+  config: Pick<WebSearchProviderConfig, "pricingOverrides" | "creditMarginBpsOverride">,
   endpoint: WebSearchProviderEndpoint,
   operation: "search" | "fetch",
 ): { providerMicros: number; marginBps: number; explicit: boolean } {
@@ -578,7 +584,7 @@ export function webSearchCallPricing(
   if (override) {
     return {
       providerMicros: operation === "search" ? override.searchMicros : override.fetchMicros,
-      marginBps: override.marginBps ?? DEFAULT_MARGIN_BPS,
+      marginBps: config.creditMarginBpsOverride ?? override.marginBps ?? DEFAULT_MARGIN_BPS,
       explicit: true,
     };
   }
@@ -586,7 +592,7 @@ export function webSearchCallPricing(
   // A keyless call (Jina reader, self-hosted SearXNG) costs nothing.
   return {
     providerMicros: spec && endpoint.apiKey ? spec.listPriceMicros : 0,
-    marginBps: DEFAULT_MARGIN_BPS,
+    marginBps: config.creditMarginBpsOverride ?? DEFAULT_MARGIN_BPS,
     explicit: false,
   };
 }
