@@ -617,8 +617,9 @@ async fn a_copy_missing_a_chunk_fails_verification_until_archived_again() {
 }
 
 /// A sweep keeps everything a stored copy needs, its working-set pack
-/// included; what a forgotten memory image or a deleted copy alone named
-/// becomes sweepable, and what another copy shares stays.
+/// included; what a forgotten memory image, its pack included, or a
+/// deleted copy alone named becomes sweepable, and what another copy
+/// shares stays.
 #[tokio::test]
 async fn a_sweep_keeps_what_stored_copies_name() {
     use compute_storage::fresh::Clock;
@@ -655,19 +656,42 @@ async fn a_sweep_keeps_what_stored_copies_name() {
     for kept in parts.iter().chain([&pack]) {
         assert!(named.contains(&kept.key()), "the pack is kept");
     }
+    // A pack holds memory pages: a copy without memory keeps none.
+    let disk_only_with_pack = serde_json::to_vec(&Head {
+        memory: None,
+        ..parse_head("test", &pointer).unwrap()
+    })
+    .unwrap();
+    let named = store.names(&disk_only_with_pack).await.unwrap();
+    for gone in parts.iter().chain([&pack]) {
+        assert!(!named.contains(&gone.key()), "a pack without its memory");
+    }
 
     // Seen from a month ahead, everything stored is old enough to go.
     let later = SystemTime::now() + Duration::from_secs(30 * 86_400);
-    let ahead = Chunked::new(chunks.with_clock(Clock::from_fn(move || later)));
+    let ahead = Chunked::new(chunks.clone().with_clock(Clock::from_fn(move || later)));
     let report = ahead.sweep(false).await.unwrap();
     assert_eq!((report.pointers, report.unnamed), (2, 0), "{report:?}");
     assert_eq!(report.named, report.stored);
 
     store.forget_memory(with_memory).await.unwrap();
+    let pointer = chunks
+        .get_pointer(&with_memory.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(parse_head("test", &pointer).unwrap().pack.is_none());
+    let named = store.names(&pointer).await.unwrap();
+    for gone in parts.iter().chain([&pack]) {
+        assert!(
+            !named.contains(&gone.key()),
+            "the pack goes with the memory"
+        );
+    }
     let forgotten = ahead.sweep(false).await.unwrap();
     assert!(
-        forgotten.unnamed >= 2,
-        "the image's manifests: {forgotten:?}"
+        forgotten.unnamed >= 3,
+        "the image's manifests and the pack: {forgotten:?}"
     );
     assert_eq!(forgotten.named + forgotten.unnamed, forgotten.stored);
 

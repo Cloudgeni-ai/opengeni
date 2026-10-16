@@ -21,11 +21,12 @@ storage: what the host agent archives to, wakes from and sweeps.
 Everything read back is hashed and fails closed: a missing, short or
 corrupt object is an error, never zeros. Hashes detect corruption, not who
 may publish: which pointer is current, and who may move it, is the host
-agent's business. Deduplication stays within one tenant or public image
-domain, so the store never answers whether another tenant holds some
+agent's business. Deduplication covers everything under one prefix: the
+caller must give each tenant or public image domain its own prefix and
+access, or the store would answer whether another tenant holds some
 content.
 
-Chunks are at most 16 MiB and manifests at most 16 MiB; decoded sizes are
+Chunks are at most 16 MiB and manifests at most 128 MiB; decoded sizes are
 checked before they are accepted. GCS and Azure were exercised against real
 accounts; S3 compiles but is untested against a real bucket.
 

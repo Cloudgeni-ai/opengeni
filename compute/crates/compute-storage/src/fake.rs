@@ -66,6 +66,11 @@ pub(crate) struct Fake {
     /// When set, every request first waits up to this long, as the seeded
     /// sequence picks, so concurrent callers interleave differently.
     latency: Mutex<Option<(Rng, Duration)>>,
+    /// When set, a put to a name containing the text waits this long
+    /// before it is stored, as a request held up in flight would; `held`
+    /// counts those that started waiting.
+    pub(crate) stall: Mutex<Option<(&'static str, Duration)>>,
+    pub(crate) held: Mutex<u32>,
     /// Asked before every delete through the XML API; the names of deletes
     /// it refused are kept in `violations` (and deleted all the same).
     pub(crate) guard: Mutex<Option<Guard>>,
@@ -264,6 +269,11 @@ impl ObjectStore for Bucket {
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
         self.0.wait().await;
+        let stall = *self.0.stall.lock().unwrap();
+        if let Some((_, stall)) = stall.filter(|(part, _)| location.as_ref().contains(part)) {
+            *self.0.held.lock().unwrap() += 1;
+            tokio::time::sleep(stall).await;
+        }
         let mut objects = self.0.objects.lock().unwrap();
         match opts.mode {
             PutMode::Create if objects.contains_key(location.as_ref()) => {
@@ -272,8 +282,18 @@ impl ObjectStore for Bucket {
                     source: "exists".into(),
                 });
             }
+            PutMode::Update(version) => {
+                let current = objects
+                    .get(location.as_ref())
+                    .map(|object| object.generation.to_string());
+                if current.is_none() || current != version.version {
+                    return Err(object_store::Error::Precondition {
+                        path: location.to_string(),
+                        source: "generation does not match".into(),
+                    });
+                }
+            }
             PutMode::Overwrite | PutMode::Create => {}
-            PutMode::Update(_) => return Err(object_store::Error::NotImplemented),
         }
         let generation = self
             .0

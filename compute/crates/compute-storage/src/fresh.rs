@@ -1,5 +1,5 @@
-//! The time rules that let a sweep delete stored objects no copy names
-//! while archives that may name them again are still in flight.
+//! The rules that let a sweep delete stored objects no copy names while
+//! archives that may name them again are still in flight.
 //!
 //! Chunks and manifests are named by their content and shared. An archive
 //! that finds one already stored reuses it without writing it, and names
@@ -7,19 +7,27 @@
 //! therefore delete an old object no pointer names just as an archive
 //! starts to reuse it. Three rules close that gap:
 //!
-//! 1. An archive that reuses an object stored more than
-//!    [`Freshness::refresh_after`] ago stores it again, so everything an
-//!    archive relies on was stored recently.
-//! 2. An archive publishes its pointer within [`Freshness::publish_within`]
-//!    of starting, or not at all (see [`Publication`]).
-//! 3. A sweep deletes only objects stored more than
-//!    [`Freshness::sweep_after`] before it began reading pointers, and only
-//!    if the object has not been stored again since it looked, so a store
-//!    under rule 1 survives a sweep that saw the older copy.
+//! 1. An archive begins by noting which version of its pointer is stored,
+//!    storing an empty pointer if there is none, and publishes only on
+//!    condition that the pointer is still that version (see
+//!    [`ChunkStore::begin`](crate::store::ChunkStore::begin)).
+//! 2. Before it deletes anything, a sweep stores every pointer again as it
+//!    read it, on condition that it is still the version read. An archive
+//!    that began before then can no longer publish, and starts again; one
+//!    that published meanwhile changed the pointer, so the sweep reads it
+//!    again.
+//! 3. An archive that reuses an object stored more than
+//!    [`Freshness::refresh_after`] ago stores it again, and a sweep deletes
+//!    only objects stored more than [`Freshness::sweep_after`] before it
+//!    began, each only if it has not been stored again since it looked.
 //!
-//! `sweep_after` covers both windows and the clocks' disagreement twice
-//! over, so any pointer naming an object a sweep may delete was published
-//! before the sweep read pointers: the sweep sees it and keeps the object.
+//! So every pointer a sweep did not account for was published by an
+//! archive that began after the sweep did, and everything such an archive
+//! relies on was stored too recently for the sweep to delete. The store
+//! enforces rules 1 and 2 on each write, so neither a slow request nor a
+//! stalled host can publish past a sweep; only rule 3 rests on the clocks
+//! of hosts, sweeps and the store agreeing to within
+//! [`Freshness::clock_skew`].
 
 use std::fmt;
 use std::sync::Arc;
@@ -27,33 +35,32 @@ use std::time::{Duration, SystemTime};
 
 const DAY: Duration = Duration::from_secs(86_400);
 
-/// The windows of the rules above. Host agents and sweeps of one store
-/// must use the same values.
+/// The times of rule 3 above. Host agents and sweeps of one store must use
+/// the same values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Freshness {
     /// A reused object stored longer ago than this is stored again.
     pub refresh_after: Duration,
-    /// An archive publishes within this long of starting, or not at all.
-    pub publish_within: Duration,
-    /// How far the clocks of hosts and the store may disagree.
+    /// How far the clock of any host or sweep may disagree with the
+    /// store's.
     pub clock_skew: Duration,
 }
 
 impl Freshness {
-    /// A week before a reused object is stored again, a day to publish, an
-    /// hour of clock disagreement: an object no copy names is deleted
-    /// about eight days after it was last stored.
+    /// A week before a reused object is stored again and an hour of clock
+    /// disagreement: an object no copy names is deleted about a week after
+    /// it was last stored.
     pub const DEFAULT: Self = Self {
         refresh_after: Duration::from_secs(7 * DAY.as_secs()),
-        publish_within: DAY,
         clock_skew: Duration::from_secs(3_600),
     };
 
     /// How long ago an object no pointer names must have been stored for a
-    /// sweep to delete it.
+    /// sweep to delete it: the refresh window, and the clocks of a host and
+    /// a sweep disagreeing in opposite directions.
     #[must_use]
     pub fn sweep_after(&self) -> Duration {
-        self.refresh_after + self.publish_within + self.clock_skew * 2
+        self.refresh_after + self.clock_skew * 2
     }
 
     /// Whether an object stored at `stored` must be stored again before an
@@ -104,48 +111,20 @@ impl fmt::Debug for Clock {
     }
 }
 
-/// One archive between its start and the pointer naming what it stored.
-/// Begun before the archive looks at the store at all.
-#[derive(Clone, Copy, Debug)]
-#[must_use = "an archive publishes through its publication"]
-pub struct Publication {
-    pub(crate) started: SystemTime,
-}
-
-impl Publication {
-    /// Whether a pointer may still be published at `now`. A clock that
-    /// went backwards leaves the elapsed time unknown, so it may not.
-    pub(crate) fn open(&self, freshness: &Freshness, now: SystemTime) -> bool {
-        now.duration_since(self.started)
-            .is_ok_and(|elapsed| elapsed <= freshness.publish_within)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn the_sweep_waits_out_both_windows_and_the_clocks() {
+    fn the_sweep_waits_out_the_refresh_window_and_the_clocks() {
         let freshness = Freshness::DEFAULT;
         assert_eq!(
             freshness.sweep_after(),
-            8 * DAY + 2 * 3_600 * Duration::from_secs(1)
+            7 * DAY + 2 * 3_600 * Duration::from_secs(1)
         );
         let now = SystemTime::UNIX_EPOCH + 30 * DAY;
         assert!(!freshness.is_stale(now - 7 * DAY, now));
         assert!(freshness.is_stale(now - 7 * DAY - Duration::from_secs(1), now));
         assert!(!freshness.is_stale(now + DAY, now), "from a later clock");
-    }
-
-    #[test]
-    fn a_publication_closes_after_its_window_or_a_clock_going_back() {
-        let freshness = Freshness::DEFAULT;
-        let started = SystemTime::UNIX_EPOCH + 30 * DAY;
-        let publication = Publication { started };
-        assert!(publication.open(&freshness, started));
-        assert!(publication.open(&freshness, started + DAY));
-        assert!(!publication.open(&freshness, started + DAY + Duration::from_secs(1)));
-        assert!(!publication.open(&freshness, started - Duration::from_secs(1)));
     }
 }

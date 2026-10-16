@@ -24,18 +24,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use futures::TryStreamExt as _;
-use object_store::{ClientOptions, ObjectStore, PutMode, PutOptions, path::Path};
+use object_store::{
+    ClientOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion, path::Path,
+};
 
 use crate::{
     Error, Result,
     chunk::{ChunkRef, EncodedChunk, decode},
-    fresh::{Clock, Freshness, Publication},
+    fresh::{Clock, Freshness},
     manifest::{DiskManifest, MAX_MANIFEST_BYTES},
     upload::{Created, Deleted, Gcs},
 };
 
 /// Largest pointer object accepted; pointers only name manifests.
 pub const MAX_POINTER_BYTES: usize = 64 * 1024;
+
+/// How often [`ChunkStore::begin`] and [`ChunkStore::fence`] try again when
+/// the pointer changes under them; a pointer has one writer, so more means
+/// something else is wrong.
+const POINTER_TRIES: usize = 4;
 
 /// Use provider-native environment or machine-identity credentials.
 pub fn provider_from_env(kind: &str) -> Result<Arc<dyn ObjectStore>> {
@@ -80,6 +87,16 @@ pub enum Area {
     Pointers,
     Manifests,
     Chunks,
+}
+
+/// One archive between its start and the pointer naming what it stored;
+/// see [`ChunkStore::begin`].
+#[derive(Clone, Debug)]
+#[must_use = "an archive publishes through its publication"]
+pub struct Publication {
+    path: Path,
+    /// The pointer's version when the archive began.
+    version: UpdateVersion,
 }
 
 impl Area {
@@ -250,7 +267,8 @@ impl ChunkStore {
     /// immutable; pointers are the only objects ever overwritten, so write one
     /// only after everything it names is stored. A pointer naming objects
     /// an archive stored or reused goes through [`Self::publish`] instead;
-    /// this is for pointers naming only what an earlier one did.
+    /// this is for the pointer's only writer replacing it with one naming
+    /// part of what it named when read.
     pub async fn put_pointer(&self, name: &str, bytes: Vec<u8>) -> Result<()> {
         if bytes.len() > MAX_POINTER_BYTES {
             return Err(Error::Invalid("pointer too large"));
@@ -261,36 +279,128 @@ impl ChunkStore {
         Ok(())
     }
 
-    /// Starts an archive: begin before looking at the store at all.
-    pub fn begin(&self) -> Publication {
-        Publication {
-            started: self.clock.now(),
+    /// Starts an archive that will replace pointer `name`: begin before
+    /// looking at the store at all. Notes which version of the pointer is
+    /// stored, first storing an empty one if there is none, so that a
+    /// sweep can stop the archive from publishing once it has taken stock
+    /// (see [`crate::fresh`]).
+    pub async fn begin(&self, name: &str) -> Result<Publication> {
+        let path = self.pointer_path(name)?;
+        for _ in 0..POINTER_TRIES {
+            match self.backend.head(&path).await {
+                Ok(meta) => {
+                    let version = UpdateVersion {
+                        e_tag: meta.e_tag,
+                        version: meta.version,
+                    };
+                    return Ok(Publication { path, version });
+                }
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+            let create = PutOptions {
+                mode: PutMode::Create,
+                ..Default::default()
+            };
+            match self
+                .backend
+                .put_opts(&path, PutPayload::new(), create)
+                .await
+            {
+                Ok(put) => {
+                    let version = UpdateVersion {
+                        e_tag: put.e_tag,
+                        version: put.version,
+                    };
+                    return Ok(Publication { path, version });
+                }
+                // Made meanwhile, or by an earlier try whose answer was
+                // lost: read its version.
+                Err(object_store::Error::AlreadyExists { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(Error::Superseded)
+    }
+
+    /// Ends `publication` by replacing its pointer with `bytes`, on
+    /// condition that the pointer is still the version the archive began
+    /// with. Refused with [`Error::Superseded`] otherwise: a sweep has
+    /// taken stock since and may delete what the archive reused, so the
+    /// archive starts again.
+    pub async fn publish(&self, publication: Publication, bytes: Vec<u8>) -> Result<()> {
+        if bytes.len() > MAX_POINTER_BYTES {
+            return Err(Error::Invalid("pointer too large"));
+        }
+        let options = PutOptions {
+            mode: PutMode::Update(publication.version),
+            ..Default::default()
+        };
+        match self
+            .backend
+            .put_opts(&publication.path, Bytes::from(bytes).into(), options)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(
+                object_store::Error::Precondition { .. } | object_store::Error::NotFound { .. },
+            ) => Err(Error::Superseded),
+            Err(error) => Err(error.into()),
         }
     }
 
-    /// Ends `publication` by replacing pointer `name`. Refused with
-    /// [`Error::Expired`] once the publication's window has passed: a sweep
-    /// may since have deleted what it reused, so the archive starts again.
-    pub async fn publish(
-        &self,
-        publication: Publication,
-        name: &str,
-        bytes: Vec<u8>,
-    ) -> Result<()> {
-        if !publication.open(&self.freshness, self.clock.now()) {
-            return Err(Error::Expired);
+    /// Stores pointer `key` (as a listing gives it) again as it is, on
+    /// condition that it has not changed since it was read, and returns
+    /// what it holds; `None` once it is gone. After this no archive that
+    /// began earlier can publish it, so what it names now is all it can
+    /// name until an archive begun later publishes.
+    pub async fn fence(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let name = Self::pointer_name(key).ok_or(Error::Invalid("pointer key"))?;
+        let path = self.pointer_path(name)?;
+        for _ in 0..POINTER_TRIES {
+            let read = match self.backend.get(&path).await {
+                Ok(read) => read,
+                Err(object_store::Error::NotFound { .. }) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            if read.meta.size > MAX_POINTER_BYTES as u64 {
+                return Err(Error::Invalid("pointer too large"));
+            }
+            let version = UpdateVersion {
+                e_tag: read.meta.e_tag.clone(),
+                version: read.meta.version.clone(),
+            };
+            let bytes = read.bytes().await?;
+            let options = PutOptions {
+                mode: PutMode::Update(version),
+                ..Default::default()
+            };
+            match self
+                .backend
+                .put_opts(&path, bytes.clone().into(), options)
+                .await
+            {
+                Ok(_) => return Ok(Some(bytes.to_vec())),
+                // Published meanwhile, or fenced by an earlier try whose
+                // answer was lost: read it again.
+                Err(object_store::Error::Precondition { .. }) => {}
+                Err(object_store::Error::NotFound { .. }) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            }
         }
-        self.put_pointer(name, bytes).await
+        Err(Error::Superseded)
     }
 
-    /// Reads pointer `name`, or `None` when there is none.
+    /// Reads pointer `name`, or `None` when there is none or it is the
+    /// empty one an archive in flight stored (see [`Self::begin`]).
     pub async fn get_pointer(&self, name: &str) -> Result<Option<Vec<u8>>> {
         match self.backend.get(&self.pointer_path(name)?).await {
             Ok(result) => {
                 if result.meta.size > MAX_POINTER_BYTES as u64 {
                     return Err(Error::Invalid("pointer too large"));
                 }
-                Ok(Some(result.bytes().await?.to_vec()))
+                let bytes = result.bytes().await?;
+                Ok((!bytes.is_empty()).then(|| bytes.to_vec()))
             }
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(error) => Err(error.into()),

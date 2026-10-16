@@ -1,16 +1,17 @@
 //! Deletes the chunks and manifests no pointer names any more: those of
 //! deleted sandboxes, forgotten memory images and replaced copies.
 //!
-//! A sweep reads every pointer, asks its owner which objects each one
-//! names, and deletes the other chunks and manifests stored more than
+//! A sweep reads every pointer, storing it again so no archive begun
+//! earlier can replace it, asks its owner which objects each one names,
+//! and deletes the other chunks and manifests stored more than
 //! [`Freshness::sweep_after`](crate::fresh::Freshness::sweep_after) before
 //! it began, each only if nothing stored it again since the sweep looked.
 //! [`crate::fresh`] explains why that is safe while archives run. Anything
 //! it cannot read stops it before it deletes anything: a pointer it could
 //! not read may name objects it would otherwise delete.
 //!
-//! Its memory grows with the number of objects stored; one sweep covers
-//! one store prefix.
+//! Its memory grows with the number of objects stored, and it writes each
+//! pointer once; one sweep covers one store prefix.
 
 use std::collections::HashSet;
 
@@ -58,7 +59,8 @@ where
     let before = started
         .checked_sub(store.freshness().sweep_after())
         .ok_or(Error::Invalid("the clock is earlier than the sweep window"))?;
-    // Listed after `started`: a pointer published before it is seen.
+    // Listed after `started`: a pointer missing from the list was first
+    // stored by an archive that began after it.
     let pointers = store.list(Area::Pointers).await?;
     let mut report = Report {
         pointers: pointers.len(),
@@ -67,12 +69,19 @@ where
     let names = &names;
     let in_use: Vec<Vec<String>> = stream::iter(pointers)
         .map(|listed| async move {
-            let name =
-                ChunkStore::pointer_name(&listed.key).ok_or(Error::Invalid("pointer key"))?;
-            match store.get_pointer(name).await? {
-                Some(bytes) => names(bytes).await,
-                // Deleted since the listing: what it named may go.
-                None => Ok(Vec::new()),
+            // Only a sweep that deletes fences: a look stops no archive.
+            let bytes = if delete {
+                store.fence(&listed.key).await?
+            } else {
+                let name =
+                    ChunkStore::pointer_name(&listed.key).ok_or(Error::Invalid("pointer key"))?;
+                store.get_pointer(name).await?
+            };
+            match bytes {
+                Some(bytes) if !bytes.is_empty() => names(bytes).await,
+                // Deleted since the listing, so what it named may go, or
+                // the empty pointer of an archive that has not published.
+                _ => Ok(Vec::new()),
             }
         })
         .buffer_unordered(READS)

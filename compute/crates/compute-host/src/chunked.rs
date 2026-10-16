@@ -225,8 +225,11 @@ impl Chunked {
             return Err(StorageError::Invalid("a stored copy of an unknown version"));
         }
         let mut manifests = vec![head.disk];
-        if let Some(memory) = head.memory {
-            manifests.extend([memory.state, memory.memory]);
+        // A working-set pack holds memory pages, so it is kept only with
+        // the memory image it serves.
+        let pack = head.memory.as_ref().and(head.pack.as_ref());
+        if let Some(memory) = &head.memory {
+            manifests.extend([memory.state.clone(), memory.memory.clone()]);
         }
         let mut names = Vec::new();
         for digest in manifests {
@@ -243,7 +246,7 @@ impl Chunked {
             );
         }
         names.extend(head.profile.as_ref().map(ChunkRef::key));
-        if let Some(index) = &head.pack {
+        if let Some(index) = pack {
             names.push(index.key());
             match working_set::parts(&self.chunks, index).await {
                 Ok(parts) => names.extend(parts.iter().map(ChunkRef::key)),
@@ -526,9 +529,17 @@ impl Store for Chunked {
         cancel: &CancellationToken,
     ) -> Result<Archive, EngineError> {
         const OP: &str = "archive";
-        // Begun before the store is looked at: everything reused from here
-        // on is safe from sweeps only until the window closes.
-        let publication = self.chunks.begin();
+        if cancel.is_cancelled() {
+            return Ok(Archive::Cancelled);
+        }
+        // Begun before the store is looked at: a sweep that takes stock
+        // before this archive publishes stops it from publishing, so it
+        // never names what that sweep deletes.
+        let publication = self
+            .chunks
+            .begin(&id.to_string())
+            .await
+            .map_err(|error| storage_error(OP, error))?;
         let earlier = match self.head(OP, id).await {
             Ok(head) => head,
             Err(error) => {
@@ -607,7 +618,7 @@ impl Store for Chunked {
             .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
         let receipt = Receipt(blake3::hash(&bytes).to_hex().to_string());
         self.chunks
-            .publish(publication, &id.to_string(), bytes)
+            .publish(publication, bytes)
             .await
             .map_err(|error| storage_error(OP, error))?;
         Ok(Archive::Stored(receipt))
@@ -721,8 +732,9 @@ impl Store for Chunked {
             .map_err(|error| storage_error("delete", error))
     }
 
-    /// Points the sandbox at its disk alone. The memory chunks stay until
-    /// garbage collection finds nothing refers to them.
+    /// Points the sandbox at its disk alone, without the memory image or
+    /// the working-set pack of its pages. Their chunks stay until a sweep
+    /// finds nothing names them.
     async fn forget_memory(&self, id: Id) -> Result<Option<Receipt>, EngineError> {
         const OP: &str = "forget";
         let Some(stored) = self
@@ -734,11 +746,12 @@ impl Store for Chunked {
             return Ok(None);
         };
         let head = parse_head(OP, &stored)?;
-        if head.memory.is_none() {
+        if head.memory.is_none() && head.pack.is_none() {
             return Ok(Some(Receipt(blake3::hash(&stored).to_hex().to_string())));
         }
         let head = Head {
             memory: None,
+            pack: None,
             ..head
         };
         let bytes = serde_json::to_vec(&head)
@@ -803,7 +816,7 @@ fn storage_error(operation: &'static str, error: StorageError) -> EngineError {
         StorageError::Io(_)
         | StorageError::Object(_)
         | StorageError::Transfer(_)
-        | StorageError::Expired => ErrorKind::Transient,
+        | StorageError::Superseded => ErrorKind::Transient,
         // A stored copy that fails its checks will fail them again: the store
         // already retried the read and quarantined the object.
         StorageError::Integrity

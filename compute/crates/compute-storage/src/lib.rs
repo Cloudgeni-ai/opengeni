@@ -27,10 +27,12 @@ pub enum Error {
     /// An upload or download did not complete; trying again may work.
     #[error("transfer failed: {0}")]
     Transfer(String),
-    /// An archive ran past the window in which it may publish what it
-    /// stored; it starts again.
-    #[error("the archive took too long to publish; it starts again")]
-    Expired,
+    /// The pointer an archive was to replace changed after the archive
+    /// began, so it may not publish what it stored; it starts again. A
+    /// sweep changes every pointer before it deletes anything (see
+    /// [`fresh`]).
+    #[error("the copy changed while it was archived; the archive starts again")]
+    Superseded,
     /// This store cannot do what was asked.
     #[error("unsupported by this store: {0}")]
     Unsupported(&'static str),
@@ -56,7 +58,7 @@ impl Error {
             | Self::Json(_)
             | Self::Unsupported(_)
             | Self::Object(object_store::Error::NotFound { .. }) => true,
-            Self::Transfer(_) | Self::Expired | Self::Io(_) | Self::Object(_) => false,
+            Self::Transfer(_) | Self::Superseded | Self::Io(_) | Self::Object(_) => false,
         }
     }
 }

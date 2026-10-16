@@ -19,30 +19,51 @@ would delete a chunk the new copy needs, after its local copy may be gone.
 
 - A sweep (`compute-host sweep --store gs://...`, run daily per store
   prefix, safe beside running agents) reads every pointer and deletes the
-  chunks and manifests none names that were stored more than about eight
-  days before it began.
+  chunks and manifests none names that were stored more than about a week
+  before it began.
 - Three rules make that safe while archives run (`compute_storage::fresh`):
-  an archive that reuses an object stored more than a week ago stores it
-  again; an archive publishes its pointer within a day of starting or
-  starts again; and a sweep deletes an object only if it is still the
-  same write it looked at (a delete conditional on the GCS generation).
-  Eight days covers the week, the day and two hours of clock disagreement,
-  so any pointer naming an object a sweep may delete was published before
-  the sweep read pointers.
+  - An archive notes its pointer's version when it begins (storing an
+    empty pointer if there is none) and publishes only on condition that
+    the pointer is still that version.
+  - Before deleting anything, a sweep stores every pointer again as it
+    read it, on condition that it is unchanged. An archive that began
+    earlier can then no longer publish and starts again; one that
+    published in between changed the pointer, so the sweep reads it again.
+  - An archive that reuses an object stored more than a week ago stores it
+    again, and a sweep deletes an object only if it was stored more than a
+    week and two hours (twice the allowed clock disagreement) before the
+    sweep began, and only if it is still the same write it looked at (a
+    delete conditional on the GCS generation).
+
+  So every pointer a sweep did not account for comes from an archive that
+  began after it, and everything such an archive reuses is too recent to
+  delete. The store enforces the first two rules on each write: a pointer
+  write held up in flight, or a host stalled for hours, is refused rather
+  than landing after a sweep. An earlier design that only gave archives a
+  deadline to publish could not stop a write already sent from landing
+  late.
+- Forgetting a memory image also drops its working-set pack, which holds
+  memory pages; a copy without memory names no pack.
 - Anything a sweep cannot read stops it before it deletes anything; only a
   damaged working-set pack does not, since a wake without it is slower.
-- Without `--delete` a sweep only reports what it would delete.
+- Without `--delete` a sweep only reports what it would delete, and writes
+  nothing.
 
 ## Consequences
 
-- Storage holds what live copies name plus at most about eight days of
-  leftovers. A forgotten memory image is gone about 38 days after the
-  sandbox was last used.
+- Storage holds what live copies name plus at most about a week of
+  leftovers. A forgotten memory image, its pack included, is gone about 37
+  days after the sandbox was last used.
 - A chunk reused for more than a week is uploaded again once a week; a
   shared chunk costs one write a week, not one per archive.
-- A seeded simulation of six concurrent archives and a sweep over a fake
-  GCS checks every delete against the stored pointers; with the reuse
-  rule turned off it finds the loss.
+- Each deleting sweep writes every pointer once (a million sandboxes cost
+  about five dollars of GCS writes per sweep), and archives in flight when
+  it does start again; with a daily sweep and archives lasting minutes,
+  that is rare.
+- A seeded simulation of six concurrent archives, some held up for five
+  minutes, and a sweep over a fake GCS, each reading its own clock off by
+  up to the allowed disagreement, checks every delete against the stored
+  pointers; with the reuse rule or the fence turned off it finds the loss.
 - Only GCS deletes on condition today. On Azure and S3 a sweep reports but
   refuses to delete until their conditional deletes are wired in.
 - A sweep holds every stored key in memory; one prefix of tens of millions
