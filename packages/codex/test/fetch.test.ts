@@ -1081,6 +1081,11 @@ describe("codexSubscriptionFetch", () => {
       kind: "websocket",
       connection: "reused",
     });
+    expect(await carried("websocket; connection=new; handshake_ms=180")).toEqual({
+      kind: "websocket",
+      connection: "new",
+      handshakeMs: 180,
+    });
     expect(await carried("http; reason=connection_busy")).toEqual({
       kind: "http",
       reason: "connection_busy",

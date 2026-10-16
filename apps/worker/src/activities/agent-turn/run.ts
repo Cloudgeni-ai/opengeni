@@ -913,6 +913,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                           transportKey,
                           codexRequestTransportLabel(event.transport),
                         );
+                        if (
+                          event.transport.kind === "websocket" &&
+                          event.transport.handshakeMs !== undefined
+                        ) {
+                          recordModelRequestPhase(observability, {
+                            provider: "codex-subscription",
+                            transport: "websocket_new",
+                            phase: "handshake",
+                            durationSeconds: event.transport.handshakeMs / 1000,
+                          });
+                        }
                       }
                       const transport = codexRequestTransports.get(transportKey);
                       if (phase === "terminal") codexRequestTransports.delete(transportKey);

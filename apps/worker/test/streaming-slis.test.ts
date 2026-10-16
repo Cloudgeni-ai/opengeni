@@ -296,9 +296,18 @@ describe("provider request lifecycle diagnostics", () => {
       durationSeconds: 0.2,
       transport: codexRequestTransportLabel({ kind: "websocket", connection: "reused" }),
     });
+    recordModelRequestPhase(observability, {
+      provider: "codex-subscription",
+      phase: "handshake",
+      durationSeconds: 0.12,
+      transport: "websocket_new",
+    });
     const metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(
       /opengeni_model_request_phase_duration_seconds_count\{[^}]*phase="first_byte"[^}]*transport="websocket_reused"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_request_phase_duration_seconds_count\{[^}]*phase="handshake"[^}]*transport="websocket_new"[^}]*\} 1\b/,
     );
   });
 

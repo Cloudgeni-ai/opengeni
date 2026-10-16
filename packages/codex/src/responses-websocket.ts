@@ -32,7 +32,12 @@ export const CODEX_TRANSPORT_HEADER = "x-opengeni-codex-transport";
  * header-capable WebSockets).
  */
 export type CodexRequestTransport =
-  | { kind: "websocket"; connection: "new" | "reused" }
+  | {
+      kind: "websocket";
+      connection: "new" | "reused";
+      /** Milliseconds this request waited for its new connection's handshake. */
+      handshakeMs?: number;
+    }
   | {
       kind: "http";
       reason:
@@ -52,9 +57,10 @@ const HTTP_REASONS = new Set([
 ]);
 
 export function formatCodexRequestTransport(transport: CodexRequestTransport): string {
-  return transport.kind === "websocket"
+  if (transport.kind === "http") return `http; reason=${transport.reason}`;
+  return transport.handshakeMs === undefined
     ? `websocket; connection=${transport.connection}`
-    : `http; reason=${transport.reason}`;
+    : `websocket; connection=${transport.connection}; handshake_ms=${Math.max(0, Math.round(transport.handshakeMs))}`;
 }
 
 /** The transport a response was carried over; null when it does not say. */
@@ -71,9 +77,11 @@ export function parseCodexRequestTransport(
   );
   if (kind === "websocket") {
     const connection = fields.get("connection");
-    return connection === "new" || connection === "reused"
-      ? { kind: "websocket", connection }
-      : null;
+    if (connection !== "new" && connection !== "reused") return null;
+    const handshakeMs = Number(fields.get("handshake_ms") ?? Number.NaN);
+    return Number.isFinite(handshakeMs) && handshakeMs >= 0
+      ? { kind: "websocket", connection, handshakeMs }
+      : { kind: "websocket", connection };
   }
   if (kind === "http") {
     const reason = fields.get("reason");
@@ -422,9 +430,12 @@ export function codexResponsesTransport(
       connection = undefined;
     }
     if (connection?.busy) return await viaHttp("connection_busy");
+    let handshakeMs: number | undefined;
     if (!connection) {
+      const handshakeStartedAt = now();
       try {
         connection = await connect(wsUrl, key, handshake);
+        handshakeMs = now() - handshakeStartedAt;
       } catch {
         backoffUntil.set(key, now() + handshakeBackoffMs);
         return await viaHttp("handshake_failed");
@@ -447,6 +458,9 @@ export function codexResponsesTransport(
     const transport: CodexRequestTransport = {
       kind: "websocket",
       connection: active.requests === 0 ? "new" : "reused",
+      // Only the request that waited for this handshake reports it; a request
+      // that joined a connection another request opened waited for none.
+      ...(handshakeMs !== undefined && connection.requests === 0 ? { handshakeMs } : {}),
     };
     active.requests += 1;
     active.busy = true;

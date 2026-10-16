@@ -62,7 +62,9 @@ test("the model client's Codex Responses requests go over the WebSocket", async 
   socket.emit({ type: "response.completed", response: { id: "r1" } });
 
   const { data: stream, response } = await pending;
-  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe("websocket; connection=new");
+  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toMatch(
+    /^websocket; connection=new; handshake_ms=\d+$/,
+  );
   const events: string[] = [];
   for await (const event of stream) events.push(event.type);
   expect(events).toEqual(["response.created", "response.completed"]);
