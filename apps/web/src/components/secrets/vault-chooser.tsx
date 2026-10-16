@@ -367,6 +367,12 @@ export function VaultChooser({
       cancelLabel={cancelLabel}
       error={formError}
       onSubmit={async (event) => {
+        // A pending portal form can return before its own callback stops
+        // propagation. Only this chooser's form may link or finish setup.
+        if (event.target !== event.currentTarget) {
+          event.stopPropagation();
+          return false;
+        }
         event.preventDefault();
         setFormError(null);
         const done: Record<string, VaultSummary> = { ...linkedNow };

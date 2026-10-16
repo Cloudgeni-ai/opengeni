@@ -292,3 +292,65 @@ test("two same-render create submits dispatch one request", async () => {
   expect(onLinked).not.toHaveBeenCalled();
   await act(async () => finish(linked));
 });
+
+for (const outcome of ["confirmed", "ordinary failure", "success"] as const) {
+  test(`a second press after pending renders cannot complete the chooser: ${outcome}`, async () => {
+    let resolve!: (value: typeof linked) => void;
+    let reject!: (error: unknown) => void;
+    createManaged.mockImplementation(
+      () =>
+        new Promise((yes, no) => {
+          resolve = yes;
+          reject = no;
+        }),
+    );
+    await setup();
+    const form = document.querySelector<HTMLFormElement>('[role="dialog"] form')!;
+    try {
+      await act(async () => {
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      });
+      expect(form.getAttribute("aria-busy")).toBe("true");
+      expect(button("Creating…")).toBeDefined();
+      expect(onLinked).not.toHaveBeenCalled();
+
+      // Unlike the same-render fence, FormFrame now sees pending=true and
+      // returns before the managed dialog's own onSubmit callback runs.
+      await act(async () => button("Creating…")!.click());
+      expect(createManaged).toHaveBeenCalledTimes(1);
+      expect(onLinked).not.toHaveBeenCalled();
+      expect(link).not.toHaveBeenCalled();
+
+      await act(async () => {
+        if (outcome === "success") resolve(linked);
+        else
+          reject(
+            fail(
+              "provider_unavailable",
+              outcome === "confirmed"
+                ? {
+                    created: true,
+                    linked: true,
+                    vaultId: linked.id,
+                    externalVaultId: meta.externalVaultId,
+                  }
+                : {},
+            ),
+          );
+      });
+      expect(createManaged).toHaveBeenCalledTimes(1);
+      expect(onLinked).not.toHaveBeenCalled();
+      if (outcome === "ordinary failure") {
+        expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+        expect(button("Create vault")!.disabled).toBe(false);
+      } else {
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+        expect(host.textContent).toContain(
+          outcome === "confirmed" ? "Don't create it again." : "Created · Read & write",
+        );
+      }
+    } finally {
+      await act(async () => resolve(linked));
+    }
+  });
+}
