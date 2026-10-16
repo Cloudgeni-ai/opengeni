@@ -193,7 +193,7 @@ impl Host {
                 capacity.awake += 1;
             }
         }
-        capacity.occupied += self.unmanaged.values().sum::<u64>();
+        capacity.occupied += self.unmanaged.values().sum::<u64>() + self.spares.held();
         Some(capacity)
     }
 
@@ -420,8 +420,8 @@ impl Host {
     }
 
     /// Frees `deficit` bytes of the budget for `waiter` by ending idle VM
-    /// processes that are already saved, least recently used first,
-    /// counting those already ending.
+    /// processes that are already saved, least recently used first, after
+    /// ready spare VMs, oldest first, counting those already ending.
     fn drop_for(&mut self, now: At, waiter: SandboxId, deficit: u64) -> Room {
         let (dropping, droppable) = self.instant_room(now, waiter);
         let Some(mut needed) = deficit.checked_sub(dropping).filter(|needed| *needed > 0) else {
@@ -430,6 +430,7 @@ impl Host {
         if droppable < needed {
             return Room::None;
         }
+        needed = self.end_spares(needed);
         let percent = self.compressed_percent();
         let grace = self.busy_grace();
         let mut candidates: Vec<(At, SandboxId)> = self
@@ -461,13 +462,13 @@ impl Host {
 
     /// Bytes of the budget that VM processes other than `waiter`'s already
     /// ending will free, and that ending every other idle one already saved
-    /// would free besides. Both take milliseconds and no I/O; a sandbox
-    /// backing off after a failed step takes no step until its backoff
-    /// ends, so it counts for neither.
+    /// would free besides, ready spare VMs included. Both take milliseconds
+    /// and no I/O; a sandbox backing off after a failed step takes no step
+    /// until its backoff ends, so it counts for neither.
     fn instant_room(&self, now: At, waiter: SandboxId) -> (u64, u64) {
         let percent = self.compressed_percent();
         let grace = self.busy_grace();
-        let (mut dropping, mut droppable) = (0, 0);
+        let (mut dropping, mut droppable) = (self.spares.ending(), self.spares.endable());
         for (id, slot) in &self.sandboxes {
             if *id == waiter {
                 continue;
@@ -490,8 +491,9 @@ impl Host {
 
     /// Keeps [`crate::Admission::buffer`] bytes of the budget free ahead of
     /// wakes, plus what the wakes refused and still held need, by pushing
-    /// idle sandboxes deeper, least recently used first. Counts what floors
-    /// already set will free. Returns whether any floor changed.
+    /// idle sandboxes deeper, least recently used first, after ending ready
+    /// spare VMs, oldest first. Counts what floors already set and spare
+    /// VMs already ending will free. Returns whether any floor changed.
     pub(super) fn keep_buffer(&mut self, now: At) -> bool {
         let (Some(admission), Some(capacity)) = (self.policy.admission, self.capacity()) else {
             return false;
@@ -512,16 +514,18 @@ impl Host {
             .filter_map(|id| self.sandboxes.get(id))
             .map(|slot| slot.wake_need(percent))
             .sum();
-        let needed = (admission.buffer + held).saturating_sub(capacity.free() + planned);
+        let needed = (admission.buffer + held)
+            .saturating_sub(capacity.free() + planned + self.spares.ending());
+        let needed = self.end_spares(needed);
         needed > 0 && self.push_idle(now, needed, Measure::Occupancy).0
     }
 
     /// When available memory drops below the low watermark, pushes the least
     /// recently used idle sandboxes deeper until the expected available
-    /// memory reaches the high watermark, and squeezes sandboxes in use
-    /// above their request when that is not enough; lets their balloons go
-    /// once there is room for what they gave. Returns whether anything
-    /// changed.
+    /// memory reaches the high watermark, after ending ready spare VMs,
+    /// and squeezes sandboxes in use above their request when that is not
+    /// enough; lets their balloons go once there is room for what they
+    /// gave. Returns whether anything changed.
     pub(super) fn relieve_pressure(&mut self, now: At) -> bool {
         let (Some(memory), Some(available)) = (self.policy.memory, self.available_memory) else {
             return false;
@@ -534,7 +538,9 @@ impl Host {
             .high_watermark
             .saturating_sub(available)
             .saturating_sub(self.pending_relief)
-            .saturating_sub(self.settled_relief);
+            .saturating_sub(self.settled_relief)
+            .saturating_sub(self.spares.ending());
+        let needed = self.end_spares(needed);
         if needed == 0 {
             return released;
         }

@@ -24,6 +24,7 @@ mod logs;
 pub mod net;
 #[cfg(target_os = "linux")]
 mod paging;
+mod pool;
 pub mod protocol;
 pub mod restore_notice;
 mod server;
@@ -36,6 +37,7 @@ pub use agent::{BusyRule, Handle, HostAgent, HostConfig, HostError, Lease, Pager
 pub use chunked::{CHUNK_BYTES, Chunked};
 pub use guest_ports::{GuestPort, Route};
 pub use lanes::Lanes;
+pub use pool::{Keep, PoolConfig, Shape};
 pub use server::serve;
 pub use store::{
     Archive, Directory, FetchInto, FetchedMemory, JailedFile, NoStore, Prefilled, Receipt,

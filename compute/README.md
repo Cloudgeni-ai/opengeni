@@ -12,9 +12,8 @@ Opengeni does not use this yet.
 | Piece | State |
 | --- | --- |
 | Host agent: jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite | on `feat/compute-lab` |
-| Templates for new sandboxes | in review |
+| Templates and a ready pool for new sandboxes | in review |
 | Admission with requests and limits, memory guarantees for running VMs | in review |
-| Ready pool | being built |
 | Control plane (placement, moves between hosts, autoscaling), observability, Opengeni integration | planned |
 
 Decisions and their reasons are in [docs/adr](docs/adr/README.md). Numbers
@@ -80,8 +79,10 @@ Paused in RAM while already having both copies, so ending it later is instant.
 
 A sandbox is **in use** while any of these holds: a caller holds it (an agent
 turn), its VM uses a quarter of a processor or moves 4 KiB/s over five
-seconds, a stream into it is open, or one of its ports saw recent traffic.
-Idle means none of them. Holds should carry a lease the caller renews.
+seconds, a command started through its guest helper still runs (unless
+started as fire-and-forget), a stream into it carries traffic (one silent
+both ways for 10 minutes stops counting until its next byte, which wakes the
+sandbox), or one of its ports saw recent traffic. Idle means none of them. Holds should carry a lease the caller renews.
 
 Recommended rules (per sandbox, all optional): pause after 10 s idle; save to
 local disk after 30 s while staying paused in RAM; archive after 2 minutes;
@@ -132,6 +133,14 @@ sandbox recovers as [ADR 10](docs/adr/0010-crash-safety-bar.md) says: from a
 valid saved image if one exists, else fresh from its disk. One agent runs per
 host.
 
+Streams the agent carries (`connect` to a guest port, so terminals, port
+forwards and requests to the guest helper) end with it; clients reconnect.
+Guest programs keep running, and the reference guest lets a client read a
+command's output from a cursor, to the end of what it wrote, so it
+resumes without loss. The guest
+helper keeps its list of commands in memory: if the helper itself restarts,
+its commands keep running but can no longer be listed, read or waited for.
+
 ## Host capacity
 
 A host takes on only the memory it can hold. Each sandbox has a memory
@@ -161,6 +170,13 @@ room. A sandbox within its request is never touched. The status shows
 `balloon_bytes` and `paused_for_memory` for such sandboxes, and
 `waiting_for_room` while one waits; asking for it meanwhile gets
 `host_full` at once.
+Ready sandboxes and template builds are in the same book: each counts
+against the capacity like any VM, a fill or build starts only in room above
+the buffer and the high watermark that no waiting wake wants, booked before
+it starts, and ready sandboxes are the first memory given back, ahead of any
+sandbox, for a wake, the buffer or memory pressure. A claimed ready sandbox
+moves into the sandbox's place in the same decision. On huge-page hosts
+available memory is the smaller of `MemAvailable` and the free pool.
 The status reports the capacity (total, reserved, occupied, free, awake), and
 a restarted agent rebuilds it from its records, counting every VM it takes
 back at its full size until it is measured, and any it cannot take back at
@@ -214,8 +230,11 @@ may let guests reach its local network
 For each shape (processors and memory) the host keeps a template: a guest
 booted once, paused and saved. A new sandbox gets a copy-on-write copy of its
 disk and shares its memory image, so creating one is a restore, not a boot. A
-ready pool will keep clones already restored, so a create is a resume
-([ADR 12](docs/adr/0012-templates-and-ready-pool.md)).
+ready pool keeps clones already restored and paused, so a create is a resume
+([ADR 12](docs/adr/0012-templates-and-ready-pool.md)). A clone is used only
+once its guest has taken its own id, random seed, machine id and hostname. A
+shape unused for a week gives up its template and ready clones until its
+next create.
 
 ## Code map
 
@@ -309,7 +328,8 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
   cannot hold shows in the status and succeeds once there is room.
 - `smoke/` runs SPACE's E2B-style scenarios through one adapter for our API,
   plus our own: sleep levels, concurrent wakes, holds, and an agent restart
-  in the middle ([smoke/README.md](smoke/README.md)).
+  in the middle, with output read on by cursor and live streams ending
+  ([smoke/README.md](smoke/README.md)).
 
 ## Not built yet
 

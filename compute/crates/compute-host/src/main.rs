@@ -17,11 +17,14 @@ use compute_host::protocol::{
     About, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
 };
 use compute_host::{
-    BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, NoStore, PagerConfig, Store,
-    serve,
+    BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, Keep, NoStore, PagerConfig,
+    PoolConfig, Store, serve,
 };
 
 use crate::bench::{BenchArgs, bench, exec};
+
+/// How long a template's freshly booted guest may take to become ready.
+const TEMPLATE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The agent's memory comes and goes in bursts: transfer buffers and
 /// compression contexts while sandboxes archive and wake, on hundreds of
@@ -209,10 +212,32 @@ struct ServeArgs {
     /// Repeatable.
     #[arg(long = "guest-port")]
     guest_ports: Vec<GuestPort>,
+    /// Seconds a stream into a sandbox (a terminal, a preview, a forwarded
+    /// port) may stay silent both ways and still keep it awake.
+    #[arg(long, default_value_t = HostConfig::STREAM_IDLE.as_secs())]
+    stream_idle_secs: u64,
     /// Guest vsock port to tell about each restore from a memory image, so
-    /// the guest can set its clock and reconnect.
+    /// the guest can set its clock, reconnect and learn its sandbox id.
     #[arg(long)]
     restore_notice_port: Option<u32>,
+    /// Keep warm templates: a guest vsock port that accepts connections
+    /// once a freshly booted guest is ready for work. New sandboxes then
+    /// start from a saved, booted guest of their shape instead of booting.
+    /// Needs `--restore-notice-port`: a sandbox started from a template is
+    /// used only once its guest has acknowledged which sandbox it is.
+    #[arg(long, requires = "restore_notice_port")]
+    template_ready_port: Option<u32>,
+    /// A shape, as `VCPUSxMEMORY_MIB[:READY]` such as `2x1024` or
+    /// `1x512:16`, whose template is built as soon as the agent starts;
+    /// other shapes get one on first use. `:READY` also keeps that many
+    /// sandboxes of the shape restored, warm and paused, so a create of it
+    /// only claims one. Repeatable. Needs `--template-ready-port`.
+    #[arg(long = "template", requires = "template_ready_port")]
+    templates: Vec<Keep>,
+    /// How long a shape may go unused (no create) before its template and
+    /// ready sandboxes are given up, until its next create.
+    #[arg(long, default_value_t = PoolConfig::UNUSED_AFTER.as_secs())]
+    template_unused_secs: u64,
     /// How guest memory is backed and saved: `bare-metal` (4 KiB pages,
     /// dirty-page tracking, compression allowed) or `nested` (2 MiB pages
     /// from the host's reserved huge-page pool, resident-page saves, no
@@ -508,7 +533,25 @@ fn describe(memory_profile: MemoryProfile, base_image: &std::path::Path) -> Abou
     }
 }
 
+/// The ready pool and templates, if `--template-ready-port` turns them on.
+fn pool_config(args: &ServeArgs) -> Option<PoolConfig> {
+    args.template_ready_port.map(|ready_port| PoolConfig {
+        ready_port,
+        shapes: args.templates.iter().map(|keep| keep.shape).collect(),
+        depends_on: vec![args.firecracker.clone(), args.jailer.clone()],
+        ready_timeout: TEMPLATE_READY_TIMEOUT,
+        ready: args
+            .templates
+            .iter()
+            .filter(|keep| keep.ready > 0)
+            .map(|keep| (keep.shape, keep.ready))
+            .collect(),
+        unused_after: Duration::from_secs(args.template_unused_secs),
+    })
+}
+
 async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
+    let pool = pool_config(&args);
     let memory_profile = if let Some(profile) = args.memory_profile {
         profile
     } else {
@@ -570,10 +613,12 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         base_image: args.base_image,
         policy,
         sample_every,
+        stream_idle: Duration::from_secs(args.stream_idle_secs),
         guest_ports: args.guest_ports,
         restore_notice_port: args.restore_notice_port,
         first_uid: args.first_uid,
         host_lock: Some(args.host_lock),
+        pool,
         network: args.network.then_some(NetworkConfig {
             pool: args.network_pool,
             trusted: args.trusted,

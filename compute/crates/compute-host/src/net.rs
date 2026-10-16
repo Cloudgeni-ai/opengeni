@@ -418,24 +418,81 @@ link set dev {UPLINK} up
 route replace default via {host_ip} dev {UPLINK}
 "
         );
-        if tap == Tap::Foreign {
-            let _ = writeln!(commands, "tuntap del dev {TAP} mode tap");
-        }
-        if tap != Tap::Fits {
-            let _ = writeln!(
-                commands,
-                "tuntap add dev {TAP} mode tap user {uid} group {gid}"
-            );
-        }
-        let _ = write!(
+        commands.push_str(&tap_commands(tap, *uid, *gid));
+        commands
+    }
+}
+
+/// `ip -batch` lines that give a namespace the guest's side of every
+/// sandbox network: the tap, owned by the VMM's `uid` and `gid`, with the
+/// gateway's fixed address and the guest's fixed neighbour entry.
+fn tap_commands(tap: Tap, uid: u32, gid: u32) -> String {
+    let mut commands = String::new();
+    if tap == Tap::Foreign {
+        let _ = writeln!(commands, "tuntap del dev {TAP} mode tap");
+    }
+    if tap != Tap::Fits {
+        let _ = writeln!(
             commands,
-            "link set dev {TAP} address {TAP_MAC}
+            "tuntap add dev {TAP} mode tap user {uid} group {gid}"
+        );
+    }
+    let _ = write!(
+        commands,
+        "link set dev {TAP} address {TAP_MAC}
 addr replace {GATEWAY_IP}/{LINK_PREFIX} dev {TAP}
 link set dev {TAP} up
 neigh replace {GUEST_IP} lladdr {GUEST_MAC} dev {TAP} nud permanent
 "
-        );
-        commands
+    );
+    commands
+}
+
+/// A network namespace holding only a tap that looks to its guest exactly
+/// like a sandbox's, and leads nowhere: for a VM whose saved state must fit
+/// every sandbox, such as a template's (see [`crate::pool`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Isolated {
+    namespace: String,
+}
+
+impl Isolated {
+    /// The isolated namespace of the VM named `vm`.
+    pub fn new(vm: &str) -> Self {
+        Self {
+            namespace: format!("{PREFIX}-{vm}"),
+        }
+    }
+
+    /// The guest interface for the VM description.
+    pub fn vm_network(&self) -> Network {
+        Network {
+            tap: TAP.to_owned(),
+            mac: GUEST_MAC.to_owned(),
+            namespace: Some(Path::new(NETNS_DIR).join(&self.namespace)),
+        }
+    }
+
+    /// Creates the namespace, or sets right what an earlier attempt left,
+    /// with a tap the VMM running as `uid` and `gid` may open. Blocks.
+    pub fn ensure(&self, uid: u32, gid: u32) -> Result<(), NetError> {
+        let path = Path::new(NETNS_DIR).join(&self.namespace);
+        if !path.exists() {
+            run("ip", &["netns", "add", &self.namespace], None)?;
+        }
+        in_namespace(&path, || {
+            let mut commands = "link set dev lo up\n".to_owned();
+            commands.push_str(&tap_commands(Tap::find(uid, gid)?, uid, gid));
+            run("ip", &["-batch", "-"], Some(&commands))
+        })
+    }
+
+    /// Deletes the namespace; succeeds when there is none. Blocks.
+    pub fn remove(&self) -> Result<(), NetError> {
+        if !Path::new(NETNS_DIR).join(&self.namespace).exists() {
+            return Ok(());
+        }
+        run("ip", &["netns", "del", &self.namespace], None)
     }
 }
 
@@ -597,36 +654,28 @@ impl Networks {
     /// another sandbox while it still exists, and so does a retry after
     /// any failure part way.
     ///
-    /// Those ends are the one `ordinal` names, which no other sandbox has
-    /// while this one holds the ordinal, and the one the namespace's uplink
-    /// is paired with, if the namespace still exists. Each is deleted
-    /// outright rather than left to go with the namespace: the kernel takes
-    /// a namespace apart in the background, and never while a process is
-    /// still inside it. Failing to look inside the namespace fails the
-    /// call: it never means that nothing is left.
+    /// The namespace's uplink is deleted, which deletes its pair whatever
+    /// the host end is called, before the namespace's name: until then a
+    /// retry finds the namespace and does it again. Then the end `ordinal`
+    /// names, which no other sandbox has while this one holds the ordinal,
+    /// is deleted if it is still there. Nothing is left to the kernel's
+    /// teardown of the namespace, which runs in the background and never
+    /// while a process is still inside it.
     #[allow(clippy::unused_self)]
     pub fn remove(&self, id: Id, ordinal: Option<u32>) -> Result<(), NetError> {
         let namespace = namespace_name(id);
         let path = Path::new(NETNS_DIR).join(&namespace);
-        let mut ends: Vec<String> = ordinal.map(host_name).into_iter().collect();
         if path.exists() {
-            let uplink = in_namespace(&path, || veth_ends(UPLINK))?;
-            if let Some(name) = uplink
-                .and_then(|uplink| uplink.peer)
-                .map(interface_named)
-                .transpose()?
-                .flatten()
-                && !ends.contains(&name)
-            {
-                ends.push(name);
-            }
+            in_namespace(&path, || delete_link(UPLINK))?;
             if let Err(error) = run("ip", &["netns", "del", &namespace], None)
                 && path.exists()
             {
                 return Err(error);
             }
         }
-        ends.iter().try_for_each(|end| delete_link(end))
+        ordinal
+            .map(host_name)
+            .map_or(Ok(()), |end| delete_link(&end))
     }
 }
 
@@ -726,25 +775,10 @@ fn veth_ends(name: &str) -> Result<Option<Veth>, NetError> {
     }))
 }
 
-/// The name of the host's interface with index `index`, if there is one.
-fn interface_named(index: u32) -> Result<Option<String>, NetError> {
-    const NET: &str = "/sys/class/net";
-    for entry in std::fs::read_dir(NET).map_err(|error| NetError::new(NET, error))? {
-        let entry = entry.map_err(|error| NetError::new(NET, error))?;
-        // An interface that went meanwhile is not the one.
-        if std::fs::read_to_string(entry.path().join("ifindex"))
-            .is_ok_and(|found| found.trim().parse() == Ok(index))
-        {
-            return Ok(Some(entry.file_name().to_string_lossy().into_owned()));
-        }
-    }
-    Ok(None)
-}
-
-/// Deletes the host's interface `name`, if it exists, and waits until it
-/// is gone. Deleting either end of a veth pair deletes both. It may be
-/// going away with its namespace right now, so it can vanish before it is
-/// deleted.
+/// Deletes interface `name` of the calling thread's namespace, if it
+/// exists, and waits until it is gone. Deleting either end of a veth pair
+/// deletes both. It may be going away with its namespace right now, so it
+/// can vanish before it is deleted.
 fn delete_link(name: &str) -> Result<(), NetError> {
     if !has_interface(name)? {
         return Ok(());
@@ -1146,30 +1180,38 @@ mod tests {
             Id(SandboxId(0x00c0_ffee_3001)),
         );
         let link = Link::new(id, ORDINAL, addresses, 1_000_000, 1_000_000);
-        networks.ensure(&link).unwrap();
-        let holder = File::open(link.namespace_path()).unwrap();
+        // The record's ordinal, another one the namespace was not paired
+        // with, and none, as for a sandbox without a record.
+        for known in [Some(ORDINAL), Some(ORDINAL + 1), None] {
+            networks.ensure(&link).unwrap();
+            let holder = File::open(link.namespace_path()).unwrap();
 
-        fail_at(&link.host, "delete");
-        let removed = networks.remove(id, Some(ORDINAL));
-        heal(&link.host);
-        assert!(removed.is_err(), "a removal with a link left succeeded");
-        assert!(!link.namespace_path().exists());
-        assert!(
-            has_interface(&link.host).unwrap(),
-            "the held namespace's link went anyway"
-        );
+            fail_at(UPLINK, "delete");
+            let removed = networks.remove(id, known);
+            heal(UPLINK);
+            assert!(
+                removed.is_err(),
+                "{known:?}: a removal with a link left succeeded"
+            );
+            assert!(
+                link.namespace_path().exists(),
+                "{known:?}: the namespace's name went before its link"
+            );
+            assert!(has_interface(&link.host).unwrap(), "{known:?}");
 
-        networks.remove(id, Some(ORDINAL)).unwrap();
-        assert!(
-            !has_interface(&link.host).unwrap(),
-            "the retry forgot the host end"
-        );
-        let made = Link::new(next, ORDINAL, addresses, 1_000_000, 1_000_000);
-        networks.ensure(&made).unwrap();
-        assert!(paired(&made));
-        drop(holder);
-        networks.remove(next, Some(ORDINAL)).unwrap();
-        assert!(!has_interface(&made.host).unwrap());
+            networks.remove(id, known).unwrap();
+            assert!(
+                !has_interface(&link.host).unwrap(),
+                "{known:?}: the retry forgot the host end"
+            );
+            assert!(!link.namespace_path().exists(), "{known:?}");
+            let made = Link::new(next, ORDINAL, addresses, 1_000_000, 1_000_000);
+            networks.ensure(&made).unwrap();
+            assert!(paired(&made), "{known:?}");
+            drop(holder);
+            networks.remove(next, Some(ORDINAL)).unwrap();
+            assert!(!has_interface(&made.host).unwrap(), "{known:?}");
+        }
     }
 
     /// Whether `link`'s host end and its namespace's uplink are one pair.

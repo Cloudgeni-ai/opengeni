@@ -2,9 +2,9 @@
 //! pressure handling.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use crate::ids::{BalloonRequest, HoldId, OpId, SandboxId};
+use crate::ids::{BalloonRequest, HoldId, LoanId, OpId, SandboxId};
 use crate::level::{Level, Priority, State, Step};
 use crate::policy::{HostPolicy, PolicyError, SleepPolicy};
 use crate::sandbox::{Health, InFlight, QueueKey, Sandbox, Wake};
@@ -12,6 +12,7 @@ use crate::time::At;
 
 mod admission;
 mod disk;
+mod spare;
 mod squeeze;
 
 pub(crate) use admission::WakeRoom;
@@ -101,6 +102,51 @@ pub enum Input {
         op: OpId,
         /// How it went.
         outcome: Outcome,
+    },
+    /// A started step no longer does the work its kind's concurrency limit
+    /// protects, such as a wake whose VM already runs and only waits for
+    /// its guest to answer. It stops counting against the limit, so another
+    /// step of its kind may start, but stays the sandbox's step until
+    /// [`Input::Finished`]. Unknown or repeated reports are ignored.
+    Unthrottled {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// The op from [`Action::Start`].
+        op: OpId,
+    },
+    /// Work outside any sandbox, such as building a template, asks for a
+    /// place under `step`'s concurrency limit, so it never runs beside more
+    /// steps of that kind than the limit allows. It gets one after every
+    /// step of that kind queued for a sandbox, in the order asked, and is
+    /// told with [`Action::Lend`]. Asking again with a loan id already in
+    /// use is ignored.
+    Borrow {
+        /// Names this loan in [`Action::Lend`] and [`Input::Return`].
+        loan: LoanId,
+        /// Whose limit it counts against.
+        step: Step,
+    },
+    /// The work of `loan` is done, or no longer wants its place: the place
+    /// is given back, or the request withdrawn. Unknown loans are ignored.
+    Return {
+        /// The loan.
+        loan: LoanId,
+    },
+    /// A spare VM, one the host runs outside sandbox management that
+    /// nobody uses yet such as a ready sandbox or a template build, holds
+    /// `bytes` of host memory; 0 once it has ended, or is no longer spare.
+    /// Book one before it starts, within [`Host::spare_room`], as
+    /// `filling`: until reported otherwise its memory is claimed above the
+    /// high watermark, since no reading shows it. Spare VMs count against
+    /// the admission budget, and ready ones (not `filling`) are the first
+    /// memory given back, with [`Action::Discard`].
+    Spare {
+        /// Names the VM.
+        sandbox: SandboxId,
+        /// Bytes it holds, or will once filled.
+        bytes: u64,
+        /// Whether it is still coming up.
+        filling: bool,
     },
     /// No copy of the sandbox's current VM process can be trusted, as with
     /// [`Failure::Unsavable`]: found out other than by a step, such as when
@@ -243,6 +289,18 @@ pub enum Action {
         /// The sandbox.
         sandbox: SandboxId,
     },
+    /// The work that asked with [`Input::Borrow`] for `loan` may start: it
+    /// now counts against its step kind's limit until [`Input::Return`].
+    Lend {
+        /// The loan.
+        loan: LoanId,
+    },
+    /// End the spare VM named `sandbox` for memory; report it with
+    /// [`Input::Spare`] and 0 once it has ended. Comes once per VM.
+    Discard {
+        /// Names the VM.
+        sandbox: SandboxId,
+    },
     /// Report a change to the control plane.
     Notify {
         /// The sandbox.
@@ -345,8 +403,13 @@ pub struct Host {
     timers: BTreeSet<(At, SandboxId)>,
     queues: [BTreeSet<QueueKey>; Step::COUNT],
     in_flight: [u32; Step::COUNT],
-    /// Steps still running for sandboxes that were removed.
+    /// Steps still running for sandboxes that were removed and still
+    /// counted against their limits.
     orphans: HashMap<OpId, Step>,
+    /// Loans waiting for a place, by step kind, in the order asked.
+    borrowers: [VecDeque<LoanId>; Step::COUNT],
+    /// Loans holding a place, with the kind it counts against.
+    lent: HashMap<LoanId, Step>,
     dirty: Vec<SandboxId>,
     next_op: u64,
     next_balloon: u64,
@@ -369,6 +432,8 @@ pub struct Host {
     /// Room claims of removed sandboxes whose VMs may still run, until the
     /// host agent reports them ended.
     removed_claims: HashMap<SandboxId, u64>,
+    /// Spare VMs; see [`Input::Spare`].
+    spares: spare::Spares,
     /// The last [`Input::Disk`] reading.
     disk: Option<DiskSpace>,
     /// Whether that reading was taken after local copies last went, so it
@@ -390,6 +455,8 @@ impl Host {
             queues: Default::default(),
             in_flight: [0; Step::COUNT],
             orphans: HashMap::new(),
+            borrowers: Default::default(),
+            lent: HashMap::new(),
             dirty: Vec::new(),
             next_op: 0,
             next_balloon: 0,
@@ -400,6 +467,7 @@ impl Host {
             unmanaged: HashMap::new(),
             unread_claims: 0,
             removed_claims: HashMap::new(),
+            spares: spare::Spares::default(),
             disk: None,
             disk_fresh: false,
             disk_spent: DiskSpace::default(),
@@ -442,6 +510,7 @@ impl Host {
         while self.admit(now, out) {
             self.reconcile_dirty(now, out);
         }
+        self.discard_spares(out);
     }
 
     /// When to call [`Host::handle`] with [`Input::Tick`] next.
@@ -473,15 +542,16 @@ impl Host {
 
     /// Bytes of host memory that ending VM processes could free at once,
     /// without losing anything or keeping anyone waiting: idle, paused
-    /// sandboxes whose current state is already saved. Placement can count
-    /// this memory as free.
+    /// sandboxes whose current state is already saved, and ready spare
+    /// VMs. Placement can count this memory as free.
     #[must_use]
     pub fn reclaimable_memory(&self) -> u64 {
         self.sandboxes
             .values()
             .filter(|sandbox| sandbox.reclaimable())
             .map(Sandbox::resident_bytes)
-            .sum()
+            .sum::<u64>()
+            + self.spares.endable()
     }
 
     /// Ids of all managed sandboxes, in no particular order.
@@ -523,14 +593,12 @@ impl Host {
                 }
             }
             Input::Remove { sandbox } => self.remove(sandbox, out),
-            Input::Unmanaged { sandbox, bytes } => {
-                if bytes == 0 {
-                    self.unmanaged.remove(&sandbox);
-                    self.removed_claims.remove(&sandbox);
-                } else {
-                    self.unmanaged.insert(sandbox, bytes);
-                }
-            }
+            Input::Spare {
+                sandbox,
+                bytes,
+                filling,
+            } => self.spare(sandbox, bytes, filling),
+            Input::Unmanaged { sandbox, bytes } => self.unmanaged(sandbox, bytes),
             Input::Touch { sandbox, priority } => {
                 self.ask_awake(sandbox, out);
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
@@ -567,6 +635,9 @@ impl Host {
                 op,
                 outcome,
             } => self.finish(now, sandbox, op, outcome, out),
+            Input::Unthrottled { sandbox, op } => self.unthrottle(sandbox, op),
+            Input::Borrow { loan, step } => self.borrow(loan, step),
+            Input::Return { loan } => self.give_back(loan),
             Input::Lost { sandbox } => self.lost(sandbox, out),
             Input::BalloonFailed { sandbox, request } => {
                 self.balloon_failed(now, sandbox, request);
@@ -581,12 +652,7 @@ impl Host {
                     self.unsavable(sandbox, out);
                 }
             }
-            Input::Memory { available } => {
-                self.available_memory = Some(available);
-                self.settled_relief = 0;
-                self.unread_claims = 0;
-                self.measured_returns();
-            }
+            Input::Memory { available } => self.memory_read(available),
             Input::Disk { available } => {
                 self.disk = Some(available);
                 self.disk_fresh = true;
@@ -626,6 +692,39 @@ impl Host {
                 slot.request_wake(priority, now);
             }
             self.mark(sandbox);
+        }
+    }
+
+    fn borrow(&mut self, loan: LoanId, step: Step) {
+        let waiting = self.borrowers.iter().any(|queue| queue.contains(&loan));
+        if !waiting && !self.lent.contains_key(&loan) {
+            self.borrowers[step.index()].push_back(loan);
+        }
+    }
+
+    fn give_back(&mut self, loan: LoanId) {
+        if let Some(step) = self.lent.remove(&loan) {
+            self.in_flight[step.index()] -= 1;
+        } else {
+            for queue in &mut self.borrowers {
+                queue.retain(|waiting| *waiting != loan);
+            }
+        }
+    }
+
+    fn unthrottle(&mut self, id: SandboxId, op: OpId) {
+        if let Some(step) = self.orphans.remove(&op) {
+            self.in_flight[step.index()] -= 1;
+            return;
+        }
+        if let Some(flight) = self
+            .sandboxes
+            .get_mut(&id)
+            .and_then(|slot| slot.in_flight.as_mut())
+            .filter(|flight| flight.op == op && flight.throttled)
+        {
+            flight.throttled = false;
+            self.in_flight[flight.step.index()] -= 1;
         }
     }
 
@@ -708,7 +807,9 @@ impl Host {
             return;
         };
         slot.in_flight = None;
-        self.in_flight[flight.step.index()] -= 1;
+        if flight.throttled {
+            self.in_flight[flight.step.index()] -= 1;
+        }
         // What deleting local files freed shows only in a later reading.
         self.disk_fresh &= !matches!(flight.step, Step::Evict | Step::Forget);
         let booked = slot.books_save();
@@ -789,7 +890,11 @@ impl Host {
             self.unread_claims += claim;
         }
         if let Some(flight) = slot.in_flight {
-            self.orphans.insert(flight.op, flight.step);
+            // Only a step still counted against its limit has a place to
+            // give back when it finishes.
+            if flight.throttled {
+                self.orphans.insert(flight.op, flight.step);
+            }
             if !flight.cancel_sent {
                 out.push(Action::Cancel {
                     sandbox: id,
@@ -933,18 +1038,34 @@ impl Host {
         for step in Step::ALL {
             if let Some(left) = left.as_mut().filter(|_| admission::needs_memory(step)) {
                 changed |= self.admit_measured(now, step, left, out);
-                continue;
+            } else {
+                let index = step.index();
+                let limit = self.policy.limits.get(step);
+                while self.in_flight[index] < limit {
+                    let Some(key) = self.queues[index].pop_first() else {
+                        break;
+                    };
+                    self.start(step, key, out);
+                }
             }
-            let index = step.index();
-            let limit = self.policy.limits.get(step);
-            while self.in_flight[index] < limit {
-                let Some(key) = self.queues[index].pop_first() else {
-                    break;
-                };
-                self.start(step, key, out);
-            }
+            self.lend(step, out);
         }
         changed
+    }
+
+    /// Lends places under `step`'s limit to work outside sandboxes, after
+    /// every sandbox's step of its kind, in the order asked.
+    fn lend(&mut self, step: Step, out: &mut Vec<Action>) {
+        let index = step.index();
+        let limit = self.policy.limits.get(step);
+        while self.in_flight[index] < limit && self.queues[index].is_empty() {
+            let Some(loan) = self.borrowers[index].pop_front() else {
+                break;
+            };
+            self.in_flight[index] += 1;
+            self.lent.insert(loan, step);
+            out.push(Action::Lend { loan });
+        }
     }
 
     /// Starts `step` for the sandbox of `key`, already taken off its queue.
@@ -969,6 +1090,7 @@ impl Host {
             op,
             step,
             cancel_sent: false,
+            throttled: true,
         });
         self.in_flight[step.index()] += 1;
         out.push(Action::Start {

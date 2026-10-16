@@ -302,10 +302,10 @@ impl Host {
     }
 
     /// Bytes claimed by sandboxes let through to wake after waiting for
-    /// host memory, or whose balloons were let go, and not yet shown by a
-    /// reading. A claim that ended still counts until a reading taken
-    /// since shows what its guest took, or, for a removed sandbox, until
-    /// its VM is gone.
+    /// host memory, or whose balloons were let go, and by spare VMs coming
+    /// up, and not yet shown by a reading. A claim that ended still counts
+    /// until a reading taken since shows what its guest took, or, for a
+    /// removed sandbox, until its VM is gone.
     fn claimed_room(&self) -> u64 {
         self.sandboxes
             .values()
@@ -313,6 +313,16 @@ impl Host {
             .sum::<u64>()
             + self.unread_claims
             + self.removed_claims.values().sum::<u64>()
+            + self.spares.filling()
+    }
+
+    /// Takes in a reading of available memory: what earlier claims and
+    /// relief stood for is in it now.
+    pub(super) fn memory_read(&mut self, available: u64) {
+        self.available_memory = Some(available);
+        self.settled_relief = 0;
+        self.unread_claims = 0;
+        self.measured_returns();
     }
 
     /// Ends the claims of sandboxes that run, were measured and whose VM

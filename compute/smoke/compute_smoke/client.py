@@ -320,6 +320,14 @@ class ProcessHandle:
         """Stops following the command. Each request is its own connection,
         so nothing stays open."""
 
+    def read_output(self, offset: int = 0) -> tuple[bytes, int, bool]:
+        """The command's standard output from `offset` on, the offset after
+        it, and whether that was the end of it: the command ended and wrote
+        nothing more. Read again from the new offset until it is."""
+
+        reply = self._guest.call("output", pid=self.pid, offset=offset)
+        return _unb64(reply["data"]), int(reply["offset"]), bool(reply["eof"])
+
     def wait(self) -> CommandResult:
         reply = self._guest.call(
             "wait",
@@ -406,6 +414,12 @@ class WatchHandle:
         if not events and self._error is not None:
             raise SandboxUnavailable(f"watcher stopped: {self._error}")
         return events
+
+    def alive(self) -> bool:
+        """Whether the connection still carries events: false once the
+        guest, the host agent or the client ended it."""
+
+        return self._thread.is_alive()
 
     def stop(self) -> None:
         self._stopped.set()

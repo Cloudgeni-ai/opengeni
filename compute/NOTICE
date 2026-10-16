@@ -20,15 +20,10 @@ listed here; each says so at its top.
   API; scenarios kept as they were except where a scenario's header says
   how it was adapted. The adapter (client, services, config), the compute_*
   scenarios and the guest service are new.
-
-Parts of the design of compute-host follow ideas from SPACE (Sandboxed
-Platform for Agentic Code Execution), https://github.com/perplexityai/SPACE,
-Copyright 2026 Perplexity AI, licensed under the Apache License, Version 2.0:
-
-- VMs outlive the host agent and are taken back from durable per-VM records
-  when it starts again.
-- Every guest gets the same fixed address behind NAT in its own network
-  namespace, so a guest restored from a snapshot needs no reconfiguration.
-
-No SPACE source code is included in compute-host. Where a file's design
-follows SPACE, its header says so.
+- crates/compute-host: no SPACE source code, but parts of its design follow
+  SPACE's ideas, and the files concerned say so at their top:
+  - VMs outlive the host agent and are taken back from durable per-VM
+    records when it starts again.
+  - Every guest gets the same fixed address behind NAT in its own network
+    namespace, so a guest restored from a snapshot needs no
+    reconfiguration.

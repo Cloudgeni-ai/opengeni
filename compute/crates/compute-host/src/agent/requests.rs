@@ -1,18 +1,21 @@
 //! Requests from handles, checked against each sandbox's generation.
 
 use std::io;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use compute_core::{Durability, HoldId, Input, Level, Priority, Resource, Step};
 use compute_engine::Engine;
 
-use crate::layout::{Images, Paths, copy_sparse, sync_parent};
+use crate::layout::{Images, Paths, sync_parent};
+use crate::pool::{Shape, Sources, Start, Template, first_files};
 use crate::protocol::{
     BlockedSandbox, CapacityStatus, DiskStatus, FailedStep, HostStatus, Id, MemoryStatus,
     SandboxConfig, SandboxStatus, step_name,
 };
-use crate::state::{Record, check_generation};
+use crate::state::{Identity, Record, check_generation};
+use crate::step::images_of;
 use crate::store::Store;
 
 use super::holds::{Write, hold_id};
@@ -34,6 +37,27 @@ fn answer_once_written(outcome: Result<Write, HostError>, reply: Reply<()>) {
             let _ = reply.send(Err(error));
         }
     }
+}
+
+/// Makes a new sandbox's directory and first files, from `template` where
+/// one fits. Blocks.
+pub(super) fn new_files(
+    paths: &Paths,
+    base: &Path,
+    template: Option<(&Template, &Sources)>,
+) -> io::Result<Start> {
+    // The directory must be new: one already there belongs to a sandbox
+    // this agent does not know, and is left alone.
+    std::fs::create_dir(&paths.dir)?;
+    std::fs::create_dir(&paths.jail)?;
+    let start = first_files(paths, &images_of(paths), base, template)?;
+    // The record, written next, vouches for these: their directory entries
+    // must outlast a crash first, all the way up to the one in the
+    // sandboxes' directory.
+    sync_parent(&paths.disk)?;
+    sync_parent(&paths.jail)?;
+    sync_parent(&paths.dir)?;
+    Ok(start)
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
@@ -130,7 +154,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // stopped part way.
             let Some(record) = self.records.get(id) else {
                 match self.leftovers.get(&id.0) {
-                    Some(&ordinal) => self.remove_leftovers(id, ordinal, reply),
+                    Some(&left) => self.remove_leftovers(id, left, reply),
                     None => {
                         let _ = reply.send(Err(self.blocked_error(id)));
                     }
@@ -315,12 +339,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if self.blocked.contains_key(&id.0) {
             return Some(Err(self.blocked_error(id)));
         }
-        if let Some(unknown) = self.unknown_ordinals.first() {
-            return Some(Err(HostError::Io(format!(
-                "sandbox {}'s record is unreadable and the user and network it holds unknown; \
-                 no sandbox is created until it is resolved",
-                Id(*unknown)
-            ))));
+        if let Err(problem) = self.ordinals_known() {
+            return Some(Err(HostError::Io(problem)));
         }
         if self.preparing.contains(&id.0) {
             // Perhaps this very create's earlier attempt: retrying once it
@@ -328,7 +348,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return Some(Err(HostError::Busy(id)));
         }
         let record = self.records.get(id);
-        if self.slots.contains_key(&id.0) || self.destroying.contains_key(&id.0) || record.is_some()
+        if self.slots.contains_key(&id.0)
+            || self.destroying.contains_key(&id.0)
+            || self.hosts.contains_key(&id.0)
+            || record.is_some()
         {
             // Creating is idempotent: a client retrying a create whose reply
             // it lost finds the sandbox it asked for. One with other
@@ -347,7 +370,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // must not touch the new sandbox's files.
             return Some(Err(HostError::Busy(id)));
         }
-        None
+        match self.sleep_policy(config) {
+            Err(error) => Some(Err(HostError::Invalid(error))),
+            Ok(policy) if policy.rules().archive_after.is_some() && !self.store.is_configured() => {
+                Some(Err(HostError::Invalid(
+                    "this host has no store, so sandboxes cannot be archived".into(),
+                )))
+            }
+            Ok(_) => None,
+        }
     }
 
     /// Refuses a new sandbox `id` of `config` that cannot be created here.
@@ -383,8 +414,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(error));
             return;
         }
+        self.template_used(Shape::of(&config));
+        let Some((config, reply)) = self.claim(id, config, reply) else {
+            return;
+        };
+        let ordinal = match self.take_ordinal() {
+            Ok(ordinal) => ordinal,
+            Err(problem) => {
+                let _ = reply.send(Err(HostError::Io(problem)));
+                return;
+            }
+        };
         self.preparing.insert(id.0);
-        let ordinal = self.take_ordinal();
         let allocation = match self.images.allocate(ordinal) {
             Ok(allocation) => allocation,
             Err(problem) => {
@@ -394,7 +435,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
         };
-        let record = Record::new(id, ordinal, allocation, config);
+        let template = self.template_for(Shape::of(&config));
+        let sources = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources));
+        let mut record = Record::new(id, ordinal, allocation, config);
         let link = Images::link(&record);
         let paths = Paths::new(&self.root, id);
         let dir = paths.dir.clone();
@@ -404,29 +447,35 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         tokio::spawn(async move {
             let networks = net.clone();
+            let from = template.clone();
             let prepared = tokio::task::spawn_blocking(move || {
-                // The directory must be new: one already there belongs to a
-                // sandbox this agent does not know, and is left alone.
-                std::fs::create_dir(&paths.dir)?;
-                std::fs::create_dir(&paths.jail)?;
-                copy_sparse(&base, &paths.disk)?;
-                // The record, written next, vouches for these: their
-                // directory entries must outlast a crash first, all the way
-                // up to the one in the sandboxes' directory.
-                sync_parent(&paths.disk)?;
-                sync_parent(&paths.jail)?;
-                sync_parent(&paths.dir)?;
+                let warm = from.as_deref().zip(sources.as_deref());
+                let start = new_files(&paths, &base, warm)?;
                 if let (Some(net), Some(link)) = (&networks, &link) {
                     net.ensure(link)?;
                 }
-                Ok(())
+                Ok(start)
             })
             .await
             .unwrap_or_else(|error| Err(io::Error::other(error)));
+            let stale = match prepared {
+                Ok(Start::Stale) => template,
+                _ => None,
+            };
             // The record goes last: a directory without one is an
             // unfinished creation and is cleaned up on recovery.
             let result = match prepared {
-                Ok(()) => records.insert(record).await.map_err(HostError::from),
+                Ok(start) => {
+                    // A sandbox started from a template holds a memory image
+                    // of a guest that never ran as it: its first wake
+                    // restores it.
+                    // It learns which sandbox it is from the restore notice.
+                    if start == Start::Template {
+                        record.image = true;
+                        record.identity = Identity::Pending;
+                    }
+                    records.insert(record).await.map_err(HostError::from)
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     tracing::error!(%id, "a directory for a new sandbox already exists; refusing it");
                     let _ = events.send(Event::Prepared {
@@ -434,6 +483,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         ordinal,
                         result: Err(HostError::Exists(id)),
                         reply,
+                        stale,
                     });
                     return;
                 }
@@ -453,6 +503,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 ordinal,
                 result,
                 reply,
+                stale,
             });
         });
     }
@@ -545,6 +596,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     inodes_free: free.inodes,
                 }
             }),
+            templates: {
+                let mut templates = self
+                    .warm
+                    .as_ref()
+                    .map(|warm| warm.pool.status())
+                    .unwrap_or_default();
+                self.ready.status(&mut templates, &self.ready_usage());
+                templates
+            },
             store_stalled_ms,
             unseen_activity: self.unseen_activity,
             about: self.about.clone(),

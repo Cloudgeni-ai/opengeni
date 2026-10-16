@@ -97,8 +97,24 @@ pub(crate) struct Allocation {
 
 /// Everything the host keeps about one sandbox across restarts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate fact one write may change on its own"
+)]
 pub(crate) struct Record {
+    /// The sandbox's id: every request names it.
     pub id: Id,
+    /// The name its directory, jail, cgroup and network were made under,
+    /// when that is not its id: a ready sandbox keeps the name it was
+    /// filled under once a create claims it, as cgroups and network
+    /// namespaces cannot be renamed (see [`crate::agent`]'s ready pool).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<Id>,
+    /// A ready sandbox: restored from its shape's template ahead of any
+    /// create, and disposable until one claims it. It is never saved, and
+    /// a starting agent removes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ready: bool,
     /// The execution: raised by every boot.
     pub generation: u64,
     /// Committed writes so far.
@@ -117,6 +133,9 @@ pub(crate) struct Record {
     /// Removal has begun; it finishes even across a restart.
     #[serde(default)]
     pub removing: bool,
+    /// Whether its guest knows it is this sandbox.
+    #[serde(default)]
+    pub identity: Identity,
     /// Its last activity, in milliseconds since the Unix epoch, as of the
     /// record's latest write, so a restart does not reset how long it has
     /// been idle. Steps write it along with what they change.
@@ -129,12 +148,29 @@ pub(crate) struct Record {
     pub backed_up_ms: Option<u64>,
 }
 
+/// Whether a sandbox's guest knows which sandbox it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Identity {
+    /// It booted with the sandbox's id on its kernel command line, or
+    /// acknowledged a restore notice naming it.
+    #[default]
+    Known,
+    /// The memory image is of another guest, such as a template's. Until
+    /// the guest has acknowledged a restore notice naming this sandbox, no
+    /// VM of it may be counted awake or used, and a VM found running after
+    /// a restart is ended. A boot makes it known.
+    Pending,
+}
+
 impl Record {
     /// A new sandbox: a local disk, nothing saved, no execution yet. Its
     /// generation is set when it is inserted.
     pub fn new(id: Id, ordinal: u32, allocation: Allocation, config: SandboxConfig) -> Self {
         Self {
             id,
+            host: None,
+            ready: false,
             generation: 0,
             revision: 1,
             ordinal,
@@ -144,9 +180,16 @@ impl Record {
             image: false,
             archived: false,
             removing: false,
+            identity: Identity::Known,
             last_used_ms: None,
             backed_up_ms: None,
         }
+    }
+
+    /// The name of the sandbox's directory and everything else the host
+    /// made for it: its id, unless it was claimed under another.
+    pub fn host(&self) -> Id {
+        self.host.unwrap_or(self.id)
     }
 
     /// The fence a write must name to replace this record.
@@ -185,6 +228,7 @@ pub(crate) struct Change {
     archived: Option<bool>,
     execution: bool,
     removing: bool,
+    identity: Option<Identity>,
     last_used_ms: Option<u64>,
     backed_up_ms: Option<u64>,
 }
@@ -212,6 +256,12 @@ impl Change {
     /// A new execution starts, from the disk: the generation rises.
     pub fn execution(mut self) -> Self {
         self.execution = true;
+        self
+    }
+
+    /// Whether the guest knows which sandbox it is.
+    pub fn identity(mut self, identity: Identity) -> Self {
+        self.identity = Some(identity);
         self
     }
 
@@ -243,6 +293,9 @@ impl Change {
         }
         if let Some(archived) = self.archived {
             record.archived = archived;
+        }
+        if let Some(identity) = self.identity {
+            record.identity = identity;
         }
         if self.execution {
             record.generation += 1;
@@ -359,8 +412,10 @@ pub(crate) struct Stray {
     pub problem: Option<StateError>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Entry {
+    /// The directory the record lives in (see [`Record::host`]).
+    host: Id,
     /// Serializes work on this record. Work holds it until it is done, so a
     /// slow write delays only its own sandbox.
     writing: Arc<tokio::sync::Mutex<()>>,
@@ -368,6 +423,17 @@ struct Entry {
     current: Mutex<Option<Record>>,
     /// A write failed part way, so the file may not be durable yet.
     unsure: AtomicBool,
+}
+
+impl Entry {
+    fn new(host: Id) -> Self {
+        Self {
+            host,
+            writing: Arc::default(),
+            current: Mutex::new(None),
+            unsure: AtomicBool::new(false),
+        }
+    }
 }
 
 /// The locks a state root's owner holds. Every piece of work in flight
@@ -431,7 +497,8 @@ impl Generations {
 
 /// One record while work on it holds its lock.
 struct Slot<'a> {
-    id: Id,
+    /// The directory its file is in.
+    host: Id,
     path: &'a Path,
     entry: &'a Entry,
 }
@@ -447,7 +514,7 @@ impl Slot<'_> {
         if !self.entry.unsure.load(Ordering::Acquire) {
             return Ok(());
         }
-        let found = read(self.path, self.id)?;
+        let found = read(self.path, self.host)?;
         sync_parent(self.path)?;
         *locked(&self.entry.current) = found;
         self.entry.unsure.store(false, Ordering::Release);
@@ -476,7 +543,7 @@ impl Slot<'_> {
                 // what the cache says, and the next work on the record
                 // first makes it durable.
                 self.entry.unsure.store(true, Ordering::Release);
-                if let Ok(found) = read(self.path, self.id) {
+                if let Ok(found) = read(self.path, self.host) {
                     *locked(&self.entry.current) = found;
                 }
                 Err(error.into())
@@ -556,17 +623,23 @@ impl Records {
                 continue;
             };
             match read(&Paths::new(&root, id).record, id) {
+                Ok(Some(record)) if entries.contains_key(&record.id.0) => strays.push(Stray {
+                    id,
+                    problem: Some(StateError::Corrupt {
+                        path: Paths::new(&root, id).record,
+                        message: format!("another record also names sandbox {}", record.id),
+                    }),
+                }),
                 Ok(Some(record)) => {
                     unused = unused.max(record.generation + 1);
                     // A record found on disk may be a write the previous
                     // owner never made durable: nothing relies on it before
                     // it is settled.
-                    let entry = Entry {
-                        current: Mutex::new(Some(record)),
-                        unsure: AtomicBool::new(true),
-                        ..Entry::default()
-                    };
-                    entries.insert(id.0, Arc::new(entry));
+                    let entry = Entry::new(id);
+                    entry.unsure.store(true, Ordering::Release);
+                    let key = record.id.0;
+                    *locked(&entry.current) = Some(record);
+                    entries.insert(key, Arc::new(entry));
                 }
                 Ok(None) => strays.push(Stray { id, problem: None }),
                 Err(problem) => strays.push(Stray {
@@ -620,7 +693,7 @@ impl Records {
     /// was unknown is made durable first, or this fails.
     pub async fn settle(&self, id: Id) -> Result<Record, StateError> {
         let entry = self.entry(id)?;
-        self.exclusive(id, entry, move |slot| {
+        self.exclusive(entry, move |slot| {
             slot.current().ok_or(StateError::NotFound(id))
         })
         .await
@@ -637,9 +710,17 @@ impl Records {
     /// generation no earlier record on this host used.
     pub async fn insert(&self, mut record: Record) -> Result<Record, StateError> {
         let id = record.id;
-        let entry = Arc::clone(locked(&self.entries).entry(id.0).or_default());
+        let host = record.host();
+        let entry = Arc::clone(
+            locked(&self.entries)
+                .entry(id.0)
+                .or_insert_with(|| Arc::new(Entry::new(host))),
+        );
+        if entry.host != host {
+            return Err(StateError::Exists(id));
+        }
         let generations = Arc::clone(&self.generations);
-        self.exclusive(id, entry, move |slot| {
+        self.exclusive(entry, move |slot| {
             if slot.current().is_some() {
                 return Err(StateError::Exists(id));
             }
@@ -659,7 +740,7 @@ impl Records {
         change: Change,
     ) -> Result<Record, StateError> {
         let entry = self.entry(id)?;
-        self.exclusive(id, entry, move |slot| {
+        self.exclusive(entry, move |slot| {
             let current = slot.current();
             match apply(id, current.as_ref(), expected, change)? {
                 Some(next) => {
@@ -673,13 +754,84 @@ impl Records {
         .await
     }
 
+    /// Gives the ready sandbox `ready`, still at `expected`, to a create:
+    /// one write makes it sandbox `id` with `config`, no longer ready, and
+    /// with a guest that has yet to learn which sandbox it is. Its
+    /// directory keeps its name, which the record keeps as its host name.
+    /// Like a new record it takes a generation no earlier record used, so
+    /// one `id` had before never comes back with it. Returns the record now
+    /// committed.
+    ///
+    /// The record answers to whichever id its file holds afterwards: `id`
+    /// once the write landed, `ready` if it did not, and whatever the file
+    /// says if its fate is unknown.
+    pub async fn claim(
+        &self,
+        ready: Id,
+        expected: Fence,
+        id: Id,
+        config: SandboxConfig,
+    ) -> Result<Record, StateError> {
+        let entry = {
+            let mut entries = locked(&self.entries);
+            if entries.contains_key(&id.0) {
+                return Err(StateError::Exists(id));
+            }
+            let entry = entries
+                .get(&ready.0)
+                .cloned()
+                .ok_or(StateError::NotFound(ready))?;
+            // Both names lead to it while the write is under way.
+            entries.insert(id.0, Arc::clone(&entry));
+            entry
+        };
+        let generations = Arc::clone(&self.generations);
+        let result = self
+            .exclusive(Arc::clone(&entry), move |slot| {
+                let current = slot.current().ok_or(StateError::NotFound(ready))?;
+                let found = current.fence();
+                if found != expected || !current.ready || current.id != ready {
+                    return Err(StateError::Stale {
+                        id: ready,
+                        expected,
+                        found,
+                    });
+                }
+                let next = Record {
+                    id,
+                    host: Some(slot.host),
+                    ready: false,
+                    config,
+                    identity: Identity::Pending,
+                    generation: generations.unused().max(current.generation),
+                    revision: current.revision + 1,
+                    ..current
+                };
+                slot.write(Some(next.clone()))?;
+                Ok(next)
+            })
+            .await;
+        let held = locked(&entry.current).as_ref().map(|record| record.id);
+        let mut entries = locked(&self.entries);
+        for name in [ready, id] {
+            if held != Some(name)
+                && entries
+                    .get(&name.0)
+                    .is_some_and(|present| Arc::ptr_eq(present, &entry))
+            {
+                entries.remove(&name.0);
+            }
+        }
+        result
+    }
+
     /// Deletes the record for `id` if it is still at `expected`. The
     /// sandbox's directory stays; without a record it is a stray. Its
     /// generations are never used again.
     pub async fn remove(&self, id: Id, expected: Fence) -> Result<(), StateError> {
         let entry = self.entry(id)?;
         let generations = Arc::clone(&self.generations);
-        self.exclusive(id, Arc::clone(&entry), move |slot| {
+        self.exclusive(Arc::clone(&entry), move |slot| {
             let found = slot
                 .current()
                 .as_ref()
@@ -713,19 +865,18 @@ impl Records {
             .ok_or(StateError::NotFound(id))
     }
 
-    /// Runs `work` on the record of `id` once all earlier work on it is
+    /// Runs `work` on the record of `entry` once all earlier work on it is
     /// done, after making a write whose fate was unknown durable. The work
     /// runs on a blocking thread that owns the record's lock and the
     /// root's, so it finishes even if the caller stops waiting, and nothing
     /// else touches the record or takes over the root meanwhile.
     async fn exclusive<T: Send + 'static>(
         &self,
-        id: Id,
         entry: Arc<Entry>,
         work: impl FnOnce(&Slot<'_>) -> Result<T, StateError> + Send + 'static,
     ) -> Result<T, StateError> {
         let writing = Arc::clone(&entry.writing).lock_owned().await;
-        let path = Paths::new(&self.root, id).record;
+        let path = Paths::new(&self.root, entry.host).record;
         let locks = Arc::clone(&self.locks);
         #[cfg(test)]
         let gate = locked(&self.gate).take();
@@ -737,7 +888,7 @@ impl Records {
                 let _ = gate.release.recv();
             }
             let slot = Slot {
-                id,
+                host: entry.host,
                 path: &path,
                 entry: &entry,
             };
@@ -841,8 +992,9 @@ fn lock_exclusive(path: &Path, wait: Duration) -> Result<File, StateError> {
     }
 }
 
-/// Reads one record; `None` when there is none.
-fn read(path: &Path, id: Id) -> Result<Option<Record>, StateError> {
+/// Reads the record in sandbox directory `host`; `None` when there is
+/// none.
+fn read(path: &Path, host: Id) -> Result<Option<Record>, StateError> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -854,8 +1006,11 @@ fn read(path: &Path, id: Id) -> Result<Option<Record>, StateError> {
     };
     let record: Record =
         serde_json::from_slice(&bytes).map_err(|error| corrupt(error.to_string()))?;
-    if record.id != id {
-        return Err(corrupt(format!("it names sandbox {}", record.id)));
+    if record.host() != host {
+        return Err(corrupt(format!(
+            "it names directory {}, not {host}",
+            record.host()
+        )));
     }
     Ok(Some(record))
 }

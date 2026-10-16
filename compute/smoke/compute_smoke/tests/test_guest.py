@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -47,7 +48,11 @@ class GuestService(unittest.TestCase):
                 f"unix:{cls.notice_address}",
                 "--keep-clock",
             ],
-            env={**os.environ, "SMOKE_GUEST_STATE": str(cls.scratch / "state")},
+            env={
+                **os.environ,
+                **_identity_files(cls.scratch),
+                "SMOKE_GUEST_STATE": str(cls.scratch / "state"),
+            },
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -146,6 +151,80 @@ class GuestService(unittest.TestCase):
         self.assertEqual(self.notice(f"restored {time.time_ns()}\n".encode()), b"ok\n")
         self.assertEqual(self.ok({"op": "ping"})["sandbox"], sandbox)
 
+    def test_two_clones_get_machine_ids_and_hostnames_of_their_own(self) -> None:
+        machine_id = self.scratch / "machine-id"
+        hostname = self.scratch / "hostname"
+        seen = set()
+        for sandbox, seed in (("c10e0001", "5eed01"), ("c10e0002", "5eed02")):
+            line = f"restored {time.time_ns()} sandbox={sandbox} seed={seed}\n".encode()
+            self.notice(line)
+            first = machine_id.read_text()
+            self.assertRegex(first, r"^[0-9a-f]{32}\n$")
+            self.assertEqual(hostname.read_text(), f"{sandbox}\n")
+            seen.add(first)
+            # A retried notice, or a later restore of the same sandbox with
+            # a new seed, keeps the machine id.
+            self.notice(line)
+            self.notice(f"restored {time.time_ns()} sandbox={sandbox} seed=0ther\n".encode())
+            self.assertEqual(machine_id.read_text(), first)
+        self.assertEqual(len(seen), 2, "two clones share a machine id")
+
+    def test_output_resumes_from_a_cursor(self) -> None:
+        pid = self.ok({"op": "spawn", "command": "printf one; sleep 0.3; printf two"})["pid"]
+        deadline = time.monotonic() + 10
+        seen, offset, eof = b"", 0, False
+        while not eof:
+            self.assertLess(time.monotonic(), deadline)
+            reply = self.ok({"op": "output", "pid": pid, "offset": offset})
+            seen += _unb64(reply["data"])
+            offset, eof = reply["offset"], reply["eof"]
+            if seen == b"one":
+                # Every read is its own connection: a later one picks up
+                # from the cursor, whoever dropped the last.
+                self.assertTrue(reply["running"])
+        self.assertEqual((seen, offset), (b"onetwo", 6))
+        # An ended command's output takes several reads at a small limit:
+        # only the last says it is the end.
+        pages = []
+        offset = 0
+        while not pages or not pages[-1]["eof"]:
+            pages.append(self.ok({"op": "output", "pid": pid, "offset": offset, "limit": 4}))
+            offset = pages[-1]["offset"]
+        self.assertEqual(b"".join(_unb64(page["data"]) for page in pages), b"onetwo")
+        self.assertEqual([page["running"] for page in pages], [False, False])
+        self.assertEqual([page["eof"] for page in pages], [False, True])
+        reply = self.ok({"op": "output", "pid": pid, "offset": 3, "limit": 2})
+        self.assertEqual((_unb64(reply["data"]), reply["offset"]), (b"tw", 5))
+        self.ok({"op": "wait", "pid": pid, "timeout": 10})
+        self.assertFalse(self.request({"op": "output", "pid": pid})["ok"], "collected")
+
+    def commands(self) -> bytes:
+        return self.notice(b"activity\n")
+
+    def test_running_commands_keep_the_sandbox_awake_unless_asked_not_to(self) -> None:
+        self.assertEqual(self.commands(), b"commands 0\n")
+        quiet = self.ok({"op": "spawn", "command": "sleep 30"})["pid"]
+        forgotten = self.ok({"op": "spawn", "command": "sleep 30", "keep_awake": False})["pid"]
+        self.assertEqual(self.commands(), b"commands 1\n", "fire and forget does not count")
+        for pid in (quiet, forgotten):
+            self.ok({"op": "signal", "pid": pid, "signal": signal.SIGKILL})
+            self.ok({"op": "wait", "pid": pid, "timeout": 10})
+        self.assertEqual(self.commands(), b"commands 0\n", "an ended command does not count")
+
+        # A foreground command counts while it runs.
+        marker = Path(self.path("started"))
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        running = threading.Thread(
+            target=self.ok, args=({"op": "exec", "command": f"touch {marker}; sleep 1"},)
+        )
+        running.start()
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.commands(), b"commands 1\n")
+        running.join()
+        self.assertEqual(self.commands(), b"commands 0\n")
+
     def test_a_command_returns_its_status_and_both_streams(self) -> None:
         reply = self.ok(
             {
@@ -157,6 +236,19 @@ class GuestService(unittest.TestCase):
         self.assertEqual(reply["exit_code"], 3)
         self.assertEqual(_unb64(reply["stdout"]), b"out")
         self.assertEqual(_unb64(reply["stderr"]), b"err-hi")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "oom_score_adj is Linux's")
+    def test_the_service_outlasts_its_commands_when_memory_runs_out(self) -> None:
+        read = "cat /proc/self/oom_score_adj"
+        ran = self.ok({"op": "exec", "command": read})
+        self.assertEqual(_unb64(ran["stdout"]).strip(), b"0", "a command starts unprotected")
+        pid = self.ok({"op": "spawn", "command": read})["pid"]
+        spawned = self.ok({"op": "wait", "pid": pid, "timeout": 10})
+        self.assertEqual(_unb64(spawned["stdout"]).strip(), b"0", "so does a background one")
+        protected = self.ok({"op": "ping"})["oom_score_adj"]
+        if os.geteuid() != 0:
+            self.skipTest(f"only root may protect the service (it reads {protected})")
+        self.assertEqual(protected, -1000)
 
     def test_a_command_runs_in_the_requested_directory(self) -> None:
         reply = self.ok({"op": "exec", "command": "pwd -P", "cwd": str(self.scratch)})
@@ -400,10 +492,23 @@ class GuestService(unittest.TestCase):
             )
 
 
+def _identity_files(scratch: Path) -> dict[str, str]:
+    """Where a guest under test keeps the machine id and hostname a clone
+    renews, and whom they were made for, in place of the host's."""
+
+    return {
+        "SMOKE_GUEST_MACHINE_ID": str(scratch / "machine-id"),
+        "SMOKE_GUEST_HOSTNAME": str(scratch / "hostname"),
+        "SMOKE_GUEST_IDENTITY": str(scratch / "identity"),
+    }
+
+
 def _load_guest(state: Path) -> Any:
     """Imports the guest service as a module, keeping its files in `state`."""
 
-    with mock.patch.dict(os.environ, {"SMOKE_GUEST_STATE": str(state)}):
+    with mock.patch.dict(
+        os.environ, {**_identity_files(state.parent), "SMOKE_GUEST_STATE": str(state)}
+    ):
         spec = importlib.util.spec_from_file_location("smoke_guest_under_test", GUEST)
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
@@ -419,6 +524,162 @@ class GuestInternals(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.scratch, True)
         self.guest = _load_guest(self.scratch / "state")
         self.now = 0.0
+
+    def test_a_seed_is_mixed_in_and_the_generator_reseeded(self) -> None:
+        pool = self.scratch / "pool"
+        pool.touch()
+        seed = "00ff" * 16
+        with mock.patch.object(self.guest.fcntl, "ioctl") as ioctl:
+            self.assertTrue(self.guest.reseed(seed, str(pool)))
+        self.assertEqual(pool.read_bytes(), bytes.fromhex(seed))
+        self.assertEqual(ioctl.call_args.args[1], self.guest.RNDRESEEDCRNG)
+        with mock.patch.object(self.guest.fcntl, "ioctl", side_effect=OSError("denied")):
+            self.assertFalse(self.guest.reseed(seed, str(pool)))
+        for bad in ("", "xyz"):
+            with self.subTest(seed=bad):
+                self.assertFalse(self.guest.reseed(bad, str(pool)))
+
+    def test_the_answer_says_whether_the_seed_was_applied(self) -> None:
+        def answer(line: bytes, applied: bool) -> tuple[bytes, list[str]]:
+            seeds: list[str] = []
+
+            def reseed(seed: str) -> bool:
+                seeds.append(seed)
+                return applied
+
+            host, guest = socket.socketpair()
+            with host, mock.patch.object(self.guest, "reseed", reseed):
+                host.sendall(line)
+                self.guest.serve_notice(guest, set_clock=False)
+                return host.recv(64), seeds
+
+        now = time.time_ns()
+        line = f"restored {now} sandbox=ab seed=5eed\n".encode()
+        self.assertEqual(answer(line, True), (b"ok seeded\n", ["5eed"]))
+        self.assertEqual(answer(line, False), (b"ok\n", ["5eed"]))
+        self.assertEqual(answer(f"restored {now}\n".encode(), True), (b"ok\n", []))
+
+    def test_a_clone_that_cannot_renew_its_identity_is_not_seeded_and_keeps_its_old_id(
+        self,
+    ) -> None:
+        self.guest.RESTORES.record("7e3a")
+        host, guest = socket.socketpair()
+        with (
+            host,
+            mock.patch.object(self.guest, "renew_identity", return_value=False),
+            mock.patch.object(self.guest, "reseed", return_value=True),
+        ):
+            host.sendall(f"restored {time.time_ns()} sandbox=c10e seed=5eed\n".encode())
+            self.guest.serve_notice(guest, set_clock=False)
+            self.assertEqual(host.recv(64), b"ok\n")
+        # Not taken, so the host's retry renews again.
+        self.assertEqual(self.guest.RESTORES.sandbox(), "7e3a")
+
+    def notice(self, nanos: int, sandbox: str, order: str) -> bytes:
+        """Serves one seeded restore notice in-process; returns the answer."""
+
+        host, guest = socket.socketpair()
+        line = f"restored {nanos} sandbox={sandbox} seed=5eed order={order}\n"
+        with host, mock.patch.object(self.guest, "reseed", return_value=True):
+            host.sendall(line.encode())
+            self.guest.serve_notice(guest, set_clock=False)
+            return host.recv(64)
+
+    def test_a_late_notice_never_takes_back_a_newer_identity(self) -> None:
+        machine_id, hostname = self.scratch / "machine-id", self.scratch / "hostname"
+        # The host's clock steps back between the attempts: the first
+        # notice for ready identity A is stamped 300 and delayed; its retry
+        # at 100 is acknowledged, then the claim for B at 200, then the
+        # first attempt arrives. Its time is the newest, its order is not.
+        self.assertEqual(self.notice(100, "a", "3.4"), b"ok seeded\n")
+        self.assertEqual(self.notice(200, "b", "3.5"), b"ok seeded\n")
+        claimed = machine_id.read_text()
+        self.assertEqual(self.notice(300, "a", "3.4"), b"", "the late notice is refused")
+        self.assertEqual(self.guest.RESTORES.sandbox(), "b")
+        self.assertEqual(machine_id.read_text(), claimed)
+        self.assertEqual(hostname.read_text(), "b\n")
+        # A later execution orders above any revision of an earlier one.
+        self.assertEqual(self.notice(50, "b", "4.1"), b"ok seeded\n")
+        self.assertEqual(self.notice(400, "b", "3.9"), b"")
+
+    def test_notices_order_by_the_host_not_by_the_clock(self) -> None:
+        # Equal times: the order decides, and a retry of the latest notice
+        # is applied again.
+        self.assertEqual(self.notice(100, "a", "1.2"), b"ok seeded\n")
+        self.assertEqual(self.notice(100, "b", "1.3"), b"ok seeded\n")
+        self.assertEqual(self.notice(100, "a", "1.2"), b"")
+        self.assertEqual(self.notice(100, "b", "1.3"), b"ok seeded\n")
+        self.assertEqual(self.guest.RESTORES.sandbox(), "b")
+        # Revisions compare as numbers, not as text.
+        self.assertEqual(self.notice(100, "c", "1.10"), b"ok seeded\n")
+        self.assertEqual(self.notice(100, "b", "1.9"), b"")
+        self.assertEqual(self.guest.RESTORES.sandbox(), "c")
+
+    def test_a_notice_order_is_two_numbers(self) -> None:
+        order = self.guest.notice_order
+        self.assertEqual(order({"order": "12.345"}), (12, 345))
+        for bad in ("", "12", "12.", ".3", "1.2.3", "a.b", "-1.2"):
+            with self.subTest(order=bad):
+                self.assertIsNone(order({"order": bad}))
+        self.assertIsNone(order({}))
+
+    def test_notices_are_applied_one_at_a_time(self) -> None:
+        notices = self.guest.Notices()
+        entered, release = threading.Event(), threading.Event()
+        order: list[str] = []
+
+        def slow() -> bytes:
+            entered.set()
+            release.wait(10)
+            order.append("a")
+            return b"ok\n"
+
+        def later() -> bytes:
+            order.append("b")
+            return b"ok\n"
+
+        first = threading.Thread(target=notices.apply, args=((1, 2), slow))
+        first.start()
+        self.assertTrue(entered.wait(10))
+        second = threading.Thread(target=notices.apply, args=((1, 3), later))
+        second.start()
+        time.sleep(0.05)
+        self.assertEqual(order, [], "the newer notice waits for the one under way")
+        release.set()
+        first.join(10)
+        second.join(10)
+        self.assertEqual(order, ["a", "b"])
+        self.assertIsNone(notices.apply((1, 1), later), "an older one is obsolete")
+        self.assertEqual(notices.apply(None, later), b"ok\n", "an unordered one is applied")
+
+    def test_a_guest_booted_from_a_cloned_disk_makes_its_own_identity(self) -> None:
+        machine_id, hostname = self.scratch / "machine-id", self.scratch / "hostname"
+        # The template's guest made its identity on the disk sandbox b
+        # boots from.
+        self.assertTrue(self.guest.renew_identity("t", "5eed"))
+        template = machine_id.read_text()
+        self.guest.take_identity("b")
+        own = machine_id.read_text()
+        self.assertNotEqual(own, template)
+        self.assertEqual(hostname.read_text(), "b\n")
+        self.assertTrue(self.guest.owns_identity("b"))
+        # Its own reboot keeps the machine id and sets the hostname again.
+        hostname.write_text("localhost\n")
+        self.guest.take_identity("b")
+        self.assertEqual(machine_id.read_text(), own)
+        self.assertEqual(hostname.read_text(), "b\n")
+
+    def test_a_notice_renews_an_identity_made_for_another_sandbox(self) -> None:
+        # Booted as b from a template's disk, where its startup could not
+        # make its own: the host's notice for b, which it must acknowledge
+        # before the sandbox runs, makes it.
+        machine_id = self.scratch / "machine-id"
+        self.assertTrue(self.guest.renew_identity("t", "5eed"))
+        template = machine_id.read_text()
+        self.guest.RESTORES.record("b")
+        self.assertEqual(self.notice(time.time_ns(), "b", "1.1"), b"ok seeded\n")
+        self.assertNotEqual(machine_id.read_text(), template)
+        self.assertTrue(self.guest.owns_identity("b"))
 
     def test_signalling_an_exited_process_leaves_its_old_group_alone(self) -> None:
         process = self.guest.PROCESSES.start("true", dict(os.environ), None)

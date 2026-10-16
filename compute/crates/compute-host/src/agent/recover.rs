@@ -11,12 +11,12 @@ use futures::StreamExt;
 
 use crate::layout::{Images, Paths, vm_spec};
 use crate::protocol::{Id, MAX_MEMORY_MIB, SandboxConfig};
-use crate::state::{Change, Disk, Record, StateError, Stray};
+use crate::state::{Change, Disk, Identity, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory, Reconnected};
 use crate::store::Store;
 
 use super::holds::{Holds, UNREADABLE, hold_id};
-use super::{HostAgent, HostError, unix_ms_now};
+use super::{HostAgent, HostError, Leftover, unix_ms_now};
 
 /// A VM found still running after an agent restart, with what it is doing
 /// and, if its memory is paged, the agent's side of its pager.
@@ -56,7 +56,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     continue;
                 }
             };
-            if record.removing {
+            if let Some(host) = record.host {
+                self.hosts.insert(host.0, id.0);
+            }
+            // A ready sandbox nobody claimed is disposable: it is removed
+            // and the pool fills again.
+            if record.removing || record.ready {
                 // Its VM may still run until the removal ends it.
                 self.unmanaged(id, &record.config);
                 self.remove_recorded(&record, None, Vec::new(), None);
@@ -75,18 +80,26 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             match stray.problem {
                 // Creation never finished or removal nearly had: nothing was
                 // promised, and no VM runs without a record.
+                // Its directory stays until its network is gone, so a
+                // failure leaves it found again.
                 None => {
-                    if let Err(error) = self.remove_network(stray.id).await {
-                        tracing::warn!(id = %stray.id, %error, "could not remove an unrecorded sandbox's network");
-                    }
-                    if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
-                        tracing::warn!(id = %stray.id, %error, "could not tidy an unrecorded sandbox");
-                        self.block(
-                            stray.id,
-                            format!("unrecorded directory left behind: {error}"),
-                        );
+                    let tidied = match self.remove_network(stray.id).await {
+                        Ok(()) => tokio::fs::remove_dir_all(&dir)
+                            .await
+                            .map_err(|error| format!("unrecorded directory left behind: {error}")),
+                        Err(error) => Err(format!("unrecorded network left behind: {error}")),
+                    };
+                    if let Err(reason) = tidied {
+                        tracing::warn!(id = %stray.id, %reason, "could not tidy an unrecorded sandbox");
+                        self.block(stray.id, reason);
                         // Removing the id again retries.
-                        self.leftovers.insert(stray.id.0, None);
+                        self.leftovers.insert(
+                            stray.id.0,
+                            Leftover {
+                                host: stray.id,
+                                ordinal: None,
+                            },
+                        );
                     }
                 }
                 Some(problem) => {
@@ -217,7 +230,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         const CONCURRENT: usize = 64;
         futures::stream::iter(records)
             .map(|record| async move {
-                let paths = Paths::new(&self.root, record.id);
+                let paths = Paths::of(&self.root, record);
                 let spec = vm_spec(record, &paths, &self.images);
                 let found = match record.disk {
                     Disk::Local => self
@@ -379,9 +392,35 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         };
         let size = self.size(&record.config);
-        let paths = Paths::new(&self.root, id);
+        let paths = Paths::of(&self.root, &record);
         let spec = vm_spec(&record, &paths, &self.images);
-        let (state, vm) = if let Some((vm, found, memory)) = found? {
+        let found = match found? {
+            Some((vm, Found::Running, memory)) if record.identity == Identity::Pending => {
+                // The previous agent restored or resumed it but its guest
+                // never acknowledged which sandbox it is: it may still
+                // think it is the template it was taken of, so nothing may
+                // use it. Its record says what its next wake starts from:
+                // the image again if the guest never ran, its disk
+                // otherwise. A paused one, such as a claimed ready sandbox,
+                // is taken back: its next resume tells it.
+                tracing::warn!(%id, "the VM's guest does not know which sandbox it is; stopping the VM");
+                if let Some(memory) = &memory {
+                    memory.ending();
+                }
+                if let Err(error) = self.engine.stop(vm).await {
+                    if let Some(memory) = memory {
+                        memory.serve_detached();
+                    }
+                    return Err(HostError::Io(error.to_string()));
+                }
+                if let Some(memory) = memory {
+                    memory.close().await;
+                }
+                None
+            }
+            found => found,
+        };
+        let (state, vm) = if let Some((vm, found, memory)) = found {
             match self.adopted_state(&record, found).await {
                 Ok(state) => (state, Some((vm, memory))),
                 Err(error) => {

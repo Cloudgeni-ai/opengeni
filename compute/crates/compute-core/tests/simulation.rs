@@ -259,6 +259,8 @@ impl World {
             Action::Balloon { sandbox, bytes, .. } => {
                 assert_eq!(bytes, 0, "{sandbox:?} squeezed within its request");
             }
+            Action::Lend { loan } => panic!("{loan:?} lent, but nothing borrows here"),
+            Action::Discard { sandbox } => panic!("{sandbox:?} discarded, but nothing is spare"),
             Action::Notify { sandbox, notice } => {
                 let Some(truth) = self.live.get_mut(&sandbox) else {
                     return;

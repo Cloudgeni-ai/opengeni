@@ -348,7 +348,10 @@ pub enum Request {
         priority: PriorityName,
     },
     /// Wake a sandbox, then turn this connection into a byte stream to
-    /// `port` inside it. The sandbox stays awake while the stream is open.
+    /// `port` inside it. The sandbox stays awake while the stream carries
+    /// traffic; once it has been silent both ways for the host's stream
+    /// idle time it may sleep, and the next byte either way wakes it. A
+    /// stream whose sandbox slept past Paused ends.
     Connect {
         /// Its id.
         id: Id,
@@ -641,6 +644,9 @@ pub struct HostStatus {
     /// does not book disk.
     #[serde(default)]
     pub disk: Option<DiskStatus>,
+    /// The warm templates new sandboxes start from, one per shape.
+    #[serde(default)]
+    pub templates: Vec<TemplateStatus>,
     /// How long, in milliseconds, memory waking from object storage has
     /// been failing to arrive, because the store does not answer or its
     /// pages cannot be written to local disk, if it is. Sandboxes waking
@@ -712,6 +718,44 @@ pub struct About {
     /// change.
     #[serde(default)]
     pub base_image: String,
+}
+
+/// One shape's warm template.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateStatus {
+    pub vcpus: u8,
+    pub memory_mib: u32,
+    pub state: TemplateState,
+    /// Ready sandboxes of the shape: restored, warm and paused, waiting
+    /// for a create to claim one.
+    #[serde(default)]
+    pub ready: u32,
+    /// What the ready sandboxes of the shape hold in memory.
+    #[serde(default)]
+    pub ready_resident_bytes: u64,
+    /// How many ready sandboxes the host keeps of the shape.
+    #[serde(default)]
+    pub target: u32,
+    /// Ready sandboxes of the shape being filled.
+    #[serde(default)]
+    pub filling: u32,
+}
+
+/// Whether new sandboxes of a shape can start from its template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateState {
+    /// New sandboxes of the shape start from it.
+    Ready,
+    /// Being built; new sandboxes boot cold meanwhile.
+    Building,
+    /// The last build failed; new sandboxes boot cold, and a later one
+    /// tries again.
+    Failed,
+    /// Unused for long enough that the host gave it and its ready
+    /// sandboxes up; the next create of the shape boots cold and builds it
+    /// again.
+    Retired,
 }
 
 /// A sandbox the host cannot manage.

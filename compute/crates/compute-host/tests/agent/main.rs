@@ -28,6 +28,8 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep};
 
 mod admission;
+mod pool;
+mod ready;
 mod requests;
 mod restart;
 mod sleep;
@@ -88,6 +90,20 @@ struct World {
     /// While set, every resume lets the guest run and then reports the VM
     /// beyond control, with its process still alive.
     lose_resumes: AtomicBool,
+    /// While set, cleaning up after a VM whose directory exists fails, as
+    /// when its VMM cannot be proven gone.
+    stuck_clean_ups: AtomicBool,
+    /// While set, every guest answers a restore notice with something
+    /// other than `ok` and ignores it.
+    refuse_notices: AtomicBool,
+    /// While set, every guest takes a restore notice but answers that it
+    /// could not apply its seed.
+    unseeded_notices: AtomicBool,
+    /// Restore notices refused or answered without the seed applied.
+    notices_turned_down: AtomicUsize,
+    /// Restore notices for another sandbox not ordered above the one the
+    /// guest applied last.
+    notices_out_of_order: AtomicUsize,
     restoring: AtomicUsize,
     max_restoring: AtomicUsize,
     compress_cancelled: AtomicUsize,
@@ -171,6 +187,9 @@ struct Work {
     cpu: Meter,
     /// A byte of traffic every microsecond while streaming.
     io: Meter,
+    /// Commands started through the guest's helper still running, which
+    /// keep it awake whatever they do.
+    commands: u32,
 }
 
 /// Time a fake VM spent on one kind of work.
@@ -222,8 +241,9 @@ impl Fake {
             listener,
             Arc::clone(&memory),
             spec.drives[0].path.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::default(),
             Arc::clone(&work),
+            Arc::clone(&self.world),
         ));
         let world = Arc::clone(&self.world);
         let dead = name.clone();
@@ -285,20 +305,22 @@ impl Fake {
     }
 }
 
-/// A guest: answers shell-like lines on any port, and remembers whether this
-/// VM process was told it was restored.
+/// A guest: answers shell-like lines on any port, and remembers the restore
+/// notice this VM process was given, if any.
 async fn guest(
     listener: UnixListener,
     memory: Arc<Mutex<String>>,
     disk: PathBuf,
-    told_restored: Arc<AtomicBool>,
+    notice: Arc<Mutex<Option<String>>>,
     work: Arc<Mutex<Work>>,
+    world: Arc<World>,
 ) {
     while let Ok((stream, _)) = listener.accept().await {
         let memory = Arc::clone(&memory);
         let disk = disk.clone();
-        let told_restored = Arc::clone(&told_restored);
+        let notice = Arc::clone(&notice);
         let work = Arc::clone(&work);
+        let world = Arc::clone(&world);
         tokio::spawn(async move {
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
@@ -309,9 +331,16 @@ async fn guest(
             if write.write_all(b"OK 1073741824\n").await.is_err() {
                 return;
             }
+            let mut flood = None;
             while let Ok(Some(line)) = lines.next_line().await {
                 let reply = match line.split_once(' ').unwrap_or((line.as_str(), "")) {
                     ("exit", _) => break,
+                    // Sends that many bytes while it reads what the client
+                    // sends until it ends, then answers how much it read.
+                    ("flood", size) => {
+                        flood = size.parse::<usize>().ok();
+                        "ok".into()
+                    }
                     ("get", _) => memory.lock().unwrap().clone(),
                     ("set", value) => {
                         value.clone_into(&mut memory.lock().unwrap());
@@ -322,11 +351,20 @@ async fn guest(
                         "ok".into()
                     }
                     ("disk", _) => std::fs::read_to_string(&disk).unwrap_or_default(),
-                    ("restored", _) => {
-                        told_restored.store(true, Ordering::SeqCst);
-                        "ok".into()
-                    }
-                    ("told-restored?", _) => told_restored.load(Ordering::SeqCst).to_string(),
+                    ("restored", fields) => answer_notice(fields, &notice, &world),
+                    ("told-restored?", _) => notice.lock().unwrap().is_some().to_string(),
+                    // The sandbox id the last restore notice named.
+                    ("sandbox?", _) => notice
+                        .lock()
+                        .unwrap()
+                        .as_deref()
+                        .and_then(|fields| {
+                            fields
+                                .split_whitespace()
+                                .find_map(|field| field.strip_prefix("sandbox="))
+                        })
+                        .unwrap_or_default()
+                        .to_owned(),
                     ("busy", _) => {
                         work.lock().unwrap().cpu.set_busy(true);
                         "ok".into()
@@ -343,17 +381,90 @@ async fn guest(
                         work.lock().unwrap().io.set_busy(false);
                         "ok".into()
                     }
+                    // A quiet command, such as `sleep 300 && deploy`.
+                    ("start-command", _) => {
+                        work.lock().unwrap().commands += 1;
+                        "ok".into()
+                    }
+                    ("end-command", _) => {
+                        let mut work = work.lock().unwrap();
+                        work.commands = work.commands.saturating_sub(1);
+                        "ok".into()
+                    }
+                    ("activity", _) => format!("commands {}", work.lock().unwrap().commands),
                     (other, _) => format!("unknown {other}"),
                 };
                 if write
                     .write_all(format!("{reply}\n").as_bytes())
                     .await
                     .is_err()
+                    || flood.is_some()
                 {
                     break;
                 }
             }
+            if let Some(size) = flood {
+                flood_both_ways(lines.into_inner(), write, size).await;
+            }
         });
+    }
+}
+
+/// The value of `key` among a notice's `fields`.
+fn notice_field<'a>(fields: &'a str, key: &str) -> Option<&'a str> {
+    fields
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix(key)?.strip_prefix('='))
+}
+
+/// A notice's order: its record's generation, then its revision.
+fn notice_order(fields: &str) -> Option<(u64, u64)> {
+    let (generation, revision) = notice_field(fields, "order")?.split_once('.')?;
+    Some((generation.parse().ok()?, revision.parse().ok()?))
+}
+
+/// How a guest answers the restore notice `fields`, remembering it unless
+/// it refuses. Like a real guest it refuses a notice ordered below the one
+/// it applied last; it also refuses one for another sandbox that is not
+/// ordered above it, which the host must never send.
+fn answer_notice(fields: &str, notice: &Mutex<Option<String>>, world: &World) -> String {
+    let mut last = notice.lock().unwrap();
+    let order = notice_order(fields).expect("every notice carries its order");
+    let out_of_order = last.as_deref().is_some_and(|last| {
+        let before = notice_order(last).unwrap();
+        order < before
+            || (order == before && notice_field(last, "sandbox") != notice_field(fields, "sandbox"))
+    });
+    if out_of_order {
+        world.notices_out_of_order.fetch_add(1, Ordering::Relaxed);
+    }
+    if out_of_order || world.refuse_notices.load(Ordering::Relaxed) {
+        world.notices_turned_down.fetch_add(1, Ordering::Relaxed);
+        return "what?".into();
+    }
+    *last = Some(fields.to_owned());
+    drop(last);
+    if fields.contains(" seed=") && !world.unseeded_notices.load(Ordering::Relaxed) {
+        "ok seeded".into()
+    } else {
+        world.notices_turned_down.fetch_add(1, Ordering::Relaxed);
+        "ok".into()
+    }
+}
+
+/// Sends `size` bytes while it reads what the client sends until it ends,
+/// then answers how much it read.
+async fn flood_both_ways(
+    mut read: BufReader<tokio::net::unix::OwnedReadHalf>,
+    mut write: tokio::net::unix::OwnedWriteHalf,
+    size: usize,
+) {
+    let (reply, mut got) = (vec![7; size], Vec::new());
+    let (sent, read) = tokio::join!(write.write_all(&reply), read.read_to_end(&mut got));
+    if sent.is_ok() && read.is_ok() {
+        let _ = write
+            .write_all(format!("got {}\n", got.len()).as_bytes())
+            .await;
     }
 }
 
@@ -576,6 +687,13 @@ impl Engine for Fake {
     }
 
     async fn clean_up(&self, spec: &VmSpec) -> Result<(), EngineError> {
+        if self.world.stuck_clean_ups.load(Ordering::Relaxed) && spec.dir.exists() {
+            return Err(EngineError::new(
+                ErrorKind::Fatal,
+                "clean_up",
+                "the VMM could not be proven gone",
+            ));
+        }
         self.world.crash(&spec.name);
         // Give the crash watcher a moment to release the name.
         for _ in 0..100 {
@@ -664,6 +782,7 @@ impl Lab {
             base_image: root.join("base.img"),
             policy,
             sample_every: Duration::from_millis(50),
+            stream_idle: HostConfig::STREAM_IDLE,
             guest_ports: Vec::new(),
             restore_notice_port: None,
             first_uid: 1 << 30,
@@ -675,6 +794,7 @@ impl Lab {
             }),
             can_compress: true,
             host_lock: None,
+            pool: None,
             // Fake VMs never start one.
             pager: PagerConfig::new(root.join("no-pager")),
             about: compute_host::protocol::About::default(),

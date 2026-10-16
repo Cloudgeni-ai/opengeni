@@ -164,6 +164,14 @@ impl Reconnected {
         self.paging.close().await;
     }
 
+    /// Says the VM is about to be ended on purpose, as
+    /// [`LiveMemory::ending`] does, so its pager going away with it is not
+    /// taken for lost memory.
+    pub fn ending(&self) {
+        #[cfg(target_os = "linux")]
+        self.paging.ending();
+    }
+
     /// For a VM that may still run but was not taken back: goes on serving
     /// and fetching its memory in the background until the pager holds all
     /// of it, or ends with the VM, so its guest never waits forever on a
@@ -272,7 +280,7 @@ impl DiskWatch {
     }
 
     /// Starts a check, before anything may sync the disk.
-    pub(super) fn begin(&self) -> io::Result<()> {
+    pub(crate) fn begin(&self) -> io::Result<()> {
         if self.failed() {
             return Err(self.lost());
         }
@@ -282,7 +290,7 @@ impl DiskWatch {
     /// Flushes the disk, failing if any write to it was lost since the
     /// watch was opened, and ends the check that [`DiskWatch::begin`]
     /// started if none was.
-    pub(super) fn sync(&self) -> io::Result<()> {
+    pub(crate) fn sync(&self) -> io::Result<()> {
         let Some(file) = self.file.as_ref().filter(|_| !self.failed()) else {
             return Err(self.lost());
         };

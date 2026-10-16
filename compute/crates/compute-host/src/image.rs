@@ -222,6 +222,14 @@ pub(crate) enum Parts<'a> {
         state: &'a Path,
         diff: &'a Path,
     },
+    /// Another directory's verified generation, such as a template's.
+    /// Published files are never modified, so memory and state are shared
+    /// by hard link where both directories are on one filesystem (one page
+    /// cache serves every VM restored from them), and copied otherwise.
+    Shared {
+        from: &'a Images,
+        image: &'a Verified,
+    },
     /// Device state only; memory stays in object storage under `manifest`
     /// (its JSON), to be paged in on demand, apart from what `prefilled`
     /// already holds (its file is moved in).
@@ -243,7 +251,8 @@ pub(crate) struct Images {
 /// A new generation's memory, in staging, and what describes it.
 struct Staged<'a> {
     parent: Option<Generation>,
-    state: &'a Path,
+    /// None when the state is shared in already.
+    state: Option<&'a Path>,
     memory_len: u64,
     chunks: ChunkMap,
     /// The manifest of memory still in object storage.
@@ -401,6 +410,17 @@ impl Images {
         }
     }
 
+    /// An empty staging directory for `generation`, replacing whatever an
+    /// interrupted publish left there.
+    fn fresh_staging(&self, generation: Generation) -> io::Result<PathBuf> {
+        let staging = self.dir.join(format!("{generation}.staging"));
+        if staging.exists() {
+            fs::remove_dir_all(&staging)?;
+        }
+        fs::create_dir(&staging)?;
+        Ok(staging)
+    }
+
     /// Builds, checks and publishes a new generation from `parts`, then
     /// points `current` at it. Blocking: run off the async executor.
     #[cfg(test)]
@@ -420,11 +440,7 @@ impl Images {
         // itself must survive a crash too.
         crate::layout::create_dir_durably(&self.dir)?;
         let generation = self.next_generation()?;
-        let staging = self.dir.join(format!("{generation}.staging"));
-        if staging.exists() {
-            fs::remove_dir_all(&staging)?;
-        }
-        fs::create_dir(&staging)?;
+        let staging = self.fresh_staging(generation)?;
         let Staged {
             parent,
             state,
@@ -432,8 +448,10 @@ impl Images {
             chunks,
             remote,
             filled,
-        } = self.stage_memory(parts, &staging.join(MEMORY))?;
-        move_in(state, &staging.join(STATE))?;
+        } = self.stage_memory(parts, &staging)?;
+        if let Some(state) = state {
+            move_in(state, &staging.join(STATE))?;
+        }
         let state_bytes = read_at_most(&staging.join(STATE), MAX_STATE_BYTES)?
             .ok_or_else(|| invalid("saved state is too large to be a snapshot's"))?;
         let chunk_bytes = chunks.encode();
@@ -464,20 +482,7 @@ impl Images {
             &staging.join(META),
             &serde_json::to_vec_pretty(&meta).map_err(io::Error::other)?,
         )?;
-        // Memory still being filled from the store stays writable until
-        // [`Images::mark_local`].
-        let sealed: &[&str] = if remote.is_some() {
-            &[STATE]
-        } else {
-            &[STATE, MEMORY]
-        };
-        for name in sealed {
-            seal(&staging.join(name))?;
-        }
-        for name in [STATE, MEMORY] {
-            File::open(staging.join(name))?.sync_all()?;
-        }
-        sync_dir(&staging)?;
+        seal_staged(&staging, remote.is_some())?;
         failpoint("staged")?;
         let published = self.path(generation);
         fs::rename(&staging, &published)?;
@@ -493,7 +498,8 @@ impl Images {
     }
 
     /// Puts the memory of `parts` at `memory` and hashes what is new.
-    fn stage_memory<'a>(&self, parts: Parts<'a>, memory: &Path) -> Result<Staged<'a>, Suspect> {
+    fn stage_memory<'a>(&self, parts: Parts<'a>, staging: &Path) -> Result<Staged<'a>, Suspect> {
+        let memory = &staging.join(MEMORY);
         Ok(match parts {
             Parts::Whole {
                 state,
@@ -512,13 +518,21 @@ impl Images {
                 let all: Vec<usize> = (0..chunk_count(memory_len)).collect();
                 Staged {
                     parent: None,
-                    state,
+                    state: Some(state),
                     memory_len,
                     chunks: ChunkMap(hash_chunks(&file, memory_len, &all)?),
                     remote: None,
                     filled: None,
                 }
             }
+            Parts::Shared { from, image } => Staged {
+                parent: None,
+                state: None,
+                memory_len: image.meta.memory_len,
+                chunks: share_image(from, image, staging)?,
+                remote: None,
+                filled: None,
+            },
             Parts::Diff { base, state, diff } => {
                 let parent = self.verify(base, Depth::Light)?;
                 if parent.meta.remote {
@@ -540,7 +554,7 @@ impl Images {
                 fs::remove_file(diff)?;
                 Staged {
                     parent: Some(base),
-                    state,
+                    state: Some(state),
                     memory_len,
                     chunks,
                     remote: None,
@@ -555,7 +569,7 @@ impl Images {
                 prefilled,
             } => Staged {
                 parent: None,
-                state,
+                state: Some(state),
                 memory_len,
                 chunks,
                 remote: Some(manifest),
@@ -918,6 +932,47 @@ fn remote_memory(
         return Err(invalid("prefilled memory has the wrong length"));
     }
     Ok(Some(filled))
+}
+
+/// Puts `image`, published in `from`, into `staging` as shared files and
+/// returns its chunk map.
+fn share_image(from: &Images, image: &Verified, staging: &Path) -> Result<ChunkMap, Suspect> {
+    if image.meta.remote {
+        return Err(Suspect::Damaged {
+            generation: image.generation(),
+            reason: "a shared image must be fully in local memory".into(),
+        });
+    }
+    let generation = image.generation();
+    share(&from.memory(generation), &staging.join(MEMORY))?;
+    share(&from.state(generation), &staging.join(STATE))?;
+    Ok(from.chunk_map(image)?)
+}
+
+/// Seals a staged generation's files and makes them and their directory
+/// durable. Memory still being filled from the store (`remote`) stays
+/// writable until [`Images::mark_local`].
+fn seal_staged(staging: &Path, remote: bool) -> io::Result<()> {
+    let sealed: &[&str] = if remote { &[STATE] } else { &[STATE, MEMORY] };
+    for name in sealed {
+        seal(&staging.join(name))?;
+    }
+    for name in [STATE, MEMORY] {
+        File::open(staging.join(name))?.sync_all()?;
+    }
+    sync_dir(staging)
+}
+
+/// Makes `to` the same file as the published `from`: a hard link where
+/// both are on one filesystem, otherwise a copy.
+fn share(from: &Path, to: &Path) -> io::Result<()> {
+    match fs::hard_link(from, to) {
+        Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(rustix::io::Errno::XDEV.raw_os_error()) => {
+            crate::layout::copy_sparse(from, to)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Makes a published file read-only and owned by the host agent, so a VMM

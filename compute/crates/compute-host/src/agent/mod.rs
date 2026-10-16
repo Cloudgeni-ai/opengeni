@@ -19,8 +19,8 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use compute_core::{
-    Action, At, BalloonRequest, HoldId, Host, HostPolicy, Input, Level, OpId, Outcome, Priority,
-    Resource, SandboxId, Size, SleepPolicy, Step,
+    Action, At, BalloonRequest, HoldId, Host, HostPolicy, Input, Level, LoanId, MemoryPolicy, OpId,
+    Outcome, Priority, Resource, SandboxId, Size, SleepPolicy, Step,
 };
 use compute_engine::{CancellationToken, Engine, PageSize, VmSpec};
 use tokio::sync::{mpsc, oneshot};
@@ -30,6 +30,8 @@ use tokio::time::{Instant, sleep_until};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
+use crate::pool::{Built, Lender, Loaning, Pool, PoolConfig, Shape, Sources, Template, Uses};
+
 use crate::protocol::{About, HostStatus, Id, SandboxConfig, StepStats};
 use crate::state::{Record, Records, StateError, claim_host, unix_ms_now};
 use crate::step::{After, Live};
@@ -37,10 +39,12 @@ use crate::store::Store;
 
 mod handle;
 mod holds;
+mod ready;
 mod recover;
 mod requests;
 mod sample;
 mod steps;
+mod warm;
 
 /// Takes the host's lock at `path` for state root `root`; see
 /// [`HostConfig::host_lock`].
@@ -64,39 +68,6 @@ const SAVE_EXTRA: u64 = 64 << 20;
 /// Where the agent's clock for the decision core starts, so a sandbox found
 /// on disk can have been idle since long before this agent started.
 const CLOCK_BASE: Duration = Duration::from_secs(10 * 365 * 86_400);
-
-/// Refuses settings no host can run with.
-fn check_config(config: &HostConfig) -> Result<(), HostError> {
-    check_root(&config.root).map_err(HostError::Invalid)?;
-    if config.first_uid == 0 {
-        return Err(HostError::Invalid(
-            "first_uid must not be 0: VMMs run as unprivileged users".into(),
-        ));
-    }
-    if let Some(network) = &config.network {
-        network.check().map_err(HostError::Invalid)?;
-    }
-    Ok(())
-}
-
-/// Refuses settings that do not fit the sandboxes already recorded: a
-/// sandbox keeps the user and addresses it was given, while new ones are
-/// handed out by today's settings, which therefore must agree.
-fn check_fit(images: &Images, records: &Records) -> Result<(), HostError> {
-    let misfits: Vec<String> = records
-        .all()
-        .iter()
-        .filter_map(|record| images.check(record).err())
-        .collect();
-    if misfits.is_empty() {
-        Ok(())
-    } else {
-        Err(HostError::Invalid(format!(
-            "this host's settings do not fit its sandboxes: {}",
-            misfits.join("; ")
-        )))
-    }
-}
 
 /// How a host is set up.
 #[derive(Clone, Debug)]
@@ -142,11 +113,24 @@ pub struct HostConfig {
     /// leaves in flight when it ends keeps the lock until it finishes. `None`
     /// only where no two agents can meet, as in tests with fake VMs.
     pub host_lock: Option<PathBuf>,
+    /// Warm templates new sandboxes start from (see [`crate::pool`]).
+    /// `None` boots every new sandbox cold.
+    pub pool: Option<PoolConfig>,
     /// How VMs whose memory needs a fault handler get one.
     pub pager: PagerConfig,
+    /// How long a stream into a sandbox (see [`crate::protocol::Request::Connect`])
+    /// may stay silent both ways and still keep it awake. A forgotten
+    /// browser tab or terminal then lets its sandbox sleep; the next byte
+    /// either way wakes it again.
+    pub stream_idle: Duration,
     /// What the host runs, as status reports it. The runtime is the
     /// engine's; whatever is set here is replaced.
     pub about: About,
+}
+
+impl HostConfig {
+    /// The default for [`HostConfig::stream_idle`].
+    pub const STREAM_IDLE: Duration = Duration::from_secs(10 * 60);
 }
 
 /// How VMs whose memory needs a fault handler get one: a pager process of
@@ -437,6 +421,29 @@ enum Event<V> {
         ordinal: u32,
         result: Result<Record, HostError>,
         reply: Reply<()>,
+        /// The template the sandbox could not start from because it no
+        /// longer fits today's inputs.
+        stale: Option<Arc<Template>>,
+    },
+    /// A sandbox about to sleep only for being idle told whether a command
+    /// started through its guest's helper still runs (see
+    /// [`crate::restore_notice::ask_commands`]).
+    Asked {
+        id: Id,
+        op: OpId,
+        step: Step,
+        running: bool,
+    },
+    /// The check of a template found on disk ended.
+    TemplateChecked {
+        shape: Shape,
+        result: Box<Result<Template, String>>,
+    },
+    /// A template build ended; `ordinal` is free again if its VM is gone.
+    TemplateBuilt {
+        shape: Shape,
+        ordinal: u32,
+        built: Built,
     },
     StepDone {
         id: Id,
@@ -448,12 +455,22 @@ enum Event<V> {
         /// What went wrong, when it failed.
         error: Option<String>,
     },
+    /// Work outside any sandbox asks for or gives back a place under a
+    /// step limit.
+    Loan(Loaning),
+    /// Step `op` of `id` no longer does the work its kind's limit protects.
+    Unthrottled {
+        id: Id,
+        op: OpId,
+    },
     Exited {
         id: Id,
         incarnation: u64,
     },
     Destroyed {
         id: Id,
+        /// The name its directory and network were made under.
+        host: Id,
         /// The ordinal it held, when known.
         ordinal: Option<u32>,
         result: Result<(), HostError>,
@@ -473,6 +490,28 @@ enum Event<V> {
         id: Id,
         request: BalloonRequest,
     },
+    /// A ready sandbox's fill ended.
+    Filled {
+        host: Id,
+        filled: Box<ready::Filled<V>>,
+    },
+    /// A create's claim of a ready sandbox ended.
+    Claimed {
+        id: Id,
+        config: SandboxConfig,
+        reply: Reply<()>,
+        claimed: Box<ready::Claimed<V>>,
+    },
+}
+
+/// What a removal that stopped part way left of a sandbox whose record is
+/// gone.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Leftover {
+    /// The name its directory and network were made under.
+    host: Id,
+    /// The ordinal it still holds, if known.
+    ordinal: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -557,6 +596,7 @@ struct Woke {
 pub struct Handle {
     commands: mpsc::UnboundedSender<Command>,
     holds: Arc<AtomicU64>,
+    stream_idle: Duration,
 }
 
 /// Keeps a sandbox awake while it lives. Dropping it lets the sandbox go
@@ -594,6 +634,7 @@ pub struct HostAgent<E: Engine, S: Store> {
     root: PathBuf,
     base_image: PathBuf,
     images: Images,
+    warm: Option<Warm>,
     core: Host,
     origin: Instant,
     slots: HashMap<SandboxId, Slot<E::Vm>>,
@@ -606,11 +647,22 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Blocked sandboxes whose record is gone but whose files a removal
     /// could not finish deleting, with the ordinal they still hold if
     /// known. Removing one again retries.
-    leftovers: HashMap<SandboxId, Option<u32>>,
+    leftovers: HashMap<SandboxId, Leftover>,
+    /// The host names of claimed ready sandboxes (see [`ready`]), with the
+    /// id each answers to. No new sandbox may take one as its id.
+    hosts: HashMap<SandboxId, SandboxId>,
     /// Blocked sandboxes with an unreadable record whose ordinal is
     /// unknown. Any new sandbox could clash with one, so none is created
     /// while there are any.
     unknown_ordinals: BTreeSet<SandboxId>,
+    /// Template builds an earlier agent left whose VM may still run, as
+    /// the user of an ordinal nothing records. No sandbox is created while
+    /// there are any.
+    unknown_builds: BTreeSet<String>,
+    /// Asks this agent for places under its step limits.
+    lender: Lender,
+    /// Loans waiting for their place, with whom to tell.
+    loans: HashMap<LoanId, oneshot::Sender<()>>,
     /// Dead VM processes of each sandbox still being torn down. Nothing new
     /// starts for a sandbox until its count is back to zero, so no teardown
     /// ever removes files of a newer VM.
@@ -631,7 +683,10 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// window, so they count as busy; see [`HostAgent::sample_busy`].
     unseen_activity: usize,
     sample_every: Duration,
-    pressure: bool,
+    /// When memory pressure frees memory, if it does.
+    memory_policy: Option<MemoryPolicy>,
+    /// Ready sandboxes, kept for creates to claim (see [`ready`]).
+    ready: ready::Ready<E::Vm>,
     guest_ports: Arc<[GuestPort]>,
     restore_notice_port: Option<u32>,
     #[cfg(target_os = "linux")]
@@ -650,6 +705,72 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
     commands_tx: mpsc::WeakUnboundedSender<Command>,
+}
+
+/// Checks that this host's settings fit every recorded sandbox: a sandbox
+/// keeps the user and addresses it was given, and new ones are handed out
+/// by today's settings, which therefore must agree.
+fn check_fit(images: &Images, records: &Records) -> Result<(), HostError> {
+    let misfits: Vec<String> = records
+        .all()
+        .iter()
+        .filter_map(|record| images.check(record).err())
+        .collect();
+    if misfits.is_empty() {
+        Ok(())
+    } else {
+        Err(HostError::Invalid(format!(
+            "this host's settings do not fit its sandboxes: {}",
+            misfits.join("; ")
+        )))
+    }
+}
+
+/// How this host's VMs are laid out, from its settings.
+fn host_images(config: &HostConfig) -> Images {
+    Images {
+        kernel: config.kernel.clone(),
+        boot_args: match &config.network {
+            Some(network) => format!("{} {}", config.boot_args, network.boot_args()),
+            None => config.boot_args.clone(),
+        },
+        first_uid: config.first_uid,
+        network: config.network.clone(),
+    }
+}
+
+/// Lends step slots to the pool, reporting each loan as an event.
+fn lender<V: Send + 'static>(events: mpsc::UnboundedSender<Event<V>>) -> Lender {
+    Lender::new(move |loaning| {
+        let _ = events.send(Event::Loan(loaning));
+    })
+}
+
+/// Sets up the host's sandbox networking, if sandboxes are networked.
+async fn prepare_network(
+    network: Option<NetworkConfig>,
+) -> Result<Option<Arc<Networks>>, HostError> {
+    let Some(network) = network else {
+        return Ok(None);
+    };
+    let prepared = tokio::task::spawn_blocking(move || Networks::prepare(&network))
+        .await
+        .map_err(|error| HostError::Io(error.to_string()))?
+        .map_err(|error| HostError::Io(error.to_string()))?;
+    Ok(Some(Arc::new(prepared)))
+}
+
+/// The host's warm templates and how to build them.
+#[derive(Debug)]
+struct Warm {
+    pool: Pool,
+    /// Templates found on disk, until their check starts.
+    found: Vec<Template>,
+    sources: Arc<Sources>,
+    ready_port: u32,
+    ready_timeout: Duration,
+    /// When each shape was last used.
+    uses: Uses,
 }
 
 /// Wakes a sandbox when data arrives for it on a guest port.
@@ -672,6 +793,23 @@ impl Activity for Toucher {
     }
 }
 
+/// Why `config` cannot run an agent, if it cannot.
+fn check_config(config: &HostConfig) -> Result<(), String> {
+    check_root(&config.root)?;
+    if config.first_uid == 0 {
+        return Err("first_uid must not be 0: VMMs run as unprivileged users".into());
+    }
+    if let Some(network) = &config.network {
+        network.check()?;
+    }
+    if config.pool.is_some() && config.restore_notice_port.is_none() {
+        // A sandbox started from a template learns which it is only from
+        // the restore notice; see `Identity::Pending`.
+        return Err("warm templates need a restore notice port".into());
+    }
+    Ok(())
+}
+
 impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Takes over the state root, recovers every sandbox recorded under it,
     /// then runs the agent until every [`Handle`] is dropped.
@@ -687,37 +825,38 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     ) -> Result<(Handle, JoinHandle<()>), HostError> {
         let core =
             Host::new(config.policy).map_err(|error| HostError::Invalid(format!("{error:?}")))?;
-        check_config(&config)?;
+        check_config(&config).map_err(HostError::Invalid)?;
+        let stream_idle = config.stream_idle;
         let host_lock = match config.host_lock.clone() {
             Some(path) => Some(claim(path, config.root.clone()).await?),
             None => None,
         };
         let (records, strays) = Records::open(config.root.clone(), HANDOVER, host_lock).await?;
-        let images = Images {
-            kernel: config.kernel,
-            boot_args: match &config.network {
-                Some(network) => format!("{} {}", config.boot_args, network.boot_args()),
-                None => config.boot_args,
-            },
-            first_uid: config.first_uid,
-            network: config.network.clone(),
-        };
+        let images = host_images(&config);
         check_fit(&images, &records)?;
-        let net = match config.network.clone() {
-            Some(network) => Some(Arc::new(
-                tokio::task::spawn_blocking(move || Networks::prepare(&network))
-                    .await
-                    .map_err(|error| HostError::Io(error.to_string()))?
-                    .map_err(|error| HostError::Io(error.to_string()))?,
-            )),
-            None => None,
-        };
+        let net = prepare_network(config.network.clone()).await?;
         let (commands_tx, commands) = mpsc::unbounded_channel();
         let (events_tx, events) = mpsc::unbounded_channel();
         // Huge-page profiles cannot compress, whatever the host says.
         let can_compress = config.can_compress && engine.memory_profile().compress;
         let reserve_whole = engine.memory_profile().pages == PageSize::Huge;
         let save_copies = save_copies(&config.root)?;
+        // Template VMs an earlier agent left are ended before any sandbox
+        // can be given the user one of them ran as.
+        let warm::Started {
+            warm,
+            shapes: warm_shapes,
+            held,
+            ready,
+        } = Warm::start(
+            config.pool,
+            &engine,
+            &config.root,
+            &config.base_image,
+            config.network.is_some(),
+            &images,
+        )
+        .await;
         let about = About {
             runtime: engine.runtime().to_owned(),
             ..config.about
@@ -734,7 +873,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             images,
             root: config.root,
             base_image: config.base_image,
-            pressure: config.policy.memory.is_some(),
+            warm,
+            memory_policy: config.policy.memory,
+            ready: ready::Ready::new(ready),
             pager: config.pager,
             core,
             origin: Instant::now(),
@@ -744,7 +885,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             blocked: BTreeMap::new(),
             destroying: HashMap::new(),
             leftovers: HashMap::new(),
+            hosts: HashMap::new(),
             unknown_ordinals: BTreeSet::new(),
+            unknown_builds: BTreeSet::new(),
+            lender: lender(events_tx.clone()),
+            loans: HashMap::new(),
             tearing_down: HashMap::new(),
             teardowns: tokio::task::JoinSet::new(),
             shutdown: CancellationToken::new(),
@@ -766,19 +911,42 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             about,
             commands_tx: commands_tx.downgrade(),
         };
+        agent.hold_builds(held);
         agent.recover(strays).await;
+        agent.start_templates(warm_shapes);
         // Admission refuses what needs disk until it has a reading, so one
         // is taken before any request is served.
         agent.sample();
         let handle = Handle {
             commands: commands_tx,
             holds: Arc::new(AtomicU64::new(1)),
+            stream_idle,
         };
         Ok((handle, tokio::spawn(agent.run())))
     }
 
-    /// The lowest ordinal no sandbox holds.
-    fn take_ordinal(&mut self) -> u32 {
+    /// Refuses while some ordinal is unknown: any ordinal that looks free
+    /// could then belong to a VM that still runs as its user.
+    fn ordinals_known(&self) -> Result<(), String> {
+        if let Some(unknown) = self.unknown_ordinals.first() {
+            return Err(format!(
+                "sandbox {}'s record is unreadable and the user and network it holds unknown; \
+                 no sandbox is created until it is resolved",
+                Id(*unknown)
+            ));
+        }
+        if let Some(build) = self.unknown_builds.first() {
+            return Err(format!(
+                "template build {build} may still run as a user nothing records; \
+                 no sandbox is created until a restart of the agent ends it"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The lowest ordinal no sandbox holds, unless some ordinal is unknown.
+    fn take_ordinal(&mut self) -> Result<u32, String> {
+        self.ordinals_known()?;
         let mut free = 0;
         for taken in &self.ordinals {
             if *taken != free {
@@ -787,7 +955,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             free += 1;
         }
         self.ordinals.insert(free);
-        free
+        Ok(free)
     }
 
     fn insert(&mut self, id: Id, paths: Paths, spec: VmSpec) {

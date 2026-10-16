@@ -111,6 +111,16 @@ pick a VM.
   outside the agent takes from the pool.
 - Status reports capacity (total, reserved, occupied, free, awake);
   reservations are rebuilt from records after a restart.
+- Spare VMs, the ready pool's clones and template builds
+  ([12](0012-templates-and-ready-pool.md)), are in the same book. Each
+  counts against the budget, at its full size until it is filled and then
+  at what it holds. A new one starts only in room above the buffer and the
+  high watermark that no wake wants: none while a wake is queued for
+  memory or refused and held, and it is booked before it starts. Ready
+  clones are the first relief for a wake, the buffer and memory pressure,
+  oldest first, ahead of step 1 of the relief above; one still filling is
+  left to finish. On huge-page hosts available memory is the smaller of
+  `MemAvailable` and the free huge-page pool.
 - Local disk is booked the same way, because a full disk blocks the very
   saves that relieve memory. Every VM whose state is not saved yet books
   its worst-case next save: its memory size once where files share extents

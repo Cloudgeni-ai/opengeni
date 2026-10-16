@@ -37,7 +37,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use compute_engine::{Drive, SnapshotFiles, VmSpec};
+use compute_engine::{Drive, Network, SnapshotFiles, VmSpec};
 
 use crate::net::{Link, NetworkConfig};
 use crate::protocol::Id;
@@ -46,6 +46,11 @@ use crate::state::{Allocation, Record};
 /// Directory name the jailer gives each VM's chroot, inside the sandbox
 /// directory.
 const JAIL: &str = "root";
+
+/// The kernel command line argument naming the sandbox (see
+/// [`crate::restore_notice`]). Dotted, so the kernel leaves it out of the
+/// init process's arguments and environment.
+pub(crate) const SANDBOX_ARG: &str = "opengeni.sandbox";
 
 /// Longest Unix socket path the kernel accepts, without the trailing NUL.
 const MAX_SOCKET_PATH: usize = 107;
@@ -70,8 +75,20 @@ pub(crate) struct Paths {
 }
 
 impl Paths {
+    /// The paths of the sandbox directory named `id`.
     pub fn new(root: &Path, id: Id) -> Self {
-        let dir = sandboxes_dir(root).join(id.to_string());
+        Self::at(sandboxes_dir(root).join(id.to_string()))
+    }
+
+    /// The paths of the sandbox `record` describes, under the name its
+    /// directory was made with (see [`Record::host`]).
+    pub fn of(root: &Path, record: &Record) -> Self {
+        Self::new(root, record.host())
+    }
+
+    /// The paths of a VM whose directory is `dir`, which the jailer needs
+    /// to be `<base>/firecracker/<VM name>`.
+    pub fn at(dir: PathBuf) -> Self {
         let jail = dir.join(JAIL);
         Self {
             record: dir.join("sandbox.json"),
@@ -103,6 +120,11 @@ pub(crate) fn chroot_base(root: &Path) -> PathBuf {
 /// The directory holding one directory per sandbox.
 pub(crate) fn sandboxes_dir(root: &Path) -> PathBuf {
     chroot_base(root).join("firecracker")
+}
+
+/// The directory holding the warm templates (see [`crate::pool`]).
+pub(crate) fn templates_dir(root: &Path) -> PathBuf {
+    root.join("templates")
 }
 
 /// Checks that every socket a sandbox under `root` needs fits in a Unix
@@ -186,33 +208,72 @@ impl Images {
     /// The network `record` was given, if any.
     pub fn link(record: &Record) -> Option<Link> {
         let Allocation { uid, gid, link } = record.allocation;
-        link.map(|addresses| Link::new(record.id, record.ordinal, addresses, uid, gid))
+        link.map(|addresses| Link::new(record.host(), record.ordinal, addresses, uid, gid))
     }
 }
 
 /// The VM description for the sandbox `record` describes, from what the
 /// record says it was given.
 pub(crate) fn vm_spec(record: &Record, paths: &Paths, images: &Images) -> VmSpec {
-    VmSpec {
-        name: record.id.to_string(),
-        dir: paths.jail.clone(),
-        logs: paths.dir.clone(),
+    Machine {
+        // The jail, cgroup and network keep the name they were made under.
+        name: record.host().to_string(),
+        paths,
         uid: record.allocation.uid,
         gid: record.allocation.gid,
         vcpus: record.config.vcpus,
         memory_mib: record.config.memory_mib,
         memory_request_mib: record.config.memory_request(),
         cpu_weight: record.config.cpu_weight(),
-        kernel: paths.kernel.clone(),
-        boot_args: images.boot_args.clone(),
-        drives: vec![Drive {
-            id: "rootfs".into(),
-            path: paths.disk.clone(),
-            root: true,
-            read_only: false,
-        }],
+        // The guest's own id, for a guest booted from its disk; a restored
+        // one is told in the restore notice.
+        boot_args: format!("{} {SANDBOX_ARG}={}", images.boot_args, record.id),
         network: Images::link(record).map(|link| link.vm_network()),
-        free_page_reporting: true,
+    }
+    .spec()
+}
+
+/// A VM on this host. Besides what is named here, every VM has the same
+/// devices at the same paths inside its jail, so the saved state of one,
+/// such as a template's, restores as any other of the same shape.
+pub(crate) struct Machine<'a> {
+    pub name: String,
+    pub paths: &'a Paths,
+    pub uid: u32,
+    pub gid: u32,
+    pub vcpus: u8,
+    pub memory_mib: u32,
+    /// Memory guaranteed to it; see [`VmSpec::memory_request_mib`].
+    pub memory_request_mib: u32,
+    /// Its share of the processors; see [`VmSpec::cpu_weight`].
+    pub cpu_weight: u16,
+    pub boot_args: String,
+    pub network: Option<Network>,
+}
+
+impl Machine<'_> {
+    pub fn spec(self) -> VmSpec {
+        VmSpec {
+            name: self.name,
+            dir: self.paths.jail.clone(),
+            logs: self.paths.dir.clone(),
+            uid: self.uid,
+            gid: self.gid,
+            vcpus: self.vcpus,
+            memory_mib: self.memory_mib,
+            memory_request_mib: self.memory_request_mib,
+            cpu_weight: self.cpu_weight,
+            kernel: self.paths.kernel.clone(),
+            boot_args: self.boot_args,
+            drives: vec![Drive {
+                id: "rootfs".into(),
+                path: self.paths.disk.clone(),
+                root: true,
+                read_only: false,
+            }],
+            network: self.network,
+            free_page_reporting: true,
+        }
     }
 }
 

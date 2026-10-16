@@ -35,7 +35,22 @@ tests and commits; each wake reads the repository and loads it in Node.
 | --- | --- |
 | kill -9 with 100 sandboxes at mixed levels | serving again in 509 ms; none lost |
 | Wake after restart, p50/p90 | running 0.7/88 ms, paused 68/107 ms, saved 377/394 ms |
-| Create from a template, 1 / 100 at once | 265 ms / p50 7.2 s, p90 9.6 s |
+
+## Nested host, Azure D32ds_v5, new sandboxes
+
+Create until a first command (reading the id, 16 random bytes and dmesg)
+finishes in the new sandbox; 1, then 100 at once. Ready pool of 101.
+
+| Start | Nested profile: 1 / 100 at once | Bare-metal profile: 1 / 100 at once |
+| --- | --- | --- |
+| Ready pool (a resume) | 28 ms / 333/450 ms, all in 0.63 s | 211 ms / 4.2/5.3 s |
+| Template (a restore) | 140 ms / 1.7/1.9 s | 283 ms / 8.2/9.3 s |
+| Cold boot | 1.3 s / 7.4/8.0 s | 1.6 s / 17.6/19.6 s |
+
+Filling the pool of 101 took 8.1 s (nested) and 16.4 s (bare-metal). The
+bare-metal profile on a nested host is CPU-bound in the guests during a
+burst (4 KiB faults are expensive under nesting); the nested profile is the
+one to run there.
 
 Bare-metal results (GCP z3 metal) and the final runs on merged code will
 replace these tables.

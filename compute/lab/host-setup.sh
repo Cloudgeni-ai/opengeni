@@ -8,8 +8,9 @@
 # Produces under $LAB_DIR (default /lab):
 #   bin/firecracker         pinned Firecracker release
 #   vmlinux                 guest kernel from Firecracker CI artifacts
-#   base.ext4               guest root filesystem with node, git, python and a
-#                           small exec agent listening on vsock port 52
+#   base.ext4               guest root filesystem with node, git, python, a
+#                           small exec agent listening on vsock port 52 and
+#                           the guest services below
 #   swapfile                backing swap so zswap can be measured
 set -euo pipefail
 
@@ -22,6 +23,196 @@ ARCH="$(uname -m)"
 export DEBIAN_FRONTEND=noninteractive
 
 log() { printf '[host-setup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+
+# The guest's side of the host agent's identity contract: a booted guest
+# finds its sandbox id on the kernel command line (`opengeni.sandbox=`), a
+# restored one in the restore notice on vsock port 53 (`restored <unix
+# nanoseconds> sandbox=<id> seed=<hex> order=<generation>.<revision>`),
+# whose time sets the clock.
+# Either way the id ends up in /run/sandbox-id. The notice's `seed` is
+# mixed into the guest's random number generator, which reseeds before the
+# guest answers `ok seeded` (`ok` if it could not), so no command of the new
+# sandbox draws numbers another clone of the same snapshot draws; the host
+# uses a clone only after `ok seeded`. (The kernel reseeds by itself when it
+# learns of the VM generation ID's change, but later.) A guest whose machine
+# id was not made for the sandbox it is (/etc/opengeni-identity names whom
+# it was made for) makes its own, with the hostname, at boot and before it
+# acknowledges a notice: a clone, or a guest booted from a cloned disk.
+# Notices are applied one at a time, and one whose order (the host's record
+# fence, never the clock) is below the latest applied is ignored, so a late
+# attempt never takes back a newer identity.
+# A template is snapshotted once the guest accepts on vsock port 54, which
+# opens only when systemd has finished starting everything, so clones wake
+# settled instead of mid-boot.
+install_guest_services() {
+  local root="$1"
+  # Resident, so answering a notice starts no process in a guest whose
+  # memory is still being faulted in after its restore.
+  sudo tee "$root/usr/local/bin/lab-notice" >/dev/null <<'SCRIPT'
+#!/usr/bin/python3
+import fcntl, hashlib, os, socket, time
+
+RNDRESEEDCRNG = 0x5207  # _IO('R', 0x07)
+
+
+def current_sandbox():
+    try:
+        with open("/run/sandbox-id") as file:
+            return file.read().strip()
+    except OSError:
+        return ""
+
+
+def owns_identity(sandbox):
+    try:
+        with open("/etc/opengeni-identity") as file:
+            return file.read().strip() == sandbox
+    except OSError:
+        return False
+
+
+def renew_identity(sandbox, seed):
+    # Its own machine id (the same for a retried notice) and hostname; whom
+    # they were made for goes last.
+    machine_id = hashlib.sha256(f"{seed}:{sandbox}".encode()).hexdigest()[:32]
+    with open("/etc/.machine-id.new", "w") as file:
+        file.write(machine_id + "\n")
+    os.replace("/etc/.machine-id.new", "/etc/machine-id")
+    socket.sethostname(sandbox[:63])
+    with open("/etc/.opengeni-identity.new", "w") as file:
+        file.write(sandbox + "\n")
+    os.replace("/etc/.opengeni-identity.new", "/etc/opengeni-identity")
+
+
+listener = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+listener.bind((socket.VMADDR_CID_ANY, 53))
+listener.listen(64)
+latest = None
+while True:
+    connection, _ = listener.accept()
+    with connection:
+        try:
+            line = b""
+            while not line.endswith(b"\n"):
+                chunk = connection.recv(256)
+                if not chunk:
+                    raise EOFError
+                line += chunk
+            word, nanos, *rest = line.decode().split()
+            fields = dict(field.partition("=")[::2] for field in rest)
+            # Ordered by the host's record fence, never by the clock.
+            order = tuple(int(part) for part in fields.get("order", "").split("."))
+            if word != "restored" or len(order) != 2 or (latest and order < latest):
+                continue
+            latest = order
+            time.clock_settime_ns(time.CLOCK_REALTIME, int(nanos))
+            sandbox, seed = fields.get("sandbox", ""), fields.get("seed", "")
+            if sandbox and (sandbox != current_sandbox() or not owns_identity(sandbox)):
+                try:
+                    renew_identity(sandbox, seed)
+                except OSError:
+                    # The id is not taken, so a retry renews again; the host
+                    # does not use a clone that is not seeded.
+                    connection.sendall(b"ok\n")
+                    continue
+                with open("/run/sandbox-id.new", "w") as file:
+                    file.write(sandbox + "\n")
+                os.replace("/run/sandbox-id.new", "/run/sandbox-id")
+            seeded = False
+            if seed:
+                # Mixed into the input pool, then the generator reseeds from
+                # it at once.
+                try:
+                    with open("/dev/urandom", "wb", buffering=0) as pool:
+                        pool.write(bytes.fromhex(seed))
+                        fcntl.ioctl(pool, RNDRESEEDCRNG)
+                    seeded = True
+                    with open("/dev/kmsg", "w") as log:
+                        log.write("lab-notice: crng reseeded from the restore notice\n")
+                except (OSError, ValueError):
+                    pass
+            connection.sendall(b"ok seeded\n" if seeded else b"ok\n")
+        except (OSError, ValueError, EOFError):
+            pass
+SCRIPT
+  sudo tee "$root/usr/local/bin/lab-identity" >/dev/null <<'SCRIPT'
+#!/bin/bash
+for arg in $(cat /proc/cmdline); do
+  case "$arg" in
+    opengeni.sandbox=*) id="${arg#opengeni.sandbox=}" ;;
+  esac
+done
+[ -n "$id" ] || exit 0
+printf '%s\n' "$id" >/run/sandbox-id
+# A machine id made for another sandbox (a template's, or the base image's)
+# is replaced by one of its own.
+if [ "$(cat /etc/opengeni-identity 2>/dev/null)" != "$id" ]; then
+  tr -d '-' </proc/sys/kernel/random/uuid >/etc/.machine-id.new &&
+    mv -f /etc/.machine-id.new /etc/machine-id &&
+    printf '%s\n' "$id" >/etc/.opengeni-identity.new &&
+    mv -f /etc/.opengeni-identity.new /etc/opengeni-identity
+fi
+hostname "${id:0:63}"
+SCRIPT
+  sudo chmod 755 "$root/usr/local/bin/lab-notice" "$root/usr/local/bin/lab-identity"
+  sudo tee "$root/etc/systemd/system/lab-notice.service" >/dev/null <<'UNIT'
+[Unit]
+Description=Restore notices from the host agent on vsock port 53
+After=local-fs.target lab-identity.service
+
+[Service]
+OOMScoreAdjust=-1000
+ExecStart=/usr/local/bin/lab-notice
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo tee "$root/etc/systemd/system/lab-identity.service" >/dev/null <<'UNIT'
+[Unit]
+Description=The sandbox id from the kernel command line
+After=local-fs.target
+# Commands arrive through lab-agent; none may run before the id is known.
+Before=lab-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/lab-identity
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo tee "$root/etc/systemd/system/lab-ready.service" >/dev/null <<'UNIT'
+[Unit]
+Description=Tells a template builder on vsock port 54 that startup has finished
+After=multi-user.target
+
+[Service]
+ExecStart=/bin/sh -c 'systemctl is-system-running --wait >/dev/null; exec /usr/bin/socat VSOCK-LISTEN:54,reuseaddr,fork SYSTEM:true'
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  # The exec agent outlasts the commands it runs when the guest runs out of
+  # memory; each command resets the inherited setting to the default.
+  sudo tee "$root/etc/systemd/system/lab-agent.service" >/dev/null <<'UNIT'
+[Unit]
+Description=Experiment exec agent on vsock port 52
+After=local-fs.target
+
+[Service]
+OOMScoreAdjust=-1000
+ExecStart=/usr/bin/socat VSOCK-LISTEN:52,reuseaddr,fork "SYSTEM:echo 0 > /proc/self/oom_score_adj; exec /bin/bash,stderr"
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  for unit in lab-notice lab-identity lab-ready lab-agent; do
+    sudo ln -sf "/etc/systemd/system/$unit.service" "$root/etc/systemd/system/multi-user.target.wants/$unit.service"
+  done
+}
 
 log "packages"
 sudo apt-get update -qq
@@ -90,6 +281,20 @@ if [ ! -f vmlinux ] || [ ! -f ubuntu.squashfs ]; then
   curl -fsSL -o vmlinux.config "$S3/${kernel_key}.config" 2>/dev/null || true
 fi
 
+if [ -f base.ext4 ] && {
+  ! sudo debugfs -R "cat /etc/systemd/system/lab-identity.service" base.ext4 2>/dev/null | grep -q Before=lab-agent ||
+    ! sudo debugfs -R "cat /usr/local/bin/lab-identity" base.ext4 2>/dev/null | grep -q "opengeni-identity" ||
+    ! sudo debugfs -R "stat /etc/systemd/system/lab-ready.service" base.ext4 2>/dev/null | grep -q Inode ||
+    ! sudo debugfs -R "cat /etc/systemd/system/lab-agent.service" base.ext4 2>/dev/null | grep -q OOMScoreAdjust ||
+    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q 'fields.get("order"'
+}; then
+  log "guest services"
+  sudo mkdir -p /mnt/lab-base
+  sudo mount -o loop base.ext4 /mnt/lab-base
+  install_guest_services /mnt/lab-base
+  sudo umount /mnt/lab-base
+fi
+
 if [ ! -f base.ext4 ]; then
   log "guest root filesystem"
   sudo rm -rf rootfs
@@ -120,19 +325,7 @@ if [ ! -f base.ext4 ]; then
     printf "%s\n" "document.getElementById(\"app\").textContent = \"hello\";" > main.js
     npm install --no-audit --no-fund --loglevel=error vite >/dev/null
   '
-  sudo tee rootfs/etc/systemd/system/lab-agent.service >/dev/null <<'UNIT'
-[Unit]
-Description=Experiment exec agent on vsock port 52
-After=local-fs.target
-
-[Service]
-ExecStart=/usr/bin/socat VSOCK-LISTEN:52,reuseaddr,fork EXEC:/bin/bash,stderr
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-  sudo ln -sf /etc/systemd/system/lab-agent.service rootfs/etc/systemd/system/multi-user.target.wants/lab-agent.service
+  install_guest_services rootfs
   for m in proc sys dev; do sudo umount -l "rootfs/$m"; done
   trap - EXIT
   # Name servers come from the kernel's `ip=` boot argument, which the
