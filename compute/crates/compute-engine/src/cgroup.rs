@@ -4,7 +4,12 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
+
+/// Serializes updates of a parent group's `memory.low`, so that the last
+/// one written counts every child's.
+static PARENT_LOW: Mutex<()> = Mutex::new(());
 
 /// One cgroup v2 directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +59,25 @@ impl Cgroup {
         read_u64(&self.path.join("memory.current"))
     }
 
+    /// Bytes of huge pages the group's processes map. The kernel charges
+    /// huge pages to a group's `memory.current` only on a cgroup v2 mount
+    /// with `memory_hugetlb_accounting`; counting them by process works on
+    /// any mount.
+    pub fn huge_page_bytes(&self) -> io::Result<u64> {
+        let mut mapped = 0_u64;
+        for pid in self.processes()? {
+            match fs::read_to_string(format!("/proc/{}/status", pid.as_raw_pid())) {
+                Ok(status) => mapped = mapped.saturating_add(parse_hugetlb_bytes(&status)),
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound
+                        || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => {
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(mapped)
+    }
+
     /// Processor time the group's processes have used since it was created
     /// (`usage_usec` in cpu.stat).
     pub fn cpu_time(&self) -> io::Result<Duration> {
@@ -86,20 +110,54 @@ impl Cgroup {
         Ok(total)
     }
 
-    /// Stops the kernel from compressing any more of the group's memory into
-    /// zswap, as it otherwise may under host memory pressure. With
-    /// `memory.zswap.writeback` at 0, a page zswap refuses is not swapped
-    /// out either, so the group's anonymous memory stays in RAM. Pages
-    /// already compressed stay so until touched.
+    /// Stops the kernel from compressing or swapping out any more of the
+    /// group's memory, as it otherwise may under host memory pressure: no
+    /// swap at all (`memory.swap.max`, which zswap needs too) and no zswap.
+    /// The group's anonymous memory then stays in RAM. Pages already
+    /// compressed stay so until touched. A kernel without swap has no
+    /// `memory.swap.max`, and nothing to close.
     pub fn close_zswap(&self) -> io::Result<()> {
+        match fs::write(self.path.join("memory.swap.max"), "0") {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
         fs::write(self.path.join("memory.zswap.max"), "0")
     }
 
     /// Sets the memory the group is protected from reclaim for others
     /// (`memory.low`): the kernel takes it only when nothing unprotected is
-    /// left to take.
+    /// left to take. Updates the parent's too; see
+    /// [`Cgroup::protect_parent`].
     pub fn set_memory_low(&self, bytes: u64) -> io::Result<()> {
-        fs::write(self.path.join("memory.low"), bytes.to_string())
+        fs::write(self.path.join("memory.low"), bytes.to_string())?;
+        self.protect_parent()
+    }
+
+    /// Sets the parent group's `memory.low` to the sum of its children's.
+    /// A group is protected only as far as its ancestors are, so a parent
+    /// left at 0 would protect none of its VMs from the rest of the host.
+    /// The sum, not more: on a mount with `memory_recursiveprot` the kernel
+    /// hands protection a parent has beyond its children's claims to the
+    /// children claiming none, such as paused VMs.
+    pub fn protect_parent(&self) -> io::Result<()> {
+        let Some(parent) = self.path.parent() else {
+            return Ok(());
+        };
+        let _serial = PARENT_LOW.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut total = 0_u64;
+        for entry in fs::read_dir(parent)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            match fs::read_to_string(entry.path().join("memory.low")) {
+                Ok(low) => total = total.saturating_add(low.trim().parse().unwrap_or(0)),
+                // A child group removed meanwhile claims nothing.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        fs::write(parent.join("memory.low"), total.to_string())
     }
 
     /// The group's zswap traffic and memory pressure so far.
@@ -119,6 +177,9 @@ impl Cgroup {
     /// `true` if it ran until the kernel could reclaim no more, `false` if
     /// `stop` interrupted it. Blocks; call it from a blocking thread.
     pub fn reclaim_to_zswap(&self, chunk: u64, stop: impl Fn() -> bool) -> io::Result<bool> {
+        // Callers check that zswap is on (`zswap_enabled`): without it,
+        // writeback 0 means nothing and swap would go to disk.
+        fs::write(self.path.join("memory.swap.max"), "max")?;
         fs::write(self.path.join("memory.zswap.max"), "max")?;
         fs::write(self.path.join("memory.zswap.writeback"), "0")?;
         let request = chunk.max(1).to_string();
@@ -201,14 +262,14 @@ impl Cgroup {
         }
     }
 
-    /// Removes the group once its processes have exited. Retries briefly,
-    /// because the kernel frees an exited process's group membership
-    /// asynchronously.
+    /// Removes the group once its processes have exited, and its claim on
+    /// the parent's protection with it. Retries briefly, because the kernel
+    /// frees an exited process's group membership asynchronously.
     pub fn remove(&self) -> io::Result<()> {
         let mut delay = Duration::from_millis(1);
         for _ in 0..10 {
             match fs::remove_dir(&self.path) {
-                Ok(()) => return Ok(()),
+                Ok(()) => return self.protect_parent(),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
                 Err(error)
                     if error.raw_os_error() == Some(rustix::io::Errno::BUSY.raw_os_error()) =>
@@ -219,7 +280,8 @@ impl Cgroup {
                 Err(error) => return Err(error),
             }
         }
-        fs::remove_dir(&self.path)
+        fs::remove_dir(&self.path)?;
+        self.protect_parent()
     }
 }
 
@@ -237,12 +299,6 @@ pub struct MemoryStats {
 }
 
 fn parse_memory_stats(stat: &str, pressure: Option<&str>) -> MemoryStats {
-    let field = |name: &str| {
-        stat.lines()
-            .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(0)
-    };
     let pressure_some_avg10 = pressure.and_then(|pressure| {
         pressure
             .lines()
@@ -253,9 +309,37 @@ fn parse_memory_stats(stat: &str, pressure: Option<&str>) -> MemoryStats {
             .ok()
     });
     MemoryStats {
-        zswpout: field("zswpout"),
-        zswpin: field("zswpin"),
+        zswpout: stat_field(stat, "zswpout"),
+        zswpin: stat_field(stat, "zswpin"),
         pressure_some_avg10,
+    }
+}
+
+/// Field `name` of a `memory.stat`, or 0 if it has none.
+fn stat_field(stat: &str, name: &str) -> u64 {
+    stat.lines()
+        .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Bytes of huge pages a process maps, from its `/proc/<pid>/status`.
+fn parse_hugetlb_bytes(status: &str) -> u64 {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("HugetlbPages:"))
+        .and_then(|value| value.trim().strip_suffix("kB"))
+        .and_then(|kib| kib.trim().parse::<u64>().ok())
+        .map_or(0, |kib| kib << 10)
+}
+
+/// Whether the kernel compresses swapped-out pages into zswap. Without it,
+/// swapping a group's memory out writes it to disk.
+pub fn zswap_enabled() -> io::Result<bool> {
+    match fs::read_to_string("/sys/module/zswap/parameters/enabled") {
+        Ok(text) => Ok(matches!(text.trim(), "Y" | "1")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 

@@ -10,10 +10,12 @@ use super::*;
 const MIB: u64 = 1 << 20;
 
 /// Pauses and saves soon after it goes idle, but keeps its VM process
-/// until another sandbox needs the memory.
+/// until another sandbox needs the memory. Saved only once the busy grace
+/// (the 1 s busy window and two samples) has passed, so its VM can then
+/// end at once for another.
 const SAVE_SOON: SleepConfig = SleepConfig {
     pause_after_ms: Some(1_000),
-    save_after_ms: Some(2_000),
+    save_after_ms: Some(4_000),
     archive_after_ms: None,
     drop_after_ms: None,
     evict_after_ms: None,
@@ -94,10 +96,24 @@ async fn exec_when_room(client: &Client, sandbox: Id, script: &str) -> (String, 
 /// Checks that the cgroup of `sandbox`'s VM carries what it is guaranteed
 /// and that the out-of-memory killer ends nearly anything else before its
 /// VMM, and the VMM before the agent, whose own cgroup lies outside it.
-fn check_guarantees(agent: &Agent, sandbox: Id) {
+async fn check_guarantees(agent: &Agent, sandbox: Id) {
+    // What a VM holds counts its huge pages too, which a cgroup v2 mount
+    // without hugetlb accounting leaves out of its memory.current.
+    agent
+        .wait_until("the sampler to see the VM's memory", |status| {
+            status.sandboxes.iter().any(|found| {
+                found.id == sandbox && found.resident_bytes.is_some_and(|bytes| bytes > 32 * MIB)
+            })
+        })
+        .await;
     assert_eq!(cgroup_value(sandbox, "cpu.weight"), "100");
     assert_eq!(cgroup_value(sandbox, "memory.low"), (512 * MIB).to_string());
     assert_eq!(cgroup_value(sandbox, "memory.zswap.max"), "0");
+    assert_eq!(cgroup_value(sandbox, "memory.swap.max"), "0");
+    // Protection reaches no further than the parent's: it claims what
+    // its running VMs do, the two held awake.
+    let parent = std::fs::read_to_string(Path::new(CGROUP).join("memory.low")).unwrap();
+    assert_eq!(parent.trim(), (1024 * MIB).to_string());
     let vmms: Vec<String> = cgroup_value(sandbox, "cgroup.procs")
         .lines()
         .filter(|pid| {
@@ -124,6 +140,52 @@ fn check_guarantees(agent: &Agent, sandbox: Id) {
         own.display(),
         parent.display()
     );
+}
+
+/// A value from `/proc/<pid>/<file>`.
+fn proc_value(pid: &str, file: &str) -> i64 {
+    std::fs::read_to_string(format!("/proc/{pid}/{file}"))
+        .unwrap_or_else(|error| panic!("{pid}/{file}: {error}"))
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// The host's out-of-memory killer picks an ordinary process first, then
+/// a VMM or pager, and the agent last, by the scores it reports, not only
+/// the adjustments: older kernels clamped adjusted scores into ties.
+fn check_oom_order(agent: &Agent) {
+    let agent_score = proc_value(&agent.child.id().to_string(), "oom_score");
+    let mut ordinary = Command::new("sleep").arg("30").spawn().unwrap();
+    let pid = ordinary.id().to_string();
+    assert_eq!(proc_value(&pid, "oom_score_adj"), 0);
+    let ordinary_score = proc_value(&pid, "oom_score");
+    let _ = ordinary.kill();
+    let _ = ordinary.wait();
+    let mut checked = 0;
+    for group in std::fs::read_dir(CGROUP).unwrap() {
+        let group = group.unwrap().path();
+        let Ok(procs) = std::fs::read_to_string(group.join("cgroup.procs")) else {
+            continue;
+        };
+        for pid in procs.lines() {
+            // A holder keeps a descriptor and nothing else; it may share
+            // the agent's score.
+            if std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .is_ok_and(|comm| comm.trim() == "sleep")
+            {
+                continue;
+            }
+            assert_eq!(proc_value(pid, "oom_score_adj"), -900, "{pid}");
+            let score = proc_value(pid, "oom_score");
+            assert!(
+                agent_score < score && score < ordinary_score,
+                "agent {agent_score}, {pid} {score}, ordinary {ordinary_score}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no VMM found");
 }
 
 /// On a full host, waking `sandbox` and creating then waking `unknown` are
@@ -218,7 +280,7 @@ async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
 
     // Two sandboxes held awake fill the host.
     hold_with_tokens(&agent, &ids[..2]).await;
-    check_guarantees(&agent, ids[0]);
+    check_guarantees(&agent, ids[0]).await;
     let capacity = agent.status().await.capacity.expect("admission is on");
     assert_eq!(
         (
@@ -281,6 +343,11 @@ async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
         hold: "work".into(),
     };
     hold(&agent.client, ids[1], release).await;
+    // A new agent takes the VMs back, each still a late choice for the
+    // out-of-memory killer, and the agent the last.
+    agent.kill();
+    let agent = host.start().await;
+    check_oom_order(&agent);
     agent.remove_all().await;
     agent.kill();
     host.finish("full-host");

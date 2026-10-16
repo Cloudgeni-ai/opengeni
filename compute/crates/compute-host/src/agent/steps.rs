@@ -77,6 +77,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                             self.ordinals.remove(&ordinal);
                         }
                         self.leftovers.remove(&id.0);
+                        // Its VM has ended: its memory is free for others.
+                        self.input(Input::Unmanaged {
+                            sandbox: id.0,
+                            bytes: 0,
+                        });
                     }
                     Err(error) => {
                         self.block(id, format!("removal failed: {error}"));

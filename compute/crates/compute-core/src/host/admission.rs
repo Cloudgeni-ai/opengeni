@@ -49,16 +49,33 @@ pub struct Capacity {
 }
 
 impl Capacity {
-    /// Bytes a wake can still take without making room first.
+    /// Bytes a wake can still take without making room first; 0 when the
+    /// budget is overdrawn.
     #[must_use]
     pub const fn free(&self) -> u64 {
         self.budget.saturating_sub(self.occupied)
     }
+
+    /// Bytes left of the budget, negative when it is overdrawn, as after
+    /// a restart with a smaller budget: then not even a wake that takes
+    /// nothing more fits until room is made.
+    pub(super) fn headroom(&self) -> i128 {
+        i128::from(self.budget) - i128::from(self.occupied)
+    }
 }
 
-/// Whether `step` creates or resumes a VM process, and so needs memory.
+/// What a compressed VM keeps of its memory, in percent, when no memory
+/// policy says: typical of zswap on guest memory.
+const COMPRESSED_PERCENT: u8 = 25;
+
+/// Whether `step` wakes a sandbox into memory: it creates or resumes a VM
+/// process, or fetches a sandbox only to restore it, so it is admitted
+/// before any download starts and holds the room meanwhile.
 pub(super) const fn needs_memory(step: Step) -> bool {
-    matches!(step, Step::Resume | Step::Restore | Step::Boot)
+    matches!(
+        step,
+        Step::Resume | Step::Restore | Step::Boot | Step::Fetch
+    )
 }
 
 impl Sandbox {
@@ -137,6 +154,7 @@ impl Host {
                 capacity.awake += 1;
             }
         }
+        capacity.occupied += self.unmanaged.values().sum::<u64>();
         Some(capacity)
     }
 
@@ -158,10 +176,12 @@ impl Host {
         Some(slot.wake_need(self.compressed_percent()))
     }
 
-    fn compressed_percent(&self) -> u8 {
+    /// What a compressed VM is expected to keep of its memory, in percent:
+    /// the memory policy's estimate, or a quarter without one.
+    pub(super) fn compressed_percent(&self) -> u8 {
         self.policy
             .memory
-            .map_or(100, |memory| memory.compressed_percent)
+            .map_or(COMPRESSED_PERCENT, |memory| memory.compressed_percent)
     }
 
     fn busy_grace(&self) -> Duration {
@@ -171,16 +191,17 @@ impl Host {
     }
 
     /// Starts the queued wakes of kind `step`, which needs memory, while
-    /// its limit allows and they fit into `free` bytes of the budget. A wake
-    /// that does not fit waits only if ending idle VM processes that are
-    /// already saved frees enough for it and every wake waiting before it;
-    /// otherwise it is refused at once. `waiting` sums what the wakes still
-    /// waiting need. Returns whether anything must be reconciled again.
+    /// its limit allows and they fit into the `headroom` left of the budget.
+    /// A wake that does not fit waits only if ending idle VM processes that
+    /// are already saved frees enough for it and every wake waiting before
+    /// it; otherwise it is refused at once. `waiting` sums what the wakes
+    /// still waiting need. Returns whether anything must be reconciled
+    /// again.
     pub(super) fn admit_measured(
         &mut self,
         now: At,
         step: Step,
-        free: &mut u64,
+        headroom: &mut i128,
         waiting: &mut u64,
         out: &mut Vec<Action>,
     ) -> bool {
@@ -197,20 +218,24 @@ impl Host {
                 continue;
             };
             let need = slot.wake_need(percent);
-            if need <= *free {
-                *free -= need;
+            if i128::from(need) <= *headroom {
+                *headroom -= i128::from(need);
                 self.queues[index].remove(&key);
                 self.start(step, key, out);
                 continue;
             }
             *waiting += need;
-            let deficit = waiting.saturating_sub(*free);
+            let deficit = u64::try_from(i128::from(*waiting) - *headroom).unwrap_or(u64::MAX);
             match self.drop_for(now, key.sandbox, deficit) {
                 Room::Coming => {}
                 Room::Made => changed = true,
                 Room::None => {
                     *waiting -= need;
-                    self.refuse(key, step, need, *free, out);
+                    // On an overdrawn budget a wake needs the overdraft
+                    // freed too.
+                    let free = u64::try_from(*headroom).unwrap_or(0);
+                    let overdraft = u64::try_from(-*headroom).unwrap_or(0);
+                    self.refuse(key, step, need + overdraft, free, out);
                     changed = true;
                 }
             }
@@ -248,7 +273,8 @@ impl Host {
             }
             let fits = capacity.is_none_or(|capacity| {
                 let (dropping, droppable) = self.instant_room(now, *id);
-                wanted + need <= capacity.free() + dropping + droppable
+                i128::from(wanted + need)
+                    <= capacity.headroom() + i128::from(dropping) + i128::from(droppable)
             });
             if fits {
                 wanted += need;
@@ -335,7 +361,9 @@ impl Host {
 
     /// Bytes of the budget that VM processes other than `waiter`'s already
     /// ending will free, and that ending every other idle one already saved
-    /// would free besides. Both take milliseconds and no I/O.
+    /// would free besides. Both take milliseconds and no I/O; a sandbox
+    /// backing off after a failed step takes no step until its backoff
+    /// ends, so it counts for neither.
     fn instant_room(&self, now: At, waiter: SandboxId) -> (u64, u64) {
         let percent = self.compressed_percent();
         let grace = self.busy_grace();
@@ -347,7 +375,10 @@ impl Host {
             let ending = slot
                 .in_flight
                 .is_some_and(|flight| flight.step == Step::Drop)
-                || (slot.floor >= Level::Saved && slot.in_flight.is_none() && slot.reclaimable());
+                || (slot.floor >= Level::Saved
+                    && slot.in_flight.is_none()
+                    && slot.reclaimable()
+                    && !slot.backing_off(now));
             if ending {
                 dropping += slot.occupies(percent);
             } else if droppable_now(slot, now, grace) {
@@ -432,15 +463,22 @@ impl Host {
                     .filter(|(_, slot)| pushable(slot, now, grace))
                     .filter_map(|(id, slot)| {
                         let reached = slot.state.level.max(slot.floor);
-                        let target = slot.policy().relief_target(reached)?;
-                        let resident = slot.relief_between(reached, target, percent);
-                        let relief = match measure {
-                            Measure::Resident if slot.resident_bytes() == 0 => 0,
-                            Measure::Resident => resident,
-                            Measure::Occupancy => reached_bytes(slot, reached, percent)
-                                .saturating_sub(slot.occupies_at(target, percent)),
-                        };
-                        (relief > 0).then_some((slot.last_activity, *id, target, relief, resident))
+                        // The first level deeper that frees anything: one
+                        // compressing nothing goes straight to the next.
+                        let mut target = slot.policy().relief_target(reached)?;
+                        loop {
+                            let resident = slot.relief_between(reached, target, percent);
+                            let relief = match measure {
+                                Measure::Resident if slot.resident_bytes() == 0 => 0,
+                                Measure::Resident => resident,
+                                Measure::Occupancy => reached_bytes(slot, reached, percent)
+                                    .saturating_sub(slot.occupies_at(target, percent)),
+                            };
+                            if relief > 0 {
+                                break Some((slot.last_activity, *id, target, relief, resident));
+                            }
+                            target = slot.policy().relief_target(target)?;
+                        }
                     }),
             );
             if candidates.is_empty() {
@@ -477,9 +515,13 @@ enum Room {
 }
 
 /// Whether ending `slot`'s VM process now frees memory instantly, without
-/// losing anything, keeping anyone waiting or ending a busy sandbox.
+/// losing anything, keeping anyone waiting or ending a busy sandbox, and
+/// without waiting for a backoff to end.
 fn droppable_now(slot: &Sandbox, now: At, grace: Duration) -> bool {
-    slot.in_flight.is_none() && slot.reclaimable() && pushable(slot, now, grace)
+    slot.in_flight.is_none()
+        && slot.reclaimable()
+        && !slot.backing_off(now)
+        && pushable(slot, now, grace)
 }
 
 /// Whether `slot` may be pushed deeper to free memory at `now`: nothing

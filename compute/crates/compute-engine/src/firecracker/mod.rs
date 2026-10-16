@@ -364,8 +364,13 @@ impl Firecracker {
             ));
         }
         // The host's out-of-memory killer ends anything else first.
-        process::protect_from_oom(pid)
+        process
+            .protect_from_oom()
             .map_err(|error| format!("protecting VMM {} from OOM: {error}", pid.as_raw_pid()))?;
+        // Its guarantee counts for its parent group too.
+        self.cgroup_of(spec)
+            .protect_parent()
+            .map_err(|error| format!("protecting the VMs' group: {error}"))?;
         let api = Api::new(spec.api_socket());
         Ok(FirecrackerVm {
             name: spec.name.clone(),
@@ -971,9 +976,12 @@ impl Engine for Firecracker {
     }
 
     fn resident_bytes(&self, vm: &FirecrackerVm) -> Result<u64, EngineError> {
-        vm.cgroup
-            .memory_current()
-            .map_err(|error| EngineError::io("resident_bytes", error))
+        // With huge pages, what counts is what the VM takes from the pool.
+        match self.memory.pages {
+            PageSize::Base => vm.cgroup.memory_current(),
+            PageSize::Huge => vm.cgroup.huge_page_bytes(),
+        }
+        .map_err(|error| EngineError::io("resident_bytes", error))
     }
 
     fn cpu_time(&self, vm: &FirecrackerVm) -> Result<Duration, EngineError> {

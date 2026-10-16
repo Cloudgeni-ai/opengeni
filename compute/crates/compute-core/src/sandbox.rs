@@ -316,6 +316,12 @@ impl Sandbox {
             && !self.is_broken()
     }
 
+    /// Whether a failed step keeps it from starting any step before a
+    /// backoff ends.
+    pub fn backing_off(&self, now: At) -> bool {
+        self.retry.is_some_and(|retry| retry.not_before > now)
+    }
+
     /// The next step to start now, if any.
     ///
     /// A needed sandbox moves straight up to [`Level::Running`]. An unneeded
@@ -325,7 +331,7 @@ impl Sandbox {
         if self.is_broken() || self.in_flight.is_some() {
             return None;
         }
-        if self.retry.is_some_and(|retry| retry.not_before > now) {
+        if self.backing_off(now) {
             return None;
         }
         // Pausing and saving it for host memory goes on whoever wants it.

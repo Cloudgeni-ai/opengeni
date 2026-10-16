@@ -4,12 +4,13 @@
 //! host keeps room ahead of wakes in the background. Hand-written
 //! scenarios, then a randomized simulation of the accounting.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use compute_core::{
-    Action, Admission, At, Capacity, Durability, HoldId, Host, HostPolicy, Input, Level, Notice,
-    OpId, Outcome, Priority, SandboxId, Size, SleepPolicy, SleepRules, State, Step, StepLimits,
+    Action, Admission, At, Capacity, Durability, Failure, HoldId, Host, HostPolicy, Input, Level,
+    MemoryPolicy, Notice, OpId, Outcome, Priority, SandboxId, Size, SleepPolicy, SleepRules, State,
+    Step, StepLimits,
 };
 
 const GIB: u64 = 1 << 30;
@@ -465,6 +466,134 @@ fn a_full_host_decides_in_microseconds() {
 
 // --- Randomized simulation -------------------------------------------------
 
+#[test]
+fn a_removed_vm_counts_until_its_process_has_ended() {
+    let mut rig = Rig::new(GIB);
+    rig.add(1, State::RUNNING, Size::whole(GIB));
+    rig.add(2, saved(), Size::whole(GIB));
+    rig.hold(1);
+    let actions = rig.hold(2);
+    assert_eq!(host_full(&actions, 2), Some((GIB, 0)));
+    // Removing the running one does not free its memory yet: the host
+    // agent still has to end its VM.
+    let actions = rig.send(Input::Remove {
+        sandbox: SandboxId(1),
+    });
+    assert!(actions.contains(&Action::Destroy {
+        sandbox: SandboxId(1)
+    }));
+    assert_eq!(started(&actions), []);
+    assert_eq!(rig.capacity().occupied, GIB);
+    let actions = rig.send(Input::Unmanaged {
+        sandbox: SandboxId(1),
+        bytes: 0,
+    });
+    assert!(matches!(started(&actions)[..], [(2, Step::Restore, _)]));
+}
+
+#[test]
+fn a_vm_found_but_not_managed_counts_against_the_budget() {
+    let mut rig = Rig::new(2 * GIB);
+    rig.add(1, saved(), Size::whole(GIB));
+    rig.send(Input::Unmanaged {
+        sandbox: SandboxId(9),
+        bytes: 1536 * MIB,
+    });
+    let actions = rig.touch(1);
+    assert_eq!(host_full(&actions, 1), Some((GIB, 512 * MIB)));
+}
+
+#[test]
+fn an_overdrawn_budget_admits_nothing_more() {
+    // As after a restart with a smaller budget: a running and a paused VM
+    // in the room of one.
+    let mut rig = Rig::new(GIB);
+    rig.add(1, State::RUNNING, Size::whole(GIB));
+    rig.add(
+        2,
+        State::new(Level::Paused, Durability::Volatile, false),
+        Size::whole(GIB),
+    );
+    rig.hold(1);
+    rig.resident(2, GIB);
+    // Resuming takes nothing more, but the budget is already overdrawn.
+    let actions = rig.touch(2);
+    assert_eq!(started(&actions), []);
+    assert_eq!(host_full(&actions, 2), Some((GIB, 0)));
+    assert_eq!(rig.capacity().reserved, GIB);
+}
+
+#[test]
+fn a_remote_wake_is_admitted_before_it_downloads() {
+    let remote = State::new(Level::Remote, Durability::Remote, true);
+    let mut rig = Rig::new(GIB);
+    rig.add(1, State::RUNNING, Size::whole(GIB));
+    rig.add(2, remote, Size::whole(GIB));
+    rig.hold(1);
+    let actions = rig.touch(2);
+    assert_eq!(started(&actions), [], "nothing is downloaded");
+    assert_eq!(host_full(&actions, 2), Some((GIB, 0)));
+    // With room, the download holds it until the restore.
+    let mut rig = Rig::new(2 * GIB);
+    rig.add(2, remote, Size::whole(GIB));
+    let actions = rig.touch(2);
+    assert!(matches!(started(&actions)[..], [(2, Step::Fetch, _)]));
+    assert_eq!(rig.capacity().reserved, GIB);
+}
+
+#[test]
+fn a_vm_backing_off_is_not_instant_relief() {
+    let mut rig = Rig::new(GIB);
+    rig.add(1, paused_saved(), Size::whole(GIB));
+    rig.add(2, saved(), Size::whole(GIB));
+    rig.resident(1, GIB);
+    rig.at(5);
+    let actions = rig.touch(2);
+    let [(1, Step::Drop, op)] = started(&actions)[..] else {
+        panic!("the idle saved VM does not end: {actions:?}");
+    };
+    // Ending it fails; it backs off, and the wake does not wait for that.
+    let actions = rig.send(Input::Finished {
+        sandbox: SandboxId(1),
+        op,
+        outcome: Outcome::Failed(Failure::Transient),
+    });
+    assert_eq!(host_full(&actions, 2), Some((GIB, 0)));
+    assert_eq!(started(&actions), []);
+}
+
+#[test]
+fn compressing_that_frees_nothing_goes_deeper_for_the_buffer() {
+    let policy = HostPolicy {
+        memory: Some(MemoryPolicy {
+            low_watermark: 0,
+            high_watermark: 0,
+            compressed_percent: 100,
+            balloon_grace: Duration::ZERO,
+        }),
+        ..policy(GIB, 256 * MIB)
+    };
+    let mut rig = Rig {
+        host: Host::new(policy).unwrap(),
+        now: At::ZERO,
+    };
+    rig.send(Input::Add {
+        sandbox: SandboxId(1),
+        state: paused_saved(),
+        policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
+        size: Size::whole(GIB),
+    });
+    rig.resident(1, 1000 * MIB);
+    rig.at(5);
+    let actions = rig.send(Input::Tick);
+    assert!(
+        matches!(started(&actions)[..], [(1, Step::Drop, _)]),
+        "{actions:?}"
+    );
+}
+
+// --- Randomized simulation -------------------------------------------------
+
 /// `SplitMix64`.
 struct Rng(u64);
 
@@ -492,6 +621,10 @@ struct Sim {
     refusals: u64,
     starts: u64,
     limit: u32,
+    /// Removed sandboxes whose VM the host agent has not ended yet.
+    ending: Vec<SandboxId>,
+    /// Sandboxes whose last step failed: they back off before any step.
+    failed: BTreeSet<SandboxId>,
 }
 
 impl Sim {
@@ -513,6 +646,8 @@ impl Sim {
             budget,
             sizes: BTreeMap::new(),
             running: BTreeMap::new(),
+            ending: Vec::new(),
+            failed: BTreeSet::new(),
             refusals: 0,
             starts: 0,
             limit,
@@ -567,13 +702,14 @@ impl Sim {
                 || view.state.level == Level::Running
                 || view.step.is_some()
                 || self.host.waits_for_room(*id)
+                || self.failed.contains(id)
             {
                 continue;
             }
-            let step = if view.state.level.has_process() {
-                Step::Resume
-            } else {
-                Step::Restore
+            let step = match view.state.level {
+                Level::Paused | Level::Compressed => Step::Resume,
+                Level::Remote => Step::Fetch,
+                _ => Step::Restore,
             };
             let limited = self.host.in_flight(step) >= self.limit;
             assert!(limited || ending, "{id:?} waits for slow relief: {view:?}");
@@ -592,10 +728,22 @@ impl Sim {
                 let request = limit / (1 + self.rng.below(4));
                 let size = Size { request, limit };
                 self.sizes.insert(id, size);
+                // Saved, paused with a saved copy, or only in object
+                // storage; compressing under pressure or not.
+                let state = match self.rng.below(3) {
+                    0 => saved(),
+                    1 => paused_saved(),
+                    _ => State::new(Level::Remote, Durability::Remote, true),
+                };
+                let policy = if self.rng.below(2) == 0 {
+                    no_compress()
+                } else {
+                    SleepPolicy::new(SleepRules::RECOMMENDED).unwrap()
+                };
                 Input::Add {
                     sandbox: id,
-                    state: saved(),
-                    policy: no_compress(),
+                    state,
+                    policy,
                     size,
                 }
             }
@@ -623,7 +771,13 @@ impl Sim {
             }
             75..78 => {
                 self.sizes.remove(&id);
+                self.ending.push(id);
                 Input::Remove { sandbox: id }
+            }
+            78..81 if !self.ending.is_empty() => {
+                let index = self.rng.below(self.ending.len() as u64);
+                let sandbox = self.ending.swap_remove(usize::try_from(index).unwrap());
+                Input::Unmanaged { sandbox, bytes: 0 }
             }
             _ => {
                 let ops: Vec<OpId> = self.running.keys().copied().collect();
@@ -631,11 +785,20 @@ impl Sim {
                     Input::Tick
                 } else {
                     let op = ops[usize::try_from(self.rng.below(ops.len() as u64)).unwrap()];
-                    let (sandbox, _) = self.running.remove(&op).unwrap();
+                    let (sandbox, step) = self.running.remove(&op).unwrap();
+                    // Steps putting a sandbox to sleep sometimes fail and
+                    // back off.
+                    let outcome = if !step.wakes() && self.rng.below(10) == 0 {
+                        self.failed.insert(sandbox);
+                        Outcome::Failed(Failure::Transient)
+                    } else {
+                        self.failed.remove(&sandbox);
+                        Outcome::Done
+                    };
                     Input::Finished {
                         sandbox,
                         op,
-                        outcome: Outcome::Done,
+                        outcome,
                     }
                 }
             }

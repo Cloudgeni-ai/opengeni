@@ -231,14 +231,22 @@ RestartSec=1
 # The agent and its helpers only: room for the 1 GiB chunk cache.
 MemoryMax=2G
 MemoryMin=256M
+# Ahead of other services when processors are contended.
+CPUWeight=1000
 ```
 
 VMs live in their own cgroups under `--cgroup`, outside the unit's, so its
 `MemoryMax` never counts them and stopping the unit never ends them; the
-agent refuses to start if `--cgroup` lies inside its own cgroup. The agent
-lowers its `oom_score_adj` to -999 at start, below its VMs' -900, so the
-host's out-of-memory killer takes VMs before the agent that would bring
-them back, yet the agent stays killable inside its own unit.
+agent refuses to start if `--cgroup` lies inside its own cgroup. Make
+`--cgroup` a top-level group: processors are shared between siblings, so
+all VMs together then compete with `system.slice` as one group however
+busy they are, and a VM's memory protection reaches only as far as its
+ancestors' (the agent keeps the parent's `memory.low` at the sum of its
+VMs'). The agent lowers its `oom_score_adj` to -999 at start, below its
+VMs' -900, so the host's out-of-memory killer takes VMs before the agent
+that would bring them back, yet the agent stays killable inside its own
+unit. A host that compresses paused VMs needs zswap on; the agent refuses
+to start otherwise.
 
 ## Testing
 

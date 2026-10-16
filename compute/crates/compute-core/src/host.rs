@@ -32,10 +32,22 @@ pub enum Input {
         /// What it may take of host memory.
         size: Size,
     },
-    /// Stop managing a sandbox and delete it.
+    /// Stop managing a sandbox and delete it. What its VM occupied stays
+    /// counted against the admission budget, as with [`Input::Unmanaged`],
+    /// until the host agent reports that VM ended.
     Remove {
         /// The sandbox.
         sandbox: SandboxId,
+    },
+    /// A VM this core does not manage holds `bytes` of host memory: the VM
+    /// of a removed sandbox not yet ended, or one the host agent found
+    /// running but could not take back. Counted against the admission
+    /// budget until reported again with 0 once it has ended.
+    Unmanaged {
+        /// The sandbox whose VM it is.
+        sandbox: SandboxId,
+        /// Bytes it holds; 0 once it has ended.
+        bytes: u64,
     },
     /// The sandbox is needed: wake it if it sleeps, and count it as activity.
     Touch {
@@ -309,6 +321,8 @@ pub struct Host {
     /// Sandboxes whose wake was refused for want of memory and that are
     /// still held awake.
     refused: BTreeSet<SandboxId>,
+    /// Bytes held by VMs not managed here; see [`Input::Unmanaged`].
+    unmanaged: HashMap<SandboxId, u64>,
 }
 
 impl Host {
@@ -328,6 +342,7 @@ impl Host {
             pending_relief: 0,
             settled_relief: 0,
             refused: BTreeSet::new(),
+            unmanaged: HashMap::new(),
         })
     }
 
@@ -447,6 +462,13 @@ impl Host {
                 }
             }
             Input::Remove { sandbox } => self.remove(sandbox, out),
+            Input::Unmanaged { sandbox, bytes } => {
+                if bytes == 0 {
+                    self.unmanaged.remove(&sandbox);
+                } else {
+                    self.unmanaged.insert(sandbox, bytes);
+                }
+            }
             Input::Touch { sandbox, priority } => {
                 self.unrefuse(sandbox);
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
@@ -657,9 +679,16 @@ impl Host {
     }
 
     fn remove(&mut self, id: SandboxId, out: &mut Vec<Action>) {
+        let percent = self.compressed_percent();
         let Some(slot) = self.sandboxes.remove(&id) else {
             return;
         };
+        // Its VM, if any, holds its memory until the host agent has ended
+        // it, after any step still running for it.
+        let held = slot.occupies(percent);
+        if held > 0 {
+            *self.unmanaged.entry(id).or_default() += held;
+        }
         if let Some(flight) = slot.in_flight {
             self.orphans.insert(flight.op, flight.step);
             if !flight.cancel_sent {
@@ -808,12 +837,12 @@ impl Host {
     /// [`crate::Admission`]. Returns whether other sandboxes must be
     /// reconciled because of it.
     fn admit(&mut self, now: At, out: &mut Vec<Action>) -> bool {
-        let mut free = self.capacity().map(|capacity| capacity.free());
+        let mut headroom = self.capacity().map(|capacity| capacity.headroom());
         let mut changed = false;
         let mut waiting = 0;
         for step in Step::ALL {
-            if let Some(free) = free.as_mut().filter(|_| admission::needs_memory(step)) {
-                changed |= self.admit_measured(now, step, free, &mut waiting, out);
+            if let Some(headroom) = headroom.as_mut().filter(|_| admission::needs_memory(step)) {
+                changed |= self.admit_measured(now, step, headroom, &mut waiting, out);
                 continue;
             }
             let index = step.index();

@@ -9,7 +9,7 @@ use compute_engine::{Engine, EngineError, ErrorKind, Found, VmSpec};
 use futures::StreamExt;
 
 use crate::layout::{Images, Paths, vm_spec};
-use crate::protocol::Id;
+use crate::protocol::{Id, SandboxConfig};
 use crate::state::{Change, Disk, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory, Reconnected};
 use crate::store::Store;
@@ -90,6 +90,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             };
             if record.removing {
+                // Its VM may still run until the removal ends it.
+                self.unmanaged(id, &record.config);
                 self.remove_recorded(&record, None, Vec::new());
                 continue;
             }
@@ -108,6 +110,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let vm = found
                 .remove(&id.0)
                 .unwrap_or_else(|| Err(HostError::Io("no result from looking for the VM".into())));
+            // A VM found, or not known to be gone, keeps its memory even if
+            // the sandbox cannot be taken back.
+            let live = !matches!(vm, Ok(None));
+            let config = live.then(|| record.config.clone());
             let result = match broken_networks.get(&id.0) {
                 // A VM found running is left as it is: its guest's programs
                 // matter more than its network, and its memory keeps coming.
@@ -123,6 +129,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Err(error) => {
                     tracing::error!(%id, %error, "could not recover sandbox; blocking it and leaving it on disk");
                     self.block(id, format!("not recovered: {error}"));
+                    if let Some(config) = config {
+                        self.unmanaged(id, &config);
+                    }
                 }
             }
         }
@@ -155,6 +164,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// removed.
     pub(super) fn block(&mut self, id: Id, problem: String) {
         self.blocked.insert(id.0, problem);
+    }
+
+    /// Counts the VM of sandbox `id`, configured as `config`, which may
+    /// still run, against the admission budget at its full size while this
+    /// agent does not manage it: until a removal ends it.
+    fn unmanaged(&mut self, id: Id, config: &SandboxConfig) {
+        let bytes = self.size(config).limit;
+        self.input(Input::Unmanaged {
+            sandbox: id.0,
+            bytes,
+        });
     }
 
     /// Looks for every recorded sandbox's VM, taking back those still

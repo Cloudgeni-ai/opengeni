@@ -438,6 +438,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     .with_memory_profile(args.memory_profile)
     .with_context(|| format!("memory profile {}", args.memory_profile))?;
     check_huge_pages(args.memory_profile)?;
+    check_zswap(args.memory_profile.compress && !args.no_compress)?;
     raise_open_file_limit();
     protect_from_oom()?;
     let mut policy = HostPolicy::default();
@@ -454,9 +455,10 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     policy.admission = Some(Admission {
         budget,
         buffer: args.memory_buffer_mib.map_or(budget / 16, |mib| mib << 20),
-        // Work seen in the last two samples keeps a sandbox from being
-        // pushed deeper to make room.
-        busy_grace: 2 * sample_every,
+        // Work of its own is reported once per busy window, at the first
+        // sample after the window ends: work seen within a window and two
+        // samples keeps a sandbox from being pushed deeper to make room.
+        busy_grace: args.busy_window + 2 * sample_every,
     });
     if let (Some(low), Some(high)) = (args.memory_low_mib, args.memory_high_mib) {
         policy.memory = Some(MemoryPolicy {
@@ -613,5 +615,17 @@ fn check_huge_pages(profile: MemoryProfile) -> anyhow::Result<()> {
         free_mib = field("HugePages_Free:") * 2,
         "huge-page pool"
     );
+    Ok(())
+}
+
+/// Compressing paused VMs needs zswap: without it the memory pushed out
+/// would go to the swap device, and `memory.zswap.writeback` would mean
+/// nothing.
+fn check_zswap(compress: bool) -> anyhow::Result<()> {
+    if compress
+        && !compute_engine::cgroup::zswap_enabled().context("reading whether zswap is on")?
+    {
+        bail!("compressing paused VMs needs zswap; turn it on or pass --no-compress");
+    }
     Ok(())
 }

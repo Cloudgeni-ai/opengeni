@@ -9,6 +9,7 @@
 
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::Arc;
@@ -25,12 +26,17 @@ use tokio::sync::watch;
 pub(crate) const OOM_SCORE_ADJ: i32 = -900;
 
 /// Makes process `pid` one of the out-of-memory killer's last choices; see
-/// [`OOM_SCORE_ADJ`]. Lowering it needs `CAP_SYS_RESOURCE`.
+/// [`OOM_SCORE_ADJ`]. Lowering it needs `CAP_SYS_RESOURCE`. `pid` must be
+/// the caller's own child, not yet reaped, so the number cannot name
+/// another process; for any other use [`Process::protect_from_oom`].
 pub(crate) fn protect_from_oom(pid: Pid) -> io::Result<()> {
-    fs::write(
-        format!("/proc/{}/oom_score_adj", pid.as_raw_pid()),
-        OOM_SCORE_ADJ.to_string(),
-    )
+    open_oom_score_adj(pid)?.write_all(OOM_SCORE_ADJ.to_string().as_bytes())
+}
+
+fn open_oom_score_adj(pid: Pid) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(format!("/proc/{}/oom_score_adj", pid.as_raw_pid()))
 }
 
 /// Whether a VMM process is still alive.
@@ -82,6 +88,29 @@ impl Process {
 
     pub fn is_running(&self) -> bool {
         *self.exit.borrow() == Exit::Running
+    }
+
+    /// Makes this process one of the out-of-memory killer's last choices;
+    /// see [`OOM_SCORE_ADJ`]. The file is opened by number, then written
+    /// only if the pinned process has not exited since: a procfs file
+    /// names the process that had the number when it was opened, and the
+    /// number cannot pass to another before the pinned process exits.
+    pub fn protect_from_oom(&self) -> io::Result<()> {
+        let mut file = open_oom_score_adj(self.pid)?;
+        let mut ready = [rustix::event::PollFd::new(
+            self.pidfd.get_ref(),
+            rustix::event::PollFlags::IN,
+        )];
+        let zero = rustix::event::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if rustix::event::poll(&mut ready, Some(&zero))? > 0 {
+            return Err(io::Error::from_raw_os_error(
+                rustix::io::Errno::SRCH.raw_os_error(),
+            ));
+        }
+        file.write_all(OOM_SCORE_ADJ.to_string().as_bytes())
     }
 
     /// Kills the process. Succeeds if it has already exited.

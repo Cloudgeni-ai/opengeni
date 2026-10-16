@@ -10,7 +10,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
-rustix = { version = "1", features = ["fs", "process", "std"] }
+rustix = { version = "1", features = ["event", "fs", "process", "std"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "net", "process", "rt", "sync", "time"] }
