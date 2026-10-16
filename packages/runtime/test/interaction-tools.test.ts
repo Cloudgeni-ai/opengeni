@@ -709,6 +709,68 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test.each([true, false])(
+    "browser_open create uses the launch view instead of two more reads (view=%s)",
+    async (withView) => {
+      const session = discoveredBrowserSession(browserSessionId, sessionId);
+      session.lifecycle = "active";
+      session.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const opened = { ...browserTarget(), url: "https://requested.example.test/" };
+      const other = { ...browserTarget(), id: "tab-2", selected: false };
+      let reads = 0;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+          createBrowserSession: async () =>
+            ({
+              session,
+              ...(withView
+                ? {
+                    initialView: {
+                      targets: [opened, other],
+                      observation: browserObservation(opened),
+                    },
+                  }
+                : {}),
+            }) as never,
+          listBrowserTargets: async () => {
+            reads++;
+            return {
+              browserSessionId,
+              controllerGeneration: "controller-1",
+              targets: [opened, other],
+            };
+          },
+          observeBrowserTarget: async () => {
+            reads++;
+            return browserObservation(opened);
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { initialUrl: opened.url },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      // Both paths give the model the same result; only the reads differ.
+      expect(reads).toBe(withView ? 0 : 2);
+      const content = result.structuredContent as Record<string, unknown>;
+      expect(content.targets).toEqual([agentTarget(opened)]);
+      expect(content.otherTabCount).toBe(1);
+      expect(content.observation).toMatchObject({
+        target: agentTarget(opened),
+        agentView: { sourceKind: "snapshot" },
+      });
+    },
+  );
+
   test.each(["matching", "missing", "unknown", "session", "generation", "target"] as const)(
     "browser_open reuse preserves no-op, refusal and unknown boundaries (%s)",
     async (scenario) => {

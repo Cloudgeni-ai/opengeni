@@ -40,6 +40,7 @@ import {
   BrowserSessionLifecycleRequest,
   BrowserSessionListResponse,
   BrowserSessionMutationResponse,
+  type BrowserTarget,
   BrowserTargetListResponse,
   BrowserTargetState,
   CreateBrowserSessionRequest,
@@ -357,6 +358,11 @@ export function registerBrowserSessionRoutes(
     const origin = requestOrigin(context, deps.settings);
     const authority = browserAuthorityRoot(deps);
     let prepared: Awaited<ReturnType<typeof prepareBrowserSessionCreate>> | null = null;
+    // What the controller showed when it launched this browser, returned so
+    // the caller can present the opened tab without two more reads.
+    const launch: { result: Awaited<ReturnType<BrowserControlClient["createSession"]>> | null } = {
+      result: null,
+    };
 
     try {
       assertEphemeralBrowserCreateEnabled(
@@ -536,7 +542,7 @@ export function registerBrowserSessionRoutes(
                         linkedComputer !== null,
                       );
                       stages.mark("display");
-                      return await client.createSession({
+                      launch.result = await client.createSession({
                         browserSessionId: preparedSession.id,
                         controllerGeneration,
                         tokenGeneration: record.tokenGeneration,
@@ -553,6 +559,7 @@ export function registerBrowserSessionRoutes(
                         ...(request.initialUrl ? { initialUrl: request.initialUrl } : {}),
                         ...(restore ? { restore } : {}),
                       });
+                      return launch.result;
                     },
                   );
                 },
@@ -614,7 +621,7 @@ export function registerBrowserSessionRoutes(
           }
         },
       );
-      const parsed = BrowserSessionMutationResponse.parse(response);
+      const parsed = BrowserSessionMutationResponse.parse(withInitialView(response, launch.result));
       observeLifecycleResult(deps.observability, startedAtMs, parsed);
       reportInteractionRouteStages(context, deps.observability, stages);
       return context.json(
@@ -4455,6 +4462,34 @@ function requireOperationGeneration(record: BrowserSessionControlRecord): string
   const generation = record.operation?.controllerGeneration;
   if (!generation) throw new BrowserSessionStateError("BrowserSession controller fence is absent");
   return generation;
+}
+
+/** Attach the controller's launch view to a create that activated exactly that
+ * launch in this request. Replays, failures and other bindings get nothing, so
+ * a caller then reads the targets and observes as before. */
+export function withInitialView<
+  T extends {
+    session: { id: string; lifecycle: string; controller: { controllerGeneration: string } | null };
+    operation: { state: string; replayed: boolean };
+  },
+>(
+  response: T,
+  launched: Awaited<ReturnType<BrowserControlClient["createSession"]>> | null,
+): T | (T & { initialView: { targets: BrowserTarget[]; observation: BrowserObservation } }) {
+  if (
+    !launched?.targets ||
+    response.operation.state !== "completed" ||
+    response.operation.replayed ||
+    response.session.lifecycle !== "active" ||
+    response.session.id !== launched.browserSessionId ||
+    response.session.controller?.controllerGeneration !== launched.controllerGeneration
+  ) {
+    return response;
+  }
+  return {
+    ...response,
+    initialView: { targets: launched.targets, observation: launched.observation },
+  };
 }
 
 async function provisionController(

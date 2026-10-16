@@ -18,12 +18,48 @@ import {
   browserScreenshotError,
   browserTabDiagnosisError,
   browserCreateInput,
+  withInitialView,
 } from "../src/routes/browser-sessions";
 
 const routeUrl = new URL("../src/routes/browser-sessions.ts", import.meta.url);
 const appUrl = new URL("../src/app.ts", import.meta.url);
 
 const FILE_ID = "33333333-3333-4333-8333-333333333333";
+
+test("a create returns the launch view only for the launch it activated in this request", () => {
+  const browserSessionId = "44444444-4444-4444-8444-444444444444";
+  const launched = {
+    browserSessionId,
+    controllerGeneration: "generation-1",
+    observation: { target: { id: "tab-1" } },
+    targets: [{ id: "tab-1" }],
+  } as unknown as Parameters<typeof withInitialView>[1];
+  const response = (
+    change: { lifecycle?: string; generation?: string; state?: string; replayed?: boolean } = {},
+  ) => ({
+    session: {
+      id: browserSessionId,
+      lifecycle: change.lifecycle ?? "active",
+      controller: { controllerGeneration: change.generation ?? "generation-1" },
+    },
+    operation: { state: change.state ?? "completed", replayed: change.replayed ?? false },
+  });
+  expect(withInitialView(response(), launched)).toEqual({
+    ...response(),
+    initialView: { targets: launched!.targets, observation: launched!.observation },
+  });
+  for (const other of [
+    { replayed: true },
+    { state: "failed" },
+    { lifecycle: "failed" },
+    { generation: "generation-2" },
+  ]) {
+    expect(withInitialView(response(other), launched)).toEqual(response(other));
+  }
+  // An older controller that did not report its tabs, or no launch at all.
+  expect(withInitialView(response(), { ...launched!, targets: undefined })).toEqual(response());
+  expect(withInitialView(response(), null)).toEqual(response());
+});
 
 test("automatic managed directory recovery preserves current authority and refused outcomes", async () => {
   const directory = await mkdtemp("/tmp/og-api-working-recovery-");
