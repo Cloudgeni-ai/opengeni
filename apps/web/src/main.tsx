@@ -2,7 +2,7 @@ import "./lib/crypto-random-uuid";
 // Must evaluate before ./App creates the router from the current URL.
 import "./lib/signup-attribution-boot";
 import { AppearanceProvider } from "./lib/appearance";
-import { markClassicScrollbars } from "@opengeni/react";
+import { markClassicScrollbars } from "@opengeni/react/scrollbars";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { App, appDestinationRoutePattern, appRoutePattern } from "./App";
