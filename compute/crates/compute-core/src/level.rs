@@ -183,6 +183,25 @@ impl State {
             Level::Remote => (self, false),
         }
     }
+
+    /// The state after the host stops trusting the sandbox's copy in object
+    /// storage while still trusting the one on local disk, because it could
+    /// put back only the record vouching for the local one. Nothing is lost:
+    /// the local copy takes over as the only one. A sandbox kept only in
+    /// object storage has no local records to lose, so it is unchanged.
+    #[must_use]
+    pub const fn without_remote_copy(self) -> Self {
+        match self.level {
+            Level::Running | Level::Remote => self,
+            Level::Paused | Level::Compressed => match self.durability {
+                Durability::Remote => Self::new(self.level, Durability::Local, true),
+                Durability::Volatile | Durability::Local => self,
+            },
+            Level::Saved | Level::Archived => {
+                Self::new(Level::Saved, Durability::Local, self.memory_saved)
+            }
+        }
+    }
 }
 
 /// One operation that changes a sandbox's [`State`].
