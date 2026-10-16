@@ -15,9 +15,11 @@ Sandboxes also get no share of processor time today.
   VM size. Bursting above the request up to the limit uses free memory and
   is best effort.
 - A host admits a create or wake only if the requests of its awake sandboxes
-  still fit within its capacity minus fixed headroom. Before refusing, it
-  makes room by pushing idle sandboxes deeper. Otherwise it answers a
-  retryable "host full" that says what it would need.
+  still fit within its capacity minus fixed headroom. The check is arithmetic
+  on numbers held in memory. The host keeps room ahead of time by putting
+  idle, already-saved sandboxes out of memory in the background, so the
+  check rarely fails; when it does, the host answers a retryable "host full"
+  at once, saying what it would need.
 - The request sets the VM cgroup's processor weight, so contention is shared
   by request. The vCPU count stays the ceiling.
 - Status reports capacity (total, reserved, free) for a scheduler and an
