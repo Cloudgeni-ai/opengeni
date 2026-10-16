@@ -12,8 +12,8 @@ Opengeni does not use this yet.
 | Piece | State |
 | --- | --- |
 | Host agent: jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite | on `feat/compute-lab` |
-| Templates and a ready pool for new sandboxes | in review |
-| Admission with requests and limits, memory guarantees for running VMs | in review |
+| Templates and a ready pool for new sandboxes | on `feat/compute-lab` |
+| Admission with requests and limits, memory guarantees for running VMs | on `feat/compute-lab` |
 | Control plane (placement, moves between hosts, autoscaling), observability, Opengeni integration | planned |
 
 Decisions and their reasons are in [docs/adr](docs/adr/README.md). Numbers
@@ -71,11 +71,11 @@ Paused in RAM while already having both copies, so ending it later is instant.
 | Level | Where memory is | Host RAM | Wake, one sandbox (observed) |
 | --- | --- | --- | --- |
 | Running | RAM | what the guest has touched | none |
-| Paused | RAM, processors stopped | the same | about 10 ms |
-| Compressed | compressed RAM (bare metal only) | about 110 MiB | about 0.15 s |
-| Saved | local disk | none | about 0.1 s while the image is in the host's file cache |
+| Paused | RAM, processors stopped | the same | about 12 ms |
+| Compressed | compressed RAM (bare metal only) | about 110 MiB | about 0.06 s |
+| Saved | local disk | none | 0.1 to 0.17 s while the image is in the host's file cache |
 | Archived | local disk and object storage | none | as Saved |
-| Remote | object storage only | none | about 1 s from same-region storage |
+| Remote | object storage only | none | about 1 to 1.5 s from same-region storage |
 
 A sandbox is **in use** while any of these holds: a caller holds it (an agent
 turn), its VM uses a quarter of a processor or moves 4 KiB/s over five
@@ -348,6 +348,8 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
   safety counters and a canary per host, exported as OpenTelemetry
   ([ADR 16](docs/adr/0016-observability.md)).
 - **The Opengeni integration**.
+- **Comparisons**: an E2B-compatible API and an activations-per-second
+  benchmark, to measure this fabric directly against other sandbox systems.
 
 ## Credits
 
