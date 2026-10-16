@@ -246,6 +246,9 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   ownedProcessIdentity?(): Promise<OwnedManagedBrowserProcess | null>;
   /** Release a failed reattach transport without closing its owned browser. */
   detach?(): Promise<void>;
+  /** Explicit end only (never shutdown or reattach): close tabs this session
+   * opened in a browser it does not own and left blank. */
+  closeUnusedOwnedTabs?(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -1015,6 +1018,16 @@ export class BrowserSupervisor {
         // Settle already-dispatched commands before their durable journals close.
         // lifecycle=ending fences queued/new dispatches without replaying input.
         await runtime.controller.waitForIdle();
+      }
+      if (
+        runtime.driver.closeUnusedOwnedTabs &&
+        !suspendForShutdown &&
+        !driverAlreadyClosed &&
+        !runtime.driver.isTerminal?.()
+      ) {
+        // Ending a session in the person's own Chrome must not leave behind the
+        // empty tab it opened. Best effort: the end itself must still succeed.
+        await runtime.driver.closeUnusedOwnedTabs?.().catch(() => undefined);
       }
       await this.disposeRuntime(
         runtime,

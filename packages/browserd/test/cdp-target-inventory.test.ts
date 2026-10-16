@@ -82,7 +82,39 @@ test("closing a tab returns inventory without it even while the browser still li
   }
 });
 
-function inventoryFixture(failInventory = false, closedTabListings = 0) {
+test("ending a session in the person's browser closes only the blank tabs it opened", async () => {
+  const fixture = inventoryFixture(false, 0, { closeUnusedOwnedTabsOnEnd: true });
+  try {
+    // A blank tab the session opened, and a tab it opened and used.
+    await fixture.driver.openTargetWithInventory("about:blank");
+    await fixture.driver.openTarget("https://navigation.example.test/used");
+    await fixture.driver.closeUnusedOwnedTabs();
+    const closed = fixture.calls
+      .filter((call) => call.method === "Target.closeTarget")
+      .map((call) => call.params.targetId);
+    // The person's own tab (prior) and the used tab stay open.
+    expect(closed).toEqual(["opened-1"]);
+  } finally {
+    await fixture.driver.detach();
+  }
+});
+
+test("a managed browser's end never closes tabs one by one", async () => {
+  const fixture = inventoryFixture();
+  try {
+    await fixture.driver.openTargetWithInventory("about:blank");
+    await fixture.driver.closeUnusedOwnedTabs();
+    expect(fixture.calls.some((call) => call.method === "Target.closeTarget")).toBe(false);
+  } finally {
+    await fixture.driver.detach();
+  }
+});
+
+function inventoryFixture(
+  failInventory = false,
+  closedTabListings = 0,
+  driverOptions: { closeUnusedOwnedTabsOnEnd?: boolean } = {},
+) {
   const browserSessionId = randomUUID();
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const pages = new Map([
@@ -187,6 +219,7 @@ function inventoryFixture(failInventory = false, closedTabListings = 0) {
     browserSessionId,
     controllerGeneration: "synthetic-controller",
     runner: { run: async <T>() => ({}) as T },
+    ...driverOptions,
   });
   Object.assign(driver, { connection, browserContextId: "owned-context" });
   return { driver, calls, browserSessionId };
