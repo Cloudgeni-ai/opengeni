@@ -19,7 +19,9 @@ import {
   createDb,
   createSession,
   initializeSessionStartAtomically,
+  listEndedEpochSandboxSetupUncertainties,
   readLease,
+  reconcileCompletedSandboxSetup,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -112,9 +114,16 @@ function terminateSpy() {
  * quiescence receipt, the turn waits on the setup marker, and the box has no
  * holder left (draining). */
 async function unknownSetupOnLiveBox(
-  options: { closedMinutesAgo: number; marker?: boolean; deadlineMinutes?: number } = {
-    closedMinutesAgo: 30,
-  },
+  options: {
+    closedMinutesAgo: number;
+    marker?: boolean | "other_attempt";
+    deadlineMinutes?: number;
+    /** Modal directory snapshot (point-in-time, the production default) or a
+     * file-by-file tar capture. */
+    persistence?: "snapshot_directory" | "tar";
+    /** Another open request of the same attempt besides its setup. */
+    alsoExec?: boolean;
+  } = { closedMinutesAgo: 30 },
 ) {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('abandoned-setup') returning id`;
@@ -165,7 +174,15 @@ async function unknownSetupOnLiveBox(
       resume_state, expires_at, provider_created_at, provider_deadline_at)
     values (${ids.accountId}, ${ids.workspaceId}, ${attempt.sandboxGroupId}, 'warm', 1, 1, 0,
       ${instanceId}, 'modal', ${EPOCH}, 'modal',
-      ${JSON.stringify({ backendId: "modal", sessionState: { providerState: { sandboxId: instanceId } } })}::text::jsonb,
+      ${JSON.stringify({
+        backendId: "modal",
+        sessionState: {
+          providerState: {
+            sandboxId: instanceId,
+            workspacePersistence: options.persistence ?? "snapshot_directory",
+          },
+        },
+      })}::text::jsonb,
       now() + interval '10 minutes', now() - interval '1 hour',
       now() + (${options.deadlineMinutes ?? 23 * 60} * interval '1 minute'))
     returning id`;
@@ -173,16 +190,19 @@ async function unknownSetupOnLiveBox(
     (account_id, lease_id, workspace_id, kind, holder_id, subject_id, last_heartbeat_at)
     values (${ids.accountId}, ${lease!.id}, ${ids.workspaceId}, 'turn', ${attempt.holderId},
       ${attempt.sessionId}, now())`;
-  const setup = await advanceWorkspaceGeneration(db, {
-    ...ids,
-    ...attempt,
-    expectedEpoch: EPOCH,
-    expectedInstanceId: instanceId,
-    operation: "eagerOwnedSandboxSetup",
-    routeKind: "home",
-    routeTargetId: null,
-    routeEpoch: 0,
-  });
+  const admit = (operation: string) =>
+    advanceWorkspaceGeneration(db, {
+      ...ids,
+      ...attempt,
+      expectedEpoch: EPOCH,
+      expectedInstanceId: instanceId,
+      operation,
+      routeKind: "home",
+      routeTargetId: null,
+      routeEpoch: 0,
+    });
+  const setup = await admit("eagerOwnedSandboxSetup");
+  if (options.alsoExec) await admit("execCommand");
   await admin`update session_turn_attempts set state = 'closed',
     outcome = 'interrupted_recoverable',
     closed_at = now() - (${options.closedMinutesAgo} * interval '1 minute'), quiesced_at = null
@@ -193,7 +213,7 @@ async function unknownSetupOnLiveBox(
         sandboxSetupOutcomeUnknown: {
           version: 1,
           turnId: attempt.turnId,
-          attemptId,
+          attemptId: options.marker === "other_attempt" ? crypto.randomUUID() : attemptId,
           reason: "sandbox_command_start_outcome_unknown",
         },
       })}
@@ -295,6 +315,74 @@ describe("an unknown-outcome setup request on a draining box", () => {
     expect(turn!.status).toBe("recovering");
     expect(turn!.marker).not.toBeNull();
   }, 60_000);
+
+  test("the saved workspace lets the waiting turn resume through ended-epoch recovery", async () => {
+    const fixture = await unknownSetupOnLiveBox({ closedMinutesAgo: 30 });
+    await expectSavedAndStopped(fixture, await drain(fixture));
+    // The cold commit wakes the owner workflow, whose quiescence check now
+    // finds no pending writer; stand in for that receipt here.
+    await admin`update session_turn_attempts set quiesced_at = now()
+      where id = ${fixture.attempt.attemptId}`;
+    const listed = (await listEndedEpochSandboxSetupUncertainties(db, { limit: 500 })).filter(
+      (row) => row.workspaceId === fixture.workspaceId,
+    );
+    expect(listed).toHaveLength(1);
+    expect(listed[0]!.box).toEqual({
+      leaseId: fixture.leaseId,
+      leaseEpoch: EPOCH,
+      providerBackend: "modal",
+      providerInstanceId: fixture.instanceId,
+    });
+    const reconciled = await reconcileCompletedSandboxSetup(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.attempt.sessionId,
+      turnId: fixture.attempt.turnId,
+      attemptId: fixture.attempt.attemptId,
+      terminatedBox: listed[0]!.box,
+    });
+    expect(reconciled.reconciled).toBe(true);
+    const [turn] = await admin<{ marker: unknown }[]>`
+      select metadata -> 'sandboxSetupOutcomeUnknown' as marker from session_turns
+      where id = ${fixture.attempt.turnId}`;
+    expect(turn!.marker).toBeNull();
+    // The resumed turn restores the saved workspace instead of failing as
+    // unrecoverable.
+    const lease = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+    expect(lease?.recovery.archive.status).toBe("available");
+  }, 60_000);
+
+  test("anything beyond the abandoned setup request still blocks", async () => {
+    const cases = [
+      // Another open request of the same attempt (not setup).
+      { closedMinutesAgo: 30, alsoExec: true },
+      // The marker names a different attempt.
+      { closedMinutesAgo: 30, marker: "other_attempt" as const },
+      // A tar capture could read a box that is still writing.
+      { closedMinutesAgo: 30, persistence: "tar" as const },
+    ];
+    for (const options of cases) {
+      const fixture = await unknownSetupOnLiveBox(options);
+      const drained = await drain(fixture);
+      expect(drained.persisted).toEqual([]);
+      expect(drained.result.status).toBe("skipped");
+      expect((await setupRow(fixture)).settled_at).toBeNull();
+    }
+    // An active turn attempt or a newer generation is not abandoned either.
+    for (const change of ["active_attempt", "generation"] as const) {
+      const fixture = await unknownSetupOnLiveBox({ closedMinutesAgo: 30 });
+      if (change === "active_attempt") {
+        await admin`update session_turns set active_attempt_id = ${fixture.attempt.attemptId}
+          where id = ${fixture.attempt.turnId}`;
+      } else {
+        await admin`update session_turns set execution_generation = execution_generation + 1
+          where id = ${fixture.attempt.turnId}`;
+      }
+      const drained = await drain(fixture);
+      expect(drained.persisted).toEqual([]);
+      expect((await setupRow(fixture)).settled_at).toBeNull();
+    }
+  }, 120_000);
 
   test("an ordinary unsettled request of a finished turn still waits for the deadline", async () => {
     const fixture = await unknownSetupOnLiveBox({ closedMinutesAgo: 60, marker: false });

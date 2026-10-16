@@ -56367,19 +56367,24 @@ export async function claimWorkspaceArchiveCapture(
         // waits (recovering) for the box to be gone. Waiting for the deadline
         // kept a box with no holder running for a day. Once its owner attempt
         // has been closed for the abandonment window, with no retained process
-        // of that attempt, capture around exactly these requests; termination
-        // then settles them and the turn's ended-epoch recovery resumes it on
-        // the saved workspace.
+        // of that attempt, capture around exactly these setup requests;
+        // termination then settles them and the turn's ended-epoch recovery
+        // resumes it on the saved workspace. Only a point-in-time (Modal
+        // snapshot) capture may run around a request that might still be
+        // writing; a file-by-file tar read keeps waiting for the deadline.
         const abandonAfterMs = input.abandonedSetupCaptureAfterMs;
         const [abandoned] =
           deadline?.mandatory !== true &&
           input.liveness === "draining" &&
+          input.pointInTimeCapture === true &&
           abandonAfterMs !== undefined &&
           Number.isSafeInteger(abandonAfterMs) &&
           abandonAfterMs > 0
             ? await scopedDb.execute<{ abandoned: boolean }>(sql`
                 select coalesce(bool_and(coalesce(
                   admission.actor_kind = 'turn'
+                  and admission.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
+                  and admission.route_kind = 'home'
                   and attempt.state = 'closed'
                   and attempt.closed_at
                     <= now() - (${abandonAfterMs}::bigint * interval '1 millisecond')
