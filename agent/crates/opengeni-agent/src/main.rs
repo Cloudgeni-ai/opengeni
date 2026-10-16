@@ -528,6 +528,16 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     let (next_platform, browser_sidecars) =
         attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone());
     platform = next_platform;
+    // Only the agent holding the instance lock may remove helper generations
+    // that earlier releases left behind; the removal runs off the startup path.
+    if instance_lock_guard.is_some() {
+        std::thread::spawn(|| {
+            let removed = embedded_runtime::prune_stale_generations();
+            if removed > 0 {
+                info!(removed, "removed earlier interaction runtime generations");
+            }
+        });
+    }
     // Clone connection platforms only after browser control is attached. Existing
     // links and links added by the watcher must expose the identical controller.
     // A successor image keeps its predecessor's connection instance, so the
