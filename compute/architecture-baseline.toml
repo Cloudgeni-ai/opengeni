@@ -11,10 +11,16 @@
 [file_size]
 
 [pattern_ratchet.process_spawn]
+# The one place compute-host runs `ip` and `nft` to set up sandbox networks:
+# short-lived host tools, not processes a sandbox owns.
+"crates/compute-host/src/net.rs" = 1
 
 [pattern_ratchet.pure_core]
 
 [pattern_ratchet.unsafe_code]
 "crates/compute-engine/src/firecracker/mod.rs" = 1
+# Registering a pidfd with Tokio's reactor; the safe constructors are
+# deprecated as unsound since Tokio 1.53.
+"crates/compute-engine/src/firecracker/process.rs" = 1
 "crates/compute-pager/src/main.rs" = 1
 "crates/compute-storage/src/bin/storage-density.rs" = 5
