@@ -29,6 +29,8 @@ import {
   getAllMcpTools,
   getLogger,
   invalidateServerToolsCache,
+  run as runAgent,
+  type Model,
 } from "@openai/agents";
 import {
   Agent,
@@ -149,6 +151,7 @@ import {
   withSandboxSessionReady,
   withSandboxLifecycleHooks,
   sessionMcpApprovalConnectionId,
+  interactionRequestArgumentsProblem,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
   type ConnectorActionPolicyHooks,
@@ -2673,6 +2676,122 @@ describe("runtime event normalization", () => {
           [INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME]: true,
         });
       }
+    });
+
+    test("invalid interaction arguments return to the model before the approval pause", async () => {
+      const interactionServer: MCPServer = {
+        name: "interaction",
+        cacheToolsList: false,
+        async connect() {},
+        async close() {},
+        async listTools() {
+          return [
+            {
+              name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+              description: "Wait for exact human interaction",
+              inputSchema: {
+                type: "object" as const,
+                properties: {},
+                required: [],
+                additionalProperties: true,
+              },
+            },
+          ];
+        },
+        async callTool() {
+          return [];
+        },
+        async invalidateToolsCache() {},
+      };
+      const request = {
+        operation: "request",
+        resourceKind: "browser_session",
+        resourceId: "32ea5a16-5f91-427e-b7a4-15cb7b7c2657",
+        targetId: "TARGET-1",
+        expectedControllerGeneration: "controller-1",
+        expectedTargetGeneration: "target-1",
+        expectedDocumentGeneration: "document-1",
+        kind: "mfa",
+        reason: "Approve the sign-in on your phone.",
+      };
+      const runWith = async (argumentsJson: string) => {
+        const requests: Array<{ input: unknown }> = [];
+        const model: Model = {
+          async getResponse(modelRequest) {
+            requests.push(modelRequest as { input: unknown });
+            return requests.length === 1
+              ? {
+                  usage: new Usage(),
+                  responseId: "response-1",
+                  output: [
+                    {
+                      type: "function_call",
+                      callId: "handoff-call",
+                      name: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+                      arguments: argumentsJson,
+                      status: "completed",
+                    },
+                  ],
+                }
+              : {
+                  usage: new Usage(),
+                  responseId: "response-2",
+                  output: [
+                    {
+                      type: "message",
+                      role: "assistant",
+                      status: "completed",
+                      content: [{ type: "output_text", text: "corrected" }],
+                    },
+                  ],
+                };
+          },
+          // oxlint-disable-next-line require-yield
+          async *getStreamedResponse() {
+            throw new Error("not streamed");
+          },
+        };
+        const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+          mcpServers: [interactionServer],
+        }) as unknown as { clone: (config: unknown) => Agent };
+        const result = await runAgent(agent.clone({ model }), "hand the sign-in over", {
+          toolExecution: { preApprovalInputGuardrails: true },
+        });
+        return { result, requests };
+      };
+
+      // A string where a number belongs: the turn continues and the model
+      // sees what to correct, instead of the turn failing at the pause.
+      const invalid = await runWith(JSON.stringify({ ...request, expiresInSeconds: "1200" }));
+      expect(invalid.result.interruptions).toHaveLength(0);
+      expect(invalid.result.finalOutput).toBe("corrected");
+      const fed = JSON.stringify(invalid.requests[1]!.input);
+      expect(fed).toContain("Invalid interaction_request_human arguments: expiresInSeconds");
+      expect(fed).toContain("Nothing was requested");
+
+      // Valid arguments still pause for the person, and the recorded request
+      // is exactly what the model sent.
+      const valid = await runWith(JSON.stringify({ ...request, expiresInSeconds: 1200 }));
+      expect(valid.result.interruptions).toHaveLength(1);
+      expect(valid.requests).toHaveLength(1);
+      expect(serializeInteractionInterventionRequests(valid.result.interruptions)).toMatchObject([
+        { toolCallId: "handoff-call", input: { ...request, expiresInSeconds: 1200 } },
+      ]);
+    });
+
+    test("describes invalid interaction arguments without echoing their values", () => {
+      expect(interactionRequestArgumentsProblem("{")).toContain("not valid JSON");
+      expect(interactionRequestArgumentsProblem(JSON.stringify({ operation: "wait" }))).toContain(
+        "interventionId",
+      );
+      expect(
+        interactionRequestArgumentsProblem(
+          JSON.stringify({
+            operation: "wait",
+            interventionId: "32ea5a16-5f91-427e-b7a4-15cb7b7c2657",
+          }),
+        ),
+      ).toBeNull();
     });
 
     test("only the exact SDK-approved interaction call can cross the attempt gateway", async () => {

@@ -117,6 +117,7 @@ import { createSecretArgumentResolver } from "./secret-argument-resolution";
 import {
   approvalIdentifier,
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+  RequestHumanInteractionToolInput,
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -303,6 +304,7 @@ import {
   applyDiff,
   RunContext,
   ToolGuardrailFunctionOutputFactory,
+  defineToolInputGuardrail,
   type AgentInputItem,
   type CallModelInputFilter,
   type MCPServer,
@@ -3881,6 +3883,23 @@ function activeModelToolInvocation(modelName: string): ModelToolInvocation | nul
   return invocation?.modelName === modelName ? invocation : null;
 }
 
+/** Why interaction_request_human arguments cannot be recorded as an
+ * intervention, in words the model can act on, or null when they can. */
+export function interactionRequestArgumentsProblem(serialized: string): string | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(serialized);
+  } catch {
+    return "Invalid interaction_request_human arguments: they are not valid JSON. Nothing was requested; call it again with a JSON object matching its schema.";
+  }
+  const parsed = RequestHumanInteractionToolInput.safeParse(value);
+  if (parsed.success) return null;
+  const issues = parsed.error.issues
+    .slice(0, 5)
+    .map((issue) => `${issue.path.join(".") || "arguments"}: ${issue.message}`);
+  return `Invalid interaction_request_human arguments: ${issues.join("; ")}. Nothing was requested; call it again with corrected arguments.`;
+}
+
 /**
  * Turn the canonical interaction-request tool into a typed SDK interruption.
  * Its MCP/Codemode catalog entry and execution stay unchanged; this projection
@@ -3903,6 +3922,22 @@ function installInteractionInterventionPolicy(
       const originalInvoke = tool.invoke.bind(tool);
       return {
         ...tool,
+        // Runs before the approval pause, so invalid arguments come back to
+        // the model as a correctable tool result. Without it the call would
+        // pause first, the intervention could never be recorded, and the
+        // turn would fail.
+        inputGuardrails: [
+          ...(tool.inputGuardrails ?? []),
+          defineToolInputGuardrail({
+            name: "validate_interaction_request_human",
+            run: async ({ toolCall }) => {
+              const problem = interactionRequestArgumentsProblem(toolCall.arguments);
+              return problem
+                ? ToolGuardrailFunctionOutputFactory.rejectContent(problem)
+                : ToolGuardrailFunctionOutputFactory.allow();
+            },
+          }),
+        ],
         needsApproval: async (
           _runContext: Parameters<typeof originalNeedsApproval>[0],
           _parsedInput: Parameters<typeof originalNeedsApproval>[1],
