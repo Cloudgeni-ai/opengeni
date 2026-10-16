@@ -343,6 +343,9 @@ export async function startApi(
     max: settings.apiDatabasePoolMax,
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
+    ...(settings.databasePreparedStatements === undefined
+      ? {}
+      : { preparedStatements: settings.databasePreparedStatements }),
   });
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;

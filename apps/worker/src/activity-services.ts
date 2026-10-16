@@ -45,6 +45,9 @@ export function createSharedActivityServices(
         : createDb(settings.databaseUrl, {
             ...(searchPath ? { searchPath } : {}),
             rlsStrategy: settings.rlsStrategy,
+            ...(settings.databasePreparedStatements === undefined
+              ? {}
+              : { preparedStatements: settings.databasePreparedStatements }),
           });
       const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
       const db = dependencies.db ?? dbClient!.db;

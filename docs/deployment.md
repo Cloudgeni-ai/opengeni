@@ -2761,6 +2761,11 @@ Use this boundary when building a production cluster:
 The runtime secret must provide values such as:
 
 - `OPENGENI_DATABASE_URL`
+- `OPENGENI_DATABASE_PREPARED_STATEMENTS=false` when the database URL goes through
+  a transaction-pooling proxy on a port other than 6432. Opengeni uses named
+  prepared statements on direct connections, which saves a round trip and a
+  re-plan per query, and turns them off by itself on port 6432 (PgBouncer,
+  including Azure Flexible Server's built-in pooler).
 - `OPENGENI_RUNTIME_DATABASE_ROLE=opengeni_app` for standalone FORCE-RLS deployments (the default)
 - `OPENGENI_TEMPORAL_HOST`
 - `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud; it enables TLS automatically

@@ -307,6 +307,11 @@ const SettingsSchema = z.object({
   // reuses the application handle. Keep the historical default for existing
   // deployments and let operators budget this per process with replica counts.
   apiDatabasePoolMax: z.coerce.number().int().positive().default(32),
+  // Named prepared statements for the application database pools. Unset → on
+  // for direct connections and off when the URL targets port 6432 (PgBouncer's
+  // port, including Azure Flexible Server's built-in pooler). Set false for any
+  // other transaction-pooling proxy; set true to force them on.
+  databasePreparedStatements: EnvBoolean.optional(),
   // Step I (§7.8 runtime half). Dedicated Postgres schema for the EMBEDDED
   // topology. Default "" → standalone: no search_path scoping, server default
   // (`public`). When set (e.g. "opengeni"), the db handle + the managed-auth
@@ -1891,6 +1896,7 @@ const ArtifactServiceSettingsSchema = SettingsSchema.pick({
   deploymentRevision: true,
   dbSchema: true,
   rlsStrategy: true,
+  databasePreparedStatements: true,
   observabilityStructuredLogs: true,
   observabilityMetricsEnabled: true,
   observabilityOtlpEndpoint: true,
@@ -1938,6 +1944,7 @@ function artifactServiceEnvironment(source: NodeJS.ProcessEnv) {
       optional("GITHUB_SHA"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
+    databasePreparedStatements: optional("OPENGENI_DATABASE_PREPARED_STATEMENTS"),
     observabilityStructuredLogs: optional("OPENGENI_OBSERVABILITY_STRUCTURED_LOGS"),
     observabilityMetricsEnabled: optional("OPENGENI_OBSERVABILITY_METRICS_ENABLED"),
     observabilityOtlpEndpoint:
@@ -4645,6 +4652,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     serverVersion: optional("OPENGENI_SERVER_VERSION"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
     apiDatabasePoolMax: optional("OPENGENI_API_DATABASE_POOL_MAX"),
+    databasePreparedStatements: optional("OPENGENI_DATABASE_PREPARED_STATEMENTS"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
     runtimeDatabaseRole: optional("OPENGENI_RUNTIME_DATABASE_ROLE"),

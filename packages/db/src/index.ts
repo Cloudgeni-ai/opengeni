@@ -1276,6 +1276,7 @@ import {
 export {
   createDb,
   databaseReconnectBackoffSeconds,
+  defaultDatabasePreparedStatements,
   registerDbBinding,
   retrySessionActivityRls,
   rlsContextForWorkspace,
