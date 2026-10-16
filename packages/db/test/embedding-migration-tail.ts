@@ -59,6 +59,10 @@ export const embeddingMigrationTail = [
   "0515_autonomous_learning_defaults.sql",
   // Patches the 0509 trial grant trigger; replay after it.
   "0521_verified_signup_trial_runtime_switch.sql",
+  // The plan catalog uses 0521's immutable-revision guard; its maintenance
+  // routines require that catalog. Replay both after the withheld guard.
+  "0797_subscription_plan_foundation.sql",
+  "0798_subscription_plan_maintenance.sql",
   // Reuses the revision guard installed by withheld 0521; its validation
   // follow-up must run after the original promotional-credit routines.
   "0613_model_scoped_promotional_credits.sql",
