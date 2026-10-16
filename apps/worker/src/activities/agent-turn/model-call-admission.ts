@@ -4,7 +4,18 @@ import type { StreamEvent } from "@openai/agents";
 export function createModelCallAdmission(input: {
   signal: AbortSignal;
   admit: () => Promise<void>;
+  /** Diagnostic timing of the producer side; never fences or fails a call. */
+  observe?: (phase: "settlement_wait" | "admission", durationSeconds: number) => void;
+  now?: () => number;
 }) {
+  const now = input.now ?? (() => performance.now());
+  const observe = (phase: "settlement_wait" | "admission", startedAt: number) => {
+    try {
+      input.observe?.(phase, (now() - startedAt) / 1_000);
+    } catch {
+      // Diagnostics must never affect admission.
+    }
+  };
   type Receipt = {
     promise: Promise<void>;
     resolve: () => void;
@@ -46,14 +57,17 @@ export function createModelCallAdmission(input: {
   if (input.signal.aborted) abort();
   return {
     beforeModelRequest: async (point: "model_entry" | "transport" = "model_entry") => {
+      const waitStartedAt = now();
       await Promise.race([latest, halted]);
       if (failed) throw failure;
+      if (point === "model_entry") observe("settlement_wait", waitStartedAt);
       // Even a settled predecessor does not grant admission to the next call:
       // every model entry revalidates, and so does a transport check with no
       // admission of its own call to join.
       let admission = point === "transport" ? currentCallAdmission : null;
       if (!admission) {
-        admission = input.admit();
+        const admissionStartedAt = now();
+        admission = input.admit().then(() => observe("admission", admissionStartedAt));
         currentCallAdmission = admission;
         const issued = admission;
         void issued.catch(() => {
