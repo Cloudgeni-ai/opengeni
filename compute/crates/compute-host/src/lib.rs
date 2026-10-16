@@ -38,6 +38,7 @@ pub use agent::{BusyRule, Handle, HostAgent, HostConfig, HostError, Lease, Pager
 pub use chunked::{CHUNK_BYTES, Chunked};
 pub use guest_ports::{GuestPort, Route};
 pub use lanes::Lanes;
+pub use layout::check_filesystem;
 pub use pool::{Keep, PoolConfig, Shape};
 pub use server::serve;
 pub use store::{

@@ -749,6 +749,10 @@ fn disk_policy(
     reserve_mib: Option<u64>,
     reserve_inodes: Option<u64>,
 ) -> anyhow::Result<DiskPolicy> {
+    // Before anything is made there: a state root on a filesystem whose
+    // saves cannot be booked is refused untouched.
+    compute_host::check_filesystem(root)
+        .with_context(|| format!("state root {}", root.display()))?;
     std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
     let stat = rustix::fs::statvfs(root)
         .with_context(|| format!("reading the filesystem of {}", root.display()))?;

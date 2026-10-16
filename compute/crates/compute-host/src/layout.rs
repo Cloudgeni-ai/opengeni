@@ -547,20 +547,36 @@ pub(crate) fn supported_filesystem(kind: u64) -> io::Result<()> {
 /// Refuses `root` unless the filesystem it is on, or will be made on (that
 /// of its nearest existing ancestor), is one of [`SUPPORTED_FILESYSTEMS`].
 /// Only reads: an unsupported filesystem is never written to.
+///
+/// # Errors
+///
+/// The filesystem is not supported, or cannot be read.
 #[cfg(target_os = "linux")]
-pub(crate) fn check_filesystem(root: &Path) -> io::Result<()> {
-    let existing = root
-        .ancestors()
-        .find(|dir| dir.exists())
-        .unwrap_or_else(|| Path::new("/"));
-    let kind = rustix::fs::statfs(existing)?.f_type;
+pub fn check_filesystem(root: &Path) -> io::Result<()> {
+    let kind = rustix::fs::statfs(&existing_ancestor(root)?)?.f_type;
     supported_filesystem(u64::try_from(kind).unwrap_or(u64::MAX))
 }
 
 /// [`check_filesystem`] where filesystem types cannot be read: any.
+///
+/// # Errors
+///
+/// None.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn check_filesystem(_: &Path) -> io::Result<()> {
+pub fn check_filesystem(_: &Path) -> io::Result<()> {
     Ok(())
+}
+
+/// The nearest directory of `root` or above it that exists, a relative
+/// `root` taken from the working directory, as anything made for it would
+/// be.
+pub(crate) fn existing_ancestor(root: &Path) -> io::Result<PathBuf> {
+    let root = std::path::absolute(root)?;
+    Ok(root
+        .ancestors()
+        .find(|dir| dir.exists())
+        .unwrap_or_else(|| Path::new("/"))
+        .to_path_buf())
 }
 
 /// The bytes the filesystem holding `dir` allocates for the smallest write,
@@ -721,6 +737,20 @@ pub(crate) mod tests {
         );
         FAILPOINTS.lock().unwrap().retain(|(path, _)| path != &made);
         create_dir_durably(&made).unwrap();
+    }
+
+    /// A root that does not exist yet is checked where it would be made: a
+    /// relative one under the working directory, not at `/`.
+    #[test]
+    fn a_missing_relative_root_is_checked_where_it_would_be_made() {
+        let here = std::env::current_dir().unwrap();
+        let found = existing_ancestor(Path::new("no-such-root-here/state")).unwrap();
+        assert_eq!(found, here);
+        let found = existing_ancestor(Path::new("no-such-root-here")).unwrap();
+        assert_eq!(found, here);
+        let dir = tempfile::tempdir().unwrap();
+        let found = existing_ancestor(&dir.path().join("a/b")).unwrap();
+        assert_eq!(found, dir.path());
     }
 
     /// The unit is learned from the filesystem itself: at least a block,
