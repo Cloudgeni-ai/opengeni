@@ -3,6 +3,8 @@
 //! Runs only when `COMPUTE_TEST_LAB` names a directory prepared by
 //! `compute/lab/host-setup.sh` (it holds `bin/firecracker`, `vmlinux` and
 //! `base.ext4`, whose guest runs a shell on vsock port 52), and only as root.
+//! With `COMPUTE_TEST_REQUIRE=lab`, as on a gate, a test that cannot run
+//! fails instead of skipping.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,7 +19,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const SHELL_PORT: u32 = 52;
 
 fn lab() -> Option<PathBuf> {
-    std::env::var_os("COMPUTE_TEST_LAB").map(PathBuf::from)
+    let lab = std::env::var_os("COMPUTE_TEST_LAB").map(PathBuf::from);
+    if lab.is_none() {
+        let required = std::env::var("COMPUTE_TEST_REQUIRE").unwrap_or_default();
+        assert!(
+            !required.split(',').any(|listed| listed.trim() == "lab"),
+            "a required test cannot run: COMPUTE_TEST_LAB is not set"
+        );
+        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
+    }
+    lab
 }
 
 /// Runs `script` in the guest shell and returns its output and the time to
@@ -188,10 +199,7 @@ fn owner_and_name(pid: i32) -> (u32, String) {
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn boot_pause_compress_snapshot_restore() {
-    let Some(lab) = lab() else {
-        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
-        return;
-    };
+    let Some(lab) = lab() else { return };
     let name = format!("engine-test-{}", std::process::id());
     let engine = engine(&lab);
     assert!(
@@ -306,10 +314,7 @@ async fn boot_pause_compress_snapshot_restore() {
 /// and a holder left after its VMM died does not stop a clean-up.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_engine_adopts_a_running_vm_without_disturbing_it() {
-    let Some(lab) = lab() else {
-        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
-        return;
-    };
+    let Some(lab) = lab() else { return };
     let name = format!("adopt-test-{}", std::process::id());
     let spec = jailed_spec(&lab, &name, 3_900_002);
     let uds = spec.vsock_path();
@@ -393,10 +398,7 @@ async fn a_new_engine_adopts_a_running_vm_without_disturbing_it() {
 /// one.
 #[tokio::test(flavor = "multi_thread")]
 async fn only_a_vmm_seen_running_counts_as_a_launch() {
-    let Some(lab) = lab() else {
-        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
-        return;
-    };
+    let Some(lab) = lab() else { return };
     let name = format!("launch-test-{}", std::process::id());
     let spec = jailed_spec(&lab, &name, 3_900_003);
     let failing = Firecracker::new(FirecrackerConfig {
