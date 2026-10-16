@@ -30,7 +30,6 @@ use std::time::Duration;
 use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_pager::control::{self, ToHost, ToPager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
-use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep, timeout};
@@ -455,7 +454,9 @@ async fn connect(
 
 /// One attempt at connecting to `link`'s pager and reading its greeting.
 async fn greet(link: &Link) -> Result<Connected, Refused> {
-    let stream = UnixStream::connect(&link.control)
+    // The pager's directory belongs to its VM's user: never follow a link
+    // there.
+    let stream = compute_engine::confined::connect(&link.control)
         .await
         .map_err(Refused::Gone)?;
     let (read, write) = stream.into_split();

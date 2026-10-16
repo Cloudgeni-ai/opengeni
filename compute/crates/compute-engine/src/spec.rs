@@ -124,9 +124,15 @@ pub enum MemorySource {
 pub struct PagerSpec {
     /// The Unix socket it listens on for the VMM, inside the VM's jail.
     pub socket: PathBuf,
+    /// A directory of its own, which the engine gives the VM's user before
+    /// the pager starts: everything the pager writes once it has dropped to
+    /// that user (see the `compute-pager` crate's `user` module) goes
+    /// there, so whoever reads it must not trust it more than the VM.
+    pub dir: PathBuf,
     /// The program to run, with its arguments. It must print `ready` on a
-    /// line of its own once `socket` listens, and nothing else on standard
-    /// output; it must exit once the VMM has gone.
+    /// line of its own once `socket` listens and it runs as the VM's user
+    /// (which the engine passes as `--user UID:GID`), and nothing else on
+    /// standard output; it must exit once the VMM has gone.
     pub program: PathBuf,
     pub args: Vec<OsString>,
 }

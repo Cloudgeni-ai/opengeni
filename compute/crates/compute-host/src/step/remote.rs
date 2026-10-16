@@ -10,7 +10,7 @@ use compute_engine::{Engine, EngineError, ErrorKind};
 
 use super::{
     Archived, Base, Job, archive_receipt, blocking, clear_local, failure, images_of, io_failure,
-    state_failure, suspect_error, wake_profile,
+    learned, pager_learned, state_failure, suspect_error, wake_profile,
 };
 use crate::image::{Parts, Suspect};
 use crate::layout::{remove_if_present, write_atomic};
@@ -62,6 +62,14 @@ impl<E: Engine, S: Store> Job<E, S> {
             };
         }
         let profile = wake_profile(&self.paths);
+        // The order the last wake learned, if its pager wrote one.
+        let (written, kept) = (pager_learned(&self.paths), profile.clone());
+        if let Err(error) = blocking(move || learned::take(&written, &kept))
+            .await
+            .and_then(|taken| taken)
+        {
+            return io_failure(OP, error);
+        }
         let files = SavedFiles {
             disk: JailedFile::new(&self.paths.disk),
             memory: memory.as_ref().map(|(image, chunks)| SavedImage {

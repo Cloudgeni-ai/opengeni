@@ -29,9 +29,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::quiesce::AskVmm;
+use super::user::User;
 use super::{MAX_BATCH, Pager, Progress, poll};
 use crate::control::{self, ToHost, ToPager};
-use crate::source::Fill;
+use crate::source::{Fill, FilledFile};
 use crate::wake::{WakeProfile, ready_prefix};
 
 /// How long the VMM may take to connect after the pager listens.
@@ -67,6 +68,10 @@ pub struct Options {
     /// (see [`super::quiesce`]). The engine adds it when it starts the
     /// pager; the pager does not run without it.
     pub api_socket: Option<PathBuf>,
+    /// The VM's user, which the pager becomes once its sockets listen and
+    /// it has read what it needs; see [`super::user`]. The engine adds it
+    /// too. Without it the pager keeps the user it was started as.
+    pub user: Option<User>,
 }
 
 impl Options {
@@ -92,6 +97,7 @@ impl Options {
             ready_bytes: 0,
             record_for: Duration::ZERO,
             api_socket: None,
+            user: None,
         };
         while let Some(arg) = args.next() {
             let arg = arg.to_string_lossy().into_owned();
@@ -114,6 +120,7 @@ impl Options {
                 "--profile" => options.profile = Some(PathBuf::from(&value)),
                 "--learned" => options.learned = Some(PathBuf::from(&value)),
                 "--api-socket" => options.api_socket = Some(PathBuf::from(&value)),
+                "--user" => options.user = Some(value.to_string_lossy().parse()?),
                 "--ready-bytes" => options.ready_bytes = number()?,
                 "--record-ms" => options.record_for = Duration::from_millis(number()?),
                 _ => return Err(format!("unknown argument {arg}")),
@@ -145,6 +152,9 @@ impl Options {
         ];
         if self.complete {
             args.push("--complete".into());
+        }
+        if let Some(user) = self.user {
+            args.extend(["--user".into(), user.to_string().into()]);
         }
         for (name, path) in [
             ("--profile", &self.profile),
@@ -221,8 +231,23 @@ fn run(options: &Options) -> io::Result<()> {
     let file = File::open(&options.memory)?;
     let metadata = file.metadata()?;
     let filling = Arc::new(Fill::new(metadata.len(), options.complete)?);
+    let profile = options
+        .profile
+        .as_deref()
+        .map(WakeProfile::load)
+        .unwrap_or_default();
+    let prepared = Prepared {
+        source: crate::source::filled(&file, Arc::clone(&filling))?,
+        profile,
+        quiesce: AskVmm::new(api_socket),
+    };
     let (control, _control_file) = bind(&options.control)?;
     let (vmm, _vmm_file) = bind(&options.vmm_socket)?;
+    // Everything a pager opens by name is open now, while it has one
+    // thread: from here on it is no more than the VM.
+    if let Some(user) = options.user {
+        user.assume()?;
+    }
     {
         let mut out = io::stdout().lock();
         out.write_all(b"ready\n")?;
@@ -240,15 +265,7 @@ fn run(options: &Options) -> io::Result<()> {
             .name("control".into())
             .spawn(move || talk(&control, &filling, &status, &hello))?;
     }
-    let result = serve(
-        &vmm,
-        &file,
-        &filling,
-        options,
-        AskVmm::new(api_socket),
-        &status,
-        &stopped,
-    );
+    let result = serve(&vmm, prepared, &filling, options, &status, &stopped);
     if result.is_ok() && status.done.load(Ordering::Acquire) {
         filling.signal_tell();
         status.await_goodbye(GOODBYE);
@@ -293,12 +310,20 @@ impl Drop for Bound {
     }
 }
 
+/// What a pager readies before it gives up root.
+struct Prepared {
+    /// The memory file, mapped.
+    source: FilledFile,
+    /// The order to prefetch in.
+    profile: WakeProfile,
+    quiesce: AskVmm,
+}
+
 fn serve(
     vmm: &UnixListener,
-    file: &File,
+    prepared: Prepared,
     filling: &Arc<Fill>,
     options: &Options,
-    quiesce: AskVmm,
     status: &Status,
     stopped: &AtomicBool,
 ) -> io::Result<()> {
@@ -323,14 +348,13 @@ fn serve(
         }
     };
     peer.set_nonblocking(false)?;
-    let source = crate::source::filled(file, Arc::clone(filling))?;
+    let Prepared {
+        source,
+        profile,
+        quiesce,
+    } = prepared;
     let mut pager =
         Pager::new(peer, source, options.record_for)?.finish_when_complete(Box::new(quiesce));
-    let profile = options
-        .profile
-        .as_deref()
-        .map(WakeProfile::load)
-        .unwrap_or_default();
     let plan: Vec<_> = profile
         .offsets
         .iter()
@@ -555,6 +579,10 @@ mod tests {
             ready_bytes: 1 << 27,
             record_for: Duration::from_secs(120),
             api_socket: Some("/j/api.sock".into()),
+            user: Some(User {
+                uid: 1_073_741_843,
+                gid: 1_073_741_843,
+            }),
         };
         assert_eq!(Options::parse(options.args()).unwrap(), options);
         assert!(Options::parse(["--tag".into()]).is_err());

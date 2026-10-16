@@ -61,6 +61,7 @@ const PREFETCH_LIMIT: Duration = Duration::from_secs(5);
 /// tries.
 const SETTLE_RETRY: (Duration, Duration) = (Duration::from_millis(50), Duration::from_secs(5));
 
+mod learned;
 mod live;
 
 pub(crate) use live::{Base, DiskWatch, LiveMemory, Reconnected};
@@ -213,9 +214,20 @@ fn paged_marker(paths: &Paths) -> PathBuf {
     paths.dir.join("paged")
 }
 
+/// The directory the sandbox's pager writes in, as its VM's user.
+fn pager_dir(paths: &Paths) -> PathBuf {
+    paths.dir.join("pager")
+}
+
 /// Where the sandbox's pager listens for the agent.
 fn pager_control(paths: &Paths) -> PathBuf {
-    paths.dir.join("pager.sock")
+    pager_dir(paths).join("sock")
+}
+
+/// Where the sandbox's pager writes the order it learned, until the agent
+/// takes it into [`wake_profile`].
+fn pager_learned(paths: &Paths) -> PathBuf {
+    pager_dir(paths).join("learned.json")
 }
 
 /// Whether the sandbox's last VM may have had its memory served by a
@@ -857,17 +869,20 @@ impl<E: Engine, S: Store> Job<E, S> {
                 tag,
                 complete: !image.meta().remote,
                 profile: Some(wake_profile(paths)),
-                learned: Some(wake_profile(paths)),
+                learned: Some(pager_learned(paths)),
                 ready_bytes: READY_BYTES,
                 record_for: self.pager.record_for,
                 // The engine adds the VMM's API socket, which it places.
                 api_socket: None,
+                // And the VM's user, which it knows.
+                user: None,
             };
             live.paging = Some(paging);
             let mut args = vec![std::ffi::OsString::from("pager")];
             args.extend(options.args());
             let pager = compute_engine::PagerSpec {
                 socket,
+                dir: pager_dir(paths),
                 program: self.pager.program.clone(),
                 args,
             };
@@ -901,6 +916,9 @@ impl<E: Engine, S: Store> Job<E, S> {
         let control = pager_control(paths);
         let tag = crate::paging::tag(generation);
         let identity = crate::paging::identity(&memory).map_err(io)?;
+        learned::make_dir(&pager_dir(paths)).map_err(io)?;
+        // What the last pager learned, the one this pager starts from.
+        learned::take(&pager_learned(paths), &wake_profile(paths)).map_err(io)?;
         remove_if_present(&crate::paging::done_file(&control)).map_err(io)?;
         // Written before the pager starts, so an agent that restarts knows
         // the VM's memory may need it, and which launch to look for.

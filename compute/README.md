@@ -122,7 +122,9 @@ on a generation fence; files on disk never count as evidence on their own.
 On start the agent settles every record, then takes each VM back
 ([ADR 9](docs/adr/0009-vms-outlive-the-agent.md)). A VM whose memory is still
 being paged in keeps its pager, a small process of its own, and the restarted
-agent reconnects to it. If the pager itself dies, the VM is ended and the
+agent reconnects to it. The pager runs as its VM's own user, with no
+capabilities ([ADR 8](docs/adr/0008-lazy-wake-with-a-working-set.md)). If
+the pager itself dies, the VM is ended and the
 sandbox recovers as [ADR 10](docs/adr/0010-crash-safety-bar.md) says: from a
 valid saved image if one exists, else fresh from its disk. One agent runs per
 host.

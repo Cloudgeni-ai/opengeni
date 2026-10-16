@@ -27,6 +27,8 @@ pub enum Owned {
     File,
     /// A Unix socket the VMM connects to.
     Socket,
+    /// A directory, such as the one a VM's pager writes in.
+    Dir,
 }
 
 impl Owned {
@@ -34,6 +36,7 @@ impl Owned {
         match self {
             Self::File => "not a regular file",
             Self::Socket => "not a socket",
+            Self::Dir => "not a directory",
         }
     }
 }
@@ -64,11 +67,14 @@ pub fn hand_over(path: &Path, kind: Owned, uid: u32, gid: u32) -> io::Result<()>
     let expected = match kind {
         Owned::File => FileType::RegularFile,
         Owned::Socket => FileType::Socket,
+        Owned::Dir => FileType::Directory,
     };
     if FileType::from_raw_mode(stat.st_mode) != expected {
         return Err(refused(path, kind.refusal()));
     }
-    if stat.st_nlink != 1 {
+    // A directory cannot have other names; its link count counts its
+    // subdirectories.
+    if kind != Owned::Dir && stat.st_nlink != 1 {
         return Err(refused(path, "a file with other names"));
     }
     rustix::fs::chownat(
@@ -96,6 +102,7 @@ pub fn hand_over(path: &Path, kind: Owned, uid: u32, gid: u32) -> io::Result<()>
     let matches = match kind {
         Owned::File => found.is_file(),
         Owned::Socket => found.is_socket(),
+        Owned::Dir => found.is_dir(),
     };
     if !matches {
         return Err(refused(path, kind.refusal()));

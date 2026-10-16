@@ -259,6 +259,7 @@ fn snapshots_are_durable_and_name_their_kind() {
 fn paged_source() -> MemorySource {
     MemorySource::Pager(crate::PagerSpec {
         socket: "/lab/vm/firecracker/a/root/uffd.sock".into(),
+        dir: "/lab/vm/firecracker/a/pager".into(),
         program: "/usr/bin/compute-host".into(),
         args: vec!["pager".into()],
     })

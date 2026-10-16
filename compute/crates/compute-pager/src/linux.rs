@@ -6,6 +6,7 @@
 
 pub mod quiesce;
 pub mod serve;
+pub mod user;
 
 use crate::source::Source;
 use crate::{Layout, Mapping, Page, Profile};

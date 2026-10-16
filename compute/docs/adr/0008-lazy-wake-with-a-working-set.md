@@ -22,6 +22,15 @@ guest's first-touched pages are scattered across most of its chunks.
   exits when the memory is complete. A restarted agent reconnects to it; if
   the pager dies, the VM is ended and the sandbox recovers as
   [10](0010-crash-safety-bar.md) says.
+- The pager is no more privileged than its VM. The agent starts it as root
+  so it can bind its sockets and open the image, and before it reports
+  ready it becomes the VM's own user and group, with no other groups, no
+  capabilities and `no_new_privs`, inside the VM's cgroup; the engine
+  checks this and ends a pager that did not. What it writes afterwards
+  (its control socket, done mark and learned order) lives in a directory
+  of its own owned by that user, and the agent reads it as it reads
+  anything from a jail: never through a link, only a bounded regular file
+  of one name, and keeps only a valid profile.
 
 ## Consequences
 

@@ -588,6 +588,39 @@ fn pagers(id: Id) -> Vec<u32> {
         .collect()
 }
 
+/// Checks that `pager`, in VM `id`'s cgroup, runs as the VM's VMM does,
+/// with no other groups, no capabilities and no way to gain any.
+fn runs_as_its_vm(id: Id, pager: u32) {
+    let status = |pid: u32| std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    let field = |status: &str, name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))
+            .unwrap_or_else(|| panic!("no {name}"))
+            .trim()
+            .to_owned()
+    };
+    let vmm = group_processes(id)
+        .into_iter()
+        .find(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .is_ok_and(|comm| comm.trim() == "firecracker")
+        })
+        .expect("the VM has a VMM");
+    let (vmm, pager) = (status(vmm), status(pager));
+    for name in ["Uid", "Gid"] {
+        let ids = field(&vmm, name);
+        assert!(!ids.starts_with('0'), "the VMM runs as {name} {ids}");
+        assert_eq!(field(&pager, name), ids, "the pager's {name}");
+    }
+    assert_eq!(field(&pager, "Groups"), "");
+    for name in ["CapInh", "CapPrm", "CapEff", "CapAmb"] {
+        assert_eq!(field(&pager, name), "0".repeat(16), "the pager's {name}");
+    }
+    assert_eq!(field(&pager, "NoNewPrivs"), "1");
+    eprintln!("the pager runs as {}", field(&pager, "Uid"));
+}
+
 /// A pager that dies while its VM still needs it leaves a guest that can
 /// never run again. With no agent around when it dies, the next agent
 /// must find that out, end the VM rather than adopt it, and boot the
@@ -631,6 +664,7 @@ async fn a_guest_whose_pager_died_boots_afresh() {
     agent.kill();
     let pager = pagers(id);
     assert_eq!(pager.len(), 1, "the woken VM has no pager: {pager:?}");
+    runs_as_its_vm(id, pager[0]);
     let killed = std::process::Command::new("kill")
         .args(["-KILL", &pager[0].to_string()])
         .status()

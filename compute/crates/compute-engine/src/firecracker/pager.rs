@@ -4,7 +4,9 @@
 //! The pager is started after the VMM and before the VMM loads its state,
 //! and then moved into the VM's own cgroup: from there on it lives beside
 //! the VMM, survives the host agent like the VMM does, and is killed with
-//! the VM's group at the latest. It exits on its own once the guest no
+//! the VM's group at the latest. Before it says it is ready it runs as the
+//! VM's own user, with no capabilities and no way to gain any, and the
+//! engine checks that it does. It exits on its own once the guest no
 //! longer needs it, or once the VMM has gone.
 //!
 //! A guest whose memory is still registered with a fault handler stalls on
@@ -35,8 +37,9 @@ const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Starts `pager` for `vm`, whose VMM runs as `uid`:`gid` and has not
 /// loaded its state yet, and returns once the pager listens on a socket
-/// the VMM may use and belongs to the VM's group. Its standard error goes
-/// to `pager.log` in `logs`. On failure no pager is left running.
+/// the VMM may use, runs as the VM's user and belongs to the VM's group.
+/// Its standard error goes to `pager.log` in `logs`. On failure no pager
+/// is left running.
 pub(super) async fn start(
     pager: &PagerSpec,
     vm: &FirecrackerVm,
@@ -46,10 +49,13 @@ pub(super) async fn start(
 ) -> io::Result<()> {
     let log_path = logs.join("pager.log");
     let log = {
-        let path = log_path.clone();
-        tokio::task::spawn_blocking(move || OpenOptions::new().create(true).append(true).open(path))
-            .await
-            .map_err(io::Error::other)??
+        let (path, dir) = (log_path.clone(), pager.dir.clone());
+        tokio::task::spawn_blocking(move || {
+            crate::confined::hand_over(&dir, crate::confined::Owned::Dir, uid, gid)?;
+            OpenOptions::new().create(true).append(true).open(path)
+        })
+        .await
+        .map_err(io::Error::other)??
     };
     let mut command = Command::new(&pager.program);
     command
@@ -58,6 +64,8 @@ pub(super) async fn start(
         // marks the process as this VM's pager (see `lost`).
         .arg(API_SOCKET_ARG)
         .arg(vm.api.socket())
+        .arg("--user")
+        .arg(format!("{uid}:{gid}"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(log);
@@ -81,6 +89,7 @@ pub(super) async fn start(
         }
         let (socket, cgroup) = (pager.socket.clone(), vm.cgroup.clone());
         tokio::task::spawn_blocking(move || {
+            check_user(pid, uid, gid)?;
             crate::confined::hand_over(&socket, crate::confined::Owned::Socket, uid, gid)?;
             cgroup.add(pid)?;
             // Its VM cannot go on without it either.
@@ -110,6 +119,48 @@ pub(super) async fn start(
 
 /// The argument that hands a pager its VMM's API socket.
 const API_SOCKET_ARG: &str = "--api-socket";
+
+/// Checks that process `pid`, a pager that said it is ready, runs as
+/// `uid`:`gid` alone, with no capabilities and no way to gain any. `pid`
+/// is the caller's unreaped child, so the number cannot name another
+/// process.
+fn check_user(pid: u32, uid: u32, gid: u32) -> io::Result<()> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
+    let problem = user_problem(&status, uid, gid);
+    match problem {
+        None => Ok(()),
+        Some(problem) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("the pager still {problem}"),
+        )),
+    }
+}
+
+/// What, in a process's `/proc/<pid>/status`, is more than a process of
+/// `uid`:`gid` alone with no capabilities and no new privileges has.
+fn user_problem(status: &str, uid: u32, gid: u32) -> Option<String> {
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))
+            .map(str::trim)
+    };
+    let ids = |id: u32| format!("{id}\t{id}\t{id}\t{id}");
+    let expected = [
+        ("Uid", ids(uid)),
+        ("Gid", ids(gid)),
+        ("Groups", String::new()),
+        ("CapInh", "0".repeat(16)),
+        ("CapPrm", "0".repeat(16)),
+        ("CapEff", "0".repeat(16)),
+        ("CapAmb", "0".repeat(16)),
+        ("NoNewPrivs", "1".to_owned()),
+    ];
+    expected.into_iter().find_map(|(name, value)| {
+        let found = field(name);
+        (found != Some(value.as_str())).then(|| format!("has {name} {found:?}"))
+    })
+}
 
 /// Whether the VM whose VMM is `vmm` and whose API listens at `api`, in
 /// `group`, lost its pager while the guest still needed it: no pager of
@@ -199,6 +250,29 @@ mod tests {
     fn ordinary_memory_is_not_registered() {
         assert!(!registered(std::process::id()).unwrap());
         assert!(!waits_for_event_reader(std::process::id()));
+    }
+
+    #[test]
+    fn a_pager_must_run_as_its_vm_alone() {
+        let dropped = "Name:\tcompute-host\nUid:\t7\t7\t7\t7\nGid:\t8\t8\t8\t8\nGroups:\t\n\
+            CapInh:\t0000000000000000\nCapPrm:\t0000000000000000\n\
+            CapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\n\
+            CapAmb:\t0000000000000000\nNoNewPrivs:\t1\n";
+        assert_eq!(user_problem(dropped, 7, 8), None);
+        assert!(user_problem(dropped, 7, 9).unwrap().contains("Gid"));
+        let root = dropped.replace("Uid:\t7\t7\t7\t7", "Uid:\t0\t0\t0\t0");
+        assert!(user_problem(&root, 7, 8).unwrap().contains("Uid"));
+        let saved = dropped.replace("Uid:\t7\t7\t7\t7", "Uid:\t7\t7\t0\t7");
+        assert!(
+            user_problem(&saved, 7, 8).is_some(),
+            "could become root again"
+        );
+        let capable = dropped.replace("CapEff:\t0000000000000000", "CapEff:\t000001ffffffffff");
+        assert!(user_problem(&capable, 7, 8).unwrap().contains("CapEff"));
+        let grouped = dropped.replace("Groups:\t", "Groups:\t0");
+        assert!(user_problem(&grouped, 7, 8).unwrap().contains("Groups"));
+        let free = dropped.replace("NoNewPrivs:\t1", "NoNewPrivs:\t0");
+        assert!(user_problem(&free, 7, 8).unwrap().contains("NoNewPrivs"));
     }
 
     #[test]
