@@ -10269,16 +10269,6 @@ export function renderSessionSystemUpdateBatch(
 export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[Opengeni scheduled task occurrence]" as const;
 
 /**
- * A schedule must never stay stuck without its owner knowing. The platform
- * pauses a schedule and tells its owner when runs cannot start; this covers
- * what only the agent can see: a run that starts but cannot do its job. The
- * key matches the platform's own schedule notice, so either updates the other
- * in place. Rendered only into new occurrences; delivered ones keep their text.
- */
-export const SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE =
-  "If something blocks this task, first try to fix it within your authority. If it stays blocked, notify the schedule's owner once with what blocks it and exactly what would unblock it, using the notification key schedule-<scheduled task ID> so a later occurrence updates that notice instead of alerting again. If no later occurrence can succeed until a person acts, also pause this schedule. If you cannot notify or pause, say so in your result.";
-
-/**
  * A pure scheduled-occurrence batch is a new task boundary for the model, not
  * merely background context. The user role here is conversational only: the
  * owning turn retains its immutable scheduler/service initiator and frozen
@@ -10316,7 +10306,6 @@ function renderScheduledOccurrenceTaskBatch(
     introduction,
     ...renderSessionSystemUpdateDeliveredAt(options),
     "The scheduled instructions below are the task for this turn. Earlier completed goals, occurrences, conversation, and tool outputs are historical context and do not complete this occurrence. When the task depends on mutable external state, query that state during this occurrence instead of reusing an earlier result.",
-    SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE,
     ...occurrences.flatMap((occurrence, index) => {
       if (!occurrence) return [];
       return [

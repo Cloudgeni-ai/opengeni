@@ -38,7 +38,6 @@ import {
   mergeToolRefs,
   MODEL_CONTEXT_LABEL,
   SESSION_GOAL_CONTEXT_LABEL,
-  SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE,
   SCHEDULED_OCCURRENCE_TASK_LABEL,
   ModelContextContributionSummaries,
   McpServerConnectionRef,
@@ -1775,11 +1774,6 @@ describe("contracts", () => {
     );
     expect(scheduled.content).toContain("Earlier completed goals");
     expect(scheduled.content).toContain("query that state during this occurrence");
-    // A blocked occurrence tells the owner once under the schedule's notice key and
-    // pauses the schedule when no later occurrence can succeed.
-    expect(scheduled.content).toContain(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE);
-    expect(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE).toContain("schedule-<scheduled task ID>");
-    expect(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE).toContain("pause this schedule");
     expect(scheduled.content).not.toContain("[Opengeni internal updates]");
     expect(scheduled.content).not.toContain("They are not human prompts");
     expect(scheduled.content).not.toContain("Unavailable in this occurrence");
