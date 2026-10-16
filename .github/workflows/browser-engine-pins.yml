@@ -1,0 +1,61 @@
+name: Browser Engine Pins
+
+# The images pin exact Chrome and Chromium artifacts. This keeps those pins on
+# the current stable release by opening (or refreshing) one pull request.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: browser-engine-pins
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update browser engine pins
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Resolve and rewrite pins
+        run: bun scripts/browser-engine-pins.ts
+
+      - name: Open or update the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "Browser engine pins are current."
+            exit 0
+          fi
+          branch=chore/browser-engine-pins-auto
+          summary="$(bun scripts/browser-engine-pins.ts --describe)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git commit -am "chore(images): update browser engines" -m "$summary"
+          git push --force origin "$branch"
+          body="$(printf 'Automated pin refresh.\n\n%s\n\nThe Chrome .deb SHA-256 was checked against the downloaded bytes, and the Chromium snapshot was checked to list both packages on amd64 and arm64.' "$summary")"
+          if gh pr view "$branch" --json state --jq .state 2>/dev/null | grep -q OPEN; then
+            gh pr edit "$branch" --body "$body"
+          else
+            gh pr create --base main --head "$branch" \
+              --title "chore(images): update browser engines" --body "$body"
+          fi
