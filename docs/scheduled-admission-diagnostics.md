@@ -73,3 +73,9 @@ in, else its most recent run's chat. It is withdrawn when a later run succeeds o
 a person resumes, pauses or deletes the schedule. `GET /scheduled-tasks` and
 `GET /scheduled-tasks/:id` return the current `blocker` (`state` `paused` or
 `notified`, `reason`, `message`, `runId`, `since`), and the schedule page shows it.
+
+Agents cover what the platform cannot see, a run that starts but cannot do its
+job: each new scheduled occurrence tells the agent to try to fix a blocker,
+otherwise notify the owner once under the same `schedule-<task id>` key, and
+pause the schedule when no later occurrence can succeed. Already delivered
+occurrences keep their original text.
