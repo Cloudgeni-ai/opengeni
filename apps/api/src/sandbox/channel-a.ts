@@ -561,6 +561,12 @@ export async function withChannelARead<T>(
  * run_on do), so the machines that person can use stay usable from browser,
  * computer, file and terminal requests; a personal machine also needs the
  * attempt's own per-chat permission, checked by the connection resolver.
+ *
+ * Ending a browser or computer is the exception: it only stops what Opengeni
+ * already started there and runs nothing new, so it needs the owner's access
+ * but not the per-chat permission. Otherwise a browser opened by a chat that
+ * has since gone idle, or ended from another chat, could never be stopped and
+ * would keep its processes alive on the person's machine.
  */
 async function channelAMachineAuthority(
   db: Database,
@@ -574,6 +580,9 @@ async function channelAMachineAuthority(
   const actor = await requireLiveAgentAttemptAuthorization(db, grant, callerSessionId);
   if (!actor.initiatingHumanSubjectId) {
     return { subjectId: ctx.subjectId, personalMachineAttempt: null };
+  }
+  if (ctx.operation === "browser.end" || ctx.operation === "computer.end") {
+    return { subjectId: actor.initiatingHumanSubjectId, personalMachineAttempt: null };
   }
   return {
     subjectId: actor.initiatingHumanSubjectId,

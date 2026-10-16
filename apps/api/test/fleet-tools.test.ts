@@ -649,6 +649,66 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     await expect(agentRequest()).rejects.toThrow();
   }, 60_000);
 
+  test("an agent can end a browser or computer on its owner's personal machine without the chat's permission", async () => {
+    if (!available) return;
+    const {
+      accountId,
+      targetWorkspaceId,
+      machine,
+      session,
+      ctx,
+      services,
+      allowThisChat,
+      revokeThisChat,
+    } = await seedPersonalMachineChat("selfhosted");
+    await allowThisChat();
+    expect((await swapActiveSandbox(services, ctx, machine.sandboxId)).swapped).toBe(true);
+    // The chat that opened the browser has lost its per-chat permission (it
+    // went idle, or another chat is cleaning up after it).
+    await revokeThisChat();
+    const agentGrant: AccessGrant = {
+      accountId,
+      workspaceId: targetWorkspaceId,
+      subjectId: `agent:${crypto.randomUUID()}`,
+      permissions: ["sessions:read", "sessions:write"],
+      principalKind: "agent_attempt",
+      metadata: {
+        sessionId: session.id,
+        turnId: ctx.attemptAuthority!.turnId,
+        attemptId: ctx.attemptAuthority!.attemptId,
+        executionGeneration: ctx.attemptAuthority!.executionGeneration,
+      },
+    };
+    const agentRequest = async (operation: "browser.end" | "computer.end" | "browser.action") =>
+      await withChannelA(
+        { db, settings, bus: services.bus as never },
+        {
+          accountId,
+          workspaceId: targetWorkspaceId,
+          session: (await getSession(db, targetWorkspaceId, session.id))!,
+          subjectId: agentGrant.subjectId,
+          grant: agentGrant,
+          operation,
+        },
+        async ({ service }) =>
+          await service.terminalExec({
+            command: "hostname",
+            cwd: "",
+            timeoutMs: 5_000,
+            emitStream: false,
+          }),
+      );
+
+    // Ending only stops what Opengeni already started there, so it still
+    // reaches the owner's machine.
+    expect(JSON.stringify(await agentRequest("browser.end"))).toContain("personal-cross-workspace");
+    expect(JSON.stringify(await agentRequest("computer.end"))).toContain(
+      "personal-cross-workspace",
+    );
+    // Anything else still needs the chat's permission.
+    await expect(agentRequest("browser.action")).rejects.toThrow();
+  }, 60_000);
+
   test("a backend:none session lists and attaches an owned Connected Machine without inventing a home box", async () => {
     if (!available) return;
     const { ctx, services, sandbox } = await seedFleet({
