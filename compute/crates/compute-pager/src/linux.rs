@@ -594,7 +594,9 @@ impl<S: Source> Pager<S> {
 
     /// Serves the VMM until `stopped` is set or the VMM disconnects,
     /// reporting [`Progress`] as it happens. Intended for a dedicated
-    /// thread, never an async executor's poll thread.
+    /// thread, never an async executor's poll thread. A recording window
+    /// still open when the VMM goes is reported then, so a VM that sleeps
+    /// again quickly still teaches the next wake what it touched.
     pub fn run(
         &mut self,
         stopped: &AtomicBool,
@@ -606,7 +608,7 @@ impl<S: Source> Pager<S> {
                 // The VMM can disappear between the last peer poll and COPY.
                 // ESRCH means its mm no longer exists, not a paging failure.
                 if error.raw_os_error() == Some(libc::ESRCH) {
-                    return Ok(());
+                    break;
                 }
                 return Err(error);
             }
@@ -629,8 +631,12 @@ impl<S: Source> Pager<S> {
                 Duration::from_millis(100)
             };
             if self.wait(timeout)? {
-                return Ok(());
+                break;
             }
+        }
+        if !self.recorded {
+            self.recorded = true;
+            progress(Progress::Recorded(&self.trace));
         }
         Ok(())
     }
