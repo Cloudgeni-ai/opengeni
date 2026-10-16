@@ -2393,6 +2393,7 @@ BEGIN
       EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid) TO %I', ${literal(role)});
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
+      'opengeni_private.list_subscription_plan_maintenance_accounts(integer)',
       'opengeni_private.list_exhausted_scheduled_tasks(integer)',
       'opengeni_private.list_scheduled_task_schedule_reconciliations(integer)',
       format('%I.scheduled_task_is_exhausted(uuid)', ${literal(schema)})

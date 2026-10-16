@@ -42,6 +42,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
   "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
 ] as const;
 
+export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
+  "list_subscription_plan_maintenance_accounts(integer)";
+
 /** Read-only maintenance work checks (migrations 0730 and 0732) and the claim
  * each one previews, which fixes its owner and runtime grant. */
 export const MAINTENANCE_WORK_PROBE_ROUTINES = [
@@ -3383,6 +3386,14 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const tableByName = new Map(posture.tables.map((table) => [table.name, table]));
+  if (
+    !options.protectedTables &&
+    !posture.privateRoutines.some(
+      (routine) => routine.name === SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE,
+    )
+  ) {
+    violations.push("subscription plan maintenance inventory is missing");
+  }
   const privateSchemaOwner = posture.schemas.find(
     (schema) => schema.name === "opengeni_private",
   )?.owner;
@@ -5607,6 +5618,19 @@ export function evaluateRuntimeDatabasePosture(
   for (const routine of posture.privateRoutines) {
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
+    }
+    if (routine.name === SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE) {
+      if (
+        !routine.execute ||
+        routine.publicExecute ||
+        !routine.securityDefiner ||
+        !routine.configuration?.includes("search_path=pg_catalog") ||
+        ["organization_plans", "plan_credit_periods", "credit_ledger_entries"].some(
+          (name) => routine.owner !== tableByName.get(name)?.owner,
+        )
+      ) {
+        violations.push("subscription plan maintenance inventory has unsafe capability posture");
+      }
     }
     if (
       routine.name === "list_pending_child_terminal_wake_repairs_v1(integer, uuid, uuid)" ||

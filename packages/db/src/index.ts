@@ -52,6 +52,7 @@ export {
 export { readCreditPromotionPolicy } from "./credit-promotion-policy";
 export * from "./subscription-plans";
 import { beginPlanCreditSettlement } from "./subscription-plans";
+export * from "./subscription-plan-maintenance";
 import {
   getBillingBalance,
   getSpendableCreditBalance,
