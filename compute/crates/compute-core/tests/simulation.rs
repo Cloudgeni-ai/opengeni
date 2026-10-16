@@ -270,7 +270,7 @@ impl World {
                         truth.unreported_losses -= 1;
                         self.losses += 1;
                     }
-                    Notice::Retrying { .. } | Notice::Broken => {}
+                    Notice::Retrying { .. } | Notice::Unsavable | Notice::Broken => {}
                 }
             }
         }
@@ -308,7 +308,7 @@ impl World {
             }
             match outcome {
                 Outcome::Done => truth.state = pending.step.apply(truth.state),
-                Outcome::Cancelled | Outcome::Failed(Failure::Transient) => {}
+                Outcome::Cancelled | Outcome::Failed(Failure::Transient | Failure::Unsavable) => {}
                 Outcome::Failed(Failure::Untrusted) => {
                     truth.settle(truth.state.without_saved_copies());
                 }

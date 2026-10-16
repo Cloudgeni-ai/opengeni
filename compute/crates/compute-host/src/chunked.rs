@@ -241,18 +241,19 @@ impl Chunked {
         }
     }
 
-    /// Stores `path` and returns its manifest's digest. With `known`, the
-    /// file's per-chunk hashes, chunks equal to the earlier copy's are taken
-    /// from it without being read, and every chunk read is checked against
-    /// its hash.
+    /// Stores `file`, opened from `path`, and returns its manifest's digest.
+    /// With `known`, the file's per-chunk hashes, chunks equal to the
+    /// earlier copy's are taken from it without being read, and every chunk
+    /// read is checked against its hash.
     async fn put_file(
         &self,
         path: &Path,
+        file: io::Result<File>,
         earlier: HashMap<u64, ChunkRef>,
         known: Option<Arc<Vec<Hash>>>,
     ) -> Result<String, EngineError> {
         const OP: &str = "archive";
-        let file = File::open(path).map_err(|error| EngineError::io(OP, error))?;
+        let file = file.map_err(|error| EngineError::io(OP, error))?;
         let length = file
             .metadata()
             .map_err(|error| EngineError::io(OP, error))?
@@ -428,14 +429,19 @@ impl Store for Chunked {
             self.earlier(memory_before.map(|memory| memory.state.as_str())),
             self.earlier(memory_before.map(|memory| memory.memory.as_str())),
         );
-        let disk = self.put_file(&files.disk, disk_before, None);
+        let disk = self.put_file(files.disk.path(), files.disk.open(), disk_before, None);
         let memory = async {
             let Some(image) = &files.memory else {
                 return Ok(None);
             };
             let (state, memory) = tokio::try_join!(
-                self.put_file(&image.state, state_before, None),
-                self.put_file(&image.memory, memory_before, image.chunks.clone()),
+                self.put_file(&image.state, File::open(&image.state), state_before, None),
+                self.put_file(
+                    &image.memory,
+                    File::open(&image.memory),
+                    memory_before,
+                    image.chunks.clone()
+                ),
             )?;
             Ok(Some(MemoryHead { state, memory }))
         };

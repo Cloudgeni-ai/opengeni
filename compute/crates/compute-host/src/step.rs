@@ -32,14 +32,14 @@ use compute_engine::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::image::{Generation, Images, Parts, Suspect, Verified};
+use crate::image::{Images, Parts, Suspect, Verified};
 use crate::layout::{Paths, link_kernel, remove_durably, remove_if_present, write_atomic};
 #[cfg(target_os = "linux")]
 use crate::lazy::{ChunkSource, Fetcher, Hydration, Memory, Paging, WakeProfile};
 use crate::protocol::Id;
 use crate::restore_notice::tell_restored;
-use crate::state::{Change, Disk, Record, Records, StateError};
-use crate::store::{FetchInto, FetchedMemory, Receipt, SavedFiles, SavedImage, Store};
+use crate::state::{Change, Disk, Record, Records, StateError, apply};
+use crate::store::{FetchInto, FetchedMemory, JailedFile, Receipt, SavedFiles, SavedImage, Store};
 
 /// How long a restore waits for the guest to acknowledge the restore notice.
 /// A guest that listens answers in about a millisecond.
@@ -48,58 +48,14 @@ const NOTICE_TIMEOUT: Duration = Duration::from_millis(250);
 /// Longest a wake waits for its learned working set before resuming the
 /// guest anyway; whatever is missing then arrives on demand.
 const PREFETCH_LIMIT: Duration = Duration::from_secs(5);
+/// How long a step first waits before trying again to settle a record
+/// whose last write has an unknown fate, and the longest it waits between
+/// tries.
+const SETTLE_RETRY: (Duration, Duration) = (Duration::from_millis(50), Duration::from_secs(5));
 
-/// What the VM's memory equals, page for page, apart from what it changed
-/// since: what a diff snapshot is relative to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Base {
-    /// All zeros: a VM booted fresh.
-    Zero,
-    /// A published image generation.
-    Image(Generation),
-    /// Unknown, for example after a failed snapshot or merge: the next
-    /// snapshot must hold every page.
-    Unknown,
-}
+mod live;
 
-/// What backs a live VM's memory.
-#[derive(Debug)]
-pub(crate) struct LiveMemory {
-    pub base: Base,
-    /// The pager thread serving its memory, if a pager does.
-    #[cfg(target_os = "linux")]
-    pub paging: Option<Paging>,
-}
-
-impl LiveMemory {
-    pub fn booted() -> Self {
-        Self {
-            base: Base::Zero,
-            #[cfg(target_os = "linux")]
-            paging: None,
-        }
-    }
-
-    /// A VM found running after an agent restart: what its memory is based
-    /// on is unknown.
-    pub fn adopted() -> Self {
-        Self {
-            base: Base::Unknown,
-            #[cfg(target_os = "linux")]
-            paging: None,
-        }
-    }
-
-    /// Resolves if the VM's memory can no longer be served, so the VM must
-    /// be stopped.
-    pub fn failed(&self) -> impl Future<Output = ()> + Send + 'static {
-        #[cfg(target_os = "linux")]
-        if let Some(paging) = &self.paging {
-            return futures::future::Either::Left(paging.failed());
-        }
-        futures::future::Either::Right(std::future::pending())
-    }
-}
+pub(crate) use live::{Base, DiskWatch, LiveMemory};
 
 /// A VM process the host owns.
 #[derive(Debug)]
@@ -297,6 +253,26 @@ impl<E: Engine, S: Store> Job<E, S> {
                 self.live.take().map_or(After::NoVm, After::Kept),
             );
         }
+        // Every decision below reads the record, which must be what its
+        // file durably says: a write whose fate was unknown may have been
+        // lost, and acting on it could run or drop a VM against a record
+        // that a crash would take back.
+        match self.records.settle(self.id).await {
+            Ok(durable) if durable == self.record => {}
+            Ok(durable) => {
+                tracing::warn!(id = %self.id, issued = %self.record.fence(), durable = %durable.fence(), "record changed before the step began");
+                return (
+                    Outcome::Failed(Failure::Transient),
+                    self.live.take().map_or(After::NoVm, After::Kept),
+                );
+            }
+            Err(error) => {
+                return (
+                    state_failure(&error),
+                    self.live.take().map_or(After::NoVm, After::Kept),
+                );
+            }
+        }
         match step {
             Step::Pause | Step::Resume | Step::Compress | Step::Save | Step::Drop => {
                 let Some(live) = self.live.take() else {
@@ -328,13 +304,48 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
-    /// Records `change` against the version this step last saw.
+    /// Records `change` against the version this step last saw. A write
+    /// whose fate is unknown is settled before this returns: it either
+    /// landed durably, which counts as success, or durably did not, which
+    /// is a plain I/O failure that changed nothing. Until one of the two is
+    /// established the step waits, trying again with backoff, and touches
+    /// nothing: an unknown fate says nothing about the sandbox's copies,
+    /// so it is never taken as their loss.
     async fn commit(&mut self, change: Change) -> Result<(), StateError> {
-        self.record = self
-            .records
-            .commit(self.id, self.record.fence(), change)
-            .await?;
-        Ok(())
+        let before = self.record.clone();
+        let failed = match self.records.commit(self.id, before.fence(), change).await {
+            Ok(record) => {
+                self.record = record;
+                return Ok(());
+            }
+            Err(StateError::Io(error)) => error,
+            Err(error) => return Err(error),
+        };
+        let intended = apply(self.id, Some(&before), before.fence(), change);
+        let (mut wait, longest) = SETTLE_RETRY;
+        loop {
+            match self.records.settle(self.id).await {
+                Ok(durable) if durable == before => return Err(StateError::Io(failed)),
+                Ok(durable) if matches!(&intended, Ok(Some(next)) if *next == durable) => {
+                    self.record = durable;
+                    return Ok(());
+                }
+                // Only this step changes the record while it runs.
+                Ok(durable) => {
+                    return Err(StateError::Stale {
+                        id: self.id,
+                        expected: before.fence(),
+                        found: durable.fence(),
+                    });
+                }
+                Err(StateError::Io(error)) => {
+                    tracing::warn!(id = %self.id, %error, ?wait, "record write has an unknown fate; the step waits with every copy as it is");
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(longest);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     #[allow(clippy::unused_self)]
@@ -445,6 +456,13 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
             Err(error) => {
                 live.memory.base = Base::Unknown;
+                if live.memory.disk.failed() {
+                    // No snapshot of this VM can be trusted again. It keeps
+                    // running, pausing and waking from memory until a new
+                    // process replaces it.
+                    tracing::error!(id = %self.id, %error, "the VM cannot be saved");
+                    return (Outcome::Failed(Failure::Unsavable), After::Kept(live));
+                }
                 return (failure(&error), After::Kept(live));
             }
         }
@@ -506,21 +524,31 @@ impl<E: Engine, S: Store> Job<E, S> {
             SnapshotKind::Diff
         };
         let files = diff_files(&self.paths);
+        // The VMM syncs the disk while it takes the snapshot, so the check
+        // that vouches for the disk starts first.
+        let starting = Arc::clone(&live.memory.disk);
+        // A failed watch is final, which the caller finds on it.
+        blocking(move || starting.begin())
+            .await
+            .and_then(|begun| begun)
+            .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?;
         let started = Instant::now();
         // From here on the VM's dirty pages are being reset: any failure
         // leaves its base unknown.
         live.memory.base = Base::Unknown;
         self.engine.snapshot(&live.vm, &files, kind).await?;
         let snapshot = started.elapsed();
-        let (scratch, disk) = (self.paths.dir.join("saving"), self.paths.disk.clone());
+        let scratch = self.paths.dir.join("saving");
+        let watching = Arc::clone(&live.memory.disk);
         let published = blocking(move || {
             // The VMM wrote these inside its jail, where it could have put
             // links instead: they move somewhere only the host reaches and
             // must prove to be plain files before anything reads them.
             let files = take_written(&files, &scratch)?;
             // The image is only good with the disk as it was when the
-            // snapshot was taken, so the disk must be durable first.
-            sync_jailed(&disk)?;
+            // snapshot was taken, so the disk must be durable first, with
+            // nothing written since the VM started lost on the way.
+            watching.sync()?;
             let parts = match base {
                 Base::Image(generation) if kind == SnapshotKind::Diff => Parts::Diff {
                     base: generation,
@@ -579,7 +607,15 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
             Err(error) => return (io_failure(OP, error), After::NoVm),
         };
-        let (memory, live_memory) = match self.memory_source(&images, &image) {
+        let paths = self.paths.clone();
+        let watch = match blocking(move || DiskWatch::fresh(&paths))
+            .await
+            .and_then(|opened| opened)
+        {
+            Ok(watch) => watch,
+            Err(error) => return (io_failure(OP, error), After::NoVm),
+        };
+        let (memory, live_memory) = match self.memory_source(&images, &image, watch) {
             Ok(prepared) => prepared,
             Err(error) => return (failure(&error), After::NoVm),
         };
@@ -590,6 +626,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         let vm = match self.engine.restore(&self.spec, &files).await {
             Ok(vm) => {
                 self.launches += 1;
+                self.hold_watch(&vm, &live_memory.disk).await;
                 vm
             }
             Err(error) => {
@@ -700,6 +737,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         &self,
         images: &Images,
         image: &Verified,
+        disk: DiskWatch,
     ) -> Result<(MemorySource, LiveMemory), EngineError> {
         const OP: &str = "restore";
         let paths = &self.paths;
@@ -711,6 +749,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             base: Base::Image(generation),
             #[cfg(target_os = "linux")]
             paging: None,
+            disk: Arc::new(disk),
         };
         if !image.meta().remote && !profile.needs_pager() {
             link(&images.memory(generation), &paths.snapshot.memory).map_err(io)?;
@@ -818,6 +857,20 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
+    /// Has the engine keep the description `watch` syncs for as long as
+    /// `vm` lives, so a later agent can still vouch for the disk; see
+    /// `DiskWatch`. Without it, a later agent never saves the VM.
+    async fn hold_watch(&self, vm: &E::Vm, watch: &DiskWatch) {
+        let held = match watch.description() {
+            Ok(Some(description)) => self.engine.hold(vm, description).await,
+            Ok(None) => return,
+            Err(error) => Err(EngineError::io("hold", error)),
+        };
+        if let Err(error) = held {
+            tracing::warn!(id = %self.id, %error, "disk watch not kept beyond this agent; a later one will not save this VM");
+        }
+    }
+
     /// Boot fresh from the disk; any old memory image is meaningless now.
     async fn boot(&mut self) -> (Outcome, After<E::Vm>) {
         let fresh = Change::new().image(false).archived(false).execution();
@@ -828,16 +881,21 @@ impl<E: Engine, S: Store> Job<E, S> {
         // Linked now rather than at creation, so a kernel upgrade reaches
         // every sandbox's next boot. No VMM of this sandbox runs meanwhile.
         let (kernel, paths) = (self.kernel.clone(), self.paths.clone());
-        let linked = blocking(move || link_kernel(&kernel, &paths))
-            .await
-            .and_then(|linked| linked);
-        if let Err(error) = linked {
-            return (io_failure("boot", error), After::NoVm);
-        }
+        let prepared = blocking(move || {
+            link_kernel(&kernel, &paths)?;
+            DiskWatch::fresh(&paths)
+        })
+        .await
+        .and_then(|prepared| prepared);
+        let watch = match prepared {
+            Ok(watch) => watch,
+            Err(error) => return (io_failure("boot", error), After::NoVm),
+        };
         match self.engine.boot(&self.spec).await {
             Ok(vm) => {
                 self.launches += 1;
-                (Outcome::Done, After::New(vm, LiveMemory::booted()))
+                self.hold_watch(&vm, &watch).await;
+                (Outcome::Done, After::New(vm, LiveMemory::booted(watch)))
             }
             Err(error) => {
                 self.launches += u32::from(error.launched);
@@ -891,7 +949,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
         let profile = wake_profile(&self.paths);
         let files = SavedFiles {
-            disk: self.paths.disk.clone(),
+            disk: JailedFile::new(&self.paths.disk),
             memory: memory.as_ref().map(|(image, chunks)| SavedImage {
                 state: images.state(image.generation()),
                 memory: images.memory(image.generation()),
@@ -1119,28 +1177,6 @@ fn take_written(files: &SnapshotFiles, scratch: &Path) -> io::Result<SnapshotFil
     Ok(taken)
 }
 
-/// Flushes a file in a VM's jail to disk without following a link or
-/// blocking on a pipe the VMM might have put in its place.
-fn sync_jailed(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::FileTypeExt;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    crate::layout::failpoint(path, "sync")?;
-    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(flags.bits().cast_signed())
-        .open(path)?;
-    let kind = file.metadata()?.file_type();
-    if !kind.is_file() || kind.is_fifo() {
-        return Err(io::Error::other(format!(
-            "{} is not a regular file",
-            path.display()
-        )));
-    }
-    file.sync_all()
-}
-
 /// Deletes the sandbox's local disk, memory images and snapshot files.
 pub(crate) async fn clear_local(paths: &Paths) -> io::Result<()> {
     let paths = paths.clone();
@@ -1167,61 +1203,4 @@ fn drop_snapshot(paths: &Paths) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn written(jail: &Path) -> SnapshotFiles {
-        SnapshotFiles {
-            state: jail.join("save.state"),
-            memory: jail.join("save.mem"),
-        }
-    }
-
-    #[test]
-    fn snapshot_outputs_must_be_plain_files_of_their_own() {
-        let dir = tempfile::tempdir().unwrap();
-        let (jail, scratch) = (dir.path().join("jail"), dir.path().join("saving"));
-        fs::create_dir(&jail).unwrap();
-        let secret = dir.path().join("secret");
-        fs::write(&secret, "host only").unwrap();
-        let files = written(&jail);
-
-        fs::write(&files.state, "state").unwrap();
-        fs::write(&files.memory, "memory").unwrap();
-        let taken = take_written(&files, &scratch).unwrap();
-        assert_eq!(fs::read_to_string(&taken.memory).unwrap(), "memory");
-        assert!(!files.memory.exists());
-
-        // A link to a host file, by name or by inode, is refused.
-        fs::write(&files.state, "state").unwrap();
-        std::os::unix::fs::symlink(&secret, &files.memory).unwrap();
-        assert!(take_written(&files, &scratch).is_err());
-        // The refused link was moved out of the jail with the rest.
-        assert!(fs::symlink_metadata(&files.memory).is_err());
-        fs::hard_link(&secret, &files.memory).unwrap();
-        fs::write(&files.state, "state").unwrap();
-        assert!(take_written(&files, &scratch).is_err());
-        assert_eq!(fs::read_to_string(&secret).unwrap(), "host only");
-    }
-
-    #[test]
-    fn syncing_a_jailed_file_follows_no_link_and_opens_no_pipe() {
-        let dir = tempfile::tempdir().unwrap();
-        let disk = dir.path().join("disk.ext4");
-        fs::write(&disk, "disk").unwrap();
-        sync_jailed(&disk).unwrap();
-
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&disk, &link).unwrap();
-        assert!(sync_jailed(&link).is_err());
-
-        let pipe = dir.path().join("pipe");
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &pipe,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
-        assert!(sync_jailed(&pipe).is_err(), "a pipe must not block or pass");
-    }
-}
+mod tests;

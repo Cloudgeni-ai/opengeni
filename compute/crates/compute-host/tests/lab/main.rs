@@ -15,7 +15,7 @@
 //! `bare-metal`, when unset; `nested` needs a reserved 2 MiB page pool).
 
 use std::collections::BTreeMap;
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{IpAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -30,6 +30,8 @@ use compute_host::protocol::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep, timeout};
+
+mod spoofing;
 
 const PORT: u32 = 52;
 
@@ -484,13 +486,25 @@ async fn wake_and_check_state(client: &Client, ids: &[Id]) -> BTreeMap<Kind, Vec
 
 /// The host's addresses guests must not reach, with a listener on each so a
 /// connection would succeed if the firewall let it through.
-fn host_addresses() -> Vec<Ipv4Addr> {
+fn host_addresses() -> Vec<IpAddr> {
     let output = Command::new("hostname").arg("-I").output().unwrap();
     String::from_utf8_lossy(&output.stdout)
         .split_whitespace()
         .filter_map(|address| address.parse().ok())
         .collect()
 }
+
+/// `address:port`, with an IPv6 address in brackets.
+fn target(address: IpAddr, port: u16) -> String {
+    match address {
+        IpAddr::V4(address) => format!("{address}:{port}"),
+        IpAddr::V6(address) => format!("[{address}]:{port}"),
+    }
+}
+
+/// The link-local address of each sandbox's gateway, which every tap
+/// derives from the MAC they all share.
+const GATEWAY_LINK_LOCAL: &str = "fe80::400:a9ff:fefe:16%eth0";
 
 /// The inner end of the second sandbox's link, inside its namespace.
 const NEIGHBOUR_INNER: &str = "198.18.0.3";
@@ -540,59 +554,133 @@ impl Drop for NamespaceListener {
 }
 
 /// Every destination a guest must never reach, whatever the host's trust:
-/// the cloud metadata service, each host address, the host's end of a
-/// sandbox link, and a listening address inside another sandbox's
-/// namespace.
+/// the cloud metadata service (also as an IPv4-mapped IPv6 address), each
+/// host address, the host's end of a sandbox link, a listening address
+/// inside another sandbox's namespace, the gateway's IPv6 link-local
+/// address and the IPv6 internet.
 fn forbidden(port: u16) -> Vec<String> {
-    let mut blocked: Vec<String> = vec!["169.254.169.254:80".into()];
+    let mut blocked: Vec<String> = vec![
+        "169.254.169.254:80".into(),
+        "[::ffff:169.254.169.254]:80".into(),
+    ];
     blocked.extend(
         host_addresses()
-            .iter()
-            .map(|address| format!("{address}:{port}")),
+            .into_iter()
+            .map(|address| target(address, port)),
     );
     blocked.push(format!("198.18.0.0:{port}"));
     blocked.push(format!("{NEIGHBOUR_INNER}:{port}"));
+    blocked.push(format!("[{GATEWAY_LINK_LOCAL}]:{port}"));
+    blocked.push("[2606:4700:4700::1111]:80".into());
     blocked
 }
 
-/// A guest script line probing each of `targets`, printing
-/// `target open|refused|timeout micros` per target: how the connection
-/// attempt ended, which unlike its duration does not depend on how busy
-/// the guest is.
+/// Connects to each target given after the source address (`-` for the
+/// guest's own) and prints `target outcome micros`: `open`, `timeout`, or
+/// the name of the error the attempt failed with.
+const PROBE: &str = r#"
+import errno, socket, sys, time
+source = sys.argv[1]
+for target in sys.argv[2:]:
+    host, port = target.rsplit(":", 1)
+    host = host.strip("[]")
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    s = socket.socket(family)
+    s.settimeout(3)
+    started = time.monotonic_ns()
+    try:
+        if source != "-":
+            s.bind((source, 0))
+        s.connect(socket.getaddrinfo(host, int(port), family)[0][4])
+        outcome = "open"
+    except socket.timeout:
+        outcome = "timeout"
+    except OSError as error:
+        outcome = errno.errorcode.get(error.errno, str(error.errno))
+    print(target, outcome, (time.monotonic_ns() - started) // 1000, flush=True)
+    s.close()
+"#;
+
+/// A guest command probing each of `targets` from the guest's own address;
+/// see [`PROBE`]. How each attempt ended, unlike its duration, does not
+/// depend on how busy the guest is.
 fn probe_script(targets: &[String]) -> String {
-    format!(
-        "for t in {}; do s=$(date +%s%N); timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*}}/${{t#*:}}\" 2>/dev/null; c=$?; if [ $c = 0 ]; then r=open; elif [ $c = 124 ]; then r=timeout; else r=refused; fi; echo $t $r $(( ($(date +%s%N) - s) / 1000 )); done",
-        targets.join(" ")
-    )
+    probe_from("-", targets)
+}
+
+/// Like [`probe_script`], with connections made from `source`.
+fn probe_from(source: &str, targets: &[String]) -> String {
+    format!("python3 -c '{PROBE}' {source} {}", targets.join(" "))
+}
+
+/// How a blocked IPv4 TCP connection must end: the firewall's reset. Any
+/// other failure (a timeout, an unreachable network) would not show that
+/// the firewall, and not something on the way, stopped it.
+const REFUSED: &str = "ECONNREFUSED";
+
+/// Whether `outcome` is a blocked connection to `target` failing as it
+/// should. IPv4 attempts must meet the firewall's reset; guests have no
+/// IPv6 route beyond their link, so IPv6 attempts may also fail before
+/// leaving the guest or meet the firewall's ICMP refusal. Nothing may be
+/// left to time out, as a dropped packet would be, except a link-local
+/// address: IPv6 is off in the sandbox's namespace, so neighbour discovery
+/// goes unanswered and gives up after about as long as a probe waits.
+fn blocked_as_expected(target: &str, outcome: &str) -> bool {
+    const V6_FAILURES: [&str; 5] = [
+        "ECONNREFUSED",
+        "ENETUNREACH",
+        "EHOSTUNREACH",
+        "EACCES",
+        "EADDRNOTAVAIL",
+    ];
+    let mapped_v4 = target.starts_with("[::ffff:");
+    if target.starts_with("[fe80:") {
+        outcome == "timeout" || V6_FAILURES.contains(&outcome)
+    } else if target.starts_with('[') && !mapped_v4 {
+        V6_FAILURES.contains(&outcome)
+    } else {
+        outcome == REFUSED
+    }
 }
 
 /// Checks that `lines` hold one row per target, in order: those in `open`
-/// connected, every other one was refused (a reset or ICMP error), never
-/// left to time out as a dropped packet would be. Returns the refusal times
-/// in milliseconds.
-fn check_probes(context: &str, lines: &[&str], targets: &[String], open: &[&str]) -> Vec<f64> {
+/// connected, every other one failed as [`blocked_as_expected`] says.
+/// Returns the refusal times in milliseconds and how often each outcome
+/// was seen.
+fn check_probes(
+    context: &str,
+    lines: &[&str],
+    targets: &[String],
+    open: &[&str],
+) -> (Vec<f64>, BTreeMap<String, usize>) {
     assert_eq!(
         lines.len(),
         targets.len(),
         "{context}: missing probe rows: {lines:?}"
     );
     let mut refusals = Vec::new();
+    let mut outcomes = BTreeMap::new();
     for (line, target) in lines.iter().zip(targets) {
         let fields: Vec<&str> = line.split_whitespace().collect();
         assert_eq!(fields.first(), Some(&target.as_str()), "{context}: {line}");
-        let expected = if open.contains(&target.as_str()) {
-            "open"
-        } else {
-            "refused"
-        };
-        assert_eq!(fields.get(1), Some(&expected), "{context}: {line}");
-        if expected == "refused" {
-            let micros: u64 = fields[2].parse().unwrap();
-            #[allow(clippy::cast_precision_loss)]
-            refusals.push(micros as f64 / 1e3);
+        let outcome = fields.get(1).copied().unwrap_or_default();
+        *outcomes.entry(outcome.to_owned()).or_default() += 1;
+        if open.contains(&target.as_str()) {
+            assert_eq!(outcome, "open", "{context}: {line}");
+            continue;
         }
+        assert!(
+            blocked_as_expected(target, outcome),
+            "{context}: {target} was not blocked as expected: {line}"
+        );
+        if outcome == "timeout" {
+            continue;
+        }
+        let micros: u64 = fields[2].parse().unwrap();
+        #[allow(clippy::cast_precision_loss)]
+        refusals.push(micros as f64 / 1e3);
     }
-    refusals
+    (refusals, outcomes)
 }
 
 /// Every restored guest reaches the internet with its very first
@@ -607,8 +695,7 @@ async fn restored_guests_reach_the_internet_at_once_and_nothing_else() {
     let count = count().max(2);
     // Something to reach on every host address and on the sandboxes' link
     // addresses, which are the host's too.
-    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = listen_everywhere();
     std::thread::spawn(move || for _ in listener.incoming() {});
     let host = Host::new(&lab, "net", &["--network"]);
     let agent = host.start().await;
@@ -632,7 +719,7 @@ async fn restored_guests_reach_the_internet_at_once_and_nothing_else() {
                 .all(|sandbox| sandbox.level == LevelName::Saved && sandbox.step.is_none())
         })
         .await;
-    let _neighbour = NamespaceListener::start(id(1), NEIGHBOUR_INNER, port);
+    let neighbour = NamespaceListener::start(id(1), NEIGHBOUR_INNER, port);
 
     let blocked = forbidden(port);
     // The first command after the restore is the outbound connection, then
@@ -657,6 +744,7 @@ if getent hosts example.com >/dev/null; then echo dns ok; else echo dns-failed; 
     let mut second_connect_ms = Vec::new();
     let mut wake_ms = Vec::new();
     let mut refusal_ms = Vec::new();
+    let mut outcomes: BTreeMap<String, usize> = BTreeMap::new();
     while let Some(done) = wakes.join_next().await {
         let (sandbox, (output, waited)) = done.unwrap();
         let lines: Vec<&str> = output.lines().collect();
@@ -675,7 +763,11 @@ if getent hosts example.com >/dev/null; then echo dns ok; else echo dns-failed; 
         assert_eq!(lines.get(2).copied(), Some("dns ok"), "{sandbox}: {output}");
         wake_ms.push(waited.as_secs_f64() * 1e3);
         let context = format!("sandbox {sandbox}");
-        refusal_ms.extend(check_probes(&context, &lines[3..], &blocked, &[]));
+        let (refusals, seen) = check_probes(&context, &lines[3..], &blocked, &[]);
+        refusal_ms.extend(refusals);
+        for (outcome, times) in seen {
+            *outcomes.entry(outcome).or_default() += times;
+        }
     }
     let total = started.elapsed();
     save_results(
@@ -689,11 +781,24 @@ if getent hosts example.com >/dev/null; then echo dns ok; else echo dns-failed; 
             "second_outbound_connect_ms": summary(&second_connect_ms),
             "blocked_refusal_ms": summary(&refusal_ms),
             "blocked_refusals_over_100ms": refusal_ms.iter().filter(|ms| **ms > 100.0).count(),
+            "blocked_outcomes": outcomes,
         }),
     );
+    // A process inside a namespace keeps it, and its link, alive, so
+    // removing that sandbox would wait for it.
+    drop(neighbour);
     agent.remove_all().await;
     agent.kill();
     host.finish(&format!("network-restore-{count}"));
+}
+
+/// A TCP listener on every host address, IPv4 and IPv6, and its port.
+fn listen_everywhere() -> (TcpListener, u16) {
+    let listener = TcpListener::bind("[::]:0")
+        .or_else(|_| TcpListener::bind("0.0.0.0:0"))
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
 }
 
 /// On a trusted host guests reach the local network; on any other host the
@@ -708,8 +813,7 @@ async fn only_trusted_hosts_let_guests_reach_the_local_network() {
         return;
     };
     let lan = target.to_string_lossy().into_owned();
-    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = listen_everywhere();
     std::thread::spawn(move || for _ in listener.incoming() {});
     let mut targets = vec![lan.clone()];
     targets.extend(forbidden(port));
@@ -730,6 +834,7 @@ async fn only_trusted_hosts_let_guests_reach_the_local_network() {
         let lines: Vec<&str> = output.lines().collect();
         let open: &[&str] = if trusted { &[lan.as_str()] } else { &[] };
         check_probes(&format!("trusted={trusted}"), &lines, &targets, open);
+        spoofing::check_spoofing(&agent.client, &targets, &lan, trusted).await;
         drop(neighbour);
         agent.remove_all().await;
         agent.kill();

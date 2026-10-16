@@ -31,7 +31,7 @@ use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
 use crate::protocol::{HostStatus, Id, SandboxConfig, StepStats};
-use crate::state::{Record, Records, StateError, lock_exclusive};
+use crate::state::{Record, Records, StateError, claim_host};
 use crate::step::{After, Live};
 use crate::store::Store;
 
@@ -40,6 +40,15 @@ mod recover;
 mod requests;
 mod sample;
 mod steps;
+
+/// Takes the host's lock at `path` for state root `root`; see
+/// [`HostConfig::host_lock`].
+async fn claim(path: PathBuf, root: PathBuf) -> Result<std::fs::File, HostError> {
+    tokio::task::spawn_blocking(move || claim_host(&path, &root, HANDOVER))
+        .await
+        .map_err(|error| HostError::Io(error.to_string()))?
+        .map_err(HostError::from)
+}
 
 /// How long a starting agent waits for the previous one to let go of the
 /// state root.
@@ -86,8 +95,11 @@ pub struct HostConfig {
     pub can_compress: bool,
     /// A lock file every agent on this host takes, whatever its state root:
     /// user ids, sandbox networks and firewall rules are the host's, so one
-    /// agent at a time may hand them out. `None` only where no two agents
-    /// can meet, as in tests with fake VMs.
+    /// agent at a time may hand them out. The file also names the state root
+    /// they belong to: an agent of another root is refused while that root
+    /// still has sandboxes, whose VMs may outlive their agent. Work an agent
+    /// leaves in flight when it ends keeps the lock until it finishes. `None`
+    /// only where no two agents can meet, as in tests with fake VMs.
     pub host_lock: Option<PathBuf>,
 }
 
@@ -318,7 +330,8 @@ enum Event<V> {
     },
     Destroyed {
         id: Id,
-        ordinal: u32,
+        /// The ordinal it held, when known.
+        ordinal: Option<u32>,
         result: Result<(), HostError>,
     },
     /// Everything a VM process of `id` left behind is released.
@@ -439,6 +452,14 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// refused and their files and VMs left alone.
     blocked: BTreeMap<SandboxId, String>,
     destroying: HashMap<SandboxId, Vec<Reply<()>>>,
+    /// Blocked sandboxes whose record is gone but whose files a removal
+    /// could not finish deleting, with the ordinal they still hold if
+    /// known. Removing one again retries.
+    leftovers: HashMap<SandboxId, Option<u32>>,
+    /// Blocked sandboxes with an unreadable record whose ordinal is
+    /// unknown. Any new sandbox could clash with one, so none is created
+    /// while there are any.
+    unknown_ordinals: BTreeSet<SandboxId>,
     /// Dead VM processes of each sandbox still being torn down. Nothing new
     /// starts for a sandbox until its count is back to zero, so no teardown
     /// ever removes files of a newer VM.
@@ -448,8 +469,6 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Stops teardowns retrying once the agent ends; the next agent
     /// finishes them.
     shutdown: CancellationToken,
-    /// The host-wide lock, held for the agent's life.
-    _host_lock: Option<std::fs::File>,
     commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedReceiver<Event<E::Vm>>,
     events_tx: mpsc::UnboundedSender<Event<E::Vm>>,
@@ -515,14 +534,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             network.check().map_err(HostError::Invalid)?;
         }
         let host_lock = match config.host_lock.clone() {
-            Some(path) => Some(
-                tokio::task::spawn_blocking(move || lock_exclusive(&path, HANDOVER))
-                    .await
-                    .map_err(|error| HostError::Io(error.to_string()))??,
-            ),
+            Some(path) => Some(claim(path, config.root.clone()).await?),
             None => None,
         };
-        let (records, strays) = Records::open(config.root.clone(), HANDOVER).await?;
+        let (records, strays) = Records::open(config.root.clone(), HANDOVER, host_lock).await?;
         let images = Images {
             kernel: config.kernel,
             boot_args: match &config.network {
@@ -580,10 +595,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             ordinals: BTreeSet::new(),
             blocked: BTreeMap::new(),
             destroying: HashMap::new(),
+            leftovers: HashMap::new(),
+            unknown_ordinals: BTreeSet::new(),
             tearing_down: HashMap::new(),
             teardowns: tokio::task::JoinSet::new(),
             shutdown: CancellationToken::new(),
-            _host_lock: host_lock,
             commands,
             events,
             events_tx,

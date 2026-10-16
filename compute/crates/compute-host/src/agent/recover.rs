@@ -10,8 +10,8 @@ use futures::StreamExt;
 
 use crate::layout::{Images, Paths, vm_spec};
 use crate::protocol::Id;
-use crate::state::{Change, Disk, Record, Stray};
-use crate::step::LiveMemory;
+use crate::state::{Change, Disk, Record, StateError, Stray};
+use crate::step::{DiskWatch, LiveMemory};
 use crate::store::Store;
 
 use super::{HostAgent, HostError};
@@ -33,6 +33,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                             stray.id,
                             format!("unrecorded directory left behind: {error}"),
                         );
+                        // Removing the id again retries.
+                        self.leftovers.insert(stray.id.0, None);
                     }
                 }
                 Some(problem) => {
@@ -40,8 +42,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     // behind the host link its ordinal names: no other
                     // sandbox may get that ordinal.
                     let ordinal = self.unreadable_ordinal(stray.id).await;
-                    if let Some(ordinal) = ordinal {
-                        self.ordinals.insert(ordinal);
+                    match ordinal {
+                        Some(ordinal) => {
+                            self.ordinals.insert(ordinal);
+                        }
+                        // Any new sandbox could get it: none is created
+                        // until someone resolves this one.
+                        None => {
+                            self.unknown_ordinals.insert(stray.id.0);
+                        }
                     }
                     tracing::error!(id = %stray.id, %problem, ?ordinal, "unreadable record; blocking the id and leaving the sandbox alone");
                     self.block(stray.id, problem.to_string());
@@ -49,13 +58,24 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         }
         let mut recovering = Vec::new();
-        for record in self.records.all() {
+        for (record, settled) in self.settle_records().await {
             let id = record.id;
             if !self.ordinals.insert(record.ordinal) {
                 tracing::error!(%id, ordinal = record.ordinal, "ordinal taken twice; leaving the sandbox on disk");
                 self.block(id, format!("ordinal {} is taken twice", record.ordinal));
                 continue;
             }
+            // Nothing is done for a sandbox, not even looking at its VM,
+            // before its record is known to be durable: a crash could
+            // still bring back an older one.
+            let record = match settled {
+                Ok(record) => record,
+                Err(error) => {
+                    tracing::error!(%id, %error, "record not known to be durable; blocking the sandbox and leaving it alone");
+                    self.block(id, format!("record not known to be durable: {error}"));
+                    continue;
+                }
+            };
             if record.removing {
                 self.remove_recorded(&record, None, Vec::new());
                 continue;
@@ -96,6 +116,21 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             blocked = self.blocked.len(),
             "recovered"
         );
+    }
+
+    /// Every record as found, with what its file durably holds or why that
+    /// is unknown. Each sandbox's own directory is synced, so they are
+    /// settled all at once.
+    async fn settle_records(&self) -> Vec<(Record, Result<Record, StateError>)> {
+        const CONCURRENT: usize = 64;
+        futures::stream::iter(self.records.all())
+            .map(|found| async move {
+                let settled = self.records.settle(found.id).await;
+                (found, settled)
+            })
+            .buffer_unordered(CONCURRENT)
+            .collect()
+            .await
     }
 
     /// Stops managing sandbox `id` for now: requests for it fail with
@@ -185,7 +220,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Some(net) = self.net.clone() else {
             return Ok(());
         };
-        tokio::task::spawn_blocking(move || net.remove_for(id))
+        tokio::task::spawn_blocking(move || net.remove(id, None))
             .await
             .map_err(|error| HostError::Io(error.to_string()))?
             .map_err(|error| HostError::Io(error.to_string()))
@@ -225,11 +260,25 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             (self.sleeping_state(&record, &paths).await?, None)
         };
         let adopted = vm.is_some();
+        // Taken back before the agent can ask the VMM to sync the disk, so
+        // it sees what the disk lost while no agent watched; see
+        // `DiskWatch`.
+        let watch = match &vm {
+            Some(vm) => {
+                let held = self.engine.held(vm).await.unwrap_or_else(|error| {
+                    tracing::warn!(%id, %error, "could not take back the disk watch");
+                    None
+                });
+                Some(DiskWatch::adopt(&paths, held))
+            }
+            None => None,
+        };
+        let unsavable = watch.as_ref().is_some_and(DiskWatch::failed);
         self.insert(id, paths, spec);
-        if let Some(vm) = vm {
+        if let (Some(vm), Some(watch)) = (vm, watch) {
             // What its memory was based on is unknown, so its next save
             // holds every page.
-            let live = self.own(id, vm, LiveMemory::adopted());
+            let live = self.own(id, vm, LiveMemory::adopted(watch));
             if let Some(slot) = self.slots.get_mut(&id.0) {
                 slot.incarnation = Some(live.incarnation);
                 slot.vm = Some(live);
@@ -240,6 +289,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             state,
             policy,
         });
+        if unsavable {
+            // It still runs and wakes, but is never saved.
+            self.input(Input::Unsavable { sandbox: id.0 });
+        }
         Ok(adopted)
     }
 
@@ -293,8 +346,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if from_record.is_some() {
             return from_record;
         }
-        let owner = tokio::fs::metadata(&paths.disk).await.ok()?.uid();
-        owner.checked_sub(self.images.first_uid)
+        // A launch hands the disk to the VMM's user, and the jail's
+        // files are created by it.
+        for path in [&paths.disk, &paths.jail] {
+            if let Ok(metadata) = tokio::fs::symlink_metadata(path).await
+                && let Some(ordinal) = metadata.uid().checked_sub(self.images.first_uid)
+            {
+                return Some(ordinal);
+            }
+        }
+        None
     }
 
     /// Where a sandbox without a VM stands, from its record, checked

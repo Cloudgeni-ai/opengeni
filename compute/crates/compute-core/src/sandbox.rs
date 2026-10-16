@@ -71,7 +71,18 @@ pub(crate) struct Sandbox {
     pub queued: Option<(Step, QueueKey)>,
     pub timer: Option<At>,
     pub dirty: bool,
-    pub broken: bool,
+    pub health: Health,
+}
+
+/// What can still be done with a sandbox.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Health {
+    Sound,
+    /// No copy of the current VM process can be trusted; see
+    /// [`Failure::Unsavable`]. Ends when the process is gone or replaced.
+    Unsavable,
+    /// Beyond recovery on this host.
+    Broken,
 }
 
 impl Sandbox {
@@ -92,7 +103,7 @@ impl Sandbox {
             queued: None,
             timer: None,
             dirty: false,
-            broken: false,
+            health: Health::Sound,
         }
     }
 
@@ -131,12 +142,17 @@ impl Sandbox {
             Outcome::Done => {
                 debug_assert!(step.can_start(self.state), "{step:?} from {:?}", self.state);
                 self.state = step.apply(self.state);
+                if matches!(step, Step::Boot | Step::Restore) {
+                    self.renew();
+                }
                 if step.wakes() && self.state.level == Level::Running {
                     self.touch(now);
                 }
                 self.retry = None;
             }
-            Outcome::Cancelled => {}
+            // Nothing changed; the host is told why the sandbox will not
+            // sleep deeper.
+            Outcome::Cancelled | Outcome::Failed(Failure::Unsavable) => {}
             Outcome::Failed(
                 failure @ (Failure::Transient | Failure::Untrusted | Failure::RemoteUntrusted),
             ) => {
@@ -162,7 +178,7 @@ impl Sandbox {
                 settled.lost |= self.lose(State::without_memory_image);
             }
             Outcome::Failed(Failure::Fatal) => {
-                self.broken = true;
+                self.health = Health::Broken;
                 settled.notice = Some(Notice::Broken);
             }
         }
@@ -207,6 +223,33 @@ impl Sandbox {
         }
     }
 
+    /// Whether the sandbox needs a copy of its VM process to sleep deeper
+    /// but none can be made.
+    pub fn cannot_save(&self) -> bool {
+        self.health == Health::Unsavable && self.state.durability == Durability::Volatile
+    }
+
+    /// The policy as it applies now: one that never saves while no copy of
+    /// the process can be trusted.
+    pub fn policy(&self) -> SleepPolicy {
+        if self.cannot_save() {
+            self.policy.without_saving()
+        } else {
+            self.policy
+        }
+    }
+
+    /// A new VM process, or none, starts with a clean slate.
+    pub fn renew(&mut self) {
+        if self.health == Health::Unsavable {
+            self.health = Health::Sound;
+        }
+    }
+
+    pub fn is_broken(&self) -> bool {
+        self.health == Health::Broken
+    }
+
     pub fn wants_awake(&self) -> bool {
         self.wake.is_some() || !self.holds.is_empty()
     }
@@ -220,6 +263,12 @@ impl Sandbox {
     /// already reached withdraws the request. A sandbox on its way up counts
     /// as running, so the request applies once the wake it serves is done.
     pub fn request_sleep(&mut self, level: Level) {
+        // A process that cannot be saved sleeps no deeper than compressed.
+        let level = if self.cannot_save() {
+            level.min(Level::Compressed)
+        } else {
+            level
+        };
         let current = if self.waking() {
             Level::Running
         } else {
@@ -239,7 +288,7 @@ impl Sandbox {
             && self.state.level != Level::Running
             && self.state.durability != Durability::Volatile
             && !self.wants_awake()
-            && !self.broken
+            && !self.is_broken()
     }
 
     /// The next step to start now, if any.
@@ -248,7 +297,7 @@ impl Sandbox {
     /// one only ever moves deeper or gets better protected; see
     /// [`SleepPolicy::next_step`].
     pub fn next_step(&self, now: At) -> Option<Step> {
-        if self.broken || self.in_flight.is_some() {
+        if self.is_broken() || self.in_flight.is_some() {
             return None;
         }
         if self.retry.is_some_and(|retry| retry.not_before > now) {
@@ -264,7 +313,7 @@ impl Sandbox {
             };
         }
         let idle = now.saturating_since(self.last_activity);
-        self.policy
+        self.policy()
             .next_step(self.state, idle, self.floor.max(self.requested))
     }
 
@@ -299,7 +348,7 @@ impl Sandbox {
             None
         } else {
             let idle = now.saturating_since(self.last_activity);
-            self.policy
+            self.policy()
                 .next_threshold(self.state, idle)
                 .map(|after| self.last_activity + after)
         };

@@ -23,7 +23,7 @@ fn sparse(path: &Path, length: u64, writes: &[(u64, &[u8])]) {
 
 fn files(dir: &Path, memory: bool) -> SavedFiles {
     SavedFiles {
-        disk: dir.join("disk"),
+        disk: crate::store::JailedFile::new(dir.join("disk")),
         memory: memory.then(|| crate::store::SavedImage {
             state: dir.join("state"),
             memory: dir.join("memory"),
@@ -109,7 +109,7 @@ async fn a_disk_fetched_over_its_base_downloads_only_what_differs() {
     let backend = Arc::new(InMemory::new());
     let store = Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")));
     let mut base_files = files(dir.path(), false);
-    base_files.disk.clone_from(&base);
+    base_files.disk = crate::store::JailedFile::new(&base);
     store
         .archive(id("00000000000000000000000000000001"), &base_files)
         .await
@@ -124,7 +124,7 @@ async fn a_disk_fetched_over_its_base_downloads_only_what_differs() {
     // The sandbox changed one chunk, erased another and grew.
     let saved = files(dir.path(), false);
     sparse(
-        &saved.disk,
+        saved.disk.path(),
         at(5, 9),
         &[
             (at(0, 1), b"same"),
@@ -149,7 +149,7 @@ async fn a_disk_fetched_over_its_base_downloads_only_what_differs() {
     into.seed = Some(base.clone());
     store.fetch(sandbox, &into).await.unwrap();
     assert_eq!(
-        fs::read(&saved.disk).unwrap(),
+        fs::read(saved.disk.path()).unwrap(),
         fs::read(&into.disk).unwrap()
     );
 
@@ -181,7 +181,7 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
     let mut saved = files(dir.path(), true);
     let big = 3 * CHUNK_BYTES + 1000;
     sparse(
-        &saved.disk,
+        saved.disk.path(),
         big,
         &[(5, b"disk"), (2 * CHUNK_BYTES + 7, b"far")],
     );
@@ -206,7 +206,7 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
     // receipt no longer matches what the store holds.
     sparse(&snapshot.memory, big, &[(CHUNK_BYTES, b"Memory")]);
     sparse(
-        &saved.disk,
+        saved.disk.path(),
         big,
         &[(5, b"disk"), (2 * CHUNK_BYTES + 7, b"far")],
     );
@@ -228,7 +228,7 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
     };
     assert_eq!(memory_len, big);
     assert_eq!(
-        fs::read(&saved.disk).unwrap(),
+        fs::read(saved.disk.path()).unwrap(),
         fs::read(&into.disk).unwrap()
     );
     assert_eq!(
@@ -255,7 +255,7 @@ async fn a_chunk_map_skips_unchanged_chunks_and_catches_a_changed_image() {
     let dir = tempfile::tempdir().unwrap();
     let mut saved = files(dir.path(), true);
     let big = 4 * CHUNK_BYTES;
-    sparse(&saved.disk, CHUNK_BYTES, &[(0, b"disk")]);
+    sparse(saved.disk.path(), CHUNK_BYTES, &[(0, b"disk")]);
     let image = saved.memory.clone().unwrap();
     sparse(&image.state, 10, &[(0, b"s")]);
     sparse(
@@ -291,7 +291,7 @@ async fn a_chunk_map_skips_unchanged_chunks_and_catches_a_changed_image() {
 async fn a_disk_only_copy_cannot_supply_a_memory_image() {
     let dir = tempfile::tempdir().unwrap();
     let saved = files(dir.path(), false);
-    sparse(&saved.disk, CHUNK_BYTES, &[(0, b"disk")]);
+    sparse(saved.disk.path(), CHUNK_BYTES, &[(0, b"disk")]);
     let store = Chunked::new(ChunkStore::new(
         Arc::new(InMemory::new()),
         ObjectPath::from("t"),

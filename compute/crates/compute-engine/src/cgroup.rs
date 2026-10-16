@@ -125,6 +125,48 @@ impl Cgroup {
         }
     }
 
+    /// Moves process `pid` into the group.
+    pub fn add(&self, pid: u32) -> io::Result<()> {
+        fs::write(self.path.join("cgroup.procs"), pid.to_string())
+    }
+
+    /// The processes in the group, as the host's PID namespace numbers
+    /// them; none if the group is gone.
+    pub fn processes(&self) -> io::Result<Vec<rustix::process::Pid>> {
+        let procs = match fs::read_to_string(self.path.join("cgroup.procs")) {
+            Ok(procs) => procs,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        procs
+            .lines()
+            .map(|line| {
+                line.trim()
+                    .parse()
+                    .ok()
+                    .and_then(rustix::process::Pid::from_raw)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, format!("bad pid {line:?}"))
+                    })
+            })
+            .collect()
+    }
+
+    /// Kills every process in the group and waits a few seconds at most
+    /// for them all to be gone. Blocks.
+    pub fn end_all(&self) -> io::Result<()> {
+        self.kill_all()?;
+        let mut delay = Duration::from_millis(1);
+        for _ in 0..12 {
+            if !self.is_populated()? {
+                break;
+            }
+            std::thread::sleep(delay);
+            delay *= 2;
+        }
+        Ok(())
+    }
+
     /// Whether any process is still in the group.
     pub fn is_populated(&self) -> io::Result<bool> {
         match fs::read_to_string(self.path.join("cgroup.events")) {
