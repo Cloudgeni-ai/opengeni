@@ -20,10 +20,12 @@ With `--notice`, the service also answers the host agent's restore notice
 (`restored <unix time in nanoseconds> [key=value ...]`, answered with `ok`):
 it sets the clock, counts restores and takes the `sandbox=<id>` field as its
 own sandbox id, ignoring fields it does not know. `ping` reports both, so a
-scenario can tell how many times its own sandbox was restored from a memory
-image, and which sandbox a guest started from a template believes it is. A
-guest booted from its disk finds its id on the kernel command line instead,
-as `opengeni.sandbox=<id>`.
+scenario can tell that its sandbox was restored from a memory image, and
+which sandbox a guest started from a template believes it is. The host
+retries a notice whose answer got lost, so the count can run ahead of the
+restores. The id is kept in the state directory before the answer, so a
+restarted service still knows it; a guest booted from its disk finds its id
+on the kernel command line instead, as `opengeni.sandbox=<id>`.
 """
 
 from __future__ import annotations
@@ -55,6 +57,8 @@ MAX_REQUEST = 64 << 20
 MAX_NOTICE = 1024
 SANDBOX_ARG = "opengeni.sandbox"
 OUTPUT_DIR = Path(os.environ.get("SMOKE_GUEST_STATE", "/run/smoke-guest"))
+# The id the latest restore notice gave, kept across restarts of the service.
+SANDBOX_FILE = OUTPUT_DIR / "sandbox"
 _OUTPUT_NAMES = itertools.count()
 
 
@@ -183,7 +187,9 @@ PROCESSES = Processes()
 
 class Restores:
     """How many restore notices this service has acknowledged, and which
-    sandbox the latest one (or the kernel command line) said it is."""
+    sandbox the latest one (or the kernel command line) said it is. A new id
+    is written to SANDBOX_FILE before it counts, so it outlives the
+    service."""
 
     def __init__(self, sandbox: str | None) -> None:
         self._lock = threading.Lock()
@@ -192,6 +198,8 @@ class Restores:
 
     def record(self, sandbox: str | None) -> None:
         with self._lock:
+            if sandbox is not None and sandbox != self._sandbox:
+                _keep_sandbox(sandbox)
             self._count += 1
             if sandbox is not None:
                 self._sandbox = sandbox
@@ -215,14 +223,32 @@ def boot_sandbox(cmdline: str) -> str | None:
     return None
 
 
-def _read_boot_sandbox() -> str | None:
+def _keep_sandbox(sandbox: str) -> None:
+    """Writes `sandbox` to SANDBOX_FILE, replacing it whole."""
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    staged = SANDBOX_FILE.with_name(f".{SANDBOX_FILE.name}.{os.getpid()}")
+    staged.write_text(sandbox, encoding="ascii")
+    os.replace(staged, SANDBOX_FILE)
+
+
+def _starting_sandbox() -> str | None:
+    """The id a starting service takes: the one a restore notice gave an
+    earlier run of the service, else the kernel command line's."""
+
+    try:
+        kept = SANDBOX_FILE.read_text(encoding="ascii").strip()
+    except OSError:
+        kept = ""
+    if kept:
+        return kept
     try:
         return boot_sandbox(Path("/proc/cmdline").read_text(encoding="ascii", errors="replace"))
     except OSError:
         return None
 
 
-RESTORES = Restores(_read_boot_sandbox())
+RESTORES = Restores(_starting_sandbox())
 
 
 def op_ping(_request: dict[str, Any]) -> dict[str, Any]:
@@ -697,7 +723,13 @@ def serve_notice(connection: socket.socket, *, set_clock: bool) -> None:
             except OSError as error:
                 # A guest that cannot set its clock still counts the restore.
                 print(f"cannot set the clock: {error}", file=sys.stderr, flush=True)
-        RESTORES.record(fields.get("sandbox") or None)
+        try:
+            RESTORES.record(fields.get("sandbox") or None)
+        except OSError as error:
+            # Unanswered, the host tries again: an id the guest could not
+            # keep is not taken.
+            print(f"cannot keep the sandbox id: {error}", file=sys.stderr, flush=True)
+            return
         with contextlib.suppress(BrokenPipeError, ConnectionResetError):
             connection.sendall(b"ok\n")
 

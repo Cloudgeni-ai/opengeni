@@ -438,6 +438,13 @@ class GuestInternals(unittest.TestCase):
         self.assertIsNone(boot_sandbox("console=ttyS0 reboot=k"))
         self.assertIsNone(boot_sandbox("opengeni.sandbox= opengeni.sandboxes=1"))
 
+    def test_a_restarted_service_keeps_the_id_a_notice_gave(self) -> None:
+        # A clone's kernel command line is its template's; only the notice
+        # names it, so the id must outlive the service process.
+        self.guest.RESTORES.record("0123456789abcdef0123456789abcdef")
+        restarted = _load_guest(self.scratch / "state")
+        self.assertEqual(restarted.RESTORES.sandbox(), "0123456789abcdef0123456789abcdef")
+
     def watcher(self) -> Any:
         """A recursive watcher on a tree with `old/inner`, on a fake clock."""
 
