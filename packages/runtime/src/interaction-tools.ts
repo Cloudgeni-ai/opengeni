@@ -90,7 +90,10 @@ import {
   type InteractionTransport,
 } from "@opengeni/sdk";
 import { z } from "zod";
-import { browserActionInputJsonSchema } from "./browser-action-json-schema";
+import {
+  describeInvalidToolArguments,
+  interactionToolInputJsonSchema,
+} from "./interaction-tool-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
 
 export const INTERACTION_ATTEMPT_TOOL_NAMES = FIRST_PARTY_IN_PROCESS_TOOL_NAMES;
@@ -786,10 +789,7 @@ export function createInteractionAttemptToolDefinitions(
       codemodePath: options.codemodePath,
       title: options.title,
       description: options.description,
-      inputSchema:
-        options.name === "browser_act"
-          ? browserActionInputJsonSchema(options.input)
-          : jsonSchema(options.input),
+      inputSchema: interactionToolInputJsonSchema(options.input),
       outputSchema: jsonSchema(options.output),
       annotations: {
         title: options.title,
@@ -2603,7 +2603,7 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     return result;
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return interactionErrorResult("invalid_arguments", "Interaction tool arguments are invalid.");
+      return interactionErrorResult("invalid_arguments", describeInvalidToolArguments(error));
     }
     // A failed read is still a useful tool result. Preserve the API's public
     // explanation; mutations and uncertain outcomes retain their failure path.
