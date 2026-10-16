@@ -620,9 +620,10 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       ),
       "session usage limit capability has unsafe owner or direct runtime privileges",
     );
-    // 0776 (Site Data), 0782 (published Sites) and 0783 (Site SQL): their tables
-    // are in the runtime and protected contracts.
-    const siteDataTables = [
+    // 0776 (Site Data), 0782 (published Sites), 0783 (Site SQL), and 0792
+    // (schedule blocker reviews): these later tables are in both contracts.
+    const heldBackTables = [
+      "scheduled_task_blocker_reviews",
       "site_abuse_reports",
       "site_auth_codes",
       "site_data_collections",
@@ -652,8 +653,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "site_viewer_sessions",
     ].join(", ");
     heldBack.push(
-      `runtime privilege tables are missing: ${siteDataTables}`,
-      `protected tables are missing: ${siteDataTables}`,
+      `runtime privilege tables are missing: ${heldBackTables}`,
+      `protected tables are missing: ${heldBackTables}`,
     );
     const expected = [
       ...heldBack,
