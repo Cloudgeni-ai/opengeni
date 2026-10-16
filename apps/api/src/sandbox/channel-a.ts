@@ -590,10 +590,6 @@ async function withChannelAOperation<T>(
     : undefined;
   const { accountId, workspaceId, session } = ctx;
 
-  if (session.sandboxBackend === "none") {
-    throw new HTTPException(409, { message: "sandbox not available" });
-  }
-
   const sandboxGroupId = session.sandboxGroupId;
   const requestId = crypto.randomUUID();
   const holderId = `direct:${requestId}`;
@@ -607,9 +603,19 @@ async function withChannelAOperation<T>(
   // The STABLE run-environment used by both a cloud home and a machine home.
   // It also carries the per-session Codemode pointer selected below. Constants
   // only: user secrets are resolved per command (W1), never seeded here.
+  // `none` describes only the durable home. A session without a home sandbox
+  // that attached a Connected Machine runs its turns there (the worker gives
+  // such a turn the effective selfhosted backend), so its direct operations,
+  // such as opening a computer or browser on that machine, follow the same
+  // active pointer.
+  const machineOnlyHome = session.sandboxBackend === "none";
+  if (machineOnlyHome && !(await readActiveSandbox(db, workspaceId, session.id))?.activeSandboxId) {
+    throw new HTTPException(409, { message: "sandbox not available" });
+  }
+  const effectiveBackend = machineOnlyHome ? "selfhosted" : session.sandboxBackend;
   const settingsForSession =
-    session.sandboxBackend !== settings.sandboxBackend
-      ? { ...settings, sandboxBackend: session.sandboxBackend }
+    effectiveBackend !== settings.sandboxBackend
+      ? { ...settings, sandboxBackend: effectiveBackend }
       : settings;
   const environment = stableSandboxEnvironmentForRun(settingsForSession, { workspaceId });
   if (hasGitCredentialRepositorySelection(session.resources)) {
@@ -673,12 +679,15 @@ async function withChannelAOperation<T>(
   // A machine-targeted top-level session has an honest selfhosted HOME label.
   // It has no cloud provider box and therefore must not acquire or establish a
   // phantom home lease before following its active machine pointer.
-  if (session.sandboxBackend === "selfhosted") {
+  if (effectiveBackend === "selfhosted") {
     let established: EstablishedSandboxSession | undefined;
     try {
       ctx.waitSignal?.throwIfAborted();
       const pointer = await readActiveSandbox(db, workspaceId, session.id);
       if (!pointer?.activeSandboxId) {
+        if (machineOnlyHome) {
+          throw new HTTPException(409, { message: "sandbox not available" });
+        }
         // A machine-home session with no selected machine uses the deployment's
         // managed group box, exactly like the worker turn path. Keep the durable
         // home label honest; only this request's effective backend changes.
