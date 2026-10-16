@@ -122,7 +122,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 match self.leftovers.get(&id.0) {
                     Some(&ordinal) => self.remove_leftovers(id, ordinal, reply),
                     None => {
-                        let _ = reply.send(Err(HostError::Broken(id)));
+                        let _ = reply.send(Err(self.blocked_error(id)));
                     }
                 }
                 return;
@@ -197,7 +197,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// runs.
     pub(super) fn check(&self, id: Id, generation: Option<u64>) -> Result<(), HostError> {
         if self.blocked.contains_key(&id.0) {
-            return Err(HostError::Broken(id));
+            return Err(self.blocked_error(id));
         }
         match self.records.get(id) {
             Some(record) => Ok(check_generation(&record, generation)?),
@@ -257,24 +257,31 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         Ok(())
     }
 
-    pub(super) fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
+    /// The refusal of a request for blocked sandbox `id`.
+    fn blocked_error(&self, id: Id) -> HostError {
+        HostError::Blocked {
+            id,
+            reason: self.blocked.get(&id.0).cloned().unwrap_or_default(),
+        }
+    }
+
+    /// The answer to creating `id` with `config` when no work is needed: a
+    /// refusal, or success for a repeat of a create that already happened.
+    fn create_answer(&self, id: Id, config: &SandboxConfig) -> Option<Result<(), HostError>> {
         if self.blocked.contains_key(&id.0) {
-            let _ = reply.send(Err(HostError::Broken(id)));
-            return;
+            return Some(Err(self.blocked_error(id)));
         }
         if let Some(unknown) = self.unknown_ordinals.first() {
-            let _ = reply.send(Err(HostError::Io(format!(
+            return Some(Err(HostError::Io(format!(
                 "sandbox {}'s record is unreadable and the user and network it holds unknown; \
                  no sandbox is created until it is resolved",
                 Id(*unknown)
             ))));
-            return;
         }
         if self.preparing.contains(&id.0) {
             // Perhaps this very create's earlier attempt: retrying once it
             // is done tells.
-            let _ = reply.send(Err(HostError::Busy(id)));
-            return;
+            return Some(Err(HostError::Busy(id)));
         }
         let record = self.records.get(id);
         if self.slots.contains_key(&id.0) || self.destroying.contains_key(&id.0) || record.is_some()
@@ -284,18 +291,24 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // settings, or on its way out, is someone else's.
             let same = self.slots.get(&id.0).is_some_and(|slot| !slot.destroy)
                 && !self.destroying.contains_key(&id.0)
-                && record.is_some_and(|record| !record.removing && record.config == config);
-            let _ = reply.send(if same {
+                && record.is_some_and(|record| !record.removing && record.config == *config);
+            return Some(if same {
                 Ok(())
             } else {
                 Err(HostError::Exists(id))
             });
-            return;
         }
         if self.tearing_down.contains_key(&id.0) {
             // An old VM of this id is still being torn down; its teardown
             // must not touch the new sandbox's files.
-            let _ = reply.send(Err(HostError::Busy(id)));
+            return Some(Err(HostError::Busy(id)));
+        }
+        None
+    }
+
+    pub(super) fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
+        if let Some(answer) = self.create_answer(id, &config) {
+            let _ = reply.send(answer);
             return;
         }
         let policy = match self.sleep_policy(&config) {

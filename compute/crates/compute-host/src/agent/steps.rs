@@ -550,10 +550,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     expected,
                     found,
                 }),
-                _ => result.clone().map(|vsock| Woke {
+                (_, Some(found)) => result.clone().map(|vsock| Woke {
                     vsock,
                     during: waiter.during,
+                    generation: found,
                 }),
+                (_, None) => result.clone().and(Err(HostError::Removed(id))),
             };
             let _ = waiter.reply.send(answer);
         }

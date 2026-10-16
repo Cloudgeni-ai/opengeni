@@ -31,8 +31,8 @@ mod requests;
 mod restart;
 mod sleep;
 
-/// Bytes of fake guest memory, as a memory image is as long as the guest's
-/// memory.
+/// Bytes of fake guest memory that hold its value. A memory image is as long
+/// as the sandbox's memory, so the rest of it is a hole.
 const FAKE_MEMORY: usize = 64 << 10;
 
 /// How long each fake operation takes.
@@ -118,6 +118,8 @@ struct World {
 struct Process {
     vsock: PathBuf,
     memory: Arc<Mutex<String>>,
+    /// The sandbox's memory size: the length of every image it writes.
+    memory_len: u64,
     paused: Arc<Mutex<bool>>,
     exit: watch::Sender<bool>,
     guest: AbortHandle,
@@ -235,6 +237,7 @@ impl Fake {
         let process = Process {
             vsock,
             memory,
+            memory_len: spec.memory_bytes(),
             paused: Arc::default(),
             exit,
             guest: guest.abort_handle(),
@@ -398,7 +401,14 @@ impl Engine for Fake {
         let MemorySource::File(path) = &files.memory else {
             panic!("a bare-metal host restores local images from files");
         };
-        let memory = std::fs::read(path)
+        let mut memory = Vec::new();
+        std::fs::File::open(path)
+            .and_then(|file| {
+                std::io::Read::read_to_end(
+                    &mut std::io::Read::take(file, FAKE_MEMORY as u64),
+                    &mut memory,
+                )
+            })
             .map_err(|error| EngineError::caused_by(ErrorKind::MemoryLost, "restore", error))?;
         let memory = String::from_utf8_lossy(&memory)
             .trim_end_matches('\0')
@@ -476,12 +486,14 @@ impl Engine for Fake {
         Self::alive(vm, "snapshot")?;
         let memory = vm.memory.lock().unwrap().clone();
         std::fs::write(&files.state, "state").unwrap();
-        // Like a real engine, the image is as long as guest memory. A diff
-        // holding every page is still a valid diff.
+        // Like a real engine, the image is as long as guest memory, and
+        // sparse. A diff holding every page is still a valid diff.
         let mut image = memory.into_bytes();
         assert!(image.len() <= FAKE_MEMORY, "fake guest memory overflow");
         image.resize(FAKE_MEMORY, 0);
-        std::fs::write(&files.memory, image).unwrap();
+        let file = std::fs::File::create(&files.memory).unwrap();
+        std::io::Write::write_all(&mut &file, &image).unwrap();
+        file.set_len(vm.memory_len).unwrap();
         self.world.snapshots[usize::from(kind == SnapshotKind::Diff)]
             .fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -754,7 +766,7 @@ impl Lab {
     async fn run(&self, id: Id, lines: &[&str]) -> Vec<String> {
         let (reply, mut stream) = self
             .client
-            .connect(id, 52, PriorityName::Interactive)
+            .connect(id, None, 52, PriorityName::Interactive)
             .await
             .unwrap();
         assert!(matches!(reply, Reply::Connected { .. }), "{reply:?}");

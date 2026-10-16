@@ -235,7 +235,7 @@ impl Process {
 /// Runs `script` in the guest's shell, waking the sandbox first.
 async fn exec(client: &Client, id: Id, script: &str) -> String {
     let (reply, mut stream) = client
-        .connect(id, SHELL_PORT, PriorityName::Interactive)
+        .connect(id, None, SHELL_PORT, PriorityName::Interactive)
         .await
         .unwrap();
     assert!(matches!(reply, Reply::Connected { .. }), "{reply:?}");

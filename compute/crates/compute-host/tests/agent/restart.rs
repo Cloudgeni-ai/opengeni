@@ -9,6 +9,7 @@ use compute_host::protocol::{
     DurabilityName, ErrorCode, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
     SleepConfig,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 
 use super::{Delays, Lab, NEVER, PAUSE_SOON, SAVE_IN_PLACE, SAVE_QUICKLY, id, vm_name};
@@ -90,7 +91,7 @@ async fn requests_for_a_replaced_execution_are_refused() {
     };
     assert!(matches!(
         lab.client.call(&wake(first)).await.unwrap(),
-        Reply::Woken { .. }
+        Reply::Woken { generation, .. } if generation == first
     ));
 
     // Saving and restoring keep the guest's programs, so the execution
@@ -100,7 +101,7 @@ async fn requests_for_a_replaced_execution_are_refused() {
     assert_eq!(lab.current(sandbox).await.generation, first);
     assert!(matches!(
         lab.client.call(&wake(first)).await.unwrap(),
-        Reply::Woken { .. }
+        Reply::Woken { generation, .. } if generation == first
     ));
 
     // A crash loses them: the next boot is a new execution.
@@ -147,6 +148,72 @@ async fn requests_for_a_replaced_execution_are_refused() {
         .await
         .unwrap();
     assert_eq!(reply, Reply::Done);
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replies_name_the_execution_they_reached() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(16);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set first"]).await;
+    let first = lab.current(sandbox).await.generation;
+    let wake = Request::Wake {
+        id: sandbox,
+        generation: None,
+        priority: PriorityName::Interactive,
+    };
+    let reply = lab.client.call(&wake).await.unwrap();
+    assert!(
+        matches!(reply, Reply::Woken { generation, .. } if generation == first),
+        "{reply:?}"
+    );
+
+    // A connection that names no execution follows the sandbox to a fresh
+    // boot, and says it reached the new one.
+    lab.world.crash(&vm_name(sandbox));
+    let (reply, mut stream) = lab
+        .client
+        .connect(sandbox, None, 52, PriorityName::Interactive)
+        .await
+        .unwrap();
+    let second = first + 1;
+    assert!(
+        matches!(reply, Reply::Connected { generation, .. } if generation == second),
+        "{reply:?}"
+    );
+    stream.get_mut().write_all(b"get\nexit\n").await.unwrap();
+    let mut output = String::new();
+    stream.read_to_string(&mut output).await.unwrap();
+    assert_eq!(output, "\n", "the new execution starts empty");
+    assert_eq!(lab.current(sandbox).await.generation, second);
+
+    // One that names the old execution is refused rather than reaching
+    // the new one.
+    let (reply, _) = lab
+        .client
+        .connect(sandbox, Some(first), 52, PriorityName::Interactive)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            reply,
+            Reply::Error {
+                code: ErrorCode::Stale,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    let (reply, _) = lab
+        .client
+        .connect(sandbox, Some(second), 52, PriorityName::Interactive)
+        .await
+        .unwrap();
+    assert!(
+        matches!(reply, Reply::Connected { generation, .. } if generation == second),
+        "{reply:?}"
+    );
     lab.assert_clean();
 }
 
@@ -238,7 +305,7 @@ async fn an_unreadable_record_blocks_its_id() {
             matches!(
                 reply,
                 Reply::Error {
-                    code: ErrorCode::Broken,
+                    code: ErrorCode::Blocked,
                     ..
                 }
             ),
@@ -345,7 +412,7 @@ async fn a_failed_recovery_blocks_the_id_until_removed() {
     assert_eq!(status.blocked.len(), 1);
     assert_eq!(status.blocked[0].id, sandbox);
     let reply = lab.client.call(&create_request(sandbox)).await.unwrap();
-    assert!(is_error(&reply, ErrorCode::Broken), "{reply:?}");
+    assert!(is_error(&reply, ErrorCode::Blocked), "{reply:?}");
     assert!(dir.join("sandbox.json").exists(), "its record is kept");
 
     let reply = lab

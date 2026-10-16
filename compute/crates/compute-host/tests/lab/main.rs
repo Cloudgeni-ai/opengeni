@@ -240,7 +240,7 @@ async fn create(client: &Client, sandbox: Id, sleep: SleepConfig) {
 async fn exec(client: &Client, sandbox: Id, script: &str) -> (String, Duration) {
     let started = Instant::now();
     let (reply, mut stream) = client
-        .connect(sandbox, PORT, PriorityName::Interactive)
+        .connect(sandbox, None, PORT, PriorityName::Interactive)
         .await
         .unwrap();
     let Reply::Connected { waited_us, .. } = reply else {

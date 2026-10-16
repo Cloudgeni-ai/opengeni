@@ -150,7 +150,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Stops managing sandbox `id` for now: requests for it fail with
-    /// [`HostError::Broken`] and status lists it with `problem`. Its record,
+    /// [`HostError::Blocked`] and status lists it with `problem`. Its record,
     /// files and any VM stay as they are; a recorded sandbox can still be
     /// removed.
     pub(super) fn block(&mut self, id: Id, problem: String) {

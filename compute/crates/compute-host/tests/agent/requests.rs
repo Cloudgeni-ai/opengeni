@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use compute_core::HostPolicy;
 use compute_host::GuestPort;
@@ -10,8 +11,88 @@ use compute_host::protocol::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixStream};
+use tokio::time::Instant;
 
-use super::{Delays, Lab, NEVER, SAVE_IN_PLACE, SAVE_QUICKLY, id};
+use super::{Delays, Lab, NEVER, PAUSE_SOON, SAVE_IN_PLACE, SAVE_QUICKLY, id};
+
+/// `request` as the line a client sends.
+fn request_line(request: &Request) -> Vec<u8> {
+    let mut line = serde_json::to_vec(request).unwrap();
+    line.push(b'\n');
+    line
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wake_its_caller_gave_up_on_lets_go_of_the_sandbox() {
+    let delays = Delays {
+        boot: Duration::from_secs(5),
+        ..Delays::default()
+    };
+    let lab = Lab::new(delays, HostPolicy::default()).await;
+    let sandbox = id(9);
+    lab.create(sandbox, PAUSE_SOON).await;
+    let mut caller = UnixStream::connect(lab.root.join("host.sock"))
+        .await
+        .unwrap();
+    let wake = Request::Wake {
+        id: sandbox,
+        generation: None,
+        priority: PriorityName::Interactive,
+    };
+    caller.write_all(&request_line(&wake)).await.unwrap();
+    lab.wait_until("the wake to hold the sandbox", |status| {
+        Lab::sandbox(status, sandbox).holds == 1
+    })
+    .await;
+    // The caller hangs up long before the boot could finish: nothing
+    // keeps the sandbox awake for it any more.
+    drop(caller);
+    let gone = Instant::now();
+    lab.wait_until("the abandoned wake to let go", |status| {
+        Lab::sandbox(status, sandbox).holds == 0
+    })
+    .await;
+    assert!(
+        gone.elapsed() < Duration::from_secs(2),
+        "held until the boot ended: {:?}",
+        gone.elapsed()
+    );
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bytes_sent_before_a_connection_is_ready_reach_the_guest() {
+    let delays = Delays {
+        boot: Duration::from_millis(200),
+        ..Delays::default()
+    };
+    let lab = Lab::new(delays, HostPolicy::default()).await;
+    let sandbox = id(10);
+    lab.create(sandbox, NEVER).await;
+    let mut caller = UnixStream::connect(lab.root.join("host.sock"))
+        .await
+        .unwrap();
+    let mut bytes = request_line(&Request::Connect {
+        id: sandbox,
+        generation: None,
+        port: 52,
+        priority: PriorityName::Interactive,
+    });
+    bytes.extend_from_slice(b"set early\nget\nexit\n");
+    caller.write_all(&bytes).await.unwrap();
+    let mut output = String::new();
+    caller.read_to_string(&mut output).await.unwrap();
+    let (reply, rest) = output.split_once('\n').unwrap();
+    assert!(
+        matches!(
+            serde_json::from_str::<Reply>(reply).unwrap(),
+            Reply::Connected { .. }
+        ),
+        "{reply}"
+    );
+    assert_eq!(rest, "ok\nearly\n");
+    lab.assert_clean();
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bad_requests_are_refused() {
@@ -76,13 +157,15 @@ async fn bad_requests_are_refused() {
         "saving needs pausing first: {reply:?}"
     );
     lab.create(missing, NEVER).await;
+    // A repeat with the same settings is a retry and succeeds; other
+    // settings for an existing id are refused.
     let reply = lab
         .client
         .call(&Request::Create {
             id: missing,
             config: SandboxConfig {
                 vcpus: 1,
-                memory_mib: 256,
+                memory_mib: 512,
                 sleep: NEVER,
             },
         })

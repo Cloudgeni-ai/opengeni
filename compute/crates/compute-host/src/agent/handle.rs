@@ -107,7 +107,8 @@ impl Handle {
             vsock: woke.vsock,
             waited: started.elapsed(),
             during: woke.during,
-            generation,
+            generation: woke.generation,
+            pinned: generation.is_some(),
             commands: self.commands.clone(),
         })
     }
@@ -203,6 +204,15 @@ impl Lease {
         self.during
     }
 
+    /// The execution the lease reaches. It changes only when the sandbox
+    /// boots afresh, which ends whatever programs ran in it; a caller that
+    /// started some can pass it to later requests to make sure they reach
+    /// the same ones.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Host side of the sandbox's vsock device.
     #[must_use]
     pub fn vsock(&self) -> &Path {
@@ -210,16 +220,45 @@ impl Lease {
     }
 
     /// Connects to `port` inside the sandbox. Right after a fresh boot the
-    /// guest may not listen yet, so this retries until `timeout`. A lease
-    /// asked for a generation connects only to that execution: should the
-    /// sandbox have booted afresh meanwhile, the connection is dropped and
-    /// [`HostError::Stale`] returned.
-    pub async fn connect(&self, port: u32, timeout: Duration) -> Result<UnixStream, HostError> {
+    /// guest may not listen yet, so this retries until `timeout`. Should the
+    /// sandbox boot afresh meanwhile, a lease asked for a generation drops
+    /// the connection and returns [`HostError::Stale`]; any other follows
+    /// the sandbox to its new execution. Either way, once this succeeds,
+    /// [`Lease::generation`] names the execution the stream reached.
+    pub async fn connect(&mut self, port: u32, timeout: Duration) -> Result<UnixStream, HostError> {
         let deadline = Instant::now() + timeout;
+        loop {
+            let stream = self.reach(port, deadline).await?;
+            // A replacement raises the generation before its VM starts, so
+            // a generation unchanged after connecting proves the connection
+            // reached the lease's execution.
+            let (reply, answer) = oneshot::channel();
+            self.commands
+                .send(Command::Check {
+                    id: self.id,
+                    generation: self.generation,
+                    reply,
+                })
+                .map_err(|_| HostError::Stopped)?;
+            match answer.await.map_err(|_| HostError::Stopped)? {
+                Ok(()) => return Ok(stream),
+                Err(HostError::Stale { found, .. })
+                    if !self.pinned && Instant::now() < deadline =>
+                {
+                    self.generation = found;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// A connection to `port` in whichever VM the sandbox has, retried
+    /// until `deadline`.
+    async fn reach(&self, port: u32, deadline: Instant) -> Result<UnixStream, HostError> {
         let mut delay = Duration::from_millis(2);
-        let stream = loop {
+        loop {
             match vsock::connect(&self.vsock, port).await {
-                Ok(stream) => break stream,
+                Ok(stream) => return Ok(stream),
                 Err(error) if Instant::now() + delay >= deadline => {
                     return Err(HostError::Unreachable {
                         port,
@@ -231,22 +270,7 @@ impl Lease {
                     delay = (delay * 2).min(Duration::from_millis(50));
                 }
             }
-        };
-        // A replacement raises the generation before its VM starts, so a
-        // generation unchanged after connecting proves the connection
-        // reached the execution the lease was asked for.
-        if let Some(generation) = self.generation {
-            let (reply, answer) = oneshot::channel();
-            self.commands
-                .send(Command::Check {
-                    id: self.id,
-                    generation,
-                    reply,
-                })
-                .map_err(|_| HostError::Stopped)?;
-            answer.await.map_err(|_| HostError::Stopped)??;
         }
-        Ok(stream)
     }
 }
 

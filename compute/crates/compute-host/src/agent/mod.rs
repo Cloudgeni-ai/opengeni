@@ -232,9 +232,18 @@ pub enum HostError {
     /// The sandbox is still being created.
     #[error("sandbox {0} is still being created")]
     Busy(Id),
-    /// The sandbox cannot be recovered on this host.
+    /// The sandbox failed in a way this host cannot retry.
     #[error("sandbox {0} is broken")]
     Broken(Id),
+    /// The host does not manage the sandbox until someone resolves why,
+    /// such as a record it cannot read or a VM it could not take back.
+    #[error("sandbox {id} is not managed on this host: {reason}")]
+    Blocked {
+        /// The sandbox.
+        id: Id,
+        /// Why.
+        reason: String,
+    },
     /// The sandbox was removed while the request waited.
     #[error("sandbox {0} was removed")]
     Removed(Id),
@@ -450,6 +459,8 @@ struct Waiter {
 struct Woke {
     vsock: PathBuf,
     during: Option<Step>,
+    /// The execution that is running.
+    generation: u64,
 }
 
 /// Talks to a running host agent. Cheap to clone.
@@ -469,8 +480,11 @@ pub struct Lease {
     waited: Duration,
     /// The step under way when the wake arrived.
     during: Option<Step>,
-    /// The generation the lease was asked for, if any.
-    generation: Option<u64>,
+    /// The execution the lease reaches: the one asked for, if any.
+    generation: u64,
+    /// Whether the caller asked for that execution. A lease that was not
+    /// asked for one follows the sandbox to a fresh boot.
+    pinned: bool,
     commands: mpsc::UnboundedSender<Command>,
 }
 

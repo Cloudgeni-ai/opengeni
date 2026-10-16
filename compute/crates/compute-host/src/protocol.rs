@@ -373,6 +373,11 @@ pub enum Reply {
         /// it to finish.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         during: Option<String>,
+        /// The execution that is running. It changes only when the sandbox
+        /// boots afresh, which ends every program in it; pass it to later
+        /// requests that rely on programs started now.
+        #[serde(default)]
+        generation: u64,
     },
     /// The stream to the guest port follows this line.
     Connected {
@@ -380,6 +385,9 @@ pub enum Reply {
         waited_us: u64,
         /// Microseconds spent reaching the guest port after waking.
         connect_us: u64,
+        /// The execution the stream reached, as in [`Reply::Woken`].
+        #[serde(default)]
+        generation: u64,
     },
     /// The host's state.
     Status(Box<HostStatus>),
@@ -406,8 +414,15 @@ pub enum ErrorCode {
     Exists,
     /// The sandbox is still being created; try again.
     Busy,
-    /// The sandbox cannot run on this host.
+    /// The sandbox failed in a way this host cannot retry: it can be
+    /// removed, or restored elsewhere from a stored copy. Retrying here
+    /// does not help.
     Broken,
+    /// The host does not manage the sandbox until someone resolves why
+    /// (status lists it under `blocked`, with the reason). Its files and
+    /// any VM are kept as they are, and it can still be removed. Retrying
+    /// does not help until then.
+    Blocked,
     /// The sandbox was removed while the request waited.
     Removed,
     /// The request names a generation the sandbox has moved past.

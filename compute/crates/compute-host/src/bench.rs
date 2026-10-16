@@ -171,10 +171,13 @@ pub(crate) async fn run_script(
     echo: bool,
 ) -> anyhow::Result<Run> {
     let dispatch_lag = started.elapsed();
-    let (reply, mut stream) = client.connect(id, port, PriorityName::Interactive).await?;
+    let (reply, mut stream) = client
+        .connect(id, None, port, PriorityName::Interactive)
+        .await?;
     let Reply::Connected {
         waited_us,
         connect_us,
+        ..
     } = reply
     else {
         bail!("{reply:?}");
