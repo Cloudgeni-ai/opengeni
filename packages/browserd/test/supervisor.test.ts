@@ -508,8 +508,9 @@ describe("BrowserSupervisor", () => {
         const second = reference(2);
         await supervisor.createSession({ ...first, headed: false });
         await expect(supervisor.createSession({ ...second, headed: false })).rejects.toMatchObject({
-          code: "resource_unavailable",
-          retryable: true,
+          code: "capacity_exhausted",
+          retryable: false,
+          message: expect.stringContaining("limit of 1 Opengeni browsers"),
         });
         await supervisor.endSession(first);
         expect(

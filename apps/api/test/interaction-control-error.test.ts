@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { ErrorCode as AgentErrorCode } from "@opengeni/agent-proto";
-import { SelfhostedControlError } from "@opengeni/runtime/sandbox";
+import { BrowserControlRequestError, SelfhostedControlError } from "@opengeni/runtime/sandbox";
 import { testSettings } from "@opengeni/testing";
 import { HTTPException } from "hono/http-exception";
 import { createApp } from "../src/app";
 import {
   interactionControlApiError,
+  legacyInteractionCapacityError,
   publicControlFailureCode,
 } from "../src/http/interaction-control-error";
 
@@ -127,5 +128,39 @@ describe("connected-machine interaction control errors", () => {
       "browser",
     );
     expect(projected?.details).not.toHaveProperty("controlRequestId");
+  });
+});
+
+describe("legacy supervisor capacity errors", () => {
+  test("a full supervisor from an older agent becomes an actionable 409, not a retryable outage", () => {
+    const legacy = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message: "browser supervisor session capacity is exhausted",
+      retryable: true,
+    });
+    const mapped = legacyInteractionCapacityError(legacy, "browser");
+    expect(mapped?.status).toBe(409);
+    expect(mapped?.message).toContain("End browser sessions that are no longer needed");
+    expect(
+      legacyInteractionCapacityError(
+        new BrowserControlRequestError(503, {
+          code: "resource_unavailable",
+          message: "computer supervisor session capacity is exhausted",
+          retryable: true,
+        }),
+        "computer",
+      )?.message,
+    ).toContain("End computer sessions");
+    // Other unavailable resources keep their own mapping.
+    expect(
+      legacyInteractionCapacityError(
+        new BrowserControlRequestError(503, {
+          code: "resource_unavailable",
+          message: "browser controller is stopping",
+          retryable: true,
+        }),
+        "browser",
+      ),
+    ).toBeNull();
   });
 });
