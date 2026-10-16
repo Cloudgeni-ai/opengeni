@@ -8,12 +8,19 @@ import { copyRuntimeDependencies } from "./copy-runtime-dependencies";
 // LiteParse's native closure only in the worker image. The API npm package still
 // declares it for embedded createApp compositions that use inline indexing.
 // The 1Password SDK stays a real package in both images: its core loads a WASM
-// file from beside its own module, which a bundle cannot carry.
-export const API_RUNTIME_EXTERNALS = ["sharp", "better-auth", "@1password/sdk"];
+// file from beside its own module, which a bundle cannot carry. The Keeper
+// SDK does too: its adapter reads the installed, hash-pinned build at run time.
+export const API_RUNTIME_EXTERNALS = [
+  "sharp",
+  "better-auth",
+  "@1password/sdk",
+  "@keeper-security/secrets-manager-core",
+];
 export const WORKER_RUNTIME_EXTERNALS = [
   "@llamaindex/liteparse",
   "sharp",
   "@1password/sdk",
+  "@keeper-security/secrets-manager-core",
   "@temporalio/activity",
   "@temporalio/client",
   "@temporalio/worker",

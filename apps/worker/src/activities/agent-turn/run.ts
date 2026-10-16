@@ -1611,6 +1611,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             subjectId: turn.initiatingHumanSubjectId ?? credentialSubjectId ?? null,
             hostVaultProvider: connectionCredentials?.vaultProvider,
             onePasswordVaultProvider: resolvedServices.onePasswordVaultProvider,
+            externalVaultProviders: resolvedServices.externalVaultProviders ?? null,
+            executionContext: {
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              attemptId: input.attemptId,
+            },
           });
           const toolRuntime = await prepareTurnToolRuntime({
             vaultAccess,

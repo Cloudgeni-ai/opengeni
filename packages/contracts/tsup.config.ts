@@ -36,6 +36,7 @@ export default defineConfig({
     "src/tool-review-presentation.ts",
     "src/code-search.ts",
     "src/workspace-integration-wire.ts",
+    "src/vault-provider-wire.ts",
     "src/organization-access.ts",
     "src/organization-recovery.ts",
     "src/personal-github.ts",

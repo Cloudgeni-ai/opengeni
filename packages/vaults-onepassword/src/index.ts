@@ -7,6 +7,7 @@
  */
 export {
   createOnePasswordVaultProvider,
+  OnePasswordVaultCreatedError,
   ONEPASSWORD_GET_ALL_BATCH,
   ONEPASSWORD_MANAGED_GROUP_PERMISSIONS,
   ONEPASSWORD_VALUE_CACHE_MS,
