@@ -243,7 +243,11 @@ impl Firecracker {
 
     /// Starts a jailed VMM for `spec` and waits for its API. `owned` are
     /// files the VMM must be able to write, such as its drives; they are
-    /// handed to the VM's user first.
+    /// handed to the VM's user first. A failure counts as a launch
+    /// ([`EngineError::launched`]) once the VMM the jailer started was found
+    /// in the VM's cgroup. Before that, a jailer that failed or hung may
+    /// have got as far as starting one, but anything it left in the cgroup
+    /// is ended unseen and not counted.
     async fn launch(
         &self,
         spec: &VmSpec,
@@ -382,16 +386,17 @@ impl Firecracker {
 
     /// Ends a VM whose start failed with `error` and returns that error, or
     /// a fatal one if the VM would not end: nothing may start in its place
-    /// while it may still run.
+    /// while it may still run. Either way the error records the launch.
     async fn ended(&self, vm: &FirecrackerVm, error: EngineError) -> EngineError {
-        match self.kill(vm).await {
+        let error = match self.kill(vm).await {
             Ok(()) => error,
             Err(stuck) => EngineError::new(
                 ErrorKind::Fatal,
                 error.operation,
                 format!("{error}; then the VM could not be ended: {stuck}"),
             ),
-        }
+        };
+        error.after_launch()
     }
 
     /// Kills whatever runs in the VM's cgroup, for VMMs the host holds no
@@ -912,6 +917,12 @@ impl Engine for Firecracker {
         vm.cgroup
             .cpu_time()
             .map_err(|error| EngineError::io("cpu_time", error))
+    }
+
+    fn io_bytes(&self, vm: &FirecrackerVm) -> Result<u64, EngineError> {
+        vm.cgroup
+            .io_bytes()
+            .map_err(|error| EngineError::io("io_bytes", error))
     }
 
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {

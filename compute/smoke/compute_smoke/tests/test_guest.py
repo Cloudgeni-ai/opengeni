@@ -510,6 +510,149 @@ class GuestInternals(unittest.TestCase):
         names = [event["name"] for event in watcher.read_events()]
         self.assertIn("old/file", names)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_directory_that_leaves_and_returns_renamed_keeps_its_watches(self) -> None:
+        # Out and back in are two moves with two cookies; the kernel gives
+        # the returning directory the watches it left with.
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        os.rename(root / "old", self.scratch / "elsewhere")
+        watcher.read_events()
+        self.assertIsNotNone(watcher.settle_seconds(), "the move away is pending")
+        os.rename(self.scratch / "elsewhere", root / "new")
+        watcher.read_events()
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        watcher.read_events()
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertIn(root / "new", watcher.watched().values())
+        self.assertIn(root / "new" / "inner", watcher.watched().values())
+        (root / "new" / "inner" / "file").touch()
+        names = [event["name"] for event in watcher.read_events()]
+        self.assertIn("new/inner/file", names)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_directory_that_leaves_and_returns_in_one_read_keeps_its_watches(self) -> None:
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        os.rename(root / "old", self.scratch / "elsewhere")
+        os.rename(self.scratch / "elsewhere", root / "new")
+        watcher.read_events()
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        watcher.read_events()
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertIn(root / "new" / "inner", watcher.watched().values())
+        (root / "new" / "inner" / "file").touch()
+        names = [event["name"] for event in watcher.read_events()]
+        self.assertIn("new/inner/file", names)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_child_that_left_stays_gone_when_its_parent_is_renamed_meanwhile(self) -> None:
+        # The parent's rename must not take over the child's pending
+        # departure, or the child would stay watched outside the tree.
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        os.rename(root / "old" / "inner", self.scratch / "elsewhere")
+        os.rename(root / "old", root / "new")
+        watcher.read_events()
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        watcher.read_events()
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertIn(root / "new", watcher.watched().values())
+        self.assertEqual(
+            [path for path in watcher.watched().values() if path.name == "inner"],
+            [],
+            "the departed child is still watched",
+        )
+        (self.scratch / "elsewhere" / "file").touch()
+        (root / "new" / "fence").touch()
+        names = [event["name"] for event in watcher.read_events()]
+        self.assertTrue(names)
+        self.assertTrue(all(name == "new/fence" for name in names), names)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_rename_inside_a_departed_directory_follows_it_back(self) -> None:
+        # The parent leaves (its arrival in a later read), its child is
+        # renamed inside it meanwhile, then the parent arrives: the child's
+        # watch ends up under the parent's new name and the child's new one.
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        isdir = self.guest.IN_ISDIR
+        away = self.event(watcher, root, self.guest.IN_MOVED_FROM | isdir, 7, "old")
+        old = root / "old"
+        renamed = self.event(watcher, old, self.guest.IN_MOVED_FROM | isdir, 8, "inner")
+        renamed += self.event(watcher, old, self.guest.IN_MOVED_TO | isdir, 8, "inner2")
+        back = self.event(watcher, root, self.guest.IN_MOVED_TO | isdir, 7, "back")
+        watcher.parse(away)
+        watcher.parse(renamed)
+        watcher.parse(back)
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertIn(root / "back", watcher.watched().values())
+        self.assertIn(root / "back" / "inner2", watcher.watched().values())
+        self.assertNotIn(root / "back" / "inner", watcher.watched().values())
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_child_that_returns_while_its_parent_is_away_keeps_its_watch(self) -> None:
+        # The parent's departure took the child's watch; the child coming
+        # back on its own makes it the tree's again, so the parent's
+        # departure must not take it along when it settles.
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        outside = self.scratch / "elsewhere"
+        os.rename(root / "old", outside)
+        watcher.read_events()
+        os.rename(outside / "inner", root / "rescued")
+        watcher.read_events()
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        watcher.read_events()
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertEqual(sorted(watcher.watched().values()), [root, root / "rescued"])
+        (outside / "ignored").touch()
+        (root / "rescued" / "file").touch()
+        names = [event["name"] for event in watcher.read_events()]
+        self.assertTrue(names)
+        self.assertTrue(all(name == "rescued/file" for name in names), names)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_child_renamed_inside_a_parent_that_stays_away_goes_with_it(self) -> None:
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        outside = self.scratch / "elsewhere"
+        os.rename(root / "old", outside)
+        watcher.read_events()
+        os.rename(outside / "inner", outside / "inner2")
+        watcher.read_events()
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        watcher.read_events()
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertEqual(list(watcher.watched().values()), [root])
+        (outside / "inner2" / "ignored").touch()
+        (root / "fence").touch()
+        names = [event["name"] for event in watcher.read_events()]
+        self.assertTrue(names)
+        self.assertTrue(all(name == "fence" for name in names), names)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_directory_moved_into_one_that_is_away_goes_with_it(self) -> None:
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        outside = self.scratch / "elsewhere"
+        (root / "other" / "deep").mkdir(parents=True)
+        watcher.read_events()
+        self.assertIn(root / "other" / "deep", watcher.watched().values())
+        os.rename(root / "old", outside)
+        watcher.read_events()
+        os.rename(root / "other", outside / "other")
+        watcher.read_events()
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        watcher.read_events()
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertEqual(list(watcher.watched().values()), [root])
+        (outside / "other" / "deep" / "ignored").touch()
+        (root / "fence").touch()
+        names = [event["name"] for event in watcher.read_events()]
+        self.assertTrue(names)
+        self.assertTrue(all(name == "fence" for name in names), names)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -141,6 +141,14 @@ pub trait Engine: Send + Sync + 'static {
     /// with work of its own from an idle one.
     fn cpu_time(&self, vm: &Self::Vm) -> Result<Duration, EngineError>;
 
+    /// Bytes the VM's processes have moved through system calls since they
+    /// started: its network and disk traffic, and possibly part of its
+    /// vsock traffic (an engine documents what it counts). The host compares
+    /// readings to see work that waits on data rather than the processor,
+    /// such as a slow download. Only differences between readings of the
+    /// same VM mean anything.
+    fn io_bytes(&self, vm: &Self::Vm) -> Result<u64, EngineError>;
+
     /// Resolves once the VM process has ended for any reason, including
     /// [`Engine::stop`]. The future does not borrow the VM, so the host can
     /// watch for a VM dying on its own while a step uses it.

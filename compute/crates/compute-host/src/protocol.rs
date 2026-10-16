@@ -426,7 +426,8 @@ pub struct SandboxStatus {
     /// Reasons it is held awake.
     pub holds: usize,
     /// VM processes started for it, boots and restores alike, since the
-    /// host agent started.
+    /// host agent started: every one the engine saw running, including
+    /// those that then failed to boot or restore.
     #[serde(default)]
     pub launches: u64,
     /// Host memory it holds, when a VM process exists.

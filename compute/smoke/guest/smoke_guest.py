@@ -448,8 +448,24 @@ class Inotify:
 
     A move away is held for `MOVE_PAIR_SECONDS` in case its arrival in the
     tree comes in a later read; only then does it count as moved out.
-    Both outcomes act on the watches the directory had when it left, so a
-    new directory made at the old path in the meantime keeps its own.
+    A move out removes the watches the directory had when it left, so a
+    new directory made at the old path in the meantime keeps its own. Each
+    watch belongs to at most one pending departure, the earliest: a parent
+    moving while its child's departure is pending leaves the child's watch
+    to the child's departure. A move whose arrival is seen rewrites the
+    paths of every watch below the old path, and the old paths of
+    departures pending below it, so later moves start from where things are
+    now.
+
+    Every directory that arrives in the tree, paired with its departure or
+    not, is walked and watched again. Asking the kernel to watch a directory
+    it already watches hands back the same watch, so a watch the walk finds
+    belongs to the tree again and is left alone when the departure that
+    took it settles: a directory that returns under another name, or a
+    child that comes back on its own while its parent is still away. The
+    walk sees only what is in the tree now, so it never takes back a watch
+    that is still outside. A directory arriving inside one that is away is
+    not walked; it goes or returns with that one.
     """
 
     def __init__(
@@ -473,6 +489,8 @@ class Inotify:
         # Directories moved away whose arrival is not seen yet: by cookie,
         # their old path, when to give up waiting and the watches they took.
         self._departed: dict[int, tuple[Path, float, list[int]]] = {}
+        # Which pending departure each of those watches still belongs to.
+        self._departing: dict[int, int] = {}
         self._watch(root)
         if recursive:
             self._watch_below(root)
@@ -491,6 +509,9 @@ class Inotify:
             error = ctypes.get_errno()
             raise OSError(error, f"cannot watch {directory}: {os.strerror(error)}")
         self._dirs[descriptor] = directory
+        # The kernel hands back the watch an inode already has: a directory
+        # that left and came back is the tree's again, not its departure's.
+        self._departing.pop(descriptor, None)
 
     def _watch_below(self, top: Path) -> None:
         """Watches every directory below `top`. One that vanishes on the way
@@ -501,6 +522,15 @@ class Inotify:
                 with contextlib.suppress(OSError):
                     self._watch(Path(directory) / name)
 
+    def _watch_tree(self, top: Path) -> None:
+        """Watches `top` and everything below it as they are now. Anything
+        inside may predate the watch: a directory moved in arrives full, and
+        a new one fills fast."""
+
+        with contextlib.suppress(OSError):
+            self._watch(top)
+        self._watch_below(top)
+
     def _below(self, top: Path) -> list[tuple[int, Path]]:
         return [
             (descriptor, path)
@@ -508,16 +538,50 @@ class Inotify:
             if path == top or top in path.parents
         ]
 
-    def _moved_within(self, old: Path, new: Path, descriptors: list[int]) -> None:
-        for descriptor in descriptors:
-            path = self._dirs.get(descriptor)
-            if path is not None and (path == old or old in path.parents):
-                self._dirs[descriptor] = new / path.relative_to(old)
+    def _moved_within(self, old: Path, new: Path) -> None:
+        """Rewrites `old` to `new` in every watched path and every pending
+        departure's old path at or below it."""
+
+        for descriptor, path in self._below(old):
+            self._dirs[descriptor] = new / path.relative_to(old)
+        for cookie, (path, deadline, taken) in list(self._departed.items()):
+            if path == old or old in path.parents:
+                self._departed[cookie] = (new / path.relative_to(old), deadline, taken)
 
     def _moved_out(self, descriptors: list[int]) -> None:
         for descriptor in descriptors:
             if self._dirs.pop(descriptor, None) is not None:
                 self._remove(self._fd, descriptor)
+
+    def _depart(self, cookie: int, path: Path) -> None:
+        """Holds the watches at and below `path` for the move `cookie`,
+        except those an earlier pending departure holds: they stay its own,
+        to remove or keep when it settles."""
+
+        taken = [
+            descriptor for descriptor, _ in self._below(path) if descriptor not in self._departing
+        ]
+        self._departed[cookie] = (path, self._clock() + MOVE_PAIR_SECONDS, taken)
+        for descriptor in taken:
+            self._departing[descriptor] = cookie
+
+    def _settle(self, cookie: int) -> tuple[Path, list[int]]:
+        """Ends the departure `cookie`: its old path and the watches it
+        still holds."""
+
+        old, _, taken = self._departed.pop(cookie)
+        held = [descriptor for descriptor in taken if self._departing.get(descriptor) == cookie]
+        for descriptor in held:
+            del self._departing[descriptor]
+        return old, held
+
+    def _join(self, cookie: int, descriptors: list[int]) -> None:
+        """Gives `descriptors` to the pending departure `cookie`: they moved
+        into a directory that is away, so they go or return with it."""
+
+        self._departed[cookie][2].extend(descriptors)
+        for descriptor in descriptors:
+            self._departing[descriptor] = cookie
 
     def read_events(self) -> list[dict[str, str]]:
         """The events waiting now, possibly none. Call it again within
@@ -530,10 +594,10 @@ class Inotify:
             buffer = b""
         events = self.parse(buffer)
         now = self._clock()
-        for cookie, (_, deadline, descriptors) in list(self._departed.items()):
+        for cookie, (_, deadline, _) in list(self._departed.items()):
             if deadline <= now:
-                del self._departed[cookie]
-                self._moved_out(descriptors)
+                _, held = self._settle(cookie)
+                self._moved_out(held)
         return events
 
     def settle_seconds(self) -> float | None:
@@ -558,21 +622,22 @@ class Inotify:
             directory = self._dirs.get(descriptor)
             if mask & IN_IGNORED or directory is None:
                 self._dirs.pop(descriptor, None)
+                self._departing.pop(descriptor, None)
                 continue
             path = directory / os.fsdecode(raw) if raw else directory
             if self._recursive and mask & IN_ISDIR:
                 if mask & IN_MOVED_FROM:
-                    taken = [descriptor for descriptor, _ in self._below(path)]
-                    self._departed[cookie] = (path, self._clock() + MOVE_PAIR_SECONDS, taken)
+                    self._depart(cookie, path)
                 elif mask & IN_MOVED_TO and cookie in self._departed:
-                    old, _, taken = self._departed.pop(cookie)
-                    self._moved_within(old, path, taken)
-                elif mask & (IN_CREATE | IN_MOVED_TO):
-                    # Anything inside may predate the watch: a directory
-                    # moved in arrives full, and a new one fills fast.
-                    with contextlib.suppress(OSError):
-                        self._watch(path)
-                    self._watch_below(path)
+                    old, held = self._settle(cookie)
+                    self._moved_within(old, path)
+                    away = self._departing.get(descriptor)
+                    if away is None:
+                        self._watch_tree(path)
+                    else:
+                        self._join(away, held)
+                elif mask & (IN_CREATE | IN_MOVED_TO) and descriptor not in self._departing:
+                    self._watch_tree(path)
             events.append(
                 {
                     "name": path.relative_to(self._root).as_posix(),
