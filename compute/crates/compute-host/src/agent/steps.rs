@@ -330,6 +330,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         self.teardowns.spawn(async move {
             let _records = records;
+            live.memory.ending();
             let mut result = engine.stop(live.vm).await;
             let mut delay = Duration::from_millis(100);
             while let Err(error) = &result {
@@ -581,6 +582,7 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
             .await?;
         let stopped = match vm {
             Some((vm, memory)) => {
+                memory.ending();
                 let stopped = self.engine.stop(vm).await;
                 // Whatever serves or fetches its memory writes into the
                 // directory about to go, so it ends first.

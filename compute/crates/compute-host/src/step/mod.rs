@@ -265,11 +265,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 After::New(vm, memory) => Some((vm, memory)),
             };
             if let Some((vm, memory)) = ended {
-                outcome = self.end(vm, outcome).await;
-                // A VM that would not end may still need its pager.
-                if outcome != Outcome::Failed(Failure::Fatal) {
-                    memory.close().await;
-                }
+                outcome = self.end_with_memory(vm, memory, outcome).await;
             }
             after = After::NoVm;
         }
@@ -513,10 +509,9 @@ impl<E: Engine, S: Store> Job<E, S> {
             return (Outcome::Failed(Failure::Fatal), After::Kept(live));
         }
         live.stopping.store(true, Ordering::Release);
-        let outcome = self.end(live.vm, Outcome::Done).await;
-        if outcome == Outcome::Done {
-            live.memory.close().await;
-        }
+        let outcome = self
+            .end_with_memory(live.vm, live.memory, Outcome::Done)
+            .await;
         (outcome, After::NoVm)
     }
 
@@ -690,10 +685,9 @@ impl<E: Engine, S: Store> Job<E, S> {
         // A restore continues the saved execution: the generation stays.
         let running = Change::new().image(false).archived(false);
         if let Err(error) = self.commit(running).await {
-            let outcome = self.end(vm, state_failure(&error)).await;
-            if outcome != Outcome::Failed(Failure::Fatal) {
-                live_memory.close().await;
-            }
+            let outcome = self
+                .end_with_memory(vm, live_memory, state_failure(&error))
+                .await;
             return (outcome, After::NoVm);
         }
         let committed = started.elapsed();
@@ -705,11 +699,10 @@ impl<E: Engine, S: Store> Job<E, S> {
         if let Err(error) = self.engine.resume(&vm).await {
             // The VM ends before the image is reconsidered, so no second
             // process ever runs from the same files.
-            let ended = self.end(vm, Outcome::Done).await;
+            let ended = self.end_with_memory(vm, live_memory, Outcome::Done).await;
             if ended != Outcome::Done {
                 return (ended, After::NoVm);
             }
-            live_memory.close().await;
             return (
                 self.after_failed_wake(&error, true, archived).await,
                 After::NoVm,
@@ -939,6 +932,18 @@ impl<E: Engine, S: Store> Job<E, S> {
                 Outcome::Failed(Failure::Fatal)
             }
         }
+    }
+
+    /// Like [`Self::end`] for a VM with its memory: the pager going away is
+    /// expected, and once the process has ended its memory is closed. A VM
+    /// that would not end keeps its memory served, since it may still run.
+    async fn end_with_memory(&self, vm: E::Vm, memory: LiveMemory, outcome: Outcome) -> Outcome {
+        memory.ending();
+        let outcome = self.end(vm, outcome).await;
+        if outcome != Outcome::Failed(Failure::Fatal) {
+            memory.close().await;
+        }
+        outcome
     }
 
     /// Lets the guest fix its clock and drop dead connections before the

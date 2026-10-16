@@ -152,6 +152,9 @@ pub(crate) struct Paging {
     /// For remote images: the filling of the memory file.
     pub hydration: Option<Arc<Hydration>>,
     cancel: CancellationToken,
+    /// Set once the agent is ending the VM, whose pager then goes away by
+    /// design.
+    ending: CancellationToken,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     prefetched: watch::Receiver<bool>,
     complete: watch::Receiver<bool>,
@@ -307,6 +310,7 @@ impl Paging {
         let (complete_tx, complete) = watch::channel(false);
         let (failed_tx, failed) = watch::channel(false);
         let cancel = CancellationToken::new();
+        let ending = CancellationToken::new();
         let (hydration, arrivals) = hydration.map_or((None, None), |(hydration, arrivals)| {
             (Some(hydration), Some(arrivals))
         });
@@ -318,6 +322,7 @@ impl Paging {
             prefetched: prefetched_tx,
             complete: complete_tx,
             cancel: cancel.clone(),
+            ending: ending.clone(),
         };
         let task = tokio::spawn(async move {
             if let Err(why) = conversation.run(connected).await {
@@ -328,11 +333,19 @@ impl Paging {
         Self {
             hydration,
             cancel,
+            ending,
             task: Mutex::new(Some(task)),
             prefetched,
             complete,
             failed,
         }
+    }
+
+    /// Says the agent is about to end the VM: its pager going away is then
+    /// expected, and ends the conversation without counting as lost memory.
+    /// Call it before stopping the VM, and [`Paging::close`] once it is gone.
+    pub fn ending(&self) {
+        self.ending.cancel();
     }
 
     /// Stops talking and filling, for a VM that has ended or whose files
@@ -505,6 +518,7 @@ struct Talk {
     prefetched: watch::Sender<bool>,
     complete: watch::Sender<bool>,
     cancel: CancellationToken,
+    ending: CancellationToken,
 }
 
 impl Talk {
@@ -529,6 +543,8 @@ impl Talk {
                 }
                 Ended::Cancelled => return Ok(()),
                 Ended::Failed(why) => return Err(why),
+                // The agent is ending the VM, and the pager with it.
+                Ended::Lost if self.ending.is_cancelled() => return Ok(()),
                 Ended::Lost => tracing::debug!("pager connection lost; reconnecting"),
             }
         }
@@ -549,6 +565,7 @@ impl Talk {
                 let _ = self.complete.send(true);
                 Ok(None)
             }
+            Err(Refused::Gone(_)) if self.ending.is_cancelled() => Ok(None),
             Err(Refused::Gone(error)) => Err(format!("the pager has gone: {error}")),
             Err(Refused::Wrong(why)) => Err(why),
         }
@@ -852,6 +869,67 @@ mod tests {
                     .unwrap()
                     .is_none()
             );
+        }
+    }
+
+    /// A pager that greets, misses part of its image, and exits without a
+    /// word when told to.
+    fn exiting_pager(
+        socket: &Path,
+        tag: String,
+        identity: (u64, u64),
+    ) -> tokio::sync::oneshot::Sender<()> {
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        let socket = socket.to_owned();
+        let (exit, exited) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (_read, mut write) = stream.into_split();
+            let hello = ToHost::Hello {
+                tag,
+                device: identity.0,
+                inode: identity.1,
+                missing: vec![(4096, 3 * 4096)],
+                prefetched: true,
+            };
+            write
+                .write_all(&control::line(&hello).unwrap())
+                .await
+                .unwrap();
+            let _ = exited.await;
+            drop(listener);
+            let _ = std::fs::remove_file(&socket);
+        });
+        exit
+    }
+
+    #[tokio::test]
+    async fn a_pager_ended_with_its_vm_is_not_lost_memory() {
+        for ending in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let (images, generation, marker, control, tag) = local_image(dir.path());
+            let identity = identity(&images.memory(generation)).unwrap();
+            let exit = exiting_pager(&control, tag, identity);
+            let paging = Paging::reconnect(&marker, &control, images, None)
+                .await
+                .unwrap()
+                .expect("the pager runs");
+            if ending {
+                paging.ending();
+            }
+            exit.send(()).unwrap();
+            let verdict = timeout(Duration::from_secs(5), paging.complete())
+                .await
+                .expect("the conversation ends");
+            // Only a pager that went while its VM was meant to go on
+            // running means memory that can no longer be served.
+            if ending {
+                assert!(matches!(verdict, Err(Incomplete::Stopped)), "{verdict:?}");
+                assert!(!*paging.failed.borrow());
+            } else {
+                assert!(matches!(verdict, Err(Incomplete::Failed)), "{verdict:?}");
+            }
+            paging.close().await;
         }
     }
 

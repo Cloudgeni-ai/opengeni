@@ -86,6 +86,15 @@ impl LiveMemory {
         futures::future::Either::Right(std::future::pending())
     }
 
+    /// Says the agent is about to end the VM, so its pager going away is
+    /// expected rather than lost memory. Call it before stopping the VM.
+    pub fn ending(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(paging) = &self.paging {
+            paging.ending();
+        }
+    }
+
     /// Waits until the image this VM's memory comes from is whole and its
     /// pager, if it has one, holds every byte: until then the image must
     /// stay the current one, unsealed and in place, so an agent that
