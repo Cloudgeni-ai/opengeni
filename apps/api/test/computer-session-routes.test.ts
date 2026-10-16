@@ -163,16 +163,24 @@ describe("ComputerSession route discipline", () => {
       source.indexOf("async function withActiveComputerController"),
     );
     const routed = placement.slice(placement.indexOf("handle.routingSession.prime()"));
+    // The machine this request pinned was already resolved under the turn's
+    // machine authority; any other routed machine is looked up the same way.
+    expect(routed).toContain("handle.pinnedMachine?.sandboxId === resolved.sandboxId");
+    expect(routed).toContain("routedMachineConnection(handle, grant, sourceSession");
+    expect(routed.indexOf("routedMachineConnection(")).toBeLessThan(
+      routed.indexOf("assertConnectedMachineComputerAccess("),
+    );
+    const lookup = source.slice(
+      source.indexOf("async function routedMachineConnection"),
+      source.indexOf("async function withComputerPlacement"),
+    );
     // An agent's tool calls carry a worker subject. A personal (Only me)
     // machine is visible only to the person who started the turn, so the
     // routed lookup must use the same authority as routing itself.
-    expect(routed).toContain("await handle.machineAuthority()");
-    expect(routed).toContain("subjectId: machineAuthority.subjectId");
-    expect(routed).toContain("resolveChannelAMachineConnection(");
-    expect(routed.indexOf("handle.machineAuthority()")).toBeLessThan(
-      routed.indexOf("assertConnectedMachineComputerAccess("),
-    );
-    expect(routed).not.toContain("getSandbox(deps.db, grant");
+    expect(lookup).toContain("await handle.machineAuthority()");
+    expect(lookup).toContain("subjectId: machineAuthority.subjectId");
+    expect(lookup).toContain("resolveChannelAMachineConnection(");
+    expect(lookup).not.toContain("getSandbox(deps.db, grant");
   });
 
   test("dispatches lifecycle authority before physical mutation and preserves unknown outcomes", async () => {
