@@ -1,5 +1,37 @@
 # @opengeni/db
 
+## 3.2.2
+
+### Minor Changes
+
+- a0c35a1: Linked vaults accept the external, Proton Pass, Keeper and Bitwarden sources (migration 0789). Linking checks the connection's provider identity, active and verified status and ownership in the database: a personal connection backs only its owner's Only-me vaults, and a shared connection only vaults of its own ownership. Vaults record the provider's effective operations, its own freshness observation and a durable cache epoch that every complete mirror replacement advances.
+
+  A mirror is replaced only by a complete inventory of at most 2,000 items; otherwise the previous mirror is kept and the failure recorded. Refreshes never bypass an active provider rate limit, even when forced, and record operations and freshness even when nothing changed. `secret_search` accepts `refresh` (first page only) and reports `complete` and the checked `sources` on every page, so an unavailable provider is never shown as an empty healthy vault. A reference that misses while a relevant connected vault could not be checked fails with that provider's error instead of a missing-secret ask card; explicitly named healthy or hosted vaults are unaffected. Vault summaries include `providerOperations` and `freshness`.
+
+  Connected-vault writes check the vault's effective operations (item type, field removal, one-time passwords, files, archive) before any value is resolved or generated. Permanent deletion, restore and field-history restore are refused for connected items. A move out of a connected vault needs a recoverable archive and archives the original only after the target confirmed the write. An unconfirmed provider write is reported as `provider_outcome_unknown` and never retried; a confirmed write that cannot be listed yet is reported as saved (`provider_inventory_incomplete` with `details.saved`).
+
+### Patch Changes
+
+- 5af5889: Sandbox: on Modal, a chat whose sandbox setup was cut off mid-start no longer keeps an unused sandbox running for up to a day. After the idle grace the workspace is saved, the sandbox is stopped, and the chat resumes on the saved workspace. A sandbox that was already shutting down is now also saved before its provider deadline instead of being stopped without a save, which previously made the resumed chat fail.
+- a0c35a1: Overlapping syncs of one connected vault now replace its mirror one at a time. The mirror replacement takes the vault row lock before it reads the mirror, so an older listing can no longer re-add an item that a newer one removed while the newer content version is recorded, which also stopped later unchanged syncs from repairing it.
+
+  A reference that finds nothing now refreshes every connected vault that could change the answer: those at or above the priority tier that matched. A hosted workspace item without a one-time password no longer stops a stale Only-me connected vault from being refreshed, so `Item/otp` resolves once that provider has the one-time password, or reports the provider as unavailable, rate limited or needing reconnection instead of asking for the secret. A lower-priority connected vault that is down no longer turns a miss decided by a higher tier into an unchecked one.
+
+- a0c35a1: Settle connected-vault inventory and status together against the cache epoch read before provider I/O. A late overlapping refresh cannot overwrite another completed check, including unchanged checks and failures. Superseded refreshes are not replayed; reference resolution rereads the settled inventory.
+
+  Preflight managed 1Password creation through the exact local link checks, rolling back all local trial effects before provider I/O. Predictable name, quota and authority refusals create nothing upstream. If a race or a later step fails after confirmed creation, return the existing provider vault identity and link/refresh recovery guidance instead of inviting another create. Failed group grants retain the created identity and still link the vault; unknown creates are never automatically retried. No destructive compensation or exactly-once guarantee is introduced.
+
+- Updated dependencies [7e50b4a]
+- Updated dependencies [a0c35a1]
+  - @opengeni/config@3.2.0
+  - @opengeni/contracts@3.2.0
+  - @opengeni/codemode@3.2.0
+  - @opengeni/codex@3.2.0
+  - @opengeni/observability@3.2.0
+  - @opengeni/network@3.2.0
+  - @opengeni/subscriptions@3.2.0
+  - @opengeni/xai-subscription@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes

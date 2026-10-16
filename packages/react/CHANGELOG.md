@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 3.2.2
+
+### Patch Changes
+
+- c30cf85: Mark expanded Site headers so the desktop app can keep Back and other actions clear of native window controls without changing inline or browser viewers.
+- Updated dependencies [a0c35a1]
+  - @opengeni/sdk@3.2.0
+  - @opengeni/connect@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes

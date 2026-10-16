@@ -1,5 +1,53 @@
 # @opengeni/worker-bundle
 
+## 3.2.2
+
+### Minor Changes
+
+- a0c35a1: Add `@opengeni/vaults-protonpass`, a Proton Pass provider that runs an operator-installed `pass-cli` 2.4.2 under a scoped personal access token (live reads, file reads, creating logins, notes and custom items, and moving items to trash), and `@opengeni/vaults-keeper`, a Keeper Secrets Manager provider on the pinned official SDK 17.6.0 (one-time token bootstrap, persisted key rotation, live reads, file reads, creating logins and notes, and field updates with revision checks).
+
+  The API and worker load both through `createNativeExternalVaultFactories(settings)`: Keeper always, with every request and file download DNS-pinned, and Proton Pass only when `OPENGENI_PROTON_PASS_CLI_PATH` names an operator-installed CLI, with one pooled CLI session per token. Both images ship the Keeper SDK as an installed package.
+
+### Patch Changes
+
+- 5af5889: Sandbox: on Modal, a chat whose sandbox setup was cut off mid-start no longer keeps an unused sandbox running for up to a day. After the idle grace the workspace is saved, the sandbox is stopped, and the chat resumes on the saved workspace. A sandbox that was already shutting down is now also saved before its provider deadline instead of being stopped without a save, which previously made the resumed chat fail.
+- Updated dependencies [5af5889]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [7e50b4a]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [d5858bb]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+  - @opengeni/db@3.2.0
+  - @opengeni/core@3.2.0
+  - @opengeni/config@3.2.0
+  - @opengeni/vaults-protonpass@3.2.0
+  - @opengeni/vaults-keeper@3.2.0
+  - @opengeni/vaults-onepassword@3.2.0
+  - @opengeni/vaults@3.2.0
+  - @opengeni/runtime@3.2.0
+  - @opengeni/contracts@3.2.0
+  - @opengeni/sdk@3.2.0
+  - @opengeni/documents@3.2.0
+  - @opengeni/events@3.2.0
+  - @opengeni/github@3.2.0
+  - @opengeni/storage@3.2.0
+  - @opengeni/capabilities@3.2.0
+  - @opengeni/codemode@3.2.0
+  - @opengeni/codex@3.2.0
+  - @opengeni/interaction@3.2.0
+  - @opengeni/observability@3.2.0
+  - @opengeni/tool-gateway@3.2.0
+  - @opengeni/agent-proto@3.2.0
+  - @opengeni/jev@3.2.0
+  - @opengeni/network@3.2.0
+  - @opengeni/subscriptions@3.2.0
+  - @opengeni/xai-subscription@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes

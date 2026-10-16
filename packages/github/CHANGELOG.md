@@ -1,5 +1,15 @@
 # @opengeni/github
 
+## 3.2.2
+
+### Patch Changes
+
+- Updated dependencies [7e50b4a]
+- Updated dependencies [a0c35a1]
+  - @opengeni/config@3.2.0
+  - @opengeni/contracts@3.2.0
+  - @opengeni/network@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes
