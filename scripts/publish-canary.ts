@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import libnpmpublish from "libnpmpublish";
@@ -630,7 +631,7 @@ export async function confirmCanaryCohort(
   options: ReceiptPollOptions = {},
 ): Promise<void> {
   const now = options.now ?? performance.now.bind(performance);
-  const sleep = options.sleep ?? Bun.sleep;
+  const waitForNextPoll = options.sleep ?? sleep;
   const timeoutMs = options.timeoutMs ?? CANARY_RECEIPT_TIMEOUT_MS;
   const pollIntervalMs = options.pollIntervalMs ?? CANARY_RECEIPT_POLL_INTERVAL_MS;
   const maxReads = options.maxReads ?? defaultCanaryReceiptReads(packages.length);
@@ -789,7 +790,7 @@ export async function confirmCanaryCohort(
       remaining,
       Math.max(pollIntervalMs, (remaining - completionTime) / remainingPolls),
     );
-    if (wait > 0 && reads < maxReads) await sleep(wait);
+    if (wait > 0 && reads < maxReads) await waitForNextPoll(wait);
   }
   const category = reads >= maxReads && now() < deadline ? "read_limit" : lastObservation;
   throw new Error(
