@@ -82,7 +82,7 @@ async function writePeriod(db: Database, input: PlanCreditPeriodInput, replace: 
   });
 }
 
-/** One receipt per subscription/start (Free: account/UTC month); changed terms fail. */
+/** One receipt per subscription/start/plan (Free: account/UTC month); changed terms fail. */
 export const grantPlanCreditPeriod = (db: Database, input: PlanCreditPeriodInput) =>
   writePeriod(db, input, false);
 /** Atomically expire the old allowance and grant a full new one. Replays never expire the new period. */

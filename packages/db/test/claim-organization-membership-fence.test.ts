@@ -146,10 +146,12 @@ describe("turn claim organization-membership fence", () => {
     }
   }, 180_000);
 
-  test("only the retired host-MCP authority tables carry triggers that take the key", async () => {
+  test("only retired host-MCP authorities and explicit membership changes take the key", async () => {
     // The claim can stay fence-free only while no trigger it can fire takes
     // the membership key. Pin the complete trigger set so a new one is a
     // deliberate review of the claim's lock order, not a silent inversion.
+    // Plan seat triggers run only on membership/invitation writes, never turn
+    // claim writes; the blocking controls above keep that separation proven.
     if (!available) return;
     const admin = postgres(shared!.adminUrl, { max: 1, onnotice: () => undefined });
     try {
@@ -165,6 +167,8 @@ describe("turn claim organization-membership fence", () => {
         "host_mcp_turn_authorities.host_mcp_inherited_turn_authority_guard",
         "host_mcp_turn_authorities.host_mcp_scheduled_turn_authority_guard",
         "host_mcp_turn_authorities.host_mcp_turn_authority_guard",
+        "organization_membership_invitations.organization_invitations_plan_seat_limit",
+        "organization_memberships.organization_memberships_plan_seat_limit",
       ]);
     } finally {
       await admin.end();

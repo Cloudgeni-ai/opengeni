@@ -74,7 +74,7 @@ Statuses are `active`, `trialing`, `past_due`, `canceled`, `unpaid`, `paused`,
 stripeSubscriptionId? })` requires matching active/trialing plan state and exact
 period bounds. Paid grants require a subscription identity. The caller must
 only invoke them after payment; these functions do not verify a Stripe invoice.
-The key is `plan-credit:stripe:<subscription>:<period-start-epoch>`; Free uses
+The key is `plan-credit:stripe:<subscription>:<period-start-epoch>:<plan-key>`; Free uses
 `plan-credit:free:<account>:<UTC YYYY-MM>`. Duplicate calls return the original
 receipt, even after state/catalog changes; different terms for the same key
 fail with `23505`. Normal renewal expires an ended old period first. Overlap
@@ -91,6 +91,10 @@ It expires the old period and grants the full new amount atomically. Retries
 check the grant receipt before expiring anything, so a duplicated upgrade
 cannot expire its own or a successor period. A failed new grant rolls the
 expiry back. A replacement cannot move behind the open period. Use this path
+even when Stripe retains the same integer-second anchor: a different plan has
+a distinct receipt at that anchor, but repeating that plan/anchor never refills.
+This refines the design's subscription/start-only key to reconcile paid
+same-second upgrades safely. Use this path
 for **every** plan transition, including Free to Pro/Max: unused Free monthly
 credit must never stack on top of the paid allowance. The separately issued
 signup promotion is not monthly plan credit and remains available.

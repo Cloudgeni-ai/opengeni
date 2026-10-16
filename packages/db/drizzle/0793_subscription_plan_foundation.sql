@@ -372,7 +372,10 @@ BEGIN
   END IF;
   PERFORM pg_advisory_xact_lock(hashtext(p_account_id::text));
   grant_key := CASE WHEN p_stripe_subscription_id IS NOT NULL
-    THEN 'plan-credit:stripe:' || p_stripe_subscription_id || ':' || extract(epoch FROM p_period_start)::text
+    -- Stripe anchors have second precision: a paid plan change can legitimately
+    -- retain the old second. Include the stable plan key so that transition has
+    -- its own immutable receipt, while same-plan/anchor retries cannot refill.
+    THEN 'plan-credit:stripe:' || p_stripe_subscription_id || ':' || extract(epoch FROM p_period_start)::text || ':' || p_plan_key
     ELSE 'plan-credit:free:' || p_account_id::text || ':' || to_char(p_period_start AT TIME ZONE 'UTC', 'YYYY-MM') END;
   SELECT * INTO period FROM plan_credit_periods WHERE idempotency_key = grant_key;
   IF FOUND THEN
@@ -441,7 +444,8 @@ BEGIN
     RETURN grant_plan_credit_period(p_account_id, p_plan_key, p_period_start, p_period_end, p_stripe_subscription_id);
   END IF;
   FOR previous IN SELECT * FROM plan_credit_periods WHERE account_id = p_account_id AND expired_at IS NULL LOOP
-    IF previous.period_start >= p_period_start THEN
+    IF previous.period_start > p_period_start OR
+      (previous.period_start = p_period_start AND previous.plan_key = p_plan_key) THEN
       RAISE EXCEPTION 'Upgrade cannot replace a newer plan period' USING ERRCODE = '55000';
     END IF;
     PERFORM expire_plan_credit_period(p_account_id, previous.id, true);

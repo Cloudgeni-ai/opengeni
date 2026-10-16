@@ -540,6 +540,33 @@ test("upgrade atomically expires old credit and grants the full new allowance; o
   );
 }, 180_000);
 
+test("a paid same-second plan transition has a distinct receipt and cannot refill on replay", async () => {
+  if (!client) return;
+  const { accountId } = await account();
+  const input = await activate(accountId);
+  input.periodStart = new Date(Math.floor(input.periodStart.getTime() / 1000) * 1000);
+  await sync(input);
+  const old = await grantPlanCreditPeriod(client.db, input);
+  await topup(accountId, 30 * M);
+  await debit(accountId, 50 * M);
+  const upgraded = { ...input, planKey: "max" };
+  await sync(upgraded);
+  const [first, replay] = await Promise.all([
+    replacePlanCreditPeriod(client.db, upgraded),
+    replacePlanCreditPeriod(client.db, upgraded),
+  ]);
+  expect(first.id).toBe(replay.id);
+  expect(first.idempotency_key).not.toBe(old.idempotency_key);
+  expect(await getBillingBalance(client.db, accountId)).toMatchObject({
+    balanceMicros: 2030 * M,
+    plan: { key: "max", creditRemainingMicros: 2000 * M },
+  });
+  await debit(accountId, 70 * M);
+  expect((await replacePlanCreditPeriod(client.db, upgraded)).id).toBe(first.id);
+  expect((await replacePlanCreditPeriod(client.db, input)).id).toBe(old.id);
+  expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(1960 * M);
+}, 180_000);
+
 test("a post-use debit queued before expiry cannot slip into the expired period", async () => {
   if (!client || !shared) return;
   const { accountId } = await account();
