@@ -14,7 +14,7 @@
 //! `COMPUTE_TEST_PROFILE` the agent's memory profile (the agent's default,
 //! `bare-metal`, when unset; `nested` needs a reserved 2 MiB page pool).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -863,11 +863,12 @@ async fn only_trusted_hosts_let_guests_reach_the_local_network() {
 /// how often its random number generator was reseeded since boot (by its
 /// kernel for a VM fork or by the guest for a restore notice), and the
 /// out-of-memory killer's view of the command and of the guest agent that
-/// runs it.
+/// runs it, and its machine id and hostname.
 const FIRST_COMMAND: &str = "cat /run/sandbox-id 2>/dev/null || echo none
 head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \\n'; echo
 dmesg | grep -c 'crng reseeded'
-echo $(cat /proc/self/oom_score_adj) $(cat /proc/$PPID/oom_score_adj)";
+echo $(cat /proc/self/oom_score_adj) $(cat /proc/$PPID/oom_score_adj)
+echo $(cat /etc/machine-id) $(hostname)";
 
 /// Shows why a guest may have missed its restore notice.
 const GUEST_NOTICE_STATUS: &str = "systemctl status lab-notice --no-pager 2>&1 | head -20
@@ -944,6 +945,36 @@ async fn start_batch(agent: &Agent, count: usize) -> (Started, Vec<Started>, f64
     (single, all, wall_s)
 }
 
+/// Checks that clones of one snapshot each draw their own random bytes and
+/// carry their own machine id, with their sandbox id as hostname.
+fn assert_each_its_own(single: &Started, all: &[Started]) {
+    fn line(started: &Started, n: usize) -> &str {
+        started.output.get(n).map_or("", String::as_str)
+    }
+    let clones = all.len() + 1;
+    let random: BTreeSet<&str> = all.iter().chain([single]).map(|s| line(s, 1)).collect();
+    assert_eq!(
+        random.len(),
+        clones,
+        "every clone draws its own random bytes"
+    );
+    let machines: BTreeSet<&str> = all
+        .iter()
+        .chain([single])
+        .map(|started| line(started, 4).split(' ').next().unwrap_or(""))
+        .collect();
+    assert_eq!(machines.len(), clones, "every clone has its own machine id");
+    for started in all.iter().chain([single]) {
+        assert_eq!(
+            line(started, 4).split(' ').nth(1),
+            Some(started.sandbox.to_string().as_str()),
+            "{}: a clone is named after its sandbox: {:?}",
+            started.sandbox,
+            started.output
+        );
+    }
+}
+
 fn totals(all: &[Started]) -> Vec<f64> {
     all.iter().map(|started| started.total_ms).collect()
 }
@@ -985,16 +1016,7 @@ async fn warm_templates_start_sandboxes_fast_and_each_its_own() {
     let template_s = began.elapsed().as_secs_f64();
     assert_eq!(firecrackers(), 0, "the template's VM has ended");
     let (single, all, wall_s) = start_batch(&agent, count).await;
-    let random: std::collections::BTreeSet<&str> = all
-        .iter()
-        .chain([&single])
-        .map(|started| started.output.get(1).map_or("", String::as_str))
-        .collect();
-    assert_eq!(
-        random.len(),
-        count + 1,
-        "every clone draws its own random bytes"
-    );
+    assert_each_its_own(&single, &all);
     for started in all.iter().chain([&single]) {
         let reseeds: u32 = started
             .output

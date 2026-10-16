@@ -33,7 +33,9 @@ log() { printf '[host-setup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 # guest answers `ok seeded` (`ok` if it could not), so no command of the new
 # sandbox draws numbers another clone of the same snapshot draws; the host
 # uses a clone only after `ok seeded`. (The kernel reseeds by itself when it
-# learns of the VM generation ID's change, but later.)
+# learns of the VM generation ID's change, but later.) A notice naming a new
+# sandbox comes to a clone, which first takes a machine id and hostname of
+# its own.
 # A template is snapshotted once the guest accepts on vsock port 54, which
 # opens only when systemd has finished starting everything, so clones wake
 # settled instead of mid-boot.
@@ -43,9 +45,27 @@ install_guest_services() {
   # memory is still being faulted in after its restore.
   sudo tee "$root/usr/local/bin/lab-notice" >/dev/null <<'SCRIPT'
 #!/usr/bin/python3
-import fcntl, os, socket, time
+import fcntl, hashlib, os, socket, time
 
 RNDRESEEDCRNG = 0x5207  # _IO('R', 0x07)
+
+
+def current_sandbox():
+    try:
+        with open("/run/sandbox-id") as file:
+            return file.read().strip()
+    except OSError:
+        return ""
+
+
+def renew_identity(sandbox, seed):
+    # A clone's own machine id (the same for a retried notice) and hostname.
+    machine_id = hashlib.sha256(f"{seed}:{sandbox}".encode()).hexdigest()[:32]
+    with open("/etc/.machine-id.new", "w") as file:
+        file.write(machine_id + "\n")
+    os.replace("/etc/.machine-id.new", "/etc/machine-id")
+    socket.sethostname(sandbox[:63])
+
 
 listener = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
 listener.bind((socket.VMADDR_CID_ANY, 53))
@@ -60,29 +80,36 @@ while True:
                 if not chunk:
                     raise EOFError
                 line += chunk
-            word, nanos, *fields = line.decode().split()
+            word, nanos, *rest = line.decode().split()
             if word != "restored":
                 continue
             time.clock_settime_ns(time.CLOCK_REALTIME, int(nanos))
+            fields = dict(field.partition("=")[::2] for field in rest)
+            sandbox, seed = fields.get("sandbox", ""), fields.get("seed", "")
+            if sandbox and sandbox != current_sandbox():
+                try:
+                    renew_identity(sandbox, seed)
+                except OSError:
+                    # The id is not taken, so a retry renews again; the host
+                    # does not use a clone that is not seeded.
+                    connection.sendall(b"ok\n")
+                    continue
+                with open("/run/sandbox-id.new", "w") as file:
+                    file.write(sandbox + "\n")
+                os.replace("/run/sandbox-id.new", "/run/sandbox-id")
             seeded = False
-            for field in fields:
-                key, _, value = field.partition("=")
-                if key == "sandbox":
-                    with open("/run/sandbox-id.new", "w") as file:
-                        file.write(value + "\n")
-                    os.replace("/run/sandbox-id.new", "/run/sandbox-id")
-                elif key == "seed":
-                    # Mixed into the input pool, then the generator reseeds
-                    # from it at once.
-                    try:
-                        with open("/dev/urandom", "wb", buffering=0) as pool:
-                            pool.write(bytes.fromhex(value))
-                            fcntl.ioctl(pool, RNDRESEEDCRNG)
-                        seeded = True
-                    except (OSError, ValueError):
-                        continue
+            if seed:
+                # Mixed into the input pool, then the generator reseeds from
+                # it at once.
+                try:
+                    with open("/dev/urandom", "wb", buffering=0) as pool:
+                        pool.write(bytes.fromhex(seed))
+                        fcntl.ioctl(pool, RNDRESEEDCRNG)
+                    seeded = True
                     with open("/dev/kmsg", "w") as log:
                         log.write("lab-notice: crng reseeded from the restore notice\n")
+                except (OSError, ValueError):
+                    pass
             connection.sendall(b"ok seeded\n" if seeded else b"ok\n")
         except (OSError, ValueError, EOFError):
             pass
@@ -224,7 +251,7 @@ fi
 
 if [ -f base.ext4 ] && {
   ! sudo debugfs -R "cat /etc/systemd/system/lab-identity.service" base.ext4 2>/dev/null | grep -q Before=lab-agent ||
-    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q "ok seeded" ||
+    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q "renew_identity" ||
     ! sudo debugfs -R "stat /etc/systemd/system/lab-ready.service" base.ext4 2>/dev/null | grep -q Inode ||
     ! sudo debugfs -R "cat /etc/systemd/system/lab-agent.service" base.ext4 2>/dev/null | grep -q OOMScoreAdjust
 }; then

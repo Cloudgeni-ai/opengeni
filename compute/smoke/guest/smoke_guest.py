@@ -31,6 +31,12 @@ restores. The id is kept in the state directory before the answer, so a
 restarted service still knows it; a guest booted from its disk finds its id
 on the kernel command line instead, as `opengeni.sandbox=<id>`.
 
+A notice naming a sandbox other than the one the guest believes it is comes
+to a clone: before taking the id, the service gives the guest a machine id
+of its own (from the seed and the id, so a retried notice writes the same)
+and the id as its hostname, and answers `ok` rather than `ok seeded` when it
+cannot, so two clones never share either.
+
 Commands started here keep the sandbox awake while they run, however quiet
 they are: asked `activity` on the notice port, the service answers
 `commands <n>`, the number still running. A request with `"keep_awake":
@@ -49,10 +55,12 @@ import contextlib
 import ctypes
 import ctypes.util
 import fcntl
+import hashlib
 import itertools
 import json
 import math
 import os
+import re
 import select
 import shutil
 import signal
@@ -73,6 +81,10 @@ SANDBOX_ARG = "opengeni.sandbox"
 RANDOM_DEVICE = "/dev/urandom"
 RNDRESEEDCRNG = 0x5207  # _IO('R', 0x07)
 OUTPUT_DIR = Path(os.environ.get("SMOKE_GUEST_STATE", "/run/smoke-guest"))
+# Where a clone's own machine id and hostname go.
+MACHINE_ID = Path(os.environ.get("SMOKE_GUEST_MACHINE_ID", "/etc/machine-id"))
+HOSTNAME = Path(os.environ.get("SMOKE_GUEST_HOSTNAME", "/proc/sys/kernel/hostname"))
+_HOSTNAME_LABEL = re.compile(r"[0-9A-Za-z][0-9A-Za-z-]{0,62}")
 # The id the latest restore notice gave, kept across restarts of the service.
 SANDBOX_FILE = OUTPUT_DIR / "sandbox"
 _OUTPUT_NAMES = itertools.count()
@@ -884,11 +896,31 @@ def reseed(seed: str, device: str = RANDOM_DEVICE) -> bool:
     return True
 
 
+def renew_identity(sandbox: str, seed: str) -> bool:
+    """Gives a clone that has just learned it is `sandbox` its own machine
+    id and hostname, in place of its template's. The machine id comes from
+    the seed and the id, so a retried notice writes the same one. Returns
+    whether both were set."""
+
+    machine_id = hashlib.sha256(f"{seed}:{sandbox}".encode()).hexdigest()[:32]
+    hostname = sandbox if _HOSTNAME_LABEL.fullmatch(sandbox) else f"sandbox-{machine_id[:12]}"
+    try:
+        staged = MACHINE_ID.with_name(f".{MACHINE_ID.name}.{os.getpid()}")
+        staged.write_text(machine_id + "\n", encoding="ascii")
+        os.replace(staged, MACHINE_ID)
+        HOSTNAME.write_text(hostname + "\n", encoding="ascii")
+    except OSError as error:
+        print(f"cannot renew the machine identity: {error}", file=sys.stderr, flush=True)
+        return False
+    return True
+
+
 def serve_notice(connection: socket.socket, *, set_clock: bool) -> None:
     """Acts on one restore notice: sets the clock, counts the restore, takes
-    the sandbox id, applies the seed and answers `ok seeded`, or `ok` when
-    there was no seed or it could not be applied. Anything else closes the
-    connection unanswered."""
+    the sandbox id (a new one after renewing the machine identity), applies
+    the seed and answers `ok seeded`, or `ok` when there was no seed or it or
+    the identity could not be applied. Anything else closes the connection
+    unanswered."""
 
     with connection, connection.makefile("rb") as reader:
         line = reader.readline(MAX_NOTICE + 1)
@@ -907,8 +939,19 @@ def serve_notice(connection: socket.socket, *, set_clock: bool) -> None:
             except OSError as error:
                 # A guest that cannot set its clock still counts the restore.
                 print(f"cannot set the clock: {error}", file=sys.stderr, flush=True)
+        sandbox = fields.get("sandbox") or None
+        if (
+            sandbox is not None
+            and sandbox != RESTORES.sandbox()
+            and not renew_identity(sandbox, fields.get("seed", ""))
+        ):
+            # The id is not taken, so a retry renews again; meanwhile the
+            # host must not use this clone.
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                connection.sendall(b"ok\n")
+            return
         try:
-            RESTORES.record(fields.get("sandbox") or None)
+            RESTORES.record(sandbox)
         except OSError as error:
             # Unanswered, the host tries again: an id the guest could not
             # keep is not taken.

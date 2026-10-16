@@ -23,6 +23,12 @@ sandboxes created at once all pay it at the same time.
   seed, reseeds, and answers `ok seeded`. Until that answer the record says
   the identity is pending. A clone that does not give it in time is ended and
   its sandbox boots from its disk; no command runs in a clone before it.
+- Safe to clone: a template guest holds nothing per instance (no secrets,
+  keys, sessions or ids derived from its boot). A notice naming a sandbox
+  other than the guest's current one comes to a clone, which first gives
+  itself a machine id (derived from the seed and the id, so a retried
+  notice writes the same one) and the sandbox id as hostname; a guest that
+  cannot answers `ok`, and the host does not use it.
 - The guest helper that answers notices and runs commands must outlast the
   user's programs when the guest runs out of memory: it sets its own
   `oom_score_adj` to -1000, and each command it starts resets it to 0 (the

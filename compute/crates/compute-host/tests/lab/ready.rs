@@ -6,13 +6,13 @@ use std::time::Duration;
 use tokio::time::{Instant, sleep};
 
 use super::{
-    Host, TemplateState, agains, count, firecrackers, lab, save_results, start_batch, summary,
-    totals,
+    Host, TemplateState, agains, assert_each_its_own, count, firecrackers, lab, save_results,
+    start_batch, summary, totals,
 };
 
 /// Every create claims a ready sandbox: its first command runs within a
 /// resume and an identity notice of the create, and each guest reports its
-/// own id and draws its own random numbers. A restarted agent removes the
+/// own id, machine id and random numbers. A restarted agent removes the
 /// ready sandboxes nobody claimed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn ready_sandboxes_start_at_once_and_each_its_own() {
@@ -48,16 +48,7 @@ async fn ready_sandboxes_start_at_once_and_each_its_own() {
     assert_eq!(firecrackers(), count + 1, "only the ready sandboxes run");
 
     let (single, all, wall_s) = start_batch(&agent, count).await;
-    let random: std::collections::BTreeSet<&str> = all
-        .iter()
-        .chain([&single])
-        .map(|started| started.output.get(1).map_or("", String::as_str))
-        .collect();
-    assert_eq!(
-        random.len(),
-        count + 1,
-        "every claim draws its own random bytes"
-    );
+    assert_each_its_own(&single, &all);
     let creates: Vec<f64> = all.iter().map(|started| started.create_ms).collect();
     let status = agent.status().await;
     let done = |step: &str| {

@@ -48,7 +48,11 @@ class GuestService(unittest.TestCase):
                 f"unix:{cls.notice_address}",
                 "--keep-clock",
             ],
-            env={**os.environ, "SMOKE_GUEST_STATE": str(cls.scratch / "state")},
+            env={
+                **os.environ,
+                **_identity_files(cls.scratch),
+                "SMOKE_GUEST_STATE": str(cls.scratch / "state"),
+            },
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -146,6 +150,24 @@ class GuestService(unittest.TestCase):
         # A notice without the field keeps the id the guest already has.
         self.assertEqual(self.notice(f"restored {time.time_ns()}\n".encode()), b"ok\n")
         self.assertEqual(self.ok({"op": "ping"})["sandbox"], sandbox)
+
+    def test_two_clones_get_machine_ids_and_hostnames_of_their_own(self) -> None:
+        machine_id = self.scratch / "machine-id"
+        hostname = self.scratch / "hostname"
+        seen = set()
+        for sandbox, seed in (("c10e0001", "5eed01"), ("c10e0002", "5eed02")):
+            line = f"restored {time.time_ns()} sandbox={sandbox} seed={seed}\n".encode()
+            self.notice(line)
+            first = machine_id.read_text()
+            self.assertRegex(first, r"^[0-9a-f]{32}\n$")
+            self.assertEqual(hostname.read_text(), f"{sandbox}\n")
+            seen.add(first)
+            # A retried notice, or a later restore of the same sandbox with
+            # a new seed, keeps the machine id.
+            self.notice(line)
+            self.notice(f"restored {time.time_ns()} sandbox={sandbox} seed=0ther\n".encode())
+            self.assertEqual(machine_id.read_text(), first)
+        self.assertEqual(len(seen), 2, "two clones share a machine id")
 
     def commands(self) -> bytes:
         return self.notice(b"activity\n")
@@ -441,10 +463,22 @@ class GuestService(unittest.TestCase):
             )
 
 
+def _identity_files(scratch: Path) -> dict[str, str]:
+    """Where a guest under test keeps the machine id and hostname a clone
+    renews, in place of the host's."""
+
+    return {
+        "SMOKE_GUEST_MACHINE_ID": str(scratch / "machine-id"),
+        "SMOKE_GUEST_HOSTNAME": str(scratch / "hostname"),
+    }
+
+
 def _load_guest(state: Path) -> Any:
     """Imports the guest service as a module, keeping its files in `state`."""
 
-    with mock.patch.dict(os.environ, {"SMOKE_GUEST_STATE": str(state)}):
+    with mock.patch.dict(
+        os.environ, {**_identity_files(state.parent), "SMOKE_GUEST_STATE": str(state)}
+    ):
         spec = importlib.util.spec_from_file_location("smoke_guest_under_test", GUEST)
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
@@ -494,6 +528,22 @@ class GuestInternals(unittest.TestCase):
         self.assertEqual(answer(line, True), (b"ok seeded\n", ["5eed"]))
         self.assertEqual(answer(line, False), (b"ok\n", ["5eed"]))
         self.assertEqual(answer(f"restored {now}\n".encode(), True), (b"ok\n", []))
+
+    def test_a_clone_that_cannot_renew_its_identity_is_not_seeded_and_keeps_its_old_id(
+        self,
+    ) -> None:
+        self.guest.RESTORES.record("7e3a")
+        host, guest = socket.socketpair()
+        with (
+            host,
+            mock.patch.object(self.guest, "renew_identity", return_value=False),
+            mock.patch.object(self.guest, "reseed", return_value=True),
+        ):
+            host.sendall(f"restored {time.time_ns()} sandbox=c10e seed=5eed\n".encode())
+            self.guest.serve_notice(guest, set_clock=False)
+            self.assertEqual(host.recv(64), b"ok\n")
+        # Not taken, so the host's retry renews again.
+        self.assertEqual(self.guest.RESTORES.sandbox(), "7e3a")
 
     def test_signalling_an_exited_process_leaves_its_old_group_alone(self) -> None:
         process = self.guest.PROCESSES.start("true", dict(os.environ), None)
