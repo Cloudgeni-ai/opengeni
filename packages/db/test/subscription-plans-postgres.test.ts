@@ -3,7 +3,8 @@ import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import {
   acceptOrganizationInvitation,
   applyCreditDebitAfterUse,
@@ -25,7 +26,7 @@ import {
   type DbClient,
   type PlanCreditPeriodInput,
 } from "../src";
-import { rawRows } from "../src/database";
+import { rawRows, type Database } from "../src/database";
 import {
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
@@ -565,6 +566,87 @@ test("a post-use debit queued before expiry cannot slip into the expired period"
   });
   await queued;
   expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(50 * M);
+}, 180_000);
+
+test("interleaved video reversals across expiry preserve exactly the purchased funding", async () => {
+  if (!client) return;
+  const { accountId } = await account();
+  const period = await grantPlanCreditPeriod(client.db, await activate(accountId));
+  await topup(accountId, 100 * M);
+  const video = async (amountMicros: number) => {
+    const sourceId = crypto.randomUUID();
+    await applyCreditDebitUpToBalance(client!.db, {
+      accountId,
+      type: "video_generation_debit",
+      requestedAmountMicros: amountMicros,
+      sourceType: "video_generation_operation",
+      sourceId,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    return () =>
+      applyCreditLedgerEntry(client!.db, {
+        accountId,
+        type: "video_generation_refund",
+        amountMicros,
+        sourceType: "video_generation_operation",
+        sourceId,
+        idempotencyKey: `refund:${sourceId}`,
+      });
+  };
+  const first = await video(200 * M);
+  const second = await video(100 * M);
+  await first();
+  await expirePlanCreditPeriod(client.db, { accountId, periodId: period.id, force: true });
+  await second();
+  await second();
+  expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(100 * M);
+}, 180_000);
+
+test("driver latency across period end uses one post-lock settlement cutoff", async () => {
+  if (!client || !shared) return;
+  const { accountId } = await account();
+  const period = await grantPlanCreditPeriod(client.db, await activate(accountId, "pro", 1500));
+  const deadline = new Date(period.period_end).getTime();
+  let intercepted = 0;
+  const dialect = new PgDialect();
+  const wrap = (db: Database): Database =>
+    new Proxy(db, {
+      get(target, property) {
+        if (property === "transaction")
+          return (callback: (tx: Database) => Promise<unknown>, config: unknown) =>
+            target.transaction((tx) => callback(wrap(tx as unknown as Database)), config as never);
+        if (property === "execute")
+          return async (query: SQL) => {
+            const result = await target.execute(query);
+            if (dialect.sqlToQuery(query).sql.includes("begin_plan_credit_settlement")) {
+              expect(Date.now()).toBeLessThan(deadline);
+              intercepted++;
+              await Bun.sleep(Math.max(0, deadline - Date.now()) + 80);
+            }
+            return result;
+          };
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  await applyCreditDebitAfterUse(wrap(client.db), {
+    accountId,
+    type: "future_resource_debit",
+    amountMicros: 300 * M,
+    sourceType: "test",
+    sourceId: crypto.randomUUID(),
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(intercepted).toBe(1);
+  const [entry] =
+    await shared.admin`select created_at from credit_ledger_entries where account_id=${accountId} and type='future_resource_debit'`;
+  expect(new Date(entry!.created_at).getTime()).toBeLessThan(deadline);
+  const expired = await expirePlanCreditPeriod(client.db, { accountId, periodId: period.id });
+  expect(expired.usage_at_expiry_micros).toBe(300 * M);
+  expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(-100 * M);
+  // A subsequent charge settles after expiry and owes its full amount.
+  await debit(accountId, 300 * M);
+  expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(-400 * M);
 }, 180_000);
 
 test("only the organization that actually received the verified signup trial is Free-eligible", async () => {

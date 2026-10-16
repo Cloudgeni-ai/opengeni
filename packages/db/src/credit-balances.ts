@@ -15,6 +15,7 @@ export async function getBillingBalance(
   db: Database,
   accountId: string,
   policyRevision?: number,
+  settlementAt?: string,
 ): Promise<CreditBalanceSnapshot> {
   return await withAccountRls(db, accountId, async (tx) => {
     const [row] = await rawRows<{
@@ -32,7 +33,7 @@ export async function getBillingBalance(
       )
       select
         coalesce((select revision from current_policy), 0)::int as revision,
-        read_organization_plan_balance(${accountId}::uuid) as plan,
+        read_organization_plan_balance(${accountId}::uuid, ${settlementAt ?? null}::timestamptz) as plan,
         (select coalesce(sum(amount_micros), 0)::text
           from ${schema.creditLedgerEntries} where account_id = ${accountId}) as balance,
         coalesce((select jsonb_agg(jsonb_build_object(
@@ -108,8 +109,9 @@ export async function getSpendableCreditBalance(
   accountId: string,
   usage?: CreditUsage,
   policyRevision?: number,
+  settlementAt?: string,
 ): Promise<CreditBalanceSnapshot> {
-  const balance = await getBillingBalance(db, accountId, policyRevision);
+  const balance = await getBillingBalance(db, accountId, policyRevision, settlementAt);
   return { ...balance, balanceMicros: spendableCreditMicros(balance, usage) };
 }
 

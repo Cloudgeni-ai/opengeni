@@ -239,13 +239,13 @@ RETURNS bigint LANGUAGE sql STABLE SET search_path FROM CURRENT AS $body$
   ), 0) FROM credit_ledger_entries WHERE account_id = p_account_id
 $body$;
 
--- Video admission is prepaid and can never create opening debt. Reconstruct
--- its original plan-funded part from the serialized settlement history. A
--- refund after that allowance ended must not turn monthly credit evergreen.
+-- Video admission is prepaid and can never create opening debt. Late refunds
+-- recompute the increase in unused allowance from the frozen net usage, using
+-- the SAME fungible accounting as expiry (not per-debit historical funding).
 CREATE FUNCTION opengeni_private.expire_refunded_plan_credit()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $body$
 DECLARE debit credit_ledger_entries%ROWTYPE; period plan_credit_periods%ROWTYPE;
-  plan_paid bigint; already_expired bigint;
+  plan_paid bigint; already_expired bigint; late_refunds bigint; effective_grant bigint;
 BEGIN
   IF NEW.account_id IS DISTINCT FROM opengeni_private.current_account_id() THEN
     RAISE EXCEPTION 'Plan refund account scope mismatch' USING ERRCODE = '42501';
@@ -259,12 +259,24 @@ BEGIN
     AND debit.created_at >= greatest(period_start, granted_at)
     AND debit.created_at < least(period_end, coalesce(expired_at, 'infinity'::timestamptz))
     ORDER BY granted_at DESC LIMIT 1;
-  IF NOT FOUND OR (period.expired_at IS NULL AND period.period_end > clock_timestamp()) THEN RETURN NEW; END IF;
-  plan_paid := least(-debit.amount_micros, greatest(0, period.granted_micros - period.opening_debt_micros
-    - opengeni_private.plan_period_usage(period, debit.created_at)));
+  IF NOT FOUND OR (period.expired_at IS NULL AND period.period_end > NEW.created_at) THEN RETURN NEW; END IF;
+  IF period.expired_at IS NULL THEN
+    RAISE EXCEPTION 'Ended plan must be settled before a video refund' USING ERRCODE = '55000';
+  END IF;
+  SELECT coalesce(sum(refund.amount_micros), 0) INTO late_refunds FROM credit_ledger_entries refund
+    WHERE refund.account_id = NEW.account_id AND refund.type = 'video_generation_refund'
+      AND refund.created_at >= least(period.period_end, period.expired_at)
+      AND EXISTS (SELECT 1 FROM credit_ledger_entries original
+        WHERE original.account_id = NEW.account_id AND original.type = 'video_generation_debit'
+          AND original.source_type = refund.source_type AND original.source_id = refund.source_id
+          AND original.created_at >= greatest(period.period_start, period.granted_at)
+          AND original.created_at < least(period.period_end, period.expired_at));
+  effective_grant := period.granted_micros - period.opening_debt_micros;
+  plan_paid := greatest(0, effective_grant - greatest(0, period.usage_at_expiry_micros - late_refunds))
+    - greatest(0, effective_grant - period.usage_at_expiry_micros);
   SELECT coalesce(-sum(amount_micros), 0) INTO already_expired FROM credit_ledger_entries
     WHERE account_id = NEW.account_id AND type = 'plan_credit_expiry'
-      AND source_type = 'plan_credit_video_refund' AND source_id = debit.id::text;
+      AND source_type = 'plan_credit_video_refund' AND metadata->>'periodId' = period.id::text;
   plan_paid := least(NEW.amount_micros, greatest(0, plan_paid - already_expired));
   IF plan_paid > 0 THEN
     INSERT INTO credit_ledger_entries(account_id, workspace_id, type, amount_micros, source_type, source_id,
@@ -325,6 +337,24 @@ BEGIN
     expired := expired + 1;
   END LOOP;
   RETURN expired;
+END $body$;
+
+CREATE FUNCTION begin_plan_credit_settlement(p_account_id uuid)
+RETURNS timestamptz LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $body$
+DECLARE settled_at timestamptz; period_id uuid;
+BEGIN
+  IF p_account_id IS DISTINCT FROM opengeni_private.current_account_id() THEN
+    RAISE EXCEPTION 'Plan account scope mismatch' USING ERRCODE = '42501';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtext(p_account_id::text));
+  settled_at := clock_timestamp();
+  FOR period_id IN SELECT id FROM plan_credit_periods WHERE account_id = p_account_id
+    AND expired_at IS NULL AND period_end <= settled_at LOOP
+    PERFORM expire_plan_credit_period(p_account_id, period_id, false);
+  END LOOP;
+  -- Expiry, promotional allocation and ledger attribution all use this one
+  -- post-lock cutoff, even if driver latency crosses the period end later.
+  RETURN settled_at;
 END $body$;
 
 CREATE FUNCTION grant_plan_credit_period(p_account_id uuid, p_plan_key text,
@@ -419,10 +449,10 @@ BEGIN
   RETURN grant_plan_credit_period(p_account_id, p_plan_key, p_period_start, p_period_end, p_stripe_subscription_id);
 END $body$;
 
-CREATE FUNCTION read_organization_plan_balance(p_account_id uuid)
+CREATE FUNCTION read_organization_plan_balance(p_account_id uuid, p_as_of timestamptz DEFAULT NULL)
 RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path FROM CURRENT AS $body$
 DECLARE state organization_plans%ROWTYPE; definition jsonb; period plan_credit_periods%ROWTYPE;
-  remaining bigint := 0; pending bigint := 0;
+  remaining bigint := 0; pending bigint := 0; as_of timestamptz := coalesce(p_as_of, clock_timestamp());
 BEGIN
   IF p_account_id IS DISTINCT FROM opengeni_private.current_account_id() THEN
     RAISE EXCEPTION 'Plan account scope mismatch' USING ERRCODE = '42501';
@@ -435,14 +465,14 @@ BEGIN
   SELECT * INTO period FROM plan_credit_periods WHERE account_id = p_account_id
     AND (expired_at IS NULL OR (plan_key = state.plan_key AND period_start = state.current_period_start))
     ORDER BY expired_at DESC NULLS FIRST, granted_at DESC LIMIT 1;
-  IF period.id IS NOT NULL AND period.expired_at IS NULL AND period.period_end > clock_timestamp() THEN
-    remaining := greatest(0, period.granted_micros - period.opening_debt_micros - opengeni_private.plan_period_usage(period, clock_timestamp()));
+  IF period.id IS NOT NULL AND period.expired_at IS NULL AND period.period_end > as_of THEN
+    remaining := greatest(0, period.granted_micros - period.opening_debt_micros - opengeni_private.plan_period_usage(period, as_of));
   END IF;
   SELECT least(greatest(0, ended.granted_micros - ended.opening_debt_micros
-      - opengeni_private.plan_period_usage(ended, clock_timestamp())),
+      - opengeni_private.plan_period_usage(ended, as_of)),
     greatest(0, opengeni_private.plan_general_balance(p_account_id))) INTO pending
     FROM plan_credit_periods ended WHERE ended.account_id = p_account_id
-      AND ended.expired_at IS NULL AND ended.period_end <= clock_timestamp();
+      AND ended.expired_at IS NULL AND ended.period_end <= as_of;
   RETURN jsonb_build_object('key',state.plan_key,'label',coalesce(definition->>'label',state.plan_key),'status',state.status,
     'creditGrantedMicros',coalesce(period.granted_micros,0),'creditRemainingMicros',remaining,
     'creditPendingExpiryMicros',coalesce(pending,0),
@@ -519,7 +549,7 @@ BEGIN
   FOR routine IN SELECT p.oid::regprocedure FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE (n.nspname = data_schema AND p.proname IN ('set_subscription_plan_catalog','free_plan_credit_eligible',
       'organization_plan_seats_used','upsert_organization_plan','expire_plan_credit_period','grant_plan_credit_period',
-      'replace_plan_credit_period','read_organization_plan_balance','expire_ended_plan_credit_periods'))
+      'replace_plan_credit_period','read_organization_plan_balance','expire_ended_plan_credit_periods','begin_plan_credit_settlement'))
       OR (n.nspname = 'opengeni_private' AND p.proname IN ('subscription_plan_definition','plan_period_usage','plan_general_balance','expire_refunded_plan_credit','enforce_organization_plan_seats'))
   LOOP
     EXECUTE format('ALTER FUNCTION %s SET search_path = pg_catalog, %I, opengeni_private, pg_temp', routine, data_schema);

@@ -116,6 +116,15 @@ export async function expireEndedPlanCreditPeriods(
   });
 }
 
+/** One post-lock cutoff for expiry, allocation and the resulting ledger entry. */
+export async function beginPlanCreditSettlement(db: Database, accountId: string): Promise<string> {
+  const [row] = await rawRows<{ settledAt: string }>(
+    db,
+    sql`select begin_plan_credit_settlement(${accountId}::uuid)::text as "settledAt"`,
+  );
+  return row!.settledAt;
+}
+
 export async function freePlanCreditEligible(db: Database, accountId: string): Promise<boolean> {
   return await withAccountRls(db, accountId, async (tx) => {
     const [row] = await rawRows<{ eligible: boolean }>(

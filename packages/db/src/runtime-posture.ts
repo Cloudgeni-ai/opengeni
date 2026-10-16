@@ -1387,8 +1387,9 @@ export const SUBSCRIPTION_PLAN_RUNTIME_ROUTINES = [
   "expire_plan_credit_period(uuid, uuid, boolean)",
   "grant_plan_credit_period(uuid, text, timestamp with time zone, timestamp with time zone, text)",
   "replace_plan_credit_period(uuid, text, timestamp with time zone, timestamp with time zone, text)",
-  "read_organization_plan_balance(uuid)",
+  "read_organization_plan_balance(uuid, timestamp with time zone)",
   "expire_ended_plan_credit_periods(uuid)",
+  "begin_plan_credit_settlement(uuid)",
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
