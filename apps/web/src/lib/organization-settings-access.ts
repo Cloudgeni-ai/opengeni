@@ -101,6 +101,16 @@ export function organizationSettingsAccess(input: {
     visible.add("billing");
   }
   if (canManageOrganizationApiKeys) visible.add("developer");
+  // Connected agents belong to the people who connect them: every signed-in
+  // member of a managed organization connects and manages their own.
+  if (
+    managedHumanSession &&
+    input.clientConfig.productAccessMode === "managed" &&
+    accessContext.subjectId.startsWith("user:") &&
+    actorRole !== null
+  ) {
+    visible.add("agents");
+  }
   // Recovery contacts are members, not only owners and admins: they accept
   // and approve recovery on this page, so every managed person can reach it.
   if (administrator || (managedHumanSession && !singleUser)) visible.add("security");

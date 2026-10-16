@@ -1,0 +1,96 @@
+---
+title: "Connected vaults"
+description: "Use a password manager or your product's own secret store with native vault references."
+icon: "vault"
+---
+
+Connect a password manager when you want agents to discover and use stored
+credentials without receiving the values in their conversation. Use a
+[credential provider](/guides/webhooks-and-credentials) instead when your
+backend needs to mint and renew access for each run. You can use both.
+
+## Supported connections
+
+- **1Password:** connect a service-account token. Existing connections and
+  references keep working.
+- **Proton Pass:** connect a scoped personal access token. Creates and Trash
+  are supported; updates are not. The deployment operator installs the official CLI.
+- **Keeper Secrets Manager:** connect a one-time setup token. Shared folders
+  become vaults. No Archive or permanent-delete action is exposed.
+- **Bitwarden Password Manager:** connect your customer-controlled bridge.
+  The master password and unlocked CLI session stay with the customer. This is
+  not Bitwarden Secrets Manager.
+- **Your product:** connect a signed external-vault endpoint. One connection
+  can provide multiple vaults with their own capabilities.
+
+The UI only offers supported operations. A read-write connection does not
+automatically support every item type, TOTP update, file upload or history
+restore. Provider permissions can also change after setup.
+
+Moves between providers are not atomic. If a versioned original changes while
+its copy is being saved, Opengeni keeps the original and reports that the copy
+was saved. Compare the two rather than repeat the move. A final check cannot
+prevent an edit immediately before archive, and unversioned providers cannot
+offer that check; the source archive or Trash remains recoverable.
+
+## Connect and link
+
+Choose **Connect** in Vaults, select the provider and choose who owns the
+connection. An **Only me** connection can back only that person's vaults.
+Workspace and organization connections retain their shared ownership.
+
+After connecting, link the vaults you want to use. Existing availability
+controls still decide where an Only-me or organization vault is reachable.
+The native permission and session-policy checks apply to every provider.
+
+If setup saved the credentials but could not finish checking the provider,
+use **Finish connecting**. This retries verification with the saved
+configuration; it does not resubmit a consumed Keeper setup token. Reconnecting
+preserves working credentials until the replacement is checked. Disconnecting
+removes local links and stored access, never upstream items.
+
+## What is synchronized?
+
+Opengeni keeps an inventory of names, websites and field metadata. It does not
+store a second copy of the connected vault's secret values. Values are fetched
+when an authorized action needs them, with bounded attempt-scoped caching.
+
+Automatic inventory refresh happens on use: normally after ten minutes when
+searching or browsing, or after two minutes when a reference cannot be found.
+It is not continuous background synchronization. **Refresh** deliberately
+rechecks the inventory and invalidates value caches, while respecting the
+provider's rate-limit retry time.
+
+The last time Opengeni checked a bridge is not necessarily the last time that
+bridge synchronized upstream. Freshness exposes both. A locked, offline or
+incomplete provider retains its previous inventory with an explicit failure
+state instead of appearing as a healthy empty vault.
+
+Agents can list without search terms and follow `nextCursor`. They also see
+incomplete discovery and source freshness, so a provider outage does not
+become a request for the person to enter the same secret again.
+
+## Your product as the password manager
+
+Keep the stored items in your backend and implement the signed external-vault
+protocol. Configure and link the connection from your trusted server using
+the SDK's `vaultsApi` helpers. Your endpoint lists vaults and metadata, resolves
+requested fields, and optionally handles the write operations it supports.
+
+Verify the exact raw-body signature, map the native account/workspace/person
+to your own tenant/user, and check authorization on every operation. A
+signature authenticates the sender; it does not grant access to every tenant.
+Use separate user-owned connections for different users' inventories.
+
+Keep signing keys and endpoint configuration out of browser code and model
+context. Production endpoints require HTTPS, bounded responses and pinned
+outbound connections. Reconcile uncertain writes rather than blindly
+retrying them.
+
+Native secret ask cards still save to hosted vaults only. If your product must
+own secret collection, collect in your own UI and expose the saved item
+through your vault provider. Short-lived Git credentials, MCP authorization
+headers, expiry and renewal remain the job of the run-credential provider.
+
+See the [external vault reference](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/external-vaults.md)
+for API methods, pending setup and the provider boundaries.

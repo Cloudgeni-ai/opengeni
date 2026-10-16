@@ -146,6 +146,16 @@ as source bytes. Source admission evidence and source-named Site pins are retain
 The successful publisher run's head is the controller, not necessarily the source;
 consumers must select `site-package-versions-<source_sha>`, not infer source from head.
 
+The trusted publisher is bundled from `scripts/publish-canary-node.ts` by Bun,
+then executed by pinned native Node 22.20.0. Build/pack subprocesses still use Bun.
+This is necessary for the official Sigstore/TUF verifier: Bun 1.4.0 rejects the
+default ECDSA digest used by its trust-root signature verification. The offline
+regression verifies the real packaged TUF root and rejects a tampered root; no
+signature checks, keys or thresholds are overridden. Signed source bundles are
+retained in `canary-source-provenance-<source_sha>` and linked by byte count and
+SHA-256 from the V2 custody records before write intent. They are signing evidence,
+not registry acceptance. Sanitized write diagnostics never change `WRITE_UNKNOWN`.
+
 It publishes `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0`
 publishes `1.0.2-canary.N`, skipping a retired patch), without consuming changesets
 or moving an existing `latest` tag. Registry first-publication behavior is unchanged.
@@ -180,6 +190,10 @@ This verifier supports only same-source receipt protocol V1. Ancestor publicatio
 records truthful split-source V2 identities; if it fails, retain those receipts and
 stop for a separately reviewed V2 recovery path. Do not feed them to V1 recovery,
 manufacture a failed canonical run, replay unknown writes, or rewrite the source.
+After diagnosis and independent review, an authorized release owner may explicitly
+supersede an incomplete publication with a fresh workflow run and its new unique
+version. That does not repair or relabel the old unknown write, and must not reuse
+its version. There is no automatic retry or continuation of an unknown cohort.
 Its immutable ops producer closure must be explicitly audited and re-pinned when
 publisher/controller code changes; new hashes are never implicitly trusted.
 The new `canary-publication-reconciliation-*` receipt and

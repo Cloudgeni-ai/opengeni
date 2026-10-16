@@ -1,5 +1,15 @@
 # @opengeni/react-native
 
+## 3.2.2
+
+### Patch Changes
+
+- Updated dependencies [c30cf85]
+- Updated dependencies [a0c35a1]
+  - @opengeni/react@3.2.0
+  - @opengeni/contracts@3.2.0
+  - @opengeni/sdk@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes

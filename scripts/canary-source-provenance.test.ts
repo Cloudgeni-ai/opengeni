@@ -70,6 +70,9 @@ test("supplied provenance uses the official verify-before-publish path without f
     })) as typeof attest;
     const supplied = await signCanarySource(manifest, packed, directory, env, sign);
     const bundle = JSON.parse(readFileSync(supplied.file, "utf8"));
+    const retained = readFileSync(supplied.file);
+    expect(supplied.evidence?.bytes).toBe(retained.length);
+    expect(supplied.evidence?.sha256).toBe(createHash("sha256").update(retained).digest("hex"));
     expect(JSON.parse(Buffer.from(bundle.dsseEnvelope.payload, "base64").toString())).toEqual(
       canarySourceStatement(manifest, packed, env),
     );

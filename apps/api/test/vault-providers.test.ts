@@ -10,11 +10,12 @@ import {
 } from "@opengeni/core";
 import {
   createDb,
+  createVault,
   decryptEnvironmentValue,
   getConnectionMetadata,
   type DbClient,
 } from "@opengeni/db";
-import { createProviderCallBudget } from "@opengeni/vaults";
+import { createProviderCallBudget, VaultProviderError } from "@opengeni/vaults";
 import { createFakeVaultProvider } from "@opengeni/vaults/testing/fake-provider";
 import {
   acquireSharedTestDatabase,
@@ -556,6 +557,277 @@ describe("provider vault link, sync and managed vaults", () => {
       itemCount: 0,
     });
     await resetOnePasswordFakeProvidersForTests();
+  });
+
+  test("refuses mismatched managed-vault ownership before reaching 1Password", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    for (const [connectionOwnership, ownerKind] of [
+      ["workspace", "user"],
+      ["user", "workspace"],
+      ["organization", "workspace"],
+    ] as const) {
+      const installed = await install(workspace, {
+        token: FAKE_HEALTHY,
+        ownership: connectionOwnership === "organization" ? "workspace" : connectionOwnership,
+      });
+      expect(installed.status).toBe(201);
+      if (connectionOwnership === "organization") {
+        // Seed an organization connection without granting the caller admin rights.
+        await shared!.admin`
+          update connections set metadata = metadata || '{"ownership":"organization"}'::jsonb
+          where id = ${installed.body.connectionId}::uuid`;
+      }
+      let providerCalls = 0;
+      const response = await call(
+        workspace,
+        "POST",
+        `/connections/${installed.body.connectionId}/managed-vaults`,
+        {
+          body: { name: "Must not be created upstream", ownerKind },
+          deps: {
+            onePasswordVaultProvider: async () => {
+              providerCalls++;
+              return createFakeVaultProvider();
+            },
+          },
+        },
+      );
+      expect(response.status).toBe(403);
+      expect(response.body).toMatchObject({
+        error: "vault_permission_denied",
+        details: { connectionOwnership, ownerKind },
+      });
+      expect(providerCalls).toBe(0);
+    }
+  });
+
+  test("creates a managed Only-me vault through its owner's personal connection", async () => {
+    if (!available) return;
+    await resetOnePasswordFakeProvidersForTests();
+    const workspace = await freshWorkspace();
+    const installed = await install(workspace, { token: FAKE_HEALTHY, ownership: "user" });
+    const created = await call(
+      workspace,
+      "POST",
+      `/connections/${installed.body.connectionId}/managed-vaults`,
+      { body: { name: "Personal agents", ownerKind: "user" } },
+    );
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({
+      name: "Personal agents",
+      ownerKind: "user",
+      source: "onepassword",
+      syncStatus: "ok",
+    });
+    await resetOnePasswordFakeProvidersForTests();
+  });
+
+  for (const refusal of ["name", "quota"] as const) {
+    test(`managed creation checks local ${refusal} before creating anything upstream`, async () => {
+      if (!available) return;
+      const workspace = await freshWorkspace();
+      const installed = await install(workspace, { token: FAKE_HEALTHY, ownership: "workspace" });
+      const context = { kind: "subject" as const, ...workspace, subjectId: "subject-a" };
+      for (let i = 0; i < (refusal === "quota" ? 200 : 1); i++) {
+        await createVault(client.db, context, { ownerKind: "workspace", name: `Reserved ${i}` });
+      }
+      const fake = createFakeVaultProvider();
+      const response = await call(
+        workspace,
+        "POST",
+        `/connections/${installed.body.connectionId}/managed-vaults`,
+        {
+          body: {
+            name: refusal === "name" ? "Reserved 0" : "Beyond quota",
+            ownerKind: "workspace",
+          },
+          deps: { onePasswordVaultProvider: async () => fake },
+        },
+      );
+      expect(response.body.error).toBe(
+        refusal === "name" ? "vault_name_conflict" : "vault_limit_reached",
+      );
+      expect(fake.calls.filter((c) => c.op === "createVault")).toHaveLength(0);
+    }, 180_000);
+  }
+
+  test("a local refusal racing after remote creation returns the created vault's recoverable identity", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const installed = await install(workspace, { token: FAKE_HEALTHY, ownership: "workspace" });
+    const fake = createFakeVaultProvider();
+    let externalVaultId: string | null = null;
+    const provider = {
+      ...fake,
+      async createVault(...args: Parameters<NonNullable<typeof fake.createVault>>) {
+        const created = await fake.createVault!(...args);
+        externalVaultId = created.externalVaultId;
+        // A different request takes the local name after preflight, while the
+        // provider is creating its vault. There must be no compensating delete.
+        await createVault(
+          client.db,
+          { kind: "subject", ...workspace, subjectId: "subject-a" },
+          {
+            ownerKind: "workspace",
+            name: "Racing name",
+          },
+        );
+        return created;
+      },
+    };
+    const response = await call(
+      workspace,
+      "POST",
+      `/connections/${installed.body.connectionId}/managed-vaults`,
+      {
+        body: { name: "Racing name", ownerKind: "workspace" },
+        deps: { onePasswordVaultProvider: async () => provider },
+      },
+    );
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      error: "vault_name_conflict",
+      details: {
+        created: true,
+        linked: false,
+        connectionId: installed.body.connectionId,
+        externalVaultId,
+      },
+    });
+    expect(response.body.message).toContain("Do not create it again");
+    expect(fake.calls.filter((c) => c.op === "createVault")).toHaveLength(1);
+    expect(
+      await fake.listVaults({ connectionId: null, budget: createProviderCallBudget(5) }),
+    ).toEqual([expect.objectContaining({ externalVaultId })]);
+    // The ordinary Link path, under a free local name, recovers the same vault.
+    const linked = await call(workspace, "POST", "/vaults/link", {
+      body: {
+        provider: "onepassword",
+        connectionId: installed.body.connectionId,
+        externalVaultId,
+        name: "Recovered vault",
+        ownerKind: "workspace",
+        mode: "read_write",
+      },
+      deps: { onePasswordVaultProvider: async () => provider },
+    });
+    expect(linked.status).toBe(201);
+    expect(fake.calls.filter((c) => c.op === "createVault")).toHaveLength(1);
+  });
+
+  test("failed managed group sharing still links the created vault and returns its identity", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const installed = await install(workspace, {
+      token: FAKE_HEALTHY,
+      ownership: "workspace",
+      planTier: "teams",
+    });
+    const { createOnePasswordVaultProvider, OnePasswordClientCache } =
+      await import("@opengeni/vaults-onepassword");
+    const { createFakeOnePasswordSdk, fakeServiceAccountToken } =
+      await import("../../../packages/vaults-onepassword/test/fake-sdk");
+    const sdk = createFakeOnePasswordSdk({ vaults: [] });
+    sdk.failNext("vaults.grantGroupPermissions", () => new Error("connection reset by peer"));
+    const provider = createOnePasswordVaultProvider({
+      token: fakeServiceAccountToken(),
+      planTier: "teams",
+      sdk: sdk.sdk,
+      clientCache: new OnePasswordClientCache(),
+    });
+    const response = await call(
+      workspace,
+      "POST",
+      `/connections/${installed.body.connectionId}/managed-vaults`,
+      {
+        body: { name: "Needs sharing", ownerKind: "workspace", groupId: "g1" },
+        deps: { onePasswordVaultProvider: async () => provider },
+      },
+    );
+    const linkedVaultId = response.body.details?.vaultId as string;
+    expect(response.body).toMatchObject({
+      error: "provider_outcome_unknown",
+      details: {
+        created: true,
+        linked: true,
+        groupGrantConfirmed: false,
+        connectionId: installed.body.connectionId,
+        externalVaultId: expect.any(String),
+        vaultId: expect.any(String),
+      },
+    });
+    expect(response.body.message).toContain("Do not create it again");
+    expect(sdk.calls.filter((c) => c.op === "vaults.create")).toHaveLength(1);
+    expect(sdk.calls.filter((c) => c.op === "vaults.grantGroupPermissions")).toHaveLength(1);
+    expect(sdk.calls.filter((c) => c.op === "vaults.delete")).toHaveLength(0);
+    const linked = await call(workspace, "GET", `/vaults/${linkedVaultId}`);
+    expect(linked).toMatchObject({ status: 200 });
+    expect(linked.body).toMatchObject({
+      name: "Needs sharing",
+      syncStatus: "ok",
+      source: "onepassword",
+    });
+    const [count] = await shared!.admin`select count(*)::int as count from audit_events
+      where account_id = ${workspace.accountId}::uuid and action = 'vault.provider.linked'`;
+    expect(count!.count).toBe(1); // No audit/placeholder left by the rolled-back preflight.
+  });
+
+  test("managed create with failed initial sync remains a created linked vault, not a failed create", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const installed = await install(workspace, { token: FAKE_HEALTHY, ownership: "workspace" });
+    const fake = createFakeVaultProvider();
+    const provider = {
+      ...fake,
+      async listVaults() {
+        throw new VaultProviderError("provider_unavailable", "fixture unavailable");
+      },
+    };
+    const response = await call(
+      workspace,
+      "POST",
+      `/connections/${installed.body.connectionId}/managed-vaults`,
+      {
+        body: { name: "Sync later", ownerKind: "workspace" },
+        deps: { onePasswordVaultProvider: async () => provider },
+      },
+    );
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({
+      name: "Sync later",
+      source: "onepassword",
+      syncStatus: "error",
+    });
+    expect(fake.calls.filter((c) => c.op === "createVault")).toHaveLength(1);
+  });
+
+  test("an unclassified managed create failure reports an unknown outcome without replay", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const installed = await install(workspace, { token: FAKE_HEALTHY, ownership: "workspace" });
+    const fake = createFakeVaultProvider();
+    let creates = 0;
+    const response = await call(
+      workspace,
+      "POST",
+      `/connections/${installed.body.connectionId}/managed-vaults`,
+      {
+        body: { name: "Unknown", ownerKind: "workspace" },
+        deps: {
+          onePasswordVaultProvider: async () => ({
+            ...fake,
+            async createVault() {
+              creates++;
+              throw new Error("raw credential-bearing diagnostic");
+            },
+          }),
+        },
+      },
+    );
+    expect(response.body.error).toBe("provider_outcome_unknown");
+    expect(response.text).not.toContain("raw credential-bearing diagnostic");
+    expect(creates).toBe(1);
   });
 
   test("edits in a read-write 1Password vault write through to the provider", async () => {

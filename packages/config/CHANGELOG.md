@@ -1,5 +1,15 @@
 # @opengeni/config
 
+## 3.2.2
+
+### Patch Changes
+
+- 7e50b4a: Add an optional deployment-wide override for margins applied to provider-rate credit charges.
+- Updated dependencies [a0c35a1]
+  - @opengeni/contracts@3.2.0
+  - @opengeni/codex@3.2.0
+  - @opengeni/xai-subscription@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes

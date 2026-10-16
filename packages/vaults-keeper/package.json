@@ -1,0 +1,48 @@
+{
+  "name": "@opengeni/vaults-keeper",
+  "version": "3.2.2",
+  "description": "Keeper Secrets Manager provider for Opengeni vaults on the pinned official SDK, with one SDK instance per operation. Load it only through dynamic import() from the API and worker.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/vaults-keeper"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "bun ../../scripts/build-typescript-package.ts",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
+  },
+  "dependencies": {
+    "@keeper-security/secrets-manager-core": "17.6.0",
+    "@opengeni/contracts": "workspace:*",
+    "@opengeni/vaults": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

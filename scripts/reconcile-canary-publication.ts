@@ -533,6 +533,7 @@ export function historicalCohort(
   for (const path of [
     PUBLISHER_PATH,
     "scripts/publish-canary.ts",
+    "scripts/publish-canary-node.ts",
     "scripts/canary-publication-receipts.ts",
     "scripts/publishable-workspaces.ts",
     "scripts/release/lockstep-version.ts",

@@ -6,7 +6,22 @@
 //   og-dev-secrets-mock-scenario  comma list: empty, error, missing-key, slow,
 //                                 capability-off, rate-limited, auth-expired,
 //                                 many-vaults, conflict, empty-task, narrowed,
-//                                 inherited
+//                                 inherited, and for the other password managers:
+//                                 provider-locked (Bitwarden), provider-offline
+//                                 (Bitwarden, your service), provider-expired and
+//                                 incomplete and syncing (Proton Pass),
+//                                 provider-rate-limited and stale and never-synced
+//                                 (Keeper), adapter-unavailable (Keeper off here),
+//                                 long-names, keeper-pending (a Keeper connection
+//                                 not finished), verify-fails, verify-refused,
+//                                 fresh-server (no connections; Proton Pass and
+//                                 Keeper not enabled), no-catalog (an older server
+//                                 that lists connections without its providers),
+//                                 move-saved, move-changed, move-missing (a move
+//                                 saved its copy but kept the original),
+//                                 move-unlisted (a copy not listed yet), move-fails
+//                                 (nothing saved, the dialog can try again),
+//                                 renew-pending (new access saved, not checked)
 import {
   totpCodeSync,
   totpRemainingMs,
@@ -14,8 +29,17 @@ import {
   generatePassword,
 } from "@opengeni/contracts";
 import type { VaultItemSummary, VaultSummary } from "@opengeni/react";
+import type { VaultProviderConnectionSummary } from "@opengeni/sdk";
 
-import { buildMockState, mockId, MOCK_NOW, type MockItem, type MockState } from "./fixtures";
+import {
+  buildMockState,
+  mockId,
+  MOCK_NOW,
+  MOCK_OPERATIONS,
+  NO_OPERATIONS,
+  type MockItem,
+  type MockState,
+} from "./fixtures";
 
 const FLAG = "og-dev-secrets-mock";
 
@@ -80,8 +104,115 @@ function stateFor(workspaceId: string): MockState {
       }
     }
     states.set(workspaceId, state);
+    if (scenarios().has("keeper-pending")) {
+      // A second Keeper application whose setup saved its device but couldn't list yet.
+      const id = mockId("keeper-pending-connection");
+      state.connections.push({
+        ...state.connections.find((each) => each.provider === "keeper")!,
+        id,
+        ownership: "workspace",
+        accountName: "Staging agents",
+        label: null,
+        verificationStatus: "pending",
+      });
+      state.providerVaults[id] = [
+        { externalVaultId: "kp-pending", name: "Staging", itemCount: 9, writeAccess: "unknown" },
+      ];
+    }
+    if (scenarios().has("long-names")) {
+      for (const each of state.vaults) {
+        if (each.source === "keeper")
+          each.name = "Keeper production shared folder for payments, billing and reconciliation";
+      }
+      for (const each of state.connections) {
+        if (each.provider === "keeper")
+          each.label = "Acme Corporation Keeper Secrets Manager application for production agents";
+        if (each.provider === "bitwarden")
+          each.label = "Ola's laptop bridge next to the unlocked Bitwarden desktop vault";
+        for (const folder of state.providerVaults[each.id] ?? []) {
+          if (each.provider === "keeper" && folder.name === "Staging")
+            folder.name =
+              "Staging shared folder for customer notifications and billing reconciliation";
+        }
+      }
+      for (const item of state.items) {
+        if (item.name === "Twilio")
+          item.name =
+            "Twilio messaging API key for the customer notifications service in production";
+      }
+    }
   }
   return state;
+}
+
+/** A provider vault that has never listed: nothing to show, which isn't empty. */
+function neverListed(vault: VaultSummary): boolean {
+  return vault.source === "keeper" && scenarios().has("never-synced");
+}
+
+const minutesFromNow = (minutes: number) => new Date(MOCK_NOW + minutes * 60_000).toISOString();
+
+/** The health a scenario gives a provider vault; untouched otherwise. */
+function providerHealth(vault: VaultSummary): Partial<VaultSummary> {
+  const active = scenarios();
+  const unavailable = (errorCode: string, lastCheckedAt: string | null) => ({
+    syncStatus: "error" as const,
+    syncErrorCode: errorCode,
+    syncErrorMessage: null,
+    freshness: {
+      state: "unavailable" as const,
+      lastCheckedAt,
+      sourceSyncedAt: vault.freshness?.sourceSyncedAt ?? null,
+      source: "cache" as const,
+      errorCode,
+      retryAt: null,
+    },
+  });
+  switch (vault.source) {
+    case "bitwarden":
+      if (active.has("provider-locked")) return unavailable("provider_locked", vault.lastSyncedAt);
+      if (active.has("provider-offline"))
+        return unavailable("provider_unavailable", vault.lastSyncedAt);
+      return {};
+    case "external":
+      return active.has("provider-offline")
+        ? unavailable("provider_unavailable", vault.lastSyncedAt)
+        : {};
+    case "protonpass":
+      if (active.has("provider-expired"))
+        return { syncStatus: "auth_expired", syncErrorCode: "provider_auth_expired" };
+      if (active.has("incomplete"))
+        return { syncStatus: "error", syncErrorCode: "provider_inventory_incomplete" };
+      if (active.has("syncing")) return { syncStatus: "syncing" };
+      return {};
+    case "keeper":
+      if (active.has("never-synced"))
+        return {
+          ...unavailable("provider_unavailable", null),
+          lastSyncedAt: null,
+          itemCount: 0,
+        };
+      if (active.has("provider-rate-limited"))
+        return {
+          syncStatus: "rate_limited",
+          syncErrorCode: "provider_rate_limited",
+          rateLimitedUntil: minutesFromNow(25),
+        };
+      if (active.has("stale"))
+        return {
+          freshness: {
+            state: "stale",
+            lastCheckedAt: new Date(MOCK_NOW - 3 * 3_600_000).toISOString(),
+            sourceSyncedAt: null,
+            source: "cache",
+            errorCode: null,
+            retryAt: null,
+          },
+        };
+      return {};
+    default:
+      return {};
+  }
 }
 
 function visibleVault(vault: VaultSummary): VaultSummary {
@@ -112,7 +243,38 @@ function visibleVault(vault: VaultSummary): VaultSummary {
     canManage,
     syncStatus,
     rateLimitedUntil,
+    ...providerHealth(vault),
   };
+}
+
+/** A connection as this role and scenario see it. */
+function visibleConnection(
+  connection: VaultProviderConnectionSummary,
+): VaultProviderConnectionSummary {
+  const who = role();
+  return {
+    ...connection,
+    canManage:
+      who === "owner" || who === "admin" || (who === "member" && connection.ownership === "user"),
+    available: !(connection.provider === "keeper" && scenarios().has("adapter-unavailable")),
+  };
+}
+
+/** The providers this mock server can connect, as its catalog says. */
+function providerCatalog() {
+  const off = new Set<string>();
+  if (scenarios().has("adapter-unavailable")) off.add("keeper");
+  if (scenarios().has("fresh-server")) {
+    off.add("protonpass");
+    off.add("keeper");
+  }
+  return (["onepassword", "protonpass", "keeper", "bitwarden", "external"] as const).map(
+    (provider) => ({
+      provider,
+      available: !off.has(provider),
+      reason: off.has(provider) ? ("not_enabled" as const) : null,
+    }),
+  );
 }
 
 function summary(item: MockItem): VaultItemSummary {
@@ -230,7 +392,17 @@ function routes(state: MockState): Route[] {
       method: "POST",
       pattern: /\/vaults\/link$/,
       handle: (_m, body) => {
-        const base = state.vaults.find((each) => each.source === "onepassword")!;
+        const provider = (body.provider ??
+          "onepassword") as VaultProviderConnectionSummary["provider"];
+        const base =
+          state.vaults.find((each) => each.source === provider) ??
+          state.vaults.find((each) => each.source === "onepassword")!;
+        const meta = (state.providerVaults[body.connectionId] ?? []).find(
+          (each) => each.externalVaultId === body.externalVaultId,
+        );
+        // A partial failure, for the chooser: one Keeper folder refuses to link.
+        if (meta?.name === "Staging" && provider === "keeper")
+          return fail(503, "provider_unavailable", "Keeper didn't respond.");
         const created: VaultSummary = {
           ...base,
           id: mockId(`link-${body.externalVaultId}`),
@@ -238,10 +410,13 @@ function routes(state: MockState): Route[] {
           ownerKind: body.ownerKind,
           mode: body.mode,
           providerConnectionId: body.connectionId ?? null,
+          source: provider,
+          providerOperations: body.mode === "read_only" ? NO_OPERATIONS : MOCK_OPERATIONS[provider],
           syncStatus: "ok",
           syncErrorCode: null,
           syncErrorMessage: null,
-          itemCount: 4,
+          lastSyncedAt: new Date().toISOString(),
+          itemCount: meta?.itemCount ?? 4,
         };
         state.vaults.push(created);
         if (body.connectionId) {
@@ -305,6 +480,7 @@ function routes(state: MockState): Route[] {
       handle: (match, _body, url) => {
         const vault = vaultOf(match[1]!);
         if (!vault) return notFound();
+        if (neverListed(vault)) return json(200, { items: [], nextCursor: null });
         const q = (url.searchParams.get("q") ?? "").toLowerCase();
         const type = url.searchParams.get("type");
         const archived = url.searchParams.get("includeArchived") === "true";
@@ -332,6 +508,11 @@ function routes(state: MockState): Route[] {
         if (!vault) return notFound();
         const blocked = readOnly(vault);
         if (blocked) return blocked;
+        if (
+          vault.providerOperations &&
+          !vault.providerOperations.createItemTypes.includes(body.type)
+        )
+          return fail(409, "vault_read_only", "This type can't be created here.");
         if (
           state.items.some(
             (each) =>
@@ -405,6 +586,8 @@ function routes(state: MockState): Route[] {
         if (!vault || !found) return fail(404, "vault_item_not_found", "Item not found.");
         const blocked = readOnly(vault);
         if (blocked) return blocked;
+        if (vault.providerOperations && !vault.providerOperations.updateItem)
+          return fail(409, "vault_read_only", "Items can't be changed here.");
         if (scenarios().has("conflict") || body.expectedGeneration !== found.generation)
           return fail(409, "vault_generation_conflict", "Changed elsewhere.");
         if (body.name && body.name !== found.name) {
@@ -452,7 +635,9 @@ function routes(state: MockState): Route[] {
       handle: (match, _body, url) => {
         const found = itemOf(match[1]!, match[2]!);
         if (!found) return fail(404, "vault_item_not_found", "Item not found.");
-        if (url.searchParams.get("permanent") === "true") {
+        // A password manager keeps the archived or trashed item; the mirror drops it.
+        const remote = vaultOf(match[1]!)?.source !== "opengeni";
+        if (url.searchParams.get("permanent") === "true" || remote) {
           state.items = state.items.filter((each) => each !== found);
         } else {
           found.archivedAt = new Date().toISOString();
@@ -470,6 +655,91 @@ function routes(state: MockState): Route[] {
         found.archivedAt = null;
         refresh(state, match[1]!);
         return json(200, detail(found));
+      },
+    },
+    {
+      method: "POST",
+      pattern: /\/vaults\/([^/]+)\/items\/([^/]+)\/move$/,
+      handle: (match, body) => {
+        const source = vaultOf(match[1]!);
+        const found = itemOf(match[1]!, match[2]!);
+        const target = vaultOf(String(body.targetVaultId ?? ""));
+        if (!source || !found || !target) return fail(404, "vault_item_not_found", "Not found.");
+        const blocked = readOnly(target);
+        if (blocked) return blocked;
+        const active = scenarios();
+        // An ordinary failure: nothing saved, the dialog stays and can try again.
+        if (active.has("move-fails"))
+          return fail(503, "provider_unavailable", "The password manager didn't respond.");
+        const unlisted = active.has("move-unlisted");
+        const now = new Date().toISOString();
+        // References name the vault they're in: the copy's name the target.
+        const retarget = (ref: string) =>
+          ref.replace(`secret:${source.name}/`, `secret:${target.name}/`);
+        const copy: MockItem = {
+          ...found,
+          id: mockId(`item-${target.id}-${found.name}`),
+          vaultId: target.id,
+          archivedAt: null,
+          updatedAt: now,
+          createdAt: now,
+          generation: 1,
+          references: {
+            primary: found.references.primary ? retarget(found.references.primary) : null,
+            otp: found.references.otp ? retarget(found.references.otp) : null,
+            byField: Object.fromEntries(
+              Object.entries(found.references.byField).map(([name, ref]) => [name, retarget(ref)]),
+            ),
+          },
+          fields: found.fields.map((field) => ({
+            ...field,
+            reference: `{{secret:${target.name}/${found.name}/${field.name}}}`,
+          })),
+        };
+        // A copy a password manager confirmed but didn't list yet appears after a sync.
+        if (!unlisted) {
+          state.items.push(copy);
+          refresh(state, target.id);
+        }
+        // The copy is saved; the original's step didn't finish (core moveAcrossProviders).
+        const kept = {
+          saved: true,
+          sourceArchived: false,
+          vaultId: target.id,
+          itemId: copy.id,
+          sourceItemId: found.id,
+          sourceVaultId: source.id,
+        };
+        if (body.mode === "move" && active.has("move-saved"))
+          return fail(
+            503,
+            "provider_unavailable",
+            "Archiving the original did not complete.",
+            kept,
+          );
+        if (body.mode === "move" && active.has("move-changed"))
+          return fail(409, "vault_generation_conflict", "Changed after its values were read.", {
+            ...kept,
+            sourceChanged: true,
+          });
+        if (body.mode === "move" && active.has("move-missing"))
+          return fail(404, "vault_item_not_found", "No longer listed at the version read.", {
+            ...kept,
+            sourceChanged: true,
+          });
+        if (body.mode === "move") {
+          if (source.source === "opengeni") found.archivedAt = now;
+          else state.items = state.items.filter((each) => each !== found);
+          refresh(state, source.id);
+        }
+        if (unlisted)
+          return fail(503, "provider_inventory_incomplete", "Saved, but not listed yet.", {
+            saved: true,
+            vaultId: target.id,
+            itemName: found.name,
+            ...(body.mode === "move" ? { sourceArchived: true } : {}),
+          });
+        return json(200, detail(copy));
       },
     },
     {
@@ -585,7 +855,197 @@ function routes(state: MockState): Route[] {
     {
       method: "GET",
       pattern: /\/connections\/1password\/service-accounts$/,
-      handle: () => json(200, { connections: scenarios().has("empty") ? [] : state.connections }),
+      handle: () =>
+        json(200, {
+          connections: scenarios().has("empty")
+            ? []
+            : state.connections
+                .filter((each) => each.provider === "onepassword")
+                .map(({ provider: _p, operations: _o, available: _a, ...rest }) => ({
+                  ...rest,
+                  planTier: rest.planTier ?? "business",
+                })),
+        }),
+    },
+    {
+      method: "GET",
+      pattern: /\/vault-providers\/connections$/,
+      handle: () =>
+        json(200, {
+          connections:
+            scenarios().has("empty") || scenarios().has("fresh-server")
+              ? []
+              : state.connections.map(visibleConnection),
+          ...(scenarios().has("no-catalog") ? {} : { providers: providerCatalog() }),
+        }),
+    },
+    {
+      method: "POST",
+      pattern: /\/vault-providers\/connections$/,
+      handle: (_m, body) => {
+        const credentials = body.credentials ?? {};
+        const provider = credentials.provider as Exclude<
+          VaultProviderConnectionSummary["provider"],
+          "onepassword"
+        >;
+        const rejected = credentialFailure(credentials);
+        if (rejected) return rejected;
+        const connectionId = mockId(`${provider}-connection-${state.connections.length}`);
+        const accountName =
+          provider === "protonpass"
+            ? "pass@example.com"
+            : provider === "keeper"
+              ? "Opengeni agents"
+              : provider === "bitwarden"
+                ? "you@example.com"
+                : new URL(credentials.endpoint).host;
+        // "pending" in the token: the provider accepted it (a Keeper token is spent) but
+        // listing failed, so the access is saved and the connection waits for Finish connecting.
+        const pending = String(credentials.token ?? credentials.oneTimeToken ?? "").includes(
+          "pending",
+        );
+        state.connections.push({
+          id: connectionId,
+          provider,
+          ownership: body.ownership,
+          accountName,
+          label: body.label ?? null,
+          verifiedAt: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+          createdBySubjectId: null,
+          canManage: true,
+          operations: MOCK_OPERATIONS[provider],
+          available: true,
+          verificationStatus: pending ? "pending" : "ready",
+        });
+        state.providerVaults[connectionId] =
+          provider === "keeper"
+            ? [
+                {
+                  externalVaultId: "kp-new-prod",
+                  name: "Production",
+                  itemCount: 12,
+                  writeAccess: "unknown",
+                },
+                {
+                  externalVaultId: "kp-new-staging",
+                  name: "Staging",
+                  itemCount: 9,
+                  writeAccess: "unknown",
+                },
+              ]
+            : [
+                {
+                  externalVaultId: `${provider}-new-ops`,
+                  name: "Operations",
+                  itemCount: 23,
+                  writeAccess: "read_write",
+                },
+                {
+                  externalVaultId: `${provider}-new-shared`,
+                  name: "Shared with me",
+                  itemCount: 6,
+                  writeAccess: "read_only",
+                },
+              ];
+        if (pending)
+          return json(202, {
+            connectionId,
+            accountName,
+            provider,
+            operations: MOCK_OPERATIONS[provider],
+            vaults: [],
+            discoveryPending: true,
+            errorCode: "provider_unavailable",
+          });
+        return json(201, {
+          connectionId,
+          accountName,
+          provider,
+          operations: MOCK_OPERATIONS[provider],
+          vaults: providerVaultsOf(connectionId),
+        });
+      },
+    },
+    {
+      method: "POST",
+      pattern: /\/vault-providers\/connections\/([^/]+)\/verify$/,
+      handle: (match) => {
+        const connection = state.connections.find((each) => each.id === match[1]);
+        if (!connection) return fail(404, "not_found", "Connection not found.");
+        const active = scenarios();
+        if (active.has("verify-refused"))
+          return fail(401, "provider_auth_invalid", "Saved configuration refused.");
+        const base = {
+          connectionId: connection.id,
+          accountName: connection.accountName,
+          provider: connection.provider,
+          operations: connection.operations,
+        };
+        if (active.has("verify-fails"))
+          return json(202, {
+            ...base,
+            vaults: [],
+            discoveryPending: true,
+            errorCode: "provider_unavailable",
+          });
+        connection.verificationStatus = "ready";
+        connection.verifiedAt = new Date().toISOString();
+        return json(200, { ...base, vaults: providerVaultsOf(connection.id) });
+      },
+    },
+    {
+      method: "PUT",
+      pattern: /\/vault-providers\/connections\/([^/]+)\/credentials$/,
+      handle: (match, body) => {
+        const connection = state.connections.find((each) => each.id === match[1]);
+        if (!connection) return fail(404, "not_found", "Connection not found.");
+        const rejected = credentialFailure(body.credentials ?? {});
+        if (rejected) return rejected;
+        // Saved but not checked yet (the API's 202): the page offers Finish connecting.
+        if (scenarios().has("renew-pending")) {
+          connection.verificationStatus = "pending";
+          return json(202, {
+            connectionId: connection.id,
+            accountName: connection.accountName,
+            provider: connection.provider,
+            operations: connection.operations,
+            vaults: [],
+            discoveryPending: true,
+            errorCode: "provider_unavailable",
+          });
+        }
+        connection.verifiedAt = new Date().toISOString();
+        for (const each of state.vaults) {
+          if (each.providerConnectionId !== connection.id) continue;
+          Object.assign(each, {
+            syncStatus: "ok",
+            syncErrorCode: null,
+            syncErrorMessage: null,
+            lastSyncedAt: new Date().toISOString(),
+          });
+        }
+        return json(200, {
+          connectionId: connection.id,
+          accountName: connection.accountName,
+          provider: connection.provider,
+          operations: connection.operations,
+          vaults: providerVaultsOf(connection.id),
+        });
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: /\/vault-providers\/connections\/([^/]+)$/,
+      handle: (match) => {
+        const connectionId = match[1]!;
+        if (!state.connections.some((each) => each.id === connectionId))
+          return fail(404, "not_found", "Connection not found.");
+        const unlinked = state.vaults.filter((each) => each.providerConnectionId === connectionId);
+        state.vaults = state.vaults.filter((each) => each.providerConnectionId !== connectionId);
+        state.connections = state.connections.filter((each) => each.id !== connectionId);
+        return json(200, { unlinkedVaultIds: unlinked.map((each) => each.id) });
+      },
     },
     {
       method: "POST",
@@ -597,6 +1057,7 @@ function routes(state: MockState): Route[] {
         const accountName = body.ownership === "user" ? "my.1password.com" : "acme.1password.com";
         state.connections.push({
           id: connectionId,
+          provider: "onepassword",
           ownership: body.ownership,
           accountName,
           label: null,
@@ -605,6 +1066,8 @@ function routes(state: MockState): Route[] {
           createdAt: new Date().toISOString(),
           createdBySubjectId: null,
           canManage: true,
+          operations: MOCK_OPERATIONS.onepassword,
+          available: true,
         });
         state.providerVaults[connectionId] = [
           { externalVaultId: "op-eng-new", name: "Engineering", itemCount: 42 },
@@ -708,10 +1171,25 @@ function tokenFailure(token: string): Response | null {
   return null;
 }
 
+/**
+ * Fake credentials for the other password managers. In the token or signing
+ * secret: "invalid", "expired", "used" (a spent Keeper one-time token),
+ * "locked" (Bitwarden), "rate"; in the address: "offline".
+ */
+function credentialFailure(credentials: Record<string, string | undefined>): Response | null {
+  const secret = credentials.token ?? credentials.oneTimeToken ?? credentials.signingSecret ?? "";
+  if ((credentials.endpoint ?? "").includes("offline"))
+    return fail(503, "provider_unavailable", "Bridge unreachable.");
+  if (secret.includes("used"))
+    return fail(400, "provider_auth_invalid", "One-time token already used.");
+  if (secret.includes("locked")) return fail(423, "provider_locked", "Vault locked.");
+  return tokenFailure(secret);
+}
+
 const WORKSPACE_PATH = /\/v1\/workspaces\/([^/]+)(\/.*)$/;
 const WORKSPACE_READ = /\/v1\/workspaces(\/[^/]+)?$/;
 const OWNED =
-  /^\/(vaults(\/|$)|sessions\/[^/]+\/(secrets|vault-policy)$|connections\/(1password\/(install|service-accounts)|[^/]+\/(provider-vaults|managed-vaults|1password|1password\/token))$)/;
+  /^\/(vaults(\/|$)|vault-providers\/connections(\/[^/]+(\/(credentials|verify))?)?$|sessions\/[^/]+\/(secrets|vault-policy)$|connections\/(1password\/(install|service-accounts)|[^/]+\/(provider-vaults|managed-vaults|1password|1password\/token))$)/;
 
 /** "capability-off": the workspace's default agent has Secrets switched off. */
 function withSecretsOff(workspace: unknown): unknown {

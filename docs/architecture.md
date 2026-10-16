@@ -1281,6 +1281,11 @@ and validate epochs/authority.
 Nothing from a vault is injected into compute. `{{secret:…}}` references in
 tool arguments resolve per call at the execution boundary, so vault and policy
 changes apply to the next command without restarting a box.
+Connected-vault refreshes commit their mirror and status atomically against the
+pre-I/O cache epoch; late overlapping results cannot overwrite a settled check.
+Managed 1Password creation preflights canonical link policy without retaining
+trial rows or holding DB locks over provider I/O; post-create failures retain
+the upstream identity for Link/Refresh recovery, never destructive compensation.
 
 Canonical: [`model-providers.md`](model-providers.md),
 [`mcp-surfaces.md`](mcp-surfaces.md),
@@ -1465,7 +1470,10 @@ behind a generic 500, so its session lookups run through
 | `packages/capabilities` | `@opengeni/capabilities` | Integration definitions, facets, local MCP bridges, and protocol compilers |
 | `packages/tool-gateway` | `@opengeni/tool-gateway` | Protocol-neutral tool identity, cataloging, schemas, validation, authorization, approval classification, and execution |
 | `packages/vaults` | `@opengeni/vaults` | Vault provider interface and registry, shell reference splicing, and secret test doubles |
+| `packages/vaults-keeper` | `@opengeni/vaults-keeper` | Keeper Secrets Manager vault provider on the pinned official SDK (a fresh, filesystem-less SDK instance per operation, DNS-pinned requests), loaded only by dynamic import from the API and worker |
 | `packages/vaults-onepassword` | `@opengeni/vaults-onepassword` | 1Password service-account vault provider (pinned `@1password/sdk`), loaded only by dynamic import from the API and worker |
+| `packages/vaults-protonpass` | `@opengeni/vaults-protonpass` | Proton Pass vault provider that runs an operator-installed, version-pinned `pass-cli` under a scoped token in private per-token sessions, loaded only by dynamic import from the API and worker |
+| `packages/vaults-bitwarden-bridge` | `@opengeni/vaults-bitwarden-bridge` | Customer-run bridge (private, unpublished) serving the signed remote vault protocol from an already-unlocked `bw serve` on a private Unix socket |
 | `packages/codemode` | `@opengeni/codemode` | Attempt-frozen programmatic tool catalog and execution client |
 | `packages/ogtool` | `@opengeni/ogtool` | CLI over the Codemode catalog and journal |
 | `packages/codex` | `@opengeni/codex` | Codex subscription authentication, transport, and provider normalization |
@@ -2279,6 +2287,10 @@ controller remains separate from its package-source checkout. Ancestor tarballs
 use supplied Sigstore provenance naming both source and controller, without changing
 GitHub's identity environment; ordinary current-head provenance stays unchanged.
 Split-source receipt V2 is explicitly outside canonical V1 receipt-only recovery.
+The trusted publisher's Node entrypoint is Bun-bundled but runs on pinned native
+Node for official Sigstore/TUF cryptography; package builds and packing stay on
+Bun. Signed split-source bundles survive failures as separate, hash-linked public
+provenance evidence. Diagnostic categories do not settle unknown registry writes.
 Canary packages prepack the complete cohort, retain write acknowledgements, then
 perform bounded strict read-only verification before producing Site pins.
 Post-write verification selects current tags and one immutable version manifest;

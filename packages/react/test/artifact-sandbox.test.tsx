@@ -66,6 +66,8 @@ describe("published HTML artifacts", () => {
       const dialog = container.querySelector("dialog")!;
       const iframe = dialog.querySelector("iframe")!;
       expect(dialog.open).toBe(true);
+      expect(dialog.hasAttribute("data-artifact-fullscreen")).toBe(false);
+      expect(dialog.querySelector("[data-window-drag]")).toBeNull();
       await act(async () =>
         (
           container.querySelector('[aria-label="Open Site full screen"]') as HTMLButtonElement
@@ -74,6 +76,8 @@ describe("published HTML artifacts", () => {
       expect(showModal).toHaveBeenCalledTimes(1);
       expect(dialog.querySelector("iframe")).toBe(iframe);
       expect(dialog.className).toContain("fixed");
+      expect(dialog.getAttribute("data-artifact-fullscreen")).toBe("true");
+      expect(dialog.querySelector("[data-window-drag]")?.contains(iframe)).toBe(false);
       await act(async () =>
         [...container.querySelectorAll("button")]
           .find((button) => button.textContent === "Back")!
@@ -82,6 +86,8 @@ describe("published HTML artifacts", () => {
       expect(show).toHaveBeenCalledTimes(1);
       expect(dialog.querySelector("iframe")).toBe(iframe);
       expect(dialog.open).toBe(true);
+      expect(dialog.hasAttribute("data-artifact-fullscreen")).toBe(false);
+      expect(dialog.querySelector("[data-window-drag]")).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();

@@ -133,23 +133,15 @@ export default function PageConnectedAgentsSection() {
     <KitSection sectionKey="page-connected-agents">
       <KitBlock
         title="Connected agents"
-        description="Organization settings > Developer. Each row says whose agent it is, what it can do and where. A row opens the agent's page."
+        description="Organization settings > Connected agents. How to add the MCP server to each client, then the agents: each row says whose agent it is, what it can do and where. A row opens the agent's page."
       >
-        <PagePreview label="Connected agents" height={520}>
+        <PagePreview label="Connected agents" height={980}>
           <AgentsPreview initial={CONNECTIONS} />
         </PagePreview>
       </KitBlock>
-      <KitBlock title="Empty" description="The empty list holds the one action.">
-        <PagePreview label="No connected agents" height={360}>
+      <KitBlock title="Empty" description="Setup stays first; the empty list is one quiet line.">
+        <PagePreview label="No connected agents" height={720}>
           <AgentsPreview initial={[]} />
-        </PagePreview>
-      </KitBlock>
-      <KitBlock
-        title="Connect an agent"
-        description="One server URL for the whole organization, and what to paste into each client. The access is chosen when the agent signs in."
-      >
-        <PagePreview label="Connect an agent" height={720}>
-          <AgentsPreview initial={CONNECTIONS} start={{ view: "connect-agent" }} />
         </PagePreview>
       </KitBlock>
       <KitBlock

@@ -1,5 +1,27 @@
 # @opengeni/runtime
 
+## 3.2.2
+
+### Patch Changes
+
+- d5858bb: Give new Sites readable typography defaults in the central bundled authoring Skill, including responsive text scaling checks, without overriding existing Sites or deliberate user designs.
+- Updated dependencies [7e50b4a]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+  - @opengeni/config@3.2.0
+  - @opengeni/vaults@3.2.0
+  - @opengeni/contracts@3.2.0
+  - @opengeni/sdk@3.2.0
+  - @opengeni/capabilities@3.2.0
+  - @opengeni/codemode@3.2.0
+  - @opengeni/codex@3.2.0
+  - @opengeni/interaction@3.2.0
+  - @opengeni/observability@3.2.0
+  - @opengeni/tool-gateway@3.2.0
+  - @opengeni/agent-proto@3.2.0
+  - @opengeni/network@3.2.0
+  - @opengeni/xai-subscription@3.2.0
+
 ## 3.1.2
 
 ### Minor Changes

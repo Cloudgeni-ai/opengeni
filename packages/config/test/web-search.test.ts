@@ -371,6 +371,42 @@ describe("web search pricing", () => {
     });
   });
 
+  test("deployment margin override applies to built-in and explicit provider prices", () => {
+    const unset = webSearchProviderConfig(
+      getSettings({
+        OPENGENI_WEB_SEARCH_PROVIDER: "parallel",
+        OPENGENI_WEB_PARALLEL_API_KEY: "key",
+      }),
+    )!;
+    expect(webSearchCallPricing(unset, unset.search[0]!, "search").marginBps).toBe(500);
+
+    const zero = webSearchProviderConfig(
+      getSettings({
+        OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "0",
+        OPENGENI_WEB_SEARCH_PROVIDER: "parallel",
+        OPENGENI_WEB_PARALLEL_API_KEY: "key",
+        OPENGENI_WEB_SEARCH_PRICING_JSON:
+          '{"parallel":{"searchMicros":10000,"fetchMicros":4000,"marginBps":2000}}',
+      }),
+    )!;
+    const zeroPricing = webSearchCallPricing(zero, zero.search[0]!, "search");
+    expect(zeroPricing).toEqual({ providerMicros: 10_000, marginBps: 0, explicit: true });
+    expect(webSearchCreditMicros(zeroPricing.providerMicros, zeroPricing.marginBps)).toBe(10_000);
+
+    const nonDefault = webSearchProviderConfig(
+      getSettings({
+        OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "1250",
+        OPENGENI_WEB_SEARCH_PROVIDER: "parallel",
+        OPENGENI_WEB_PARALLEL_API_KEY: "key",
+      }),
+    )!;
+    const nonDefaultPricing = webSearchCallPricing(nonDefault, nonDefault.search[0]!, "search");
+    expect(nonDefaultPricing.marginBps).toBe(1_250);
+    expect(
+      webSearchCreditMicros(nonDefaultPricing.providerMicros, nonDefaultPricing.marginBps),
+    ).toBe(1_125);
+  });
+
   test("credit cost rounds up after margin", () => {
     expect(webSearchCreditMicros(5_000, 500)).toBe(5_250);
     expect(webSearchCreditMicros(1, 500)).toBe(2);

@@ -993,8 +993,12 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
           db: routeDeps.db,
           settings: gatewaySettings,
           grant,
-          providersForSubject: (subjectId) =>
-            vaultProviderRegistryFor(routeDeps, { workspaceId: grant.workspaceId, subjectId }),
+          providersForSubject: (subjectId, site) =>
+            vaultProviderRegistryFor(routeDeps, {
+              workspaceId: grant.workspaceId,
+              subjectId,
+              ...(site ? { executionContext: { siteId: site.siteId } } : {}),
+            }),
         }),
         mapDefinition: (definition) => {
           // Raw/local providers have no native credential revision. The legacy

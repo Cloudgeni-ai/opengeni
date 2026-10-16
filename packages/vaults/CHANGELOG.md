@@ -1,5 +1,20 @@
 # @opengeni/vaults
 
+## 3.2.2
+
+### Minor Changes
+
+- a0c35a1: Provider listings now say whether they prove which items are absent. `traverseProviderPages`, `readProviderVaultInventory` and `readProviderItemInventory` return `{ items, consistent }`, where consistent means one response or every page under one snapshot. `collectProviderPages`, `listProviderVaults` and `listProviderItems` keep their bounded enumeration for discovery.
+
+  A connected vault's mirror is replaced only from a consistent inventory. A multi-page listing without a snapshot keeps the previous mirror and records `provider_inventory_incomplete`, because offset cursors can skip an existing item when an earlier one is deleted between pages; a vault missing from such a vault listing is not reported as removed. An item with more than 50 fields or 20 websites, or a website over 2,048 characters, also makes the inventory incomplete instead of being cut down, and the previous mirror is kept.
+
+- a0c35a1: Add the signed remote vault protocol `opengeni.vault.v1`. `@opengeni/contracts/vault-provider-wire` defines its bounded request and response schemas; item metadata has no value fields. `@opengeni/vaults` adds `createRemoteVaultProvider`, which signs each request with the connection secret, verifies signed responses, pages inventory without silent truncation, and reports an uncertain write as `provider_outcome_unknown` instead of retrying it. Server-side embedders can serve their own password manager with `createExternalVaultReceiver` from `@opengeni/sdk/external-vault-receiver`. It checks the signature, request age and replay, maps Opengeni's account, workspace and user to the host's tenant and user on every request, and records writes in a caller-owned durable store keyed by idempotency key.
+
+### Patch Changes
+
+- Updated dependencies [a0c35a1]
+  - @opengeni/contracts@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes

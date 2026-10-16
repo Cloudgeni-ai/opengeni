@@ -145,6 +145,7 @@ export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
 export * from "./vaults";
+export * from "./vault-provider-wire";
 export * from "./secret-references";
 export * from "./secret-resolution";
 export * from "./secret-generator";

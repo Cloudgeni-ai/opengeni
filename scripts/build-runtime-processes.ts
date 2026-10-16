@@ -77,9 +77,15 @@ const nativeRuntimeExternals = ["@llamaindex/liteparse", "sharp"];
 
 // Packages that read a file next to their own module at load time. Bundling
 // freezes that location to the build machine's path, so the asset is missing
-// at runtime: the 1Password SDK core reads `core_bg.wasm` from its __dirname.
+// at runtime: the 1Password SDK core reads `core_bg.wasm` from its __dirname,
+// and the Keeper adapter reads (and hash-checks) the installed KSM SDK's
+// CommonJS build to evaluate a fresh copy per operation.
 // The API and worker load them from their runtime closure instead.
-export const PACKAGE_ASSET_RUNTIME_EXTERNALS = ["@1password/sdk", "@1password/sdk-core"];
+export const PACKAGE_ASSET_RUNTIME_EXTERNALS = [
+  "@1password/sdk",
+  "@1password/sdk-core",
+  "@keeper-security/secrets-manager-core",
+];
 
 async function buildApi(): Promise<void> {
   const outdir = join(repositoryRoot, "apps/api/dist/process");

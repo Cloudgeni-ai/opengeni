@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "3.1.2",
+  "version": "3.2.2",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -197,6 +197,10 @@
     "./workspace-integration-wire": {
       "types": "./src/workspace-integration-wire.ts",
       "default": "./src/workspace-integration-wire.ts"
+    },
+    "./vault-provider-wire": {
+      "types": "./src/vault-provider-wire.ts",
+      "default": "./src/vault-provider-wire.ts"
     },
     "./code-search": {
       "types": "./src/code-search.ts",
