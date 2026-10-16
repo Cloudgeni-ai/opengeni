@@ -512,6 +512,10 @@ The trusted current-main controller stays checked out separately, and supplied
 Sigstore provenance identifies both it and the selected package source without
 overriding GitHub identity. Split-source receipt protocol V2 is deliberately not
 accepted by the canonical V1 reconciliation verifier. See `CONTRIBUTING.md`.
+The publisher entrypoint is bundled by Bun and executed by pinned native Node;
+package builds and packing remain on pinned Bun. Do not run TUF verification
+under Bun 1.4.0: its missing default ECDSA digest rejects the real Sigstore root.
+Never bypass root signatures or change their threshold to accommodate a runtime.
 
 See the hotfix admission contract in
 `.github/workflows/source-admission.yml`, `scripts/check-source-admission.mjs`,

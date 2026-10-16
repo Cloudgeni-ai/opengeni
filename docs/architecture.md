@@ -2287,6 +2287,10 @@ controller remains separate from its package-source checkout. Ancestor tarballs
 use supplied Sigstore provenance naming both source and controller, without changing
 GitHub's identity environment; ordinary current-head provenance stays unchanged.
 Split-source receipt V2 is explicitly outside canonical V1 receipt-only recovery.
+The trusted publisher's Node entrypoint is Bun-bundled but runs on pinned native
+Node for official Sigstore/TUF cryptography; package builds and packing stay on
+Bun. Signed split-source bundles survive failures as separate, hash-linked public
+provenance evidence. Diagnostic categories do not settle unknown registry writes.
 Canary packages prepack the complete cohort, retain write acknowledgements, then
 perform bounded strict read-only verification before producing Site pins.
 Post-write verification selects current tags and one immutable version manifest;

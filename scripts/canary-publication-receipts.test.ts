@@ -14,6 +14,7 @@ import { PUBLISHER_RECEIPT_FILES } from "./canary-reconciliation-inputs";
 import {
   CANARY_RECEIPT_MAX_COHORT,
   CANARY_RECEIPT_MAX_READS,
+  canaryWriteFailureDiagnostic,
   confirmCanaryCohort,
   freezeCanaryCohort,
   publishAndVerifyCanaryCohort,
@@ -115,6 +116,58 @@ afterEach(() => {
 });
 
 describe("canary acknowledgement and receipt phases", () => {
+  test("TUF failure retains diagnostics without inferring no write or exposing arbitrary errors", async () => {
+    expect(canaryWriteFailureDiagnostic(new Error("root was signed by 0/3 keys"))).toEqual({
+      category: "tuf_root_signature_verification_failed",
+    });
+    expect(
+      canaryWriteFailureDiagnostic(
+        Object.assign(new Error("synthetic-secret-token"), { code: "E403" }),
+      ),
+    ).toEqual({ category: "registry_or_transport_error", code: "E403" });
+    expect(
+      JSON.stringify(
+        canaryWriteFailureDiagnostic(
+          Object.assign(new Error("synthetic-secret-token"), { code: "synthetic-secret-token" }),
+        ),
+      ),
+    ).not.toContain("synthetic-secret-token");
+    const f = fixture(),
+      cohort = freezeCanaryCohort(f.packages, f.store);
+    let writes = 0;
+    await expect(
+      publishPreparedCanaries(
+        cohort,
+        f.store,
+        "synthetic-secret-token",
+        reader((name) => Response.json(metadata(cohort.find((pkg) => pkg.name === name)!, false))),
+        (async () => {
+          writes++;
+          throw new Error("root was signed by 0/3 keys");
+        }) as typeof libnpmpublish.publish,
+        120_000,
+        async () => ({
+          file: "/synthetic/bundle.json",
+          transparencyLogUrl: "https://search.sigstore.dev/?logIndex=7",
+          evidence: { file: "bundle.json", bytes: 100, sha256: "a".repeat(64) },
+        }),
+      ),
+    ).rejects.toThrow("outcome is unknown");
+    expect(writes).toBe(1);
+    const prepared = f.events().find((row) => row.kind === "PROVENANCE_PREPARED");
+    expect(prepared.provenance).toEqual({
+      file: "bundle.json",
+      bytes: 100,
+      sha256: "a".repeat(64),
+    });
+    const unknown = f.events().find((row) => row.kind === "WRITE_UNKNOWN");
+    expect(unknown).toMatchObject({
+      noReplay: true,
+      diagnostic: { category: "tuf_root_signature_verification_failed" },
+    });
+    expect(f.events().filter((row) => row.kind === "WRITE_ACKNOWLEDGED")).toHaveLength(0);
+    expect(JSON.stringify(f.events())).not.toContain("synthetic-secret-token");
+  });
   test("retains every acknowledgement before the next write and waits for visibility only afterward", async () => {
     const f = fixture();
     const cohort = freezeCanaryCohort(f.packages, f.store);

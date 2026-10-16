@@ -62,7 +62,7 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "11024ac64c3fd45645d530e5844d4a144acd8365fbde585167e80fd4d0a46148"
+      "sha256": "3df4a6050c9448b76421708eea7b15a4d50222c4237898651bbc379a50cb1245"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
@@ -1138,6 +1138,12 @@
     {
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
+      "step": "Build trusted publisher for Node",
+      "sha256": "be6a4c8d74cb012c03aa87a848f414e7644b6840b29e6061b96d720ec709b3fe"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "publish",
       "step": "Check out admitted source",
       "sha256": "4a04e3e8059a0265df759ece12bc66ccca4028d5590d504b23b038a60292044a"
     },
@@ -1157,7 +1163,7 @@
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
       "step": "Publish canary versions",
-      "sha256": "35ab9cbe37950552054bf677cb69e36a67b7eb9b8fdd878bbadffeb3d149f3ac"
+      "sha256": "0cb9c571b7799a7b28947d061a45817f3bc25d8eccc3c3443c948454f0fbd408"
     },
     {
       "workflow": ".github/workflows/publish-desktop-image.yml",
