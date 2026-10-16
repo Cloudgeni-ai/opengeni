@@ -1,5 +1,40 @@
 # @opengeni/runtime
 
+## 3.4.0
+
+### Minor Changes
+
+- ceaf911: Browsers: a browser whose working directory was copied or restored (for example after a machine's disk was replaced) can now be continued from that copy instead of staying unavailable. `inspectBrowserSessionWorkingCopy` reports why the copy is refused and, when it can be adopted, the exact digest of its bytes; `adoptBrowserSessionWorkingCopy` adopts exactly those bytes under the browser's existing control authority, and `getBrowserSessionWorkingCopyAdoption` reports an adoption's recorded outcome, without changing it, when a reply was lost; retrying the same adoption settles one that stopped part way and never repeats a step. How recent the copy is stays explicitly unknown. Only controller-owned derived entries are left out of the copy, and inspection lists them. An adopted copy is never replaced by an older checkpoint afterwards, the directory it replaced is kept, and every step is journaled so a crash at any point is finished or reported, never guessed. Supported on Linux machines only for now. When a preserved browser is refused, its error now says why and what to do next.
+
+### Patch Changes
+
+- a544972: Browser tool results now reach the model as a compact page outline instead of JSON: one line per element (`role "name" [ref] value states`), indented by nesting, with refs on controls and actionable elements and omitted on text and layout lines. Noise states are dropped. `browser_open`, `browser_tabs`, `browser_observe`, `browser_act` and accessibility `browser_read` use it; `structuredContent` keeps the complete typed value for Code Mode, the API and the UI. Element refs are shorter (`e`/`a` plus 8 hex digits, with the full digest on a collision within a snapshot). Together this roughly halves the tokens of browser tool output.
+- 0ed367a: Browser and computer tasks start without a tool search. `browser_open` and `computer_open` are visible from the first request, and opening one shows the rest of its tools (observe, act, screenshot, tabs) right after the open result, frozen so later requests reproduce the same prefix. Tagged-union summaries also list a tag once when several variants share it.
+- fbb2765: Browser and computer tool definitions are about four times smaller for the model. Each tagged union, such as a browser action and its locator, is now shown once as a single object with one line listing the fields each variant takes, instead of repeating the locator in every action. Limits that only matter for validation are left out of what the model sees; the tools still enforce them. When arguments are invalid, the error now names the exact field, such as `action.locator.role: expected string`, instead of only saying the arguments are invalid.
+- 462fa87: Connected-app tools no longer start with an account line when the turn has only one account for that app. The line ("Account: … Use only this account …") was added to every tool of every connected account, which repeated the same text across hundreds of tools and gave the model nothing to choose between. It now appears only when the same app has several accounts in the turn, where it tells them apart.
+- ad17c9e: An invalid human-handoff request no longer fails the agent's turn. The handoff tool pauses for a person before it runs, and its arguments were only checked after that pause, so a request with a wrong value type (for example a number sent as a string) stopped the whole turn with a raw validation error. The arguments are now checked before the pause, like the human-input question tool, and the model gets a tool result naming the fields to correct, with nothing requested.
+- 8053c9b: A Connected Machine that stops answering in the middle of a command now fails only that command. Previously the turn could not finish: it kept trying to cancel the command on the unreachable machine until the worker's quiescence watchdog drained the whole worker, ending the turn and every other turn on it. The command is now recorded in the session's command ledger with a stop request, the turn finishes normally, and the reconciler stops or settles the command when the machine returns or its runner is retired. The error the model sees is unchanged, and the later stop adds no model input. If the ledger cannot record the command, the turn keeps ownership as before.
+- Updated dependencies [28844d8]
+- Updated dependencies [ceaf911]
+- Updated dependencies [2f370c3]
+- Updated dependencies [60191f6]
+- Updated dependencies [c594c1d]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+  - @opengeni/contracts@3.4.0
+  - @opengeni/sdk@3.4.0
+  - @opengeni/config@3.4.0
+  - @opengeni/capabilities@3.4.0
+  - @opengeni/codemode@3.4.0
+  - @opengeni/codex@3.4.0
+  - @opengeni/interaction@3.4.0
+  - @opengeni/observability@3.4.0
+  - @opengeni/tool-gateway@3.4.0
+  - @opengeni/vaults@3.4.0
+  - @opengeni/agent-proto@3.4.0
+  - @opengeni/network@3.4.0
+  - @opengeni/xai-subscription@3.4.0
+
 ## 3.3.0
 
 ### Patch Changes
