@@ -59,6 +59,10 @@ sandboxes created at once all pay it at the same time.
   was last read, at its full size, and stop when sandbox users run out. The
   agent knows their count and resident memory per shape (huge pages
   included; also in status), for the admission budget to count.
+- Every clone the agent ends on purpose (a discarded or failed ready clone,
+  a claim it takes back, a clone whose guest never answered) first tells its
+  pager the VM is ending, so the pager going with it is not reported as lost
+  memory. Template builds boot without a pager.
 - A shape with no create for a while (`--template-unused-secs`, a week by
   default) retires: its template and ready clones go, and nothing is built
   or filled for it until its next create, which boots cold. The last use is

@@ -164,6 +164,14 @@ impl Reconnected {
         self.paging.close().await;
     }
 
+    /// Says the VM is about to be ended on purpose, as
+    /// [`LiveMemory::ending`] does, so its pager going away with it is not
+    /// taken for lost memory.
+    pub fn ending(&self) {
+        #[cfg(target_os = "linux")]
+        self.paging.ending();
+    }
+
     /// For a VM that may still run but was not taken back: goes on serving
     /// and fetching its memory in the background until the pager holds all
     /// of it, or ends with the VM, so its guest never waits forever on a

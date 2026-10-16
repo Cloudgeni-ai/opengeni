@@ -1185,10 +1185,9 @@ impl<E: Engine, S: Store> Job<E, S> {
                 self.hold_watch(&vm, &watch).await;
                 let memory = LiveMemory::booted(watch);
                 if pending && self.tell_guest_restored().await.is_err() {
-                    let outcome = self.end(vm, Outcome::Failed(Failure::Transient)).await;
-                    if outcome != Outcome::Failed(Failure::Fatal) {
-                        memory.close().await;
-                    }
+                    let outcome = self
+                        .end_with_memory(vm, memory, Outcome::Failed(Failure::Transient))
+                        .await;
                     return (outcome, After::NoVm);
                 }
                 (Outcome::Done, After::New(vm, memory))

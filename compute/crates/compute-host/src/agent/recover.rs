@@ -357,6 +357,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // otherwise. A paused one, such as a claimed ready sandbox,
                 // is taken back: its next resume tells it.
                 tracing::warn!(%id, "the VM's guest does not know which sandbox it is; stopping the VM");
+                if let Some(memory) = &memory {
+                    memory.ending();
+                }
                 if let Err(error) = self.engine.stop(vm).await {
                     if let Some(memory) = memory {
                         memory.serve_detached();
