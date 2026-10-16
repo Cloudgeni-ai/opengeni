@@ -201,7 +201,8 @@ function sessionAuthorizationDb(privateSessionOwner?: string) {
         }
         if (
           text.includes("set_config('opengeni.lossless_content_writer'") ||
-          text.includes("set_config('opengeni.sandbox_recovery_protocol_v2'")
+          text.includes("set_config('opengeni.sandbox_recovery_protocol_v2'") ||
+          text.includes("set_config('opengeni.agent_root_session_id'")
         ) {
           return [];
         }
