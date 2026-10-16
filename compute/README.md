@@ -205,8 +205,9 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
 - **A control plane**: placement, moving sandboxes between hosts, recovery
   after losing a host, autoscaling ([ADR 15](docs/adr/0015-placement-and-moves-between-hosts.md)).
 - **Admission with requests and limits** ([ADR 14](docs/adr/0014-requests-limits-and-admission.md)).
-- **Observability**: wide events, label-free metrics, zero-alarm safety
-  counters and a canary per host ([ADR 16](docs/adr/0016-observability.md)).
+- **Observability**: wide events, bounded-cardinality metrics, zero-alarm
+  safety counters and a canary per host, exported as OpenTelemetry
+  ([ADR 16](docs/adr/0016-observability.md)).
 - **The Opengeni integration**.
 
 ## Credits
