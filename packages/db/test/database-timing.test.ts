@@ -25,6 +25,9 @@ function fixture(
           initiating_human_subject_id: "",
           personal_resource_human_subject_id: "",
           personal_resource_actor_subject_id: "",
+          agent_root_session_id: "",
+          site_id: "",
+          site_viewer_principal: "",
         },
       ];
     },
