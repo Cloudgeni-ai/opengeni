@@ -846,8 +846,6 @@ async fn bench(client: &Client, args: &BenchArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Refuses a huge-page memory profile on a host without a reserved pool of
-/// 2 MiB pages: every VM's memory would fail to allocate.
 /// Lets the agent hold as many open files as the system allows it. Every VM
 /// keeps several open here (its process, pager, image files and store
 /// connections), so the usual soft limit of 1024 runs out near a hundred
@@ -870,6 +868,8 @@ fn raise_open_file_limit() {
     }
 }
 
+/// Refuses a huge-page memory profile on a host without a reserved pool of
+/// 2 MiB pages: every VM's memory would fail to allocate.
 fn check_huge_pages(profile: MemoryProfile) -> anyhow::Result<()> {
     if profile.pages != compute_engine::PageSize::Huge {
         return Ok(());
