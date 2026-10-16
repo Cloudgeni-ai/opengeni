@@ -623,6 +623,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
     // 0776 (Site Data), 0782 (published Sites) and 0783 (Site SQL): their tables
     // are in the runtime and protected contracts.
     const siteDataTables = [
+      // 0792 (schedule blocker reviews) is also a later runtime/protected table.
+      "scheduled_task_blocker_reviews",
       "site_abuse_reports",
       "site_auth_codes",
       "site_data_collections",
