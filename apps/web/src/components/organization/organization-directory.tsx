@@ -1,4 +1,6 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { BillingPlanBalance } from "@opengeni/sdk";
+import { isSeatLimitError } from "@/lib/subscription-plans";
 import { retryOrganizationUserSetupDelivery } from "@opengeni/sdk/organization-user-setup";
 import {
   createContext,
@@ -64,10 +66,11 @@ type Pending<Request> = Request & { operationId: string };
 
 export interface InviteResult {
   sent: OrganizationInvitation[];
-  failed: { email: string; message: string }[];
+  failed: { email: string; message: string; seatLimitReached?: boolean }[];
 }
 
 export interface OrganizationDirectory {
+  plan: BillingPlanBalance | null;
   identity: OrganizationAdminIdentity;
   /** How the signed-in person is named when the server has no name ("Local dev"). */
   youLabel: string | null;
@@ -207,6 +210,37 @@ export function OrganizationDirectoryProvider({
   const [invitations, setInvitations] = useState<
     Owned<{ invitations: OrganizationInvitation[]; nextCursor: string | null }>
   >({ ownerKey: "", value: EMPTY_INVITATIONS, loading: true, error: null });
+  const [planState, setPlanState] = useState<{ ownerKey: string; plan: BillingPlanBalance | null }>(
+    { ownerKey: "", plan: null },
+  );
+  // Both reads are necessary: existing plan rows can remain while the feature is off.
+  useEffect(() => {
+    let active = true;
+    setPlanState({ ownerKey: identityKey, plan: null });
+    if (!peopleEnabled) return;
+    void (async () => {
+      try {
+        const billing = await client.getBilling({ accountId: identity.organizationId });
+        if (!active || !billing.balance.plan) return;
+        const catalog = await client.getBillingSubscriptionPlans({
+          accountId: identity.organizationId,
+        });
+        if (active && catalog.plan) setPlanState({ ownerKey: identityKey, plan: catalog.plan });
+      } catch {
+        /* Billing details are optional for people administrators. */
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [
+    client,
+    identity.organizationId,
+    identityKey,
+    peopleEnabled,
+    members.value,
+    invitations.value,
+  ]);
 
   // Writes whose outcome is unknown, by target, so a retry reuses the operation id.
   const pendingRef = useRef(new Map<string, Pending<Record<string, unknown>>>());
@@ -664,6 +698,7 @@ export function OrganizationDirectoryProvider({
           failed.push({
             email,
             message: failure(error, "The invitation list changed. Check it and try again.").message,
+            ...(isSeatLimitError(error) ? { seatLimitReached: true } : {}),
           });
         }
       }
@@ -779,6 +814,7 @@ export function OrganizationDirectoryProvider({
         : { value: empty, loading: true, error: null };
     const visibleMembers = visible(members, []);
     return {
+      plan: planState.ownerKey === identityKey ? planState.plan : null,
       identity,
       youLabel,
       actorRole,
@@ -819,6 +855,7 @@ export function OrganizationDirectoryProvider({
     managedSession,
     members,
     overview,
+    planState,
     reload,
     removeWorkspaceAccess,
     renameOrganization,
