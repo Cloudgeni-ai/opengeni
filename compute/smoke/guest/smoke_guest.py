@@ -31,6 +31,11 @@ restores. The id is kept in the state directory before the answer, so a
 restarted service still knows it; a guest booted from its disk finds its id
 on the kernel command line instead, as `opengeni.sandbox=<id>`.
 
+Commands started here keep the sandbox awake while they run, however quiet
+they are: asked `activity` on the notice port, the service answers
+`commands <n>`, the number still running. A request with `"keep_awake":
+false` starts one that does not count (fire and forget).
+
 The service sets its own `oom_score_adj` to -1000, so when the guest runs
 out of memory the kernel kills the user's programs before it; every command
 it starts resets the inherited setting to 0 before running.
@@ -114,7 +119,7 @@ def _unb64(text: str) -> bytes:
 def _field(request: dict[str, Any], name: str, kind: type | tuple[type, ...]) -> Any:
     value = request.get(name)
     # JSON true and false are never numbers here.
-    if isinstance(value, bool) or not isinstance(value, kind):
+    if (isinstance(value, bool) and kind is not bool) or not isinstance(value, kind):
         kinds = kind if isinstance(kind, tuple) else (kind,)
         expected = " or ".join(k.__name__ for k in kinds)
         raise RequestError(f"field {name!r} must be {expected}")
@@ -137,9 +142,12 @@ def _environment(request: dict[str, Any]) -> dict[str, str]:
 class Process:
     """One background command, with its output kept in files."""
 
-    def __init__(self, command: str, env: dict[str, str], cwd: str | None) -> None:
+    def __init__(
+        self, command: str, env: dict[str, str], cwd: str | None, *, keep_awake: bool = True
+    ) -> None:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         self.command = command
+        self.keep_awake = keep_awake
         name = f"{os.getpid()}-{next(_OUTPUT_NAMES)}"
         self._stdout = (OUTPUT_DIR / f"{name}.out").open("w+b")
         self._stderr = (OUTPUT_DIR / f"{name}.err").open("w+b")
@@ -189,8 +197,10 @@ class Processes:
         self._lock = threading.Lock()
         self._by_pid: dict[int, Process] = {}
 
-    def start(self, command: str, env: dict[str, str], cwd: str | None) -> Process:
-        process = Process(command, env, cwd)
+    def start(
+        self, command: str, env: dict[str, str], cwd: str | None, *, keep_awake: bool = True
+    ) -> Process:
+        process = Process(command, env, cwd, keep_awake=keep_awake)
         with self._lock:
             self._by_pid[process.pid] = process
         return process
@@ -220,6 +230,38 @@ class Processes:
 
 
 PROCESSES = Processes()
+
+
+class Running:
+    """Foreground commands (`exec`) under way that keep the sandbox awake."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._count = 0
+
+    @contextlib.contextmanager
+    def one(self, keep_awake: bool) -> Any:
+        with self._lock:
+            self._count += keep_awake
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._count -= keep_awake
+
+    def count(self) -> int:
+        with self._lock:
+            return self._count
+
+
+EXECS = Running()
+
+
+def awake_commands() -> int:
+    """Commands started here that still run and keep the sandbox awake."""
+
+    background = sum(1 for process in PROCESSES.running() if process.keep_awake)
+    return background + EXECS.count()
 
 
 class Restores:
@@ -300,21 +342,23 @@ def op_ping(_request: dict[str, Any]) -> dict[str, Any]:
 def op_exec(request: dict[str, Any]) -> dict[str, Any]:
     command = _field(request, "command", str)
     timeout = _optional(request, "timeout", (int, float), None)
-    process = subprocess.Popen(
-        _user_command(command),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=_environment(request),
-        cwd=_optional(request, "cwd", str, None),
-        start_new_session=True,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        stdout, stderr = process.communicate()
-        raise RequestError(f"command timed out after {timeout}s") from None
+    keep_awake = _optional(request, "keep_awake", bool, True)
+    with EXECS.one(keep_awake):
+        process = subprocess.Popen(
+            _user_command(command),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=_environment(request),
+            cwd=_optional(request, "cwd", str, None),
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+            raise RequestError(f"command timed out after {timeout}s") from None
     return {
         "exit_code": process.returncode,
         "stdout": _b64(stdout),
@@ -327,6 +371,7 @@ def op_spawn(request: dict[str, Any]) -> dict[str, Any]:
         _field(request, "command", str),
         _environment(request),
         _optional(request, "cwd", str, None),
+        keep_awake=_optional(request, "keep_awake", bool, True),
     )
     return {"pid": process.pid}
 
@@ -847,6 +892,10 @@ def serve_notice(connection: socket.socket, *, set_clock: bool) -> None:
 
     with connection, connection.makefile("rb") as reader:
         line = reader.readline(MAX_NOTICE + 1)
+        if line == b"activity\n":
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                connection.sendall(f"commands {awake_commands()}\n".encode())
+            return
         notice = parse_notice(line)
         if notice is None:
             print(f"ignored restore notice {line[:80]!r}", file=sys.stderr, flush=True)

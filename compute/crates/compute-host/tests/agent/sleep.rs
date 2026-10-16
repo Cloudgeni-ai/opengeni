@@ -369,6 +369,34 @@ async fn work_inside_the_guest_keeps_it_awake() {
     lab.assert_clean();
 }
 
+/// A command started through the guest's helper keeps its sandbox awake
+/// while it runs, however quiet: the host asks a quiet guest how many run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_quiet_command_keeps_its_sandbox_awake_until_it_ends() {
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        |config| config.restore_notice_port = Some(53),
+    )
+    .await;
+    let sandbox = id(17);
+    lab.create(sandbox, PAUSE_SOON).await;
+    assert_eq!(lab.run(sandbox, &["start-command"]).await, ["ok"]);
+    sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        Lab::sandbox(&lab.status().await, sandbox).level,
+        LevelName::Running,
+        "a sandbox running a command stays awake"
+    );
+    assert_eq!(lab.run(sandbox, &["end-command"]).await, ["ok"]);
+    let ended = Instant::now();
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    assert!(ended.elapsed() >= Duration::from_millis(200));
+    lab.assert_clean();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn traffic_keeps_a_guest_awake_while_its_processor_idles() {
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;

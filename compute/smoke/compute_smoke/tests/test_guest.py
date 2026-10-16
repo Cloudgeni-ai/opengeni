@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -145,6 +146,33 @@ class GuestService(unittest.TestCase):
         # A notice without the field keeps the id the guest already has.
         self.assertEqual(self.notice(f"restored {time.time_ns()}\n".encode()), b"ok\n")
         self.assertEqual(self.ok({"op": "ping"})["sandbox"], sandbox)
+
+    def commands(self) -> bytes:
+        return self.notice(b"activity\n")
+
+    def test_running_commands_keep_the_sandbox_awake_unless_asked_not_to(self) -> None:
+        self.assertEqual(self.commands(), b"commands 0\n")
+        quiet = self.ok({"op": "spawn", "command": "sleep 30"})["pid"]
+        forgotten = self.ok({"op": "spawn", "command": "sleep 30", "keep_awake": False})["pid"]
+        self.assertEqual(self.commands(), b"commands 1\n", "fire and forget does not count")
+        for pid in (quiet, forgotten):
+            self.ok({"op": "signal", "pid": pid, "signal": signal.SIGKILL})
+            self.ok({"op": "wait", "pid": pid, "timeout": 10})
+        self.assertEqual(self.commands(), b"commands 0\n", "an ended command does not count")
+
+        # A foreground command counts while it runs.
+        marker = Path(self.path("started"))
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        running = threading.Thread(
+            target=self.ok, args=({"op": "exec", "command": f"touch {marker}; sleep 1"},)
+        )
+        running.start()
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.commands(), b"commands 1\n")
+        running.join()
+        self.assertEqual(self.commands(), b"commands 0\n")
 
     def test_a_command_returns_its_status_and_both_streams(self) -> None:
         reply = self.ok(

@@ -1,14 +1,20 @@
 //! Periodic sampling of host memory and of VM processor use and traffic.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use compute_core::{Input, Level, SandboxId};
 use compute_engine::{Engine, PageSize};
 use tokio::time::Instant;
 
+use crate::protocol::Id;
+use crate::restore_notice::ask_commands;
 use crate::store::Store;
 
-use super::{ActivityWindow, BusyRule, HostAgent};
+use super::{ActivityWindow, BusyRule, Event, HostAgent};
+
+/// How long a quiet guest may take to say whether commands still run.
+const ASK_LIMIT: Duration = Duration::from_secs(1);
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn sample(&mut self) {
@@ -60,6 +66,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn sample_busy(&mut self, rule: BusyRule) -> Vec<SandboxId> {
         let now = Instant::now();
         let mut busy = Vec::new();
+        let mut quiet = Vec::new();
         for (id, slot) in &mut self.slots {
             let running = self
                 .core
@@ -99,6 +106,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                             .map_or(0, |(before, after)| after.saturating_sub(before));
                         if rule.is_busy(used, moved, elapsed) {
                             busy.push(*id);
+                        } else {
+                            quiet.push((*id, live.incarnation, slot.spec.vsock_path()));
                         }
                         slot.activity = Some(fresh);
                     }
@@ -106,7 +115,50 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 _ => slot.activity = Some(fresh),
             }
         }
+        self.ask_quiet(quiet);
         busy
+    }
+
+    /// Asks the guests of sandboxes that used neither processor nor traffic
+    /// over their last window whether a command started through the guest's
+    /// helper still runs; one that does counts as busy. Guests that do not
+    /// answer change nothing.
+    fn ask_quiet(&self, quiet: Vec<(SandboxId, u64, PathBuf)>) {
+        let Some(port) = self.restore_notice_port else {
+            return;
+        };
+        for (sandbox, incarnation, vsock) in quiet {
+            let events = self.events_tx.clone();
+            tokio::spawn(async move {
+                match ask_commands(&vsock, port, ASK_LIMIT).await {
+                    Ok(0) => {}
+                    Ok(_) => {
+                        let _ = events.send(Event::CommandsRunning {
+                            sandbox,
+                            incarnation,
+                        });
+                    }
+                    Err(error) => tracing::trace!(id = %Id(sandbox), %error, "no command count"),
+                }
+            });
+        }
+    }
+
+    /// A quiet guest still runs a command started through its helper: that
+    /// counts as activity, if the VM asked is still the sandbox's and runs.
+    pub(super) fn commands_running(&mut self, sandbox: SandboxId, incarnation: u64) {
+        let current = self
+            .slots
+            .get(&sandbox)
+            .and_then(|slot| slot.vm.as_ref())
+            .is_some_and(|live| live.incarnation == incarnation);
+        let running = self
+            .core
+            .sandbox(sandbox)
+            .is_some_and(|view| view.state.level == Level::Running && view.step.is_none());
+        if current && running {
+            self.inputs(vec![Input::Busy { sandbox }]);
+        }
     }
 }
 

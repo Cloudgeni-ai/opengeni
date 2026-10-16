@@ -12,7 +12,12 @@ human. Sleep also has to be cheap to undo, or nobody will let it happen early.
 
 A sandbox is in use while any of these holds: a caller holds it (an agent
 turn), its VM uses a quarter of a processor or moves 4 KiB/s over five
-seconds, a stream into it is open, or a port saw recent traffic. Idle means
+seconds, a command started through its guest helper still runs, a stream
+into it is open, or a port saw recent traffic. A quiet command (a long poll,
+`sleep 300 && deploy`) uses neither processor nor traffic, so the host asks
+a guest that looks idle how many such commands run (`activity` on the
+notice port); a caller can start one as fire-and-forget, which does not
+count. Idle means
 none of them. Holds carry a name and a lease the caller renews, so a crashed
 caller cannot pin a sandbox; the API still accepts a hold without a lease,
 which lasts until released, and that will be removed.

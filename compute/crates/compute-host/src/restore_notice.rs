@@ -39,6 +39,14 @@
 //!
 //! A guest booted from its disk instead finds the same id on its kernel
 //! command line, as `opengeni.sandbox=<sandbox id>`.
+//!
+//! The same port answers one more question, asked of a running guest that
+//! used neither processor nor traffic for a while: the line `activity`,
+//! answered `commands <n>`, the number of commands started through the
+//! guest's helper that are still running and keep the sandbox awake (a
+//! caller can start one that does not). A sandbox running such a command
+//! stays awake however quiet the command is. A guest that does not know
+//! the question gives no count, and only processor use and traffic count.
 
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -179,6 +187,45 @@ async fn exchange(vsock_socket: &Path, port: u32, sandbox: &str, seed: &str) -> 
     ))
 }
 
+/// Longest answer to `activity` a guest may give.
+const MAX_ACTIVITY: usize = 32;
+
+/// Asks a running guest how many commands started through its helper are
+/// still running and keep it awake (see the module documentation), giving
+/// up after `limit`.
+///
+/// # Errors
+///
+/// The guest did not answer in time, or answered something else.
+pub async fn ask_commands(vsock_socket: &Path, port: u32, limit: Duration) -> io::Result<u32> {
+    let asked = async {
+        let mut stream = vsock::connect(vsock_socket, port).await?;
+        stream.write_all(b"activity\n").await?;
+        let mut answer = Vec::with_capacity(MAX_ACTIVITY);
+        let mut byte = [0_u8; 1];
+        while answer.len() <= MAX_ACTIVITY {
+            stream.read_exact(&mut byte).await?;
+            if byte[0] == b'\n' {
+                return std::str::from_utf8(&answer)
+                    .ok()
+                    .and_then(|line| line.strip_prefix("commands "))
+                    .and_then(|count| count.parse().ok())
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "unexpected answer to activity")
+                    });
+            }
+            answer.push(byte[0]);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "answer to activity too long",
+        ))
+    };
+    tokio::time::timeout(limit, asked)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the guest did not answer activity"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +320,57 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
         }
+    }
+
+    /// A guest that answers each `activity` question with one of `answers`.
+    fn activity_guest(name: &str, answers: &'static [&'static [u8]]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("activity-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("vsock.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            for answer in answers {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                assert_eq!(lines.next_line().await.unwrap().unwrap(), "CONNECT 53");
+                write.write_all(b"OK 1073741824\n").await.unwrap();
+                assert_eq!(lines.next_line().await.unwrap().unwrap(), "activity");
+                write.write_all(answer).await.unwrap();
+                held.push((lines, write));
+            }
+            std::future::pending::<()>().await;
+        });
+        socket
+    }
+
+    #[tokio::test]
+    async fn a_guest_counts_the_commands_that_keep_it_awake() {
+        let socket = activity_guest(
+            "counts",
+            &[
+                b"commands 2\n",
+                b"commands 0\n",
+                b"what?\n",
+                b"commands two\n",
+                b"",
+            ],
+        );
+        let limit = Duration::from_millis(200);
+        assert_eq!(ask_commands(&socket, 53, limit).await.unwrap(), 2);
+        assert_eq!(ask_commands(&socket, 53, limit).await.unwrap(), 0);
+        for _ in 0..2 {
+            let error = ask_commands(&socket, 53, limit).await.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        let error = ask_commands(&socket, 53, limit).await.unwrap_err();
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::TimedOut,
+            "a guest that never answers"
+        );
     }
 
     #[tokio::test]

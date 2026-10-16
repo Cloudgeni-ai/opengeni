@@ -177,6 +177,9 @@ struct Work {
     cpu: Meter,
     /// A byte of traffic every microsecond while streaming.
     io: Meter,
+    /// Commands started through the guest's helper still running, which
+    /// keep it awake whatever they do.
+    commands: u32,
 }
 
 /// Time a fake VM spent on one kind of work.
@@ -372,6 +375,17 @@ async fn guest(
                         work.lock().unwrap().io.set_busy(false);
                         "ok".into()
                     }
+                    // A quiet command, such as `sleep 300 && deploy`.
+                    ("start-command", _) => {
+                        work.lock().unwrap().commands += 1;
+                        "ok".into()
+                    }
+                    ("end-command", _) => {
+                        let mut work = work.lock().unwrap();
+                        work.commands = work.commands.saturating_sub(1);
+                        "ok".into()
+                    }
+                    ("activity", _) => format!("commands {}", work.lock().unwrap().commands),
                     (other, _) => format!("unknown {other}"),
                 };
                 if write
