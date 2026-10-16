@@ -46,7 +46,7 @@
 //! ordinal stays taken until its VM is proven gone, so no sandbox ever
 //! shares a user with a VMM that may still run.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -142,6 +142,37 @@ impl FromStr for Shape {
     }
 }
 
+/// A shape and how many ready sandboxes of it to keep, written
+/// `SHAPE[:READY]` such as `1x512:16`. Without `:READY`, none: new
+/// sandboxes of the shape restore its template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Keep {
+    /// The shape, whose template is built as soon as the agent starts.
+    pub shape: Shape,
+    /// How many sandboxes of it to keep restored, warm and paused.
+    pub ready: u32,
+}
+
+impl FromStr for Keep {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        let (shape, ready) = match text.split_once(':') {
+            Some((shape, ready)) => (
+                shape,
+                ready
+                    .parse()
+                    .map_err(|error| format!("ready count in {text:?}: {error}"))?,
+            ),
+            None => (text, 0),
+        };
+        Ok(Self {
+            shape: shape.parse()?,
+            ready,
+        })
+    }
+}
+
 /// How a host keeps warm templates.
 #[derive(Clone, Debug)]
 pub struct PoolConfig {
@@ -156,6 +187,11 @@ pub struct PoolConfig {
     pub depends_on: Vec<PathBuf>,
     /// How long a template's guest may take to become ready.
     pub ready_timeout: Duration,
+    /// How many ready sandboxes to keep of each shape: restored from its
+    /// template, warmed until the guest is ready and paused, so a create
+    /// of that shape only claims one. Each shape here also gets its
+    /// template at start.
+    pub ready: BTreeMap<Shape, u32>,
 }
 
 /// Where today's templates come from. Fixed for the agent's life; the
@@ -312,6 +348,12 @@ pub(crate) struct Template {
 impl Template {
     pub fn shape(&self) -> Shape {
         self.inputs.shape
+    }
+
+    /// Whether the template still fits today's `sources`. Blocks, as
+    /// [`Sources::inputs`] does.
+    pub fn fits(&self, sources: &Sources) -> io::Result<bool> {
+        Ok(sources.inputs(self.inputs.shape)? == self.inputs)
     }
 
     fn images(&self) -> Images {
@@ -472,6 +514,14 @@ impl Pool {
         build
     }
 
+    /// `shape`'s template, if one is ready.
+    pub fn ready(&self, shape: Shape) -> Option<Arc<Template>> {
+        match self.entries.get(&shape) {
+            Some(Entry::Ready(template)) => Some(Arc::clone(template)),
+            _ => None,
+        }
+    }
+
     /// The template a new sandbox of `shape` starts from, if one is ready;
     /// otherwise asks for it as [`Pool::want`] does. The second value says
     /// whether the caller must build it.
@@ -522,6 +572,9 @@ impl Pool {
                     Entry::Building => TemplateState::Building,
                     Entry::Failed { .. } => TemplateState::Failed,
                 },
+                ready: 0,
+                target: 0,
+                filling: 0,
             })
             .collect();
         all.sort_by_key(|status| (status.vcpus, status.memory_mib));
@@ -784,7 +837,7 @@ async fn attempt<E: Engine>(
 }
 
 /// Waits until the guest of `vm` accepts a connection on `port`.
-async fn ready<E: Engine>(
+pub(crate) async fn ready<E: Engine>(
     engine: &E,
     vm: &E::Vm,
     spec: &VmSpec,
@@ -801,11 +854,11 @@ async fn ready<E: Engine>(
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "the template's guest did not accept connections on port {port} within {limit:?}"
+                "the guest did not accept connections on port {port} within {limit:?}"
             ));
         }
         tokio::select! {
-            () = &mut exited => return Err("the template's VM ended while booting".into()),
+            () = &mut exited => return Err("the VM ended before its guest was ready".into()),
             () = sleep(READY_POLL) => {}
         }
     }
@@ -1024,6 +1077,16 @@ mod tests {
                 memory: String::new(),
                 ready_port: 52,
             },
+        }
+    }
+
+    #[test]
+    fn kept_shapes_parse_with_an_optional_ready_count() {
+        let keep: Keep = "1x512:16".parse().unwrap();
+        assert_eq!((keep.shape, keep.ready), (shape(1, 512), 16));
+        assert_eq!("2x1024".parse::<Keep>().unwrap().ready, 0);
+        for bad in ["1x512:", "1x512:-1", "1x512:a", "1x64:2"] {
+            assert!(bad.parse::<Keep>().is_err(), "{bad}");
         }
     }
 

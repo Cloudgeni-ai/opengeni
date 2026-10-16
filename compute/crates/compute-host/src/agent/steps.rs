@@ -19,7 +19,7 @@ use crate::state::{Change, Fence, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::Store;
 
-use super::{Event, HostAgent, HostError, Reply, Running, TEARDOWN_RETRY, Woke};
+use super::{Event, HostAgent, HostError, Leftover, Reply, Running, TEARDOWN_RETRY, Woke};
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn on_event(&mut self, event: Event<E::Vm>) {
@@ -46,7 +46,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let Ok(policy) = self.sleep_policy(&record.config) else {
                     return;
                 };
-                let paths = Paths::new(&self.root, id);
+                let paths = Paths::of(&self.root, &record);
                 let spec = vm_spec(&record, &paths, &self.images);
                 self.insert(id, paths, spec);
                 // A new sandbox is a saved one: a disk, with a memory image
@@ -84,35 +84,64 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 shape,
                 ordinal,
                 built,
-            } => self.template_built(shape, ordinal, built),
+            } => {
+                self.template_built(shape, ordinal, built);
+                self.discard_stale_ready(shape);
+                self.refill();
+            }
+            Event::Filled { host, filled } => {
+                self.filled(host, *filled);
+                self.refill();
+            }
+            Event::Claimed {
+                id,
+                config,
+                reply,
+                claimed,
+            } => {
+                self.claimed(id, config, reply, *claimed);
+                self.refill();
+            }
             Event::Destroyed {
                 id,
+                host,
                 ordinal,
                 result,
-            } => {
-                // A removal that stopped part way keeps its ordinal, and its
-                // id stays blocked until removing it again or the next
-                // start of the agent finishes it.
-                match &result {
-                    Ok(()) => {
-                        if let Some(ordinal) = ordinal {
-                            self.ordinals.remove(&ordinal);
-                        }
-                        self.leftovers.remove(&id.0);
-                    }
-                    Err(error) => {
-                        self.block(id, format!("removal failed: {error}"));
-                        if self.records.get(id).is_none() {
-                            self.leftovers.insert(id.0, ordinal);
-                        }
-                    }
-                }
-                for remover in self.destroying.remove(&id.0).unwrap_or_default() {
-                    let _ = remover.send(result.clone());
-                }
-            }
+            } => self.destroyed(id, host, ordinal, &result),
             Event::TornDown { id } => self.torn_down(id),
         }
+    }
+
+    /// A removal ended, finished or stopped part way.
+    fn destroyed(
+        &mut self,
+        id: Id,
+        host: Id,
+        ordinal: Option<u32>,
+        result: &Result<(), HostError>,
+    ) {
+        // A removal that stopped part way keeps its ordinal, and its
+        // id stays blocked until removing it again or the next
+        // start of the agent finishes it.
+        match result {
+            Ok(()) => {
+                if let Some(ordinal) = ordinal {
+                    self.ordinals.remove(&ordinal);
+                }
+                self.leftovers.remove(&id.0);
+                self.hosts.remove(&host.0);
+            }
+            Err(error) => {
+                self.block(id, format!("removal failed: {error}"));
+                if self.records.get(id).is_none() {
+                    self.leftovers.insert(id.0, Leftover { host, ordinal });
+                }
+            }
+        }
+        for remover in self.destroying.remove(&id.0).unwrap_or_default() {
+            let _ = remover.send(result.clone());
+        }
+        self.ready_removed(host);
     }
 
     pub(super) fn execute(&mut self, action: Action) {
@@ -208,29 +237,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Step::Pause | Step::Resume | Step::Compress | Step::Save | Step::Drop | Step::Archive
         );
         let events = self.events_tx.clone();
-        let job = Job {
-            engine: Arc::clone(&self.engine),
-            store: Arc::clone(&self.store),
-            records: Arc::clone(&self.records),
-            record,
-            id,
-            spec: VmSpec::clone(&slot.spec),
-            paths: Paths::clone(&slot.paths),
-            cancel,
-            live: if needs_vm { slot.vm.take() } else { None },
-            restore_notice_port: self.restore_notice_port,
-            base_image: self.base_image.clone(),
-            kernel: self.images.kernel.clone(),
-            #[cfg(target_os = "linux")]
-            fetcher: self.fetcher.clone(),
-            launches: 0,
-            unthrottle: Some({
-                let events = events.clone();
-                Box::new(move || {
-                    let _ = events.send(Event::Unthrottled { id, op });
-                })
-            }),
-        };
+        let (spec, paths) = (VmSpec::clone(&slot.spec), Paths::clone(&slot.paths));
+        let live = if needs_vm { slot.vm.take() } else { None };
+        let mut job = self.job(record, spec, paths, cancel);
+        job.live = live;
+        job.unthrottle = Some({
+            let events = events.clone();
+            Box::new(move || {
+                let _ = events.send(Event::Unthrottled { id, op });
+            })
+        });
         tokio::spawn(async move {
             let ran = job.run(step).await;
             let _ = events.send(Event::StepDone {
@@ -241,6 +257,35 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 launches: ran.launches,
             });
         });
+    }
+
+    /// A step for the sandbox `record` describes, with no VM, that frees
+    /// no place when its work is done.
+    pub(super) fn job(
+        &self,
+        record: Record,
+        spec: VmSpec,
+        paths: Paths,
+        cancel: CancellationToken,
+    ) -> Job<E, S> {
+        Job {
+            engine: Arc::clone(&self.engine),
+            store: Arc::clone(&self.store),
+            records: Arc::clone(&self.records),
+            id: record.id,
+            record,
+            spec,
+            paths,
+            cancel,
+            live: None,
+            restore_notice_port: self.restore_notice_port,
+            base_image: self.base_image.clone(),
+            kernel: self.images.kernel.clone(),
+            #[cfg(target_os = "linux")]
+            fetcher: self.fetcher.clone(),
+            launches: 0,
+            unthrottle: None,
+        }
     }
 
     pub(super) fn step_done(
@@ -354,7 +399,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             None => self
                 .records
                 .get(id)
-                .map(|record| vm_spec(&record, &Paths::new(&self.root, id), &self.images)),
+                .map(|record| vm_spec(&record, &Paths::of(&self.root, &record), &self.images)),
         };
         let engine = Arc::clone(&self.engine);
         // Keeps the state root locked until the teardown ends, so a
@@ -406,6 +451,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     pub(super) fn exited(&mut self, id: Id, incarnation: u64) {
+        if self.ready_exited(id, incarnation) {
+            return;
+        }
+        // A claimed ready sandbox's VM was watched under its host name.
+        let id = self.hosts.get(&id.0).map_or(id, |public| Id(*public));
         let Some(slot) = self.slots.get_mut(&id.0) else {
             return;
         };
@@ -453,9 +503,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         vm: Option<E::Vm>,
         removers: Vec<Reply<()>>,
     ) {
-        let id = record.id;
+        let (id, host) = (record.id, record.host());
         self.destroying.insert(id.0, removers);
-        let paths = Paths::new(&self.root, id);
+        let paths = Paths::of(&self.root, record);
         let spec = vm_spec(record, &paths, &self.images);
         let engine = Arc::clone(&self.engine);
         let store = Arc::clone(&self.store);
@@ -470,6 +520,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 records: &records,
                 net,
                 id,
+                host,
             };
             let result = removal.run(fence, vm, &spec, &paths.dir).await;
             if let Err(error) = &result {
@@ -477,6 +528,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             let _ = events.send(Event::Destroyed {
                 id,
+                host,
                 ordinal: Some(ordinal),
                 result,
             });
@@ -485,11 +537,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Deletes in the background what a removal left of a sandbox whose
     /// record is already gone: its network and its directory.
-    pub(super) fn remove_leftovers(&mut self, id: Id, ordinal: Option<u32>, reply: Reply<()>) {
+    pub(super) fn remove_leftovers(&mut self, id: Id, left: Leftover, reply: Reply<()>) {
+        let Leftover { host, ordinal } = left;
         self.blocked.remove(&id.0);
         self.leftovers.remove(&id.0);
         self.destroying.insert(id.0, vec![reply]);
-        let dir = Paths::new(&self.root, id).dir;
+        let dir = Paths::new(&self.root, host).dir;
         let net = self.net.clone();
         let records = Arc::clone(&self.records);
         let events = self.events_tx.clone();
@@ -499,7 +552,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let failed = |error: &dyn std::fmt::Display| HostError::Io(error.to_string());
             let result = async {
                 if let Some(net) = net {
-                    tokio::task::spawn_blocking(move || net.remove(id, ordinal))
+                    tokio::task::spawn_blocking(move || net.remove(host, ordinal))
                         .await
                         .map_err(|error| failed(&error))?
                         .map_err(|error| failed(&error))?;
@@ -512,6 +565,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .await;
             let _ = events.send(Event::Destroyed {
                 id,
+                host,
                 ordinal,
                 result,
             });
@@ -588,6 +642,8 @@ struct Removal<'a, E, S> {
     records: &'a Records,
     net: Option<Arc<Networks>>,
     id: Id,
+    /// The name its network was made under.
+    host: Id,
 }
 
 impl<E: Engine, S: Store> Removal<'_, E, S> {
@@ -615,7 +671,8 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
         if let Some(net) = self.net.clone() {
             // The record holds its ordinal until it is removed below.
             let ordinal = record.allocation.link.map(|_| record.ordinal);
-            tokio::task::spawn_blocking(move || net.remove(id, ordinal))
+            let host = self.host;
+            tokio::task::spawn_blocking(move || net.remove(host, ordinal))
                 .await
                 .map_err(|error| HostError::Io(error.to_string()))?
                 .map_err(|error| HostError::Io(error.to_string()))?;

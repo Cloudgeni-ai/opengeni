@@ -1,6 +1,7 @@
 //! Keeping warm templates: building them in the background and handing
 //! them to new sandboxes (see [`crate::pool`]).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -21,6 +22,8 @@ pub(super) struct Started {
     pub shapes: Vec<Shape>,
     /// Builds an earlier agent left whose VMs may still run.
     pub held: Vec<Held>,
+    /// How many ready sandboxes to keep of each shape.
+    pub ready: BTreeMap<Shape, u32>,
 }
 
 impl Warm {
@@ -54,6 +57,7 @@ impl Warm {
                 warm: None,
                 shapes: Vec::new(),
                 held,
+                ready: BTreeMap::new(),
             };
         };
         let ready = pool::keep_templates(root, &sources).await;
@@ -66,6 +70,7 @@ impl Warm {
             }),
             shapes: config.shapes,
             held,
+            ready: config.ready,
         }
     }
 }
@@ -102,6 +107,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if warm.pool.stale(template, Instant::now()) {
             self.build_template(template.shape());
         }
+        // Ready sandboxes cloned from it are as stale.
+        self.discard_stale_ready(template.shape());
     }
 
     /// Records a finished build and frees the user its VM ran as, once

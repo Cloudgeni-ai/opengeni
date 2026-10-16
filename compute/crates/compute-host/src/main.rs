@@ -17,7 +17,7 @@ use compute_host::protocol::{
     Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
 };
 use compute_host::{
-    BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, NoStore, PoolConfig, Shape,
+    BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, Keep, NoStore, PoolConfig,
     Store, serve,
 };
 
@@ -154,11 +154,13 @@ struct ServeArgs {
     /// used only once its guest has acknowledged which sandbox it is.
     #[arg(long, requires = "restore_notice_port")]
     template_ready_port: Option<u32>,
-    /// A shape, as `VCPUSxMEMORY_MIB` such as `2x1024`, whose template is
-    /// built as soon as the agent starts; other shapes get one on first
-    /// use. Repeatable. Needs `--template-ready-port`.
+    /// A shape, as `VCPUSxMEMORY_MIB[:READY]` such as `2x1024` or
+    /// `1x512:16`, whose template is built as soon as the agent starts;
+    /// other shapes get one on first use. `:READY` also keeps that many
+    /// sandboxes of the shape restored, warm and paused, so a create of it
+    /// only claims one. Repeatable. Needs `--template-ready-port`.
     #[arg(long = "template", requires = "template_ready_port")]
-    templates: Vec<Shape>,
+    templates: Vec<Keep>,
     /// How guest memory is backed and saved: `bare-metal` (4 KiB pages,
     /// dirty-page tracking, compression allowed) or `nested` (2 MiB pages
     /// from the host's reserved huge-page pool, resident-page saves, no
@@ -418,9 +420,15 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         host_lock: Some(args.host_lock),
         pool: args.template_ready_port.map(|ready_port| PoolConfig {
             ready_port,
-            shapes: args.templates.clone(),
+            shapes: args.templates.iter().map(|keep| keep.shape).collect(),
             depends_on: vec![firecracker.clone(), jailer.clone()],
             ready_timeout: TEMPLATE_READY_TIMEOUT,
+            ready: args
+                .templates
+                .iter()
+                .filter(|keep| keep.ready > 0)
+                .map(|keep| (keep.shape, keep.ready))
+                .collect(),
         }),
         network: args.network.then_some(NetworkConfig {
             pool: args.network_pool,

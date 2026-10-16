@@ -14,7 +14,7 @@ use crate::state::{Change, Disk, Identity, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory};
 use crate::store::Store;
 
-use super::{HostAgent, HostError};
+use super::{HostAgent, HostError, Leftover};
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) async fn recover(&mut self, strays: Vec<Stray>) {
@@ -36,7 +36,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         tracing::warn!(id = %stray.id, %reason, "could not tidy an unrecorded sandbox");
                         self.block(stray.id, reason);
                         // Removing the id again retries.
-                        self.leftovers.insert(stray.id.0, None);
+                        self.leftovers.insert(
+                            stray.id.0,
+                            Leftover {
+                                host: stray.id,
+                                ordinal: None,
+                            },
+                        );
                     }
                 }
                 Some(problem) => {
@@ -78,7 +84,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     continue;
                 }
             };
-            if record.removing {
+            if let Some(host) = record.host {
+                self.hosts.insert(host.0, id.0);
+            }
+            // A ready sandbox nobody claimed is disposable: it is removed
+            // and the pool fills again.
+            if record.removing || record.ready {
                 self.remove_recorded(&record, None, Vec::new());
                 continue;
             }
@@ -155,7 +166,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         const CONCURRENT: usize = 64;
         futures::stream::iter(records)
             .map(|record| async move {
-                let paths = Paths::new(&self.root, record.id);
+                let paths = Paths::of(&self.root, record);
                 let spec = vm_spec(record, &paths, &self.images);
                 let found = match record.disk {
                     Disk::Local => self
@@ -239,7 +250,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let policy = self
             .sleep_policy(&record.config)
             .map_err(HostError::Invalid)?;
-        let paths = Paths::new(&self.root, id);
+        let paths = Paths::of(&self.root, &record);
         let spec = vm_spec(&record, &paths, &self.images);
         let found = match found? {
             Some((vm, _)) if crate::step::paged(&paths) => {
@@ -254,12 +265,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     .map_err(|error| HostError::Io(error.to_string()))?;
                 None
             }
-            Some((vm, _)) if record.identity == Identity::Pending => {
-                // The previous agent restored it but its guest never
-                // acknowledged which sandbox it is: it may still think it
-                // is the template it was taken of, so nothing may use it.
-                // Its record says what its next wake starts from: the
-                // image again if the guest never ran, its disk otherwise.
+            Some((vm, Found::Running)) if record.identity == Identity::Pending => {
+                // The previous agent restored or resumed it but its guest
+                // never acknowledged which sandbox it is: it may still
+                // think it is the template it was taken of, so nothing may
+                // use it. Its record says what its next wake starts from:
+                // the image again if the guest never ran, its disk
+                // otherwise. A paused one, such as a claimed ready sandbox,
+                // is taken back: its next resume tells it.
                 tracing::warn!(%id, "the VM's guest does not know which sandbox it is; stopping the VM");
                 self.engine
                     .stop(vm)

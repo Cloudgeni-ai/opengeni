@@ -73,8 +73,15 @@ pub(crate) struct Paths {
 }
 
 impl Paths {
+    /// The paths of the sandbox directory named `id`.
     pub fn new(root: &Path, id: Id) -> Self {
         Self::at(sandboxes_dir(root).join(id.to_string()))
+    }
+
+    /// The paths of the sandbox `record` describes, under the name its
+    /// directory was made with (see [`Record::host`]).
+    pub fn of(root: &Path, record: &Record) -> Self {
+        Self::new(root, record.host())
     }
 
     /// The paths of a VM whose directory is `dir`, which the jailer needs
@@ -198,7 +205,7 @@ impl Images {
     /// The network `record` was given, if any.
     pub fn link(record: &Record) -> Option<Link> {
         let Allocation { uid, gid, link } = record.allocation;
-        link.map(|addresses| Link::new(record.id, record.ordinal, addresses, uid, gid))
+        link.map(|addresses| Link::new(record.host(), record.ordinal, addresses, uid, gid))
     }
 }
 
@@ -206,7 +213,8 @@ impl Images {
 /// record says it was given.
 pub(crate) fn vm_spec(record: &Record, paths: &Paths, images: &Images) -> VmSpec {
     Machine {
-        name: record.id.to_string(),
+        // The jail, cgroup and network keep the name they were made under.
+        name: record.host().to_string(),
         paths,
         uid: record.allocation.uid,
         gid: record.allocation.gid,

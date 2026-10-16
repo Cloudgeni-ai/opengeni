@@ -490,6 +490,16 @@ pub struct TemplateStatus {
     pub vcpus: u8,
     pub memory_mib: u32,
     pub state: TemplateState,
+    /// Ready sandboxes of the shape: restored, warm and paused, waiting
+    /// for a create to claim one.
+    #[serde(default)]
+    pub ready: u32,
+    /// How many ready sandboxes the host keeps of the shape.
+    #[serde(default)]
+    pub target: u32,
+    /// Ready sandboxes of the shape being filled.
+    #[serde(default)]
+    pub filling: u32,
 }
 
 /// Whether new sandboxes of a shape can start from its template.

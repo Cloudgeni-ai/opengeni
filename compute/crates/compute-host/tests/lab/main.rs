@@ -31,6 +31,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep, timeout};
 
+mod ready;
 mod spoofing;
 
 const PORT: u32 = 52;

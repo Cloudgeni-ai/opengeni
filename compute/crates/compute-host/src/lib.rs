@@ -30,7 +30,7 @@ mod store;
 pub use agent::{BusyRule, Handle, HostAgent, HostConfig, HostError, Lease};
 pub use chunked::{CHUNK_BYTES, Chunked};
 pub use guest_ports::{GuestPort, Route};
-pub use pool::{PoolConfig, Shape};
+pub use pool::{Keep, PoolConfig, Shape};
 pub use server::serve;
 pub use store::{
     Directory, FetchInto, FetchedMemory, JailedFile, NoStore, Receipt, SavedFiles, SavedImage,

@@ -27,6 +27,7 @@ fn warm(shapes: Vec<Shape>) -> impl FnOnce(&mut HostConfig) {
             shapes,
             depends_on: Vec::new(),
             ready_timeout: Duration::from_secs(5),
+            ready: std::collections::BTreeMap::new(),
         });
     }
 }

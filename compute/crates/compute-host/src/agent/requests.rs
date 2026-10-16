@@ -19,7 +19,7 @@ use super::{Command, Event, HostAgent, HostError, Reply, Waiter, Woke};
 
 /// Makes a new sandbox's directory and first files, from `template` where
 /// one fits. Blocks.
-fn new_files(
+pub(super) fn new_files(
     paths: &Paths,
     base: &Path,
     template: Option<(&Template, &Sources)>,
@@ -144,7 +144,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // stopped part way.
             let Some(record) = self.records.get(id) else {
                 match self.leftovers.get(&id.0) {
-                    Some(&ordinal) => self.remove_leftovers(id, ordinal, reply),
+                    Some(&left) => self.remove_leftovers(id, left, reply),
                     None => {
                         let _ = reply.send(Err(HostError::Broken(id)));
                     }
@@ -302,6 +302,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if self.slots.contains_key(&id.0)
             || self.preparing.contains(&id.0)
             || self.destroying.contains_key(&id.0)
+            || self.hosts.contains_key(&id.0)
             || self.records.get(id).is_some()
         {
             return Err(HostError::Exists(id));
@@ -325,6 +326,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(error));
             return;
         }
+        let Some((config, reply)) = self.claim(id, config, reply) else {
+            return;
+        };
         self.preparing.insert(id.0);
         let ordinal = self.take_ordinal();
         let allocation = match self.images.allocate(ordinal) {
@@ -457,11 +461,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     problem: problem.clone(),
                 })
                 .collect(),
-            templates: self
-                .warm
-                .as_ref()
-                .map(|warm| warm.pool.status())
-                .unwrap_or_default(),
+            templates: {
+                let mut templates = self
+                    .warm
+                    .as_ref()
+                    .map(|warm| warm.pool.status())
+                    .unwrap_or_default();
+                self.ready.status(&mut templates);
+                templates
+            },
         }
     }
 }

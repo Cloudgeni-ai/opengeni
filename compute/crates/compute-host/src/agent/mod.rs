@@ -19,8 +19,8 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use compute_core::{
-    Action, At, HoldId, Host, HostPolicy, Input, Level, LoanId, OpId, Outcome, Priority, SandboxId,
-    SleepPolicy, Step,
+    Action, At, HoldId, Host, HostPolicy, Input, Level, LoanId, MemoryPolicy, OpId, Outcome,
+    Priority, SandboxId, SleepPolicy, Step,
 };
 use compute_engine::{CancellationToken, Engine, VmSpec};
 use tokio::sync::{mpsc, oneshot};
@@ -38,6 +38,7 @@ use crate::step::{After, Live};
 use crate::store::Store;
 
 mod handle;
+mod ready;
 mod recover;
 mod requests;
 mod sample;
@@ -353,6 +354,8 @@ enum Event<V> {
     },
     Destroyed {
         id: Id,
+        /// The name its directory and network were made under.
+        host: Id,
         /// The ordinal it held, when known.
         ordinal: Option<u32>,
         result: Result<(), HostError>,
@@ -361,6 +364,28 @@ enum Event<V> {
     TornDown {
         id: Id,
     },
+    /// A ready sandbox's fill ended.
+    Filled {
+        host: Id,
+        filled: Box<ready::Filled<V>>,
+    },
+    /// A create's claim of a ready sandbox ended.
+    Claimed {
+        id: Id,
+        config: SandboxConfig,
+        reply: Reply<()>,
+        claimed: Box<ready::Claimed<V>>,
+    },
+}
+
+/// What a removal that stopped part way left of a sandbox whose record is
+/// gone.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Leftover {
+    /// The name its directory and network were made under.
+    host: Id,
+    /// The ordinal it still holds, if known.
+    ordinal: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -479,7 +504,10 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Blocked sandboxes whose record is gone but whose files a removal
     /// could not finish deleting, with the ordinal they still hold if
     /// known. Removing one again retries.
-    leftovers: HashMap<SandboxId, Option<u32>>,
+    leftovers: HashMap<SandboxId, Leftover>,
+    /// The host names of claimed ready sandboxes (see [`ready`]), with the
+    /// id each answers to. No new sandbox may take one as its id.
+    hosts: HashMap<SandboxId, SandboxId>,
     /// Blocked sandboxes with an unreadable record whose ordinal is
     /// unknown. Any new sandbox could clash with one, so none is created
     /// while there are any.
@@ -509,7 +537,10 @@ pub struct HostAgent<E: Engine, S: Store> {
     stats: [StepStats; Step::COUNT],
     available_memory: Option<u64>,
     sample_every: Duration,
-    pressure: bool,
+    /// When memory pressure frees memory, if it does.
+    memory_policy: Option<MemoryPolicy>,
+    /// Ready sandboxes, kept for creates to claim (see [`ready`]).
+    ready: ready::Ready<E::Vm>,
     guest_ports: Arc<[GuestPort]>,
     restore_notice_port: Option<u32>,
     #[cfg(target_os = "linux")]
@@ -642,17 +673,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let can_compress = config.can_compress && engine.memory_profile().compress;
         // Template VMs an earlier agent left are ended before any sandbox
         // can be given the user one of them ran as.
-        let networked = config.network.is_some();
         let warm::Started {
             warm,
             shapes: warm_shapes,
             held,
+            ready,
         } = Warm::start(
             config.pool,
             &engine,
             &config.root,
             &config.base_image,
-            networked,
+            config.network.is_some(),
             &images,
         )
         .await;
@@ -667,7 +698,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             root: config.root,
             base_image: config.base_image,
             warm,
-            pressure: config.policy.memory.is_some(),
+            memory_policy: config.policy.memory,
+            ready: ready::Ready::new(ready, config.policy.memory),
             core,
             origin: Instant::now(),
             slots: HashMap::new(),
@@ -676,6 +708,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             blocked: BTreeMap::new(),
             destroying: HashMap::new(),
             leftovers: HashMap::new(),
+            hosts: HashMap::new(),
             unknown_ordinals: BTreeSet::new(),
             unknown_builds: BTreeSet::new(),
             lender: {
