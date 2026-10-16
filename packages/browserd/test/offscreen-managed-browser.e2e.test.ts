@@ -103,6 +103,20 @@ e2e(
         expect(page.availHeight).toBeLessThan(page.height);
         expect(page.focus).toBe(true);
         expect(page.visibility).toBe("visible");
+        // Lean launch: Chrome's startup new-tab page is closed and the
+        // address-bar popup is not preloaded into its own renderers.
+        let leftovers: string[] = [];
+        for (let attempt = 0; attempt < 40; attempt += 1) {
+          const { targetInfos } = await connection.send<{
+            targetInfos: { type: string; url: string }[];
+          }>("Target.getTargets", { filter: [{}] });
+          leftovers = targetInfos
+            .map((info) => info.url)
+            .filter((url) => url.startsWith("chrome://newtab") || url.includes("omnibox-popup"));
+          if (leftovers.length === 0) break;
+          await Bun.sleep(50);
+        }
+        expect(leftovers).toEqual([]);
       } finally {
         connection.close();
       }

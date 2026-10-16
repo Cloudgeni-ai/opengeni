@@ -21,6 +21,7 @@ import {
   browserLaunchArguments,
   browserProfileCryptoPolicy,
   macosOffscreenChromeArguments,
+  MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT,
   parseMacosDisplayGeometry,
   reapManagedBrowserProcesses,
   inspectOwnedManagedBrowserProcess,
@@ -130,6 +131,12 @@ describe("managed browser profile cryptography", () => {
         expect(wrapper).toContain("Chrome/155.0.0.0 Safari/537.36'");
         expect(wrapper).toMatch(/'--screen-info=\{\d+x\d+ devicePixelRatio=\d+ /u);
         expect(wrapper).not.toContain("HeadlessChrome");
+        // Chromium honors only the last --disable-features switch, so the
+        // complete list follows agent-browser's own arguments.
+        expect(wrapper).toContain(`"$@" '${MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT}' 2>`);
+        expect(MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT).toBe(
+          "--disable-features=Translate,OptimizationGuideOnDeviceModel,WebUIOmniboxPopup,WebUIOmniboxAimPopup",
+        );
       } finally {
         await rm(root, { recursive: true, force: true });
       }
