@@ -28,7 +28,7 @@
 //!
 //! Memory is one book, kept by the core: every ready sandbox, filling or
 //! filled, is a spare VM there (see [`compute_core::Input::Spare`]). A
-//! fill starts only within [`compute_core::Host::spare_room`], room no wake
+//! fill starts only within [`compute_core::Host::spare_fits`], room no wake
 //! wants, and is booked before it starts; the core counts ready sandboxes
 //! against the admission budget and ends them first, with
 //! [`compute_core::Action::Discard`], when it needs memory for a wake, its
@@ -46,7 +46,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use compute_core::{Durability, Input, Level, Outcome, SandboxId, State, Step};
+use compute_core::{DiskSpace, Durability, Input, Level, Outcome, SandboxId, State, Step};
 use compute_engine::{CancellationToken, Engine};
 use tokio::time::Instant;
 
@@ -366,22 +366,21 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    /// Whether the core leaves room for one more spare VM of `shape`: room
-    /// no wake wants, above the admission buffer and the high watermark,
-    /// counting every spare booked already.
+    /// Whether the core leaves room for one more ready sandbox of `shape`:
+    /// room no wake wants, above the admission buffer and the high
+    /// watermark, counting every spare booked already.
     pub(super) fn memory_allows(&self, shape: Shape) -> bool {
-        self.core
-            .spare_room()
-            .is_none_or(|room| room >= shape.bytes())
+        self.core.spare_fits(shape.bytes(), DiskSpace::default())
     }
 
     /// Books `bytes` for the spare VM `host` with the core: `filling` until
-    /// it is ready, then what it holds.
-    pub(super) fn book_spare(&mut self, host: Id, bytes: u64, filling: bool) {
+    /// it is ready, then what it holds; and `disk`, what it may still write.
+    pub(super) fn book_spare(&mut self, host: Id, bytes: u64, disk: DiskSpace, filling: bool) {
         self.ready.spares.insert(host.0, bytes);
         self.input(Input::Spare {
             sandbox: host.0,
             bytes,
+            disk,
             filling,
         });
     }
@@ -396,6 +395,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let gone = Input::Spare {
             sandbox: host.0,
             bytes: 0,
+            disk: DiskSpace::default(),
             filling: false,
         };
         if ended {
@@ -428,6 +428,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Input::Spare {
                     sandbox: host,
                     bytes,
+                    disk: DiskSpace::default(),
                     filling: false,
                 }
             })
@@ -492,7 +493,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let link = Images::link(&record);
         self.ready.filling.insert(host.0, shape);
         // Booked before it starts, so no wake takes the same room.
-        self.book_spare(host, shape.bytes(), true);
+        self.book_spare(host, shape.bytes(), DiskSpace::default(), true);
         let fill = Fill {
             job: self.job(record, spec, paths, CancellationToken::new()),
             template: Arc::clone(template),
@@ -549,7 +550,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     // from now on.
                     let bytes = self.ready_resident(&idle).max(1);
                     self.ready.idle.push_back(idle);
-                    self.book_spare(host, bytes, false);
+                    self.book_spare(host, bytes, DiskSpace::default(), false);
                 } else {
                     // Counted as filling until its removal ends it.
                     self.discard(idle);
@@ -695,6 +696,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Input::Spare {
                 sandbox: host.0,
                 bytes: 0,
+                disk: DiskSpace::default(),
                 filling: false,
             },
             Input::Unmanaged {

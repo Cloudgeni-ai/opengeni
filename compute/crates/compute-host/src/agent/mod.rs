@@ -913,10 +913,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         agent.hold_builds(held);
         agent.recover(strays).await;
-        agent.start_templates(warm_shapes);
-        // Admission refuses what needs disk until it has a reading, so one
-        // is taken before any request is served.
+        // Admission refuses what needs disk until it has a reading, and
+        // spare VMs wait for a memory reading too, so one is taken before
+        // any build starts or request is served.
         agent.sample();
+        agent.start_templates(warm_shapes);
         let handle = Handle {
             commands: commands_tx,
             holds: Arc::new(AtomicU64::new(1)),

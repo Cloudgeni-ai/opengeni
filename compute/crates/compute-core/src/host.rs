@@ -135,16 +135,21 @@ pub enum Input {
     /// A spare VM, one the host runs outside sandbox management that
     /// nobody uses yet such as a ready sandbox or a template build, holds
     /// `bytes` of host memory; 0 once it has ended, or is no longer spare.
-    /// Book one before it starts, within [`Host::spare_room`], as
+    /// Book one before it starts, within [`Host::spare_fits`], as
     /// `filling`: until reported otherwise its memory is claimed above the
     /// high watermark, since no reading shows it. Spare VMs count against
     /// the admission budget, and ready ones (not `filling`) are the first
-    /// memory given back, with [`Action::Discard`].
+    /// memory given back, with [`Action::Discard`]. What one may still
+    /// write to local disk is booked like a save's, and what it wrote
+    /// stays booked until a disk reading taken after it ended.
     Spare {
         /// Names the VM.
         sandbox: SandboxId,
         /// Bytes it holds, or will once filled.
         bytes: u64,
+        /// Local disk it may still write, such as a template build's
+        /// snapshot; nothing for a ready sandbox.
+        disk: DiskSpace,
         /// Whether it is still coming up.
         filling: bool,
     },
@@ -596,8 +601,9 @@ impl Host {
             Input::Spare {
                 sandbox,
                 bytes,
+                disk,
                 filling,
-            } => self.spare(sandbox, bytes, filling),
+            } => self.spare(sandbox, bytes, disk, filling),
             Input::Unmanaged { sandbox, bytes } => self.unmanaged(sandbox, bytes),
             Input::Touch { sandbox, priority } => {
                 self.ask_awake(sandbox, out);

@@ -116,14 +116,16 @@ pick a VM.
   counts against the budget, at its full size until it is filled and then
   at what it holds. A new one starts only in room above the buffer and the
   high watermark that no wake wants: none while a wake is queued for
-  memory or refused and held, and it is booked before it starts. Ready
+  memory or refused and held, or before the first memory reading after a
+  start; and it is booked before it starts. Ready
   clones are the first relief for a wake, the buffer and memory pressure,
   oldest first, ahead of step 1 of the relief above; one still filling is
   left to finish. A ready clone is offered for relief only once it waits
   to be claimed. One whose removal fails, and a build VM that cannot be
   proven gone, stay counted as unmanaged at their size (a build's is in
   its directory, for a later agent) and are no relief, until a later
-  build of the same VM or the next start of the agent ends them. On
+  build of the same VM or the next start of the agent ends them; one still
+  filling keeps its claim above the high watermark until it is gone. On
   huge-page hosts available memory is the smaller of `MemAvailable` and
   the free huge-page pool.
 - Local disk is booked the same way, because a full disk blocks the very
@@ -136,7 +138,12 @@ pick a VM.
   filesystem has free, read every sample. A booking whose save has written
   stays counted until a reading taken after it shows what the save used,
   and before the first reading after a start nothing that needs disk is
-  admitted. A wake that cannot book its save
+  admitted. A template build books its snapshot the same way, at its
+  shape's worst-case save, before it starts, and waits without the room;
+  what it wrote stays booked until the next reading after it ends. Ready
+  clones' disk copies, which share extents with their template where
+  the filesystem can, and guests' disk growth are not booked. A wake that
+  cannot book its save
   gets `host_full` at once, naming disk or inodes and how much. In the
   background, while refused held sandboxes cannot book, idle sandboxes
   that are already archived to object storage give up their local copies,

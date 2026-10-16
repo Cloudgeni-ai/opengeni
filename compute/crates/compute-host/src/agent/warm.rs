@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use compute_core::Input;
+use compute_core::{DiskSpace, Input};
 use compute_engine::Engine;
 use tokio::time::Instant;
 
@@ -15,7 +15,7 @@ use crate::pool::{self, Build, Built, Held, Pool, PoolConfig, Shape, Sources, Te
 use crate::protocol::Id;
 use crate::store::Store;
 
-use super::{Event, HostAgent, Warm};
+use super::{Event, HostAgent, SAVE_EXTRA, Warm};
 
 /// How a starting agent stands with templates.
 pub(super) struct Started {
@@ -272,9 +272,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Builds `shape`'s template in the background. Its VM runs as the user
     /// of an ordinal reserved for the build, so it shares a user with no
-    /// sandbox. Its memory is booked with the core as a spare VM's, within
-    /// what the core can spare; without that room it waits as after a
-    /// failed build, and sandboxes boot cold meanwhile.
+    /// sandbox. Its memory, and the disk its snapshot may write, are booked
+    /// with the core as a spare VM's, within what the core can spare;
+    /// without that room it waits as after a failed build, and sandboxes
+    /// boot cold meanwhile.
     fn build_template(&mut self, shape: Shape) {
         let Some((sources, ready_port, ready_timeout)) = self.warm.as_ref().map(|warm| {
             (
@@ -285,9 +286,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }) else {
             return;
         };
-        if !self.memory_allows(shape) {
+        let disk = self.build_disk(shape);
+        if !self.core.spare_fits(shape.bytes(), disk) {
             if let Some(warm) = &mut self.warm {
-                let problem = "the host has no memory to spare for a template build";
+                let problem = "the host has no memory or disk to spare for a template build";
                 warm.pool.built(shape, Err(problem.into()), Instant::now());
             }
             return;
@@ -328,7 +330,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let name = self.spare_name();
         self.ready.building.insert(shape, name);
-        self.book_spare(name, shape.bytes(), true);
+        self.book_spare(name, shape.bytes(), disk, true);
         let engine = Arc::clone(&self.engine);
         let events = self.events_tx.clone();
         tokio::spawn(async move {
@@ -339,5 +341,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 built,
             });
         });
+    }
+
+    /// What a build of `shape` may write to local disk, booked as a
+    /// sandbox save of that size: its snapshot holds the whole of guest
+    /// memory, and where files cannot share extents a second copy's worth
+    /// stands for its own copy of the base image.
+    fn build_disk(&self, shape: Shape) -> DiskSpace {
+        DiskSpace::save(shape.bytes() * self.save_copies + SAVE_EXTRA)
     }
 }

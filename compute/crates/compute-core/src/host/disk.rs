@@ -45,6 +45,16 @@ pub struct DiskSpace {
 }
 
 impl DiskSpace {
+    /// What one save that writes at most `bytes` books: those bytes and
+    /// the inodes of one save's files.
+    #[must_use]
+    pub const fn save(bytes: u64) -> Self {
+        Self {
+            bytes,
+            inodes: SAVE_INODES,
+        }
+    }
+
     pub(super) fn add(self, other: Self) -> Self {
         Self {
             bytes: self.bytes.saturating_add(other.bytes),
@@ -133,10 +143,7 @@ impl Sandbox {
 
     /// What its next save may need at most.
     pub(super) fn save_space(&self) -> DiskSpace {
-        DiskSpace {
-            bytes: self.size.save,
-            inodes: SAVE_INODES,
-        }
+        DiskSpace::save(self.size.save)
     }
 
     /// What a wake of it books besides what it already does.
@@ -151,8 +158,10 @@ impl Sandbox {
 
 impl Host {
     /// How much of the host's local disk saves have booked, or `None`
-    /// without a disk policy or a reading. What steps that finished since
-    /// that reading wrote stays booked until the next one.
+    /// without a disk policy or a reading. Spare VMs book what they may
+    /// still write, such as a template build its snapshot. What steps and
+    /// spare VMs that finished since that reading wrote stays booked until
+    /// the next one.
     #[must_use]
     pub fn disk(&self) -> Option<DiskCapacity> {
         let policy = self.policy.disk?;
@@ -161,7 +170,9 @@ impl Host {
             .sandboxes
             .values()
             .filter(|slot| slot.books_save())
-            .fold(self.disk_spent, |sum, slot| sum.add(slot.save_space()));
+            .fold(self.disk_spent.add(self.spares.disk()), |sum, slot| {
+                sum.add(slot.save_space())
+            });
         Some(DiskCapacity {
             available,
             booked,

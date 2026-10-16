@@ -172,8 +172,9 @@ room. A sandbox within its request is never touched. The status shows
 `host_full` at once.
 Ready sandboxes and template builds are in the same book: each counts
 against the capacity like any VM, a fill or build starts only in room above
-the buffer and the high watermark that no waiting wake wants, booked before
-it starts, and ready sandboxes are the first memory given back, ahead of any
+the buffer and the high watermark that no waiting wake wants, and only
+once memory has been read since the agent started, booked before it starts,
+and ready sandboxes are the first memory given back, ahead of any
 sandbox, for a wake, the buffer or memory pressure. A claimed ready sandbox
 moves into the sandbox's place in the same decision. On huge-page hosts
 available memory is the smaller of `MemAvailable` and the free pool.
@@ -189,11 +190,13 @@ twice, plus 64 MiB), and bookings plus `--disk-reserve-mib` and
 `--disk-reserve-inodes` (default a twentieth of the filesystem) stay within
 what is free. A booking stays until a reading after its save shows what
 the save used, and nothing needing disk is admitted before the first
-reading. A wake the disk cannot book gets `host_full` naming disk or
-inodes; archived idle sandboxes give up their local copies in the background
-to make room. The status shows the disk (available, booked, reserve, free),
-and a sandbox's `failed_step` with the error while a step such as a save
-keeps failing.
+reading. A template build books its snapshot like a save before it starts
+and waits without the room; ready sandboxes' disk copies and guests' disk
+growth are not booked. A wake the disk cannot book gets `host_full` naming
+disk or inodes; archived idle sandboxes give up their local copies in the
+background to make room. The status shows the disk (available, booked,
+reserve, free), and a sandbox's `failed_step` with the error while a step
+such as a save keeps failing.
 
 The request also sets the VM's guarantees in its cgroup: `memory.low` while
 it runs (zero while paused, so the kernel takes from idle VMs first; not

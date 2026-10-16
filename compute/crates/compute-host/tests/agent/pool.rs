@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use compute_core::{Admission, HostPolicy};
+use compute_core::{Admission, DiskPolicy, HostPolicy};
 use compute_host::protocol::{HostStatus, Id, LevelName, Reply, TemplateState};
 use compute_host::{HostConfig, PoolConfig, Shape};
 use tokio::time::{Instant, sleep};
@@ -425,6 +425,32 @@ async fn a_build_that_ends_frees_what_an_earlier_vm_of_its_name_kept_counted() {
     })
     .await;
     lab.assert_clean();
+}
+
+/// A build's snapshot is booked on disk like a sandbox save: without the
+/// room, the build waits and nothing boots.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_build_waits_for_disk_its_snapshot_may_take() {
+    let full = HostPolicy {
+        disk: Some(DiskPolicy {
+            reserve: u64::MAX / 4,
+            reserve_inodes: 0,
+        }),
+        ..HostPolicy::default()
+    };
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::<World>::default(),
+        Delays::default(),
+        full,
+        warm(vec![SHAPE]),
+    )
+    .await;
+    lab.wait_until("a template build refused", |status| {
+        template_state(status) == Some(TemplateState::Failed)
+    })
+    .await;
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 0, "nothing booted");
 }
 
 /// Checks that `lab`, started with an ordinal it cannot know, creates no
