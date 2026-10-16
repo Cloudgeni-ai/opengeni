@@ -270,6 +270,8 @@ export type PlacementBrowserSessionReference = {
 
 export type PlacementBrowserSession = PlacementBrowserSessionReference & {
   observation: BrowserObservationValue;
+  /** The tab inventory at creation, when the controller reports it. */
+  targets?: BrowserTargetValue[];
 };
 
 export type PlacementComputerSessionReference = {
@@ -652,6 +654,7 @@ export class BrowserControlClient {
     return {
       ...returnedReference,
       observation: BrowserObservation.parse(data.observation),
+      ...creationTargets(data.targets, returnedReference),
     };
   }
 
@@ -2702,6 +2705,28 @@ function parseReference(value: unknown): PlacementBrowserSessionReference {
     browserSessionId: requireUuid(value.browserSessionId, "browser session id"),
     controllerGeneration: requireGeneration(value.controllerGeneration),
   };
+}
+
+/** A create's tab inventory is a convenience: an older controller omits it,
+ * and an inventory that does not validate, or that belongs to another
+ * binding, is dropped rather than failing a browser that did launch. */
+function creationTargets(
+  value: unknown,
+  reference: PlacementBrowserSessionReference,
+): { targets?: BrowserTargetValue[] } {
+  if (!Array.isArray(value) || value.length > 10_000) return {};
+  const targets: BrowserTargetValue[] = [];
+  for (const entry of value) {
+    const parsed = BrowserTarget.safeParse(entry);
+    if (
+      !parsed.success ||
+      parsed.data.browserSessionId !== reference.browserSessionId ||
+      parsed.data.controllerGeneration !== reference.controllerGeneration
+    )
+      return {};
+    targets.push(parsed.data);
+  }
+  return { targets };
 }
 
 function parseComputerReference(value: unknown): PlacementComputerSessionReference {

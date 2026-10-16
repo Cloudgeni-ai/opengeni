@@ -2371,6 +2371,39 @@ test("serializes only explicit internal directory recovery and refuses navigatio
   }
 });
 
+test("keeps a create's tab inventory only when it validates for the same binding", async () => {
+  const reference = { browserSessionId: randomUUID(), controllerGeneration: "synthetic-launch" };
+  const target = browserTarget(reference.browserSessionId, reference.controllerGeneration);
+  const foreign = browserTarget(randomUUID(), reference.controllerGeneration);
+  let targets: unknown;
+  const server = Bun.serve({
+    port: 0,
+    fetch: () =>
+      success({
+        ...reference,
+        observation: browserObservation(target),
+        ...(targets === undefined ? {} : { targets }),
+      }),
+  });
+  const placement = await localPlacement();
+  const client = new BrowserControlClient(placement.session, { adminToken, port: server.port });
+  const input = { ...reference, tokenGeneration: 1, controlToken, viewToken, headed: false };
+  try {
+    targets = [target];
+    expect((await client.createSession(input)).targets).toEqual([target]);
+    // An older controller sends none; a malformed or foreign inventory is
+    // dropped without failing the browser that did launch.
+    for (const value of [undefined, [{ id: "x" }], [target, foreign], "not-a-list"]) {
+      targets = value;
+      const created = await client.createSession(input);
+      expect(created.observation.target.id).toBe(target.id);
+      expect(created).not.toHaveProperty("targets");
+    }
+  } finally {
+    await server.stop(true);
+  }
+});
+
 describe("agent-native controller transport", () => {
   type NativeCall = Parameters<
     NonNullable<BrowserControlPlacementSession["browserControlHttp"]>

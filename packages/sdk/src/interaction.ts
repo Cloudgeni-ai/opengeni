@@ -991,6 +991,8 @@ export type BrowserSessionListResponse = {
 export type BrowserSessionMutationResponse = {
   session: BrowserSession;
   operation: InteractionLifecycleOperationReceipt;
+  /** Present only on a create that launched the browser in this request. */
+  initialView?: { targets: BrowserTarget[]; observation: BrowserObservation } | undefined;
 };
 
 export type BrowserSessionLifecycleRequest = { operationId: string };

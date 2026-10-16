@@ -2806,6 +2806,17 @@ export const BrowserSessionMutationResponse = /* @__PURE__ */ defineSchema(() =>
     .object({
       session: BrowserSession,
       operation: InteractionLifecycleOperationReceipt,
+      /** Set only by a create that launched the browser in this request: the
+       * tabs and the opened tab's observation exactly as the controller
+       * produced them, so a caller does not need two more reads. A replayed
+       * or failed create omits it; read the targets and observe instead. */
+      initialView: z
+        .object({
+          targets: z.array(BrowserTarget).max(10_000),
+          observation: BrowserObservation,
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
 );

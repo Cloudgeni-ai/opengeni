@@ -1912,6 +1912,9 @@ async function openBrowser(
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
   let created = false;
+  // A create that launched the browser in this call returns its tabs and the
+  // opened tab's observation, which replaces the two reads below.
+  let initialView: Awaited<ReturnType<InteractionTransport["createBrowserSession"]>>["initialView"];
   let profileChoice: AttachedProfileChoice | undefined;
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
@@ -1967,23 +1970,23 @@ async function openBrowser(
       const placement = profileChoice
         ? { kind: "attached_device" as const, deviceId: profileChoice.chosen.id }
         : (value.placement as z.infer<typeof InteractionPlacement> | undefined);
-      session = (
-        await transport.createBrowserSession(workspaceId, {
-          operationId: context.operationId,
-          sessionId: sourceSessionId,
-          ...(value.name ? { name: value.name } : {}),
-          ...(value.initialUrl ? { initialUrl: value.initialUrl } : {}),
-          headless: requestedHeadless,
-          ...(value.storageMode ? { storageMode: value.storageMode } : {}),
-          ...(placement ? { placement } : {}),
-          ...(value.identityId ? { identityId: value.identityId } : {}),
-          ...(value.baseRevisionId ? { baseRevisionId: value.baseRevisionId } : {}),
-          ...(value.networkRouteId ? { networkRouteId: value.networkRouteId } : {}),
-          ...(value.linkedComputerSessionId
-            ? { linkedComputerSessionId: value.linkedComputerSessionId }
-            : {}),
-        })
-      ).session;
+      const createdResponse = await transport.createBrowserSession(workspaceId, {
+        operationId: context.operationId,
+        sessionId: sourceSessionId,
+        ...(value.name ? { name: value.name } : {}),
+        ...(value.initialUrl ? { initialUrl: value.initialUrl } : {}),
+        headless: requestedHeadless,
+        ...(value.storageMode ? { storageMode: value.storageMode } : {}),
+        ...(placement ? { placement } : {}),
+        ...(value.identityId ? { identityId: value.identityId } : {}),
+        ...(value.baseRevisionId ? { baseRevisionId: value.baseRevisionId } : {}),
+        ...(value.networkRouteId ? { networkRouteId: value.networkRouteId } : {}),
+        ...(value.linkedComputerSessionId
+          ? { linkedComputerSessionId: value.linkedComputerSessionId }
+          : {}),
+      });
+      session = createdResponse.session;
+      initialView = createdResponse.initialView;
     }
   }
   if (session.lifecycle === "suspended") {
@@ -2002,7 +2005,8 @@ async function openBrowser(
       }
     : {};
   if (session.lifecycle !== "active") return { session, targets: [], ...chosenProfile };
-  let targets = (await transport.listBrowserTargets(workspaceId, session.id)).targets;
+  let targets =
+    initialView?.targets ?? (await transport.listBrowserTargets(workspaceId, session.id)).targets;
   if (
     value.initialUrl &&
     !created &&
@@ -2031,9 +2035,11 @@ async function openBrowser(
     targets = inventory.targets;
   }
   const primary = openedBrowserTarget(targets, value.initialUrl);
-  const observation = primary
-    ? await observeOpenedBrowserTarget(transport, workspaceId, session.id, primary)
-    : undefined;
+  const observation = !primary
+    ? undefined
+    : initialView?.observation.target.id === primary.id
+      ? projectBrowserObservation(initialView.observation, "compact")
+      : await observeOpenedBrowserTarget(transport, workspaceId, session.id, primary);
   // A browser opened on a URL is about that tab. A person's own Chrome profile
   // can hold dozens of unrelated tabs; listing them all costs context on every
   // later step, so only the opened tab is returned with a count of the rest

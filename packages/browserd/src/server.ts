@@ -939,6 +939,15 @@ export class BrowserControlServer {
             : {}),
         };
         const created = await this.supervisor.createSession(sessionOptions);
+        // The tab inventory rides along so the caller can show the opened
+        // browser without another round trip. It is a read-only convenience:
+        // a failed listing leaves the created session intact.
+        const targets = await this.supervisor
+          .listTargets({
+            browserSessionId: created.browserSessionId,
+            controllerGeneration: created.controllerGeneration,
+          })
+          .catch(() => null);
         const rotated = current && body.tokenGeneration > current.tokenGeneration;
         this.authorities.set(body.browserSessionId, {
           browserSessionId: body.browserSessionId,
@@ -949,7 +958,7 @@ export class BrowserControlServer {
           viewGrants: rotated ? new Map() : (current?.viewGrants ?? new Map()),
         });
         if (rotated) this.closeSessionSockets(body.browserSessionId, 1008, "authorization rotated");
-        return success(created, current ? 200 : 201);
+        return success(targets ? { ...created, targets } : created, current ? 200 : 201);
       });
     } finally {
       body.restore?.dataKey.fill(0);
