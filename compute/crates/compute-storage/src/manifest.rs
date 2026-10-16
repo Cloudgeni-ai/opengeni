@@ -3,7 +3,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result, chunk::ChunkRef};
 
-pub const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
+/// The largest manifest read or written. A guard against a corrupt or
+/// runaway one, sized to hold a dense 64 GiB file: about 350 bytes per
+/// 256 KiB chunk, so 92 MB. Real manifests are far smaller, since zero and
+/// base ranges merge into one extent each.
+pub const MAX_MANIFEST_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

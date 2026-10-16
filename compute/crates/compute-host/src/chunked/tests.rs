@@ -74,6 +74,43 @@ fn manifests_cover_the_whole_file_and_merge_zeros() {
     );
 }
 
+/// The memory of the largest sandbox, every chunk distinct, still fits in
+/// one manifest.
+#[test]
+fn a_dense_manifest_of_the_largest_sandbox_fits() {
+    use compute_storage::manifest::{Extent, MAX_MANIFEST_BYTES};
+    const SAMPLE: u64 = 1024;
+    let mut reference = EncodedChunk::encode(&[7; 4096], 1).unwrap().reference;
+    reference.plain_len = u32::try_from(CHUNK_BYTES).unwrap();
+    reference.stored_len = reference.plain_len;
+    reference.checksums = Some(format!("crc32c={},md5={}", "A".repeat(8), "A".repeat(24)));
+    let manifest = DiskManifest {
+        version: 1,
+        disk_len: SAMPLE * CHUNK_BYTES,
+        base_len: 0,
+        base_digest: "0".repeat(64),
+        extents: (0..SAMPLE)
+            .map(|index| Extent {
+                offset: index * CHUNK_BYTES,
+                length: CHUNK_BYTES,
+                source: ExtentSource::Chunk {
+                    reference: reference.clone(),
+                    offset: 0,
+                },
+            })
+            .collect(),
+    };
+    let sample = manifest.encode().unwrap().len() as u64;
+    // The largest file's offsets take up to 3 more digits than the sample's.
+    let per_chunk = sample.div_ceil(SAMPLE) + 3;
+    let largest = u64::from(crate::protocol::MAX_MEMORY_MIB) << 20;
+    let needed = per_chunk * (largest / CHUNK_BYTES);
+    assert!(
+        needed < MAX_MANIFEST_BYTES as u64,
+        "{needed} bytes at {per_chunk} per chunk"
+    );
+}
+
 #[test]
 fn overlap_finds_data_inside_a_chunk() {
     let data = [10..20, 40..50];

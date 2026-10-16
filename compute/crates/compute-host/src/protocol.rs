@@ -201,6 +201,9 @@ impl SleepConfig {
     }
 }
 
+/// The most guest memory a sandbox may have, in MiB.
+pub const MAX_MEMORY_MIB: u32 = 65_536;
+
 /// What a sandbox looks like and how it sleeps.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxConfig {
@@ -225,8 +228,10 @@ impl SandboxConfig {
         if self.vcpus == 0 || self.vcpus > 32 {
             return Err("vcpus must be between 1 and 32".into());
         }
-        if !(128..=65_536).contains(&self.memory_mib) {
-            return Err("memory_mib must be between 128 and 65536".into());
+        if !(128..=MAX_MEMORY_MIB).contains(&self.memory_mib) {
+            return Err(format!(
+                "memory_mib must be between 128 and {MAX_MEMORY_MIB}"
+            ));
         }
         self.sleep_policy()
     }
