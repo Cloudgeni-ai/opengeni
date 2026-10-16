@@ -164,6 +164,17 @@ describe("createRuntimeBatcher", () => {
     expect(flushes).toEqual([[0], [1, 2, 3], [4], [5]]);
   });
 
+  test("a non-text event does not use up the first text fragment's leading edge", async () => {
+    const { batcher, flushes } = recordingBatcher();
+    await batcher.push(delta(0, "agent.updated" as SessionEventType)); // handoff marker
+    await batcher.push(delta(1)); // first text still goes at once
+    await sleep(10); // the serialized drain, far shorter than one window
+    expect(flushes.flat()).toEqual([0, 1]);
+    await batcher.push(delta(2));
+    expect(flushes.flat()).toEqual([0, 1]); // later fragments batch
+    await batcher.flush();
+  });
+
   test("coalesces a delta burst into ONE flush, order preserved (trailing timer)", async () => {
     const { batcher, flushes } = recordingBatcher();
     await openWindow(batcher, flushes);

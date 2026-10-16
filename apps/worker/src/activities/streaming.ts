@@ -136,8 +136,12 @@ export function createRuntimeBatcher(
 ) {
   const now = options.now ?? (() => performance.now());
   let pending: AppendEventInput[] = [];
-  // Leading edge: no window is open yet, so the first content goes out at once.
   let lastFlush = Number.NEGATIVE_INFINITY;
+  // Leading edge: the first text fragment of a turn, and the first after a
+  // structural event, goes out at once. Only text consumes it, so another
+  // non-structural event (such as `agent.updated` on a handoff) cannot delay
+  // the content that follows it.
+  let awaitingFirstText = true;
   let trailingTimer: ReturnType<typeof setTimeout> | null = null;
   let activeBatchSize = 0;
   // One drain loop owns `flushEvents`, so DB-assigned sequence order always
@@ -177,12 +181,14 @@ export function createRuntimeBatcher(
       const elapsed = Date.now() - lastFlush;
       if (structural.has(event.type)) {
         await flush();
-        // A structural event closes the window: the next fragment (the start
-        // of the next message or reasoning item) is sent at once.
-        lastFlush = Number.NEGATIVE_INFINITY;
+        // A structural event closes the window: the next text fragment (the
+        // start of the next message or reasoning item) is sent at once.
+        awaitingFirstText = true;
         return;
       }
-      if (pending.length >= MAX_BATCH_EVENTS || elapsed >= TRAILING_FLUSH_MS) {
+      const firstText = awaitingFirstText && MERGEABLE_TEXT_DELTA_TYPES.has(event.type);
+      if (firstText) awaitingFirstText = false;
+      if (firstText || pending.length >= MAX_BATCH_EVENTS || elapsed >= TRAILING_FLUSH_MS) {
         // Start the serialized drain, but keep consuming provider deltas while
         // the append/publish round-trip is in flight. The active drain records
         // any failure for the next awaited boundary.
@@ -237,37 +243,46 @@ export function createRuntimeBatcher(
       return Promise.resolve();
     }
     clearTrailingTimer();
+    // Clear `drainPromise` in the same step that observes an empty queue, so a
+    // push can never join a drain that has already finished its last batch
+    // (that fragment would then wait for the trailing timer).
+    let finished = false;
     const running = (async () => {
-      while (pending.length > 0) {
-        const events = mergeAdjacentTextDeltas(pending.splice(0, MAX_BATCH_EVENTS));
-        activeBatchSize = events.length;
-        lastFlush = Date.now();
-        const startedAt = now();
-        try {
-          await flushEvents(events);
-        } catch (error) {
-          flushFailed = true;
-          flushFailure = error;
-          throw error;
-        } finally {
-          activeBatchSize = 0;
-          if (options.onFlush) {
-            try {
-              options.onFlush({
-                events: events.length,
-                durationSeconds: Math.max(0, (now() - startedAt) / 1000),
-              });
-            } catch {
-              // Metrics emission must never affect a flush.
+      try {
+        while (pending.length > 0) {
+          const events = mergeAdjacentTextDeltas(pending.splice(0, MAX_BATCH_EVENTS));
+          activeBatchSize = events.length;
+          lastFlush = Date.now();
+          const startedAt = now();
+          try {
+            await flushEvents(events);
+          } catch (error) {
+            flushFailed = true;
+            flushFailure = error;
+            throw error;
+          } finally {
+            activeBatchSize = 0;
+            if (options.onFlush) {
+              try {
+                options.onFlush({
+                  events: events.length,
+                  durationSeconds: Math.max(0, (now() - startedAt) / 1000),
+                });
+              } catch {
+                // Metrics emission must never affect a flush.
+              }
             }
           }
         }
+      } finally {
+        finished = true;
+        drainPromise = null;
       }
     })();
-    drainPromise = running.finally(() => {
-      drainPromise = null;
-    });
-    return drainPromise;
+    if (!finished) {
+      drainPromise = running;
+    }
+    return running;
   }
 
   function throwIfFlushFailed(): void {
