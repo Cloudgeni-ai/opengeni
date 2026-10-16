@@ -326,6 +326,11 @@ pub enum Reply {
     Woken {
         /// Microseconds spent waking.
         waited_us: u64,
+        /// The step under way when the wake arrived, if any; a wake during
+        /// a sleep step such as `pause` or `save` cancels it or waits for
+        /// it to finish.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        during: Option<String>,
     },
     /// The stream to the guest port follows this line.
     Connected {
@@ -358,6 +363,10 @@ pub struct SandboxStatus {
     pub step: Option<String>,
     /// Reasons it is held awake.
     pub holds: usize,
+    /// VM processes started for it, boots and restores alike, since the
+    /// host agent started.
+    #[serde(default)]
+    pub launches: u64,
     /// Host memory it holds, when a VM process exists.
     pub resident_bytes: Option<u64>,
     /// Whether it is beyond recovery on this host.
