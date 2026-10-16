@@ -184,14 +184,42 @@ impl Run {
     }
 }
 
+/// How the pager learns that the VMM has gone. The UFFD cannot say: the
+/// VMM shares it with the pager.
+#[derive(Debug)]
+enum Vmm {
+    /// The socket the VMM's handshake arrived on, which hangs up when the
+    /// VMM exits.
+    Socket(UnixStream),
+    /// A pidfd of the VMM process, which turns readable when it exits.
+    Process(OwnedFd),
+}
+
+impl Vmm {
+    fn raw_fd(&self) -> RawFd {
+        match self {
+            Self::Socket(socket) => socket.as_raw_fd(),
+            Self::Process(pidfd) => pidfd.as_raw_fd(),
+        }
+    }
+
+    /// Whether `revents` from polling [`Self::raw_fd`] for input say the
+    /// VMM has gone.
+    fn gone(&self, revents: libc::c_short) -> bool {
+        match self {
+            Self::Socket(_) => revents & libc::POLLHUP != 0,
+            Self::Process(_) => revents & (libc::POLLIN | libc::POLLHUP) != 0,
+        }
+    }
+}
+
 /// One memory image served to one VMM through its UFFD. A single owner
 /// serializes demand faults, discard events and prefetch; nothing here
 /// blocks on the source.
 #[derive(Debug)]
 pub struct Pager<S> {
     fd: OwnedFd,
-    // Keep the stream alive; its HUP signals VMM exit, unlike the shared UFFD.
-    peer: UnixStream,
+    vmm: Vmm,
     source: S,
     zero: MmapMut,
     layout: Layout,
@@ -224,12 +252,58 @@ impl<S: Source> Pager<S> {
     pub fn new(peer: UnixStream, source: S, record_for: Duration) -> io::Result<Self> {
         peer.set_read_timeout(Some(Duration::from_secs(10)))?;
         let (fd, regions) = handshake(&peer)?;
+        Self::serving(fd, Vmm::Socket(peer), regions, source, record_for)
+    }
+
+    /// Takes over serving a VMM whose previous pager has gone (the process
+    /// that ran it restarted, say). `uffd` is a duplicate of the VMM's
+    /// UFFD, `regions` the layout its handshake announced, and `vmm` a
+    /// pidfd of the VMM process. The VMM kept its own reference to the
+    /// UFFD, so its faults waited for a handler rather than reading zeros;
+    /// those the previous pager had read but not served are woken to fault
+    /// again. Which pages are present is unknown: copying over one that is
+    /// counts as done.
+    pub fn adopt(
+        uffd: OwnedFd,
+        regions: Vec<Mapping>,
+        vmm: OwnedFd,
+        source: S,
+        record_for: Duration,
+    ) -> io::Result<Self> {
+        // SAFETY: a flag query on a descriptor we own.
+        let flags = unsafe { libc::fcntl(uffd.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: a flag update on a descriptor we own.
+        if unsafe { libc::fcntl(uffd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let pager = Self::serving(uffd, Vmm::Process(vmm), regions, source, record_for)?;
+        for region in pager.layout.regions() {
+            let mut range = [region.base_host_virt_addr, region.size];
+            // SAFETY: repr-compatible uffdio_range over a region the VMM
+            // registered; waking a range nobody waits on does nothing.
+            if unsafe { libc::ioctl(pager.fd.as_raw_fd(), WAKE, range.as_mut_ptr()) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(pager)
+    }
+
+    fn serving(
+        fd: OwnedFd,
+        vmm: Vmm,
+        regions: Vec<Mapping>,
+        source: S,
+        record_for: Duration,
+    ) -> io::Result<Self> {
         let layout = Layout::new(regions, source.len())?;
         let zero = MmapMut::map_anon(usize::try_from(MAX_BATCH).map_err(|_| invalid("batch"))?)?;
         let state = vec![0; layout.page_count()];
         Ok(Self {
             fd,
-            peer,
+            vmm,
             source,
             zero,
             layout,
@@ -609,7 +683,7 @@ impl<S: Source> Pager<S> {
                 revents: 0,
             },
             libc::pollfd {
-                fd: self.peer.as_raw_fd(),
+                fd: self.vmm.raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -632,7 +706,7 @@ impl<S: Source> Pager<S> {
         if poll[0].revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
             return Err(invalid("UFFD disconnected"));
         }
-        Ok(poll[1].revents & libc::POLLHUP != 0)
+        Ok(self.vmm.gone(poll[1].revents))
     }
 
     /// Serves the VMM until `stopped` is set or the VMM disconnects,
@@ -1048,5 +1122,71 @@ mod tests {
         forged.index = usize::MAX;
         assert!(pager.queue_background(&[forged]).is_err());
         drop(pager);
+    }
+
+    #[test]
+    #[ignore = "requires Linux userfaultfd permission"]
+    fn kernel_a_new_pager_takes_over_a_fault_its_predecessor_dropped() {
+        // `fd` stands for the VMM's own reference to its UFFD.
+        let (fd, memory, peer, _sender) = registered_memory();
+        // Declared after `memory`, so it is released first even when a
+        // failed assertion unwinds; otherwise the unmap waits for an UNMAP
+        // reader forever.
+        let vmm_uffd = fd;
+        let image = image_file(0x5a);
+        // SAFETY: the image is private to this test and never changed.
+        let source = unsafe { MappedFile::new(&image) }.unwrap();
+        let mut first = Pager::new(peer, source, Duration::from_secs(60)).unwrap();
+        let regions = first.layout().regions().to_vec();
+        std::thread::scope(|scope| {
+            // The first pager serves one fault in full...
+            let served = scope.spawn(|| memory[0]);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !served.is_finished() {
+                assert!(Instant::now() < deadline, "first fault never served");
+                first.turn().unwrap();
+                std::thread::yield_now();
+            }
+            assert_eq!(served.join().unwrap(), 0x5a);
+            // ...then reads another and goes without serving it.
+            let reader = scope.spawn(|| memory[4096]);
+            while first.faults.is_empty() {
+                assert!(Instant::now() < deadline, "fault never arrived");
+                first.drain_events().unwrap();
+                std::thread::yield_now();
+            }
+            drop(first);
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(
+                !reader.is_finished(),
+                "a fault without a handler waits rather than reading zeros"
+            );
+            // SAFETY: pidfd_open of this very process, without flags.
+            let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0) };
+            assert!(raw >= 0, "{}", io::Error::last_os_error());
+            // SAFETY: pidfd_open returned a new owned descriptor.
+            let pidfd = unsafe { OwnedFd::from_raw_fd(i32::try_from(raw).unwrap()) };
+            // SAFETY: as above.
+            let source = unsafe { MappedFile::new(&image) }.unwrap();
+            let uffd = vmm_uffd.try_clone().unwrap();
+            let mut second =
+                Pager::adopt(uffd, regions, pidfd, source, Duration::from_secs(60)).unwrap();
+            while !reader.is_finished() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the woken fault was never served"
+                );
+                second.turn().unwrap();
+                std::thread::yield_now();
+            }
+            assert_eq!(reader.join().unwrap(), 0x5a);
+            // The page the first pager put in place counts as done.
+            let plan = second.layout.plan(&[0, 4096, 8192, 12288]).unwrap();
+            second.prefetch(&plan, 4096).unwrap();
+            assert_eq!(second.stats.existing_pages, 1);
+            assert!(!second.wait(Duration::ZERO).unwrap(), "the VMM is alive");
+            drop(second);
+        });
+        assert!(memory.iter().all(|byte| *byte == 0x5a));
     }
 }

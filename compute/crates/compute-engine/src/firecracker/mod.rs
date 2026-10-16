@@ -32,7 +32,7 @@ use self::process::{Process, in_cgroup, parse_pid};
 use crate::cgroup::Cgroup;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
-use crate::spec::{MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
+use crate::spec::{MemorySource, PagedMemory, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
 use crate::{CancellationToken, Completion, Engine, Found};
 
 /// Memory pushed to compressed RAM per reclaim request. Small enough that a
@@ -866,6 +866,14 @@ impl Engine for Firecracker {
         vm.cgroup
             .cpu_time()
             .map_err(|error| EngineError::io("cpu_time", error))
+    }
+
+    fn paged_memory(&self, vm: &FirecrackerVm) -> Result<PagedMemory, EngineError> {
+        let (uffd, vmm) = vm
+            .process
+            .paged_memory()
+            .map_err(|error| EngineError::io("paged_memory", error))?;
+        Ok(PagedMemory { uffd, vmm })
     }
 
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {

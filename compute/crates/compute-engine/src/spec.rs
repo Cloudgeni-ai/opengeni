@@ -109,6 +109,16 @@ pub enum MemorySource {
     Pager(PathBuf),
 }
 
+/// A running VM's page-fault handling, handed over to a new handler.
+#[derive(Debug)]
+pub struct PagedMemory {
+    /// A duplicate of the VMM's userfaultfd. The VMM keeps its own, so a
+    /// fault waits for a handler instead of reading zeros.
+    pub uffd: std::os::fd::OwnedFd,
+    /// A pidfd of the VMM process: readable once it has exited.
+    pub vmm: std::os::fd::OwnedFd,
+}
+
 /// What a VM is restored from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RestoreFiles {

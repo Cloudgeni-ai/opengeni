@@ -71,13 +71,19 @@ impl Drop for Agent {
 }
 
 async fn start<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> Agent {
+    let root = lab.join("ht").join(name);
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    restart(lab, name, first_uid, store).await
+}
+
+/// Starts an agent on the state root of an earlier one, as after a crash.
+async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> Agent {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
         .try_init();
     let root = lab.join("ht").join(name);
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
     let engine = Firecracker::new(FirecrackerConfig {
         firecracker: lab.join("bin/firecracker"),
         jailer: lab.join("bin/jailer"),
@@ -103,6 +109,7 @@ async fn start<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> Ag
         can_compress: true,
     };
     let socket = root.join("agent.sock");
+    let _ = std::fs::remove_file(&socket);
     let (handle, agent) = HostAgent::start(config, engine, store).await.unwrap();
     let serving = socket.clone();
     let task = tokio::spawn(async move {
@@ -311,4 +318,100 @@ async fn guest_processes_survive_waking_from_object_storage() {
         )
         .await;
     }
+}
+
+/// Wakes the sandbox through a pager, then lets the agent (and with it the
+/// pager) go while the guest is about to read memory it has not touched
+/// since the wake. The guest must wait rather than read zeros, and a new
+/// agent on the same state must take the pager over so the guest goes on.
+async fn survive_restart<S: Store>(
+    lab: &Path,
+    name: &str,
+    deepest: LevelName,
+    store: impl Fn() -> S,
+) {
+    const UID: u32 = (1 << 30) + 2000;
+    let id: Id = "00000000-0000-4000-8000-0000000000b3".parse().unwrap();
+    let agent = start(lab, name, UID, store()).await;
+    let config = SandboxConfig {
+        vcpus: 2,
+        memory_mib: 512,
+        sleep: ladder(deepest),
+    };
+    let created = agent
+        .client
+        .call(&Request::Create { id, config })
+        .await
+        .unwrap();
+    assert!(matches!(created, Reply::Done), "{created:?}");
+    let setup = exec(&agent.client, id, SETUP).await;
+    let pid = field(&setup, "pid").to_owned();
+    let sum = field(&setup, "sum").to_owned();
+    wait_for(&agent.client, id, deepest).await;
+    // The wake reads nothing of the blob; two seconds later, with no pager
+    // left, the guest reads all of it.
+    let later = format!(
+        "\
+kill -0 {pid} && echo alive=yes
+setsid sh -c 'sleep 2; md5sum < /dev/shm/blob | cut -d\" \" -f1 > /dev/shm/later' \
+  </dev/null >/dev/null 2>&1 &
+echo started=yes"
+    );
+    let output = exec(&agent.client, id, &later).await;
+    assert_eq!(field(&output, "alive"), "yes", "{output}");
+    drop(agent);
+    tokio::time::sleep(Duration::from_secs(4)).await;
+
+    let agent = restart(lab, name, UID, store()).await;
+    let read = "\
+for _ in $(seq 100); do [ -s /dev/shm/later ] && break; sleep 0.1; done
+echo later=$(cat /dev/shm/later)";
+    let output = exec(&agent.client, id, read).await;
+    assert_eq!(
+        field(&output, "later"),
+        sum,
+        "memory read while no pager ran differs"
+    );
+    // Saving and waking still work under the new pager.
+    wait_for(&agent.client, id, deepest).await;
+    let output = exec(&agent.client, id, &check(&pid)).await;
+    assert_eq!(field(&output, "alive"), "yes", "{output}");
+    assert_eq!(
+        field(&output, "was"),
+        sum,
+        "memory differs after the next save"
+    );
+    let removed = agent
+        .client
+        .call(&Request::Remove {
+            id,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(removed, Reply::Done), "{removed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paged_guest_survives_its_agent_restarting() {
+    let Some(lab) = lab() else { return };
+    let name = format!("p{}", short());
+    if profile().needs_pager() {
+        // Every restore on a huge-page host goes through a pager.
+        survive_restart(&lab, &name, LevelName::Saved, || NoStore).await;
+        return;
+    }
+    let Ok(url) = std::env::var("COMPUTE_TEST_STORE") else {
+        eprintln!("skipped: 4 KiB pages page only from a store; set COMPUTE_TEST_STORE");
+        return;
+    };
+    let url = format!("{url}/restart");
+    if Chunked::from_url(&url).unwrap().is_none() {
+        eprintln!("skipped: only a chunked store pages memory in");
+        return;
+    }
+    survive_restart(&lab, &name, LevelName::Remote, || {
+        Chunked::from_url(&url).unwrap().unwrap()
+    })
+    .await;
 }

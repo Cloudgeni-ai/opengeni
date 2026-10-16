@@ -20,7 +20,9 @@ use std::time::Duration;
 
 pub use error::{EngineError, ErrorKind};
 pub use profile::{MemoryProfile, PageSize, ProfileError, SaveMode};
-pub use spec::{Drive, MemorySource, Network, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
+pub use spec::{
+    Drive, MemorySource, Network, PagedMemory, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
+};
 pub use tokio_util::sync::CancellationToken;
 
 /// How an interruptible operation ended.
@@ -138,4 +140,16 @@ pub trait Engine: Send + Sync + 'static {
     /// [`Engine::stop`]. The future does not borrow the VM, so the host can
     /// watch for a VM dying on its own while a step uses it.
     fn exited(&self, vm: &Self::Vm) -> impl Future<Output = ()> + Send + 'static;
+
+    /// What a new page-fault handler needs to take over a VM restored with
+    /// [`MemorySource::Pager`] whose handler has gone, for example with the
+    /// host agent that ran it. Engines that cannot hand it over refuse.
+    fn paged_memory(&self, vm: &Self::Vm) -> Result<PagedMemory, EngineError> {
+        let _ = vm;
+        Err(EngineError::new(
+            ErrorKind::Fatal,
+            "paged_memory",
+            "this engine cannot hand over a VM's page-fault handling",
+        ))
+    }
 }

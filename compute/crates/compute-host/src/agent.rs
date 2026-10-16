@@ -805,6 +805,28 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .map_err(|error| HostError::Io(error.to_string()))
     }
 
+    /// Serves the memory of a VM found running whose pager went with the
+    /// previous agent; see [`crate::step::take_over_paging`].
+    async fn take_over_paging(
+        &self,
+        vm: &E::Vm,
+        paths: &Paths,
+    ) -> Result<LiveMemory, compute_engine::EngineError> {
+        #[cfg(target_os = "linux")]
+        {
+            crate::step::take_over_paging(&*self.engine, vm, paths, self.fetcher.as_ref()).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (vm, paths);
+            Err(compute_engine::EngineError::new(
+                compute_engine::ErrorKind::Fatal,
+                "take over paging",
+                "paged memory needs Linux",
+            ))
+        }
+    }
+
     /// Brings one recorded sandbox back under management. Returns whether
     /// a VM was still running it.
     async fn recover_one(
@@ -818,18 +840,29 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .map_err(HostError::Invalid)?;
         let paths = Paths::new(&self.root, id);
         let spec = vm_spec(id, record.ordinal, &record.config, &paths, &self.images);
+        let mut memory = None;
         let found = match found? {
-            Some((vm, _)) if crate::step::paged(&paths) => {
+            Some((vm, how)) if crate::step::paged(&paths) => {
                 // The previous agent's pager served this VM's memory and
-                // went with it: the guest would stall on its next page
-                // fault. Its record still says whether a saved image
-                // stands in for it.
-                tracing::warn!(%id, "the VM's memory pager is gone; stopping the VM");
-                self.engine
-                    .stop(vm)
-                    .await
-                    .map_err(|error| HostError::Io(error.to_string()))?;
-                None
+                // went with it, so the guest waits on its next page fault
+                // until a new pager takes over.
+                match self.take_over_paging(&vm, &paths).await {
+                    Ok(taken) => {
+                        tracing::info!(%id, "took over the VM's memory pager");
+                        memory = Some(taken);
+                        Some((vm, how))
+                    }
+                    Err(error) => {
+                        // Its record still says whether a saved image
+                        // stands in for it.
+                        tracing::warn!(%id, %error, "the VM's memory pager cannot be taken over; stopping the VM");
+                        self.engine
+                            .stop(vm)
+                            .await
+                            .map_err(|error| HostError::Io(error.to_string()))?;
+                        None
+                    }
+                }
             }
             found => found,
         };
@@ -849,7 +882,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if let Some(vm) = vm {
             // What its memory was based on is unknown, so its next save
             // holds every page.
-            let live = self.own(id, vm, LiveMemory::adopted());
+            let live = self.own(id, vm, memory.unwrap_or_else(LiveMemory::adopted));
             if let Some(slot) = self.slots.get_mut(&id.0) {
                 slot.incarnation = Some(live.incarnation);
                 slot.vm = Some(live);
@@ -1574,7 +1607,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         let removers = std::mem::take(&mut slot.removers);
         if let Some(record) = self.records.get(id) {
-            self.remove_recorded(&record, live.map(|live| live.vm), removers);
+            self.remove_recorded(&record, live.map(|live| (live.vm, live.memory)), removers);
         } else {
             tracing::error!(%id, "removing a sandbox without a record");
             for remover in removers {
@@ -1585,7 +1618,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Deletes a recorded sandbox in the background. Its ordinal and id
     /// stay taken until nothing of it is left.
-    fn remove_recorded(&mut self, record: &Record, vm: Option<E::Vm>, removers: Vec<Reply<()>>) {
+    fn remove_recorded(
+        &mut self,
+        record: &Record,
+        vm: Option<(E::Vm, LiveMemory)>,
+        removers: Vec<Reply<()>>,
+    ) {
         let id = record.id;
         self.destroying.insert(id.0, removers);
         let paths = Paths::new(&self.root, id);
@@ -1804,7 +1842,7 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
     async fn run(
         &self,
         fence: Fence,
-        vm: Option<E::Vm>,
+        vm: Option<(E::Vm, LiveMemory)>,
         spec: &VmSpec,
         dir: &Path,
     ) -> Result<(), HostError> {
@@ -1814,7 +1852,13 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
             .commit(id, fence, Change::new().removing())
             .await?;
         let stopped = match vm {
-            Some(vm) => self.engine.stop(vm).await,
+            Some((vm, memory)) => {
+                let stopped = self.engine.stop(vm).await;
+                // Whatever serves or fetches its memory writes into the
+                // directory about to go, so it ends first.
+                memory.close().await;
+                stopped
+            }
             None => self.engine.clean_up(spec).await,
         };
         stopped.map_err(|error| HostError::Io(error.to_string()))?;
@@ -1829,11 +1873,20 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
             .await
             .map_err(|error| HostError::Io(error.to_string()))?;
         self.records.remove(id, record.fence()).await?;
-        match tokio::fs::remove_dir_all(dir).await {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                Err(HostError::Io(error.to_string()))
+        // A pager thread of a VM that ended on its own may still be writing
+        // its last file here; a moment later the directory is quiet.
+        let mut tries = 0;
+        loop {
+            match tokio::fs::remove_dir_all(dir).await {
+                Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty && tries < 10 => {
+                    tries += 1;
+                    sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    return Err(HostError::Io(error.to_string()));
+                }
+                _ => return Ok(()),
             }
-            _ => Ok(()),
         }
     }
 }

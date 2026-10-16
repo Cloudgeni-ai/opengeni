@@ -242,6 +242,8 @@ pub(crate) struct Hydration {
     requests: mpsc::UnboundedSender<Request>,
     failure: Mutex<Option<Unavailable>>,
     done: watch::Sender<Option<Result<(), Unavailable>>>,
+    /// Set when the image is going away: fetching stops.
+    cancelled: compute_engine::CancellationToken,
 }
 
 impl Hydration {
@@ -291,6 +293,7 @@ impl Hydration {
             requests,
             failure: Mutex::new(None),
             done,
+            cancelled: compute_engine::CancellationToken::new(),
         });
         if missing == 0 {
             hydration.done.send_replace(Some(Ok(())));
@@ -328,6 +331,19 @@ impl Hydration {
     /// Why filling failed, if it did.
     pub fn failure(&self) -> Option<Unavailable> {
         lock(&self.failure).clone()
+    }
+
+    /// Stops filling: the image is going away. Anyone waiting for the fill
+    /// to finish is told it will not.
+    pub fn cancel(&self) {
+        self.cancelled.cancel();
+        self.done.send_if_modified(|done| {
+            if done.is_some() {
+                return false;
+            }
+            *done = Some(Err(Unavailable::passing("filling cancelled".to_owned())));
+            true
+        });
     }
 
     fn store(&self, index: usize, plain: &[u8]) -> Result<(), Unavailable> {
@@ -404,6 +420,7 @@ async fn fill(
         }
         tokio::select! {
             biased;
+            () = hydration.cancelled.cancelled() => return,
             request = requests.recv(), if open => match request {
                 Some(request) if request.urgent => {
                     urgent.push_back(request);
@@ -642,6 +659,8 @@ pub(crate) struct Paging {
     stop: Arc<AtomicBool>,
     failed: watch::Receiver<bool>,
     prefetched: watch::Receiver<bool>,
+    /// Set once the pager thread has ended and written all it will write.
+    ended: watch::Receiver<bool>,
     /// For remote images: the filling of the memory file.
     pub hydration: Option<Arc<Hydration>>,
 }
@@ -650,47 +669,94 @@ impl Paging {
     /// Listens on `socket` (which the VMM must be able to open) and serves
     /// `memory` to the first VMM that connects, prefetching `profile`'s
     /// pages first. The order the guest then touches pages is learned into
-    /// `learned`.
+    /// `learned`. Once the VMM has connected, its memory layout is written
+    /// to `layout`, so another pager can take over if this one goes.
     pub fn start(
         socket: &Path,
         memory: Memory,
         hydration: Option<Arc<Hydration>>,
         profile: WakeProfile,
         learned: PathBuf,
+        layout: PathBuf,
     ) -> io::Result<Self> {
         let _ = std::fs::remove_file(socket);
         let listener = std::os::unix::net::UnixListener::bind(socket)?;
         listener.set_nonblocking(true)?;
+        let socket = socket.to_owned();
+        Self::spawn(hydration, move |stop, prefetched| {
+            let result = serve(
+                &listener, memory, &profile, &learned, &layout, stop, prefetched,
+            );
+            let _ = std::fs::remove_file(&socket);
+            result
+        })
+    }
+
+    /// Takes over serving `memory` to a running VM whose pager has gone,
+    /// through what its engine handed over and the `regions` its first
+    /// pager recorded. Nothing is learned: what this VM touches next is no
+    /// wake's working set.
+    pub fn adopt(
+        handed: compute_engine::PagedMemory,
+        regions: Vec<compute_pager::Mapping>,
+        memory: Memory,
+        hydration: Option<Arc<Hydration>>,
+    ) -> io::Result<Self> {
+        use compute_pager::linux::Pager;
+
+        let mut pager = Pager::adopt(handed.uffd, regions, handed.vmm, memory, RECORD_FOR)?;
+        Self::spawn(hydration, move |stop, prefetched| {
+            let result = pager.run(stop, |progress| {
+                if let compute_pager::linux::Progress::Prefetched = progress {
+                    let _ = prefetched.send(true);
+                }
+            });
+            tracing::debug!(stats = ?pager.stats, "pager finished");
+            result
+        })
+    }
+
+    /// Runs `body` on a pager thread of its own and reports how it ends.
+    fn spawn(
+        hydration: Option<Arc<Hydration>>,
+        body: impl FnOnce(&AtomicBool, &watch::Sender<bool>) -> io::Result<()> + Send + 'static,
+    ) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let (failed_tx, failed) = watch::channel(false);
         let (prefetched_tx, prefetched) = watch::channel(false);
+        let (ended_tx, ended) = watch::channel(false);
         let stopping = Arc::clone(&stop);
-        let socket = socket.to_owned();
         std::thread::Builder::new()
             .name("pager".into())
             .spawn(move || {
-                let result = serve(
-                    &listener,
-                    memory,
-                    &profile,
-                    &learned,
-                    &stopping,
-                    &prefetched_tx,
-                );
-                let _ = std::fs::remove_file(&socket);
-                if let Err(error) = result {
+                if let Err(error) = body(&stopping, &prefetched_tx) {
                     tracing::error!(%error, "pager failed; the VM cannot continue");
                     let _ = failed_tx.send(true);
                 }
                 // Never leave a wake waiting on a prefetch that will not come.
                 let _ = prefetched_tx.send(true);
+                let _ = ended_tx.send(true);
             })?;
         Ok(Self {
             stop,
             failed,
             prefetched,
+            ended,
             hydration,
         })
+    }
+
+    /// Stops serving and filling for good, for a VM that has ended and whose
+    /// files are about to go, and returns once the pager thread has ended,
+    /// so nothing writes into the sandbox's directory any more.
+    pub async fn close(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(hydration) = &self.hydration {
+            hydration.cancel();
+        }
+        let mut ended = self.ended.clone();
+        // An error means the thread is gone, which is just as good.
+        let _ = ended.wait_for(|ended| *ended).await;
     }
 
     /// Waits until the prefetch plan is in place, for at most `limit`.
@@ -723,6 +789,7 @@ fn serve(
     memory: Memory,
     profile: &WakeProfile,
     learned: &Path,
+    layout: &Path,
     stop: &AtomicBool,
     prefetched: &watch::Sender<bool>,
 ) -> io::Result<()> {
@@ -743,6 +810,14 @@ fn serve(
     };
     peer.set_nonblocking(false)?;
     let mut pager = Pager::new(peer, memory, RECORD_FOR)?;
+    match serde_json::to_vec(pager.layout().regions()) {
+        Ok(regions) => {
+            if let Err(error) = crate::layout::write_atomic(layout, &regions) {
+                tracing::warn!(%error, "memory layout not recorded; a restarted agent cannot take this VM over");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "memory layout not encodable"),
+    }
     let plan: Vec<_> = profile
         .offsets
         .iter()

@@ -99,6 +99,16 @@ impl LiveMemory {
         }
         futures::future::Either::Right(std::future::pending())
     }
+
+    /// For a VM that has ended and whose files are about to be deleted:
+    /// stops serving and fetching its memory and returns once nothing more
+    /// will be written for it.
+    pub async fn close(self) {
+        #[cfg(target_os = "linux")]
+        if let Some(paging) = &self.paging {
+            paging.close().await;
+        }
+    }
 }
 
 /// A VM process the host owns.
@@ -220,6 +230,96 @@ fn paged_marker(paths: &Paths) -> PathBuf {
 /// does not outlive the agent that ran it.
 pub(crate) fn paged(paths: &Paths) -> bool {
     paged_marker(paths).exists()
+}
+
+/// What serves `image`'s memory to a pager: the local file, or the store
+/// with the file filling in behind, fetching `first` (image offsets) first.
+#[cfg(target_os = "linux")]
+fn served_memory(
+    images: &Images,
+    image: &Verified,
+    fetcher: Option<&Arc<Fetcher>>,
+    first: &[u64],
+) -> Result<(Memory, Option<Arc<Hydration>>), EngineError> {
+    const OP: &str = "restore";
+    let io = |error| EngineError::io(OP, error);
+    let generation = image.generation();
+    if !image.meta().remote {
+        let file = fs::File::open(images.memory(generation)).map_err(io)?;
+        // SAFETY: published images are sealed read-only and never
+        // modified; a new save always writes a new generation.
+        let mapped = unsafe { compute_pager::MappedFile::new(&file) }.map_err(io)?;
+        return Ok((Memory::Local(mapped), None));
+    }
+    let Some(fetcher) = fetcher else {
+        return Err(EngineError::new(
+            ErrorKind::MemoryLost,
+            OP,
+            "the memory image is in a store this host cannot page from",
+        ));
+    };
+    let manifest = fs::read(images.remote(generation)).map_err(io)?;
+    let manifest = compute_storage::manifest::DiskManifest::decode(&manifest)
+        .map_err(|error| EngineError::caused_by(ErrorKind::MemoryLost, OP, error))?;
+    let refs = crate::chunked::chunk_refs(&manifest).ok_or_else(|| {
+        EngineError::new(ErrorKind::MemoryLost, OP, "memory manifest not in chunks")
+    })?;
+    let hashes = images.chunk_map(image).map_err(io)?.0;
+    let hydration = Hydration::start(
+        Arc::clone(fetcher),
+        &images.memory(generation),
+        refs,
+        hashes,
+        first,
+    )
+    .map_err(io)?;
+    let source = ChunkSource::new(Arc::clone(&hydration)).map_err(io)?;
+    Ok((Memory::Remote(source), Some(hydration)))
+}
+
+/// Takes over serving the memory of `vm`, a VM found running after an
+/// agent restart whose pager went with the previous agent. Its guest has
+/// been waiting on any page it touched since; it goes on once a new pager
+/// serves them. The pages come from the sandbox's current image: every
+/// image published since the VM was restored is its restore image with
+/// the pages the guest changed merged in, so the pages it has not touched
+/// read the same in each.
+#[cfg(target_os = "linux")]
+pub(crate) async fn take_over_paging<E: Engine>(
+    engine: &E,
+    vm: &E::Vm,
+    paths: &Paths,
+    fetcher: Option<&Arc<Fetcher>>,
+) -> Result<LiveMemory, EngineError> {
+    const OP: &str = "take over paging";
+    let images = images_of(paths);
+    let marker = paged_marker(paths);
+    let (regions, image) = blocking(move || {
+        let layout = fs::read(&marker).map_err(|error| EngineError::io(OP, error))?;
+        let regions: Vec<compute_pager::Mapping> =
+            serde_json::from_slice(&layout).map_err(|_| {
+                EngineError::new(
+                    ErrorKind::MemoryLost,
+                    OP,
+                    "the VMM never connected to its pager",
+                )
+            })?;
+        let image = images
+            .current_verified()
+            .map_err(|suspect| suspect_error(OP, suspect))?
+            .ok_or_else(|| EngineError::new(ErrorKind::MemoryLost, OP, "no memory image"))?;
+        Ok::<_, EngineError>((regions, image))
+    })
+    .await
+    .map_err(|error| EngineError::io(OP, error))??;
+    let (memory, hydration) = served_memory(&images_of(paths), &image, fetcher, &[])?;
+    let handed = engine.paged_memory(vm)?;
+    let paging = Paging::adopt(handed, regions, memory, hydration)
+        .map_err(|error| EngineError::io(OP, error))?;
+    Ok(LiveMemory {
+        base: Base::Unknown,
+        paging: Some(paging),
+    })
 }
 
 /// The files a diff snapshot is written to, inside the jail.
@@ -531,6 +631,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         if !self.record.image || self.record.disk != Disk::Local {
             return (Outcome::Failed(Failure::MemoryLost), After::NoVm);
         }
+        let started = Instant::now();
         let images = images_of(&self.paths);
         let checked = {
             let images = images.clone();
@@ -548,9 +649,15 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
             Err(error) => return (io_failure(OP, error), After::NoVm),
         };
+        let verified = started.elapsed();
         let (memory, live_memory) = match self.memory_source(&images, &image) {
             Ok(prepared) => prepared,
             Err(error) => return (failure(&error), After::NoVm),
+        };
+        let source = match &memory {
+            MemorySource::File(_) => "file",
+            MemorySource::Pager(_) if image.meta().remote => "remote",
+            MemorySource::Pager(_) => "pager",
         };
         let files = RestoreFiles {
             state: self.paths.snapshot.state.clone(),
@@ -564,15 +671,18 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
             Err(error) => return (failure(&error), After::NoVm),
         };
+        let loaded = started.elapsed();
         let archived = self.record.archived;
         let running = Change::new().image(false).archived(false).execution();
         if let Err(error) = self.commit(running).await {
             return (self.end(vm, state_failure(&error)).await, After::NoVm);
         }
+        let committed = started.elapsed();
         #[cfg(target_os = "linux")]
         if let Some(paging) = &live_memory.paging {
             paging.prefetched(PREFETCH_LIMIT).await;
         }
+        let prefetched = started.elapsed();
         if let Err(error) = self.engine.resume(&vm).await {
             // The VM ends before the image is reconsidered, so no second
             // process ever runs from the same files.
@@ -585,7 +695,19 @@ impl<E: Engine, S: Store> Job<E, S> {
                 After::NoVm,
             );
         }
+        let resumed = started.elapsed();
         self.tell_guest_restored().await;
+        tracing::debug!(
+            id = %self.id,
+            source,
+            verify_ms = verified.as_millis(),
+            load_ms = loaded.saturating_sub(verified).as_millis(),
+            commit_ms = committed.saturating_sub(loaded).as_millis(),
+            prefetch_ms = prefetched.saturating_sub(committed).as_millis(),
+            resume_ms = resumed.saturating_sub(prefetched).as_millis(),
+            notice_ms = started.elapsed().saturating_sub(resumed).as_millis(),
+            "memory image restored"
+        );
         (Outcome::Done, After::New(vm, live_memory))
     }
 
@@ -682,45 +804,26 @@ impl<E: Engine, S: Store> Job<E, S> {
         #[cfg(target_os = "linux")]
         {
             // Written before the VMM can depend on the pager, so an agent
-            // that restarts knows the VM cannot be taken back.
+            // that restarts knows the VM's memory needs a pager. The pager
+            // fills in the memory layout once the VMM has connected; until
+            // then a restarted agent cannot take the VM over.
             write_atomic(&paged_marker(paths), b"").map_err(io)?;
             let socket = paths.in_jail("uffd.sock");
             let learned = wake_profile(paths);
             let wake = WakeProfile::load(&learned);
-            let (memory, hydration) = if image.meta().remote {
-                let Some(fetcher) = &self.fetcher else {
-                    return Err(EngineError::new(
-                        ErrorKind::MemoryLost,
-                        OP,
-                        "the memory image is in a store this host cannot page from",
-                    ));
-                };
-                let manifest = fs::read(images.remote(generation)).map_err(io)?;
-                let manifest = compute_storage::manifest::DiskManifest::decode(&manifest)
-                    .map_err(|error| EngineError::caused_by(ErrorKind::MemoryLost, OP, error))?;
-                let refs = crate::chunked::chunk_refs(&manifest).ok_or_else(|| {
-                    EngineError::new(ErrorKind::MemoryLost, OP, "memory manifest not in chunks")
-                })?;
-                let hashes = images.chunk_map(image).map_err(io)?.0;
-                let hydration = Hydration::start(
-                    Arc::clone(fetcher),
-                    &images.memory(generation),
-                    refs,
-                    hashes,
-                    &wake.offsets,
+            let (memory, hydration) =
+                served_memory(images, image, self.fetcher.as_ref(), &wake.offsets)?;
+            live.paging = Some(
+                Paging::start(
+                    &socket,
+                    memory,
+                    hydration,
+                    wake,
+                    learned,
+                    paged_marker(paths),
                 )
-                .map_err(io)?;
-                let source = ChunkSource::new(Arc::clone(&hydration)).map_err(io)?;
-                (Memory::Remote(source), Some(hydration))
-            } else {
-                let file = fs::File::open(images.memory(generation)).map_err(io)?;
-                // SAFETY: published images are sealed read-only and never
-                // modified; a new save always writes a new generation.
-                let mapped = unsafe { compute_pager::MappedFile::new(&file) }.map_err(io)?;
-                (Memory::Local(mapped), None)
-            };
-            live.paging =
-                Some(Paging::start(&socket, memory, hydration, wake, learned).map_err(io)?);
+                .map_err(io)?,
+            );
             Ok((MemorySource::Pager(socket), live))
         }
         #[cfg(not(target_os = "linux"))]
