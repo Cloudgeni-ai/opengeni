@@ -176,7 +176,9 @@ each browser and its agent may use:
   | Open agent event streams (concurrent)                          | 8           | 24                 | 200          |
   | Open product update streams (concurrent)                       | 4           | 24                 | 200          |
 
-  A refusal is a 429 with `Retry-After`. Every write, the product update
+  A refusal is a 429 with `Retry-After`. The limits apply to the single-origin
+  server (`PORT` set, as in the container); `bun run server` for local
+  development listens on loopback only and skips them. Every write, the product update
   stream, and the workspace live stream need an established visitor cookie, so
   dropping the cookie never buys a fresh per-visitor allowance. Other proxied
   reads do not (the page's first config read sets the cookie), so a cookie-less

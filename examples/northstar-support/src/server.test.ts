@@ -256,7 +256,9 @@ const CLIENT_HEADER = "x-real-ip";
 const MCP_TOKEN = "mcp-test-token";
 const VISITOR_HEADER = "x-northstar-visitor";
 
-function demoServer(options: FakeOptions & { now?: () => number; clientIpHeader?: string } = {}) {
+function demoServer(
+  options: FakeOptions & { now?: () => number; clientIpHeader?: string; rateLimits?: boolean } = {},
+) {
   const upstream = fakeOpenGeni(options);
   const demo = createDemoServer({
     apiBaseUrl: API,
@@ -269,6 +271,7 @@ function demoServer(options: FakeOptions & { now?: () => number; clientIpHeader?
     fetch: upstream.fetch,
     ...(options.now ? { now: options.now } : {}),
     ...(options.clientIpHeader ? { clientIpHeader: options.clientIpHeader } : {}),
+    ...(options.rateLimits !== undefined ? { rateLimits: options.rateLimits } : {}),
   });
   return { upstream, handler: demo.product, mcp: demo.mcp };
 }
@@ -676,6 +679,28 @@ describe("Northstar anonymous visitor isolation", () => {
     });
     expect((await startRun(denied.handler, await newVisitor(denied.handler))).status).toBe(502);
   });
+
+  test("retries a failed operator onboarding only after a short pause", async () => {
+    const clock = testClock();
+    const { handler, upstream } = demoServer({
+      now: clock.now,
+      membership: Response.json(
+        { error: { code: "forbidden", message: "membership exceeds key authority" } },
+        { status: 403 },
+      ),
+    });
+    const onboardings = () =>
+      upstream.calls.filter((call) => call.path.endsWith("/external-members")).length;
+    const cookie = await newVisitor(handler);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await startRun(handler, cookie)).status).toBe(502);
+    }
+    expect(onboardings()).toBe(1);
+
+    clock.advance(15_000);
+    expect((await startRun(handler, cookie)).status).toBe(502);
+    expect(onboardings()).toBe(2);
+  });
 });
 
 describe("Northstar demo rate limits", () => {
@@ -717,6 +742,15 @@ describe("Northstar demo rate limits", () => {
     clock.advance(60 * 60_000);
     expect((await startRun(handler, first)).status).toBe(201);
     expect(sessionCreates(upstream)).toBe(31);
+  });
+
+  test("can run without rate limits for loopback-only local development", async () => {
+    const { handler, upstream } = demoServer({ rateLimits: false });
+    const cookie = await newVisitor(handler);
+    for (let run = 0; run < 12; run += 1) {
+      expect((await startRun(handler, cookie)).status).toBe(201);
+    }
+    expect(sessionCreates(upstream)).toBe(12);
   });
 
   test("limits demo resets", async () => {

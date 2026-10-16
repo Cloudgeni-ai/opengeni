@@ -567,6 +567,11 @@ export type DemoServerConfig = {
    * network on every request.
    */
   clientIpHeader?: string | null | undefined;
+  /**
+   * Apply the rate limits (default). The loopback-only local development
+   * servers turn them off; concurrency caps and every other check still apply.
+   */
+  rateLimits?: boolean | undefined;
   /** Test seam: the fetch the server-side Opengeni client uses. */
   fetch?: OpenGeniClientOptions["fetch"];
   /** Test seam: the clock the rate limits and capability checks use. */
@@ -635,7 +640,11 @@ export function createDemoServer(config: DemoServerConfig): DemoServer {
   // The caller of each request, for the proxy hooks (which receive the same Request).
   const callers = new WeakMap<Request, Caller>();
   const limit = (bounds: TieredRateBounds, action: string) =>
-    new TieredRateLimit(bounds, action, config.now);
+    new TieredRateLimit(
+      config.rateLimits === false ? unlimited(bounds) : bounds,
+      action,
+      config.now,
+    );
   const agentRuns = limit(AGENT_RUNS, "agent runs");
   const resets = limit(RESETS, "resets");
   const productWrites = limit(PRODUCT_WRITES, "ticket changes");
@@ -657,7 +666,14 @@ export function createDemoServer(config: DemoServerConfig): DemoServer {
   // Explicit onboarding: the proxy and asUser never grant membership. A stable
   // operation id makes the grant an exact replay on every server start.
   let demoMembership: Promise<void> | null = null;
+  // After a failed onboarding, requests reuse that failure until this time
+  // instead of each calling Opengeni again.
+  let demoMembershipRetryAt: number | null = null;
   function ensureDemoMembership(): Promise<void> {
+    if (demoMembershipRetryAt !== null && now() >= demoMembershipRetryAt) {
+      demoMembership = null;
+      demoMembershipRetryAt = null;
+    }
     demoMembership ??= (async () => {
       try {
         await openGeni.addExternalWorkspaceMember(workspaceId, {
@@ -682,7 +698,7 @@ export function createDemoServer(config: DemoServerConfig): DemoServer {
         }
       }
     })().catch((error: unknown) => {
-      demoMembership = null;
+      demoMembershipRetryAt = now() + CAPABILITY_RETRY_MS;
       throw error;
     });
     return demoMembership;
@@ -1220,6 +1236,14 @@ export function createDemoServer(config: DemoServerConfig): DemoServer {
   return { product, mcp };
 }
 
+function unlimited(bounds: TieredRateBounds): TieredRateBounds {
+  const none = (tier: TieredRateBounds["visitor"]) => ({
+    ...tier,
+    limit: Number.POSITIVE_INFINITY,
+  });
+  return { visitor: none(bounds.visitor), client: none(bounds.client), demo: none(bounds.demo) };
+}
+
 function usageLimitsDisabled(error: unknown): boolean {
   return (
     error instanceof OpenGeniApiError &&
@@ -1467,6 +1491,8 @@ if (import.meta.main) {
     resolveMcpUrl: resolvePublicMcpUrl,
     serveStatic: UNIFIED_SERVER,
     clientIpHeader,
+    // The two-server local development mode listens on loopback only.
+    rateLimits: UNIFIED_SERVER,
   });
   const productServer = Bun.serve({
     hostname: UNIFIED_SERVER ? "0.0.0.0" : "127.0.0.1",

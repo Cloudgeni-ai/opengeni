@@ -67,7 +67,8 @@ describe("VisitorCookies", () => {
     expect(cookies.read(new Request(url))).toBeNull();
     expect(cookies.read(withCookie(url, `${name}=${id}`))).toBeNull();
     expect(cookies.read(withCookie(url, `${name}=${id}.${mac}.extra`))).toBeNull();
-    expect(cookies.read(withCookie(url, `${name}=${id}.${mac.slice(0, -1)}A`))).toBeNull();
+    const tampered = `${mac.slice(0, -1)}${mac.endsWith("A") ? "B" : "A"}`;
+    expect(cookies.read(withCookie(url, `${name}=${id}.${tampered}`))).toBeNull();
     // A different id cannot reuse another visitor's signature.
     const other = cookies.issue(new Request(url));
     expect(cookies.read(withCookie(url, `${name}=${other.id}.${mac}`))).toBeNull();
