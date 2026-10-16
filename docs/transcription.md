@@ -281,6 +281,12 @@ pinned to a provider keeps that provider. Workspace preferences still apply.
   same 5% margin as models). OpenAI/Azure have built-in prices for recognized
   transcription models; override contracted rates.
 
+`OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE` replaces the margin on all provider-rate
+transcription prices, including custom entries that specify `marginBps`.
+Leave it unset to preserve current margins; use `0` to bill at the configured
+provider rates without an added margin. Direct fixed credit tariffs are not
+affected.
+
 When Stripe billing or managed usage limits are enabled, deployment-funded
 providers require general credits. Connected subscriptions are never debited.
 Malformed pricing never fails boot (API and workers share this config): the

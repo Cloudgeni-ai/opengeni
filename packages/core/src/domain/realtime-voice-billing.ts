@@ -340,7 +340,10 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
       }
       const attribution: CreditDebitAttribution =
         input.callerSubjectId === facts.ownerSubjectId ? input.attribution : { kind: "unknown" };
-      const cost = realtimeVoiceMinuteCreditMicros(voice.pricing);
+      const cost = realtimeVoiceMinuteCreditMicros(
+        voice.pricing,
+        deps.settings.creditMarginBpsOverride,
+      );
       const minutes = facts.connections.flatMap((connection) =>
         Array.from(
           { length: realtimeVoiceStartedMinutes(connection.startedAt, connection.observedUntil) },
