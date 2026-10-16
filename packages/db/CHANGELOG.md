@@ -1,5 +1,18 @@
 # @opengeni/db
 
+## 3.3.1
+
+### Patch Changes
+
+- @opengeni/codemode@3.3.1
+- @opengeni/codex@3.3.1
+- @opengeni/config@3.3.1
+- @opengeni/contracts@3.3.1
+- @opengeni/network@3.3.1
+- @opengeni/observability@3.3.1
+- @opengeni/subscriptions@3.3.1
+- @opengeni/xai-subscription@3.3.1
+
 ## 3.3.0
 
 ### Patch Changes

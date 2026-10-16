@@ -1,5 +1,14 @@
 # @opengeni/codemode
 
+## 3.3.1
+
+### Patch Changes
+
+- Updated dependencies [60191f6]
+  - @opengeni/sdk@3.3.1
+  - @opengeni/contracts@3.3.1
+  - @opengeni/tool-gateway@3.3.1
+
 ## 3.3.0
 
 ### Patch Changes

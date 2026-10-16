@@ -1,5 +1,11 @@
 # @opengeni/interaction
 
+## 3.3.1
+
+### Patch Changes
+
+- @opengeni/contracts@3.3.1
+
 ## 3.3.0
 
 ### Patch Changes

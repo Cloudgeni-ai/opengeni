@@ -1,5 +1,14 @@
 # @opengeni/documents
 
+## 3.3.1
+
+### Patch Changes
+
+- @opengeni/db@3.3.1
+- @opengeni/config@3.3.1
+- @opengeni/contracts@3.3.1
+- @opengeni/storage@3.3.1
+
 ## 3.3.0
 
 ### Patch Changes

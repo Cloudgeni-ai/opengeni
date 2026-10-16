@@ -1,5 +1,23 @@
 # @opengeni/core
 
+## 3.3.1
+
+### Patch Changes
+
+- Updated dependencies [ad17c9e]
+  - @opengeni/runtime@3.3.1
+  - @opengeni/db@3.3.1
+  - @opengeni/documents@3.3.1
+  - @opengeni/events@3.3.1
+  - @opengeni/capabilities@3.3.1
+  - @opengeni/codex@3.3.1
+  - @opengeni/config@3.3.1
+  - @opengeni/contracts@3.3.1
+  - @opengeni/network@3.3.1
+  - @opengeni/observability@3.3.1
+  - @opengeni/storage@3.3.1
+  - @opengeni/vaults@3.3.1
+
 ## 3.3.0
 
 ### Patch Changes

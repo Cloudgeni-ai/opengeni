@@ -1,5 +1,13 @@
 # @opengeni/sdk
 
+## 3.3.1
+
+### Patch Changes
+
+- 60191f6: No API changes. Republishes the 3.3.0 packages on a main whose CI is green again: Site test fixtures and the generated MCP action catalog are aligned, the desktop artifact browser test is mapped in the change-impact plan, and changesets that name only ignored packages no longer block Version PRs.
+  - @opengeni/connect@3.3.1
+  - @opengeni/contracts@3.3.1
+
 ## 3.3.0
 
 ### Minor Changes
