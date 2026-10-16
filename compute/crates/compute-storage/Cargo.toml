@@ -15,6 +15,7 @@ blake3 = "1.8"
 bytes = "1"
 chrono = { version = "0.4.34", default-features = false, features = ["clock"] }
 crc32c = "0.6"
+getrandom = { version = "0.3", features = ["std"] }
 http = "1"
 md-5 = "0.10"
 object_store = { version = "0.12.4", features = ["aws", "azure", "gcp"] }

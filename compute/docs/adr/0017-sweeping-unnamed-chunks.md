@@ -49,11 +49,15 @@ would delete a chunk the new copy needs, after its local copy may be gone.
   version moved reads again; a write held up in flight long after its
   caller gave up can never land over a newer copy and leave a pointer
   naming what a sweep took.
-- The fence needs a store that gives a pointer stored again with the same
-  bytes a new version. GCS generations and Azure entity tags change; S3
-  entity tags do not. A sweep that deletes is refused before it stores any
-  pointer on a store without deletes on condition, which today means
-  anything but GCS.
+- Every pointer write begins with a random 16-byte stamp, so a pointer
+  stored again with the same contents is a new version on every store.
+  GCS generations change anyway, but an S3 entity tag follows the bytes:
+  without the stamp, a delete held up in flight could land on a pointer
+  a new sandbox of the same name later stored with the same contents,
+  and the fence would not stop an archive whose pointer it stored again
+  unchanged. A sweep that deletes is refused before it stores any pointer
+  on a store without deletes on condition, which today means anything but
+  GCS.
 - Forgetting a memory image also drops its working-set pack, which holds
   memory pages; a copy without memory names no pack.
 - Anything a sweep cannot read stops it before it deletes anything; only a
@@ -78,7 +82,8 @@ would delete a chunk the new copy needs, after its local copy may be gone.
   up to the allowed disagreement, checks every delete against the stored
   pointers; with the reuse rule or the fence turned off it finds the loss.
   Regressions hold up a forgetting write and a pointer delete in flight
-  past a newer copy and check that neither lands.
+  past a newer copy and check that neither lands, also on a store whose
+  entity tags follow the bytes.
 - Only GCS deletes on condition today. On Azure and S3 a sweep reports but
   refuses to delete until their conditional deletes are wired in.
 - A sweep holds every stored key in memory; one prefix of tens of millions

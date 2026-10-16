@@ -8,8 +8,9 @@ use object_store::path::Path;
 
 use super::*;
 use crate::chunk::EncodedChunk;
-use crate::fake::{Fake, Object, Rng};
+use crate::fake::{Bucket, Fake, Object, Rng};
 use crate::fresh::{Clock, Freshness};
+use crate::store::unstamped;
 
 const SECOND: Duration = Duration::from_secs(1);
 
@@ -107,7 +108,8 @@ async fn an_archive_begins_by_storing_an_empty_pointer() {
     let fake = Fake::new(paused_clock());
     let store = ChunkStore::over_fake(&fake, "p");
     let first = store.begin("a").await.unwrap();
-    assert_eq!(fake.bytes("p/pointers/v1/a").unwrap().len(), 0);
+    let stored = fake.bytes("p/pointers/v2/a").unwrap();
+    assert!(unstamped(&stored).unwrap().is_empty());
     assert_eq!(store.get_pointer("a").await.unwrap(), None);
     let looked = sweep(&store, listed_names, true).await.unwrap();
     assert_eq!((looked.pointers, looked.named), (1, 0));
@@ -119,7 +121,7 @@ async fn an_archive_begins_by_storing_an_empty_pointer() {
     store.publish(again, pointer(&[])).await.unwrap();
     assert_eq!(store.get_pointer("a").await.unwrap(), Some(pointer(&[])));
     store.delete_pointer("a").await.unwrap();
-    assert!(fake.bytes("p/pointers/v1/a").is_none());
+    assert!(fake.bytes("p/pointers/v2/a").is_none());
 }
 
 /// The race a deadline cannot close: an archive reuses an old chunk, its
@@ -212,7 +214,7 @@ async fn a_change_held_up_past_a_newer_copy_never_lands() {
     let swept = sweep(&store, listed_names, true).await.unwrap();
     assert_eq!(swept.deleted, 2, "{swept:?}");
 
-    tokio::time::sleep(300 * SECOND).await;
+    tokio::time::sleep(301 * SECOND).await;
     assert_eq!(*fake.held.lock().unwrap(), 1);
     assert_eq!(store.get_pointer("a").await.unwrap(), Some(current));
     store.get_chunk(&newer.reference).await.unwrap();
@@ -240,9 +242,39 @@ async fn a_delete_held_up_past_a_newer_copy_never_lands() {
     let current = pointer(&[stored.reference.key()]);
     store.publish(again, current.clone()).await.unwrap();
 
-    tokio::time::sleep(300 * SECOND).await;
+    tokio::time::sleep(301 * SECOND).await;
     assert_eq!(*fake.held.lock().unwrap(), 1);
     assert_eq!(store.get_pointer("a").await.unwrap(), Some(current));
+}
+
+/// The same where an entity tag follows the bytes (S3) and deletes carry
+/// no condition: the sandbox is removed again and a new one of the same
+/// name stores exactly the pointer the held-up delete read. That pointer
+/// is a later write with its own stamp, so the delete is still refused.
+#[tokio::test(start_paused = true)]
+async fn a_delete_held_up_past_the_same_bytes_stored_again_never_lands() {
+    let fake = Fake::new(paused_clock());
+    *fake.tags_follow_bytes.lock().unwrap() = true;
+    let store = ChunkStore::new(Arc::new(Bucket(fake.clone())), Path::from("p"))
+        .with_clock(fake.clock.clone());
+    let same = pointer(&[]);
+    let first = store.begin("a").await.unwrap();
+    store.publish(first, same.clone()).await.unwrap();
+    *fake.stall.lock().unwrap() = Some(("pointers/", 300 * SECOND));
+    let deleting = tokio::spawn({
+        let store = store.clone();
+        async move { store.delete_pointer("a").await }
+    });
+    give_up_once_held(&fake, deleting).await;
+
+    store.delete_pointer("a").await.unwrap();
+    assert_eq!(store.get_pointer("a").await.unwrap(), None);
+    let again = store.begin("a").await.unwrap();
+    store.publish(again, same.clone()).await.unwrap();
+
+    tokio::time::sleep(301 * SECOND).await;
+    assert_eq!(*fake.held.lock().unwrap(), 1);
+    assert_eq!(store.get_pointer("a").await.unwrap(), Some(same));
 }
 
 #[tokio::test(start_paused = true)]
@@ -267,7 +299,7 @@ async fn only_a_store_that_deletes_on_condition_deletes() {
     store.put_chunk(&chunk(7)).await.unwrap();
     let empty = store.begin("a").await.unwrap();
     store.publish(empty, pointer(&[])).await.unwrap();
-    let pointer_path = Path::from("p/pointers/v1/a");
+    let pointer_path = Path::from("p/pointers/v2/a");
     let version = backend.head(&pointer_path).await.unwrap().e_tag;
     // Seen from far enough ahead, the chunk is old.
     let later = SystemTime::now() + 30 * Duration::from_secs(86_400);
@@ -294,9 +326,11 @@ const SIMULATED: Freshness = Freshness {
 fn pointers_stay_whole(objects: &BTreeMap<String, Object>, name: &str) -> bool {
     objects
         .iter()
-        .filter(|(key, pointer)| key.starts_with("p/pointers/v1/") && !pointer.bytes.is_empty())
-        .all(|(_, pointer)| {
-            let keys: Vec<String> = serde_json::from_slice(&pointer.bytes).unwrap();
+        .filter(|(key, _)| key.starts_with("p/pointers/v2/"))
+        .map(|(_, pointer)| unstamped(&pointer.bytes).unwrap())
+        .filter(|pointer| !pointer.is_empty())
+        .all(|pointer| {
+            let keys: Vec<String> = serde_json::from_slice(&pointer).unwrap();
             keys.iter().all(|key| format!("p/{key}") != name)
         })
 }

@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt as _;
 use futures::stream::{self, BoxStream};
+use md5::Digest as _;
 use object_store::client::{HttpClient, HttpError, HttpRequest, HttpResponse, HttpService};
 use object_store::gcp::GcpCredential;
 use object_store::path::Path;
@@ -76,6 +77,10 @@ pub(crate) struct Fake {
     /// it refused are kept in `violations` (and deleted all the same).
     pub(crate) guard: Mutex<Option<Guard>>,
     pub(crate) violations: Mutex<Vec<String>>,
+    /// When set, an object's entity tag is the MD5 of its bytes, as on S3,
+    /// so the same bytes stored again have the same tag; otherwise it is
+    /// the generation, as on GCS.
+    pub(crate) tags_follow_bytes: Mutex<bool>,
 }
 
 impl Fake {
@@ -198,30 +203,42 @@ impl Fake {
             PutMode::Update(version) => {
                 let current = objects
                     .get(location.as_ref())
-                    .map(|object| object.generation.to_string());
-                if current.is_none() || current != version.version {
+                    .map(|object| self.tag(object));
+                if current.is_none() || current != version.e_tag {
                     return Err(object_store::Error::Precondition {
                         path: location.to_string(),
-                        source: "generation does not match".into(),
+                        source: "entity tag does not match".into(),
                     });
                 }
             }
             PutMode::Overwrite | PutMode::Create => {}
         }
-        let generation = self.store(&mut objects, location.as_ref(), payload.into());
+        self.store(&mut objects, location.as_ref(), payload.into());
+        let meta = self.meta(location.as_ref(), &objects[location.as_ref()]);
         Ok(PutResult {
-            e_tag: Some(generation.to_string()),
-            version: Some(generation.to_string()),
+            e_tag: meta.e_tag,
+            version: meta.version,
         })
     }
 
-    fn meta(name: &str, object: &Object) -> ObjectMeta {
+    /// `object`'s entity tag; see [`Self::tags_follow_bytes`].
+    fn tag(&self, object: &Object) -> String {
+        if *self.tags_follow_bytes.lock().unwrap() {
+            format!("{:x}", md5::Md5::digest(&object.bytes))
+        } else {
+            object.generation.to_string()
+        }
+    }
+
+    fn meta(&self, name: &str, object: &Object) -> ObjectMeta {
+        let follow = *self.tags_follow_bytes.lock().unwrap();
         ObjectMeta {
             location: Path::from(name),
             last_modified: object.at.into(),
             size: object.bytes.len() as u64,
-            e_tag: Some(object.generation.to_string()),
-            version: Some(object.generation.to_string()),
+            e_tag: Some(self.tag(object)),
+            // S3 without versioning names no version.
+            version: (!follow).then(|| object.generation.to_string()),
         }
     }
 }
@@ -372,7 +389,7 @@ impl ObjectStore for Bucket {
             .0
             .object(location.as_ref())
             .ok_or_else(|| not_found(location))?;
-        let meta = Fake::meta(location.as_ref(), &object);
+        let meta = self.0.meta(location.as_ref(), &object);
         let bytes = object.bytes;
         Ok(GetResult {
             range: 0..bytes.len() as u64,
@@ -404,7 +421,7 @@ impl ObjectStore for Bucket {
                             .as_ref()
                             .is_none_or(|prefix| name.starts_with(prefix))
                     })
-                    .map(|(name, object)| Ok(Fake::meta(name, object)))
+                    .map(|(name, object)| Ok(fake.meta(name, object)))
                     .collect();
                 stream::iter(listed)
             })

@@ -340,6 +340,7 @@ dependencies = [
  "chrono",
  "crc32c",
  "futures",
+ "getrandom 0.3.4",
  "http",
  "md-5",
  "object_store",

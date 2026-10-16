@@ -87,11 +87,17 @@ and what we chose not to build.
   with the newest kernel, so a new guest kernel must be tested against the
   root filesystems still in use. We never replace a user's disk to upgrade
   it.
-- **Security patches.** A fixed Firecracker reaches a sleeping sandbox at
-  its next wake when it reads the image's snapshot format; a VM that stays
-  busy keeps the VMM it runs under until it sleeps. A guest kernel fix
-  needs a fresh boot, which means stopping affected sandboxes (they boot
-  fresh from their disks). There is no live patching.
+- **Security patches.** A sandbox runs a patched Firecracker only once its
+  VMM process is replaced: when it wakes from a saved image (Saved,
+  Archived or Remote). One that resumes from Paused or Compressed resumes
+  the same process, and one that stays busy keeps it. A restore prefers
+  the binary that made the image while it is kept with
+  `--retained-firecracker`, so drop a vulnerable binary from that list
+  first; the current binary then restores every image whose snapshot
+  format it reads. To move a sandbox off a vulnerable VMM now, sleep it to
+  `saved` (the `Sleep` request) and wake it. A guest kernel fix needs a
+  fresh boot, which means stopping affected sandboxes (they boot fresh
+  from their disks). There is no live patching.
 
 ## Emergencies
 
