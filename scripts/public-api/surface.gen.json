@@ -34327,6 +34327,10 @@
       "sessionComputeLabel": "value",
       "sessionSandboxLabel": "value"
     },
+    "@opengeni/react/scrollbars": {
+      "CLASSIC_SCROLLBARS_ATTRIBUTE": "value",
+      "markClassicScrollbars": "value"
+    },
     "@opengeni/react/session": {
       "ActivityItem": "type",
       "AgentMessageItem": "type",

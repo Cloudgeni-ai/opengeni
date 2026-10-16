@@ -135,7 +135,7 @@ describe("managed browser profile cryptography", () => {
         // complete list follows agent-browser's own arguments.
         expect(wrapper).toContain(`"$@" '${MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT}' 2>`);
         expect(MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT).toBe(
-          "--disable-features=Translate,OptimizationGuideOnDeviceModel,WebUIOmniboxPopup,WebUIOmniboxAimPopup",
+          "--disable-features=Translate,OptimizationGuideOnDeviceModel,WebUIOmniboxPopup,WebUIOmniboxAimPopup,PassageEmbedder",
         );
       } finally {
         await rm(root, { recursive: true, force: true });

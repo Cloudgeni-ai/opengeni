@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "5d9bc01143fd10aa7826eeda0bca6bf7d853b579db98c3a0b0f87b344fb13eb3"
+      "sha256": "06af7c748040a75d55740de160fc0187aa1b032fb04533e8a019a8166378af11"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -62,7 +62,7 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "2fecee50c354d8567e750f0627de842e359298bb61c49396b6994341fbb9729e"
+      "sha256": "11024ac64c3fd45645d530e5844d4a144acd8365fbde585167e80fd4d0a46148"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
@@ -281,7 +281,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build (Linux musl static)",
-      "sha256": "d89ddd6baa6b20ae87b6430992c376c5f28e08c81a7d384ce16c9b77f4262ecf"
+      "sha256": "8810a8bf5f3a5eeb73a3c555c8fdbd799f0c07181f62621a59f4913c8b5976d0"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -299,7 +299,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (Linux glibc)",
-      "sha256": "96627610d87b395d487b77685a4ba02a71ab04aab86c797234d29d81483471a4"
+      "sha256": "42214f3264e151ea02dd5c5846fadd7e2646873ceb71939afe3a9b45eebb90e6"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -1126,8 +1126,26 @@
     {
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
+      "step": "Admit exact source and CI",
+      "sha256": "dc894f956640654d7075246f3d4a8ad042575fbdd55f687a74dd0fad793b8adc"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "publish",
       "step": "Admit protected main source",
-      "sha256": "faec0df74f1ec9d6b83e2b21389f8cc52ec16d8f7873ecbec89edaec0cbc1bf8"
+      "sha256": "6590c803e20faf9692c6f63fe4e23f8c131e38f604f13d1288da3d709cdddc6e"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "publish",
+      "step": "Check out admitted source",
+      "sha256": "4a04e3e8059a0265df759ece12bc66ccca4028d5590d504b23b038a60292044a"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "publish",
+      "step": "Install admitted source dependencies",
+      "sha256": "ecb9e615659e3141ac8a5318b89529c2e3c319663adf0ae8fbef1112da0b08e7"
     },
     {
       "workflow": ".github/workflows/publish-canary.yml",
@@ -1139,13 +1157,7 @@
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
       "step": "Publish canary versions",
-      "sha256": "339463616de54eba4955bca6b0a3a69ad0be2e7e4f5bb3dd5e30ce6089b785d7"
-    },
-    {
-      "workflow": ".github/workflows/publish-canary.yml",
-      "job": "publish",
-      "step": "Verify exact source",
-      "sha256": "a75d25d34d692e5afcf6e883c33d3cd2ea19d2422effd6a041c38d0dc607dd49"
+      "sha256": "35ab9cbe37950552054bf677cb69e36a67b7eb9b8fdd878bbadffeb3d149f3ac"
     },
     {
       "workflow": ".github/workflows/publish-desktop-image.yml",

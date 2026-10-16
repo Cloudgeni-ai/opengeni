@@ -137,11 +137,16 @@ jobs:
           set -euo pipefail
           pip install ziglang
           cargo install --locked cargo-zigbuild
-          rustup target add "${{ matrix.target }}"
+          # computer-native loads the session's libpipewire at runtime for GNOME
+          # Wayland screen capture, which a static musl binary cannot do, so it
+          # is glibc-dynamic like browserd.
+          native_target="${{ matrix.target }}"
+          native_target="${native_target%-musl}-gnu"
+          rustup target add "${{ matrix.target }}" "$native_target"
           cargo zigbuild --release --target "${{ matrix.target }}" -p opengeni-agent
-          cargo zigbuild --release --target "${{ matrix.target }}" -p opengeni-computer-native
+          cargo zigbuild --release --target "$native_target.2.28" -p opengeni-computer-native
           cp "target/${{ matrix.target }}/release/opengeni-agent" "../${{ matrix.asset }}"
-          cp "target/${{ matrix.target }}/release/opengeni-computer-native" \
+          cp "target/$native_target/release/opengeni-computer-native" \
             "../opengeni-computer-native-${{ matrix.target }}"
           file "../${{ matrix.asset }}"
 
@@ -179,6 +184,11 @@ jobs:
           esac
           if readelf -d "opengeni-browserd-${{ matrix.target }}" | grep -F 'libc.musl'; then
             echo "::error::linux browserd must not link musl libc" >&2
+            exit 1
+          fi
+          native_interp="$(readelf -l "opengeni-computer-native-${{ matrix.target }}" | sed -n 's/.*program interpreter: \(.*\)]/\1/p')"
+          if [ "$native_interp" != "$interp" ]; then
+            echo "::error::linux computer-native must use the glibc dynamic linker; got ${native_interp:-<missing>}" >&2
             exit 1
           fi
           OPENGENI_BROWSERD_TARGET_PLATFORM=linux \

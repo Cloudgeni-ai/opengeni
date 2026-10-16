@@ -16,6 +16,8 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
   id-token: write
 
 jobs:
@@ -36,11 +38,10 @@ jobs:
           [[ "$GITHUB_REF" == "refs/heads/main" ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/publish-canary.yml@refs/heads/main" ]]
 
-      - name: Check out source
+      - name: Check out controller
         uses: actions/checkout@v6
         with:
           ref: "${{ github.sha }}"
@@ -94,29 +95,41 @@ jobs:
             echo "::error::Selected checkout identity changed"
             exit 1
           fi
-      - name: Verify exact source
-        env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]
-          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
-
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: .bun-version
 
+      - name: Admit exact source and CI
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: bun scripts/canary-source-admission.ts
+
+      - name: Check out admitted source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/canary-source" "$SOURCE_SHA"
+          [[ "$(git -C "$RUNNER_TEMP/canary-source" rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          cmp .bun-version "$RUNNER_TEMP/canary-source/.bun-version"
+
       - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install admitted source dependencies
+        working-directory: ${{ runner.temp }}/canary-source
         run: bun install --frozen-lockfile
 
       - name: Publish canary versions
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          GH_TOKEN: ${{ github.token }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           OPENGENI_RELEASE: "1"
-        # The checked-out source and workflow identity must match the attested commit.
+          OPENGENI_RELEASE_SOURCE_ROOT: ${{ runner.temp }}/canary-source
+        # Execute the trusted controller; only admitted source supplies package builds.
         run: bun scripts/publish-canary.ts
 
       - name: Retain exact Site package pins for this deployment
@@ -132,5 +145,14 @@ jobs:
         with:
           name: canary-publication-receipts-${{ inputs.source_sha }}
           path: .release/canary-receipts
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Retain source admission evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: canary-source-admission-${{ inputs.source_sha }}
+          path: .release/canary-source-admission.json
           if-no-files-found: warn
           retention-days: 7

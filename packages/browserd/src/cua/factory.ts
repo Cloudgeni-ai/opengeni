@@ -2,7 +2,7 @@ import { ComputerDriver } from "../computer-driver";
 import { join } from "node:path";
 import type { ComputerSupervisorDriverContext } from "../computer-supervisor";
 import { CuaComputerBackend } from "./backend";
-import { createCuaRuntime } from "./sdk";
+import { createCuaRuntime, missingLinuxLibraryError } from "./sdk";
 
 // One physical desktop has one runtime. Separate cursor overlays do not make
 // simultaneous input into the same desktop safe.
@@ -32,7 +32,9 @@ export async function createCuaComputerDriver(
     // Lazy loading keeps the browser engine and normal native backend independent
     // of CUA's Node-API runtime. Never expose CUA browser tools or its raw SDK.
     const environment = { ...context.environment };
-    const sdk = await createCuaRuntime(environment);
+    const sdk = await createCuaRuntime(environment).catch((error: unknown) => {
+      throw (process.platform === "linux" && missingLinuxLibraryError(error)) || error;
+    });
     let closed = false;
     const backend = await CuaComputerBackend.open(
       {

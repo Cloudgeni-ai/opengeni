@@ -31,8 +31,8 @@ use image::{
     ExtendedColorType, ImageEncoder as _, RgbaImage,
 };
 use opengeni_agent_platform::{
-    validate_linux_named_key_chord, DesktopBackend as _, LinuxDesktop, LinuxRgbaFrame, LinuxWindow,
-    LinuxWindowRect, PlatformError,
+    validate_linux_named_key_chord, CapturedFrame, DesktopBackend as _, LinuxDesktop,
+    LinuxRgbaFrame, LinuxWindow, LinuxWindowRect, PlatformError,
 };
 use opengeni_agent_proto::v1;
 use serde_json::json;
@@ -45,6 +45,7 @@ use crate::captured_frames::{
     dispatch_with_frame_invalidation, dispatch_with_mutation_invalidation, CapturedFrames,
 };
 use crate::clipboard::NativeClipboardController;
+use crate::linux_gnome::{self, GnomeScreen, WaylandScreen};
 use crate::tree::semantic_roots_equivalent;
 use crate::window_input_fences::{WindowInputFences, WindowInputIdentity};
 use crate::{
@@ -349,6 +350,10 @@ pub(crate) struct AtspiComputerAdapter {
     window_input_fences: RwLock<WindowInputFences<WindowFocusFence>>,
     target_locators: RwLock<BTreeMap<String, TargetLocator>>,
     desktop: Option<LinuxDesktop>,
+    /// GNOME Wayland whole-screen control; X11 window control is then absent.
+    gnome: Option<Arc<GnomeScreen>>,
+    /// Why no screen backend is available, when neither is.
+    screen_unavailable: Option<String>,
     application_launcher: Option<LinuxApplicationLauncher>,
     clipboard: Option<NativeClipboardController>,
     captured_frames: RwLock<CapturedFrames<FrameFence>>,
@@ -391,6 +396,14 @@ impl AtspiComputerAdapter {
                 event_generation.fetch_add(1, Ordering::AcqRel);
             });
         }
+        let (desktop, gnome, screen_unavailable) = match linux_gnome::detect().await {
+            WaylandScreen::NotWayland => match LinuxDesktop::open_default() {
+                Ok(desktop) => (Some(desktop), None, None),
+                Err(reason) => (None, None, Some(reason)),
+            },
+            WaylandScreen::Gnome(screen) => (None, Some(screen), None),
+            WaylandScreen::Unsupported(reason) => (None, None, Some(reason)),
+        };
         Ok(Self {
             connection,
             incarnation: Uuid::new_v4(),
@@ -399,7 +412,9 @@ impl AtspiComputerAdapter {
             latest: RwLock::new(BTreeMap::new()),
             window_input_fences: RwLock::new(WindowInputFences::new()),
             target_locators: RwLock::new(BTreeMap::new()),
-            desktop: LinuxDesktop::open_default().ok(),
+            desktop,
+            gnome,
+            screen_unavailable,
             application_launcher: LinuxApplicationLauncher::discover(),
             clipboard: NativeClipboardController::open().ok(),
             captured_frames: RwLock::new(CapturedFrames::new()),
@@ -410,8 +425,35 @@ impl AtspiComputerAdapter {
         })
     }
 
+    fn screen_device(&self) -> NativeAdapterResult<ScreenDevice<'_>> {
+        if let Some(screen) = &self.gnome {
+            return Ok(ScreenDevice::Gnome(screen));
+        }
+        self.desktop.as_ref().map(ScreenDevice::X11).ok_or_else(|| {
+            NativeAdapterError::unavailable(
+                format!(
+                    "this Linux desktop cannot be seen or controlled: {}",
+                    self.screen_unavailable
+                        .as_deref()
+                        .unwrap_or("no graphical display is reachable")
+                ),
+                true,
+            )
+        })
+    }
+
+    fn window_control_unavailable(&self, what: &str) -> NativeAdapterError {
+        if self.gnome.is_some() {
+            NativeAdapterError::unsupported(format!(
+                "Linux {what} is not available on GNOME Wayland; use the screen target for pointer, keyboard and screenshots, and semantic actions for windows"
+            ))
+        } else {
+            NativeAdapterError::unavailable(format!("Linux X11 {what} is unavailable"), true)
+        }
+    }
+
     fn screen_target(&self) -> Option<NativeTarget> {
-        let display = self.desktop.as_ref()?.probe()?;
+        let display = self.screen_device().ok()?.probe()?;
         let key = format!("{}\0{}\0{}", display.id, display.width, display.height);
         Some(NativeTarget {
             id: format!("screen:{}", stable_digest(&display.id)),
@@ -1298,9 +1340,10 @@ impl AtspiComputerAdapter {
             ));
         }
         self.revalidate_window_focus(&fence).await?;
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window activation is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window activation"))?;
         let window = fence.target.x11_window.clone().ok_or_else(|| {
             NativeAdapterError::unsupported("observed window has no exact X11 client identity")
         })?;
@@ -1662,9 +1705,7 @@ impl AtspiComputerAdapter {
         target: &NativeTarget,
         frame: Option<&ScreenFrameFence>,
     ) -> NativeAdapterResult<()> {
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 input is unavailable", true)
-        })?;
+        let desktop = self.screen_device()?;
         let inputs = screen_inputs(&command.action, target, frame)?;
         for (index, input) in inputs.into_iter().enumerate() {
             desktop
@@ -1679,9 +1720,10 @@ impl AtspiComputerAdapter {
         &self,
         record: TargetRecord,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window capture is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window capture"))?;
         let window = record.x11_window.clone().ok_or_else(|| {
             NativeAdapterError::definite(
                 NativeAdapterErrorCode::TargetNotFound,
@@ -1719,9 +1761,10 @@ impl AtspiComputerAdapter {
         record: TargetRecord,
         options: crate::NativeCaptureOptions,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window capture is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window capture"))?;
         let window = record.x11_window.clone().ok_or_else(|| {
             NativeAdapterError::definite(
                 NativeAdapterErrorCode::TargetNotFound,
@@ -1767,9 +1810,10 @@ impl AtspiComputerAdapter {
         mime_type: &str,
         bytes: Vec<u8>,
     ) -> NativeAdapterResult<NativeCapturedFrame> {
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window capture is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window capture"))?;
         let current = desktop
             .windows()
             .await
@@ -1928,9 +1972,10 @@ impl AtspiComputerAdapter {
                 "window input requires matching accessibility and X11 process identity",
             ));
         }
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window input is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window input"))?;
         // Raw input never substitutes screen authority or implicitly focuses
         // another client. Explicit window focus must precede input.
         let activation = desktop
@@ -2018,9 +2063,10 @@ impl AtspiComputerAdapter {
         self.validate(command).await?;
         let fence = self.window_keyboard_fence(command).await?;
         self.revalidate_window_focus(&fence).await?;
-        let desktop = self.desktop.as_ref().ok_or_else(|| {
-            NativeAdapterError::unavailable("Linux X11 window input is unavailable", true)
-        })?;
+        let desktop = self
+            .desktop
+            .as_ref()
+            .ok_or_else(|| self.window_control_unavailable("window input"))?;
         let window = fence.target.x11_window.clone().ok_or_else(|| {
             NativeAdapterError::unsupported("window input has no exact X11 client identity")
         })?;
@@ -2072,7 +2118,7 @@ impl AtspiComputerAdapter {
 #[async_trait]
 impl ComputerAdapter for AtspiComputerAdapter {
     fn capabilities(&self) -> NativeCapabilities {
-        let desktop = self.desktop.is_some();
+        let desktop = self.desktop.is_some() || self.gnome.is_some();
         NativeCapabilities {
             semantic_observation: true,
             app_discovery: true,
@@ -2126,13 +2172,11 @@ impl ComputerAdapter for AtspiComputerAdapter {
     async fn capture(&self, target_id: &str) -> NativeAdapterResult<NativeCapturedFrame> {
         if let Some(target) = self.screen_target() {
             if target.id == target_id {
-                let desktop = self.desktop.as_ref().ok_or_else(|| {
-                    NativeAdapterError::unavailable("Linux X11 screen capture is unavailable", true)
-                })?;
+                let desktop = self.screen_device()?;
                 let captured = desktop.capture().await.map_err(|error| {
                     NativeAdapterError::definite(
                         NativeAdapterErrorCode::DriverFailed,
-                        format!("capture Linux X11 screen: {error}"),
+                        format!("capture Linux screen: {error}"),
                         true,
                     )
                 })?;
@@ -2180,13 +2224,11 @@ impl ComputerAdapter for AtspiComputerAdapter {
     ) -> NativeAdapterResult<NativeCapturedFrame> {
         if let Some(target) = self.screen_target() {
             if target.id == target_id {
-                let desktop = self.desktop.as_ref().ok_or_else(|| {
-                    NativeAdapterError::unavailable("Linux X11 screen capture is unavailable", true)
-                })?;
+                let desktop = self.screen_device()?;
                 let captured = desktop.capture_rgba().await.map_err(|error| {
                     NativeAdapterError::definite(
                         NativeAdapterErrorCode::DriverFailed,
-                        format!("capture Linux X11 live screen: {error}"),
+                        format!("capture Linux live screen: {error}"),
                         true,
                     )
                 })?;
@@ -2525,12 +2567,10 @@ impl AtspiComputerAdapter {
                     .get(&command.target_id)
                     .cloned();
                 if let Some(window) = locator.and_then(|locator| locator.record.x11_window) {
-                    let desktop = self.desktop.as_ref().ok_or_else(|| {
-                        NativeAdapterError::unavailable(
-                            "Linux X11 window focus is unavailable",
-                            true,
-                        )
-                    })?;
+                    let desktop = self
+                        .desktop
+                        .as_ref()
+                        .ok_or_else(|| self.window_control_unavailable("window focus"))?;
                     desktop
                         .focus_window(window.id, window.bounds)
                         .await
@@ -2575,8 +2615,45 @@ fn screen_input_error(error: PlatformError, first_input: bool) -> NativeAdapterE
             NativeAdapterError::unsupported(message)
         }
         error => NativeAdapterError::outcome_unknown(format!(
-            "Linux XTEST delivery could not be confirmed: {error}"
+            "Linux input delivery could not be confirmed: {error}"
         )),
+    }
+}
+
+/// The whole-screen backend: X11 (a real display, Xvfb or another X server) or
+/// GNOME on Wayland through Mutter.
+enum ScreenDevice<'a> {
+    X11(&'a LinuxDesktop),
+    Gnome(&'a GnomeScreen),
+}
+
+impl ScreenDevice<'_> {
+    fn probe(&self) -> Option<v1::Display> {
+        match self {
+            Self::X11(desktop) => desktop.probe(),
+            Self::Gnome(screen) => screen.probe(),
+        }
+    }
+
+    async fn capture(&self) -> Result<CapturedFrame, PlatformError> {
+        match self {
+            Self::X11(desktop) => desktop.capture().await,
+            Self::Gnome(screen) => screen.capture().await,
+        }
+    }
+
+    async fn capture_rgba(&self) -> Result<LinuxRgbaFrame, PlatformError> {
+        match self {
+            Self::X11(desktop) => desktop.capture_rgba().await,
+            Self::Gnome(screen) => screen.capture_rgba().await,
+        }
+    }
+
+    async fn inject(&self, input: &v1::DesktopInput) -> Result<(), PlatformError> {
+        match self {
+            Self::X11(desktop) => desktop.inject(input).await,
+            Self::Gnome(screen) => screen.inject(input).await,
+        }
     }
 }
 

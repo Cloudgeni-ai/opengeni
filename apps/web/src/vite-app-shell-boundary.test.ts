@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 describe("web app-shell chunk boundary", () => {
-  test("coalesces eager route parsers without promoting lazy implementations", async () => {
+  test("coalesces eager route parsers and the scrollbar entry without promoting lazy implementations", async () => {
     const config = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
     const group = config.match(/name: "startup-sdk-runtime",[\s\S]*?priority: (\d+),/u);
     const pattern = group?.[0].match(/test: \/(.+)\/,/u)?.[1];
@@ -16,6 +16,11 @@ describe("web app-shell chunk boundary", () => {
         `/repo/apps/web/src/${relative}`.replaceAll("/", separator);
       for (const helper of ["integration-connect-return", "secrets-route", "composer-launch"]) {
         expect(runtimeTest.test(moduleId(`lib/${helper}.ts`))).toBe(true);
+      }
+      for (const relative of ["scrollbars.ts", "lib/scrollbars.ts"]) {
+        expect(
+          runtimeTest.test(`/repo/packages/react/src/${relative}`.replaceAll("/", separator)),
+        ).toBe(true);
       }
       for (const relative of [
         "routes/secrets.tsx",
@@ -33,6 +38,10 @@ describe("web app-shell chunk boundary", () => {
       )?.[1];
       expect(Number(group?.[1])).toBeGreaterThan(Number(routePriority));
     }
+    const uiPriority = config.match(/name: "ui-runtime",[\s\S]*?priority: (\d+),/u)?.[1];
+    // The entry uses this group, while the shared probe keeps the stronger
+    // existing UI-runtime placement even though both regexes match it.
+    expect(Number(uiPriority)).toBeGreaterThan(Number(group?.[1]));
     expect(config).not.toContain('name: "composer-launch"');
   });
 

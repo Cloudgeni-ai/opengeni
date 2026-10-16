@@ -505,7 +505,13 @@ controller, reads historical publisher source as data, and preserves the failed
 origin and absent Site artifact. Only complete positive acknowledged cohorts are
 eligible; unknown writes never replay. Distinct linked receipts and Site pins are
 nonpromotable and require explicit manual staging consumer authority. Do not relax
-the ordinary publisher/source equality, production or scheduled release guards.
+the canonical receipt verifier's source equality, production or scheduled release guards.
+Exact-source canary publication may select a normally merged protected-main ancestor
+with successful exact-source CI through `scripts/canary-source-admission.ts`.
+The trusted current-main controller stays checked out separately, and supplied
+Sigstore provenance identifies both it and the selected package source without
+overriding GitHub identity. Split-source receipt protocol V2 is deliberately not
+accepted by the canonical V1 reconciliation verifier. See `CONTRIBUTING.md`.
 
 See the hotfix admission contract in
 `.github/workflows/source-admission.yml`, `scripts/check-source-admission.mjs`,

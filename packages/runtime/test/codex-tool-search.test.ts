@@ -157,6 +157,54 @@ describe("searchToolPool named tools", () => {
 });
 
 describe("searchToolPool disclosure bounds", () => {
+  const names = (tools: Tool[]) => tools.map((tool) => (tool as { name: string }).name);
+  function interactionTool(name: string, description: string): Tool {
+    return { ...connectorTool(name, description), name: `interaction__${name}` } as Tool;
+  }
+  const INTERACTION_POOL: Tool[] = [
+    interactionTool("browser_open", "Open or reuse a browser session"),
+    interactionTool("browser_observe", "Read one tab's accessibility view"),
+    interactionTool("browser_act", "Perform one browser action"),
+    interactionTool("browser_screenshot", "Capture tab pixels"),
+    interactionTool("browser_tabs", "Manage browser tabs"),
+    interactionTool("browser_downloads", "List browser downloads"),
+    interactionTool("computer_open", "Open a desktop computer session"),
+    interactionTool("computer_act", "Act on the desktop"),
+    ...POOL,
+  ];
+
+  test("one browser result discloses the browser working set beyond the limit", () => {
+    expect(names(searchToolPool(INTERACTION_POOL, { query: "browser_open", limit: 1 }))).toEqual([
+      "interaction__browser_open",
+      "interaction__browser_observe",
+      "interaction__browser_act",
+      "interaction__browser_screenshot",
+      "interaction__browser_tabs",
+    ]);
+    expect(
+      names(searchToolPool(INTERACTION_POOL, { query: "", names: ["interaction__browser_act"] })),
+    ).toEqual([
+      "interaction__browser_act",
+      "interaction__browser_open",
+      "interaction__browser_observe",
+      "interaction__browser_screenshot",
+      "interaction__browser_tabs",
+    ]);
+  });
+
+  test("family companions come only from the authorized pool and leave other tools alone", () => {
+    const partial = INTERACTION_POOL.filter(
+      (tool) => (tool as { name: string }).name !== "interaction__browser_tabs",
+    );
+    expect(names(searchToolPool(partial, { query: "computer_open", limit: 1 }))).toEqual([
+      "interaction__computer_open",
+      "interaction__computer_act",
+    ]);
+    expect(names(searchToolPool(partial, { query: "gmail_send_email", limit: 1 }))).toEqual([
+      "codex_apps__gmail_send_email",
+    ]);
+  });
+
   test("discloses a rich nested schema admitted by discovery", () => {
     const rich = connectorTool("rich", "Read a record");
     if (rich.type !== "function") throw new Error("expected a function tool");

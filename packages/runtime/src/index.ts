@@ -15,6 +15,11 @@ export {
   compactionPrefixCuts,
 } from "./anthropic-compaction";
 export { AnthropicProviderRejection } from "./anthropic-messages";
+export {
+  createModelImageSizer,
+  type ModelImageSizerOptions,
+  type SizedImage,
+} from "./model-image-sizing";
 import { runSingleModelCall, type SingleModelCallTarget } from "./single-model-call";
 export {
   runSingleModelCall,

@@ -265,8 +265,10 @@ export default defineConfig({
               // Boot and App also read the connect-return, Secrets and composer
               // search parsers. Coalesce these small eager leaves here without
               // recursively pulling their lazy route consumers into startup.
+              // The before-paint scrollbar entry is eager too; its shared probe
+              // remains in the higher-priority ui-runtime group.
               name: "startup-sdk-runtime",
-              test: /(?:packages[\\/]sdk[\\/]src[\\/](?:errors|types|retained-artifacts|interaction)\.ts|packages[\\/]contracts[\\/]src[\\/]browser-storage\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:signup-attribution|analytics-observer|integration-connect-return|secrets-route|composer-launch)\.ts|vite[\\/]preload-helper\.js)$/,
+              test: /(?:packages[\\/]sdk[\\/]src[\\/](?:errors|types|retained-artifacts|interaction)\.ts|packages[\\/]contracts[\\/]src[\\/]browser-storage\.ts|packages[\\/]react[\\/]src[\\/](?:scrollbars|lib[\\/]scrollbars)\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:signup-attribution|analytics-observer|integration-connect-return|secrets-route|composer-launch)\.ts|vite[\\/]preload-helper\.js)$/,
               includeDependenciesRecursively: false,
               priority: 5,
             },

@@ -1,6 +1,5 @@
 import type {
   AttemptToolResult,
-  AttachedBrowserBridge,
   AttachedBrowserDevice,
   AuthRun,
   AuthRunListResponse,
@@ -27,7 +26,6 @@ import type {
   BrowserSession,
   BrowserSessionMutationResponse,
   BrowserTarget,
-  BrowserTargetListResponse,
   ComputerAction,
   ComputerActionReceipt,
   ComputerClipboard,
@@ -91,8 +89,20 @@ export type InteractionDiscovery = {
   browsers: BrowserSession[];
   computers: ComputerSession[];
   identities: BrowserIdentity[];
-  attachedBrowserBridges: AttachedBrowserBridge[];
-  attachedBrowsers: AttachedBrowserDevice[];
+  /** Online machines ready for the extension; listed only when no attached
+   * profile is connected. */
+  attachedBrowserBridges: Array<{ enrollmentId: string; connectedProfileCount: number }>;
+  attachedBrowsers: Array<{
+    id: string;
+    name: string;
+    profileLabel?: string;
+    browserName: string;
+    platform: AttachedBrowserDevice["platform"];
+    state: AttachedBrowserDevice["state"];
+    tabCount: number;
+    /** Capabilities this profile lacks; absent when it supports all of them. */
+    unsupported?: string[];
+  }>;
 };
 
 export type CodemodeBrowserOpenOptions = {
@@ -101,7 +111,9 @@ export type CodemodeBrowserOpenOptions = {
   name?: string | undefined;
   initialUrl?: string | undefined;
   headless?: boolean | undefined;
-  placement?: InteractionPlacement | undefined;
+  /** `{ kind: "attached_device" }` without a deviceId opens the person's own
+   * connected Chrome (the only, or most recently active, profile). */
+  placement?: InteractionPlacement | { kind: "attached_device" } | undefined;
   identityId?: string | undefined;
   baseRevisionId?: string | undefined;
   linkedComputerSessionId?: string | undefined;
@@ -159,30 +171,66 @@ export type CodemodeBrowserAgentNode = Readonly<{
   name?: string;
   description?: string;
   value?: string | { redacted: true; reason: string };
-  states: readonly string[];
-  actions: readonly string[];
+  /** Omitted when empty. */
+  states?: readonly string[];
+  /** Omitted when empty. */
+  actions?: readonly string[];
 }>;
 
 export type CodemodeBrowserAgentView = Readonly<{
-  kind: "compact";
   sourceKind: "snapshot" | "diff" | "none";
   nodes: readonly CodemodeBrowserAgentNode[];
-  sourceNodeCount: number;
-  omittedNodeCount: number;
-  removedRefCount: number;
-  clippedFieldCount: number;
-  maxNodes: number;
-  maxNodeBytes: number;
+  /** Nodes left out by the output budget; absent when nothing was left out. */
+  omittedNodeCount?: number;
+  removedRefCount?: number;
+  clippedFieldCount?: number;
 }>;
 
-export type CodemodeBrowserAgentObservation = BrowserObservation & {
-  /** Present on the compact default; absent when the full tree was requested. */
-  agentView?: CodemodeBrowserAgentView;
-};
+/** A tab with the identity, page, selection and fences a next call needs. */
+export type CodemodeBrowserTarget = Readonly<{
+  id: string;
+  kind: BrowserTarget["kind"];
+  title: string;
+  url: string;
+  selected: boolean;
+  controllerGeneration: string;
+  targetGeneration: string;
+  documentGeneration: string | null;
+}>;
 
-export type CodemodeBrowserActionReceipt = Omit<BrowserActionReceipt, "observation"> & {
-  observation: CodemodeBrowserAgentObservation | null;
-};
+export type CodemodeBrowserTargetList = Readonly<{
+  browserSessionId: string;
+  targets: readonly CodemodeBrowserTarget[];
+}>;
+
+/** The compact default observation. Empty, zero and default fields are
+ * omitted; use observeFull() for the complete BrowserObservation. */
+export type CodemodeBrowserAgentObservation = Readonly<{
+  target: CodemodeBrowserTarget;
+  frameId?: string;
+  viewport?: Readonly<{
+    width: number;
+    height: number;
+    deviceScaleFactor?: number;
+    maxTouchPoints?: number;
+  }>;
+  focusedRef?: string;
+  changedRegions?: BrowserObservation["changedRegions"];
+  diagnostics?: BrowserObservation["diagnostics"];
+  dialog?: NonNullable<BrowserObservation["dialog"]>;
+  screenshot?: NonNullable<BrowserObservation["screenshot"]>;
+  agentView: CodemodeBrowserAgentView;
+}>;
+
+/** The compact default receipt; pass view "full" for the complete
+ * BrowserActionReceipt with operation id and timestamps. */
+export type CodemodeBrowserActionReceipt = Readonly<{
+  targetId: string;
+  state: BrowserActionReceipt["state"];
+  error?: NonNullable<BrowserActionReceipt["error"]>;
+  targets?: BrowserActionReceipt["targets"];
+  observation?: CodemodeBrowserAgentObservation;
+}>;
 
 export type CodemodeBrowserActionOptions = BrowserActionFences & {
   view?: "compact" | "full" | "none" | undefined;
@@ -586,14 +634,14 @@ export class CodemodeBrowserClipboard {
     text: string,
     options: BrowserActionFences & { targetId?: string | undefined } = {},
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     return await this.act({ type: "clipboard", operation: "write", text }, options, callOptions);
   }
 
   async clear(
     options: BrowserActionFences & { targetId?: string | undefined } = {},
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     return await this.act({ type: "clipboard", operation: "clear" }, options, callOptions);
   }
 
@@ -604,7 +652,7 @@ export class CodemodeBrowserClipboard {
       content?: "selection" | "value" | "text" | undefined;
     } = {},
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     const {
       targetId,
       expectedTargetGeneration,
@@ -631,7 +679,7 @@ export class CodemodeBrowserClipboard {
       text?: string | undefined;
     } = {},
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     const {
       targetId,
       expectedTargetGeneration,
@@ -655,7 +703,7 @@ export class CodemodeBrowserClipboard {
     action: BrowserAction,
     options: BrowserActionFences & { targetId?: string | undefined },
     callOptions: CodemodeCallOptions,
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     const { targetId, ...fences } = options;
     return await this.tabs
       .use(await this.tabs.resolveId(targetId, callOptions))
@@ -669,7 +717,7 @@ export class CodemodeBrowserTabCollection {
     private readonly browserSessionId: string,
   ) {}
 
-  async list(callOptions: CodemodeCallOptions = {}): Promise<BrowserTargetListResponse> {
+  async list(callOptions: CodemodeCallOptions = {}): Promise<CodemodeBrowserTargetList> {
     return await callStructured(
       this.client,
       PATH.browserTabs,
@@ -688,7 +736,7 @@ export class CodemodeBrowserTabCollection {
 
   async open(url?: string, callOptions: CodemodeCallOptions = {}): Promise<CodemodeBrowserTab> {
     const before = await this.list(callOptions);
-    const after = await callStructured<BrowserTargetListResponse>(
+    const after = await callStructured<CodemodeBrowserTargetList>(
       this.client,
       PATH.browserTabs,
       {
@@ -710,7 +758,7 @@ export class CodemodeBrowserTabCollection {
     targetId: string,
     callOptions: CodemodeCallOptions = {},
   ): Promise<CodemodeBrowserTab> {
-    const after = await callStructured<BrowserTargetListResponse>(
+    const after = await callStructured<CodemodeBrowserTargetList>(
       this.client,
       PATH.browserTabs,
       { operation: "select", browserSessionId: this.browserSessionId, targetId },
@@ -725,7 +773,7 @@ export class CodemodeBrowserTabCollection {
   async close(
     targetId: string,
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserTargetListResponse> {
+  ): Promise<CodemodeBrowserTargetList> {
     return await callStructured(
       this.client,
       PATH.browserTabs,
@@ -828,7 +876,7 @@ export class CodemodeBrowserTab {
     setting: BrowserPermissionSetting,
     fences: BrowserActionFences = {},
     callOptions: CodemodeCallOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<CodemodeBrowserActionReceipt> {
     return await this.act({ type: "permission", permission, setting }, fences, callOptions);
   }
 
