@@ -64,6 +64,15 @@ const LOCK: &str = "agent.lock";
 /// record has used.
 const GENERATIONS: &str = "generations";
 
+/// Milliseconds since the Unix epoch, as records keep times.
+pub(crate) fn unix_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 /// Where a sandbox's disk is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +122,11 @@ pub(crate) struct Record {
     /// been idle. Steps write it along with what they change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used_ms: Option<u64>,
+    /// When the store's latest copy was made, in milliseconds since the
+    /// Unix epoch. It stays once the sandbox changes again: that copy is
+    /// still what losing this host would go back to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backed_up_ms: Option<u64>,
 }
 
 impl Record {
@@ -131,6 +145,7 @@ impl Record {
             archived: false,
             removing: false,
             last_used_ms: None,
+            backed_up_ms: None,
         }
     }
 
@@ -171,6 +186,7 @@ pub(crate) struct Change {
     execution: bool,
     removing: bool,
     last_used_ms: Option<u64>,
+    backed_up_ms: Option<u64>,
 }
 
 impl Change {
@@ -211,6 +227,13 @@ impl Change {
         self
     }
 
+    /// Records that the store now holds a copy made at `unix_ms`. It never
+    /// moves backwards.
+    pub fn backed_up(mut self, unix_ms: u64) -> Self {
+        self.backed_up_ms = Some(unix_ms);
+        self
+    }
+
     fn apply_to(self, record: &mut Record) {
         if let Some(disk) = self.disk {
             record.disk = disk;
@@ -227,6 +250,9 @@ impl Change {
         record.removing |= self.removing;
         if let Some(at) = self.last_used_ms {
             record.last_used_ms = Some(record.last_used_ms.map_or(at, |was| was.max(at)));
+        }
+        if let Some(at) = self.backed_up_ms {
+            record.backed_up_ms = Some(record.backed_up_ms.map_or(at, |was| was.max(at)));
         }
     }
 }

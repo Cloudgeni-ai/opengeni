@@ -32,6 +32,10 @@ simplest fix, or write the window down instead of adding a mechanism.
 ## Consequences
 
 - Review findings are judged against this table.
+- Archiving follows idleness, not a schedule, so a sandbox that stays busy
+  for a week has a week to lose if its host dies. Status reports
+  `backed_up_ms`, when the store's latest copy was made, so Opengeni can
+  show it and decide whether a long-running sandbox needs a checkpoint.
 - Two mechanisms exist only to meet the first row: the separate pager process
   ([8](0008-lazy-wake-with-a-working-set.md)) and the disk holder, which keeps
   lost disk writes detectable after an agent restart

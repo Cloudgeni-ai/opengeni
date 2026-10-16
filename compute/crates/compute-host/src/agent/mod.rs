@@ -31,7 +31,7 @@ use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
 use crate::protocol::{About, HostStatus, Id, SandboxConfig, StepStats};
-use crate::state::{Record, Records, StateError, claim_host};
+use crate::state::{Record, Records, StateError, claim_host, unix_ms_now};
 use crate::step::{After, Live};
 use crate::store::Store;
 
@@ -61,15 +61,6 @@ const TEARDOWN_RETRY: Duration = Duration::from_secs(30);
 /// Where the agent's clock for the decision core starts, so a sandbox found
 /// on disk can have been idle since long before this agent started.
 const CLOCK_BASE: Duration = Duration::from_secs(10 * 365 * 86_400);
-
-/// Milliseconds since the Unix epoch.
-fn unix_ms_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
-}
 
 /// Refuses settings no host can run with.
 fn check_config(config: &HostConfig) -> Result<(), HostError> {

@@ -449,6 +449,11 @@ pub struct SandboxStatus {
     pub level: LevelName,
     /// Where a copy of its current state is kept besides the VM.
     pub durability: DurabilityName,
+    /// When the store's latest copy of it was made, in milliseconds since
+    /// the Unix epoch: what losing this host would go back to. A sandbox
+    /// that stays busy is not archived, so this can be long ago.
+    #[serde(default)]
+    pub backed_up_ms: Option<u64>,
     /// Whether its running programs survive (a memory image or live VM).
     pub memory_saved: bool,
     /// The step in progress.

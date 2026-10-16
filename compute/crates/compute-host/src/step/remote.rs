@@ -14,7 +14,7 @@ use super::{
 };
 use crate::image::{Parts, Suspect};
 use crate::layout::{remove_if_present, write_atomic};
-use crate::state::{Change, Disk};
+use crate::state::{Change, Disk, unix_ms_now};
 use crate::store::{Archive, FetchInto, FetchedMemory, JailedFile, SavedFiles, SavedImage, Store};
 
 impl<E: Engine, S: Store> Job<E, S> {
@@ -90,7 +90,8 @@ impl<E: Engine, S: Store> Job<E, S> {
         if let Err(error) = written {
             return io_failure(OP, error);
         }
-        match self.commit(Change::new().archived(true)).await {
+        let change = Change::new().archived(true).backed_up(unix_ms_now());
+        match self.commit(change).await {
             Ok(()) => Outcome::Done,
             Err(error) => state_failure(&error),
         }

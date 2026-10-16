@@ -143,6 +143,23 @@ fn last_use_never_moves_backwards() {
 }
 
 #[test]
+fn the_backup_time_stays_until_a_newer_copy() {
+    let mut record = Record::new(id(1), 0, allocation(), config());
+    Change::new()
+        .archived(true)
+        .backed_up(2_000)
+        .apply_to(&mut record);
+    // The sandbox changes again: the store's copy is no longer current, but
+    // it is still what losing the host would go back to.
+    Change::new().archived(false).apply_to(&mut record);
+    assert_eq!(record.backed_up_ms, Some(2_000));
+    Change::new().backed_up(1_000).apply_to(&mut record);
+    assert_eq!(record.backed_up_ms, Some(2_000), "an older time is ignored");
+    let json = serde_json::to_value(Record::new(id(1), 0, allocation(), config())).unwrap();
+    assert!(json.get("backed_up_ms").is_none(), "older agents read it");
+}
+
+#[test]
 fn requests_naming_another_execution_are_refused() {
     let mut record = Record::new(id(1), 0, allocation(), config());
     record.generation = 4;

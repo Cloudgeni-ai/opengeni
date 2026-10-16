@@ -91,6 +91,14 @@ and what we chose not to build.
 
 ## Capacity and cost
 
+- **Nested hosts need their huge-page pool reserved** (`vm.nr_hugepages`,
+  or `hugepages=` on the kernel command line so it is reserved before
+  memory fragments). Pages in the pool serve only guests, so size it to the
+  guest memory meant to be resident at once, ready pool included, and leave
+  the rest to the host: page cache, pagers and the agent. The agent refuses
+  to start the nested profile without a pool. On cgroup v2 without the
+  `memory_hugetlb_accounting` mount option, a VM's huge pages do not show in
+  its `memory.current`.
 - **Sleeping sandboxes are not free on the host.** Each record keeps a
   network namespace and its guest-port listeners even when its memory and
   disk live only in object storage. The final measurements report agent

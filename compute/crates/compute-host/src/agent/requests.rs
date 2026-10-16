@@ -452,6 +452,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     revision: record.as_ref().map_or(0, |record| record.revision),
                     level: view.state.level.into(),
                     durability: view.state.durability.into(),
+                    backed_up_ms: record.as_ref().and_then(|record| record.backed_up_ms),
                     memory_saved: view.state.keeps_programs(),
                     step: view.step.map(|step| step_name(step).to_owned()),
                     holds: view.holds,

@@ -415,6 +415,7 @@ async fn an_uncertain_eviction_keeps_the_local_copy() {
     let sandbox = Sandbox::new().await;
     let store = sandbox.root.path().join("store");
     let idle = sandbox.record(Change::new()).await;
+    let before = crate::state::unix_ms_now();
     let ran = sandbox
         .job(Directory::new(&store), idle, false)
         .run(Step::Archive)
@@ -422,6 +423,13 @@ async fn an_uncertain_eviction_keeps_the_local_copy() {
     assert_eq!(ran.outcome, Outcome::Done);
     let archived = sandbox.records.get(sandbox.id).unwrap();
     assert!(archived.archived);
+    assert!(
+        archived
+            .backed_up_ms
+            .is_some_and(|at| (before..=crate::state::unix_ms_now()).contains(&at)),
+        "an archive records when its copy was made: {:?}",
+        archived.backed_up_ms
+    );
     sandbox.fail_record_writes();
 
     let job = tokio::spawn(
