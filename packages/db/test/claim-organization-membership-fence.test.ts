@@ -146,7 +146,7 @@ describe("turn claim organization-membership fence", () => {
     }
   }, 180_000);
 
-  test("only the retired host-MCP authority tables carry triggers that take the key", async () => {
+  test("membership-lock triggers are retired host-MCP writers or insert-only Site binding", async () => {
     // The claim can stay fence-free only while no trigger it can fire takes
     // the membership key. Pin the complete trigger set so a new one is a
     // deliberate review of the claim's lock order, not a silent inversion.
@@ -165,7 +165,21 @@ describe("turn claim organization-membership fence", () => {
         "host_mcp_turn_authorities.host_mcp_inherited_turn_authority_guard",
         "host_mcp_turn_authorities.host_mcp_scheduled_turn_authority_guard",
         "host_mcp_turn_authorities.host_mcp_turn_authority_guard",
+        "sessions.zz_sessions_site_audience",
       ]);
+      // Claims update sessions, never insert them. The Site audience trigger
+      // validates immutable fields then returns before its INSERT-only policy
+      // fence. Keep the explicit exception tied to that early return, rather
+      // than allowing a new trigger to silently serialize claims.
+      const [siteBinding] = await admin<{ source: string }[]>`
+        select p.prosrc as source from pg_trigger t
+        join pg_proc p on p.oid=t.tgfoid
+        where t.tgrelid='sessions'::regclass and t.tgname='zz_sessions_site_audience'`;
+      expect(siteBinding!.source).toMatch(
+        /IF TG_OP='UPDATE' THEN[\s\S]*?RETURN NEW;\s*END IF;[\s\S]*?organization-membership:/,
+      );
+      const updateBranch = siteBinding!.source.split("RETURN NEW;")[0]!;
+      expect(updateBranch).not.toContain("pg_advisory");
     } finally {
       await admin.end();
     }
