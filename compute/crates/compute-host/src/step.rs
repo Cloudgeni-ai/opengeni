@@ -41,9 +41,11 @@ use crate::restore_notice::tell_restored;
 use crate::state::{Change, Disk, Record, Records, StateError};
 use crate::store::{FetchInto, FetchedMemory, Receipt, SavedFiles, SavedImage, Store};
 
-/// How long a restore waits for the guest to acknowledge the restore notice.
-/// A guest that listens answers in about a millisecond.
-const NOTICE_TIMEOUT: Duration = Duration::from_millis(250);
+/// How long a restore keeps trying to tell the guest of it. A listening
+/// guest answers in milliseconds, but only once its kernel has handled the
+/// vsock transport reset that follows every restore; under a burst of
+/// restores that can take a while.
+const NOTICE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Longest a wake waits for its learned working set before resuming the
 /// guest anyway; whatever is missing then arrives on demand.
@@ -786,10 +788,11 @@ impl<E: Engine, S: Store> Job<E, S> {
             return;
         };
         let started = Instant::now();
-        match tell_restored(&self.spec.vsock_path(), port, NOTICE_TIMEOUT).await {
-            Ok(()) => tracing::debug!(
+        match tell_restored(&self.spec.vsock_path(), port, self.id, NOTICE_DEADLINE).await {
+            Ok(attempts) => tracing::debug!(
                 id = %self.id,
                 us = started.elapsed().as_micros(),
+                attempts,
                 "guest acknowledged the restore"
             ),
             Err(error) => tracing::warn!(id = %self.id, %error, "guest not told of its restore"),
@@ -1074,7 +1077,7 @@ impl<E: Engine, S: Store> Job<E, S> {
 /// directory only the host can reach, and checks each is a plain file of
 /// its own. A renamed link stays a link, so the check sees what the VMM
 /// left, and nothing jailed can swap it afterwards.
-fn take_written(files: &SnapshotFiles, scratch: &Path) -> io::Result<SnapshotFiles> {
+pub(crate) fn take_written(files: &SnapshotFiles, scratch: &Path) -> io::Result<SnapshotFiles> {
     match fs::remove_dir_all(scratch) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
         _ => {}
@@ -1093,7 +1096,7 @@ fn take_written(files: &SnapshotFiles, scratch: &Path) -> io::Result<SnapshotFil
 
 /// Flushes a file in a VM's jail to disk without following a link or
 /// blocking on a pipe the VMM might have put in its place.
-fn sync_jailed(path: &Path) -> io::Result<()> {
+pub(crate) fn sync_jailed(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::FileTypeExt;
     use std::os::unix::fs::OpenOptionsExt;
 
