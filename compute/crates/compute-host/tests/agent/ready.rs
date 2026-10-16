@@ -374,7 +374,9 @@ fn template_dirs(lab: &Lab) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unused_shape_gives_up_its_template_and_ready_sandboxes_until_its_next_create() {
-    const UNUSED: Duration = Duration::from_secs(2);
+    // Long enough for a template build and both fills to finish inside it
+    // while the other tests load the host's disk.
+    const UNUSED: Duration = Duration::from_secs(5);
     let start = |root, world| {
         Lab::start_configured(
             root,
