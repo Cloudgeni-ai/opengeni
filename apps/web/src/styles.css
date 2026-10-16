@@ -467,6 +467,13 @@ body {
   animation: pending-dot 1.2s infinite ease-in-out both;
 }
 
+/* Spend the title's last pixels on letters, not an ellipsis. Keep the fade
+   within the title column, before the gap to trailing icons. The mask affects
+   only text, so the rail glow and selected/hover backgrounds stay untouched. */
+[data-session-row-title] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 1rem), transparent);
+}
+
 /* Workspace Insights — tabular figures for meter columns */
 [data-insights] {
   font-feature-settings: "cv11", "ss01", "ss03", "tnum";
