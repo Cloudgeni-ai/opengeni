@@ -19,6 +19,10 @@
 //! issued against an older state can never overwrite a newer one. The
 //! decision is the pure [`apply`]; [`Records`] adds the disk and ordering.
 //!
+//! Keeping VMs alive across agent restarts and taking them back from
+//! durable per-VM records follows the design of SPACE
+//! (<https://github.com/perplexityai/SPACE>, Apache-2.0); see `NOTICE`.
+//!
 //! One agent owns a state root at a time: [`Records::open`] takes an
 //! exclusive lock on `<root>/agent.lock`, which the kernel releases when the
 //! agent's process ends, however it ends. A write in flight holds both its
