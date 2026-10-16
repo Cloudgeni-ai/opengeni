@@ -1116,11 +1116,11 @@ def serve_notices(server: socket.socket, *, set_clock: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--listen", default="vsock:53")
+    parser.add_argument("--listen", default="vsock:55")
     parser.add_argument(
         "--notice",
         default=None,
-        help="address for the host agent's restore notices, such as vsock:54",
+        help="address for the host agent's restore notices, such as vsock:56",
     )
     parser.add_argument(
         "--keep-clock",

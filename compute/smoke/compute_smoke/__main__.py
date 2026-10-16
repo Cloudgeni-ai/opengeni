@@ -4,7 +4,7 @@
 
 Environment:
   COMPUTE_SMOKE_SOCKET           the host agent's API socket (/run/compute-host.sock)
-  COMPUTE_SMOKE_GUEST_PORT       the guest service's vsock port (53)
+  COMPUTE_SMOKE_GUEST_PORT       the guest service's vsock port (55)
   COMPUTE_SMOKE_RESTART_AGENT    a command that restarts the host agent, for
                                  scenarios that prove sandboxes survive it
   COMPUTE_SMOKE_SCENARIO_PACKAGES  extra scenario packages, comma separated
@@ -42,7 +42,7 @@ SOCKET_ENV = "COMPUTE_SMOKE_SOCKET"
 GUEST_PORT_ENV = "COMPUTE_SMOKE_GUEST_PORT"
 RESTART_ENV = "COMPUTE_SMOKE_RESTART_AGENT"
 DEFAULT_SOCKET = "/run/compute-host.sock"
-DEFAULT_GUEST_PORT = 53
+DEFAULT_GUEST_PORT = 55
 API_SURFACE = "ecw"
 # The conventional status of a process ended by SIGTERM.
 TERMINATED_EXIT_CODE = 128 + 15
