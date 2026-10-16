@@ -151,32 +151,6 @@ function sessionAuthorizationDb(privateSessionOwner?: string) {
         if (tableName === "workspaces" && selected.size === 1 && selected.has("accountId")) {
           return [{ accountId: ACCOUNT_ID }];
         }
-        if (
-          tableName === "sessions" &&
-          selected.has("sessionId") &&
-          selected.has("rootSessionId") &&
-          selected.has("visibility") &&
-          selected.has("ownerSubjectId")
-        ) {
-          return [
-            {
-              sessionId: SESSION_ID,
-              rootSessionId: SESSION_ID,
-              visibility: privateSessionOwner ? "user_private" : "workspace_shared",
-              ownerSubjectId: privateSessionOwner ?? null,
-            },
-          ];
-        }
-        if (
-          tableName === "sessions" &&
-          selected.size === 3 &&
-          selected.has("id") &&
-          selected.has("accountId") &&
-          selected.has("rootSessionId") &&
-          privateSessionOwner
-        ) {
-          return [];
-        }
         throw new Error("Unexpected editable artifact route select projection");
       },
     };
@@ -225,13 +199,26 @@ function sessionAuthorizationDb(privateSessionOwner?: string) {
         ) {
           return [{ account_id: rls.accountId, workspace_id: rls.workspaceId }];
         }
-        if (
-          query.usedTables.includes("sessions") &&
-          query.usedTables.includes("slack_interactions") &&
-          text.includes('session.root_session_id as "rootSessionId"')
-        ) {
+        if (text.includes("target.id as target_id")) {
           expect(rls).toEqual({ accountId: ACCOUNT_ID, workspaceId: WORKSPACE_ID });
-          return [];
+          const compiled = new PgDialect().sqlToQuery(query);
+          expect(compiled.params).toContain(WORKSPACE_ID);
+          expect(compiled.params).toContain(SESSION_ID);
+          return [
+            {
+              target_id: SESSION_ID,
+              target_account_id: ACCOUNT_ID,
+              target_root_session_id: SESSION_ID,
+              target_visibility: privateSessionOwner ? "user_private" : "workspace_shared",
+              target_authority_epoch: 1,
+              target_owner_subject_id: privateSessionOwner ?? null,
+              target_agent_access: "workspace",
+              target_memory_scope: "workspace",
+              caller_account_id: null,
+              caller_root_session_id: null,
+              turn_id: null,
+            },
+          ];
         }
         throw new Error("Unexpected editable artifact route database operation");
       },
