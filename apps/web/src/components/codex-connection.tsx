@@ -897,22 +897,19 @@ export function useCodexSubscriptions({
   );
 
   /**
-   * Start a device-code sign-in. `useFor` answers "use this account instead of
-   * the organization's subscriptions?" when the organization pool is in use:
-   * "organization" pins the source first so connecting doesn't switch it;
-   * "workspace" switches to this workspace's accounts once the account exists.
+   * Start a device-code sign-in. `useFor` answers "use this account for new
+   * work?" when the workspace is set to use only the organization's accounts:
+   * "together" returns it to the automatic choice, which uses this
+   * workspace's accounts and the organization's together, once the account
+   * exists; "organization" leaves the setting as it is.
    */
   const connect = useCallback(
     async (options?: {
-      useFor?: "workspace" | "organization";
+      useFor?: "together" | "organization";
       onConnected?: (accountId: string | null) => void;
     }) => {
       const recordOutcome = trackModelConnection("codex", workspaceId);
       const mode = data?.source?.mode;
-      if (options?.useFor === "organization" && mode === "automatic") {
-        const kept = await setSourceMode("organization");
-        if (!kept) return;
-      }
       setBusy(true);
       try {
         const start = await client.codexConnectStart(workspaceId);
@@ -935,14 +932,14 @@ export function useCodexSubscriptions({
             if (!result) return;
             if (result.status === "connected") {
               recordOutcome("connected");
-              const sourceChanged = options?.useFor === "workspace" && mode === "organization";
+              const sourceChanged = options?.useFor === "together" && mode === "organization";
               if (sourceChanged) {
                 await client
                   .requestJson("PATCH", `/v1/workspaces/${workspaceId}/codex/source`, {
-                    mode: "workspace",
+                    mode: "automatic",
                   })
                   .catch((error: unknown) =>
-                    toast.error("Connected, but couldn't switch to this workspace's accounts", {
+                    toast.error("Connected, but couldn't start using it here", {
                       description: userErrorText(error),
                     }),
                   );
@@ -992,7 +989,7 @@ export function useCodexSubscriptions({
         setBusy(false);
       }
     },
-    [client, workspaceId, refreshUsage, data?.source?.mode, setSourceMode],
+    [client, workspaceId, refreshUsage, data?.source?.mode],
   );
 
   const activate = useCallback(
