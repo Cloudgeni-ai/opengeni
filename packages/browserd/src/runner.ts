@@ -49,6 +49,11 @@ const MANAGED_CHROME_DISABLED_FEATURES = [
   // to its native popup. Pages cannot observe the difference.
   "WebUIOmniboxPopup",
   "WebUIOmniboxAimPopup",
+  // History search embeddings: every new profile downloads a 37 MB text
+  // embedding model and embeds visited pages in the background. Nothing in a
+  // managed browser searches its history, and pages cannot observe it (the
+  // built-in AI web APIs use other models and stay available).
+  "PassageEmbedder",
 ] as const;
 
 export const MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT = `--disable-features=${MANAGED_CHROME_DISABLED_FEATURES.join(",")}`;
