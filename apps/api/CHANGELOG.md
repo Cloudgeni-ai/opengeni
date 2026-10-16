@@ -1,5 +1,45 @@
 # @opengeni/api-router
 
+## 3.1.2
+
+### Patch Changes
+
+- 17d61c6: Schedules no longer stay stuck without anyone knowing. When no later run can start until a person acts (its chat is paused or gone, a pinned account or machine is unavailable, or the run is refused for good), the schedule pauses itself and its owner gets one inbox notice saying why and what would unblock it. When runs keep failing or being skipped for a reason that may clear by itself, the owner is told once after three in a row. The notice goes away when a run succeeds or the schedule is resumed, paused or deleted, and the schedule page and API show the current blocker.
+- 0b164a9: Unexpected request and Channel-A failures now say which component refused them. The failure logs carry the reviewed class of the underlying error, plus the browser or computer controller's closed error code and status, the connected machine's error number, or the database SQLSTATE when there is one. Browser and computer operations are now named in Channel-A failure logs too. Messages, paths and identifiers are still never logged.
+- 2bdc71f: Resuming a browser whose earlier resume expired now continues it from its retained working copy instead of failing with an internal error. The continuation kept its controller authority alive by checking an operation that is only recorded after the controller adopts the working copy, so every such resume stopped before reaching the controller. It now checks the expired resume itself: the browser must still be lost from that resume and still be bound to the same controller generation.
+- 79af429: Restore direct connector tools on published Site pages for signed-in workspace members, including older bundled SDKs. Page catalogs and calls use exact immutable Site declarations, live viewer permissions and account-qualified connections through the normal console gateway. Keep approvals and revocation enforced, deny nonmembers, and make page tools independent of the embedded agent's configuration.
+- Updated dependencies [17d61c6]
+- Updated dependencies [0b164a9]
+- Updated dependencies [3f3b476]
+- Updated dependencies [2bdc71f]
+- Updated dependencies [99d545d]
+- Updated dependencies [1e67711]
+- Updated dependencies [0bdb953]
+- Updated dependencies [79af429]
+- Updated dependencies [877c70d]
+- Updated dependencies [86df483]
+  - @opengeni/db@3.1.0
+  - @opengeni/contracts@3.1.0
+  - @opengeni/observability@3.1.0
+  - @opengeni/core@3.1.0
+  - @opengeni/codemode@3.1.0
+  - @opengeni/runtime@3.1.0
+  - @opengeni/events@3.1.0
+  - @opengeni/documents@3.1.0
+  - @opengeni/artifact-tool@3.1.0
+  - @opengeni/capabilities@3.1.0
+  - @opengeni/codex@3.1.0
+  - @opengeni/config@3.1.0
+  - @opengeni/github@3.1.0
+  - @opengeni/interaction@3.1.0
+  - @opengeni/storage@3.1.0
+  - @opengeni/tool-gateway@3.1.0
+  - @opengeni/vaults@3.1.0
+  - @opengeni/vaults-onepassword@3.1.0
+  - @opengeni/agent-proto@3.1.0
+  - @opengeni/network@3.1.0
+  - @opengeni/xai-subscription@3.1.0
+
 ## 3.0.0
 
 ### Minor Changes

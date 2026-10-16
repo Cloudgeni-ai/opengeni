@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/vaults-onepassword",
-  "version": "3.0.0",
+  "version": "3.1.2",
   "description": "1Password service-account provider for Opengeni vaults. Load it only through dynamic import() from the API and worker: it carries the pinned @1password/sdk WASM core.",
   "license": "Apache-2.0",
   "repository": {
