@@ -44,6 +44,7 @@ export async function maintainSubscriptionPlans(
   const result = {
     examinedAccounts: accounts.length,
     expiredPeriods: 0,
+    enrolledFreeAccounts: 0,
     grantedFreePeriods: 0,
     failedAccounts: 0,
   };
@@ -55,14 +56,22 @@ export async function maintainSubscriptionPlans(
         );
         // Snapshot time after acquiring the fence. Recheck everything inside
         // this tenant transaction: inventory can be stale by the time we lock.
-        const [clock] = await rawRows<{ now: string; month_end: string; month_key: string }>(
+        const [clock] = await rawRows<{
+          now: string;
+          period_start: string;
+          period_end: string;
+          month_key: string;
+        }>(
           tx,
           sql`select stamp::text as now,
-            ((date_trunc('month', stamp at time zone 'UTC') + interval '1 month') at time zone 'UTC')::text as month_end,
-            to_char(stamp at time zone 'UTC', 'YYYY-MM') as month_key
-            from (select clock_timestamp() as stamp) snapshot`,
+            anniversary.period_start::text, anniversary.period_end::text,
+            to_char(anniversary.period_start at time zone 'UTC', 'YYYY-MM') as month_key
+            from managed_accounts account cross join (select clock_timestamp() as stamp) snapshot
+            cross join lateral opengeni_private.subscription_plan_free_anniversary(account.created_at, greatest(account.created_at, stamp)) anniversary
+            where account.id = ${accountId}::uuid and account.created_at <= stamp`,
         );
-        const now = new Date(clock!.now);
+        if (!clock) return { expiredPeriods: 0, enrolledFreeAccounts: 0, grantedFreePeriods: 0 };
+        const now = new Date(clock.now);
         const periods = await rawRows<{ id: string; period_end: string }>(
           tx,
           sql`select id, period_end::text from plan_credit_periods where account_id = ${accountId}::uuid and expired_at is null`,
@@ -73,7 +82,7 @@ export async function maintainSubscriptionPlans(
           await expirePlanCreditPeriod(tx, { accountId, periodId: period.id });
           expiredPeriods += 1;
         }
-        const unchanged = { expiredPeriods, grantedFreePeriods: 0 };
+        const unchanged = { expiredPeriods, enrolledFreeAccounts: 0, grantedFreePeriods: 0 };
         // Never replace a live paid/manual allowance, including canceled but
         // not-yet-ended subscriptions. Enterprise is always operator-owned.
         if (periods.some((period) => new Date(period.period_end) > now)) return unchanged;
@@ -94,44 +103,51 @@ export async function maintainSubscriptionPlans(
               ["active", "trialing"].includes(state.status) &&
               state.stripe_subscription_id === null) ||
             (["pro", "max"].includes(state.plan_key) &&
-              state.status === "canceled" &&
+              ["canceled", "unpaid", "incomplete_expired"].includes(state.status) &&
               state.current_period_end !== null &&
               new Date(state.current_period_end) <= now)
           )
         )
           return unchanged;
-        if (!(await freePlanCreditEligible(tx, accountId))) return unchanged;
-        if (
-          !(await readSubscriptionPlanCatalog(tx)).plans.some(
+        const eligible =
+          (await freePlanCreditEligible(tx, accountId)) &&
+          (await readSubscriptionPlanCatalog(tx)).plans.some(
             (plan) => plan.key === "free" && plan.freeCredit,
-          )
-        )
-          return unchanged;
+          );
         const [receipt] = await rawRows<{ id: string }>(
           tx,
           sql`select id from plan_credit_periods
-          where account_id = ${accountId}::uuid and idempotency_key = ${`plan-credit:free:${accountId}:${clock!.month_key}`}`,
+          where account_id = ${accountId}::uuid and idempotency_key = ${`plan-credit:free:${accountId}:${clock.month_key}`}`,
         );
-        if (receipt) return unchanged;
-        // No historical months are issued. A first/mid-month enrollment gets
-        // the full catalog amount now, ending at the next UTC month boundary.
-        const periodEnd = new Date(clock!.month_end);
+        const transition = !state || state.plan_key !== "free";
+        if (!transition && (!eligible || receipt)) return unchanged;
+        // Every organization gets a Free seat-cap row at activation; funding
+        // still needs the actual signup receipt. Only the current anniversary
+        // interval is issued, never historical intervals or a second receipt.
+        const periodStart = new Date(clock.period_start);
+        const periodEnd = new Date(clock.period_end);
         await upsertOrganizationPlan(tx, {
           accountId,
           planKey: "free",
           status: "active",
-          currentPeriodStart: now,
+          currentPeriodStart: periodStart,
           currentPeriodEnd: periodEnd,
         });
-        await grantPlanCreditPeriod(tx, {
-          accountId,
-          planKey: "free",
-          periodStart: now,
-          periodEnd,
-        });
-        return { expiredPeriods, grantedFreePeriods: 1 };
+        if (eligible && !receipt)
+          await grantPlanCreditPeriod(tx, {
+            accountId,
+            planKey: "free",
+            periodStart,
+            periodEnd,
+          });
+        return {
+          expiredPeriods,
+          enrolledFreeAccounts: transition ? 1 : 0,
+          grantedFreePeriods: eligible && !receipt ? 1 : 0,
+        };
       });
       result.expiredPeriods += changed.expiredPeriods;
+      result.enrolledFreeAccounts += changed.enrolledFreeAccounts;
       result.grantedFreePeriods += changed.grantedFreePeriods;
     } catch (error) {
       result.failedAccounts += 1;

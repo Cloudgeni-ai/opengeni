@@ -44,6 +44,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
   "list_subscription_plan_maintenance_accounts(integer)";
+export const SUBSCRIPTION_PLAN_FREE_ANNIVERSARY_ROUTINE =
+  "subscription_plan_free_anniversary(timestamp with time zone, timestamp with time zone)";
 
 /** Read-only maintenance work checks (migrations 0730 and 0732) and the claim
  * each one previews, which fixes its owner and runtime grant. */
@@ -3394,6 +3396,14 @@ export function evaluateRuntimeDatabasePosture(
   ) {
     violations.push("subscription plan maintenance inventory is missing");
   }
+  if (
+    !options.protectedTables &&
+    !posture.privateRoutines.some(
+      (routine) => routine.name === SUBSCRIPTION_PLAN_FREE_ANNIVERSARY_ROUTINE,
+    )
+  ) {
+    violations.push("subscription plan Free anniversary helper is missing");
+  }
   const privateSchemaOwner = posture.schemas.find(
     (schema) => schema.name === "opengeni_private",
   )?.owner;
@@ -5625,12 +5635,25 @@ export function evaluateRuntimeDatabasePosture(
         routine.publicExecute ||
         !routine.securityDefiner ||
         !routine.configuration?.includes("search_path=pg_catalog") ||
-        ["organization_plans", "plan_credit_periods", "credit_ledger_entries"].some(
-          (name) => routine.owner !== tableByName.get(name)?.owner,
-        )
+        [
+          "managed_accounts",
+          "organization_plans",
+          "plan_credit_periods",
+          "credit_ledger_entries",
+        ].some((name) => routine.owner !== tableByName.get(name)?.owner)
       ) {
         violations.push("subscription plan maintenance inventory has unsafe capability posture");
       }
+    }
+    if (
+      routine.name === SUBSCRIPTION_PLAN_FREE_ANNIVERSARY_ROUTINE &&
+      (!routine.execute ||
+        routine.publicExecute ||
+        routine.securityDefiner ||
+        !routine.configuration?.includes("search_path=pg_catalog") ||
+        routine.owner !== tableByName.get("managed_accounts")?.owner)
+    ) {
+      violations.push("subscription plan Free anniversary helper has unsafe capability posture");
     }
     if (
       routine.name === "list_pending_child_terminal_wake_repairs_v1(integer, uuid, uuid)" ||

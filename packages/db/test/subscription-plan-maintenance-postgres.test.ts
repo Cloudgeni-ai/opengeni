@@ -15,6 +15,7 @@ import {
   listSubscriptionPlanMaintenanceAccounts,
   maintainSubscriptionPlans,
   nestedPostgresSqlState,
+  replacePlanCreditPeriod,
   subscriptionPlanMaintenanceDue,
   upsertOrganizationPlan,
   withRlsContext,
@@ -128,12 +129,75 @@ async function state(accountId: string) {
   );
 }
 
-test("bounded production-owner inventory discovers eligible receipts in a non-public schema, without leaking its capability", async () => {
+test("monthly anniversaries retain the original UTC day/time across clamping, leap years and year boundaries", async () => {
+  if (!shared || !client) return;
+  const cases = [
+    [
+      "2025-01-31T10:20:30.123Z",
+      "2025-02-28T10:20:30.122Z",
+      "2025-01-31T10:20:30.123Z",
+      "2025-02-28T10:20:30.123Z",
+    ],
+    [
+      "2025-01-31T10:20:30.123Z",
+      "2025-02-28T10:20:30.123Z",
+      "2025-02-28T10:20:30.123Z",
+      "2025-03-31T10:20:30.123Z",
+    ],
+    [
+      "2025-01-31T10:20:30.123Z",
+      "2025-03-30T12:00:00.000Z",
+      "2025-02-28T10:20:30.123Z",
+      "2025-03-31T10:20:30.123Z",
+    ],
+    [
+      "2025-01-31T10:20:30.123Z",
+      "2025-03-31T10:20:30.123Z",
+      "2025-03-31T10:20:30.123Z",
+      "2025-04-30T10:20:30.123Z",
+    ],
+    [
+      "2024-01-31T23:59:59.999Z",
+      "2024-02-29T23:59:59.999Z",
+      "2024-02-29T23:59:59.999Z",
+      "2024-03-31T23:59:59.999Z",
+    ],
+    [
+      "2024-02-29T08:15:00.000Z",
+      "2025-02-28T08:15:00.000Z",
+      "2025-02-28T08:15:00.000Z",
+      "2025-03-29T08:15:00.000Z",
+    ],
+    [
+      "2025-12-30T02:30:00.000Z",
+      "2026-01-01T00:00:00.000Z",
+      "2025-12-30T02:30:00.000Z",
+      "2026-01-30T02:30:00.000Z",
+    ],
+  ];
+  await client.db.transaction(async (tx) => {
+    await tx.execute(sql`select set_config('TimeZone', 'Pacific/Auckland', true)`);
+    for (const [created, now, start, end] of cases) {
+      const [boundary] = await rawRows<{ start: string; end: string }>(
+        tx,
+        sql`select to_char(period_start at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as start,
+          to_char(period_end at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as end
+          from opengeni_private.subscription_plan_free_anniversary(${created}::timestamptz, ${now}::timestamptz)`,
+      );
+      expect(boundary).toEqual({ start: start!, end: end! });
+    }
+  });
+}, 180_000);
+
+test("bounded production-owner inventory discovers unenrolled orgs and eligible receipts in a non-public schema without leaking capability", async () => {
   if (!shared || !client) return;
   expect(await subscriptionPlanMaintenanceDue(client.db)).toBe(false);
   const eligible = await account(true);
   const other = await account();
-  expect(await listSubscriptionPlanMaintenanceAccounts(client.db, 1)).toEqual([eligible]);
+  expect(await listSubscriptionPlanMaintenanceAccounts(client.db, 1)).toHaveLength(1);
+  expect(await listSubscriptionPlanMaintenanceAccounts(client.db)).toEqual(
+    [eligible, other].sort(),
+  );
   expect(await state(eligible)).toBeUndefined(); // inventory never enrolls
   await withRlsContext(client.db, { accountId: other }, async (tx) => {
     expect(await listSubscriptionPlanMaintenanceAccounts(tx, 100)).toContain(eligible);
@@ -152,7 +216,7 @@ test("bounded production-owner inventory discovers eligible receipts in a non-pu
   expect(owner).toEqual({ rolsuper: false, rolbypassrls: false });
   const policies =
     await shared.admin`select cmd, qual from pg_policies where schemaname = ${shared.schema} and policyname = 'subscription_plan_maintenance_inventory_read' order by tablename`;
-  expect(policies).toHaveLength(3);
+  expect(policies).toHaveLength(4);
   expect(
     policies.every(
       (p) =>
@@ -212,10 +276,9 @@ test("bounded production-owner inventory discovers eligible receipts in a non-pu
   }
 }, 180_000);
 
-test("concurrent sweeps enroll only once with a full current-month grant and no backfill", async () => {
+test("concurrent sweeps enroll every organization once but only trial orgs get a full current-anniversary grant", async () => {
   if (!shared || !client) return;
   const eligible = await account(true);
-  const before = Date.now();
   const results = await Promise.all(
     Array.from({ length: 4 }, () => maintainSubscriptionPlans(client!.db)),
   );
@@ -226,9 +289,10 @@ test("concurrent sweeps enroll only once with a full current-month grant and no 
   expect(receipts).toHaveLength(1);
   const receipt = receipts[0]!;
   expect(Number(receipt.granted_micros)).toBe(10 * M);
-  expect(receipt.period_start.getTime()).toBeGreaterThanOrEqual(before);
-  const monthEnd = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1));
-  expect(receipt.period_end.toISOString()).toBe(monthEnd.toISOString());
+  const [anniversary] = await shared.admin`select boundary.* from managed_accounts account,
+    lateral opengeni_private.subscription_plan_free_anniversary(account.created_at, clock_timestamp()) boundary where account.id = ${eligible}`;
+  expect(receipt.period_start.getTime()).toBe(anniversary!.period_start.getTime());
+  expect(receipt.period_end.getTime()).toBe(anniversary!.period_end.getTime());
   expect(receipt.idempotency_key).toBe(
     `plan-credit:free:${eligible}:${new Date().toISOString().slice(0, 7)}`,
   );
@@ -280,21 +344,13 @@ test("ended periods expire once for every plan without expiring purchased top-up
   }
 }, 180_000);
 
-test("ended canceled paid may resume Free; active, delinquent, paused, Enterprise and external/no-receipt orgs are untouched", async () => {
+test("ended terminal paid resumes Free; retrying/live paid and Enterprise are preserved; ineligible/embedder orgs get only a Free row", async () => {
   if (!shared || !client) return;
   const canceled = await account(true);
   await paid(canceled, "pro", "canceled");
   await endPeriod(canceled);
   const protectedAccounts: string[] = [];
-  for (const status of [
-    "active",
-    "past_due",
-    "unpaid",
-    "paused",
-    "trialing",
-    "incomplete",
-    "incomplete_expired",
-  ]) {
+  for (const status of ["active", "past_due", "paused", "trialing", "incomplete"]) {
     const id = await account(true);
     await paid(id, "pro", status);
     await endPeriod(id);
@@ -310,6 +366,13 @@ test("ended canceled paid may resume Free; active, delinquent, paused, Enterpris
     status: "canceled",
   });
   protectedAccounts.push(enterprise);
+  const terminalAccounts: string[] = [];
+  for (const status of ["unpaid", "incomplete_expired"]) {
+    const terminal = await account(true);
+    await paid(terminal, "max", status);
+    await endPeriod(terminal);
+    terminalAccounts.push(terminal);
+  }
   const ineligible = await account();
   const external = await bootstrapWorkspace(client.db, {
     accountExternalSource: "embedder-test",
@@ -327,11 +390,14 @@ test("ended canceled paid may resume Free; active, delinquent, paused, Enterpris
     await shared.admin`select expired_at from plan_credit_periods where account_id = ${canceled} and plan_key = 'pro'`;
   expect(old!.expired_at).not.toBeNull();
   for (const id of protectedAccounts) expect((await state(id))!.plan_key).not.toBe("free");
-  expect(await state(ineligible)).toBeUndefined();
-  expect(await state(externalId)).toBeUndefined();
+  for (const id of terminalAccounts) expect((await state(id))!.plan_key).toBe("free");
+  expect(await state(ineligible)).toEqual({ plan_key: "free", status: "active" });
+  expect(await state(externalId)).toEqual({ plan_key: "free", status: "active" });
+  expect((await getBillingBalance(client.db, ineligible)).balanceMicros).toBe(0);
+  expect((await getBillingBalance(client.db, externalId)).balanceMicros).toBe(0);
 }, 180_000);
 
-test("an expired current-month Free receipt is not reissued, and a prior-month receipt renews without rollover", async () => {
+test("an expired current-anniversary Free receipt is not reissued, and a prior interval renews without rollover", async () => {
   if (!shared || !client) return;
   const id = await account(true);
   await maintainSubscriptionPlans(client.db);
@@ -362,6 +428,53 @@ test("an expired current-month Free receipt is not reissued, and a prior-month r
   const [count] =
     await shared.admin`select count(*)::int n from plan_credit_periods where account_id = ${prior} and expired_at is null`;
   expect(count!.n).toBe(1);
+}, 180_000);
+
+test("a terminal paid plan returns to Free seats even if its current-anniversary Free receipt was already spent or expired", async () => {
+  if (!shared || !client) return;
+  const id = await account(true);
+  await maintainSubscriptionPlans(client.db);
+  const periodStart = new Date();
+  const periodEnd = new Date(Date.now() + 3_600_000);
+  const stripeSubscriptionId = `sub_${crypto.randomUUID()}`;
+  await withRlsContext(client.db, { accountId: id }, async (tx) => {
+    await upsertOrganizationPlan(tx, {
+      accountId: id,
+      planKey: "pro",
+      status: "active",
+      stripeSubscriptionId,
+      currentPeriodStart: periodStart,
+      currentPeriodEnd: periodEnd,
+    });
+    await replacePlanCreditPeriod(tx, {
+      accountId: id,
+      planKey: "pro",
+      periodStart,
+      periodEnd,
+      stripeSubscriptionId,
+    });
+  });
+  await upsertOrganizationPlan(client.db, {
+    accountId: id,
+    planKey: "pro",
+    status: "canceled",
+    stripeSubscriptionId,
+    currentPeriodStart: periodStart,
+    currentPeriodEnd: periodEnd,
+  });
+  await endPeriod(id);
+  expect(await maintainSubscriptionPlans(client.db)).toMatchObject({
+    enrolledFreeAccounts: 1,
+    grantedFreePeriods: 0,
+    expiredPeriods: 1,
+    failedAccounts: 0,
+  });
+  expect(await state(id)).toEqual({ plan_key: "free", status: "active" });
+  const [count] =
+    await shared.admin`select count(*)::int as n from plan_credit_periods where account_id = ${id} and plan_key = 'free'`;
+  expect(count!.n).toBe(1);
+  expect((await getBillingBalance(client.db, id)).plan!.creditRemainingMicros).toBe(0);
+  expect(await subscriptionPlanMaintenanceDue(client.db)).toBe(false);
 }, 180_000);
 
 test("a failed grant rolls back enrollment/expiry, then retries without duplicate receipts", async () => {
@@ -479,16 +592,52 @@ test("bounded batches drain independently and neither GUCs nor a caller-opened c
     }
   });
   expect(await listSubscriptionPlanMaintenanceAccounts(client.db, 1)).toHaveLength(1);
-  for (let index = 0; index < 3; index += 1) {
-    expect(await maintainSubscriptionPlans(client.db, { batchSize: 1 })).toMatchObject({
+  let granted = 0;
+  for (let index = 0; index < 4; index += 1) {
+    const result = await maintainSubscriptionPlans(client.db, { batchSize: 1 });
+    granted += result.grantedFreePeriods;
+    expect(result).toMatchObject({
       examinedAccounts: 1,
-      grantedFreePeriods: 1,
+      enrolledFreeAccounts: 1,
       failedAccounts: 0,
     });
   }
+  expect(granted).toBe(3);
   expect(await subscriptionPlanMaintenanceDue(client.db)).toBe(false);
   for (const id of ids) expect((await state(id))!.plan_key).toBe("free");
   const [publicShape] =
     await shared.admin`select to_regclass('public.organization_plans')::text as relation`;
   expect(publicShape!.relation).toBeNull(); // nothing silently fell back to public
+}, 180_000);
+
+test("historical orgs receive only the current anchored interval, and a second org for the same human receives no funding", async () => {
+  if (!shared || !client) return;
+  const id = await account(true);
+  await shared.admin`update managed_accounts set created_at = '2024-01-31T10:20:30.123Z'::timestamptz where id = ${id}`;
+  const [trial] =
+    await shared.admin`select source_id from credit_ledger_entries where account_id = ${id} and source_type = 'verified_signup_trial'`;
+  const sibling = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "maintenance-same-human",
+    accountExternalId: crypto.randomUUID(),
+    accountName: "Another organization",
+    workspaceExternalSource: "maintenance-same-human",
+    workspaceExternalId: crypto.randomUUID(),
+    workspaceName: "Another organization",
+    subjectId: `user:${trial!.source_id}`,
+  });
+  const siblingId = sibling.workspaceGrants[0]!.accountId;
+  expect(await maintainSubscriptionPlans(client.db)).toMatchObject({
+    enrolledFreeAccounts: 2,
+    grantedFreePeriods: 1,
+    failedAccounts: 0,
+  });
+  const periods = await shared.admin`select * from plan_credit_periods where account_id = ${id}`;
+  expect(periods).toHaveLength(1);
+  const [anniversary] = await shared.admin`select boundary.* from managed_accounts account,
+    lateral opengeni_private.subscription_plan_free_anniversary(account.created_at, clock_timestamp()) boundary where account.id = ${id}`;
+  expect(periods[0]!.period_start.getTime()).toBe(anniversary!.period_start.getTime());
+  expect(periods[0]!.period_end.getTime()).toBe(anniversary!.period_end.getTime());
+  expect(await state(siblingId)).toEqual({ plan_key: "free", status: "active" });
+  expect((await getBillingBalance(client.db, siblingId)).balanceMicros).toBe(0);
+  expect(await maintainSubscriptionPlans(client.db)).toMatchObject({ examinedAccounts: 0 });
 }, 180_000);
