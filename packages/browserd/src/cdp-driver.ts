@@ -1147,6 +1147,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await this.bringToFrontForAction(state);
       let completedActions = 0;
       const initialEffectCount = state.actionEffectCount;
+      const requestsBeforeActions = {
+        open: new Set(state.inflightRequests),
+        activity: state.networkActivitySequence,
+      };
       for (const [actionIndex, action] of actions.entries()) {
         state.actionTrace = trace ? { actionIndex, trace } : undefined;
         try {
@@ -1237,6 +1241,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return null;
       }
       try {
+        // Navigation already waits for the new document to load, and an
+        // explicit wait has its own condition; only page input settles here.
+        const last = actions.at(-1)?.type;
+        if (last !== "navigate" && last !== "history" && last !== "wait")
+          await this.settleActionRequests(state, requestsBeforeActions);
         await this.settleFiniteAnimations(state);
         const currentInfo = await this.requireTargetInfo(
           await this.ensureConnection(),
@@ -4455,6 +4464,39 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /**
+   * A click often starts a request whose response then updates the page, as
+   * when a form posts and shows "Submitted". Observing immediately shows the
+   * page before that update, so the agent waits for, or guesses at, a result
+   * that is already on its way. Briefly wait for the requests the action
+   * itself started (not ones already open, such as long polls) to finish,
+   * then give the page a moment to apply the response. Actions that caused
+   * no network activity pay nothing, and the wait is bounded.
+   */
+  private async settleActionRequests(
+    state: TargetState,
+    before: { open: ReadonlySet<string>; activity: number },
+  ): Promise<void> {
+    if (state.dialog) return;
+    try {
+      // The renderer reports a request it starts before it answers a later
+      // command on the same session, so one cheap round trip makes sure the
+      // requests this action started have been seen.
+      await this.sendTarget(state, "Runtime.getIsolateId", {});
+    } catch {
+      // Settling only improves the snapshot; it never decides the outcome.
+    }
+    if (state.dialog || state.networkActivitySequence === before.activity) return;
+    const deadline = Date.now() + ACTION_REQUEST_SETTLE_LIMIT_MS;
+    const pending = () =>
+      state.networkTrackingOverflow ||
+      [...state.inflightRequests].some((requestId) => !before.open.has(requestId));
+    while (pending() && Date.now() < deadline && !state.dialog) {
+      await delay(ACTION_REQUEST_POLL_MS);
+    }
+    if (!state.dialog) await delay(ACTION_RESPONSE_APPLY_MS);
+  }
+
+  /**
    * Menus, listboxes and dialogs usually animate out before they leave the
    * DOM. A snapshot taken mid-animation reports UI the action already
    * dismissed, so briefly wait for finite running animations to finish.
@@ -5199,6 +5241,12 @@ const KEY_DEFINITIONS: Record<string, KeyDefinition> = {
 // Typical exit animations take 100-300 ms. Longer finite animations are
 // waited for only this long, so a slow transition cannot stall every action.
 const ANIMATION_SETTLE_LIMIT_MS = 750;
+// Requests an action starts usually answer in well under a second; a request
+// that stays open (a stream, a stalled server) must not hold the result back.
+const ACTION_REQUEST_SETTLE_LIMIT_MS = 1_500;
+const ACTION_REQUEST_POLL_MS = 20;
+// The response handler runs after the network layer reports the load finished.
+const ACTION_RESPONSE_APPLY_MS = 50;
 
 // Waits until no finite animation is running, then lets animationend
 // handlers commit their DOM removal (which can chain another animation).
