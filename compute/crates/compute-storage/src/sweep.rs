@@ -53,7 +53,9 @@ pub struct Report {
 /// bytes keeps. With `delete` false nothing is deleted, and the report says
 /// what would be. A sweep that deletes is refused before it stores any
 /// pointer again where the store cannot delete on condition, as
-/// [`ChunkStore::deletes_on_condition`] says.
+/// [`ChunkStore::deletes_on_condition`] says, and every sweep is refused
+/// over a store holding pointers it cannot read (see
+/// [`ChunkStore::refuse_unstamped_pointers`]).
 pub async fn sweep<F, Fut>(store: &ChunkStore, names: F, delete: bool) -> Result<Report>
 where
     F: Fn(Vec<u8>) -> Fut,
@@ -64,6 +66,7 @@ where
             "deleting stored objects needs a delete on condition (GCS)",
         ));
     }
+    store.refuse_unstamped_pointers().await?;
     let started = store.now();
     let before = started
         .checked_sub(store.freshness().sweep_after())

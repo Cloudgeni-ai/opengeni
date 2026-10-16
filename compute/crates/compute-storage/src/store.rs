@@ -40,6 +40,9 @@ pub const MAX_POINTER_BYTES: usize = 64 * 1024;
 /// Length of the stamp every stored pointer begins with (see [`stamped`]).
 const STAMP_BYTES: usize = 16;
 
+/// Where pointers were stored before they carried a stamp.
+const UNSTAMPED_POINTERS: &str = "pointers/v1";
+
 /// How often [`ChunkStore::begin`], [`ChunkStore::fence`] and
 /// [`ChunkStore::delete_pointer`] try again when the pointer changes under
 /// them; a pointer has one writer, so more means something else is wrong.
@@ -270,6 +273,21 @@ impl ChunkStore {
     #[must_use]
     pub fn deletes_on_condition(&self) -> bool {
         matches!(self.uploader, Uploader::Gcs(_))
+    }
+
+    /// Refuses a store that holds pointers from before they carried a
+    /// stamp: this release does not read them, so their copies would look
+    /// absent and a sweep would delete what they name. Such a store needs
+    /// migrating; a new prefix starts afresh.
+    pub async fn refuse_unstamped_pointers(&self) -> Result<()> {
+        let prefix = self.path(UNSTAMPED_POINTERS);
+        match self.backend.list(Some(&prefix)).try_next().await? {
+            None => Ok(()),
+            Some(_) => Err(Error::Unsupported(
+                "the store holds pointers in an older format (pointers/v1): \
+                 migrate them or use a new prefix",
+            )),
+        }
     }
 
     /// Reads the pointer at `path`: what it holds, without its stamp, and

@@ -95,7 +95,9 @@ and what we chose not to build.
   `--retained-firecracker`, so drop a vulnerable binary from that list
   first; the current binary then restores every image whose snapshot
   format it reads. To move a sandbox off a vulnerable VMM now, sleep it to
-  `saved` (the `Sleep` request) and wake it. A guest kernel fix needs a
+  `saved` (the `Sleep` request), wait until status shows it saved (the
+  request answers at once, holds delay it and a wake cancels it), then
+  wake it. A guest kernel fix needs a
   fresh boot, which means stopping affected sandboxes (they boot fresh
   from their disks). There is no live patching.
 

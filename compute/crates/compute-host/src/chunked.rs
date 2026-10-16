@@ -203,6 +203,12 @@ impl Chunked {
         Ok(ChunkStore::from_url(url)?.map(Self::new))
     }
 
+    /// Refuses a store this release cannot read every copy in; see
+    /// [`ChunkStore::refuse_unstamped_pointers`].
+    pub async fn refuse_unreadable(&self) -> Result<(), StorageError> {
+        self.chunks.refuse_unstamped_pointers().await
+    }
+
     /// Deletes the chunks and manifests no sandbox's stored copy names any
     /// more, or with `delete` false only reports them (see
     /// [`compute_storage::sweep`]).

@@ -539,6 +539,10 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         return run_agent(config, engine, NoStore, socket).await;
     };
     if let Some(chunked) = Chunked::from_url(&store)? {
+        chunked
+            .refuse_unreadable()
+            .await
+            .with_context(|| format!("opening {store}"))?;
         return run_agent(config, engine, chunked, socket).await;
     }
     // Fine for tests and a single machine, but an archive there does not

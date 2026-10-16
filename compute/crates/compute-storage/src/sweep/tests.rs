@@ -277,6 +277,25 @@ async fn a_delete_held_up_past_the_same_bytes_stored_again_never_lands() {
     assert_eq!(store.get_pointer("a").await.unwrap(), Some(same));
 }
 
+/// A store still holding pointers from before they carried a stamp is
+/// refused, rather than read as holding no copies and swept bare.
+#[tokio::test(start_paused = true)]
+async fn a_store_with_unstamped_pointers_is_refused() {
+    let fake = Fake::new(paused_clock());
+    let store = ChunkStore::over_fake(&fake, "p");
+    store.refuse_unstamped_pointers().await.unwrap();
+    let named = chunk(5);
+    store.put_chunk(&named).await.unwrap();
+    fake.put_raw("p/pointers/v1/a", pointer(&[named.reference.key()]).into());
+    tokio::time::advance(store.freshness().sweep_after() + SECOND).await;
+    for delete in [false, true] {
+        let refused = sweep(&store, listed_names, delete).await;
+        assert!(matches!(refused, Err(Error::Unsupported(_))), "{refused:?}");
+    }
+    assert!(store.refuse_unstamped_pointers().await.is_err());
+    store.get_chunk(&named.reference).await.unwrap();
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_sweep_that_cannot_read_a_pointer_deletes_nothing() {
     let fake = Fake::new(paused_clock());
