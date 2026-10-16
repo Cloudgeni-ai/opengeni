@@ -7,6 +7,7 @@ use std::time::Duration;
 use compute_core::HostPolicy;
 use compute_host::protocol::{
     DurabilityName, ErrorCode, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
+    SleepConfig,
 };
 use tokio::time::Instant;
 
@@ -412,6 +413,53 @@ async fn a_replacement_waits_for_the_dead_vms_teardown() {
     assert_eq!(lab.run(sandbox, &["get"]).await, [""]);
     assert!(started.elapsed() >= Duration::from_millis(250));
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
+    lab.assert_clean();
+}
+
+/// An agent that stops part way through checking a VM's disk leaves no
+/// proof the disk kept every write. The next agent takes the VM back and
+/// never saves it, but the sandbox is not broken: it still wakes and runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vm_whose_disk_check_was_cut_short_still_wakes_and_runs() {
+    const SAVE_LATER: SleepConfig = SleepConfig {
+        pause_after_ms: Some(30),
+        save_after_ms: Some(1_500),
+        ..NEVER
+    };
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(47);
+    lab.create(sandbox, SAVE_LATER).await;
+    lab.run(sandbox, &["set alive"]).await;
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    let marker = lab.sandbox_dir(sandbox).join("disk-check");
+    let (root, world) = lab.stop().await;
+    // As if the agent stopped after the VMM synced the disk but before it
+    // learned how that went.
+    std::fs::write(&marker, "").unwrap();
+
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    let view = lab.current(sandbox).await;
+    assert!(view.unsavable && !view.broken, "{view:?}");
+    let reply = lab.sleep_to(sandbox, LevelName::Saved).await;
+    assert!(is_error(&reply, ErrorCode::Invalid), "{reply:?}");
+    // Well past its save time it is still only paused, and never saved.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let view = lab.current(sandbox).await;
+    assert_eq!(
+        (view.level, view.durability),
+        (LevelName::Paused, DurabilityName::Volatile),
+        "{view:?}"
+    );
+    assert!(!lab.image(sandbox));
+    assert!(marker.exists(), "the record of the cut-short check went");
+
+    let reply = lab.wake(sandbox).await;
+    assert!(matches!(reply, Reply::Woken { .. }), "{reply:?}");
+    assert_eq!(lab.run(sandbox, &["get"]).await, ["alive"]);
+    let view = lab.current(sandbox).await;
+    assert!(view.unsavable && !view.broken, "{view:?}");
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 0);
     lab.assert_clean();
 }
 

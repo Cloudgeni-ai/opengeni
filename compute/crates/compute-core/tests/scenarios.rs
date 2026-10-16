@@ -723,6 +723,83 @@ fn a_sleep_request_drains_a_sandbox_to_object_storage_and_it_still_wakes() {
 }
 
 #[test]
+fn a_sandbox_that_cannot_be_saved_still_wakes_and_runs() {
+    let mut rig = pressured_rig();
+    rig.add(1, paused(Durability::Volatile), recommended());
+    rig.send(Input::Resident {
+        sandbox: SandboxId(1),
+        bytes: GIB,
+    });
+    let (step, op) = only_start(&rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Remote,
+    }));
+    assert_eq!(step, Step::Save);
+    let actions = rig.finish(1, op, Outcome::Failed(Failure::Unsavable));
+    assert_nothing_started(&actions);
+    assert_eq!(notices(&actions, 1), [Notice::Unsavable]);
+    let view = rig.host.sandbox(SandboxId(1)).unwrap();
+    assert!(view.unsavable && !view.broken, "{view:?}");
+    assert_eq!(view.state, paused(Durability::Volatile));
+    assert_eq!(view.requested, Level::Running, "a deeper sleep is given up");
+    // Idle time and memory pressure never try to save it again; pressure
+    // only compresses it, since ending its process would lose its programs.
+    assert_nothing_started(
+        &rig.at(Duration::from_secs(30 * 24 * 3600))
+            .send(Input::Tick),
+    );
+    let actions = rig.send(Input::Memory { available: GIB });
+    let (step, op) = only_start(&actions);
+    assert_eq!(step, Step::Compress);
+    assert_nothing_started(&rig.finish(1, op, Outcome::Done));
+    assert_nothing_started(&rig.send(Input::Memory { available: GIB / 2 }));
+    // The user's wake still runs it.
+    let (step, op) = only_start(&rig.touch(1));
+    assert_eq!(step, Step::Resume);
+    let actions = rig.finish(1, op, Outcome::Done);
+    assert_eq!(rig.state(1).level, Level::Running);
+    assert!(rig.host.sandbox(SandboxId(1)).unwrap().unsavable);
+    // Memory pressure still wants it paused again.
+    let (step, op) = only_start(&actions);
+    assert_eq!(step, Step::Pause);
+    // Once its process is gone, the next one starts with a clean slate.
+    rig.send(Input::Lost {
+        sandbox: SandboxId(1),
+    });
+    rig.finish(1, op, Outcome::Done);
+    let view = rig.host.sandbox(SandboxId(1)).unwrap();
+    assert!(!view.unsavable, "{view:?}");
+    assert!(!view.state.level.has_process());
+}
+
+#[test]
+fn a_running_vm_found_unsavable_is_never_saved() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, paused(Durability::Volatile), recommended());
+    let actions = rig.send(Input::Unsavable {
+        sandbox: SandboxId(1),
+    });
+    assert_eq!(notices(&actions, 1), [Notice::Unsavable]);
+    assert_nothing_started(
+        &rig.at(Duration::from_secs(30 * 24 * 3600))
+            .send(Input::Tick),
+    );
+    // A request to save it gets no deeper than compressed.
+    let (step, _) = only_start(&rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Saved,
+    }));
+    assert_eq!(step, Step::Compress);
+    // A sandbox without a process has nothing to distrust.
+    rig.add(2, saved(), recommended());
+    let actions = rig.send(Input::Unsavable {
+        sandbox: SandboxId(2),
+    });
+    assert_eq!(notices(&actions, 2), []);
+    assert!(!rig.host.sandbox(SandboxId(2)).unwrap().unsavable);
+}
+
+#[test]
 fn a_sleep_request_waits_for_holds_and_a_touch_cancels_it() {
     let mut rig = Rig::new(HostPolicy::default());
     rig.add(1, State::RUNNING, SleepPolicy::NEVER);
