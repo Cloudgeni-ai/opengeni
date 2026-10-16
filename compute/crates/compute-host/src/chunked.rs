@@ -734,34 +734,43 @@ impl Store for Chunked {
 
     /// Points the sandbox at its disk alone, without the memory image or
     /// the working-set pack of its pages. Their chunks stay until a sweep
-    /// finds nothing names them.
+    /// finds nothing names them. The new pointer lands only on the version
+    /// read, so a write held up past a newer copy never replaces it; a
+    /// sweep's fence meanwhile means reading it again.
     async fn forget_memory(&self, id: Id) -> Result<Option<Receipt>, EngineError> {
         const OP: &str = "forget";
-        let Some(stored) = self
-            .chunks
-            .get_pointer(&id.to_string())
-            .await
-            .map_err(|error| storage_error(OP, error))?
-        else {
-            return Ok(None);
-        };
-        let head = parse_head(OP, &stored)?;
-        if head.memory.is_none() && head.pack.is_none() {
-            return Ok(Some(Receipt(blake3::hash(&stored).to_hex().to_string())));
+        /// Reads before giving up for now: each fence a sweep stored since
+        /// the read costs one.
+        const TRIES: usize = 3;
+        let name = id.to_string();
+        for _ in 0..TRIES {
+            let Some((stored, change)) = self
+                .chunks
+                .read_for_change(&name)
+                .await
+                .map_err(|error| storage_error(OP, error))?
+            else {
+                return Ok(None);
+            };
+            let head = parse_head(OP, &stored)?;
+            if head.memory.is_none() && head.pack.is_none() {
+                return Ok(Some(Receipt(blake3::hash(&stored).to_hex().to_string())));
+            }
+            let head = Head {
+                memory: None,
+                pack: None,
+                ..head
+            };
+            let bytes = serde_json::to_vec(&head)
+                .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
+            let receipt = Receipt(blake3::hash(&bytes).to_hex().to_string());
+            match self.chunks.publish(change, bytes).await {
+                Ok(()) => return Ok(Some(receipt)),
+                Err(StorageError::Superseded) => {}
+                Err(error) => return Err(storage_error(OP, error)),
+            }
         }
-        let head = Head {
-            memory: None,
-            pack: None,
-            ..head
-        };
-        let bytes = serde_json::to_vec(&head)
-            .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
-        let receipt = Receipt(blake3::hash(&bytes).to_hex().to_string());
-        self.chunks
-            .put_pointer(&id.to_string(), bytes)
-            .await
-            .map_err(|error| storage_error(OP, error))?;
-        Ok(Some(receipt))
+        Err(storage_error(OP, StorageError::Superseded))
     }
 
     fn chunks(&self) -> Option<(&ChunkStore, &Arc<Lanes>)> {

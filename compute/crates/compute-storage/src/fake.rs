@@ -66,9 +66,10 @@ pub(crate) struct Fake {
     /// When set, every request first waits up to this long, as the seeded
     /// sequence picks, so concurrent callers interleave differently.
     latency: Mutex<Option<(Rng, Duration)>>,
-    /// When set, a put to a name containing the text waits this long
-    /// before it is stored, as a request held up in flight would; `held`
-    /// counts those that started waiting.
+    /// When set, a put or delete of a name containing the text waits this
+    /// long before it is applied, as a request held up in flight would,
+    /// and is applied even if its caller stopped waiting; `held` counts
+    /// those that started waiting.
     pub(crate) stall: Mutex<Option<(&'static str, Duration)>>,
     pub(crate) held: Mutex<u32>,
     /// Asked before every delete through the XML API; the names of deletes
@@ -134,6 +135,86 @@ impl Fake {
         }
     }
 
+    /// How long a request for `name` is held up, counting it as held.
+    fn stalled(&self, name: &str) -> Option<Duration> {
+        let stall = *self.stall.lock().unwrap();
+        let (_, stall) = stall.filter(|(part, _)| name.contains(part))?;
+        *self.held.lock().unwrap() += 1;
+        Some(stall)
+    }
+
+    /// Applies `apply` after `stall`, if any, on a task of its own, so it
+    /// lands even when the caller stops waiting for the answer.
+    async fn after<T, F>(self: &Arc<Self>, stall: Option<Duration>, apply: F) -> T
+    where
+        T: Send + 'static,
+        F: FnOnce(&Self) -> T + Send + 'static,
+    {
+        let Some(stall) = stall else {
+            return apply(self);
+        };
+        let fake = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(stall).await;
+            apply(&fake)
+        })
+        .await
+        .expect("a held request panicked")
+    }
+
+    /// A delete through the XML API, on condition of `generation_match`.
+    fn delete(&self, name: &str, generation_match: Option<u64>) -> HttpResponse {
+        let mut objects = self.objects.lock().unwrap();
+        let current = objects.get(name).map(|object| object.generation);
+        match (current, generation_match) {
+            (None, _) => reply(404, ""),
+            (Some(current), Some(wanted)) if current != wanted => reply(412, ""),
+            (Some(_), _) => {
+                let guard = *self.guard.lock().unwrap();
+                if guard.is_some_and(|guard| !guard(&objects, name)) {
+                    self.violations.lock().unwrap().push(name.to_owned());
+                }
+                objects.remove(name);
+                reply(204, "")
+            }
+        }
+    }
+
+    /// A put through `object_store`, under `mode`'s condition.
+    fn put(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        mode: PutMode,
+    ) -> object_store::Result<PutResult> {
+        let mut objects = self.objects.lock().unwrap();
+        match mode {
+            PutMode::Create if objects.contains_key(location.as_ref()) => {
+                return Err(object_store::Error::AlreadyExists {
+                    path: location.to_string(),
+                    source: "exists".into(),
+                });
+            }
+            PutMode::Update(version) => {
+                let current = objects
+                    .get(location.as_ref())
+                    .map(|object| object.generation.to_string());
+                if current.is_none() || current != version.version {
+                    return Err(object_store::Error::Precondition {
+                        path: location.to_string(),
+                        source: "generation does not match".into(),
+                    });
+                }
+            }
+            PutMode::Overwrite | PutMode::Create => {}
+        }
+        let generation = self.store(&mut objects, location.as_ref(), payload.into());
+        Ok(PutResult {
+            e_tag: Some(generation.to_string()),
+            version: Some(generation.to_string()),
+        })
+    }
+
     fn meta(name: &str, object: &Object) -> ObjectMeta {
         ObjectMeta {
             location: Path::from(name),
@@ -172,6 +253,12 @@ impl HttpService for Service {
             .headers
             .get("x-goog-if-generation-match")
             .map(|value| value.to_str().unwrap().parse::<u64>().unwrap());
+        if parts.method == http::Method::DELETE {
+            let stall = fake.stalled(&name);
+            return Ok(fake
+                .after(stall, move |fake| fake.delete(&name, generation_match))
+                .await);
+        }
         let mut objects = fake.objects.lock().unwrap();
         let current = objects.get(&name).map(|object| object.generation);
         match parts.method {
@@ -189,18 +276,6 @@ impl HttpService for Service {
                         .header(http::header::LAST_MODIFIED, at.to_rfc2822())
                         .body(Bytes::new().into())
                         .unwrap()
-                }
-            }),
-            http::Method::DELETE => Ok(match (current, generation_match) {
-                (None, _) => reply(404, ""),
-                (Some(current), Some(wanted)) if current != wanted => reply(412, ""),
-                (Some(_), _) => {
-                    let guard = *fake.guard.lock().unwrap();
-                    if guard.is_some_and(|guard| !guard(&objects, &name)) {
-                        fake.violations.lock().unwrap().push(name.clone());
-                    }
-                    objects.remove(&name);
-                    reply(204, "")
                 }
             }),
             http::Method::PUT => {
@@ -269,39 +344,11 @@ impl ObjectStore for Bucket {
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
         self.0.wait().await;
-        let stall = *self.0.stall.lock().unwrap();
-        if let Some((_, stall)) = stall.filter(|(part, _)| location.as_ref().contains(part)) {
-            *self.0.held.lock().unwrap() += 1;
-            tokio::time::sleep(stall).await;
-        }
-        let mut objects = self.0.objects.lock().unwrap();
-        match opts.mode {
-            PutMode::Create if objects.contains_key(location.as_ref()) => {
-                return Err(object_store::Error::AlreadyExists {
-                    path: location.to_string(),
-                    source: "exists".into(),
-                });
-            }
-            PutMode::Update(version) => {
-                let current = objects
-                    .get(location.as_ref())
-                    .map(|object| object.generation.to_string());
-                if current.is_none() || current != version.version {
-                    return Err(object_store::Error::Precondition {
-                        path: location.to_string(),
-                        source: "generation does not match".into(),
-                    });
-                }
-            }
-            PutMode::Overwrite | PutMode::Create => {}
-        }
-        let generation = self
-            .0
-            .store(&mut objects, location.as_ref(), payload.into());
-        Ok(PutResult {
-            e_tag: Some(generation.to_string()),
-            version: Some(generation.to_string()),
-        })
+        let stall = self.0.stalled(location.as_ref());
+        let location = location.clone();
+        self.0
+            .after(stall, move |fake| fake.put(&location, payload, opts.mode))
+            .await
     }
 
     async fn put_multipart_opts(

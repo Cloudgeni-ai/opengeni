@@ -42,6 +42,18 @@ would delete a chunk the new copy needs, after its local copy may be gone.
   than landing after a sweep. An earlier design that only gave archives a
   deadline to publish could not stop a write already sent from landing
   late.
+- Every other pointer change is conditional too. Forgetting a memory image
+  replaces the pointer only on the version it read, and deleting a pointer
+  deletes only the version it read (by GCS generation; elsewhere by
+  replacing it with the empty pointer on condition). A change whose
+  version moved reads again; a write held up in flight long after its
+  caller gave up can never land over a newer copy and leave a pointer
+  naming what a sweep took.
+- The fence needs a store that gives a pointer stored again with the same
+  bytes a new version. GCS generations and Azure entity tags change; S3
+  entity tags do not. A sweep that deletes is refused before it stores any
+  pointer on a store without deletes on condition, which today means
+  anything but GCS.
 - Forgetting a memory image also drops its working-set pack, which holds
   memory pages; a copy without memory names no pack.
 - Anything a sweep cannot read stops it before it deletes anything; only a
@@ -52,8 +64,9 @@ would delete a chunk the new copy needs, after its local copy may be gone.
 ## Consequences
 
 - Storage holds what live copies name plus at most about a week of
-  leftovers. A forgotten memory image, its pack included, is gone about 37
-  days after the sandbox was last used.
+  leftovers. Age counts from when an object was last stored, so a memory
+  image forgotten 30 days after last use, its pack included, usually goes
+  at the first sweep after.
 - A chunk reused for more than a week is uploaded again once a week; a
   shared chunk costs one write a week, not one per archive.
 - Each deleting sweep writes every pointer once (a million sandboxes cost
@@ -64,6 +77,8 @@ would delete a chunk the new copy needs, after its local copy may be gone.
   minutes, and a sweep over a fake GCS, each reading its own clock off by
   up to the allowed disagreement, checks every delete against the stored
   pointers; with the reuse rule or the fence turned off it finds the loss.
+  Regressions hold up a forgetting write and a pointer delete in flight
+  past a newer copy and check that neither lands.
 - Only GCS deletes on condition today. On Azure and S3 a sweep reports but
   refuses to delete until their conditional deletes are wired in.
 - A sweep holds every stored key in memory; one prefix of tens of millions

@@ -697,7 +697,9 @@ async fn a_sweep_keeps_what_stored_copies_name() {
 
     store.delete(with_memory).await.unwrap();
     let shared = ahead.sweep(false).await.unwrap();
-    assert_eq!(shared.pointers, 1);
+    // This store deletes on no condition, so the deleted copy's pointer
+    // stays, empty, naming nothing.
+    assert_eq!(shared.pointers, 2);
     assert!(shared.named >= 2, "the shared disk stays: {shared:?}");
     assert_eq!(shared.named + shared.unnamed, shared.stored);
 

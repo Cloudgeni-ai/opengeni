@@ -28,6 +28,8 @@ const DELETES: usize = 32;
 /// What a sweep found, and did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Report {
+    /// Pointer objects listed, counting the empty ones that name nothing
+    /// (an archive's start, or a delete where deletes carry no condition).
     pub pointers: usize,
     /// Chunks and manifests some pointer names.
     pub named: usize,
@@ -49,12 +51,19 @@ pub struct Report {
 /// [`ChunkRef::key`](crate::chunk::ChunkRef::key) and
 /// [`ChunkStore::manifest_key`] give them) the pointer holding the given
 /// bytes keeps. With `delete` false nothing is deleted, and the report says
-/// what would be.
+/// what would be. A sweep that deletes is refused before it stores any
+/// pointer again where the store cannot delete on condition, as
+/// [`ChunkStore::deletes_on_condition`] says.
 pub async fn sweep<F, Fut>(store: &ChunkStore, names: F, delete: bool) -> Result<Report>
 where
     F: Fn(Vec<u8>) -> Fut,
     Fut: Future<Output = Result<Vec<String>>>,
 {
+    if delete && !store.deletes_on_condition() {
+        return Err(Error::Unsupported(
+            "deleting stored objects needs a delete on condition (GCS)",
+        ));
+    }
     let started = store.now();
     let before = started
         .checked_sub(store.freshness().sweep_after())

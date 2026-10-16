@@ -514,10 +514,11 @@ pub struct HostStatus {
     /// when its record is readable.
     #[serde(default)]
     pub blocked: Vec<BlockedSandbox>,
-    /// How long, in milliseconds, memory has been failing to arrive from an
-    /// object store that does not answer, if it is. Sandboxes waking from
-    /// the store stall meanwhile; they lose nothing and carry on once it
-    /// answers.
+    /// How long, in milliseconds, memory waking from object storage has
+    /// been failing to arrive, because the store does not answer or its
+    /// pages cannot be written to local disk, if it is. Sandboxes waking
+    /// from the store stall meanwhile; they lose nothing and carry on once
+    /// the store answers and there is room.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_stalled_ms: Option<u64>,
     /// Running sandboxes whose processor use and traffic could not be read

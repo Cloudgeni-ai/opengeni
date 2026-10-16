@@ -39,9 +39,9 @@ use crate::{
 /// Largest pointer object accepted; pointers only name manifests.
 pub const MAX_POINTER_BYTES: usize = 64 * 1024;
 
-/// How often [`ChunkStore::begin`] and [`ChunkStore::fence`] try again when
-/// the pointer changes under them; a pointer has one writer, so more means
-/// something else is wrong.
+/// How often [`ChunkStore::begin`], [`ChunkStore::fence`] and
+/// [`ChunkStore::delete_pointer`] try again when the pointer changes under
+/// them; a pointer has one writer, so more means something else is wrong.
 const POINTER_TRIES: usize = 4;
 
 /// Use provider-native environment or machine-identity credentials.
@@ -89,13 +89,15 @@ pub enum Area {
     Chunks,
 }
 
-/// One archive between its start and the pointer naming what it stored;
-/// see [`ChunkStore::begin`].
+/// One change of a pointer between the version it started from and the
+/// pointer it writes: an archive (see [`ChunkStore::begin`]) or a change
+/// naming part of what the pointer named (see
+/// [`ChunkStore::read_for_change`]). It lands only on that version.
 #[derive(Clone, Debug)]
-#[must_use = "an archive publishes through its publication"]
+#[must_use = "a change lands through its publication"]
 pub struct Publication {
     path: Path,
-    /// The pointer's version when the archive began.
+    /// The pointer's version when the change started.
     version: UpdateVersion,
 }
 
@@ -262,17 +264,48 @@ impl ChunkStore {
         Ok(self.path(&format!("pointers/v1/{name}")))
     }
 
-    /// Replaces the small mutable object `name`, such as the record of which
-    /// manifests make up a sandbox's current copy. Chunks and manifests are
-    /// immutable; pointers are the only objects ever overwritten, so write one
-    /// only after everything it names is stored. A pointer naming objects
-    /// an archive stored or reused goes through [`Self::publish`] instead;
-    /// this is for the pointer's only writer replacing it with one naming
-    /// part of what it named when read.
-    pub async fn put_pointer(&self, name: &str, bytes: Vec<u8>) -> Result<()> {
-        if bytes.len() > MAX_POINTER_BYTES {
+    /// Whether this store deletes on condition (GCS), which a sweep that
+    /// deletes needs. Its writes also give every pointer a new version,
+    /// even one stored again as it was, which the sweep's fence needs: an
+    /// S3 entity tag stays the same for the same bytes.
+    #[must_use]
+    pub fn deletes_on_condition(&self) -> bool {
+        matches!(self.uploader, Uploader::Gcs(_))
+    }
+
+    /// Reads pointer `name` to replace it with one naming part of what it
+    /// names now, such as the same copy without its memory image. The
+    /// replacement goes through [`Self::publish`] with the publication
+    /// returned, so it lands only on the version read: a write held up in
+    /// flight long after its caller stopped waiting can never replace a
+    /// copy stored since, and a sweep's fence sends the caller to read
+    /// again. `None` when there is no pointer, or only the empty one an
+    /// archive in flight stored.
+    pub async fn read_for_change(&self, name: &str) -> Result<Option<(Vec<u8>, Publication)>> {
+        let path = self.pointer_path(name)?;
+        let read = match self.backend.get(&path).await {
+            Ok(read) => read,
+            Err(object_store::Error::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if read.meta.size > MAX_POINTER_BYTES as u64 {
             return Err(Error::Invalid("pointer too large"));
         }
+        let version = UpdateVersion {
+            e_tag: read.meta.e_tag.clone(),
+            version: read.meta.version.clone(),
+        };
+        let bytes = read.bytes().await?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some((bytes.to_vec(), Publication { path, version })))
+    }
+
+    /// Replaces pointer `name` with no condition, as a writer without the
+    /// fence would; for tests that show what the fence prevents.
+    #[cfg(test)]
+    pub(crate) async fn put_pointer_unfenced(&self, name: &str, bytes: Vec<u8>) -> Result<()> {
         self.backend
             .put(&self.pointer_path(name)?, Bytes::from(bytes).into())
             .await?;
@@ -324,10 +357,10 @@ impl ChunkStore {
     }
 
     /// Ends `publication` by replacing its pointer with `bytes`, on
-    /// condition that the pointer is still the version the archive began
-    /// with. Refused with [`Error::Superseded`] otherwise: a sweep has
-    /// taken stock since and may delete what the archive reused, so the
-    /// archive starts again.
+    /// condition that the pointer is still the version the change started
+    /// from. Refused with [`Error::Superseded`] otherwise: a sweep has
+    /// taken stock since and may delete what an archive reused, or a newer
+    /// copy was stored, so the change starts again.
     pub async fn publish(&self, publication: Publication, bytes: Vec<u8>) -> Result<()> {
         if bytes.len() > MAX_POINTER_BYTES {
             return Err(Error::Invalid("pointer too large"));
@@ -353,7 +386,9 @@ impl ChunkStore {
     /// condition that it has not changed since it was read, and returns
     /// what it holds; `None` once it is gone. After this no archive that
     /// began earlier can publish it, so what it names now is all it can
-    /// name until an archive begun later publishes.
+    /// name until an archive begun later publishes. That holds only where
+    /// storing the same bytes again gives a new version, as
+    /// [`Self::deletes_on_condition`] says.
     pub async fn fence(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let name = Self::pointer_name(key).ok_or(Error::Invalid("pointer key"))?;
         let path = self.pointer_path(name)?;
@@ -407,13 +442,55 @@ impl ChunkStore {
         }
     }
 
-    /// Deletes pointer `name`; succeeds when there is none. What it named
-    /// stays until garbage collection finds nothing refers to it.
+    /// Deletes pointer `name`; succeeds when there is none. It deletes only
+    /// the version it read, so a delete held up in flight long after its
+    /// caller stopped waiting can never take a copy stored since: on GCS by
+    /// generation; elsewhere, where a delete carries no condition, by
+    /// replacing the pointer with the empty one on condition, which reads
+    /// as no copy and stays. A version that changes between the read and
+    /// the delete is read again. What the pointer named stays until a
+    /// sweep finds nothing names it.
     pub async fn delete_pointer(&self, name: &str) -> Result<()> {
-        match self.backend.delete(&self.pointer_path(name)?).await {
-            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
-            Err(error) => Err(error.into()),
+        let path = self.pointer_path(name)?;
+        for _ in 0..POINTER_TRIES {
+            if let Uploader::Gcs(gcs) = &self.uploader {
+                let Some(stored) = gcs.stored(&path).await? else {
+                    return Ok(());
+                };
+                let generation = stored
+                    .generation
+                    .ok_or(Error::Invalid("the store gave no generation"))?;
+                match gcs.delete_generation(&path, &generation).await? {
+                    Deleted::Yes | Deleted::Gone => return Ok(()),
+                    Deleted::Changed => continue,
+                }
+            }
+            let meta = match self.backend.head(&path).await {
+                Ok(meta) => meta,
+                Err(object_store::Error::NotFound { .. }) => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
+            if meta.size == 0 {
+                return Ok(());
+            }
+            let options = PutOptions {
+                mode: PutMode::Update(UpdateVersion {
+                    e_tag: meta.e_tag,
+                    version: meta.version,
+                }),
+                ..Default::default()
+            };
+            match self
+                .backend
+                .put_opts(&path, PutPayload::new(), options)
+                .await
+            {
+                Ok(_) | Err(object_store::Error::NotFound { .. }) => return Ok(()),
+                Err(object_store::Error::Precondition { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
+        Err(Error::Superseded)
     }
 
     /// Returns true only when this call created the object; never overwrites it.
@@ -744,8 +821,12 @@ mod tests {
     async fn pointers_are_replaced_read_and_deleted() {
         let store = ChunkStore::new(Arc::new(InMemory::new()), Path::from("tenant/test"));
         assert_eq!(store.get_pointer("a1").await.unwrap(), None);
-        store.put_pointer("a1", b"one".to_vec()).await.unwrap();
-        store.put_pointer("a1", b"two".to_vec()).await.unwrap();
+        assert!(store.read_for_change("a1").await.unwrap().is_none());
+        let first = store.begin("a1").await.unwrap();
+        store.publish(first, b"one two".to_vec()).await.unwrap();
+        let (read, part) = store.read_for_change("a1").await.unwrap().unwrap();
+        assert_eq!(read, b"one two".to_vec());
+        store.publish(part, b"two".to_vec()).await.unwrap();
         assert_eq!(
             store.get_pointer("a1").await.unwrap(),
             Some(b"two".to_vec())
@@ -753,13 +834,37 @@ mod tests {
         store.delete_pointer("a1").await.unwrap();
         store.delete_pointer("a1").await.unwrap();
         assert_eq!(store.get_pointer("a1").await.unwrap(), None);
-        assert!(store.put_pointer("../escape", Vec::new()).await.is_err());
+        assert!(store.read_for_change("a1").await.unwrap().is_none());
+        assert!(store.begin("../escape").await.is_err());
+        let big = store.begin("big").await.unwrap();
         assert!(
             store
-                .put_pointer("big", vec![0; MAX_POINTER_BYTES + 1])
+                .publish(big, vec![0; MAX_POINTER_BYTES + 1])
                 .await
                 .is_err()
         );
+    }
+
+    /// A change that read an older version never lands, and a delete
+    /// where deletes carry no condition leaves the empty pointer.
+    #[tokio::test]
+    async fn changes_land_only_on_the_version_they_read() {
+        let backend = Arc::new(InMemory::new());
+        let store = ChunkStore::new(backend.clone(), Path::from("p"));
+        let first = store.begin("a").await.unwrap();
+        store.publish(first, b"old".to_vec()).await.unwrap();
+        let (_, stale) = store.read_for_change("a").await.unwrap().unwrap();
+        let newer = store.begin("a").await.unwrap();
+        store.publish(newer, b"new".to_vec()).await.unwrap();
+        let refused = store.publish(stale, b"part of old".to_vec()).await;
+        assert!(matches!(refused, Err(Error::Superseded)), "{refused:?}");
+        assert_eq!(store.get_pointer("a").await.unwrap(), Some(b"new".to_vec()));
+
+        store.delete_pointer("a").await.unwrap();
+        assert_eq!(store.get_pointer("a").await.unwrap(), None);
+        let left = backend.head(&Path::from("p/pointers/v1/a")).await.unwrap();
+        assert_eq!(left.size, 0, "the empty pointer stays");
+        assert!(store.read_for_change("a").await.unwrap().is_none());
     }
 
     #[tokio::test]

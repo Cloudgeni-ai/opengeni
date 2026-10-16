@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use object_store::ObjectStore as _;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 
@@ -170,13 +171,87 @@ async fn a_publication_held_up_past_a_sweep_never_lands() {
     store.get_chunk(&reused.reference).await.unwrap();
 }
 
+/// Waits until a request is held up in flight, then stops waiting for its
+/// answer, as a caller that gave up would; the request still lands.
+async fn give_up_once_held<T>(fake: &Fake, request: tokio::task::JoinHandle<T>) {
+    while *fake.held.lock().unwrap() == 0 {
+        tokio::task::yield_now().await;
+    }
+    request.abort();
+    *fake.stall.lock().unwrap() = None;
+}
+
+/// Forgetting a memory image replaces the pointer with one naming part
+/// of what it named. Held up in flight after its caller gave up, it lands
+/// after a newer copy and a sweep that took what the old pointer named,
+/// and is refused: the pointer still names only what is stored.
+#[tokio::test(start_paused = true)]
+async fn a_change_held_up_past_a_newer_copy_never_lands() {
+    let fake = Fake::new(paused_clock());
+    let store = ChunkStore::over_fake(&fake, "p").with_freshness(SIMULATED);
+    let (memory, disk, newer) = (chunk(1), chunk(2), chunk(3));
+    store.put_chunk(&memory).await.unwrap();
+    store.put_chunk(&disk).await.unwrap();
+    let first = store.begin("a").await.unwrap();
+    let both = pointer(&[memory.reference.key(), disk.reference.key()]);
+    store.publish(first, both).await.unwrap();
+
+    let (_, change) = store.read_for_change("a").await.unwrap().unwrap();
+    *fake.stall.lock().unwrap() = Some(("pointers/", 300 * SECOND));
+    let forgetting = tokio::spawn({
+        let (store, key) = (store.clone(), disk.reference.key());
+        async move { store.publish(change, pointer(&[key])).await }
+    });
+    give_up_once_held(&fake, forgetting).await;
+
+    let archive = store.begin("a").await.unwrap();
+    store.put_chunk(&newer).await.unwrap();
+    let current = pointer(&[newer.reference.key()]);
+    store.publish(archive, current.clone()).await.unwrap();
+    tokio::time::advance(SIMULATED.sweep_after() + SECOND).await;
+    let swept = sweep(&store, listed_names, true).await.unwrap();
+    assert_eq!(swept.deleted, 2, "{swept:?}");
+
+    tokio::time::sleep(300 * SECOND).await;
+    assert_eq!(*fake.held.lock().unwrap(), 1);
+    assert_eq!(store.get_pointer("a").await.unwrap(), Some(current));
+    store.get_chunk(&newer.reference).await.unwrap();
+}
+
+/// A delete of a removed sandbox's pointer, held up in flight after its
+/// caller gave up, lands after a sandbox of the same name stored a copy,
+/// and is refused.
+#[tokio::test(start_paused = true)]
+async fn a_delete_held_up_past_a_newer_copy_never_lands() {
+    let fake = Fake::new(paused_clock());
+    let store = ChunkStore::over_fake(&fake, "p");
+    let first = store.begin("a").await.unwrap();
+    store.publish(first, pointer(&[])).await.unwrap();
+    *fake.stall.lock().unwrap() = Some(("pointers/", 300 * SECOND));
+    let deleting = tokio::spawn({
+        let store = store.clone();
+        async move { store.delete_pointer("a").await }
+    });
+    give_up_once_held(&fake, deleting).await;
+
+    let stored = chunk(4);
+    let again = store.begin("a").await.unwrap();
+    store.put_chunk(&stored).await.unwrap();
+    let current = pointer(&[stored.reference.key()]);
+    store.publish(again, current.clone()).await.unwrap();
+
+    tokio::time::sleep(300 * SECOND).await;
+    assert_eq!(*fake.held.lock().unwrap(), 1);
+    assert_eq!(store.get_pointer("a").await.unwrap(), Some(current));
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_sweep_that_cannot_read_a_pointer_deletes_nothing() {
     let fake = Fake::new(paused_clock());
     let store = ChunkStore::over_fake(&fake, "p");
     store.put_chunk(&chunk(6)).await.unwrap();
     store
-        .put_pointer("garbled", b"not json".to_vec())
+        .put_pointer_unfenced("garbled", b"not json".to_vec())
         .await
         .unwrap();
     tokio::time::advance(store.freshness().sweep_after() + SECOND).await;
@@ -187,8 +262,13 @@ async fn a_sweep_that_cannot_read_a_pointer_deletes_nothing() {
 
 #[tokio::test]
 async fn only_a_store_that_deletes_on_condition_deletes() {
-    let store = ChunkStore::new(Arc::new(InMemory::new()), Path::from("p"));
+    let backend = Arc::new(InMemory::new());
+    let store = ChunkStore::new(backend.clone(), Path::from("p"));
     store.put_chunk(&chunk(7)).await.unwrap();
+    let empty = store.begin("a").await.unwrap();
+    store.publish(empty, pointer(&[])).await.unwrap();
+    let pointer_path = Path::from("p/pointers/v1/a");
+    let version = backend.head(&pointer_path).await.unwrap().e_tag;
     // Seen from far enough ahead, the chunk is old.
     let later = SystemTime::now() + 30 * Duration::from_secs(86_400);
     let store = store.with_clock(Clock::from_fn(move || later));
@@ -196,6 +276,11 @@ async fn only_a_store_that_deletes_on_condition_deletes() {
     assert_eq!(looked.unnamed, 1);
     let refused = sweep(&store, listed_names, true).await;
     assert!(matches!(refused, Err(Error::Unsupported(_))), "{refused:?}");
+    assert_eq!(
+        backend.head(&pointer_path).await.unwrap().e_tag,
+        version,
+        "refused before it fenced anything"
+    );
 }
 
 /// The times the simulation runs with: a sweep may delete what was stored
@@ -274,7 +359,7 @@ async fn simulate(seed: u64, archives: Freshness, sweeps: Freshness, fenced: boo
                 let published = if fenced {
                     store.publish(publication, pointer(&keys)).await
                 } else {
-                    store.put_pointer(&name, pointer(&keys)).await
+                    store.put_pointer_unfenced(&name, pointer(&keys)).await
                 };
                 match published {
                     Ok(()) => {

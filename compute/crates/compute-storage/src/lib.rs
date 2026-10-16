@@ -27,11 +27,11 @@ pub enum Error {
     /// An upload or download did not complete; trying again may work.
     #[error("transfer failed: {0}")]
     Transfer(String),
-    /// The pointer an archive was to replace changed after the archive
-    /// began, so it may not publish what it stored; it starts again. A
-    /// sweep changes every pointer before it deletes anything (see
-    /// [`fresh`]).
-    #[error("the copy changed while it was archived; the archive starts again")]
+    /// The pointer a change was to replace changed after the change read
+    /// it (an archive, when it began), so the change may not land; it
+    /// starts again from the pointer as it is now. A sweep changes every
+    /// pointer before it deletes anything (see [`fresh`]).
+    #[error("the stored copy changed meanwhile; the change starts again")]
     Superseded,
     /// This store cannot do what was asked.
     #[error("unsupported by this store: {0}")]

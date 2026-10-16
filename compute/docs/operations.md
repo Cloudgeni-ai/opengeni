@@ -9,20 +9,26 @@ and what we chose not to build.
 - **Mount the state volume before the agent starts.** The agent creates its
   state root if the parent directory exists, so an unmounted volume looks
   like an empty host and the agent would start keeping new records on the
-  wrong filesystem. Start it from a systemd unit with
-  `RequiresMountsFor=<state root>`, so a missing mount fails the start
-  instead.
+  wrong filesystem. Configure the volume's mount, start the agent from a
+  systemd unit with `RequiresMountsFor=<state root>` so it starts after
+  that mount, and check that the intended volume is there:
+  `AssertPathIsMountPoint=` on the volume's mount point, and an
+  `ExecStartPre=` that compares the mounted filesystem's UUID with the one
+  recorded when the volume was set up. Ordering alone does not prove which
+  volume occupies the path.
 - **Archives must go off the host.** `--store` takes a directory or object
   storage. A directory is for tests and single machines: the agent warns at
   start, and an archive there is lost with the host. Production hosts use
   `gs://`, `az://` or `s3://`.
-- **Disk headroom for saves is best effort.** Admission keeps room for the
-  saves it admits ([ADR 14](adr/0014-requests-limits-and-admission.md)), but
-  guest disk growth and pages written during a wake from object storage are
-  not booked against it. A full disk does not lose memory: a save that cannot
-  write fails and is tried again later, and a wake from object storage whose
-  local writes fail waits, shown as stalled, and continues once there is
-  room. Alert on free space well before it reaches the reserve.
+- **Disk headroom for saves is the deployment's job.** The agent does not
+  yet book disk for the saves it admits (the admission in
+  [ADR 14](adr/0014-requests-limits-and-admission.md) is being built), and
+  guest disk growth and pages written during a wake from object storage
+  will not be booked even then. A full disk does not lose memory: a save
+  that cannot write fails and is tried again later, and a wake from object
+  storage whose local writes fail waits, shown as stalled, and continues
+  once there is room. Size state volumes for the sandboxes placed on them
+  and alert on free space early, for example below 20 %.
 - **Encryption is the volume's and the store's.** Chunks are stored raw or
   compressed, not encrypted by us, and a host's state volume holds disks and
   memory images. Check that every state volume and the bucket are encrypted
@@ -32,14 +38,24 @@ and what we chose not to build.
 
 ## Deleting
 
-- **Deleting a sandbox removes it from our API at once; its bytes leave
-  storage later.** Its pointer goes immediately. A daily sweep
-  (`compute-host sweep --store ... --delete`) deletes chunks no pointer names
-  once they are more than a week old
-  ([ADR 17](adr/0017-sweeping-unnamed-chunks.md)). A chunk another sandbox
+- **Deleting a sandbox: its pointer goes last, its bytes later.** Removal
+  records the intent, stops the VM, removes its network and then deletes
+  the pointer in object storage; a step that fails is tried again, and the
+  sandbox shows as removing (or blocked) until all are done. A daily sweep
+  (`compute-host sweep --store ... --delete`) then deletes the chunks and
+  manifests no pointer names that were stored more than about a week
+  before it began ([ADR 17](adr/0017-sweeping-unnamed-chunks.md)). Age
+  counts from when an object was last stored, so a copy archived long ago
+  goes at the first sweep after nothing names it. A chunk another sandbox
   still names stays: identical content is shared.
-- **Forgotten memory images** go with their working-set pack about 37 days
-  after last use: 30 days to forget, then the sweep's week.
+- **Forgotten memory images** (30 days after last use by default) lose
+  their pointer entry together with their working-set pack, and their
+  chunks go at a following sweep under the same rule.
+- **Only GCS sweeps delete.** A sweep that deletes needs deletes on
+  condition, which we use on GCS; on Azure and S3 it refuses and only
+  reports, so unnamed chunks stay there until conditional deletes are
+  built for those stores. Deleting a pointer there leaves an empty one,
+  which reads as no copy.
 - **Provider retention comes on top.** GCS soft delete keeps deleted
   objects 7 days by default; set the bucket's policy to what we promise.
 - **Quarantined objects** (stored copies that failed their checksum, kept
@@ -54,22 +70,27 @@ and what we chose not to build.
 
 - **The agent** can be replaced at any time; running VMs keep running
   ([ADR 9](adr/0009-vms-outlive-the-agent.md)).
-- **Firecracker**: keep the previous binary with `--retained-firecracker`
-  until no saved image needs it, so older memory images still wake with
-  their programs.
+- **Firecracker**: a wake uses whichever configured Firecracker (the
+  current one or one kept with `--retained-firecracker`) reads the image's
+  snapshot format on the image's CPU, so a newer compatible release
+  restores older images and runs them from then on. Keep the previous
+  binary only when a release changes the snapshot format, until no saved
+  image needs it. Status shows the runtime the agent launches new VMs
+  under, not the runtime of every saved image; each image records its own.
 - **The host kernel**: Firecracker does not promise that a memory image
   restores under another host kernel. Before rolling a new host image out,
   save sandboxes on the old one and wake them on the new one (with the
   `save_wake` and `lab` tests and a store both hosts share), and keep the
-  old image to roll back to. Status shows the runtime images are made
-  under.
-- **The guest kernel** is replaced on a fresh boot, not on a wake from a
-  memory image. A sandbox's own disk then boots with the newest kernel, so
-  a new guest kernel must be tested against the root filesystems still in
-  use. We never replace a user's disk to upgrade it.
-- **Security patches reach a sandbox only when it boots again.** A VM that
-  stays busy keeps its kernel and VMM, and memory images wake with what they
-  had. An urgent fix therefore means stopping affected sandboxes (they boot
+  old image to roll back to.
+- **The guest kernel** a VM booted with stays through every save and wake;
+  only a fresh boot picks up a new one. A sandbox's own disk then boots
+  with the newest kernel, so a new guest kernel must be tested against the
+  root filesystems still in use. We never replace a user's disk to upgrade
+  it.
+- **Security patches.** A fixed Firecracker reaches a sleeping sandbox at
+  its next wake when it reads the image's snapshot format; a VM that stays
+  busy keeps the VMM it runs under until it sleeps. A guest kernel fix
+  needs a fresh boot, which means stopping affected sandboxes (they boot
   fresh from their disks). There is no live patching.
 
 ## Emergencies
@@ -77,7 +98,7 @@ and what we chose not to build.
 - **Stopping a sandbox when the state disk is read-only.** Removal writes
   its intent first and refuses when it cannot. To contain a sandbox anyway,
   kill its VM directly: `echo 1 > /sys/fs/cgroup/compute/<sandbox id>/cgroup.kill`
-  (the path under `--cgroup-parent`). Its files stay and the agent treats
+  (the path under `--cgroup`). Its files stay and the agent treats
   the VM's end like a crash. Remove the sandbox through the API once the
   disk is writable again.
 
