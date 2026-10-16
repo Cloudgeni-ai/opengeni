@@ -29,6 +29,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep, timeout};
 
+mod spoofing;
+
 const PORT: u32 = 52;
 
 fn lab() -> Option<PathBuf> {
@@ -706,7 +708,7 @@ async fn restored_guests_reach_the_internet_at_once_and_nothing_else() {
                 .all(|sandbox| sandbox.level == LevelName::Saved && sandbox.step.is_none())
         })
         .await;
-    let _neighbour = NamespaceListener::start(id(1), NEIGHBOUR_INNER, port);
+    let neighbour = NamespaceListener::start(id(1), NEIGHBOUR_INNER, port);
 
     let blocked = forbidden(port);
     // The first command after the restore is the outbound connection, then
@@ -771,6 +773,9 @@ if getent hosts example.com >/dev/null; then echo dns ok; else echo dns-failed; 
             "blocked_outcomes": outcomes,
         }),
     );
+    // A process inside a namespace keeps it, and its link, alive, so
+    // removing that sandbox would wait for it.
+    drop(neighbour);
     agent.remove_all().await;
     agent.kill();
     host.finish(&format!("network-restore-{count}"));
@@ -783,54 +788,6 @@ fn listen_everywhere() -> (TcpListener, u16) {
         .unwrap();
     let port = listener.local_addr().unwrap().port();
     (listener, port)
-}
-
-/// A guest that takes another source address gets nowhere with it, and
-/// one that changes its MAC address still reaches nothing it may not.
-/// Packets from a foreign source or MAC are refused with a reset addressed
-/// to the guest's real addresses, which the spoofer never sees, so such
-/// attempts time out; none may ever connect.
-async fn check_spoofing(client: &Client, targets: &[String], lan: &str, trusted: bool) {
-    let mut outside = vec!["1.1.1.1:80".to_owned(), lan.to_owned()];
-    outside.extend(
-        targets
-            .iter()
-            .filter(|target| !target.starts_with('['))
-            .cloned(),
-    );
-    for source in ["203.0.113.7", NEIGHBOUR_INNER] {
-        let script = format!(
-            "ip addr add {source}/32 dev eth0\n{}\nip addr del {source}/32 dev eth0",
-            probe_from(source, &outside)
-        );
-        let (output, _) = exec(client, id(0), &script).await;
-        let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(lines.len(), outside.len(), "spoofed {source}: {output}");
-        for line in lines {
-            assert!(
-                line.split_whitespace().nth(1) != Some("open"),
-                "spoofed {source} got through: {line}"
-            );
-        }
-    }
-    let script = format!(
-        "ip link set dev eth0 address 06:00:00:00:00:99\n{}\nip link set dev eth0 address 06:00:a9:fe:00:15",
-        probe_script(targets)
-    );
-    // Replies go to the MAC the host knows the guest by, so what the new
-    // MAC can see is only whether anything blocked answered at all.
-    let (output, _) = exec(client, id(0), &script).await;
-    let lines: Vec<&str> = output.lines().collect();
-    assert_eq!(lines.len(), targets.len(), "spoofed MAC: {output}");
-    for (line, target) in lines.iter().zip(targets) {
-        if trusted && target.as_str() == lan {
-            continue;
-        }
-        assert!(
-            line.split_whitespace().nth(1) != Some("open"),
-            "spoofed MAC, trusted={trusted}: {target} got through: {line}"
-        );
-    }
 }
 
 /// On a trusted host guests reach the local network; on any other host the
@@ -866,7 +823,7 @@ async fn only_trusted_hosts_let_guests_reach_the_local_network() {
         let lines: Vec<&str> = output.lines().collect();
         let open: &[&str] = if trusted { &[lan.as_str()] } else { &[] };
         check_probes(&format!("trusted={trusted}"), &lines, &targets, open);
-        check_spoofing(&agent.client, &targets, &lan, trusted).await;
+        spoofing::check_spoofing(&agent.client, &targets, &lan, trusted).await;
         drop(neighbour);
         agent.remove_all().await;
         agent.kill();
