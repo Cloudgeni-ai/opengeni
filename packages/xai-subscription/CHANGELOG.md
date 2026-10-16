@@ -1,5 +1,11 @@
 # @opengeni/xai-subscription
 
+## 3.2.2
+
+### Patch Changes
+
+- @opengeni/network@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes

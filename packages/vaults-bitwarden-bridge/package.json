@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/vaults-bitwarden-bridge",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "private": true,
   "description": "Customer-run bridge that serves Opengeni's signed remote vault protocol from a Bitwarden Password Manager account through a private, already-unlocked `bw serve` Unix socket.",
   "license": "Apache-2.0",

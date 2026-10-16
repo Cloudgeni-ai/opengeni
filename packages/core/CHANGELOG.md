@@ -1,5 +1,52 @@
 # @opengeni/core
 
+## 3.2.2
+
+### Minor Changes
+
+- a0c35a1: Linked vaults accept the external, Proton Pass, Keeper and Bitwarden sources (migration 0789). Linking checks the connection's provider identity, active and verified status and ownership in the database: a personal connection backs only its owner's Only-me vaults, and a shared connection only vaults of its own ownership. Vaults record the provider's effective operations, its own freshness observation and a durable cache epoch that every complete mirror replacement advances.
+
+  A mirror is replaced only by a complete inventory of at most 2,000 items; otherwise the previous mirror is kept and the failure recorded. Refreshes never bypass an active provider rate limit, even when forced, and record operations and freshness even when nothing changed. `secret_search` accepts `refresh` (first page only) and reports `complete` and the checked `sources` on every page, so an unavailable provider is never shown as an empty healthy vault. A reference that misses while a relevant connected vault could not be checked fails with that provider's error instead of a missing-secret ask card; explicitly named healthy or hosted vaults are unaffected. Vault summaries include `providerOperations` and `freshness`.
+
+  Connected-vault writes check the vault's effective operations (item type, field removal, one-time passwords, files, archive) before any value is resolved or generated. Permanent deletion, restore and field-history restore are refused for connected items. A move out of a connected vault needs a recoverable archive and archives the original only after the target confirmed the write. An unconfirmed provider write is reported as `provider_outcome_unknown` and never retried; a confirmed write that cannot be listed yet is reported as saved (`provider_inventory_incomplete` with `details.saved`).
+
+### Patch Changes
+
+- a0c35a1: Overlapping syncs of one connected vault now replace its mirror one at a time. The mirror replacement takes the vault row lock before it reads the mirror, so an older listing can no longer re-add an item that a newer one removed while the newer content version is recorded, which also stopped later unchanged syncs from repairing it.
+
+  A reference that finds nothing now refreshes every connected vault that could change the answer: those at or above the priority tier that matched. A hosted workspace item without a one-time password no longer stops a stale Only-me connected vault from being refreshed, so `Item/otp` resolves once that provider has the one-time password, or reports the provider as unavailable, rate limited or needing reconnection instead of asking for the secret. A lower-priority connected vault that is down no longer turns a miss decided by a higher tier into an unchecked one.
+
+- 7e50b4a: Add an optional deployment-wide override for margins applied to provider-rate credit charges.
+- a0c35a1: A move out of a connected vault records the provider's version of the original from a fresh listing before copying its values. If it differs from the version Opengeni last synced (so the item's fields here may be out of date), the move is refused with `provider_conflict` before anything is saved; sync the vault and move again. The original is listed again just before archiving: if it changed, is no longer listed or cannot be checked, it is kept and the move reports the copy as saved with `sourceArchived: false` (`sourceChanged: true` when it changed). These checks are not an atomic read, and providers have no conditional archive, so an edit landing after the last check is still archived recoverably; providers that do not version items get no drift check.
+- a0c35a1: Provider listings now say whether they prove which items are absent. `traverseProviderPages`, `readProviderVaultInventory` and `readProviderItemInventory` return `{ items, consistent }`, where consistent means one response or every page under one snapshot. `collectProviderPages`, `listProviderVaults` and `listProviderItems` keep their bounded enumeration for discovery.
+
+  A connected vault's mirror is replaced only from a consistent inventory. A multi-page listing without a snapshot keeps the previous mirror and records `provider_inventory_incomplete`, because offset cursors can skip an existing item when an earlier one is deleted between pages; a vault missing from such a vault listing is not reported as removed. An item with more than 50 fields or 20 websites, or a website over 2,048 characters, also makes the inventory incomplete instead of being cut down, and the previous mirror is kept.
+
+- a0c35a1: Settle connected-vault inventory and status together against the cache epoch read before provider I/O. A late overlapping refresh cannot overwrite another completed check, including unchanged checks and failures. Superseded refreshes are not replayed; reference resolution rereads the settled inventory.
+
+  Preflight managed 1Password creation through the exact local link checks, rolling back all local trial effects before provider I/O. Predictable name, quota and authority refusals create nothing upstream. If a race or a later step fails after confirmed creation, return the existing provider vault identity and link/refresh recovery guidance instead of inviting another create. Failed group grants retain the created identity and still link the vault; unknown creates are never automatically retried. No destructive compensation or exactly-once guarantee is introduced.
+
+- Updated dependencies [5af5889]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [7e50b4a]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [d5858bb]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+  - @opengeni/db@3.2.0
+  - @opengeni/config@3.2.0
+  - @opengeni/vaults@3.2.0
+  - @opengeni/runtime@3.2.0
+  - @opengeni/contracts@3.2.0
+  - @opengeni/documents@3.2.0
+  - @opengeni/events@3.2.0
+  - @opengeni/storage@3.2.0
+  - @opengeni/capabilities@3.2.0
+  - @opengeni/codex@3.2.0
+  - @opengeni/observability@3.2.0
+  - @opengeni/network@3.2.0
+
 ## 3.1.2
 
 ### Minor Changes

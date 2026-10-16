@@ -1,5 +1,19 @@
 # @opengeni/vaults-onepassword
 
+## 3.2.2
+
+### Patch Changes
+
+- a0c35a1: Scope the per-attempt 1Password item cache to the connection and token that read an item and to the vault's durable cache epoch, so a mirror refresh in any API or worker process makes later reads fetch the item again; `forceRefresh` always reads it again. A write that 1Password fails without a classified answer after it was sent is reported as `provider_outcome_unknown` instead of `provider_unavailable`, so it is never presented as safe to repeat.
+- a0c35a1: Settle connected-vault inventory and status together against the cache epoch read before provider I/O. A late overlapping refresh cannot overwrite another completed check, including unchanged checks and failures. Superseded refreshes are not replayed; reference resolution rereads the settled inventory.
+
+  Preflight managed 1Password creation through the exact local link checks, rolling back all local trial effects before provider I/O. Predictable name, quota and authority refusals create nothing upstream. If a race or a later step fails after confirmed creation, return the existing provider vault identity and link/refresh recovery guidance instead of inviting another create. Failed group grants retain the created identity and still link the vault; unknown creates are never automatically retried. No destructive compensation or exactly-once guarantee is introduced.
+
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+  - @opengeni/vaults@3.2.0
+  - @opengeni/contracts@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes
