@@ -2705,6 +2705,159 @@ describe("interaction attempt tools", () => {
       definitions.length,
     );
   });
+
+  test("browser tools keep working in the last used tab when ids are omitted", async () => {
+    const target = browserTarget();
+    const older = { ...discoveredBrowserSession(randomUUID(), sessionId), lastUsedAt: now };
+    const latest = {
+      ...discoveredBrowserSession(browserSessionId, sessionId),
+      lastUsedAt: "2026-08-10T12:05:00.000Z",
+    };
+    const lookups: string[] = [];
+    const acted: Array<{ browserSessionId: string; request: BrowserActionRequest }> = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act", "browser_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+      transport: partialTransport({
+        listBrowserSessions: async (_workspace, options) => {
+          lookups.push("sessions");
+          expect(options).toMatchObject({ associatedSessionId: sessionId, includeTerminal: false });
+          return { revision: 1, sessions: [older, latest] };
+        },
+        listBrowserTargets: async (_workspace, id) => {
+          lookups.push(`targets:${id}`);
+          return {
+            revision: 1,
+            targets: [{ ...target, id: "tab-0", selected: false }, target],
+          } as never;
+        },
+        actInBrowser: async (_workspace, id, request) => {
+          acted.push({ browserSessionId: id, request });
+          return browserReceipt(request.operationId, browserObservation(target));
+        },
+      }),
+    });
+    const act = definitions.find((tool) => tool.modelName === "interaction__browser_act")!;
+    expect(act.inputSchema.required).toEqual(["action"]);
+
+    const first = await act.execute(
+      { action: { type: "click", locator: "e1a2b3c4d" } },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(first.isError).toBeUndefined();
+    await act.execute(
+      {
+        action: {
+          type: "batch",
+          actions: [
+            { type: "fill", locator: "e00000001", value: "Ada" },
+            { type: "drag", from: "e00000002", to: { kind: "ref", ref: "e00000003" } },
+          ],
+        },
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+
+    // Only the first call looked the browser up; the second reused it.
+    expect(lookups).toEqual(["sessions", `targets:${browserSessionId}`]);
+    expect(acted.map((call) => [call.browserSessionId, call.request.targetId])).toEqual([
+      [browserSessionId, target.id],
+      [browserSessionId, target.id],
+    ]);
+    expect(acted[0]!.request.action).toEqual({
+      type: "click",
+      locator: { kind: "ref", ref: "e1a2b3c4d" },
+    });
+    expect(acted[1]!.request.action).toEqual({
+      type: "batch",
+      actions: [
+        { type: "fill", locator: { kind: "ref", ref: "e00000001" }, value: "Ada" },
+        {
+          type: "drag",
+          from: { kind: "ref", ref: "e00000002" },
+          to: { kind: "ref", ref: "e00000003" },
+        },
+      ],
+    });
+  });
+
+  test("an explicit tab becomes the current tab for later calls", async () => {
+    const target = browserTarget();
+    const other = randomUUID();
+    const acted: Array<[string, string]> = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        actInBrowser: async (_workspace, id, request) => {
+          acted.push([id, request.targetId]);
+          return browserReceipt(request.operationId, browserObservation(target));
+        },
+      }),
+    });
+    const act = definitions[0]!;
+    const run = async (args: Record<string, unknown>) =>
+      await act.execute(
+        { ...args, action: { type: "press", key: "Enter" } },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+    await run({ browserSessionId: other, targetId: "tab-9" });
+    await run({});
+    await run({ targetId: "tab-3" });
+    await run({});
+    expect(acted).toEqual([
+      [other, "tab-9"],
+      [other, "tab-9"],
+      [other, "tab-3"],
+      [other, "tab-3"],
+    ]);
+  });
+
+  test("omitting ids without an open browser fails clearly before dispatch", async () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+        actInBrowser: async () => {
+          throw new Error("must not dispatch");
+        },
+      }),
+    });
+    const result = await definitions[0]!.execute(
+      { action: { type: "press", key: "Enter" } },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: "browser_session_required",
+          message: expect.stringContaining("browser_open"),
+        },
+      },
+    });
+  });
+
+  test("browser_act shows an element ref as a locator shorthand", () => {
+    const act = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({}),
+    })[0]!;
+    const action = (act.inputSchema.properties as Record<string, Record<string, unknown>>).action!;
+    const locator = (action.properties as Record<string, { anyOf?: unknown[] }>).locator!;
+    expect(locator.anyOf?.[0]).toEqual({ type: "string", description: "An element ref." });
+    expect(JSON.stringify(locator.anyOf?.[1])).toContain('"ref"');
+  });
 });
 
 function browserTarget(): BrowserTarget {
