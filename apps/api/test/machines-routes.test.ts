@@ -1670,12 +1670,13 @@ describe("Connected Machine signed self-update orchestration", () => {
     // Still open after the busy backoff: postponed again, never requested.
     now += 11 * 60_000;
     await heartbeat();
-    await waitForValue(
+    // A new operation is recorded before it settles; wait for its postponement.
+    const postponedAgain = await waitForValue(
       status,
-      (update) => update?.operationId !== postponed!.operationId,
+      (update) => update?.operationId !== postponed!.operationId && update?.status === "failed",
       "the second postponement",
     );
-    expect((await status())?.errorCode).toBe("update_busy_browsers");
+    expect(postponedAgain?.errorCode).toBe("update_busy_browsers");
     expect(updateRequests()).toHaveLength(0);
 
     // Once the browser has ended, the next look requests the update.
