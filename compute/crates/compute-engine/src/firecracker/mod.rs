@@ -33,7 +33,7 @@ use self::jail::{
 };
 pub use self::process::Exit;
 use self::process::{Process, in_cgroup, parse_pid};
-use crate::cgroup::Cgroup;
+use crate::cgroup::{Cgroup, MemoryStats};
 use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
@@ -360,12 +360,16 @@ impl Firecracker {
                 cgroup.display()
             ));
         }
+        // The host's out-of-memory killer ends anything else first.
+        process::protect_from_oom(pid)
+            .map_err(|error| format!("protecting VMM {} from OOM: {error}", pid.as_raw_pid()))?;
         Ok(FirecrackerVm {
             name: spec.name.clone(),
             process,
             api: Api::new(spec.api_socket()),
             cgroup: self.cgroup_of(spec),
             jail: jail.clone(),
+            memory_low: u64::from(spec.memory_request_mib) << 20,
         })
     }
 
@@ -515,6 +519,8 @@ pub struct FirecrackerVm {
     api: Api,
     cgroup: Cgroup,
     jail: Jail,
+    /// Bytes of its memory protected from reclaim for others while it runs.
+    memory_low: u64,
 }
 
 impl FirecrackerVm {
@@ -611,6 +617,13 @@ impl FirecrackerVm {
     }
 
     /// Pauses or resumes the processors; see [`set_run_state`].
+    /// Gives the VM what a running VM has: no compression into zswap and
+    /// its memory guarantee.
+    fn guard_running(&self) -> io::Result<()> {
+        self.cgroup.close_zswap()?;
+        self.cgroup.set_memory_low(self.memory_low)
+    }
+
     async fn set_state(&self, operation: &'static str, run: RunState) -> Result<(), EngineError> {
         set_run_state(&self.api, || self.is_running(), operation, run).await
     }
@@ -819,10 +832,17 @@ impl Engine for Firecracker {
     }
 
     async fn pause(&self, vm: &FirecrackerVm) -> Result<(), EngineError> {
-        vm.set_state("pause", RunState::Paused).await
+        vm.set_state("pause", RunState::Paused).await?;
+        // Idle, its guarantee goes to the VMs that run: the kernel may now
+        // take its file pages before theirs. Best effort, since the pause
+        // itself took effect; the next resume sets it again either way.
+        let _ = vm.cgroup.set_memory_low(0);
+        Ok(())
     }
 
     async fn resume(&self, vm: &FirecrackerVm) -> Result<(), EngineError> {
+        vm.guard_running()
+            .map_err(|error| EngineError::io("resume", error))?;
         vm.set_state("resume", RunState::Running).await
     }
 
@@ -958,6 +978,12 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::io("io_bytes", error))
     }
 
+    fn memory_stats(&self, vm: &FirecrackerVm) -> Result<MemoryStats, EngineError> {
+        vm.cgroup
+            .memory_stats()
+            .map_err(|error| EngineError::io("memory_stats", error))
+    }
+
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {
         let mut exit = vm.exit_watch();
         async move {
@@ -1017,7 +1043,20 @@ impl Firecracker {
         const OP: &str = "adopt";
         let unsure = |why: String| EngineError::new(ErrorKind::Transient, OP, why);
         match timeout(ADOPT_TIMEOUT, vm.found()).await {
-            Ok(Ok(Some(found))) => Ok(Some((vm, found))),
+            Ok(Ok(Some(found))) => {
+                // Whatever an earlier agent left behind: zswap closed,
+                // since a compression it ran ended with it, and the
+                // guarantee as for the state found.
+                let guarded = match found {
+                    Found::Running => vm.guard_running(),
+                    Found::Paused => vm
+                        .cgroup
+                        .close_zswap()
+                        .and_then(|()| vm.cgroup.set_memory_low(0)),
+                };
+                guarded.map_err(|error| unsure(format!("guarding its memory: {error}")))?;
+                Ok(Some((vm, found)))
+            }
             // The VMM says it never started a guest: a launch cut short.
             Ok(Ok(None)) => {
                 self.kill(&vm).await?;

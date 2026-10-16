@@ -18,6 +18,21 @@ use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::watch;
 
+/// What the out-of-memory killer adds to the badness of a process that
+/// keeps a VM alive, in thousandths of the host's memory: it ends nearly
+/// anything else first. Not -1000, which would make it unkillable and turn
+/// a host with nothing else left into a kernel panic.
+pub(crate) const OOM_SCORE_ADJ: i32 = -900;
+
+/// Makes process `pid` one of the out-of-memory killer's last choices; see
+/// [`OOM_SCORE_ADJ`]. Lowering it needs `CAP_SYS_RESOURCE`.
+pub(crate) fn protect_from_oom(pid: Pid) -> io::Result<()> {
+    fs::write(
+        format!("/proc/{}/oom_score_adj", pid.as_raw_pid()),
+        OOM_SCORE_ADJ.to_string(),
+    )
+}
+
 /// Whether a VMM process is still alive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {

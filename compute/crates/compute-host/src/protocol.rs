@@ -451,9 +451,10 @@ pub enum ErrorCode {
     Stale,
     /// A guest port did not answer.
     Unreachable,
-    /// The host cannot take on the sandbox's memory now, even after pushing
-    /// its idle sandboxes deeper: every other sandbox is busy or held. Retry
-    /// later or on another host; the message says how much was needed.
+    /// The host cannot take on the sandbox's memory now, even after ending
+    /// its idle VMs that are already saved. It answers at once, never after
+    /// slow work, and keeps making room in the background. Retry later or
+    /// on another host; the message says how much was needed.
     HostFull,
     /// The host failed; the request may succeed if retried.
     #[default]
@@ -499,6 +500,39 @@ pub struct SandboxStatus {
     /// itself once room can be made.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_for_room: Option<u64>,
+    /// Its VM's zswap traffic and memory pressure, when a VM process exists
+    /// and the engine reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryStatus>,
+}
+
+/// A VM's zswap traffic and memory pressure. A running VM is never
+/// compressed: its `zswpout` grows only while it is paused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryStatus {
+    /// Pages compressed into zswap since the VM process started.
+    pub zswpout: u64,
+    /// Pages brought back from zswap since the VM process started.
+    pub zswpin: u64,
+    /// Share of the last ten seconds in which some of its processes waited
+    /// for memory, in hundredths of a percent; `None` without pressure
+    /// stall information.
+    pub pressure_some_avg10_hundredths: Option<u32>,
+}
+
+impl From<compute_engine::MemoryStats> for MemoryStatus {
+    fn from(stats: compute_engine::MemoryStats) -> Self {
+        Self {
+            zswpout: stats.zswpout,
+            zswpin: stats.zswpin,
+            pressure_some_avg10_hundredths: stats.pressure_some_avg10.map(|percent| {
+                // At most 100 percent: 10 000 hundredths.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let hundredths = (percent * 100.0).round().clamp(0.0, 10_000.0) as u32;
+                hundredths
+            }),
+        }
+    }
 }
 
 /// Counters for one kind of step.
@@ -556,7 +590,7 @@ pub struct CapacityStatus {
     /// Bytes taken: the requests of awake sandboxes or what they use beyond
     /// them, and what paused ones still hold.
     pub occupied: u64,
-    /// Bytes a wake can take without pushing anything deeper first.
+    /// Bytes a wake can take without ending any VM first.
     pub free: u64,
     /// Sandboxes awake or waking.
     pub awake: u32,

@@ -1,6 +1,7 @@
 //! Whether a wake fits into the memory the host lets its sandboxes take,
-//! making room for it by pushing idle sandboxes deeper, and the memory
-//! pressure relief that shares that mechanism; see [`crate::Admission`].
+//! decided by arithmetic with instant relief only; the buffer of free room
+//! kept ahead of wakes in the background, and the memory pressure relief
+//! that shares its mechanism; see [`crate::Admission`].
 
 use std::time::Duration;
 
@@ -105,15 +106,6 @@ impl Sandbox {
         self.awake_bytes()
             .saturating_sub(self.occupies(compressed_percent))
     }
-
-    /// The deepest level memory pressure may push it to, from `reached`.
-    fn deepest_relief(&self, reached: Level) -> Level {
-        let mut level = reached;
-        while let Some(deeper) = self.policy().relief_target(level) {
-            level = deeper;
-        }
-        level
-    }
 }
 
 /// What relief is measured in.
@@ -179,10 +171,11 @@ impl Host {
     }
 
     /// Starts the queued wakes of kind `step`, which needs memory, while
-    /// its limit allows and they fit into `free` bytes of the budget,
-    /// making room for those that do not and refusing those no room can
-    /// be made for. `waiting` sums what the wakes still waiting need.
-    /// Returns whether anything must be reconciled again.
+    /// its limit allows and they fit into `free` bytes of the budget. A wake
+    /// that does not fit waits only if ending idle VM processes that are
+    /// already saved frees enough for it and every wake waiting before it;
+    /// otherwise it is refused at once. `waiting` sums what the wakes still
+    /// waiting need. Returns whether anything must be reconciled again.
     pub(super) fn admit_measured(
         &mut self,
         now: At,
@@ -210,11 +203,9 @@ impl Host {
                 self.start(step, key, out);
                 continue;
             }
-            // It waits while room is made for it and for every wake
-            // waiting before it.
             *waiting += need;
             let deficit = waiting.saturating_sub(*free);
-            match self.make_room(now, key.sandbox, deficit) {
+            match self.drop_for(now, key.sandbox, deficit) {
                 Room::Coming => {}
                 Room::Made => changed = true,
                 Room::None => {
@@ -228,7 +219,7 @@ impl Host {
     }
 
     /// Lets sandboxes refused earlier but still held try again once their
-    /// wake fits, or room can be made for it, next to every wake already
+    /// wake fits, counting instant relief, next to every wake already
     /// queued for memory: a retried wake queues behind those, and
     /// [`Self::admit_measured`] charges it their need too, so a sandbox let
     /// through here is not refused again for the same shortfall. Returns
@@ -251,8 +242,8 @@ impl Host {
                 continue;
             };
             let need = slot.wake_need(percent);
-            let (planned, possible) = self.room(now, *id);
-            if wanted + need <= capacity.free() + planned + possible {
+            let (dropping, droppable) = self.instant_room(now, *id);
+            if wanted + need <= capacity.free() + dropping + droppable {
                 wanted += need;
                 ready.push(*id);
             }
@@ -277,7 +268,7 @@ impl Host {
     }
 
     /// Refuses the queued wake `key`: it needs `need` bytes, only `free`
-    /// are left, and no room can be made.
+    /// are left, and instant relief cannot free the rest.
     fn refuse(&mut self, key: QueueKey, step: Step, need: u64, free: u64, out: &mut Vec<Action>) {
         let Some(slot) = self.sandboxes.get_mut(&key.sandbox) else {
             return;
@@ -294,24 +285,78 @@ impl Host {
         self.mark(key.sandbox);
     }
 
-    /// Makes `deficit` bytes of the budget free for `waiter`, counting what
-    /// floors already set will free.
-    fn make_room(&mut self, now: At, waiter: SandboxId, deficit: u64) -> Room {
-        let (planned, possible) = self.room(now, waiter);
-        let Some(needed) = deficit.checked_sub(planned).filter(|needed| *needed > 0) else {
+    /// Frees `deficit` bytes of the budget for `waiter` by ending idle VM
+    /// processes that are already saved, least recently used first,
+    /// counting those already ending.
+    fn drop_for(&mut self, now: At, waiter: SandboxId, deficit: u64) -> Room {
+        let (dropping, droppable) = self.instant_room(now, waiter);
+        let Some(mut needed) = deficit.checked_sub(dropping).filter(|needed| *needed > 0) else {
             return Room::Coming;
         };
-        if possible < needed {
+        if droppable < needed {
             return Room::None;
         }
-        self.push_idle(now, needed, Measure::Occupancy, Some(waiter));
+        let percent = self.compressed_percent();
+        let grace = self.busy_grace();
+        let mut candidates: Vec<(At, SandboxId)> = self
+            .sandboxes
+            .iter()
+            .filter(|(id, slot)| {
+                **id != waiter && slot.floor < Level::Saved && droppable_now(slot, now, grace)
+            })
+            .map(|(id, slot)| (slot.last_activity, *id))
+            .collect();
+        candidates.sort_unstable();
+        for (_, id) in candidates {
+            if needed == 0 {
+                break;
+            }
+            let Some(slot) = self.sandboxes.get_mut(&id) else {
+                continue;
+            };
+            let reached = slot.state.level.max(slot.floor);
+            let resident = slot.relief_between(reached, Level::Saved, percent);
+            needed = needed.saturating_sub(slot.occupies(percent));
+            slot.floor = Level::Saved;
+            slot.floor_relief += resident;
+            self.pending_relief += resident;
+            self.mark(id);
+        }
         Room::Made
     }
 
-    /// Bytes of the budget that floors already set will free, and that
-    /// pushing every other idle sandbox than `waiter` as deep as it may go
-    /// would free besides.
-    fn room(&self, now: At, waiter: SandboxId) -> (u64, u64) {
+    /// Bytes of the budget that VM processes other than `waiter`'s already
+    /// ending will free, and that ending every other idle one already saved
+    /// would free besides. Both take milliseconds and no I/O.
+    fn instant_room(&self, now: At, waiter: SandboxId) -> (u64, u64) {
+        let percent = self.compressed_percent();
+        let grace = self.busy_grace();
+        let (mut dropping, mut droppable) = (0, 0);
+        for (id, slot) in &self.sandboxes {
+            if *id == waiter {
+                continue;
+            }
+            let ending = slot
+                .in_flight
+                .is_some_and(|flight| flight.step == Step::Drop)
+                || (slot.floor >= Level::Saved && slot.in_flight.is_none() && slot.reclaimable());
+            if ending {
+                dropping += slot.occupies(percent);
+            } else if droppable_now(slot, now, grace) {
+                droppable += slot.occupies(percent);
+            }
+        }
+        (dropping, droppable)
+    }
+
+    /// Keeps [`crate::Admission::buffer`] bytes of the budget free ahead of
+    /// wakes, plus what the wakes refused and still held need, by pushing
+    /// idle sandboxes deeper, least recently used first. Counts what floors
+    /// already set will free. Returns whether any floor changed.
+    pub(super) fn keep_buffer(&mut self, now: At) -> bool {
+        let (Some(admission), Some(capacity)) = (self.policy.admission, self.capacity()) else {
+            return false;
+        };
         let percent = self.compressed_percent();
         let planned: u64 = self
             .sandboxes
@@ -322,18 +367,14 @@ impl Host {
                     .saturating_sub(slot.occupies_at(slot.floor, percent))
             })
             .sum();
-        let grace = self.busy_grace();
-        let possible: u64 = self
-            .sandboxes
+        let held: u64 = self
+            .refused
             .iter()
-            .filter(|(id, slot)| **id != waiter && pushable(slot, now, grace))
-            .map(|(_, slot)| {
-                let reached = slot.state.level.max(slot.floor);
-                reached_bytes(slot, reached, percent)
-                    .saturating_sub(slot.occupies_at(slot.deepest_relief(reached), percent))
-            })
+            .filter_map(|id| self.sandboxes.get(id))
+            .map(|slot| slot.wake_need(percent))
             .sum();
-        (planned, possible)
+        let needed = (admission.buffer + held).saturating_sub(capacity.free() + planned);
+        needed > 0 && self.push_idle(now, needed, Measure::Occupancy)
     }
 
     /// When available memory drops below the low watermark, pushes the least
@@ -351,24 +392,17 @@ impl Host {
             .saturating_sub(available)
             .saturating_sub(self.pending_relief)
             .saturating_sub(self.settled_relief);
-        needed > 0 && self.push_idle(now, needed, Measure::Resident, None)
+        needed > 0 && self.push_idle(now, needed, Measure::Resident)
     }
 
-    /// Pushes idle sandboxes other than `except` deeper, least recently
-    /// used first, until `needed` bytes of `measure` are expected back.
+    /// Pushes idle sandboxes deeper, least recently used first, until `needed` bytes of `measure` are expected back.
     /// Returns whether any floor changed.
     ///
     /// Each pass moves every candidate at most one level deeper, oldest
     /// first. When even that is not enough, the next pass goes deeper, so
     /// a large shortfall ends processes directly instead of compressing
     /// memory that is about to be freed anyway.
-    fn push_idle(
-        &mut self,
-        now: At,
-        mut needed: u64,
-        measure: Measure,
-        except: Option<SandboxId>,
-    ) -> bool {
+    fn push_idle(&mut self, now: At, mut needed: u64, measure: Measure) -> bool {
         let percent = self.compressed_percent();
         let grace = self.busy_grace();
         let mut changed = false;
@@ -378,7 +412,7 @@ impl Host {
             candidates.extend(
                 self.sandboxes
                     .iter()
-                    .filter(|(id, slot)| Some(**id) != except && pushable(slot, now, grace))
+                    .filter(|(_, slot)| pushable(slot, now, grace))
                     .filter_map(|(id, slot)| {
                         let reached = slot.state.level.max(slot.floor);
                         let target = slot.policy().relief_target(reached)?;
@@ -417,12 +451,18 @@ impl Host {
 
 /// How making room for a wake went.
 enum Room {
-    /// Floors already set will free enough.
+    /// VM processes already ending will free enough.
     Coming,
-    /// Floors were set that will free enough.
+    /// VM processes were set to end that will free enough.
     Made,
-    /// Not even pushing every idle sandbox as deep as it may go would.
+    /// Not even ending every idle VM process already saved would.
     None,
+}
+
+/// Whether ending `slot`'s VM process now frees memory instantly, without
+/// losing anything, keeping anyone waiting or ending a busy sandbox.
+fn droppable_now(slot: &Sandbox, now: At, grace: Duration) -> bool {
+    slot.in_flight.is_none() && slot.reclaimable() && pushable(slot, now, grace)
 }
 
 /// Whether `slot` may be pushed deeper to free memory at `now`: nothing

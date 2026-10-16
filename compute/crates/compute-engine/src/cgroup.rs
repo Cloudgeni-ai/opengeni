@@ -86,6 +86,31 @@ impl Cgroup {
         Ok(total)
     }
 
+    /// Stops the kernel from compressing any more of the group's memory into
+    /// zswap, as it otherwise may under host memory pressure. With
+    /// `memory.zswap.writeback` at 0, a page zswap refuses is not swapped
+    /// out either, so the group's anonymous memory stays in RAM. Pages
+    /// already compressed stay so until touched.
+    pub fn close_zswap(&self) -> io::Result<()> {
+        fs::write(self.path.join("memory.zswap.max"), "0")
+    }
+
+    /// Sets the memory the group is protected from reclaim for others
+    /// (`memory.low`): the kernel takes it only when nothing unprotected is
+    /// left to take.
+    pub fn set_memory_low(&self, bytes: u64) -> io::Result<()> {
+        fs::write(self.path.join("memory.low"), bytes.to_string())
+    }
+
+    /// The group's zswap traffic and memory pressure so far.
+    pub fn memory_stats(&self) -> io::Result<MemoryStats> {
+        let stat = fs::read_to_string(self.path.join("memory.stat"))?;
+        // Without pressure stall information the file is missing or
+        // unreadable; the rest still counts.
+        let pressure = fs::read_to_string(self.path.join("memory.pressure")).ok();
+        Ok(parse_memory_stats(&stat, pressure.as_deref()))
+    }
+
     /// Pushes the group's memory out of RAM: anonymous pages into compressed
     /// memory (zswap, never written to disk), file pages dropped.
     ///
@@ -198,6 +223,42 @@ impl Cgroup {
     }
 }
 
+/// A group's zswap traffic and memory pressure; see
+/// [`Cgroup::memory_stats`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MemoryStats {
+    /// Pages compressed into zswap since the group was created.
+    pub zswpout: u64,
+    /// Pages brought back from zswap since the group was created.
+    pub zswpin: u64,
+    /// Share of the last ten seconds in which some of the group's processes
+    /// waited for memory, in percent (`some avg10` in `memory.pressure`).
+    pub pressure_some_avg10: Option<f64>,
+}
+
+fn parse_memory_stats(stat: &str, pressure: Option<&str>) -> MemoryStats {
+    let field = |name: &str| {
+        stat.lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '))
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let pressure_some_avg10 = pressure.and_then(|pressure| {
+        pressure
+            .lines()
+            .find_map(|line| line.strip_prefix("some "))?
+            .split_whitespace()
+            .find_map(|pair| pair.strip_prefix("avg10="))?
+            .parse()
+            .ok()
+    });
+    MemoryStats {
+        zswpout: field("zswpout"),
+        zswpin: field("zswpin"),
+        pressure_some_avg10,
+    }
+}
+
 fn read_u64(path: &Path) -> io::Result<u64> {
     fs::read_to_string(path)?
         .trim()
@@ -236,6 +297,26 @@ mod tests {
             Duration::from_micros(1_234_567)
         );
         assert!(parse_cpu_usage("user_usec 5\n").is_err());
+    }
+
+    #[test]
+    fn reads_zswap_traffic_and_pressure() {
+        let stat = "anon 4096\nzswap 0\nzswapped 0\nzswpin 3\nzswpout 17\nzswpwb 0\n";
+        let pressure = "some avg10=1.25 avg60=0.40 avg300=0.08 total=12345\n\
+                        full avg10=0.50 avg60=0.10 avg300=0.02 total=4567\n";
+        assert_eq!(
+            parse_memory_stats(stat, Some(pressure)),
+            MemoryStats {
+                zswpout: 17,
+                zswpin: 3,
+                pressure_some_avg10: Some(1.25),
+            }
+        );
+        // Without zswap or pressure stall information.
+        assert_eq!(
+            parse_memory_stats("anon 4096\n", None),
+            MemoryStats::default()
+        );
     }
 
     #[test]

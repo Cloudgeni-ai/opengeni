@@ -33,6 +33,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 bytes,
             })
         }));
+        self.check_uncompressed();
         if self.pressure
             && let Some(available) = self.available_memory
         {
@@ -99,6 +100,38 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         }
         busy
+    }
+}
+
+impl<E: Engine, S: Store> HostAgent<E, S> {
+    /// Warns when a running VM's memory was compressed into zswap between
+    /// two samples: only a paused one may be, so this is a defect, and the
+    /// sandbox would slow down unnoticed while it pages back in.
+    fn check_uncompressed(&mut self) {
+        for (id, slot) in &mut self.slots {
+            let running = self
+                .core
+                .sandbox(*id)
+                .is_some_and(|view| view.state.level == Level::Running && view.step.is_none());
+            let Some(live) = slot.vm.as_ref().filter(|_| running) else {
+                slot.compressed = None;
+                continue;
+            };
+            let Ok(stats) = self.engine.memory_stats(&live.vm) else {
+                continue;
+            };
+            if let Some((incarnation, before)) = slot.compressed
+                && incarnation == live.incarnation
+                && stats.zswpout > before
+            {
+                tracing::warn!(
+                    sandbox = %crate::protocol::Id(*id),
+                    pages = stats.zswpout - before,
+                    "a running VM's memory was compressed into zswap"
+                );
+            }
+            slot.compressed = Some((live.incarnation, stats.zswpout));
+        }
     }
 }
 

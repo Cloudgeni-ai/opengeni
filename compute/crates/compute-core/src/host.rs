@@ -334,7 +334,8 @@ impl Host {
         }
         self.fire_timers(now);
         self.reconcile_dirty(now, out);
-        if self.relieve_pressure(now) {
+        // Room is made ahead of wakes, never inside one.
+        if self.relieve_pressure(now) | self.keep_buffer(now) {
             self.reconcile_dirty(now, out);
         }
         // Refused wakes still held try again once per decision, never inside
@@ -342,9 +343,9 @@ impl Host {
         if self.retry_refused(now) {
             self.reconcile_dirty(now, out);
         }
-        // Making room for a wake or refusing it changes other sandboxes'
-        // next steps; each round only deepens floors or refuses wakes, so
-        // it settles.
+        // Ending idle saved VMs for a wake or refusing it changes other
+        // sandboxes' next steps; each round only deepens floors or refuses
+        // wakes, so it settles.
         while self.admit(now, out) {
             self.reconcile_dirty(now, out);
         }

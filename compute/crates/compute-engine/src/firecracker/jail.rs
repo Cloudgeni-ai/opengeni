@@ -149,10 +149,18 @@ pub fn jailer_args(spec: &VmSpec, jail: &Jail, launch: &Launch<'_>) -> Vec<OsStr
     // parent. This one also keeps the VM's memory out of swap devices:
     // compressed pages stay in RAM, and nothing of the guest reaches disk.
     push("--cgroup", "memory.zswap.writeback=0".into());
+    // And a running VM is never compressed either, not even by the kernel
+    // under host memory pressure: zswap opens only while the agent
+    // compresses the paused VM (see `Cgroup::reclaim_to_zswap`). Refused by
+    // zswap, a page is not swapped out instead, since writeback is off.
+    push("--cgroup", "memory.zswap.max=0".into());
     // What the VM is guaranteed: its requested memory is kept from reclaim
     // for others (reclaim the agent asks of this group itself, to compress
     // it, is not held back), and contended processors are shared by
-    // request.
+    // request. `memory.low` rather than `memory.min`: admission keeps the
+    // requests within the host, so the kernel always finds unprotected
+    // memory first, and should it not, slowing a VM beats the out-of-memory
+    // killer that `memory.min` would call instead.
     let low = u64::from(spec.memory_request_mib) << 20;
     push("--cgroup", format!("memory.low={low}").into());
     push(
@@ -283,8 +291,9 @@ mod tests {
             text.join(" "),
             "--id abc --exec-file /opt/bin/firecracker --uid 4000001 --gid 4000001 \
              --chroot-base-dir /srv/vm --cgroup-version 2 --parent-cgroup compute \
-             --cgroup memory.zswap.writeback=0 --cgroup memory.low=134217728 \
-             --cgroup cpu.weight=50 --netns /run/netns/ogc-abc --new-pid-ns \
+             --cgroup memory.zswap.writeback=0 --cgroup memory.zswap.max=0 \
+             --cgroup memory.low=134217728 --cgroup cpu.weight=50 \
+             --netns /run/netns/ogc-abc --new-pid-ns \
              -- --api-sock /api.sock"
         );
     }

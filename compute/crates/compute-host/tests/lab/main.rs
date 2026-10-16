@@ -32,6 +32,7 @@ use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep, timeout};
 
 mod admission;
+mod memory;
 mod spoofing;
 
 const PORT: u32 = 52;
@@ -70,6 +71,7 @@ struct Host {
     root: PathBuf,
     socket: PathBuf,
     extra: Vec<String>,
+    cgroup: PathBuf,
 }
 
 impl Host {
@@ -82,7 +84,14 @@ impl Host {
             socket: root.join("agent.sock"),
             root,
             extra: extra.iter().map(|&arg| arg.to_owned()).collect(),
+            cgroup: PathBuf::from(CGROUP),
         }
+    }
+
+    /// Puts the agent's VMs under `cgroup` instead of [`CGROUP`].
+    fn with_cgroup(mut self, cgroup: impl Into<PathBuf>) -> Self {
+        self.cgroup = cgroup.into();
+        self
     }
 
     async fn start(&self) -> Agent {
@@ -108,7 +117,7 @@ impl Host {
             .arg("--base-image")
             .arg(lab.join("base.ext4"))
             .arg("--cgroup")
-            .arg(CGROUP)
+            .arg(&self.cgroup)
             .args(["--limit", "boot=32", "--limit", "restore=32"])
             .args(profile())
             .args(&self.extra)

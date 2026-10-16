@@ -150,8 +150,9 @@ struct ServeArgs {
     /// ...until expected available memory reaches this.
     #[arg(long)]
     memory_high_mib: Option<u64>,
-    /// Guest memory this host promises its sandboxes at once: wakes beyond
-    /// it first push idle sandboxes deeper, then are refused as host full.
+    /// Guest memory this host promises its sandboxes at once: a wake beyond
+    /// it may end idle VMs that are already saved, otherwise it is refused
+    /// at once as host full.
     /// Defaults to the huge-page pool with huge pages, otherwise to the
     /// host's memory less `--memory-headroom-mib`.
     #[arg(long)]
@@ -161,6 +162,10 @@ struct ServeArgs {
     /// Defaults to a sixteenth of it, at least 1 GiB.
     #[arg(long)]
     memory_headroom_mib: Option<u64>,
+    /// Memory kept free for wakes ahead of time by pushing idle sandboxes
+    /// deeper in the background. Defaults to a sixteenth of the capacity.
+    #[arg(long)]
+    memory_buffer_mib: Option<u64>,
     /// A port guests may connect to on this host, as `PORT=HOST:PORT`, with
     /// `,wake` appended to wake a sleeping sandbox when data arrives for it.
     /// Repeatable.
@@ -447,6 +452,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     tracing::info!(capacity_mib = budget >> 20, "guest memory capacity");
     policy.admission = Some(Admission {
         budget,
+        buffer: args.memory_buffer_mib.map_or(budget / 16, |mib| mib << 20),
         // Work seen in the last two samples keeps a sandbox from being
         // pushed deeper to make room.
         busy_grace: 2 * sample_every,

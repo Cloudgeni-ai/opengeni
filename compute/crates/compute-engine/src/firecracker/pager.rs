@@ -82,7 +82,13 @@ pub(super) async fn start(
         let (socket, cgroup) = (pager.socket.clone(), vm.cgroup.clone());
         tokio::task::spawn_blocking(move || {
             crate::confined::hand_over(&socket, crate::confined::Owned::Socket, uid, gid)?;
-            cgroup.add(pid)
+            cgroup.add(pid)?;
+            // Its VM cannot go on without it either.
+            let pid = i32::try_from(pid)
+                .ok()
+                .and_then(Pid::from_raw)
+                .ok_or_else(|| io::Error::other(format!("bad pager pid {pid}")))?;
+            process::protect_from_oom(pid)
         })
         .await
         .map_err(io::Error::other)?

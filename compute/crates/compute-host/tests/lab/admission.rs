@@ -1,6 +1,7 @@
-//! A full host: a wake it cannot hold is refused as host full, saying what
-//! it needs, and succeeds once an idle sandbox can be pushed out to make
-//! room, losing nothing of it. VM cgroups get the sandboxes' guarantees.
+//! A full host: a wake it cannot hold is refused at once as host full,
+//! saying what it needs, and goes through as soon as an idle sandbox is
+//! paused and saved, whose VM then ends at once to make room, losing
+//! nothing. VM cgroups get the sandboxes' guarantees.
 
 use compute_host::protocol::ErrorCode;
 
@@ -8,10 +9,11 @@ use super::*;
 
 const MIB: u64 = 1 << 20;
 
-/// Sleeps only when the host needs the room: after an hour otherwise.
-const SAVE_WHEN_NEEDED: SleepConfig = SleepConfig {
-    pause_after_ms: Some(3_600_000),
-    save_after_ms: Some(7_200_000),
+/// Pauses and saves soon after it goes idle, but keeps its VM process
+/// until another sandbox needs the memory.
+const SAVE_SOON: SleepConfig = SleepConfig {
+    pause_after_ms: Some(1_000),
+    save_after_ms: Some(2_000),
     archive_after_ms: None,
     drop_after_ms: None,
     evict_after_ms: None,
@@ -20,7 +22,7 @@ const SAVE_WHEN_NEEDED: SleepConfig = SleepConfig {
 };
 
 /// How long the guests' own background work (a disk flush seconds after a
-/// command) may keep an idle sandbox busy, and so not pushed out.
+/// command) may keep an idle sandbox busy, and so awake.
 const SETTLE: Duration = Duration::from_secs(30);
 
 async fn hold(client: &Client, sandbox: Id, request: Request) {
@@ -64,9 +66,10 @@ async fn connect(
     }
 }
 
-/// Runs `script` in `sandbox` once the host has room for it: it may answer
-/// host full while the sandboxes it would push out are still busy with
-/// work of their own. Returns the output and the refusals before.
+/// Runs `script` in `sandbox` once the host has room for it: it answers
+/// host full until another sandbox is paused and saved, which may take a
+/// while after work of its own. Returns the output and the refusals
+/// before.
 async fn exec_when_room(client: &Client, sandbox: Id, script: &str) -> (String, u32) {
     let deadline = Instant::now() + SETTLE;
     let mut refusals = 0;
@@ -88,39 +91,53 @@ async fn exec_when_room(client: &Client, sandbox: Id, script: &str) -> (String, 
     (output, refusals)
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
-    let Some(lab) = lab() else {
-        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
-        return;
-    };
-    // Room for two of these 512 MiB sandboxes.
-    let host = Host::new(
-        &lab,
-        "full",
-        &["--memory-capacity-mib", "1024", "--busy-window", "1s"],
-    );
-    let agent = host.start().await;
-    let ids: Vec<Id> = (0..3).map(id).collect();
-    for sandbox in &ids[..2] {
-        agent.create(*sandbox, SAVE_WHEN_NEEDED).await;
-    }
-    let third = SandboxConfig {
-        cpu_request_millis: Some(250),
-        ..SandboxConfig::new(1, 512, SAVE_WHEN_NEEDED)
-    };
-    let reply = agent
-        .client
-        .call(&Request::Create {
-            id: ids[2],
-            config: third,
+/// Checks that the cgroup of `sandbox`'s VM carries what it is guaranteed
+/// and that the out-of-memory killer ends nearly anything else before its
+/// VMM.
+fn check_guarantees(sandbox: Id) {
+    assert_eq!(cgroup_value(sandbox, "cpu.weight"), "100");
+    assert_eq!(cgroup_value(sandbox, "memory.low"), (512 * MIB).to_string());
+    assert_eq!(cgroup_value(sandbox, "memory.zswap.max"), "0");
+    let vmms: Vec<String> = cgroup_value(sandbox, "cgroup.procs")
+        .lines()
+        .filter(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .is_ok_and(|comm| comm.trim() == "firecracker")
         })
-        .await
-        .unwrap();
-    assert_eq!(reply, Reply::Done);
+        .map(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
+                .unwrap()
+                .trim()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(vmms, ["-900"]);
+}
 
-    // Two sandboxes held awake fill the host.
-    for (n, sandbox) in ids[..2].iter().copied().enumerate() {
+/// On a full host, waking `sandbox` and creating then waking `unknown` are
+/// both refused at once, saying what they need.
+async fn refused_at_once(agent: &Agent, sandbox: Id, unknown: Id) {
+    let begin = Instant::now();
+    let message = refused(&agent.client, sandbox).await;
+    let refusal = begin.elapsed();
+    assert!(
+        message.contains(&(512 * MIB).to_string()),
+        "says what it needs: {message}"
+    );
+    let begin = Instant::now();
+    agent.create(unknown, SAVE_SOON).await;
+    refused(&agent.client, unknown).await;
+    let create_and_refusal = begin.elapsed();
+    eprintln!(
+        "on a full host: wake refused in {refusal:?}, create then wake refused in \
+         {create_and_refusal:?}"
+    );
+    assert!(refusal < Duration::from_millis(100), "{refusal:?}");
+}
+
+/// Holds each of `sandboxes` awake and leaves a token in its memory.
+async fn hold_with_tokens(agent: &Agent, sandboxes: &[Id]) {
+    for (n, sandbox) in sandboxes.iter().copied().enumerate() {
         let request = Request::Hold {
             id: sandbox,
             generation: None,
@@ -133,9 +150,63 @@ async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
         let (output, _) = exec(&agent.client, sandbox, &script).await;
         assert_eq!(output.trim(), format!("token-{n}"));
     }
-    // Each VM's cgroup carries what it is guaranteed.
-    assert_eq!(cgroup_value(ids[0], "cpu.weight"), "100");
-    assert_eq!(cgroup_value(ids[0], "memory.low"), (512 * MIB).to_string());
+}
+
+/// Waits until `sandbox` is paused with its state saved on the host.
+async fn wait_paused_and_saved(agent: &Agent, sandbox: Id) {
+    agent
+        .wait_until("it to be paused and saved", |status| {
+            status.sandboxes.iter().any(|found| {
+                found.id == sandbox
+                    && found.level == LevelName::Paused
+                    && found.durability == DurabilityName::Local
+            })
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
+    let Some(lab) = lab() else {
+        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
+        return;
+    };
+    // Room for two of these 512 MiB sandboxes.
+    let host = Host::new(
+        &lab,
+        "full",
+        &[
+            "--memory-capacity-mib",
+            "1024",
+            "--memory-buffer-mib",
+            "0",
+            "--busy-window",
+            "1s",
+        ],
+    );
+    let agent = host.start().await;
+    let ids: Vec<Id> = (0..3).map(id).collect();
+    for sandbox in &ids[..2] {
+        agent.create(*sandbox, SAVE_SOON).await;
+    }
+    let third = SandboxConfig {
+        cpu_request_millis: Some(250),
+        ..SandboxConfig::new(1, 512, SAVE_SOON)
+    };
+    let reply = agent
+        .client
+        .call(&Request::Create {
+            id: ids[2],
+            config: third,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply, Reply::Done);
+    let unknown = id(3);
+
+    // Two sandboxes held awake fill the host.
+    hold_with_tokens(&agent, &ids[..2]).await;
+    check_guarantees(ids[0]);
     let capacity = agent.status().await.capacity.expect("admission is on");
     assert_eq!(
         (
@@ -147,12 +218,9 @@ async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
         (1024 * MIB, 1024 * MIB, 0, 2)
     );
 
-    // Nothing idle to push out: the third is refused at once.
-    let message = refused(&agent.client, ids[2]).await;
-    assert!(
-        message.contains(&(512 * MIB).to_string()),
-        "says what it needs: {message}"
-    );
+    // Nothing idle and saved to end: the third is refused at once, and so
+    // is a sandbox created on the full host and woken.
+    refused_at_once(&agent, ids[2], unknown).await;
     let status = agent.status().await;
     let waiting = status
         .sandboxes
@@ -161,7 +229,8 @@ async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
         .unwrap();
     assert_eq!((waiting.level, waiting.holds), (LevelName::Saved, 0));
 
-    // Released and quiet, the first makes room: the wake goes through.
+    // Released, the first pauses and saves once quiet; then its VM ends at
+    // once for the third, whose wake goes straight through.
     let release = Request::Release {
         id: ids[0],
         generation: None,
@@ -169,11 +238,15 @@ async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
     };
     hold(&agent.client, ids[0], release).await;
     let started = Instant::now();
+    wait_paused_and_saved(&agent, ids[0]).await;
+    let saved = started.elapsed();
+    let begin = Instant::now();
     let (output, refusals) = exec_when_room(&agent.client, ids[2], "echo third=ok").await;
     assert!(output.contains("third=ok"), "{output}");
+    assert_eq!(refusals, 0, "the saved VM ended for it at once");
     eprintln!(
-        "made room and woke in {:?} after {refusals} refusals while the other was busy",
-        started.elapsed()
+        "the first was paused and saved {saved:?} after release; the third then woke in {:?}",
+        begin.elapsed()
     );
     assert_eq!(cgroup_value(ids[2], "cpu.weight"), "25");
     let status = agent.status().await;
@@ -182,11 +255,11 @@ async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
         .iter()
         .find(|sandbox| sandbox.id == ids[0])
         .unwrap();
-    assert_eq!(first.level, LevelName::Saved, "pushed out to make room");
+    assert_eq!(first.level, LevelName::Saved, "ended to make room");
     assert!(first.memory_saved);
 
-    // Pushed out, it lost nothing: once the third is quiet, it makes room
-    // in turn for the first, whose memory comes back as it was.
+    // Ended, it lost nothing: once the third is paused and saved, it makes
+    // room in turn for the first, whose memory comes back as it was.
     let (output, _) = exec_when_room(&agent.client, ids[0], "cat /dev/shm/token").await;
     assert_eq!(output.trim(), "token-0");
 

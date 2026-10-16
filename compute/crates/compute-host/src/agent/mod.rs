@@ -431,6 +431,9 @@ struct Slot<V> {
     deferred: Option<Step>,
     /// Processor use and traffic measured so far, while the VM runs.
     activity: Option<ActivityWindow>,
+    /// The incarnation of the running VM and the pages compressed out of it
+    /// when last sampled running; see [`HostAgent::check_uncompressed`].
+    compressed: Option<(u64, u64)>,
 }
 
 /// A request waiting for a sandbox to run.
@@ -715,6 +718,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 waiters: Vec::new(),
                 deferred: None,
                 activity: None,
+                compressed: None,
             },
         );
     }

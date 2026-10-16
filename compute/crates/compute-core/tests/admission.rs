@@ -1,10 +1,11 @@
 //! Admission: wakes start only while what the sandbox then takes fits into
-//! the host's memory budget; otherwise idle sandboxes make room, and a wake
-//! nothing can make room for is refused. Hand-written scenarios, then a
-//! randomized simulation of the accounting.
+//! the host's memory budget. A wake waits only for instant relief, idle VM
+//! processes already saved ending; otherwise it is refused at once, and the
+//! host keeps room ahead of wakes in the background. Hand-written
+//! scenarios, then a randomized simulation of the accounting.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use compute_core::{
     Action, Admission, At, Capacity, Durability, HoldId, Host, HostPolicy, Input, Level, Notice,
@@ -29,10 +30,15 @@ fn saved() -> State {
     State::new(Level::Saved, Durability::Local, true)
 }
 
-fn policy(budget: u64) -> HostPolicy {
+fn paused_saved() -> State {
+    State::new(Level::Paused, Durability::Local, true)
+}
+
+fn policy(budget: u64, buffer: u64) -> HostPolicy {
     HostPolicy {
         admission: Some(Admission {
             budget,
+            buffer,
             busy_grace: GRACE,
         }),
         ..HostPolicy::default()
@@ -46,8 +52,12 @@ struct Rig {
 
 impl Rig {
     fn new(budget: u64) -> Self {
+        Self::buffered(budget, 0)
+    }
+
+    fn buffered(budget: u64, buffer: u64) -> Self {
         Self {
-            host: Host::new(policy(budget)).unwrap(),
+            host: Host::new(policy(budget, buffer)).unwrap(),
             now: At::ZERO,
         }
     }
@@ -64,6 +74,19 @@ impl Rig {
             state,
             policy: no_compress(),
             size,
+        })
+    }
+
+    fn busy(&mut self, id: u128) -> Vec<Action> {
+        self.send(Input::Busy {
+            sandbox: SandboxId(id),
+        })
+    }
+
+    fn resident(&mut self, id: u128, bytes: u64) -> Vec<Action> {
+        self.send(Input::Resident {
+            sandbox: SandboxId(id),
+            bytes,
         })
     }
 
@@ -205,59 +228,105 @@ fn a_wake_no_room_can_be_made_for_is_refused_with_what_it_needs() {
 }
 
 #[test]
-fn idle_sandboxes_make_room_least_recently_used_first() {
+fn a_wake_never_waits_for_slow_relief() {
     let mut rig = Rig::new(2 * GIB);
     for id in 1..=3 {
         rig.add(id, saved(), Size::whole(GIB));
     }
     wake(&mut rig, 1);
-    rig.at(1);
     wake(&mut rig, 2);
-    // Both idle past the grace, before their own pause.
+    // Both idle past the grace, but pausing and saving them takes seconds.
     rig.at(5);
     let actions = rig.touch(3);
-    assert!(host_full(&actions, 3).is_none());
-    let first = started(&actions);
-    assert!(
-        matches!(first[..], [(1, Step::Pause, _)]),
-        "the least recently used makes room: {first:?}"
+    assert_eq!(host_full(&actions, 3), Some((GIB, 0)));
+    assert_eq!(started(&actions), [], "nothing is pushed for it");
+    assert_eq!(
+        (rig.level(1), rig.level(2)),
+        (Level::Running, Level::Running)
     );
-    let (step, op) = rig.drive_until(actions, 3);
-    assert_eq!(step, Step::Restore);
-    assert_eq!(rig.level(1), Level::Saved, "its process ended");
-    assert_eq!(rig.level(2), Level::Running, "only as many as needed");
-    rig.finish(3, op);
-    assert_eq!(rig.capacity().reserved, 2 * GIB);
 }
 
 #[test]
-fn busy_sandboxes_are_never_pushed_to_make_room() {
+fn idle_saved_vms_end_at_once_for_a_wake_least_recently_used_first() {
     let mut rig = Rig::new(2 * GIB);
+    rig.add(1, paused_saved(), Size::whole(GIB));
+    rig.at(1);
+    rig.add(2, paused_saved(), Size::whole(GIB));
+    rig.add(3, saved(), Size::whole(GIB));
+    rig.resident(1, GIB);
+    rig.resident(2, GIB);
+    rig.at(5);
+    let actions = rig.touch(3);
+    assert!(host_full(&actions, 3).is_none());
+    let ends = started(&actions);
+    assert!(
+        matches!(ends[..], [(1, Step::Drop, _)]),
+        "only the least recently used ends: {ends:?}"
+    );
+    let (step, op) = rig.drive_until(actions, 3);
+    assert_eq!(step, Step::Restore);
+    assert_eq!(rig.level(1), Level::Saved);
+    assert_eq!(rig.level(2), Level::Paused, "only as many as needed");
+    rig.finish(3, op);
+    assert_eq!(rig.capacity().reserved, GIB);
+}
+
+#[test]
+fn a_recently_active_or_unsaved_vm_never_ends_for_a_wake() {
+    let mut rig = Rig::new(2 * GIB);
+    rig.add(
+        2,
+        State::new(Level::Paused, Durability::Volatile, false),
+        Size::whole(GIB),
+    );
+    rig.add(3, saved(), Size::whole(GIB));
+    // Paused and saved, but active within the grace.
+    rig.at(5);
+    rig.add(1, paused_saved(), Size::whole(GIB));
+    rig.at(6);
+    let actions = rig.touch(3);
+    assert_eq!(host_full(&actions, 3), Some((GIB, 0)));
+    assert_eq!(started(&actions), []);
+}
+
+#[test]
+fn the_buffer_is_kept_ahead_of_wakes_from_idle_sandboxes() {
+    let mut rig = Rig::buffered(3 * GIB, GIB);
     for id in 1..=3 {
         rig.add(id, saved(), Size::whole(GIB));
     }
     wake(&mut rig, 1);
     wake(&mut rig, 2);
-    rig.at(5);
-    // Work of their own just now.
-    let mut out = Vec::new();
-    rig.host.handle_all(
-        rig.now,
-        [1, 2].map(|id| Input::Busy {
-            sandbox: SandboxId(id),
-        }),
-        &mut out,
+    // Within the buffer is still free: wakes take it.
+    let actions = rig.hold(3);
+    let (_, op) = rig.drive_until(actions, 3);
+    rig.finish(3, op);
+    assert_eq!(rig.capacity().free(), 0);
+    // Once idle past the grace, the least recently used idle one that is
+    // not busy goes, in the background.
+    rig.at(10);
+    let actions = rig.busy(1);
+    assert!(
+        matches!(started(&actions)[..], [(2, Step::Pause, _)]),
+        "{actions:?}"
     );
-    rig.at(6);
-    let actions = rig.touch(3);
-    assert_eq!(started(&actions), []);
-    assert_eq!(host_full(&actions, 3), Some((GIB, 0)));
-    // Once they have been quiet for the grace, they make room.
-    rig.at(8);
-    let actions = rig.touch(3);
-    assert!(host_full(&actions, 3).is_none());
-    let (step, _) = rig.drive_until(actions, 3);
-    assert_eq!(step, Step::Restore);
+    let mut actions = actions;
+    while !started(&actions).is_empty() {
+        let mut next = Vec::new();
+        for (id, _, op) in started(&actions) {
+            next.extend(rig.finish(id, op));
+        }
+        actions = next;
+    }
+    assert_eq!(rig.level(2), Level::Saved);
+    assert_eq!(
+        (rig.level(1), rig.level(3)),
+        (Level::Running, Level::Running)
+    );
+    assert_eq!(rig.capacity().free(), GIB);
+    // Kept, not exceeded.
+    rig.at(20);
+    assert_eq!(started(&rig.busy(1)), []);
 }
 
 #[test]
@@ -278,12 +347,15 @@ fn a_held_sandbox_refused_wakes_once_room_can_be_made() {
     // Released, but active just now: not yet.
     rig.at(1);
     assert_eq!(started(&rig.release(1)), []);
-    // Quiet past the grace: the next decision makes room, unasked.
+    // Quiet past the grace: room is made for it in the background, and it
+    // wakes once there is.
     rig.at(4);
     let actions = rig.send(Input::Tick);
-    assert!(!rig.host.waits_for_room(SandboxId(3)));
+    assert!(matches!(started(&actions)[..], [(1, Step::Pause, _)]));
+    assert!(rig.host.waits_for_room(SandboxId(3)));
     let (step, _) = rig.drive_until(actions, 3);
     assert_eq!(step, Step::Restore);
+    assert!(!rig.host.waits_for_room(SandboxId(3)));
     assert_eq!(rig.level(1), Level::Saved);
 }
 
@@ -365,6 +437,32 @@ fn reservations_are_rebuilt_from_the_records_after_a_restart() {
     assert_eq!(host_full(&actions, 3), None);
 }
 
+#[test]
+fn a_full_host_decides_in_microseconds() {
+    // A thousand sandboxes, the budget full of busy ones, half the rest
+    // paused but unsaved: nothing can end at once.
+    let mut rig = Rig::new(500 * GIB);
+    for id in 1..=1000 {
+        let state = if id <= 500 {
+            State::RUNNING
+        } else {
+            State::new(Level::Paused, Durability::Volatile, false)
+        };
+        rig.add(id, state, Size::whole(GIB));
+        rig.hold(id);
+    }
+    rig.add(1001, saved(), Size::whole(GIB));
+    let mut slowest = Duration::ZERO;
+    for _ in 0..20 {
+        let begin = Instant::now();
+        let actions = rig.touch(1001);
+        slowest = slowest.max(begin.elapsed());
+        assert!(host_full(&actions, 1001).is_some());
+    }
+    println!("admission decision among 1001 sandboxes: at most {slowest:?}");
+    assert!(slowest < Duration::from_millis(50), "{slowest:?}");
+}
+
 // --- Randomized simulation -------------------------------------------------
 
 /// `SplitMix64`.
@@ -393,16 +491,19 @@ struct Sim {
     running: BTreeMap<OpId, (SandboxId, Step)>,
     refusals: u64,
     starts: u64,
+    limit: u32,
 }
 
 impl Sim {
     fn new(seed: u64) -> Self {
         let mut rng = Rng(seed);
         let budget = (4 + rng.below(12)) * GIB;
-        let limits = StepLimits::uniform(1 + u32::try_from(rng.below(8)).unwrap());
+        let buffer = rng.below(3) * GIB;
+        let limit = 1 + u32::try_from(rng.below(8)).unwrap();
+        let limits = StepLimits::uniform(limit);
         let host = Host::new(HostPolicy {
             limits,
-            ..policy(budget)
+            ..policy(budget, buffer)
         })
         .unwrap();
         Self {
@@ -414,6 +515,7 @@ impl Sim {
             running: BTreeMap::new(),
             refusals: 0,
             starts: 0,
+            limit,
         }
     }
 
@@ -441,6 +543,41 @@ impl Sim {
             capacity.reserved <= self.budget,
             "requests of awake sandboxes exceed the budget: {capacity:?}"
         );
+        self.check_waits_only_for_instant_relief();
+    }
+
+    /// A wake that neither started nor was refused waits for a free slot
+    /// of its step or for a VM process that is ending; never for slow
+    /// relief.
+    fn check_waits_only_for_instant_relief(&self) {
+        let views: Vec<_> = self
+            .sizes
+            .keys()
+            .filter_map(|id| Some((*id, self.host.sandbox(*id)?)))
+            .collect();
+        let ending = views.iter().any(|(_, view)| {
+            view.step == Some(Step::Drop)
+                || (view.floor >= Level::Saved
+                    && view.step.is_none()
+                    && matches!(view.state.level, Level::Paused | Level::Compressed)
+                    && view.state.durability != Durability::Volatile)
+        });
+        for (id, view) in &views {
+            if !view.wants_awake
+                || view.state.level == Level::Running
+                || view.step.is_some()
+                || self.host.waits_for_room(*id)
+            {
+                continue;
+            }
+            let step = if view.state.level.has_process() {
+                Step::Resume
+            } else {
+                Step::Restore
+            };
+            let limited = self.host.in_flight(step) >= self.limit;
+            assert!(limited || ending, "{id:?} waits for slow relief: {view:?}");
+        }
     }
 
     fn sandbox(&mut self) -> SandboxId {

@@ -78,13 +78,34 @@ the request is always the whole VM, since a guest never gives huge pages
 back. The requests of awake and waking sandboxes, together with what paused
 ones still hold and any use above a request, stay within the host's
 capacity (`--memory-capacity-mib`; by default the huge-page pool, or the
-host's memory less `--memory-headroom-mib`). A wake that does not fit first
-pushes idle sandboxes deeper, least recently used first; sandboxes that are
-held or recently busy are never touched. If even that cannot make room the
-request fails with the retryable `host_full` error, saying how much it
-needed, and a sandbox still held wakes by itself once room appears. The
-status reports the capacity (total, reserved, occupied, free, awake), and a
-restarted agent rebuilds it from its records. The request also sets the VM's
-guarantees in its cgroup: `memory.low`, and `cpu.weight` from
-`cpu_request_millis` (all its processors unless set lower), so contended
-processors are shared by request while `vcpus` stays the ceiling.
+host's memory less `--memory-headroom-mib`).
+
+Admission is arithmetic on numbers the agent already holds, decided in
+microseconds. Inside a request the only relief is instant: ending idle VMs
+whose state is already saved, which frees their memory in milliseconds
+without I/O. If that is not enough, the request fails at once with the
+retryable `host_full` error, saying how much it needed; it never waits for a
+pause, compression or save. Room is made ahead of time instead: the host
+keeps `--memory-buffer-mib` (default a sixteenth of the capacity) free by
+pushing idle sandboxes deeper in the background, least recently used
+first, and also makes room for sandboxes that are held while refused, which
+then wake by themselves. Held or recently busy sandboxes are never touched.
+The status reports the capacity (total, reserved, occupied, free, awake), and
+a restarted agent rebuilds it from its records.
+
+The request also sets the VM's guarantees in its cgroup: `memory.low` while
+it runs (zero while paused, so the kernel takes from idle VMs first; not
+`memory.min`, which would have the kernel kill processes rather than slow a
+VM down if the host ever runs short beyond everything unprotected), and
+`cpu.weight` from `cpu_request_millis` (all its processors unless set
+lower), so contended processors are shared by request while `vcpus` stays
+the ceiling. A running VM is never compressed or swapped, not even by the
+kernel under memory pressure: `memory.zswap.max` is 0 from launch, on
+adoption and before every resume, and opens only while the agent compresses
+the paused VM; with `memory.zswap.writeback` at 0 a page zswap refuses is
+not swapped out either. The status shows each VM's zswap traffic and memory
+pressure. VMMs and pagers have `oom_score_adj` -900, so the host's
+out-of-memory killer ends nearly anything else first. On huge-page hosts a
+guest that finds the pool empty stalls (its vCPU retries the fault) until a
+page is free; admission counting every awake VM whole against the pool
+keeps that from happening unless something else takes from the pool.

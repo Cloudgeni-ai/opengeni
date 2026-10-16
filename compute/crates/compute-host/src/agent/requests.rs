@@ -9,7 +9,8 @@ use compute_engine::Engine;
 
 use crate::layout::{Images, Paths, copy_sparse, sync_parent};
 use crate::protocol::{
-    BlockedSandbox, CapacityStatus, HostStatus, Id, SandboxConfig, SandboxStatus, step_name,
+    BlockedSandbox, CapacityStatus, HostStatus, Id, MemoryStatus, SandboxConfig, SandboxStatus,
+    step_name,
 };
 use crate::state::{Record, check_generation};
 use crate::store::Store;
@@ -407,6 +408,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     unsavable: view.unsavable,
                     broken: view.broken,
                     waiting_for_room: self.core.room_needed(*id),
+                    memory: slot
+                        .vm
+                        .as_ref()
+                        .and_then(|live| self.engine.memory_stats(&live.vm).ok())
+                        .map(MemoryStatus::from),
                 })
             })
             .collect();

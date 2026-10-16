@@ -20,6 +20,7 @@ use std::future::Future;
 use std::os::fd::OwnedFd;
 use std::time::Duration;
 
+pub use cgroup::MemoryStats;
 pub use error::{EngineError, ErrorKind};
 pub use profile::{MemoryProfile, PageSize, ProfileError, SaveMode};
 pub use spec::{
@@ -172,6 +173,18 @@ pub trait Engine: Send + Sync + 'static {
     /// such as a slow download. Only differences between readings of the
     /// same VM mean anything.
     fn io_bytes(&self, vm: &Self::Vm) -> Result<u64, EngineError>;
+
+    /// The VM's zswap traffic and memory pressure so far. A running VM is
+    /// never compressed, so its `zswpout` grows only while it is paused.
+    /// Engines that cannot tell report an error.
+    fn memory_stats(&self, vm: &Self::Vm) -> Result<MemoryStats, EngineError> {
+        let _ = vm;
+        Err(EngineError::new(
+            ErrorKind::Transient,
+            "memory_stats",
+            "this engine does not report memory statistics",
+        ))
+    }
 
     /// Resolves once the VM process has ended for any reason, including
     /// [`Engine::stop`]. The future does not borrow the VM, so the host can
