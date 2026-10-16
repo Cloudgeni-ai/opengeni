@@ -428,6 +428,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "cancelBillingSubscription",
+    "method": "POST",
+    "path": "/v1/billing/subscription/cancel",
+    "request": [
+      "CancelBillingSubscriptionRequest"
+    ],
+    "response": [
+      "BillingSubscriptionChange"
+    ]
+  },
+  {
     "id": "cancelConnectAttempt",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/connect/attempts/:attemptId/cancel",
@@ -481,6 +492,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/targets/:targetId/screenshot",
     "request": [],
     "response": []
+  },
+  {
+    "id": "changeBillingSubscription",
+    "method": "POST",
+    "path": "/v1/billing/subscription/change",
+    "request": [
+      "ChangeBillingSubscriptionRequest"
+    ],
+    "response": [
+      "BillingSubscriptionChange"
+    ]
   },
   {
     "id": "changeMachineAudience",
@@ -1110,6 +1132,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AutomationSource"
+    ]
+  },
+  {
+    "id": "createSubscriptionCheckout",
+    "method": "POST",
+    "path": "/v1/billing/subscription/checkout",
+    "request": [
+      "CreateSubscriptionCheckoutRequest"
+    ],
+    "response": [
+      "CreateSubscriptionCheckoutResponse"
+    ]
+  },
+  {
+    "id": "createSubscriptionPortalSession",
+    "method": "POST",
+    "path": "/v1/billing/subscription/portal",
+    "request": [
+      "CreateBillingPortalRequest"
+    ],
+    "response": [
+      "CreateBillingPortalResponse"
     ]
   },
   {
@@ -2432,6 +2476,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/billing/entitlements",
     "request": [],
     "response": []
+  },
+  {
+    "id": "getBillingSubscriptionPlans",
+    "method": "GET",
+    "path": "/v1/billing/subscription/plans",
+    "request": [],
+    "response": [
+      "BillingSubscriptionCatalog"
+    ]
   },
   {
     "id": "getBillingUsage",
@@ -7932,6 +7985,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceWebhook"
+    ]
+  },
+  {
+    "id": "upgradeBillingSubscription",
+    "method": "POST",
+    "path": "/v1/billing/subscription/upgrade",
+    "request": [
+      "ChangeBillingSubscriptionRequest"
+    ],
+    "response": [
+      "BillingSubscriptionChange"
     ]
   },
   {
