@@ -7594,6 +7594,14 @@ export const sessionTurns = pgTable(
         table.createdAt.desc(),
       )
       .where(sql`${table.finishedAt} is not null`),
+    // "Mine" session-list filter (migration 0799): prompts a person sent
+    // directly, by sender, so a workstream probe is one index lookup per tree
+    // session. Agent-relayed and service turns are excluded by the predicate.
+    humanPromptSubject: index("session_turns_human_prompt_subject_idx")
+      .on(table.workspaceId, table.initiatorSubjectId, table.sessionId)
+      .where(
+        sql`${table.initiatorKind} = 'subject' and ${table.source} in ('user', 'api') and ${table.surface} is distinct from 'agent'`,
+      ),
     latencyModeValid: check(
       "session_turns_latency_mode_check",
       sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
