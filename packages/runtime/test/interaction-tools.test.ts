@@ -356,7 +356,7 @@ describe("interaction attempt tools", () => {
         browsers: [],
         computers: [],
         identities: [],
-        attachedBrowserBridges: [bridge],
+        attachedBrowserBridges: [{ enrollmentId: bridge.enrollmentId, connectedProfileCount: 0 }],
         attachedBrowsers: [],
       });
     }
@@ -364,6 +364,82 @@ describe("interaction attempt tools", () => {
       { workspace: workspaceId, options: { includeDisconnected: false } },
       { workspace: workspaceId, options: { includeDisconnected: true } },
     ]);
+  });
+
+  test("attached Chrome discovery lists lean profiles and hides bridges once one is connected", async () => {
+    const device = {
+      id: randomUUID(),
+      accountId,
+      workspaceId,
+      enrollmentId: randomUUID(),
+      name: "Work laptop",
+      profileLabel: "Personal",
+      browserName: "Google Chrome",
+      browserVersion: "150.0.0.0",
+      extensionVersion: "0.1.4",
+      platform: "macos" as const,
+      architecture: "arm64" as const,
+      state: "connected" as const,
+      connectionGeneration: "connection-1",
+      inventoryRevision: 3,
+      tabCount: 12,
+      capabilities: {
+        tabInventory: true,
+        debuggerAttachment: true,
+        semanticObservation: true,
+        screenshots: true,
+        liveFrames: false,
+        humanInput: true,
+        diagnostics: true,
+        rawCdp: false,
+        linkedComputer: false,
+      },
+      lastSeenAt: now,
+      disconnectedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const bridges = (["online", "offline"] as const).map((state) => ({
+      enrollmentId: randomUUID(),
+      state,
+      bridgeGeneration: "bridge-1",
+      inventoryRevision: 1,
+      connectedProfileCount: 1,
+      lastSeenAt: now,
+    }));
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listAttachedBrowsers: async () => ({ revision: 7, bridges, devices: [device] }),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["interaction_discover"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { scope: "attached_browsers" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(result.structuredContent).toMatchObject({
+      attachedBrowserBridges: [],
+      attachedBrowsers: [
+        {
+          id: device.id,
+          name: "Work laptop",
+          profileLabel: "Personal",
+          browserName: "Google Chrome",
+          platform: "macos",
+          state: "connected",
+          tabCount: 12,
+          unsupported: ["liveFrames", "rawCdp", "linkedComputer"],
+        },
+      ],
+    });
+    expect(
+      Object.keys(
+        (result.structuredContent as { attachedBrowsers: object[] }).attachedBrowsers[0]!,
+      ),
+    ).toHaveLength(8);
   });
 
   test("browser_open, computer_open and discovery narrow inventories in the query", async () => {
@@ -503,9 +579,80 @@ describe("interaction attempt tools", () => {
         { ...(explicit ? { browserSessionId } : {}), initialUrl: "https://new.example.test/" },
         { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
       );
-      expect(result.structuredContent).toEqual({ session, targets: [prior, opened] });
+      expect(result.structuredContent).toEqual({
+        session,
+        targets: [prior, opened].map(agentTarget),
+      });
       expect(lists).toBe(1);
       expect(opens).toBe(1);
+    },
+  );
+
+  test.each(["initial-url", "selected", "failed"] as const)(
+    "browser_open returns a compact observation of the primary tab (%s)",
+    async (scenario) => {
+      const session = discoveredBrowserSession(browserSessionId, sessionId);
+      session.lifecycle = "active";
+      session.controller = {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      };
+      const selected = browserTarget();
+      const requested = {
+        ...browserTarget(),
+        id: "tab-2",
+        url: "https://requested.example.test/",
+        selected: false,
+      };
+      const observed: string[] = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          getBrowserSession: async () => session,
+          listBrowserTargets: async () => ({
+            browserSessionId,
+            controllerGeneration: "controller-1",
+            targets: [selected, requested],
+          }),
+          observeBrowserTarget: async (_workspace, _id, targetId) => {
+            observed.push(targetId ?? "default");
+            if (scenario === "failed") throw new Error("synthetic observation failure");
+            return browserObservation(targetId === requested.id ? requested : selected);
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        {
+          browserSessionId,
+          ...(scenario === "selected" ? {} : { initialUrl: requested.url }),
+        },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      const primary = scenario === "selected" ? selected : requested;
+      expect(observed).toEqual([primary.id]);
+      const content = result.structuredContent as Record<string, unknown>;
+      if (scenario === "selected") {
+        // Without a requested URL every tab stays listed.
+        expect(content.targets).toEqual([selected, requested].map(agentTarget));
+        expect(content).not.toHaveProperty("otherTabCount");
+      } else {
+        // A browser opened on a URL lists only that tab and counts the rest.
+        expect(content.targets).toEqual([agentTarget(requested)]);
+        expect(content.otherTabCount).toBe(1);
+      }
+      if (scenario === "failed") {
+        expect(content).not.toHaveProperty("observation");
+      } else {
+        expect(content.observation).toMatchObject({
+          target: agentTarget(primary),
+          agentView: { sourceKind: "snapshot" },
+        });
+        expect(content.observation).not.toHaveProperty("semantic");
+      }
     },
   );
 
@@ -566,7 +713,10 @@ describe("interaction attempt tools", () => {
         { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
       );
       if (scenario === "matching")
-        expect((await pending).structuredContent).toEqual({ session, targets: [target] });
+        expect((await pending).structuredContent).toEqual({
+          session,
+          targets: [agentTarget(target)],
+        });
       else
         await expect(pending).rejects.toThrow(
           scenario === "missing"
@@ -657,6 +807,107 @@ describe("interaction attempt tools", () => {
       headless: false,
       placement: { kind: "attached_device", deviceId },
       networkRouteId,
+    });
+  });
+
+  describe("browser_open on the person's own Chrome without a deviceId", () => {
+    const profile = (
+      name: string,
+      updatedAt: string,
+      overrides: { state?: "connected" | "disconnected"; debuggerAttachment?: boolean } = {},
+    ) => {
+      const state = overrides.state ?? "connected";
+      return {
+        id: randomUUID(),
+        accountId,
+        workspaceId,
+        enrollmentId: randomUUID(),
+        name,
+        profileLabel: name,
+        browserName: "Chrome",
+        browserVersion: "150.0.0.0",
+        extensionVersion: "0.1.4",
+        platform: "macos" as const,
+        architecture: "arm64" as const,
+        state,
+        connectionGeneration: "connection-1",
+        inventoryRevision: 3,
+        tabCount: 4,
+        capabilities: {
+          tabInventory: true,
+          debuggerAttachment: overrides.debuggerAttachment ?? true,
+          semanticObservation: true,
+          screenshots: true,
+          liveFrames: false,
+          humanInput: true,
+          diagnostics: true,
+          rawCdp: false,
+          linkedComputer: false,
+        },
+        lastSeenAt: updatedAt,
+        disconnectedAt: state === "connected" ? null : updatedAt,
+        createdAt: "2026-10-01T00:00:00.000Z",
+        updatedAt,
+      };
+    };
+    const open = async (devices: ReturnType<typeof profile>[]) => {
+      let createRequest: Record<string, unknown> | null = null;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+          listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices }),
+          createBrowserSession: async (_workspaceId, request) => {
+            createRequest = request as unknown as Record<string, unknown>;
+            return { session: discoveredBrowserSession(randomUUID(), sessionId) } as never;
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { placement: { kind: "attached_device" } },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      return { result, createRequest: createRequest as Record<string, unknown> | null };
+    };
+
+    test("opens the only connected profile", async () => {
+      const only = profile("Personal", "2026-10-15T10:00:00.000Z");
+      const { result, createRequest } = await open([only]);
+      expect(createRequest).toMatchObject({
+        placement: { kind: "attached_device", deviceId: only.id },
+      });
+      expect(result.structuredContent).toMatchObject({
+        attachedProfile: { id: only.id, name: "Personal" },
+      });
+      expect(result.structuredContent).not.toHaveProperty("otherAttachedProfiles");
+    });
+
+    test("opens the most recently active profile and names the others", async () => {
+      const older = profile("Work", "2026-10-15T09:00:00.000Z");
+      const newer = profile("Personal", "2026-10-15T10:00:00.000Z");
+      const gone = profile("Old", "2026-10-15T11:00:00.000Z", { state: "disconnected" });
+      const blind = profile("Locked", "2026-10-15T12:00:00.000Z", { debuggerAttachment: false });
+      const { result, createRequest } = await open([older, gone, blind, newer]);
+      expect(createRequest).toMatchObject({
+        placement: { kind: "attached_device", deviceId: newer.id },
+      });
+      expect(result.structuredContent).toMatchObject({
+        attachedProfile: { id: newer.id, name: "Personal" },
+        otherAttachedProfiles: [{ id: older.id, name: "Work" }],
+      });
+    });
+
+    test("explains how to connect Chrome when no profile is connected", async () => {
+      const { result, createRequest } = await open([
+        profile("Old", "2026-10-15T11:00:00.000Z", { state: "disconnected" }),
+      ]);
+      expect(createRequest).toBeNull();
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.structuredContent)).toContain("No Chrome profile is connected");
+      expect(JSON.stringify(result.structuredContent)).toContain("attached_browser_unavailable");
     });
   });
 
@@ -879,22 +1130,25 @@ describe("interaction attempt tools", () => {
         );
       expect(result.isError).not.toBe(true);
       const output = result.structuredContent as {
-        mutationObservation: BrowserObservation & {
+        mutationObservation: {
+          target: ReturnType<typeof agentTarget>;
+          frameId: string;
           agentView: { nodes: Array<{ ref: string }>; omittedNodeCount: number };
         };
       };
       const snapshot = output.mutationObservation;
-      expect(result.structuredContent).toMatchObject(tabs);
-      expect(snapshot).toMatchObject({
-        observationId: observation.observationId,
-        browserSessionId,
-        target,
-        frameId: observation.frameId,
-        focusedRef: observation.focusedRef,
-        observedAt: observation.observedAt,
-        semantic: null,
-        agentView: { kind: "compact", sourceNodeCount: 76 },
+      expect(result.structuredContent).toMatchObject({
+        browserSessionId: tabs.browserSessionId,
+        targets: tabs.targets.map(agentTarget),
       });
+      expect(snapshot).toMatchObject({
+        target: agentTarget(target),
+        frameId: observation.frameId,
+        agentView: { sourceKind: "snapshot" },
+      });
+      expect(snapshot).toMatchObject({ focusedRef: observation.focusedRef });
+      for (const omitted of ["semantic", "observationId", "observedAt", "diagnostics"])
+        expect(snapshot).not.toHaveProperty(omitted);
       expect(snapshot.agentView.nodes).toContainEqual(
         expect.objectContaining({ ref: "button-ref", role: "button", name: "Continue" }),
       );
@@ -907,7 +1161,7 @@ describe("interaction attempt tools", () => {
         .find((definition) => definition.modelName === "interaction__browser_act")!
         .execute(
           {
-            browserSessionId: snapshot.browserSessionId,
+            browserSessionId,
             targetId: snapshot.target.id,
             expectedTargetGeneration: snapshot.target.targetGeneration,
             expectedDocumentGeneration: snapshot.target.documentGeneration,
@@ -926,10 +1180,7 @@ describe("interaction attempt tools", () => {
         expectedFrameId: observation.frameId,
         observationMode: "none",
       });
-      expect(action.structuredContent).toEqual({
-        ...browserReceipt(actionOperationId, observation),
-        observation: null,
-      });
+      expect(action.structuredContent).toEqual({ targetId: target.id, state: "completed" });
       expect(calls).toEqual([operation, "list", "act"]);
     }
   });
@@ -965,7 +1216,10 @@ describe("interaction attempt tools", () => {
           : { operation, browserSessionId, targetId: target.id },
         { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
       );
-      expect(result.structuredContent).toEqual(tabs);
+      expect(result.structuredContent).toEqual({
+        browserSessionId: tabs.browserSessionId,
+        targets: tabs.targets.map(agentTarget),
+      });
       expect(calls).toEqual([operation]);
     }
   });
@@ -1024,11 +1278,12 @@ describe("interaction attempt tools", () => {
       action: { type: "scroll", deltaX: 0, deltaY: 480 },
     });
     expect(result.structuredContent).toMatchObject({
-      operationId,
-      browserSessionId,
+      targetId: target.id,
       state: "completed",
-      observation: { semantic: null, agentView: { kind: "compact" } },
+      observation: { target: agentTarget(target), agentView: { sourceKind: "snapshot" } },
     });
+    for (const omitted of ["operationId", "browserSessionId", "dispatchedAt", "error"])
+      expect(result.structuredContent).not.toHaveProperty(omitted);
   });
 
   test("skips the pre-action AX read with all explicit fences and omits post-action AX on request", async () => {
@@ -1077,7 +1332,7 @@ describe("interaction attempt tools", () => {
       observationMode: "none",
     });
     expect(observationCalls).toBe(0);
-    expect(result.structuredContent).toMatchObject({ state: "completed", observation: null });
+    expect(result.structuredContent).toEqual({ targetId: target.id, state: "completed" });
   });
 
   test("returns a bounded tool error for invalid action input without touching transport", async () => {
@@ -1606,9 +1861,12 @@ describe("interaction attempt tools", () => {
       { type: "image", data: Buffer.from(image).toString("base64"), mimeType: "image/jpeg" },
     ]);
     expect(visualResult.structuredContent).toMatchObject({
-      semantic: null,
-      agentView: { kind: "compact", sourceNodeCount: 0, omittedNodeCount: 0 },
+      agentView: { sourceKind: "snapshot", nodes: [] },
     });
+    expect(visualResult.structuredContent).not.toHaveProperty("semantic");
+    expect((visualResult.structuredContent as { agentView: object }).agentView).not.toHaveProperty(
+      "omittedNodeCount",
+    );
   });
 
   test("a failed page read waits for the parallel capture to settle", async () => {
@@ -1768,8 +2026,7 @@ describe("interaction attempt tools", () => {
     expect(compact.structuredContent).toMatchObject({
       target: { targetGeneration: target.targetGeneration },
       frameId: observation.frameId,
-      semantic: null,
-      agentView: { kind: "compact", sourceNodeCount: 150, maxNodes: 60 },
+      agentView: { sourceKind: "snapshot" },
     });
     const agentView = (
       compact.structuredContent as {
@@ -1792,6 +2049,70 @@ describe("interaction attempt tools", () => {
       context,
     );
     expect(full.structuredContent).toEqual(observation);
+  });
+
+  test("compact view folds redundant nodes and leaves out default fields", async () => {
+    const target = browserTarget();
+    const observation = browserObservation(target);
+    observation.viewport = {
+      width: 1280,
+      height: 800,
+      visualWidth: 1280,
+      visualHeight: 800,
+      deviceScaleFactor: 1,
+      maxTouchPoints: 0,
+    };
+    const node = (
+      ref: string,
+      role: string,
+      extra: { name?: string; actions?: string[]; children?: unknown[] } = {},
+    ) => ({ ref, role, states: [], actions: [], ...extra });
+    const roots = [
+      node("main", "main", {
+        children: [
+          node("wrapper", "generic", {
+            children: [
+              node("submit", "button", {
+                name: "Submit",
+                actions: ["click"],
+                children: [node("submit-text", "text", { name: "Submit" })],
+              }),
+              node("title", "heading", {
+                name: "Title",
+                children: [node("title-text", "text", { name: "Title" })],
+              }),
+              node("hello", "text", { name: "Hello" }),
+            ],
+          }),
+        ],
+      }),
+    ];
+    observation.semantic = { kind: "snapshot", roots: roots as never, nodeCount: 7 };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({ observeBrowserTarget: async () => observation }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(result.structuredContent).toEqual({
+      target: agentTarget(target),
+      frameId: observation.frameId,
+      viewport: { width: 1280, height: 800 },
+      agentView: {
+        sourceKind: "snapshot",
+        nodes: [
+          { ref: "main", role: "main", depth: 0 },
+          { ref: "submit", role: "button", depth: 2, name: "Submit", actions: ["click"] },
+          { ref: "title", role: "heading", depth: 2, name: "Title" },
+          { ref: "hello", role: "text", depth: 2, name: "Hello" },
+        ],
+      },
+    });
   });
 
   test("keeps a dense ten-thousand-node page within the compact output budget", async () => {
@@ -1821,9 +2142,12 @@ describe("interaction attempt tools", () => {
     expect(beforeBytes).toBeGreaterThan(10_000_000);
     expect(afterBytes).toBeLessThan(17_000);
     expect(beforeBytes / afterBytes).toBeGreaterThan(500);
-    expect(result.structuredContent).toMatchObject({
-      agentView: { sourceNodeCount: 10_000 },
-    });
+    const denseView = (
+      result.structuredContent as {
+        agentView: { nodes: unknown[]; omittedNodeCount: number };
+      }
+    ).agentView;
+    expect(denseView.omittedNodeCount).toBe(10_000 - denseView.nodes.length);
     expect(
       (result.structuredContent as { agentView: { clippedFieldCount: number } }).agentView
         .clippedFieldCount,
@@ -2276,6 +2600,20 @@ function browserTarget(): BrowserTarget {
     selected: true,
     attached: true,
     createdAt: now,
+  };
+}
+
+/** The model-facing tab projection: identity, page, selection and fences. */
+function agentTarget(target: BrowserTarget) {
+  return {
+    id: target.id,
+    kind: target.kind,
+    title: target.title,
+    url: target.url,
+    selected: target.selected,
+    controllerGeneration: target.controllerGeneration,
+    targetGeneration: target.targetGeneration,
+    documentGeneration: target.documentGeneration,
   };
 }
 
