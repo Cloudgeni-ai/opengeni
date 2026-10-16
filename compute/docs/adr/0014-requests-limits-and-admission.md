@@ -149,8 +149,11 @@ pick a VM.
   filesystem, as written where extents cannot be shared; the agent
   learns the unit at start by writing a probe, so ext4 bigalloc's
   clusters count) and its worst-case snapshot the same way before it
-  starts, and waits without the room;
-  what it wrote stays booked until the next reading after it ends. Ready
+  starts, and waits without the room. The probe bounds what any write
+  takes only on ext4, XFS and btrfs, so the agent refuses to start on a
+  state root on any other filesystem (ZFS grows a file's record size,
+  tmpfs can give huge pages within a file's size), naming those three.
+  What a build wrote stays booked until the next reading after it ends. Ready
   clones' disk copies, which share extents with their template where
   the filesystem can, and guests' disk growth are not booked. A wake that
   cannot book its save

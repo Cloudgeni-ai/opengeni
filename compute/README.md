@@ -194,7 +194,10 @@ twice, plus 64 MiB), and bookings plus `--disk-reserve-mib` and
 what is free. A booking stays until a reading after its save shows what
 the save used, and nothing needing disk is admitted before the first
 reading. A template build books its copies of the base image and kernel
-and its snapshot like a save before it starts and waits without the room; ready
+(in the state filesystem's allocation unit, learned at start) and its
+snapshot like a save before it starts and waits without the room. The
+state root must be on ext4, XFS or btrfs, where that unit bounds what any
+write takes; the agent refuses to start on any other filesystem. Ready
 sandboxes' disk copies and guests' disk growth are not booked. A wake the
 disk cannot book gets `host_full` naming disk or inodes; archived idle
 sandboxes give up their local copies in the background to make room. The

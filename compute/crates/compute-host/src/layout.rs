@@ -507,14 +507,58 @@ pub(crate) fn copy_size(from: &Path, unit: u64) -> io::Result<u64> {
     Ok(fs::metadata(from)?.len().next_multiple_of(unit.max(1)))
 }
 
+/// Filesystems the state root may be on: those on which the smallest write
+/// [`allocation_unit`] makes bounds what any write takes, so sparse copies
+/// and saves can be booked. Ext4 allocates blocks, or with bigalloc whole
+/// clusters, which the probe's file takes too; XFS allocates blocks, or
+/// the extent size hint the probe's file inherits; btrfs allocates
+/// sectors, and its inline and compressed extents take less. Others, such
+/// as ZFS, whose record size grows with a file, or tmpfs with huge pages
+/// within a file's size, can take more than the probe shows.
+pub(crate) const SUPPORTED_FILESYSTEMS: [(u64, &str); 3] = [
+    (0xEF53, "ext4"),
+    (0x5846_5342, "XFS"),
+    (0x9123_683E, "btrfs"),
+];
+
+/// Refuses a filesystem of statfs type `kind` that is not one of
+/// [`SUPPORTED_FILESYSTEMS`].
+pub(crate) fn supported_filesystem(kind: u64) -> io::Result<()> {
+    if SUPPORTED_FILESYSTEMS
+        .iter()
+        .any(|(magic, _)| *magic == kind)
+    {
+        return Ok(());
+    }
+    let names: Vec<&str> = SUPPORTED_FILESYSTEMS
+        .iter()
+        .map(|(_, name)| *name)
+        .collect();
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "it is on a filesystem of type {kind:#x}, on which what a save or copy \
+             takes cannot be bounded; use one of {}",
+            names.join(", ")
+        ),
+    ))
+}
+
 /// The bytes the filesystem holding `dir` allocates for the smallest write,
 /// learned by writing one: 4 KiB that do not compress, made durable, then
 /// what the file takes; no less than the block size it reports, as some
 /// filesystems count what a write takes only later. Ext4 with bigalloc,
-/// for one, allocates whole clusters of up to megabytes.
+/// for one, allocates whole clusters of up to megabytes. Refuses a
+/// filesystem not in [`SUPPORTED_FILESYSTEMS`], on which that bounds
+/// nothing, before writing.
 pub(crate) fn allocation_unit(dir: &Path) -> io::Result<u64> {
     use std::os::unix::fs::MetadataExt;
 
+    #[cfg(target_os = "linux")]
+    {
+        let kind = rustix::fs::statfs(dir)?.f_type;
+        supported_filesystem(u64::try_from(kind).unwrap_or(u64::MAX))?;
+    }
     let probe = dir.join(".allocation-probe");
     let result = (|| {
         let mut file = File::create(&probe)?;
@@ -672,6 +716,27 @@ pub(crate) mod tests {
         let unit = allocation_unit(dir.path()).unwrap();
         assert!(unit >= 4096 && unit.is_power_of_two(), "{unit}");
         assert!(!dir.path().join(".allocation-probe").exists());
+    }
+
+    /// A state root on a filesystem whose allocation the probe cannot bound,
+    /// such as tmpfs or ZFS, is refused, naming the ones that are supported;
+    /// nothing is written there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_filesystem_the_probe_cannot_bound_is_refused() {
+        const ZFS: u64 = 0x2fc1_2fc1;
+        let refused = supported_filesystem(ZFS).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            refused.to_string().contains("ext4, XFS, btrfs"),
+            "{refused}"
+        );
+        let shm = Path::new("/dev/shm");
+        if rustix::fs::statfs(shm).is_ok_and(|fs| fs.f_type == 0x0102_1994) {
+            let refused = allocation_unit(shm).unwrap_err();
+            assert_eq!(refused.kind(), io::ErrorKind::Unsupported, "{refused}");
+            assert!(!shm.join(".allocation-probe").exists());
+        }
     }
 
     /// What a VMM can leave in its jail in place of a file is never read.

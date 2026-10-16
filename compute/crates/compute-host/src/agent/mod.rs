@@ -342,10 +342,11 @@ fn save_copies(root: &std::path::Path) -> Result<u64, HostError> {
 }
 
 /// The bytes the filesystem holding `root` allocates at a time, which
-/// sparse copies onto it are booked in.
+/// sparse copies onto it are booked in; refused on a filesystem where
+/// that bounds nothing.
 fn allocation_unit(root: &std::path::Path) -> Result<u64, HostError> {
     crate::layout::allocation_unit(root)
-        .map_err(|error| HostError::Io(format!("probing the state root: {error}")))
+        .map_err(|error| HostError::Io(format!("state root {}: {error}", root.display())))
 }
 
 /// What a host-full refusal counts.
@@ -849,8 +850,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // Huge-page profiles cannot compress, whatever the host says.
         let can_compress = config.can_compress && engine.memory_profile().compress;
         let reserve_whole = engine.memory_profile().pages == PageSize::Huge;
-        let save_copies = save_copies(&config.root)?;
+        // Refuses a state root on a filesystem it cannot book saves on
+        // before writing anything there.
         let allocation_unit = allocation_unit(&config.root)?;
+        let save_copies = save_copies(&config.root)?;
         // Template VMs an earlier agent left are ended before any sandbox
         // can be given the user one of them ran as.
         let warm::Started {
