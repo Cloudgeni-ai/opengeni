@@ -174,6 +174,11 @@ struct ServeArgs {
     /// processor counts as busy and stays awake; 0 ignores processor use.
     #[arg(long, default_value_t = BusyRule::DEFAULT.cpu_percent)]
     busy_cpu_percent: u32,
+    /// A running sandbox whose VM moves at least this many KiB a second
+    /// through its disk, network and vsock counts as busy and stays awake;
+    /// 0 ignores traffic.
+    #[arg(long, default_value_t = BusyRule::DEFAULT.io_bytes_per_second >> 10)]
+    busy_io_kib: u64,
     /// ...averaged over this long.
     #[arg(long, default_value = "5s", value_parser = parse_duration)]
     busy_window: Duration,
@@ -400,8 +405,9 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
             blocked: args.blocked,
             dns: args.dns,
         }),
-        busy: (args.busy_cpu_percent > 0).then_some(BusyRule {
+        busy: (args.busy_cpu_percent > 0 || args.busy_io_kib > 0).then_some(BusyRule {
             cpu_percent: args.busy_cpu_percent,
+            io_bytes_per_second: args.busy_io_kib.saturating_mul(1024),
             window: args.busy_window,
         }),
         can_compress: !args.no_compress,

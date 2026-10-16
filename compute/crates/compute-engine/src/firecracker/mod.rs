@@ -914,6 +914,12 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::io("cpu_time", error))
     }
 
+    fn io_bytes(&self, vm: &FirecrackerVm) -> Result<u64, EngineError> {
+        vm.cgroup
+            .io_bytes()
+            .map_err(|error| EngineError::io("io_bytes", error))
+    }
+
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {
         let mut exit = vm.exit_watch();
         async move {

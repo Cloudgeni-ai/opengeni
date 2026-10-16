@@ -107,7 +107,7 @@ struct Process {
     paused: Arc<Mutex<bool>>,
     exit: watch::Sender<bool>,
     guest: AbortHandle,
-    cpu: Arc<Mutex<CpuMeter>>,
+    work: Arc<Mutex<Work>>,
 }
 
 impl World {
@@ -145,15 +145,23 @@ impl std::ops::Deref for FakeVm {
     }
 }
 
-/// Processor time a fake VM used: one full processor while its guest is
-/// told to be busy.
+/// What a fake VM's guest is told to be doing.
 #[derive(Debug, Default)]
-struct CpuMeter {
+struct Work {
+    /// One full processor while busy.
+    cpu: Meter,
+    /// A byte of traffic every microsecond while streaming.
+    io: Meter,
+}
+
+/// Time a fake VM spent on one kind of work.
+#[derive(Debug, Default)]
+struct Meter {
     used: Duration,
     busy_since: Option<Instant>,
 }
 
-impl CpuMeter {
+impl Meter {
     fn total(&self) -> Duration {
         self.used
             + self
@@ -189,14 +197,14 @@ impl Fake {
         let _ = std::fs::remove_file(&vsock);
         let listener = UnixListener::bind(&vsock).unwrap();
         let memory = Arc::new(Mutex::new(memory));
-        let cpu = Arc::new(Mutex::new(CpuMeter::default()));
+        let work = Arc::new(Mutex::new(Work::default()));
         let (exit, mut exited) = watch::channel(false);
         let guest = tokio::spawn(guest(
             listener,
             Arc::clone(&memory),
             spec.drives[0].path.clone(),
             Arc::new(AtomicBool::new(false)),
-            Arc::clone(&cpu),
+            Arc::clone(&work),
         ));
         let world = Arc::clone(&self.world);
         let dead = name.clone();
@@ -214,7 +222,7 @@ impl Fake {
             paused: Arc::default(),
             exit,
             guest: guest.abort_handle(),
-            cpu,
+            work,
         };
         self.world
             .vms
@@ -263,13 +271,13 @@ async fn guest(
     memory: Arc<Mutex<String>>,
     disk: PathBuf,
     told_restored: Arc<AtomicBool>,
-    cpu: Arc<Mutex<CpuMeter>>,
+    work: Arc<Mutex<Work>>,
 ) {
     while let Ok((stream, _)) = listener.accept().await {
         let memory = Arc::clone(&memory);
         let disk = disk.clone();
         let told_restored = Arc::clone(&told_restored);
-        let cpu = Arc::clone(&cpu);
+        let work = Arc::clone(&work);
         tokio::spawn(async move {
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
@@ -299,11 +307,19 @@ async fn guest(
                     }
                     ("told-restored?", _) => told_restored.load(Ordering::SeqCst).to_string(),
                     ("busy", _) => {
-                        cpu.lock().unwrap().set_busy(true);
+                        work.lock().unwrap().cpu.set_busy(true);
                         "ok".into()
                     }
                     ("quiet", _) => {
-                        cpu.lock().unwrap().set_busy(false);
+                        work.lock().unwrap().cpu.set_busy(false);
+                        "ok".into()
+                    }
+                    ("stream", _) => {
+                        work.lock().unwrap().io.set_busy(true);
+                        "ok".into()
+                    }
+                    ("still", _) => {
+                        work.lock().unwrap().io.set_busy(false);
                         "ok".into()
                     }
                     (other, _) => format!("unknown {other}"),
@@ -505,7 +521,12 @@ impl Engine for Fake {
     }
 
     fn cpu_time(&self, vm: &FakeVm) -> Result<Duration, EngineError> {
-        Ok(vm.cpu.lock().unwrap().total())
+        Ok(vm.work.lock().unwrap().cpu.total())
+    }
+
+    fn io_bytes(&self, vm: &FakeVm) -> Result<u64, EngineError> {
+        let streamed = vm.work.lock().unwrap().io.total();
+        Ok(u64::try_from(streamed.as_micros()).unwrap_or(u64::MAX))
     }
 
     fn exited(&self, vm: &FakeVm) -> impl Future<Output = ()> + Send + 'static {
@@ -563,6 +584,7 @@ impl Lab {
             network: None,
             busy: Some(BusyRule {
                 cpu_percent: 50,
+                io_bytes_per_second: 100_000,
                 window: Duration::from_millis(100),
             }),
             can_compress: true,

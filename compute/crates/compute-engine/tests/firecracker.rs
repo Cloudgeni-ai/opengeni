@@ -102,6 +102,32 @@ async fn assert_processor_time_follows_work(engine: &Firecracker, vm: &Firecrack
     eprintln!("processor time: busy loop {busy:?}, paused 300 ms {paused:?}");
 }
 
+/// Traffic is the other half of the activity rule: a guest writing its disk
+/// must show up in it, and a paused VM must stay well under the default
+/// 4 KiB a second. Leaves the VM running.
+async fn assert_traffic_follows_io(engine: &Firecracker, vm: &FirecrackerVm, uds: &Path) {
+    let before = engine.io_bytes(vm).unwrap();
+    exec(
+        uds,
+        "dd if=/dev/zero of=/var/tmp/io-probe bs=1M count=8 conv=fsync 2>/dev/null; \
+         rm -f /var/tmp/io-probe; sync",
+    )
+    .await
+    .unwrap();
+    let written = engine.io_bytes(vm).unwrap().saturating_sub(before);
+    assert!(
+        written >= 8 << 20,
+        "writing 8 MiB to disk showed only {written} bytes of traffic"
+    );
+    engine.pause(vm).await.unwrap();
+    let before = engine.io_bytes(vm).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let paused = engine.io_bytes(vm).unwrap().saturating_sub(before);
+    engine.resume(vm).await.unwrap();
+    assert!(paused < 1024, "a paused VM moved {paused} bytes in 300 ms");
+    eprintln!("traffic: 8 MiB write {written} bytes, paused 300 ms {paused} bytes");
+}
+
 /// A VM's spec in the jail layout the jailer expects, with its own copy of
 /// the base disk and a hard link to the lab kernel.
 fn jailed_spec(lab: &Path, name: &str, uid: u32) -> VmSpec {
@@ -202,6 +228,7 @@ async fn boot_pause_compress_snapshot_restore() {
     assert_ne!(output.trim(), "");
     let awake = engine.resident_bytes(&vm).unwrap();
     assert_processor_time_follows_work(&engine, &vm, &uds).await;
+    assert_traffic_follows_io(&engine, &vm, &uds).await;
 
     let started = Instant::now();
     engine.pause(&vm).await.unwrap();
