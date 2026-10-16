@@ -13,6 +13,10 @@ use super::{ActivityWindow, BusyRule, HostAgent};
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn sample(&mut self) {
         self.available_memory = read_available_memory();
+        #[cfg(target_os = "linux")]
+        if let Some(fetcher) = &self.fetcher {
+            fetcher.forget_old();
+        }
         let mut batch: Vec<Input> = match self.busy {
             Some(rule) => self
                 .sample_busy(rule)

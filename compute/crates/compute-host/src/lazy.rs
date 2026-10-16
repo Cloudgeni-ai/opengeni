@@ -67,6 +67,10 @@ const FETCHES_PER_HOST: usize = 512;
 /// Recently fetched chunks kept in memory, shared by every VM: sandboxes
 /// started from the same template share most of their memory.
 const CACHE_BYTES: usize = 1 << 30;
+/// How long a fetched chunk stays in that cache. The cache serves wakes
+/// close together; between them its memory belongs to sandboxes, so a
+/// chunk leaves this long after it arrived, used or not.
+const CACHE_FOR: Duration = Duration::from_secs(60);
 /// A chunk is retried for as long as its VM lives while the store or host
 /// fails in ways that may pass (timeouts, dropped connections, refused
 /// credentials, local resource limits): the guest stalls on a demand fetch
@@ -202,24 +206,31 @@ impl Drop for Waiting<'_> {
 struct Cache {
     bytes: usize,
     chunks: HashMap<String, Arc<Vec<u8>>>,
-    order: VecDeque<String>,
+    /// Keys oldest first, with when each arrived.
+    order: VecDeque<(String, tokio::time::Instant)>,
 }
 
 impl Cache {
-    /// Adds `chunk` and returns the chunks it pushed out, for the caller to
-    /// free once the lock is released: freeing 256 KiB buffers can wait on
-    /// the allocator, and every fetch on the host waits for this lock.
+    /// Adds `chunk`, arrived `now`, and returns the chunks it pushed out
+    /// (those older than [`CACHE_FOR`] first), for the caller to free once
+    /// the lock is released: freeing 256 KiB buffers can wait on the
+    /// allocator, and every fetch on the host waits for this lock.
     #[must_use]
-    fn insert(&mut self, key: String, chunk: Arc<Vec<u8>>) -> Vec<Arc<Vec<u8>>> {
-        let mut evicted = Vec::new();
+    fn insert(
+        &mut self,
+        key: String,
+        chunk: Arc<Vec<u8>>,
+        now: tokio::time::Instant,
+    ) -> Vec<Arc<Vec<u8>>> {
+        let mut evicted = self.expire(now);
         if chunk.len() > CACHE_BYTES || self.chunks.contains_key(&key) {
             return evicted;
         }
         self.bytes += chunk.len();
-        self.order.push_back(key.clone());
+        self.order.push_back((key.clone(), now));
         self.chunks.insert(key, chunk);
         while self.bytes > CACHE_BYTES {
-            let Some(oldest) = self.order.pop_front() else {
+            let Some((oldest, _)) = self.order.pop_front() else {
                 break;
             };
             if let Some(chunk) = self.chunks.remove(&oldest) {
@@ -228,6 +239,26 @@ impl Cache {
             }
         }
         evicted
+    }
+
+    /// Takes out the chunks that arrived [`CACHE_FOR`] or more before
+    /// `now`, and returns them for the caller to free as
+    /// [`Self::insert`]'s are.
+    #[must_use]
+    fn expire(&mut self, now: tokio::time::Instant) -> Vec<Arc<Vec<u8>>> {
+        let mut expired = Vec::new();
+        while let Some((key, _)) = self
+            .order
+            .front()
+            .filter(|(_, arrived)| now.saturating_duration_since(*arrived) >= CACHE_FOR)
+        {
+            if let Some(chunk) = self.chunks.remove(key) {
+                self.bytes -= chunk.len();
+                expired.push(chunk);
+            }
+            self.order.pop_front();
+        }
+        expired
     }
 }
 
@@ -249,6 +280,13 @@ impl Fetcher {
     /// meanwhile and lose nothing.
     pub fn stalled_for(&self) -> Option<Duration> {
         lock(&self.stall).since.map(|since| since.elapsed())
+    }
+
+    /// Frees the cached chunks older than [`CACHE_FOR`]; the agent calls
+    /// this as it samples, so the cache empties once wakes stop.
+    pub fn forget_old(&self) {
+        let expired = lock(&self.cache).expire(tokio::time::Instant::now());
+        drop(expired);
     }
 
     /// Counts a chunk as failing for longer than [`STALL_AFTER`] until the
@@ -323,7 +361,11 @@ impl Fetcher {
                 ))),
             };
             if let Ok(chunk) = &fetched {
-                let evicted = lock(&cache).insert(key.clone(), Arc::clone(chunk));
+                let evicted = lock(&cache).insert(
+                    key.clone(),
+                    Arc::clone(chunk),
+                    tokio::time::Instant::now(),
+                );
                 drop(evicted);
             }
             let mut inflight = lock(&inflight);
@@ -877,6 +919,40 @@ mod tests {
     }
 
     const PAGE: u64 = 4096;
+
+    /// Cached chunks leave [`CACHE_FOR`] after they arrived, with the
+    /// bytes they held, whether the agent samples or the next fetch lands.
+    #[test]
+    fn cached_chunks_leave_a_minute_after_they_arrived() {
+        let start = tokio::time::Instant::now();
+        let chunk = |byte| Arc::new(vec![byte; 4096]);
+        let mut cache = Cache::default();
+        assert_eq!(cache.insert("a".into(), chunk(1), start).len(), 0);
+        let later = start + Duration::from_secs(30);
+        assert_eq!(cache.insert("b".into(), chunk(2), later).len(), 0);
+        assert_eq!(cache.bytes, 2 * 4096);
+
+        let just_before = start + CACHE_FOR - Duration::from_millis(1);
+        assert_eq!(cache.expire(just_before).len(), 0);
+        let expired = cache.expire(start + CACHE_FOR);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0][0], 1, "the oldest goes first");
+        assert!(!cache.chunks.contains_key("a"));
+        assert_eq!((cache.bytes, cache.order.len()), (4096, 1));
+
+        // A fetch landing takes out what has expired by then, and a chunk
+        // fetched again after it left comes back.
+        let evicted = cache.insert("a".into(), chunk(3), later + CACHE_FOR);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0][0], 2);
+        assert_eq!((cache.bytes, cache.order.len()), (4096, 1));
+        assert_eq!(cache.chunks["a"][0], 3);
+        assert_eq!(cache.expire(later + 3 * CACHE_FOR).len(), 1);
+        assert_eq!(
+            (cache.bytes, cache.chunks.len(), cache.order.len()),
+            (0, 0, 0)
+        );
+    }
 
     /// Hydrates a three-chunk image whose chunk 1 is never stored, with
     /// `filled` written into the memory file first by `prefill`.
