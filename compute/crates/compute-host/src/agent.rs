@@ -12,7 +12,7 @@
 //! still running, so restarting, upgrading or killing the agent costs the
 //! guests nothing.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,7 +33,9 @@ use tokio::time::{Instant, sleep, sleep_until};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root, copy_sparse, link_kernel, vm_spec};
 use crate::net::{NetworkConfig, Networks};
-use crate::protocol::{HostStatus, Id, SandboxConfig, SandboxStatus, StepStats, step_name};
+use crate::protocol::{
+    HostStatus, Id, SandboxConfig, SandboxStatus, StepStats, UnreadableSandbox, step_name,
+};
 use crate::state::{Change, Disk, Fence, Record, Records, StateError, Stray, check_generation};
 use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::Store;
@@ -538,6 +540,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     slots: HashMap<SandboxId, Slot<E::Vm>>,
     preparing: HashSet<SandboxId>,
     ordinals: BTreeSet<u32>,
+    /// Sandboxes on disk the host cannot manage, with why: their ids are
+    /// refused and their files and VMs left alone.
+    unreadable: BTreeMap<SandboxId, String>,
     destroying: HashMap<SandboxId, Vec<Reply<()>>>,
     commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedReceiver<Event<E::Vm>>,
@@ -637,6 +642,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             slots: HashMap::new(),
             preparing: HashSet::new(),
             ordinals: BTreeSet::new(),
+            unreadable: BTreeMap::new(),
             destroying: HashMap::new(),
             commands,
             events,
@@ -672,10 +678,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     }
                     if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
                         tracing::warn!(id = %stray.id, %error, "could not tidy an unrecorded sandbox");
+                        self.unreadable.insert(
+                            stray.id.0,
+                            format!("unrecorded directory left behind: {error}"),
+                        );
                     }
                 }
                 Some(problem) => {
-                    tracing::error!(id = %stray.id, %problem, "unreadable record; leaving the sandbox on disk");
+                    // Its VM may still run as the user its ordinal names,
+                    // behind the host link its ordinal names: no other
+                    // sandbox may get that ordinal.
+                    let ordinal = self.unreadable_ordinal(stray.id).await;
+                    if let Some(ordinal) = ordinal {
+                        self.ordinals.insert(ordinal);
+                    }
+                    tracing::error!(id = %stray.id, %problem, ?ordinal, "unreadable record; blocking the id and leaving the sandbox alone");
+                    self.unreadable.insert(stray.id.0, problem.to_string());
                 }
             }
         }
@@ -872,6 +890,27 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             Found::Paused => State::new(Level::Paused, Durability::Volatile, false),
         })
+    }
+
+    /// The ordinal a sandbox with an unreadable record was given, from
+    /// what is left: the record's `ordinal` field if the file still parses
+    /// as JSON, else the owner of its disk, which every launch hands to
+    /// the VM's user. `None` if it never launched, when no VM or user can
+    /// clash with a newcomer's.
+    async fn unreadable_ordinal(&self, id: Id) -> Option<u32> {
+        use std::os::unix::fs::MetadataExt;
+        let paths = Paths::new(&self.root, id);
+        let from_record = tokio::fs::read(&paths.record)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|record| record.get("ordinal")?.as_u64())
+            .and_then(|ordinal| u32::try_from(ordinal).ok());
+        if from_record.is_some() {
+            return from_record;
+        }
+        let owner = tokio::fs::metadata(&paths.disk).await.ok()?.uid();
+        owner.checked_sub(self.images.first_uid)
     }
 
     /// Where a sandbox without a VM stands, from its record, checked
@@ -1128,6 +1167,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Refuses a request that names an execution the sandbox no longer
     /// runs.
     fn check(&self, id: Id, generation: Option<u64>) -> Result<(), HostError> {
+        if self.unreadable.contains_key(&id.0) {
+            return Err(HostError::Broken(id));
+        }
         match self.records.get(id) {
             Some(record) => Ok(check_generation(&record, generation)?),
             None => Ok(()),
@@ -1176,6 +1218,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
+        if self.unreadable.contains_key(&id.0) {
+            let _ = reply.send(Err(HostError::Broken(id)));
+            return;
+        }
         if self.slots.contains_key(&id.0)
             || self.preparing.contains(&id.0)
             || self.destroying.contains_key(&id.0)
@@ -1218,6 +1264,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         tokio::spawn(async move {
             let networks = net.clone();
             let prepared = tokio::task::spawn_blocking(move || {
+                // The directory must be new: one already there belongs to a
+                // sandbox this agent does not know, and is left alone.
+                std::fs::create_dir(&paths.dir)?;
                 std::fs::create_dir_all(&paths.jail)?;
                 link_kernel(&kernel, &paths)?;
                 copy_sparse(&base, &paths.disk)?;
@@ -1232,6 +1281,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // unfinished creation and is cleaned up on recovery.
             let result = match prepared {
                 Ok(()) => records.insert(record).await.map_err(HostError::from),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    tracing::error!(%id, "a directory for a new sandbox already exists; refusing it");
+                    let _ = events.send(Event::Prepared {
+                        id,
+                        ordinal,
+                        result: Err(HostError::Exists(id)),
+                        reply,
+                    });
+                    return;
+                }
                 Err(error) => Err(HostError::Io(error.to_string())),
             };
             if result.is_err() {
@@ -1707,6 +1766,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             steps,
             available_memory: self.available_memory,
             reclaimable_memory: self.core.reclaimable_memory(),
+            unreadable: self
+                .unreadable
+                .iter()
+                .map(|(id, problem)| UnreadableSandbox {
+                    id: Id(*id),
+                    problem: problem.clone(),
+                })
+                .collect(),
         }
     }
 }

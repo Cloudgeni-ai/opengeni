@@ -1407,6 +1407,106 @@ async fn a_removal_cut_short_finishes_on_the_next_start() {
     lab.assert_clean();
 }
 
+/// A record the agent cannot read blocks its id: the sandbox is reported,
+/// its VM and files are left alone, the id cannot be created again, and
+/// no newcomer gets its ordinal (its VM's user and host link).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unreadable_record_blocks_its_id() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let (broken, other) = (id(40), id(41));
+    lab.create(broken, NEVER).await;
+    assert_eq!(lab.run(broken, &["set alive"]).await, ["ok"]);
+    let ordinal = lab.record(broken)["ordinal"].clone();
+    let (root, world) = lab.stop().await;
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    let mut record = lab.record(broken);
+    record["generation"] = "unreadable".into();
+    let path = lab.sandbox_dir(broken).join("sandbox.json");
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let (root, world) = lab.stop().await;
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+
+    let status = lab.status().await;
+    assert!(status.sandboxes.is_empty(), "{status:?}");
+    assert_eq!(status.unreadable.len(), 1);
+    assert_eq!(status.unreadable[0].id, broken);
+    assert!(
+        lab.world.live.lock().unwrap().contains(&vm_name(broken)),
+        "its VM is left running"
+    );
+    for request in [
+        Request::Create {
+            id: broken,
+            config: SandboxConfig {
+                vcpus: 1,
+                memory_mib: 256,
+                sleep: NEVER,
+            },
+        },
+        Request::Wake {
+            id: broken,
+            generation: None,
+            priority: PriorityName::Interactive,
+        },
+        Request::Remove {
+            id: broken,
+            generation: None,
+        },
+    ] {
+        let reply = lab.client.call(&request).await.unwrap();
+        assert!(
+            matches!(
+                reply,
+                Reply::Error {
+                    code: ErrorCode::Broken,
+                    ..
+                }
+            ),
+            "{request:?}: {reply:?}"
+        );
+    }
+    assert!(path.exists(), "its files are left alone");
+    lab.create(other, NEVER).await;
+    assert_ne!(lab.record(other)["ordinal"], ordinal);
+    lab.assert_clean();
+}
+
+/// Creating a sandbox whose directory is already there is refused, and the
+/// directory is left as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_refuses_an_existing_directory() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(42);
+    let dir = lab.sandbox_dir(sandbox);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("kept"), "kept").unwrap();
+    let reply = lab
+        .client
+        .call(&Request::Create {
+            id: sandbox,
+            config: SandboxConfig {
+                vcpus: 1,
+                memory_mib: 256,
+                sleep: NEVER,
+            },
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            reply,
+            Reply::Error {
+                code: ErrorCode::Exists,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    assert_eq!(std::fs::read_to_string(dir.join("kept")).unwrap(), "kept");
+    assert!(lab.status().await.sandboxes.is_empty());
+    lab.assert_clean();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bad_requests_are_refused() {
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
