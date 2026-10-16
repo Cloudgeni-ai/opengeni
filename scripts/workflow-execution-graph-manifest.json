@@ -22,7 +22,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "235d8e4d131178429bf04d2ebf7316da7f3a2421123707d85d9edad6530a64d6"
+      "sha256": "88048193cf7b2691ae30cd07a59c358cd3ad776391e42ff63b55d7cec6177951"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -593,7 +593,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "automation-admission",
       "step": "Reproduce deterministic Version PR tree",
-      "sha256": "abd3d6e39075c7463d09e9d7db441013dc68017e86ced309dbf611a5c132e0ba"
+      "sha256": "74d5ec04aa741753f63a6b5fa961b817b1544411cc5e3f993c2bdc5d338911c0"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -869,7 +869,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Validate changeset release plan",
-      "sha256": "67607b839be59a82a088124958b3b7aab9f31098c888aac432551da9993903f0"
+      "sha256": "42c6ad458ed243282cdb4786fae53e7568b9ffe1bddcbc39eda960cb47a74833"
     },
     {
       "workflow": ".github/workflows/ci.yml",
