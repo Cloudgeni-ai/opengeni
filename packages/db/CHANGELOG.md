@@ -1,5 +1,40 @@
 # @opengeni/db
 
+## 3.4.0
+
+### Minor Changes
+
+- c594c1d: The session list can show only your workstreams. `mineOnly=true` (with `view=page`; SDK `listSessionPage`/`listSessionSummaryPage` `mineOnly`, React `useWorkspaceSessions` `mineOnly`) keeps a workstream when any session in its tree was created by you or received a message you sent directly; agent-relayed messages and service turns do not count. Matching roots list their children in full, totals follow the filter, and the response echoes `mineOnly: true`. The web sidebar's view menu adds an "Only mine" option. A new online index (`session_turns_human_prompt_subject_idx`, built concurrently in rolling migration 0799) keeps the probe to one index lookup per tree session.
+- 7998676: Add an inert subscription-plan catalog, organization plan state, non-rollover period credit accounting, and database-enforced human seat caps. Expose optional plan funding and seat information in billing balances without enrolling existing organizations.
+
+### Patch Changes
+
+- ceaf911: Browsers: a browser whose working directory was copied or restored (for example after a machine's disk was replaced) can now be continued from that copy instead of staying unavailable. `inspectBrowserSessionWorkingCopy` reports why the copy is refused and, when it can be adopted, the exact digest of its bytes; `adoptBrowserSessionWorkingCopy` adopts exactly those bytes under the browser's existing control authority, and `getBrowserSessionWorkingCopyAdoption` reports an adoption's recorded outcome, without changing it, when a reply was lost; retrying the same adoption settles one that stopped part way and never repeats a step. How recent the copy is stays explicitly unknown. Only controller-owned derived entries are left out of the copy, and inspection lists them. An adopted copy is never replaced by an older checkpoint afterwards, the directory it replaced is kept, and every step is journaled so a crash at any point is finished or reported, never guessed. Supported on Linux machines only for now. When a preserved browser is refused, its error now says why and what to do next.
+- acc2718: Preserve the caller's actor scope while building a capability catalog inside a transaction, so prepared MCP setup persists its replay receipt. Roll back completion writes if the receipt cannot be saved instead of reporting success.
+- 2f370c3: Direct database connections now use named prepared statements. Before, every parameterized query was sent unprepared, so it cost two round trips (postgres-js waits for a Describe reply before it can bind) and Postgres parsed and planned it again each time. Pools now prepare by default, except when the URL targets port 6432 (PgBouncer, including Azure Flexible Server's built-in pooler). Set `OPENGENI_DATABASE_PREPARED_STATEMENTS=false` for any other transaction-pooling proxy.
+- 960fea8: A first-party MCP tool listing reads its tool surface (workspace settings, model catalog, Memory selector and admin access) together and alongside the bound-session check, and an agent attempt's learning policy alongside its liveness check. Authorization still decides before anything is disclosed. The listing now waits on two rounds of database reads instead of nine, and no longer reads the workspace's control state and kind.
+- cac0334: Scoped database work makes fewer round trips to PostgreSQL. Each tenant-scoped transaction used to look up the workspace's account, then set the tenant, subject and actor settings, read them back and take its advisory locks in separate statements, about nine sequential round trips for a single read. One statement now resolves the account, applies every setting, takes the locks in the same order and reads the result back, so a standalone scoped read is BEGIN, setup, query and COMMIT. Isolation, lock order, nested-scope restore and the fail-loud checks are unchanged.
+- 33bf04d: Migrations now apply to a fresh PostgreSQL 18 database. PostgreSQL 18 records column NOT NULL constraints in `pg_constraint`, which made two historical migrations fail on a new install: 0345's tenancy-fence drift check and 0598's Claude pool table copy. Both now skip those rows; databases that already ran them are unaffected.
+- ab48465: Preserve deployed migration hashes while adapting two historical constraint-catalog reads for PostgreSQL 18 in the migration runner.
+- 8d93488: Session authorization reads everything it needs in one database round trip. Authorizing an agent's action on its own session used to make five sequential scoped reads (Slack ownership, the session's authority, the full caller session with its event cursor and connector metadata, the live attempt's turn with its goal snapshot, and the target identity), about 37 statements. One scoped statement now returns the target's authority and Slack ownership together with the caller session and its live attempt turn, so the check is BEGIN, setup, read and COMMIT. Every fact comes from the same snapshot and the same RLS visibility, and every denial (missing or hidden target, stale or forged attempt, ended attempt, revoked linked authority, Slack-private ownership, private sessions, cross-tree reach and host decisions) is decided exactly as before.
+- 7998676: Bind subscription upgrade, downgrade and cancellation requests to durable organization-scoped intent and result receipts before Stripe mutations. Preserve original targets across database rollback, replacement subscriptions and provider idempotency-key expiry. Refund duplicate subscription funding according to payment timestamps rather than invoice creation time.
+- 8053c9b: A Connected Machine that stops answering in the middle of a command now fails only that command. Previously the turn could not finish: it kept trying to cancel the command on the unreachable machine until the worker's quiescence watchdog drained the whole worker, ending the turn and every other turn on it. The command is now recorded in the session's command ledger with a stop request, the turn finishes normally, and the reconciler stops or settles the command when the machine returns or its runner is retired. The error the model sees is unchanged, and the later stop adds no model input. If the ledger cannot record the command, the turn keeps ownership as before.
+- Updated dependencies [28844d8]
+- Updated dependencies [ceaf911]
+- Updated dependencies [42caae1]
+- Updated dependencies [2f370c3]
+- Updated dependencies [c594c1d]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+  - @opengeni/contracts@3.4.0
+  - @opengeni/codex@3.4.0
+  - @opengeni/config@3.4.0
+  - @opengeni/codemode@3.4.0
+  - @opengeni/observability@3.4.0
+  - @opengeni/network@3.4.0
+  - @opengeni/subscriptions@3.4.0
+  - @opengeni/xai-subscription@3.4.0
+
 ## 3.3.0
 
 ### Patch Changes
