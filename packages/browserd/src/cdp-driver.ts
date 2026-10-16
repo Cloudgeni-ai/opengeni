@@ -330,6 +330,15 @@ type BrowserUserAgentMetadata = {
   formFactors?: string[];
 };
 
+/** How a tab's navigation treats a page that fails to load. */
+export type BrowserTabNavigationOptions = {
+  /** Reopening a saved tab: when its page can't load (the host is unreachable
+   * or no longer resolves), keep the tab open on the browser's error page with
+   * its URL, as the browser's own session restore does, instead of failing.
+   * Navigation policy refusals and invalid URLs still fail. */
+  keepTabOnLoadError?: boolean;
+};
+
 export type BrowserRuntimeSnapshot = {
   engine: "chromium" | "chrome" | "lightpanda";
   engineVersion: string | null;
@@ -461,7 +470,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.connect = options.connect ?? (async (endpoint) => await CdpConnection.connect(endpoint));
   }
 
-  async start(url?: string): Promise<BrowserObservationValue> {
+  async start(
+    url?: string,
+    options: BrowserTabNavigationOptions = {},
+  ): Promise<BrowserObservationValue> {
     const deferNavigation = url !== undefined && url !== "about:blank";
     // Resolving the daemon's private CDP endpoint is itself the cold-start
     // primitive. Calling `agent-browser open` first makes the CLI perform one
@@ -490,7 +502,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       try {
         target = await this.waitForCreatedTargetInfo(connection, created.targetId);
         this.selectedTargetId = target.targetId;
-        if (deferNavigation) await this.navigate(await this.ensureTargetState(target), url);
+        if (deferNavigation)
+          await this.navigate(await this.ensureTargetState(target), url, options);
         return await this.observe(target.targetId);
       } catch (error) {
         // The session never started, so nothing can use or close this tab.
@@ -532,7 +545,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     this.selectedTargetId = target.targetId;
     if (deferNavigation) {
-      await this.navigate(await this.ensureTargetState(target), url);
+      await this.navigate(await this.ensureTargetState(target), url, options);
     }
     return await this.observe(target.targetId);
   }
@@ -570,8 +583,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
-  async openTarget(url = "about:blank"): Promise<BrowserObservationValue> {
-    const state = await this.createTarget(url);
+  async openTarget(
+    url = "about:blank",
+    options: BrowserTabNavigationOptions = {},
+  ): Promise<BrowserObservationValue> {
+    const state = await this.createTarget(url, options);
     return await this.observe(state.targetId);
   }
 
@@ -584,7 +600,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return targets;
   }
 
-  private async createTarget(url: string): Promise<TargetState> {
+  private async createTarget(
+    url: string,
+    options: BrowserTabNavigationOptions = {},
+  ): Promise<TargetState> {
     if (!this.tabControl) {
       throw new InteractionDefiniteDriverError(
         "unsupported",
@@ -609,7 +628,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.selectedTargetId = result.targetId;
     if (deferNavigation) {
       try {
-        await this.navigate(createdState, url);
+        await this.navigate(createdState, url, options);
       } catch (error) {
         // A slow page may still finish loading in a tab the caller can list
         // and select. Any other failure leaves a tab nobody asked for: the
@@ -734,14 +753,45 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const targets = await this.listTargets();
-    const tabs = targets
-      .filter((target) => target.kind === "page" || target.kind === "popup")
-      .map((target) => ({ url: target.url, selected: target.selected }));
+    const tabs: BrowserRuntimeSnapshot["tabs"] = [];
+    for (const target of targets) {
+      if (target.kind !== "page" && target.kind !== "popup") continue;
+      // A tab showing the browser's error page still belongs to the page it
+      // failed to load; save that page so a later restore can retry it.
+      const url = target.url.toLowerCase().startsWith("chrome-error:")
+        ? ((await this.errorPageDestination(target.id)) ?? target.url)
+        : target.url;
+      tabs.push({ url, selected: target.selected });
+    }
     const separator = this.browserProduct.indexOf("/");
     const rawVersion = separator >= 0 ? this.browserProduct.slice(separator + 1) : "";
     const engineVersion =
       rawVersion.length > 0 && Buffer.byteLength(rawVersion) <= 256 ? rawVersion : null;
     return { engine: this.engine, engineVersion, tabs };
+  }
+
+  /** The http(s) URL an error page failed to load, read from its current
+   * history entry. Null when it can't be read; the caller keeps the error URL. */
+  private async errorPageDestination(targetId: string): Promise<string | null> {
+    try {
+      const connection = await this.ensureConnection();
+      const info = (await this.targetInfos(connection)).find(
+        (candidate) => candidate.targetId === targetId,
+      );
+      if (!info) return null;
+      const history = await this.sendActionTarget<{ currentIndex?: unknown; entries?: unknown }>(
+        await this.ensureTargetState(info),
+        "Page.getNavigationHistory",
+        {},
+      );
+      const entries = Array.isArray(history.entries) ? history.entries : [];
+      const entry =
+        typeof history.currentIndex === "number" ? entries[history.currentIndex] : undefined;
+      if (!isRecord(entry) || typeof entry.url !== "string") return null;
+      return /^https?:\/\//iu.test(entry.url) ? entry.url : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Supervisor-only read after both action controllers have quiesced. Never
@@ -4351,12 +4401,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  private async navigate(state: TargetState, url: string): Promise<void> {
+  private async navigate(
+    state: TargetState,
+    url: string,
+    options: BrowserTabNavigationOptions = {},
+  ): Promise<void> {
     this.connection?.assertNavigable?.(url);
     const result = await this.sendActionTarget<{ errorText?: unknown }>(state, "Page.navigate", {
       url,
     });
-    if (typeof result.errorText === "string" && result.errorText) {
+    if (
+      typeof result.errorText === "string" &&
+      result.errorText &&
+      !(options.keepTabOnLoadError === true && isPageLoadError(result.errorText))
+    ) {
       throw new InteractionDefiniteDriverError(
         "resource_unavailable",
         "browser could not navigate to the requested URL",
@@ -5954,4 +6012,11 @@ function isNavigationTimeout(error: unknown): boolean {
     error instanceof CdpCommandTimeoutError ||
     (error instanceof InteractionDefiniteDriverError && error.code === "timeout")
   );
+}
+
+/** Chromium reports a page that could not load (DNS, connection, TLS, ...)
+ * as a `net::ERR_*` navigation error after committing its error page. Other
+ * navigation errors, such as an invalid URL, leave no page for the URL. */
+function isPageLoadError(errorText: string): boolean {
+  return /^net::ERR_[A-Z0-9_]+$/u.test(errorText);
 }
