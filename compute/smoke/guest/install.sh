@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Installs the reference guest service into an ext4 root disk image, started
-# by systemd at every boot. It serves requests on vsock port 53 and takes the
-# host agent's restore notices on vsock port 54; start the host agent with
-# `--restore-notice-port 54` to match.
+# by systemd at every boot. It serves requests on vsock port 55 and takes the
+# host agent's restore notices on vsock port 56; start the host agent with
+# `--restore-notice-port 56` to match. Both stay clear of the lab image's own
+# guest services on ports 52 to 54 (lab/host-setup.sh), so the service can be
+# installed into a copy of that image.
 #
 # Usage: sudo guest/install.sh IMAGE [PORT [NOTICE_PORT]]
 #
@@ -11,8 +13,8 @@
 set -euo pipefail
 
 image="${1:?usage: install.sh IMAGE [PORT [NOTICE_PORT]]}"
-port="${2:-53}"
-notice_port="${3:-54}"
+port="${2:-55}"
+notice_port="${3:-56}"
 here="$(cd "$(dirname "$0")" && pwd)"
 
 if [[ "$(id -u)" != 0 ]]; then
