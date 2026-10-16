@@ -142,7 +142,7 @@ organizations are uncapped.
 
 SQLSTATE `P0S01` maps through `rethrowMembershipError` to HTTP 402:
 `{ error: "seat_limit_reached", message, action: { type: "upgrade", href:
-"/settings/billing" } }`.
+"/billing" } }`.
 
 ## Billing/UI contract
 

@@ -108,7 +108,7 @@ test("seat-limit errors are actionable HTTP 402 responses", async () => {
   expect(await response.json()).toEqual({
     error: "seat_limit_reached",
     message: "Organization seat limit reached. Upgrade your plan to add people.",
-    action: { type: "upgrade", href: "/settings/billing" },
+    action: { type: "upgrade", href: "/billing" },
   });
 }, 180_000);
 

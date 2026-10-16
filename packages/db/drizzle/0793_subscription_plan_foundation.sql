@@ -150,20 +150,26 @@ BEGIN
 END $body$;
 
 CREATE FUNCTION organization_plan_seats_used(p_account_id uuid)
-RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT
-SET opengeni.organization_tenancy_lifecycle = 'organization_membership_lifecycle' AS $body$
+RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $body$
+DECLARE seats integer; previous_marker text := current_setting('opengeni.organization_tenancy_lifecycle', true);
 BEGIN
   IF p_account_id IS DISTINCT FROM opengeni_private.current_account_id() THEN
     RAISE EXCEPTION 'Plan account scope mismatch' USING ERRCODE = '42501';
   END IF;
-  RETURN (SELECT count(*) FROM organization_memberships WHERE account_id = p_account_id
+  PERFORM set_config('opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true);
+  SELECT (SELECT count(*) FROM organization_memberships WHERE account_id = p_account_id
     AND subject_id LIKE 'user:%' AND status IN ('active','provisioning')) +
     (SELECT count(*) FROM organization_membership_invitations invitation
       WHERE invitation.account_id = p_account_id AND invitation.status = 'pending'
         AND invitation.expires_at > clock_timestamp()
         AND NOT EXISTS (SELECT 1 FROM organization_memberships membership
           WHERE membership.account_id = p_account_id AND membership.subject_id = invitation.target_subject_id
-            AND membership.subject_id LIKE 'user:%' AND membership.status IN ('active','provisioning')));
+            AND membership.subject_id LIKE 'user:%' AND membership.status IN ('active','provisioning'))) INTO seats;
+  PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_marker,''), true);
+  RETURN seats;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_marker,''), true);
+  RAISE;
 END $body$;
 
 CREATE FUNCTION upsert_organization_plan(p_account_id uuid, p_plan_key text, p_status text,
@@ -362,9 +368,9 @@ BEGIN
 END $body$;
 
 CREATE FUNCTION opengeni_private.enforce_organization_plan_seats()
-RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT
-SET opengeni.organization_tenancy_lifecycle = 'organization_membership_lifecycle' AS $body$
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $body$
 DECLARE seat_limit integer; seats integer; reserved boolean := false;
+  previous_marker text := current_setting('opengeni.organization_tenancy_lifecycle', true);
 BEGIN
   IF TG_TABLE_NAME = 'organization_memberships' THEN
     IF NEW.subject_id NOT LIKE 'user:%' OR NEW.status NOT IN ('active','provisioning') THEN RETURN NEW; END IF;
@@ -381,15 +387,22 @@ BEGIN
   SELECT (opengeni_private.subscription_plan_definition(plan_key)->>'seatLimit')::integer INTO seat_limit
     FROM organization_plans WHERE account_id = NEW.account_id;
   IF seat_limit IS NULL THEN RETURN NEW; END IF;
+  PERFORM set_config('opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true);
   IF TG_TABLE_NAME = 'organization_memberships' THEN
     SELECT EXISTS (SELECT 1 FROM organization_membership_invitations WHERE account_id = NEW.account_id
       AND target_subject_id = NEW.subject_id AND status = 'pending' AND expires_at > clock_timestamp()) INTO reserved;
     -- Acceptance converts an already-counted reservation, even after a downgrade.
-    IF reserved THEN RETURN NEW; END IF;
+    IF reserved THEN
+      PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_marker,''), true);
+      RETURN NEW;
+    END IF;
   ELSE
     SELECT EXISTS (SELECT 1 FROM organization_memberships WHERE account_id = NEW.account_id
       AND subject_id = NEW.target_subject_id AND subject_id LIKE 'user:%' AND status IN ('active','provisioning')) INTO reserved;
-    IF reserved THEN RETURN NEW; END IF;
+    IF reserved THEN
+      PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_marker,''), true);
+      RETURN NEW;
+    END IF;
   END IF;
   seats := organization_plan_seats_used(NEW.account_id);
   IF TG_TABLE_NAME = 'organization_membership_invitations' THEN
@@ -397,11 +410,15 @@ BEGIN
       seats := seats - 1;
     END IF;
   END IF;
+  PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_marker,''), true);
   IF seats >= seat_limit THEN
     RAISE EXCEPTION 'Organization seat limit reached; upgrade your plan to add people'
       USING ERRCODE = 'P0S01', DETAIL = jsonb_build_object('seatLimit',seat_limit,'seatsUsed',seats,'action','upgrade')::text;
   END IF;
   RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM set_config('opengeni.organization_tenancy_lifecycle', coalesce(previous_marker,''), true);
+  RAISE;
 END $body$;
 CREATE TRIGGER organization_memberships_plan_seat_limit BEFORE INSERT OR UPDATE OF status, subject_id, account_id
   ON organization_memberships FOR EACH ROW EXECUTE FUNCTION opengeni_private.enforce_organization_plan_seats();

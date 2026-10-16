@@ -253,7 +253,7 @@ function rethrowMembershipError(error: unknown, resourceLimitMessage?: string): 
         {
           error: "seat_limit_reached",
           message: "Organization seat limit reached. Upgrade your plan to add people.",
-          action: { type: "upgrade", href: "/settings/billing" },
+          action: { type: "upgrade", href: "/billing" },
         },
         { status: 402 },
       ),

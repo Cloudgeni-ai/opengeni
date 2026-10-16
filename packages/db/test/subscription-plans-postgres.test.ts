@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import {
   acceptOrganizationInvitation,
@@ -28,16 +31,16 @@ import {
   inspectRuntimeDatabasePosture,
 } from "../src/runtime-posture";
 
-let shared: SharedTestDatabase | null = null;
+let shared: RestrictedRuntimeTestDatabase | null = null;
 let client: DbClient | null = null;
 const M = 1_000_000;
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("subscription-plans");
+  shared = await acquireRestrictedRuntimeTestDatabase("subscription-plans");
   if (!shared) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") throw new Error("PostgreSQL required");
     return;
   }
-  client = createDb(shared.appUrl, { max: 4 });
+  client = createDb(shared.appUrl, { max: 4, searchPath: shared.schema });
 }, 180_000);
 afterAll(async () => {
   await client?.close();
@@ -121,7 +124,7 @@ test("ships inert defaults and preserves legacy organizations, with least-privil
   const options = {
     expectedRole: "opengeni_app",
     rlsStrategy: "force" as const,
-    targetSchema: "public",
+    targetSchema: shared.schema,
   };
   expect(
     evaluateRuntimeDatabasePosture(
