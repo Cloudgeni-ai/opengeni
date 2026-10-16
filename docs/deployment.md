@@ -2608,6 +2608,27 @@ The chart defaults API, worker, and web deployments to zero-surge rolling update
 
 The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
+The in-cluster Postgres runs PostgreSQL 18 (`pgvector/pgvector:pg18-bookworm`). An
+init container checks the data directory's major version before the server
+starts. A directory from an older major (for example one created by an earlier
+chart that defaulted to PostgreSQL 17) does not start until you choose:
+
+- keep the old major: set `postgres.image.tag` back to that major's image
+  (for example `pg17`), or
+- upgrade in place: take a backup, plan a short outage, and set
+  `postgres.majorUpgrade.enabled=true` with `postgres.majorUpgrade.fromImage` at
+  the old major on the same OS release (the default is
+  `pgvector/pgvector:pg17`). The init container runs `pg_upgrade --link`, keeps
+  the old directory as `pgdata.pre-upgrade-from-<major>` and then starts
+  PostgreSQL 18. Until the new server has started once, rolling back is
+  restoring that directory and the old image; after that, restore from backup.
+  Every extension library the old databases use must exist in the new image
+  (drop unused extensions whose library is missing first). Afterwards run
+  `vacuumdb --all --analyze-in-stages --missing-stats-only`, then
+  `vacuumdb --all --analyze-only`, and `ALTER EXTENSION ... UPDATE` for each
+  extension, turn `majorUpgrade.enabled` off again, and delete the retained
+  directory once you have verified the new cluster.
+
 Production self-hosted platform dependencies should use mature upstream projects rather than Opengeni-owned replicas of those systems:
 
 - NATS: official NATS Helm chart, or an existing managed/customer NATS endpoint.

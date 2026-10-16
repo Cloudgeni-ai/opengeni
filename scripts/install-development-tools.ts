@@ -334,10 +334,10 @@ export async function main(args = process.argv.slice(2)) {
     options.tools.includes("garage") && target.os !== "linux" ? [garageDiagnostic(target)] : [];
   const manualPreconditions = [
     "Use the repository-pinned Bun version, Git and Bash; Windows users must run the entire launcher inside WSL2.",
-    "For native Linux/WSL2 infrastructure, provision PostgreSQL 17 server/client with matching pgcrypto and pgvector extensions. Ensure pg_config, psql and pg_isready are on PATH; pg_config --bindir must contain postgres, initdb, pg_ctl and createdb. This script never sudo-installs packages or changes database data.",
+    "For native Linux/WSL2 infrastructure, provision PostgreSQL 18 (or an existing 17) server/client with matching pgcrypto and pgvector extensions. Ensure pg_config, psql and pg_isready are on PATH; pg_config --bindir must contain postgres, initdb, pg_ctl and createdb. This script never sudo-installs packages or changes database data.",
     target.os === "darwin"
       ? "Use Docker Desktop for infrastructure on macOS; installing NATS/Temporal alone does not enable a supported native stack."
-      : "Debian/Ubuntu with PGDG guidance: install postgresql-17 postgresql-client-17 postgresql-17-pgvector through your administrator; other distributions use equivalent packages. Build tools are only needed if an artifact or opted-in relay source build is required.",
+      : "Debian/Ubuntu with PGDG guidance: install postgresql-18 postgresql-client-18 postgresql-18-pgvector through your administrator; other distributions use equivalent packages. Build tools are only needed if an artifact or opted-in relay source build is required.",
     "If a selected build needs Rust, install rustup yourself and honor repository rust-toolchain.toml; no automatic Rust installation.",
     garageDiagnostic(target),
     "Artifact runtimes are provisioned separately; installing these tools does not mean the full development stack is ready.",
