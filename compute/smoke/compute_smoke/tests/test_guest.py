@@ -169,6 +169,25 @@ class GuestService(unittest.TestCase):
             self.assertEqual(machine_id.read_text(), first)
         self.assertEqual(len(seen), 2, "two clones share a machine id")
 
+    def test_output_resumes_from_a_cursor(self) -> None:
+        pid = self.ok({"op": "spawn", "command": "printf one; sleep 0.3; printf two"})["pid"]
+        deadline = time.monotonic() + 10
+        seen, offset, running = b"", 0, True
+        while running:
+            self.assertLess(time.monotonic(), deadline)
+            reply = self.ok({"op": "output", "pid": pid, "offset": offset})
+            seen += _unb64(reply["data"])
+            offset, running = reply["offset"], reply["running"]
+            if seen == b"one":
+                # Every read is its own connection: a later one picks up
+                # from the cursor, whoever dropped the last.
+                self.assertTrue(running)
+        self.assertEqual((seen, offset), (b"onetwo", 6))
+        reply = self.ok({"op": "output", "pid": pid, "offset": 3, "limit": 2})
+        self.assertEqual((_unb64(reply["data"]), reply["offset"]), (b"tw", 5))
+        self.ok({"op": "wait", "pid": pid, "timeout": 10})
+        self.assertFalse(self.request({"op": "output", "pid": pid})["ok"], "collected")
+
     def commands(self) -> bytes:
         return self.notice(b"activity\n")
 

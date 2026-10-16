@@ -37,6 +37,13 @@ of its own (from the seed and the id, so a retried notice writes the same)
 and the id as its hostname, and answers `ok` rather than `ok seeded` when it
 cannot, so two clones never share either.
 
+A background command's output can be read from a cursor (`output`) while
+it runs: a client whose connection dropped, for example because the host
+agent restarted, resumes where it stopped. Live connections such as a
+`watch` or an `exec` under way end with the host agent and are not resumed.
+Everything here lives in this service's memory, so a restart of the service
+itself forgets its background commands, though they keep running.
+
 Commands started here keep the sandbox awake while they run, however quiet
 they are: asked `activity` on the notice port, the service answers
 `commands <n>`, the number still running. A request with `"keep_awake":
@@ -179,6 +186,17 @@ class Process:
     def _reap(self) -> None:
         self.popen.wait()
         self.exited.set()
+
+    def output(self, stream: str, offset: int, limit: int) -> bytes:
+        """Up to `limit` bytes of `stream` (`stdout` or `stderr`) from
+        `offset` on, so a client that lost its connection, or whose host
+        agent restarted, resumes where it stopped."""
+
+        file = {"stdout": self._stdout, "stderr": self._stderr}.get(stream)
+        if file is None:
+            raise RequestError("field 'stream' must be 'stdout' or 'stderr'")
+        file.flush()
+        return os.pread(file.fileno(), limit, offset)
 
     def result(self) -> dict[str, Any]:
         stdout = _read_all(self._stdout)
@@ -439,6 +457,22 @@ def op_wait(request: dict[str, Any]) -> dict[str, Any]:
     if request.get("forget", True):
         PROCESSES.forget(pid)
     return result
+
+
+def op_output(request: dict[str, Any]) -> dict[str, Any]:
+    """A background command's output from a cursor: the bytes from
+    `offset` on (at most `limit`), the cursor after them, and whether the
+    command still runs. Output stays readable until `wait` collects it."""
+
+    process = PROCESSES.get(_field(request, "pid", int))
+    offset = _optional(request, "offset", int, 0)
+    limit = _optional(request, "limit", int, 1 << 20)
+    if offset < 0 or not 0 < limit <= MAX_REQUEST:
+        raise RequestError("field 'offset' or 'limit' out of range")
+    # Read whether it runs first: output read after it ended is complete.
+    running = not process.exited.is_set()
+    data = process.output(_optional(request, "stream", str, "stdout"), offset, limit)
+    return {"data": _b64(data), "offset": offset + len(data), "running": running}
 
 
 def op_read(request: dict[str, Any]) -> dict[str, Any]:
@@ -787,6 +821,7 @@ OPERATIONS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "processes": op_processes,
     "signal": op_signal,
     "wait": op_wait,
+    "output": op_output,
     "read": op_read,
     "write": op_write,
     "mkdir": op_mkdir,

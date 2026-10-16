@@ -128,6 +128,13 @@ sandbox recovers as [ADR 10](docs/adr/0010-crash-safety-bar.md) says: from a
 valid saved image if one exists, else fresh from its disk. One agent runs per
 host.
 
+Streams the agent carries (`connect` to a guest port, so terminals, port
+forwards and requests to the guest helper) end with it; clients reconnect.
+Guest programs keep running, and the reference guest lets a client read a
+command's output from a cursor, so it resumes without loss. The guest
+helper keeps its list of commands in memory: if the helper itself restarts,
+its commands keep running but can no longer be listed, read or waited for.
+
 ## Network
 
 Every guest has the same address (169.254.0.21), MAC and gateway, so a
@@ -203,7 +210,8 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
   time.
 - `smoke/` runs SPACE's E2B-style scenarios through one adapter for our API,
   plus our own: sleep levels, concurrent wakes, holds, and an agent restart
-  in the middle ([smoke/README.md](smoke/README.md)).
+  in the middle, with output read on by cursor and live streams ending
+  ([smoke/README.md](smoke/README.md)).
 
 ## Not built yet
 
