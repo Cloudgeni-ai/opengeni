@@ -13,6 +13,7 @@ use tokio::time::{Instant, sleep};
 
 use crate::layout::{Paths, vm_spec};
 use crate::net::Networks;
+use crate::pool::Loaning;
 use crate::protocol::Id;
 use crate::state::{Change, Fence, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory};
@@ -65,12 +66,25 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 after,
                 launches,
             } => self.step_done(id, op, outcome, after, launches),
+            Event::Loan(Loaning::Borrow {
+                loan,
+                step,
+                granted,
+            }) => {
+                self.loans.insert(loan, granted);
+                self.input(Input::Borrow { loan, step });
+            }
+            Event::Loan(Loaning::Return(loan)) => {
+                self.loans.remove(&loan);
+                self.input(Input::Return { loan });
+            }
+            Event::Unthrottled { id, op } => self.input(Input::Unthrottled { sandbox: id.0, op }),
             Event::Exited { id, incarnation } => self.exited(id, incarnation),
             Event::TemplateBuilt {
                 shape,
                 ordinal,
-                result,
-            } => self.template_built(shape, ordinal, result),
+                built,
+            } => self.template_built(shape, ordinal, built),
             Event::Destroyed {
                 id,
                 ordinal,
@@ -133,6 +147,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             Action::Notify { sandbox, notice } => self.notify(Id(sandbox), notice),
+            Action::Lend { loan } => {
+                if let Some(granted) = self.loans.remove(&loan) {
+                    let _ = granted.send(());
+                }
+            }
         }
     }
 
@@ -186,6 +205,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             step,
             Step::Pause | Step::Resume | Step::Compress | Step::Save | Step::Drop | Step::Archive
         );
+        let events = self.events_tx.clone();
         let job = Job {
             engine: Arc::clone(&self.engine),
             store: Arc::clone(&self.store),
@@ -202,8 +222,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             #[cfg(target_os = "linux")]
             fetcher: self.fetcher.clone(),
             launches: 0,
+            unthrottle: Some({
+                let events = events.clone();
+                Box::new(move || {
+                    let _ = events.send(Event::Unthrottled { id, op });
+                })
+            }),
         };
-        let events = self.events_tx.clone();
         tokio::spawn(async move {
             let ran = job.run(step).await;
             let _ = events.send(Event::StepDone {

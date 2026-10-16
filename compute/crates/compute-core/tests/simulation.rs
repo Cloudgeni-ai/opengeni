@@ -253,6 +253,7 @@ impl World {
                 }
             }
             Action::Destroy { sandbox } => assert!(!self.live.contains_key(&sandbox)),
+            Action::Lend { loan } => panic!("{loan:?} lent, but nothing borrows here"),
             Action::Notify { sandbox, notice } => {
                 let Some(truth) = self.live.get_mut(&sandbox) else {
                     return;

@@ -171,6 +171,7 @@ impl Sandbox {
             #[cfg(target_os = "linux")]
             fetcher: None,
             launches: 0,
+            unthrottle: None,
         }
     }
 

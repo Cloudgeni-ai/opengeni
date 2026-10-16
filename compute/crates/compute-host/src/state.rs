@@ -108,6 +108,24 @@ pub(crate) struct Record {
     /// Removal has begun; it finishes even across a restart.
     #[serde(default)]
     pub removing: bool,
+    /// Whether its guest knows it is this sandbox.
+    #[serde(default)]
+    pub identity: Identity,
+}
+
+/// Whether a sandbox's guest knows which sandbox it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Identity {
+    /// It booted with the sandbox's id on its kernel command line, or
+    /// acknowledged a restore notice naming it.
+    #[default]
+    Known,
+    /// The memory image is of another guest, such as a template's. Until
+    /// the guest has acknowledged a restore notice naming this sandbox, no
+    /// VM of it may be counted awake or used, and a VM found running after
+    /// a restart is ended. A boot makes it known.
+    Pending,
 }
 
 impl Record {
@@ -125,6 +143,7 @@ impl Record {
             image: false,
             archived: false,
             removing: false,
+            identity: Identity::Known,
         }
     }
 
@@ -164,6 +183,7 @@ pub(crate) struct Change {
     archived: Option<bool>,
     execution: bool,
     removing: bool,
+    identity: Option<Identity>,
 }
 
 impl Change {
@@ -192,6 +212,12 @@ impl Change {
         self
     }
 
+    /// Whether the guest knows which sandbox it is.
+    pub fn identity(mut self, identity: Identity) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+
     /// Removal begins.
     pub fn removing(mut self) -> Self {
         self.removing = true;
@@ -207,6 +233,9 @@ impl Change {
         }
         if let Some(archived) = self.archived {
             record.archived = archived;
+        }
+        if let Some(identity) = self.identity {
+            record.identity = identity;
         }
         if self.execution {
             record.generation += 1;

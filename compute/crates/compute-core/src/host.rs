@@ -2,9 +2,9 @@
 //! pressure handling.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use crate::ids::{HoldId, OpId, SandboxId};
+use crate::ids::{HoldId, LoanId, OpId, SandboxId};
 use crate::level::{Level, Priority, State, Step};
 use crate::policy::{HostPolicy, PolicyError, SleepPolicy};
 use crate::sandbox::{InFlight, QueueKey, Sandbox, Wake};
@@ -72,6 +72,35 @@ pub enum Input {
         op: OpId,
         /// How it went.
         outcome: Outcome,
+    },
+    /// A started step no longer does the work its kind's concurrency limit
+    /// protects, such as a wake whose VM already runs and only waits for
+    /// its guest to answer. It stops counting against the limit, so another
+    /// step of its kind may start, but stays the sandbox's step until
+    /// [`Input::Finished`]. Unknown or repeated reports are ignored.
+    Unthrottled {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// The op from [`Action::Start`].
+        op: OpId,
+    },
+    /// Work outside any sandbox, such as building a template, asks for a
+    /// place under `step`'s concurrency limit, so it never runs beside more
+    /// steps of that kind than the limit allows. It gets one after every
+    /// step of that kind queued for a sandbox, in the order asked, and is
+    /// told with [`Action::Lend`]. Asking again with a loan id already in
+    /// use is ignored.
+    Borrow {
+        /// Names this loan in [`Action::Lend`] and [`Input::Return`].
+        loan: LoanId,
+        /// Whose limit it counts against.
+        step: Step,
+    },
+    /// The work of `loan` is done, or no longer wants its place: the place
+    /// is given back, or the request withdrawn. Unknown loans are ignored.
+    Return {
+        /// The loan.
+        loan: LoanId,
     },
     /// The VM process ended unexpectedly. Files survive, and so do running
     /// programs if a current copy was saved.
@@ -178,6 +207,12 @@ pub enum Action {
         /// The sandbox.
         sandbox: SandboxId,
     },
+    /// The work that asked with [`Input::Borrow`] for `loan` may start: it
+    /// now counts against its step kind's limit until [`Input::Return`].
+    Lend {
+        /// The loan.
+        loan: LoanId,
+    },
     /// Report a change to the control plane.
     Notify {
         /// The sandbox.
@@ -240,8 +275,13 @@ pub struct Host {
     timers: BTreeSet<(At, SandboxId)>,
     queues: [BTreeSet<QueueKey>; Step::COUNT],
     in_flight: [u32; Step::COUNT],
-    /// Steps still running for sandboxes that were removed.
+    /// Steps still running for sandboxes that were removed and still
+    /// counted against their limits.
     orphans: HashMap<OpId, Step>,
+    /// Loans waiting for a place, by step kind, in the order asked.
+    borrowers: [VecDeque<LoanId>; Step::COUNT],
+    /// Loans holding a place, with the kind it counts against.
+    lent: HashMap<LoanId, Step>,
     dirty: Vec<SandboxId>,
     next_op: u64,
     available_memory: Option<u64>,
@@ -264,6 +304,8 @@ impl Host {
             queues: Default::default(),
             in_flight: [0; Step::COUNT],
             orphans: HashMap::new(),
+            borrowers: Default::default(),
+            lent: HashMap::new(),
             dirty: Vec::new(),
             next_op: 0,
             available_memory: None,
@@ -416,6 +458,9 @@ impl Host {
                 op,
                 outcome,
             } => self.finish(now, sandbox, op, outcome, out),
+            Input::Unthrottled { sandbox, op } => self.unthrottle(sandbox, op),
+            Input::Borrow { loan, step } => self.borrow(loan, step),
+            Input::Return { loan } => self.give_back(loan),
             Input::Lost { sandbox } => {
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
                     if slot.in_flight.is_some() {
@@ -453,6 +498,39 @@ impl Host {
         }
     }
 
+    fn borrow(&mut self, loan: LoanId, step: Step) {
+        let waiting = self.borrowers.iter().any(|queue| queue.contains(&loan));
+        if !waiting && !self.lent.contains_key(&loan) {
+            self.borrowers[step.index()].push_back(loan);
+        }
+    }
+
+    fn give_back(&mut self, loan: LoanId) {
+        if let Some(step) = self.lent.remove(&loan) {
+            self.in_flight[step.index()] -= 1;
+        } else {
+            for queue in &mut self.borrowers {
+                queue.retain(|waiting| *waiting != loan);
+            }
+        }
+    }
+
+    fn unthrottle(&mut self, id: SandboxId, op: OpId) {
+        if let Some(step) = self.orphans.remove(&op) {
+            self.in_flight[step.index()] -= 1;
+            return;
+        }
+        if let Some(flight) = self
+            .sandboxes
+            .get_mut(&id)
+            .and_then(|slot| slot.in_flight.as_mut())
+            .filter(|flight| flight.op == op && flight.throttled)
+        {
+            flight.throttled = false;
+            self.in_flight[flight.step.index()] -= 1;
+        }
+    }
+
     fn finish(
         &mut self,
         now: At,
@@ -472,7 +550,9 @@ impl Host {
             return;
         };
         slot.in_flight = None;
-        self.in_flight[flight.step.index()] -= 1;
+        if flight.throttled {
+            self.in_flight[flight.step.index()] -= 1;
+        }
         let before = slot.state;
         let backoff = if flight.step.wakes() {
             &self.policy.wake_backoff
@@ -525,7 +605,11 @@ impl Host {
             return;
         };
         if let Some(flight) = slot.in_flight {
-            self.orphans.insert(flight.op, flight.step);
+            // Only a step still counted against its limit has a place to
+            // give back when it finishes.
+            if flight.throttled {
+                self.orphans.insert(flight.op, flight.step);
+            }
             if !flight.cancel_sent {
                 out.push(Action::Cancel {
                     sandbox: id,
@@ -663,6 +747,7 @@ impl Host {
                     op,
                     step,
                     cancel_sent: false,
+                    throttled: true,
                 });
                 self.in_flight[index] += 1;
                 out.push(Action::Start {
@@ -670,6 +755,15 @@ impl Host {
                     op,
                     step,
                 });
+            }
+            // Work outside sandboxes goes after every sandbox's.
+            while self.in_flight[index] < limit && self.queues[index].is_empty() {
+                let Some(loan) = self.borrowers[index].pop_front() else {
+                    break;
+                };
+                self.in_flight[index] += 1;
+                self.lent.insert(loan, step);
+                out.push(Action::Lend { loan });
             }
         }
     }

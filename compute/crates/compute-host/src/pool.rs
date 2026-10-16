@@ -37,11 +37,14 @@
 //!     disk.ext4                    its disk, as its memory image left it
 //!     images/                      its memory image (see crate::image)
 //!   <shape>-<key>.building/        a template being put together
-//!   vm/firecracker/template-<key>/ the jail of the VM building it
+//!   vm/firecracker/template-<key>/ the VM building it: its jail, and
+//!     ordinal                      the ordinal whose user its VMM runs as
 //! ```
 //!
 //! Anything a build left when the agent stopped is removed on start, its VM
-//! ended first.
+//! ended first, whether or not the agent keeps templates now. A build's
+//! ordinal stays taken until its VM is proven gone, so no sandbox ever
+//! shares a user with a VMM that may still run.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -50,14 +53,17 @@ use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use compute_core::{LoanId, Step};
 use compute_engine::{Engine, SnapshotFiles, SnapshotKind, VmSpec, vsock};
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep, timeout};
 
-use crate::image::{Images, Parts};
+use crate::image::{Images, Parts, Suspect};
 use crate::layout::{
     Machine, Paths, copy_sparse, link_kernel, remove_if_present, sync_parent, templates_dir,
     write_atomic,
@@ -67,9 +73,11 @@ use crate::protocol::{SandboxConfig, TemplateState, TemplateStatus};
 use crate::step::{DiskWatch, take_written};
 
 /// Version of the template layout; a change rebuilds every template.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 /// The inputs file in a template's directory.
 const INPUTS: &str = "template.json";
+/// The file in a template VM's directory naming the ordinal it runs as.
+const ORDINAL: &str = "ordinal";
 /// The disk in a template's directory.
 const DISK: &str = "disk.ext4";
 /// The suffix of a template being put together.
@@ -151,8 +159,8 @@ pub struct PoolConfig {
 }
 
 /// Where today's templates come from. Fixed for the agent's life; the
-/// files' identities are read whenever a template is built or used.
-#[derive(Clone, Debug)]
+/// files' contents are checked whenever a template is built or used.
+#[derive(Debug)]
 pub(crate) struct Sources {
     pub kernel: PathBuf,
     pub base_image: PathBuf,
@@ -163,15 +171,21 @@ pub(crate) struct Sources {
     pub networked: bool,
     /// How guest memory is backed, as the engine describes it.
     pub memory: String,
+    /// The guest port that says a booted guest is ready for work: a guest
+    /// image that answers elsewhere is another guest.
+    pub ready_port: u32,
+    /// The content hash of each file, with the metadata it was read under.
+    pub hashes: Mutex<HashMap<PathBuf, (Stamp, String)>>,
 }
 
 impl Sources {
-    /// The inputs a template of `shape` built now has. Blocks.
+    /// The inputs a template of `shape` built now has. Blocks: the first
+    /// time, and after a file changed, it reads the whole file.
     pub fn inputs(&self, shape: Shape) -> io::Result<Inputs> {
         let files = [&self.kernel, &self.base_image]
             .into_iter()
             .chain(&self.depends_on)
-            .map(|path| FileId::of(path))
+            .map(|path| self.content(path))
             .collect::<io::Result<_>>()?;
         Ok(Inputs {
             format: FORMAT,
@@ -180,7 +194,70 @@ impl Sources {
             boot_args: self.boot_args.clone(),
             networked: self.networked,
             memory: self.memory.clone(),
+            ready_port: self.ready_port,
         })
+    }
+
+    /// What the file at `path` holds, hashed again only when its metadata
+    /// says it may have changed.
+    fn content(&self, path: &Path) -> io::Result<FileId> {
+        let stamp = Stamp::of(&fs::metadata(path)?);
+        let known = self
+            .hashes
+            .lock()
+            .map_err(|_| io::Error::other("template input hashes poisoned"))?
+            .get(path)
+            .filter(|(seen, _)| *seen == stamp)
+            .map(|(_, hash)| hash.clone());
+        let hash = if let Some(hash) = known {
+            hash
+        } else {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update_reader(fs::File::open(path)?)?;
+            // A file written to while it was read has no one content.
+            if Stamp::of(&fs::metadata(path)?) != stamp {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    format!("{} changed while it was read", path.display()),
+                ));
+            }
+            let hash = hasher.finalize().to_hex().to_string();
+            self.hashes
+                .lock()
+                .map_err(|_| io::Error::other("template input hashes poisoned"))?
+                .insert(path.to_owned(), (stamp, hash.clone()));
+            hash
+        };
+        Ok(FileId {
+            path: path.to_owned(),
+            len: stamp.len,
+            blake3: hash,
+        })
+    }
+}
+
+/// What a file's metadata says about its content. Every write to a file,
+/// and every replacement of it, changes one of these: the kernel moves a
+/// file's change time on each, and nothing can set it back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Stamp {
+    device: u64,
+    inode: u64,
+    len: u64,
+    modified_ns: i128,
+    changed_ns: i128,
+}
+
+impl Stamp {
+    fn of(metadata: &fs::Metadata) -> Self {
+        let ns = |secs: i64, nanos: i64| i128::from(secs) * 1_000_000_000 + i128::from(nanos);
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            len: metadata.len(),
+            modified_ns: ns(metadata.mtime(), metadata.mtime_nsec()),
+            changed_ns: ns(metadata.ctime(), metadata.ctime_nsec()),
+        }
     }
 }
 
@@ -194,6 +271,7 @@ pub(crate) struct Inputs {
     boot_args: String,
     networked: bool,
     memory: String,
+    ready_port: u32,
 }
 
 impl Inputs {
@@ -214,30 +292,14 @@ impl Inputs {
     }
 }
 
-/// Which file a path named when a template was built: replacing or
-/// rewriting it changes its identity.
+/// What a path held when a template was built: any change to its content
+/// changes this, and nothing else does.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileId {
     path: PathBuf,
-    device: u64,
-    inode: u64,
     len: u64,
-    modified_ns: i128,
-}
-
-impl FileId {
-    fn of(path: &Path) -> io::Result<Self> {
-        let metadata = fs::metadata(path)?;
-        Ok(Self {
-            path: path.to_owned(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            len: metadata.len(),
-            modified_ns: i128::from(metadata.mtime()) * 1_000_000_000
-                + i128::from(metadata.mtime_nsec()),
-        })
-    }
+    blake3: String,
 }
 
 /// A ready template.
@@ -274,20 +336,50 @@ impl Template {
 
     /// Gives the new sandbox at `paths` this template's disk and memory
     /// image. Blocks.
-    fn copy_to(&self, paths: &Paths, images: &Images) -> io::Result<()> {
+    fn copy_to(&self, paths: &Paths, images: &Images) -> Result<(), CopyFailure> {
         let source = self.images();
         let image = source
             .current_verified()
-            .map_err(io::Error::other)?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the template has no image"))?;
-        copy_sparse(&self.dir.join(DISK), &paths.disk)?;
+            .map_err(CopyFailure::from)?
+            .ok_or_else(|| CopyFailure::Unusable("the template has no image".into()))?;
+        copy_sparse(&self.dir.join(DISK), &paths.disk).map_err(CopyFailure::from)?;
         images
             .publish(Parts::Shared {
                 from: &source,
                 image: &image,
             })
-            .map_err(io::Error::other)?;
+            .map_err(CopyFailure::from)?;
         Ok(())
+    }
+}
+
+/// Why a template could not be given to a sandbox.
+#[derive(Debug, thiserror::Error)]
+enum CopyFailure {
+    /// A file of the template is gone or damaged: it must be rebuilt.
+    #[error("the template is unusable: {0}")]
+    Unusable(String),
+    /// The host could not copy it this time.
+    #[error(transparent)]
+    Io(io::Error),
+}
+
+impl From<io::Error> for CopyFailure {
+    fn from(error: io::Error) -> Self {
+        if error.kind() == io::ErrorKind::NotFound {
+            Self::Unusable(error.to_string())
+        } else {
+            Self::Io(error)
+        }
+    }
+}
+
+impl From<Suspect> for CopyFailure {
+    fn from(suspect: Suspect) -> Self {
+        match suspect {
+            Suspect::Io(error) => error.into(),
+            definite => Self::Unusable(definite.to_string()),
+        }
     }
 }
 
@@ -299,7 +391,7 @@ pub(crate) enum Start {
     /// From a template, to be restored.
     Template,
     /// From the base image, because the template no longer fits today's
-    /// inputs: it must be rebuilt.
+    /// inputs, or a file of it is gone or damaged: it must be rebuilt.
     Stale,
 }
 
@@ -318,10 +410,15 @@ pub(crate) fn first_files(
             Ok(now) if now == template.inputs => match template.copy_to(paths, images) {
                 Ok(()) => return Ok(Start::Template),
                 Err(error) => {
-                    // Removed by a rebuild meanwhile, say: boot cold.
+                    // Removed by a rebuild meanwhile, damaged, or the host's
+                    // disk failed: boot cold. Only a template proven
+                    // unusable is replaced.
                     tracing::warn!(%error, dir = %template.dir.display(), "could not copy a template");
                     images.clear()?;
                     remove_if_present(&paths.disk)?;
+                    if matches!(error, CopyFailure::Unusable(_)) {
+                        start = Start::Stale;
+                    }
                 }
             },
             Ok(_) => start = Start::Stale,
@@ -438,11 +535,93 @@ pub(crate) struct Build {
     pub root: PathBuf,
     pub sources: Arc<Sources>,
     pub shape: Shape,
+    /// The ordinal reserved for the build, recorded with its VM.
+    pub ordinal: u32,
+    /// Admits its boot and its save under the host's limits.
+    pub lender: Lender,
     /// The user and group the template's VMM runs as, which no other VM on
-    /// the host has meanwhile.
+    /// the host has meanwhile: the ordinal's.
     pub uid: u32,
     pub ready_port: u32,
     pub ready_timeout: Duration,
+}
+
+/// Asks the host for places under its step limits, for work outside any
+/// sandbox, so template builds never run beside more boots or saves than
+/// the limits allow (see [`compute_core::Input::Borrow`]).
+#[derive(Clone)]
+pub(crate) struct Lender {
+    send: Arc<dyn Fn(Loaning) + Send + Sync>,
+    next: Arc<AtomicU64>,
+}
+
+impl fmt::Debug for Lender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Lender")
+    }
+}
+
+/// What a [`Lender`] tells the host.
+#[derive(Debug)]
+pub(crate) enum Loaning {
+    /// Asks for a place under `step`'s limit; `granted` is told once lent.
+    Borrow {
+        loan: LoanId,
+        step: Step,
+        granted: oneshot::Sender<()>,
+    },
+    /// Gives the place back, or withdraws the request.
+    Return(LoanId),
+}
+
+impl Lender {
+    pub fn new(send: impl Fn(Loaning) + Send + Sync + 'static) -> Self {
+        Self {
+            send: Arc::new(send),
+            next: Arc::default(),
+        }
+    }
+
+    /// Waits for a place under `step`'s limit, held until the loan is
+    /// dropped. A host that is gone lends at once: nothing else runs.
+    pub async fn borrow(&self, step: Step) -> Loan {
+        let loan = LoanId(self.next.fetch_add(1, Ordering::Relaxed));
+        let (granted, lent) = oneshot::channel();
+        (self.send)(Loaning::Borrow {
+            loan,
+            step,
+            granted,
+        });
+        // Made first, so a borrower dropped while waiting withdraws.
+        let held = Loan {
+            lender: self.clone(),
+            loan,
+        };
+        let _ = lent.await;
+        held
+    }
+}
+
+/// A place under a step limit, given back when dropped.
+#[derive(Debug)]
+pub(crate) struct Loan {
+    lender: Lender,
+    loan: LoanId,
+}
+
+impl Drop for Loan {
+    fn drop(&mut self) {
+        (self.lender.send)(Loaning::Return(self.loan));
+    }
+}
+
+/// How a build ended.
+#[derive(Debug)]
+pub(crate) struct Built {
+    pub result: Result<Template, String>,
+    /// Whether the build's VM is proven gone. Until it is, its ordinal
+    /// stays taken: the VMM may still run as its user.
+    pub ended: bool,
 }
 
 /// The jailer's chroot base for template VMs.
@@ -483,20 +662,34 @@ async fn blocking<T: Send + 'static>(
 }
 
 /// Builds the template `build` describes, replacing older ones of its
-/// shape. Whatever happens, the build's VM has ended and its jail and
-/// namespace are gone when this returns.
-pub(crate) async fn build<E: Engine>(engine: &E, build: Build) -> Result<Template, String> {
+/// shape. Unless the build's VM could not be proven gone, it has ended and
+/// its jail and namespace are gone when this returns; otherwise they are
+/// left for the next start of the agent, with the ordinal it runs as.
+pub(crate) async fn build<E: Engine>(engine: &E, build: Build) -> Built {
     let started = Instant::now();
     let inputs = {
         let (sources, shape) = (Arc::clone(&build.sources), build.shape);
-        blocking(move || sources.inputs(shape)).await?
+        match blocking(move || sources.inputs(shape)).await {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                return Built {
+                    result: Err(error),
+                    ended: true,
+                };
+            }
+        }
     };
     let name = inputs.vm_name();
     let (paths, spec) = template_vm(&build.root, &name, build.shape, build.uid, &build.sources);
     let isolated = build.sources.networked.then(|| Isolated::new(&name));
     let result = attempt(engine, &build, inputs, &paths, &spec, isolated.clone()).await;
     if let Err(error) = engine.clean_up(&spec).await {
-        tracing::warn!(%error, %name, "a template VM was not cleaned up");
+        // Its files say which ordinal it holds when the next agent tries.
+        tracing::error!(%error, %name, ordinal = build.ordinal, "a template VM may still run; its user stays taken");
+        return Built {
+            result,
+            ended: false,
+        };
     }
     let dir = paths.dir.clone();
     let cleared = blocking(move || {
@@ -516,7 +709,10 @@ pub(crate) async fn build<E: Engine>(engine: &E, build: Build) -> Result<Templat
             "template built"
         );
     }
-    result
+    Built {
+        result,
+        ended: true,
+    }
 }
 
 async fn attempt<E: Engine>(
@@ -536,10 +732,15 @@ async fn attempt<E: Engine>(
     // to the template's disk that is lost; see `DiskWatch`.
     let disk = {
         let (paths, sources, uid) = (paths.clone(), Arc::clone(&build.sources), build.uid);
+        let ordinal = build.ordinal;
         Arc::new(
             blocking(move || {
                 remove_dir(&paths.dir)?;
                 fs::create_dir_all(&paths.jail)?;
+                // Before any VMM of it can exist. Only an agent stop leaves
+                // it behind for the next agent, and a VM outlives only that,
+                // so it needs no flush to disk.
+                fs::write(paths.dir.join(ORDINAL), ordinal.to_string())?;
                 copy_sparse(&sources.base_image, &paths.disk)?;
                 link_kernel(&sources.kernel, &paths)?;
                 if let Some(isolated) = isolated {
@@ -550,6 +751,10 @@ async fn attempt<E: Engine>(
             .await?,
         )
     };
+    // Booting until the guest is ready counts as a boot, and pausing and
+    // saving it as a save, under the same limits as sandboxes' steps and
+    // after every one queued: a sandbox can always boot cold instead.
+    let booting = build.lender.borrow(Step::Boot).await;
     let vm = engine.boot(spec).await.map_err(|error| error.to_string())?;
     let files = SnapshotFiles {
         state: paths.in_jail("save.state"),
@@ -557,6 +762,8 @@ async fn attempt<E: Engine>(
     };
     let saved = async {
         ready(engine, &vm, spec, build.ready_port, build.ready_timeout).await?;
+        drop(booting);
+        let _saving = build.lender.borrow(Step::Save).await;
         engine.pause(&vm).await.map_err(|error| error.to_string())?;
         let watch = Arc::clone(&disk);
         blocking(move || watch.begin()).await?;
@@ -669,15 +876,26 @@ fn remove_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// Clears what builds cut short by an agent stop left under `root`, their
-/// VMs ended first, and returns the templates that still fit today's
-/// `sources`. `uid` is any unprivileged user, for describing leftover VMs.
-pub(crate) async fn recover<E: Engine>(
+/// A template build's VM an earlier agent left that could not be proven
+/// gone: it may still run, as the user of `ordinal`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Held {
+    pub name: String,
+    /// The ordinal its VMM runs as, when its files still say.
+    pub ordinal: Option<u32>,
+}
+
+/// Ends the VMs of builds an earlier agent left under `root` and removes
+/// their files, whether or not this agent keeps templates. Returns those
+/// whose VM could not be proven gone: their files are left for the next
+/// start, and their ordinals must stay taken. `first_uid` is the user of
+/// ordinal 0.
+pub(crate) async fn end_leftover_builds<E: Engine>(
     engine: &E,
     root: &Path,
     sources: &Arc<Sources>,
-    uid: u32,
-) -> Vec<Template> {
+    first_uid: u32,
+) -> Vec<Held> {
     let jails = chroot_base(root).join("firecracker");
     let leftovers: Vec<String> = fs::read_dir(&jails)
         .into_iter()
@@ -686,14 +904,26 @@ pub(crate) async fn recover<E: Engine>(
         .filter_map(|entry| entry.file_name().into_string().ok())
         .filter(|name| name.starts_with(VM_PREFIX))
         .collect();
+    let mut held = Vec::new();
     for name in leftovers {
+        // Only its name and paths matter for ending it.
         let shape = Shape {
             vcpus: 1,
             memory_mib: 128,
         };
+        let dir = jails.join(&name);
+        let ordinal = {
+            let dir = dir.clone();
+            blocking(move || Ok(build_ordinal(&dir, first_uid)))
+                .await
+                .ok()
+                .flatten()
+        };
+        let uid = ordinal.map_or(first_uid, |ordinal| first_uid.saturating_add(ordinal));
         let (paths, spec) = template_vm(root, &name, shape, uid, sources);
         if let Err(error) = engine.clean_up(&spec).await {
-            tracing::warn!(%error, %name, "could not end a template VM left behind");
+            tracing::error!(%error, %name, ?ordinal, "a template VM left behind may still run; its user stays taken");
+            held.push(Held { name, ordinal });
             continue;
         }
         let networked = sources.networked;
@@ -708,6 +938,27 @@ pub(crate) async fn recover<E: Engine>(
             tracing::warn!(%error, "could not remove a template VM's files");
         }
     }
+    held
+}
+
+/// The ordinal the build VM in `dir` runs as: from its ordinal file, or
+/// else from the owner of its disk, which the host gives the VMM's user
+/// before the VMM starts. Blocks.
+fn build_ordinal(dir: &Path, first_uid: u32) -> Option<u32> {
+    if let Ok(text) = fs::read_to_string(dir.join(ORDINAL))
+        && let Ok(ordinal) = text.trim().parse()
+    {
+        return Some(ordinal);
+    }
+    let owner = fs::symlink_metadata(Paths::at(dir.to_owned()).disk)
+        .ok()?
+        .uid();
+    owner.checked_sub(first_uid)
+}
+
+/// The templates under `root` that still fit today's `sources`; the rest
+/// are removed.
+pub(crate) async fn keep_templates(root: &Path, sources: &Arc<Sources>) -> Vec<Template> {
     let (dir, sources) = (templates_dir(root), Arc::clone(sources));
     blocking(move || Ok(keep_fitting(&dir, &sources)))
         .await
@@ -771,6 +1022,7 @@ mod tests {
                 boot_args: String::new(),
                 networked: false,
                 memory: String::new(),
+                ready_port: 52,
             },
         }
     }
@@ -821,12 +1073,65 @@ mod tests {
         assert_eq!(pool.status()[0].state, TemplateState::Building);
     }
 
+    /// A file rewritten in place with its length and modification time
+    /// kept is another input; one only touched is not.
+    #[test]
+    fn inputs_follow_file_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, text: &str| {
+            let path = dir.path().join(name);
+            fs::write(&path, text).unwrap();
+            path
+        };
+        let sources = Sources {
+            kernel: file("vmlinux", "kernel"),
+            base_image: file("base.img", "base one"),
+            depends_on: Vec::new(),
+            boot_args: String::new(),
+            networked: false,
+            memory: String::new(),
+            ready_port: 52,
+            hashes: Mutex::default(),
+        };
+        let small = shape(1, 512);
+        let before = sources.inputs(small).unwrap();
+        assert_eq!(sources.inputs(small).unwrap(), before);
+
+        let modified = fs::metadata(&sources.base_image)
+            .unwrap()
+            .modified()
+            .unwrap();
+        fs::write(&sources.base_image, "base two").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&sources.base_image)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        let rewritten = sources.inputs(small).unwrap();
+        assert_ne!(
+            rewritten.key(),
+            before.key(),
+            "same length and mtime, new content"
+        );
+
+        fs::write(&sources.base_image, "base one").unwrap();
+        assert_eq!(
+            sources.inputs(small).unwrap(),
+            before,
+            "the same content again"
+        );
+    }
+
     #[test]
     fn inputs_name_every_change() {
         let base = template(shape(1, 512)).inputs;
         let mut other = base.clone();
         other.boot_args = "quiet".into();
         assert_ne!(base.key(), other.key());
+        let mut other = base.clone();
+        other.ready_port = 53;
+        assert_ne!(base.key(), other.key(), "another readiness contract");
         assert_eq!(base.key(), base.clone().key());
         assert!(base.dir_name().starts_with("1x512-"));
         assert!(base.vm_name().len() <= 64);

@@ -986,8 +986,9 @@ mod tests {
     }
 
     /// A sandbox started from a template publishes the template's image as
-    /// its own: the same memory file, and a later save merges over it
-    /// without touching the template.
+    /// its own: the same memory file. A later save of one sandbox merges
+    /// over it without touching the template or a sibling, and a sibling
+    /// that never saved keeps a whole image after the template is gone.
     #[test]
     fn a_shared_image_is_the_same_file_and_survives_its_source() {
         use std::os::unix::fs::MetadataExt;
@@ -1005,38 +1006,50 @@ mod tests {
             .unwrap();
         let before = content(&template, source.generation());
 
-        let sandbox = Images::new(dir.join("sandbox"));
-        let image = sandbox
-            .publish(Parts::Shared {
-                from: &template,
-                image: &source,
-            })
-            .unwrap();
-        assert_eq!(sandbox.current().unwrap(), Some(image.generation()));
-        sandbox.verify(image.generation(), Depth::Deep).unwrap();
+        let share = |name: &str| {
+            let sandbox = Images::new(dir.join(name));
+            let image = sandbox
+                .publish(Parts::Shared {
+                    from: &template,
+                    image: &source,
+                })
+                .unwrap();
+            (sandbox, image)
+        };
+        let (modified, image) = share("modified");
+        let (untouched, kept) = share("untouched");
+        assert_eq!(modified.current().unwrap(), Some(image.generation()));
+        modified.verify(image.generation(), Depth::Deep).unwrap();
         let inode = |path: PathBuf| fs::metadata(path).unwrap().ino();
-        assert_eq!(
-            inode(sandbox.memory(image.generation())),
-            inode(template.memory(source.generation())),
-            "one file, one page cache"
-        );
+        for (sandbox, image) in [(&modified, &image), (&untouched, &kept)] {
+            assert_eq!(
+                inode(sandbox.memory(image.generation())),
+                inode(template.memory(source.generation())),
+                "one file, one page cache"
+            );
+        }
 
         let diff = dir.join("diff");
         write_diff(&diff, &[(2, 5)]);
         write_state(&state, b"sandbox state");
-        let saved = sandbox
+        let saved = modified
             .publish(Parts::Diff {
                 base: image.generation(),
                 state: &state,
                 diff: &diff,
             })
             .unwrap();
-        sandbox.retire(&saved, &[]).unwrap();
+        modified.retire(&saved, &[]).unwrap();
         assert_eq!(content(&template, source.generation()), before);
+        assert_eq!(content(&untouched, kept.generation()), before);
         template.verify(source.generation(), Depth::Deep).unwrap();
 
+        // The template is removed, as when it is rebuilt: the clone that
+        // still shares its file loses nothing.
         fs::remove_dir_all(dir.join("template")).unwrap();
-        sandbox.verify(saved.generation(), Depth::Deep).unwrap();
+        untouched.verify(kept.generation(), Depth::Deep).unwrap();
+        assert_eq!(content(&untouched, kept.generation()), before);
+        modified.verify(saved.generation(), Depth::Deep).unwrap();
         fs::remove_dir_all(&dir).unwrap();
     }
 

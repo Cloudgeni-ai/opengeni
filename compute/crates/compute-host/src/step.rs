@@ -38,7 +38,7 @@ use crate::layout::{Paths, link_kernel, remove_durably, remove_if_present, write
 use crate::lazy::{ChunkSource, Fetcher, Hydration, Memory, Paging, WakeProfile};
 use crate::protocol::Id;
 use crate::restore_notice::tell_restored;
-use crate::state::{Change, Disk, Record, Records, StateError, apply};
+use crate::state::{Change, Disk, Identity, Record, Records, StateError, apply};
 use crate::store::{FetchInto, FetchedMemory, JailedFile, Receipt, SavedFiles, SavedImage, Store};
 
 /// How long a restore keeps trying to tell the guest of it. A listening
@@ -128,6 +128,10 @@ pub(crate) struct Job<E: Engine, S> {
     pub fetcher: Option<Arc<Fetcher>>,
     /// VM processes this job has started; zero when it is issued.
     pub launches: u32,
+    /// Called once the step no longer does the work its kind's
+    /// concurrency limit protects (a wake, once its VMM has resumed), so
+    /// another may start while this one waits for its guest.
+    pub unthrottle: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
 fn failure(error: &EngineError) -> Outcome {
@@ -376,6 +380,15 @@ impl<E: Engine, S: Store> Job<E, S> {
             return (state_failure(&error), After::Kept(live));
         }
         let outcome = match self.engine.resume(&live.vm).await {
+            // A paused VM's guest knows its time; only one that has yet to
+            // learn which sandbox it is must be told.
+            Ok(()) if self.record.identity == Identity::Pending => {
+                self.unthrottle();
+                self.tell_guest_restored()
+                    .await
+                    .err()
+                    .unwrap_or(Outcome::Done)
+            }
             Ok(()) => Outcome::Done,
             Err(error) => self.after_failed_wake(&error, image, archived).await,
         };
@@ -668,7 +681,12 @@ impl<E: Engine, S: Store> Job<E, S> {
                 After::NoVm,
             );
         }
-        self.tell_guest_restored().await;
+        // The host's share of a restore is done; the guest's answer is
+        // not the limit's concern.
+        self.unthrottle();
+        if let Err(outcome) = self.tell_guest_restored().await {
+            return (outcome, After::New(vm, live_memory));
+        }
         (Outcome::Done, After::New(vm, live_memory))
     }
 
@@ -847,12 +865,25 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
-    /// Lets the guest fix its clock and drop dead connections before the
-    /// sandbox counts as awake. Failing to is not fatal: a guest without an
-    /// agent still runs, just with a stale clock.
-    async fn tell_guest_restored(&self) {
+    /// Lets the guest fix its clock, drop dead connections and learn which
+    /// sandbox it is before the sandbox counts as awake.
+    ///
+    /// Failing to is not fatal for a guest that knows which sandbox it is:
+    /// a guest without an agent still runs, just with a stale clock. One
+    /// that does not (see [`Identity::Pending`]) must acknowledge the notice
+    /// before anything may use it, so otherwise this reports its memory
+    /// lost: the caller's VM is ended, and the sandbox's next wake boots
+    /// from its disk, where the guest finds its id on the kernel command
+    /// line.
+    async fn tell_guest_restored(&mut self) -> Result<(), Outcome> {
+        const LOST: Outcome = Outcome::Failed(Failure::MemoryLost);
+        let must = self.record.identity == Identity::Pending;
         let Some(port) = self.restore_notice_port else {
-            return;
+            if must {
+                tracing::error!(id = %self.id, "the guest must learn which sandbox it is, but no restore notice port is set");
+                return Err(LOST);
+            }
+            return Ok(());
         };
         let started = Instant::now();
         match tell_restored(&self.spec.vsock_path(), port, self.id, NOTICE_DEADLINE).await {
@@ -862,13 +893,40 @@ impl<E: Engine, S: Store> Job<E, S> {
                 attempts,
                 "guest acknowledged the restore"
             ),
-            Err(error) => tracing::warn!(id = %self.id, %error, "guest not told of its restore"),
+            Err(error) if must => {
+                tracing::error!(id = %self.id, %error, "the guest did not learn which sandbox it is; it is not used");
+                return Err(LOST);
+            }
+            Err(error) => {
+                tracing::warn!(id = %self.id, %error, "guest not told of its restore");
+                return Ok(());
+            }
+        }
+        if must && let Err(error) = self.commit(Change::new().identity(Identity::Known)).await {
+            // A record that still says the guest must be told ends the VM
+            // after a restart anyway.
+            tracing::error!(id = %self.id, %error, "could not record that the guest knows which sandbox it is");
+            return Err(LOST);
+        }
+        Ok(())
+    }
+
+    /// Frees the step's place under its kind's concurrency limit: the work
+    /// the limit protects is done, though the step goes on.
+    fn unthrottle(&mut self) {
+        if let Some(unthrottle) = self.unthrottle.take() {
+            unthrottle();
         }
     }
 
     /// Boot fresh from the disk; any old memory image is meaningless now.
     async fn boot(&mut self) -> (Outcome, After<E::Vm>) {
-        let fresh = Change::new().image(false).archived(false).execution();
+        // The guest finds its id on the kernel command line.
+        let fresh = Change::new()
+            .image(false)
+            .archived(false)
+            .identity(Identity::Known)
+            .execution();
         if let Err(error) = self.commit(fresh).await {
             return (state_failure(&error), After::NoVm);
         }

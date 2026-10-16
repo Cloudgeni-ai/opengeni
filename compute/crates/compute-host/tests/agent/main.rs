@@ -87,6 +87,12 @@ struct World {
     /// While set, every resume lets the guest run and then reports the VM
     /// beyond control, with its process still alive.
     lose_resumes: AtomicBool,
+    /// While set, cleaning up after a VM whose directory exists fails, as
+    /// when its VMM cannot be proven gone.
+    stuck_clean_ups: AtomicBool,
+    /// While set, every guest answers a restore notice with something
+    /// other than `ok` and ignores it.
+    refuse_notices: AtomicBool,
     restoring: AtomicUsize,
     max_restoring: AtomicUsize,
     compress_cancelled: AtomicUsize,
@@ -201,6 +207,7 @@ impl Fake {
             spec.drives[0].path.clone(),
             Arc::default(),
             Arc::clone(&cpu),
+            Arc::clone(&self.world),
         ));
         let world = Arc::clone(&self.world);
         let dead = name.clone();
@@ -268,12 +275,14 @@ async fn guest(
     disk: PathBuf,
     notice: Arc<Mutex<Option<String>>>,
     cpu: Arc<Mutex<CpuMeter>>,
+    world: Arc<World>,
 ) {
     while let Ok((stream, _)) = listener.accept().await {
         let memory = Arc::clone(&memory);
         let disk = disk.clone();
         let notice = Arc::clone(&notice);
         let cpu = Arc::clone(&cpu);
+        let world = Arc::clone(&world);
         tokio::spawn(async move {
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
@@ -297,6 +306,9 @@ async fn guest(
                         "ok".into()
                     }
                     ("disk", _) => std::fs::read_to_string(&disk).unwrap_or_default(),
+                    ("restored", _) if world.refuse_notices.load(Ordering::Relaxed) => {
+                        "what?".into()
+                    }
                     ("restored", fields) => {
                         *notice.lock().unwrap() = Some(fields.to_owned());
                         "ok".into()
@@ -512,6 +524,13 @@ impl Engine for Fake {
     }
 
     async fn clean_up(&self, spec: &VmSpec) -> Result<(), EngineError> {
+        if self.world.stuck_clean_ups.load(Ordering::Relaxed) && spec.dir.exists() {
+            return Err(EngineError::new(
+                ErrorKind::Fatal,
+                "clean_up",
+                "the VMM could not be proven gone",
+            ));
+        }
         self.world.crash(&spec.name);
         // Give the crash watcher a moment to release the name.
         for _ in 0..100 {

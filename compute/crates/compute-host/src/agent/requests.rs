@@ -11,7 +11,7 @@ use compute_engine::Engine;
 use crate::layout::{Images, Paths, sync_parent};
 use crate::pool::{Shape, Sources, Start, Template, first_files};
 use crate::protocol::{BlockedSandbox, HostStatus, Id, SandboxConfig, SandboxStatus, step_name};
-use crate::state::{Record, check_generation};
+use crate::state::{Identity, Record, check_generation};
 use crate::step::images_of;
 use crate::store::Store;
 
@@ -282,6 +282,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Id(*unknown)
             )));
         }
+        if let Some(build) = self.unknown_builds.first() {
+            return Err(HostError::Io(format!(
+                "template build {build} may still run as a user nothing records; \
+                 no sandbox is created until a restart of the agent ends it"
+            )));
+        }
         if self.slots.contains_key(&id.0)
             || self.preparing.contains(&id.0)
             || self.destroying.contains_key(&id.0)
@@ -353,7 +359,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     // A sandbox started from a template holds a memory image
                     // of a guest that never ran as it: its first wake
                     // restores it.
-                    record.image = start == Start::Template;
+                    // It learns which sandbox it is from the restore notice.
+                    if start == Start::Template {
+                        record.image = true;
+                        record.identity = Identity::Pending;
+                    }
                     records.insert(record).await.map_err(HostError::from)
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {

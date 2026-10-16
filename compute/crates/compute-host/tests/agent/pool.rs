@@ -7,11 +7,11 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use compute_core::HostPolicy;
-use compute_host::protocol::{HostStatus, Id, LevelName, TemplateState};
+use compute_host::protocol::{HostStatus, Id, LevelName, Reply, TemplateState};
 use compute_host::{HostConfig, PoolConfig, Shape};
 use tokio::time::Instant;
 
-use super::{Delays, Lab, NEVER, World, id};
+use super::{Delays, Lab, NEVER, World, id, vm_name};
 
 /// The shape [`Lab::create`] gives every sandbox.
 const SHAPE: Shape = Shape {
@@ -149,6 +149,226 @@ async fn without_a_ready_template_a_sandbox_boots_cold_at_once() {
         2,
         "one cold, one template"
     );
+    lab.assert_clean();
+}
+
+/// A guest restored from a template thinks it is the template until it
+/// acknowledges the notice naming its sandbox. One that does not is never
+/// used: its VM is ended, and the sandbox boots from its disk instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clone_that_never_learns_which_sandbox_it_is_is_never_used() {
+    let lab = warm_lab(Lab::root(), Arc::default(), Delays::default(), vec![SHAPE]).await;
+    wait_ready(&lab).await;
+    lab.create(id(1), NEVER).await;
+    assert_eq!(
+        lab.record(id(1))["identity"],
+        "pending",
+        "recorded before restore"
+    );
+
+    lab.world.refuse_notices.store(true, Ordering::Relaxed);
+    let woken = lab.wake(id(1)).await;
+    assert!(matches!(woken, Reply::Woken { .. }), "{woken:?}");
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        lab.world.boots.load(Ordering::Relaxed),
+        2,
+        "the template, then the sandbox from its disk"
+    );
+    assert_eq!(
+        lab.run(id(1), &["sandbox?"]).await,
+        [""],
+        "the booted guest, never the restored one, answers"
+    );
+    assert_eq!(lab.record(id(1))["identity"], "known", "a boot settles it");
+
+    // An acknowledged notice is recorded, so nothing after it repeats it.
+    lab.world.refuse_notices.store(false, Ordering::Relaxed);
+    lab.create(id(2), NEVER).await;
+    assert_eq!(lab.run(id(2), &["sandbox?"]).await, [id(2).to_string()]);
+    assert_eq!(lab.record(id(2))["identity"], "known");
+    lab.assert_clean();
+}
+
+/// An agent that stopped after restoring a template's sandbox but before
+/// its guest acknowledged which sandbox it is leaves a VM that may still
+/// think it is the template. The next agent ends it rather than take it
+/// back, and the sandbox boots from its disk on its next wake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_ends_a_clone_whose_guest_was_never_told() {
+    let lab = warm_lab(Lab::root(), Arc::default(), Delays::default(), vec![SHAPE]).await;
+    wait_ready(&lab).await;
+    lab.create(id(1), NEVER).await;
+    lab.run(id(1), &["set x"]).await;
+    let dir = lab.sandbox_dir(id(1));
+    let (root, world) = lab.stop().await;
+    assert!(world.live.lock().unwrap().contains(&vm_name(id(1))));
+
+    // The agent died after the guest ran but before its answer was
+    // recorded.
+    let path = dir.join("sandbox.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(record["image"], false, "recorded before the guest ran");
+    record["identity"] = "pending".into();
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let lab = warm_lab(root, world, Delays::default(), vec![SHAPE]).await;
+    assert!(
+        !lab.world.live.lock().unwrap().contains(&vm_name(id(1))),
+        "its VM was ended"
+    );
+    assert_eq!(
+        Lab::sandbox(&lab.status().await, id(1)).level,
+        LevelName::Saved
+    );
+    assert_eq!(lab.run(id(1), &["get"]).await, [""], "booted afresh");
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
+    assert_eq!(lab.record(id(1))["identity"], "known");
+    lab.assert_clean();
+}
+
+/// A template build whose VM cannot be proven gone keeps its ordinal, so
+/// no sandbox gets the user its VMM may still run as, until a later start
+/// of the agent ends it, whether or not that agent keeps templates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_build_whose_vm_may_survive_keeps_its_user_taken() {
+    let world = Arc::<World>::default();
+    world.stuck_clean_ups.store(true, Ordering::Relaxed);
+    let lab = warm_lab(
+        Lab::root(),
+        Arc::clone(&world),
+        Delays::default(),
+        vec![SHAPE],
+    )
+    .await;
+    wait_ready(&lab).await;
+    let jails = lab.root.join("state/templates/vm/firecracker");
+    let leftovers = || std::fs::read_dir(&jails).unwrap().count();
+    assert_eq!(leftovers(), 1, "its files stay with it");
+    lab.create(id(1), NEVER).await;
+    assert_eq!(
+        lab.record(id(1))["ordinal"],
+        1,
+        "the build's ordinal is taken"
+    );
+    let (root, world) = lab.stop().await;
+
+    // An agent that keeps no templates still ends it, and frees its user.
+    world.stuck_clean_ups.store(false, Ordering::Relaxed);
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    assert_eq!(leftovers(), 0, "the leftover build is gone");
+    lab.create(id(2), NEVER).await;
+    assert_eq!(lab.record(id(2))["ordinal"], 0);
+    let (root, world) = lab.stop().await;
+
+    // One whose ordinal nothing records could clash with any sandbox.
+    std::fs::create_dir_all(jails.join("template-feedface/root")).unwrap();
+    world.stuck_clean_ups.store(true, Ordering::Relaxed);
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    let config = compute_host::protocol::SandboxConfig {
+        vcpus: 1,
+        memory_mib: 256,
+        sleep: NEVER,
+    };
+    let refused = lab
+        .client
+        .call(&compute_host::protocol::Request::Create { id: id(3), config })
+        .await
+        .unwrap();
+    assert!(matches!(refused, Reply::Error { .. }), "{refused:?}");
+    let (root, world) = lab.stop().await;
+    world.stuck_clean_ups.store(false, Ordering::Relaxed);
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    lab.create(id(3), NEVER).await;
+    lab.assert_clean();
+}
+
+/// A template a file of which is gone is not kept as ready: the sandbox
+/// that found it boots cold, and the template is built again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_template_missing_a_file_is_rebuilt() {
+    let lab = warm_lab(Lab::root(), Arc::default(), Delays::default(), vec![SHAPE]).await;
+    wait_ready(&lab).await;
+    let old = templates(&lab.root);
+    std::fs::remove_file(old[0].join("disk.ext4")).unwrap();
+
+    lab.create(id(1), NEVER).await;
+    assert!(!memory_saved(&lab.status().await, id(1)), "booted cold");
+    lab.wait_until("a rebuilt template", |status| {
+        template_state(status) == Some(TemplateState::Ready)
+            && status.templates.len() == 1
+            && templates(&lab.root)
+                .iter()
+                .all(|dir| dir.join("disk.ext4").exists())
+    })
+    .await;
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2, "built again");
+
+    lab.create(id(2), NEVER).await;
+    assert!(memory_saved(&lab.status().await, id(2)), "from the new one");
+    assert_eq!(lab.run(id(2), &["sandbox?"]).await, [id(2).to_string()]);
+    lab.assert_clean();
+}
+
+/// Template builds count against the host's boot and save limits like any
+/// sandbox's steps: with one boot and one save at a time, builds for
+/// several shapes never boot at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn template_builds_respect_the_boot_limit() {
+    let delays = Delays {
+        boot: Duration::from_millis(100),
+        ..Delays::default()
+    };
+    let policy = HostPolicy {
+        limits: compute_core::StepLimits::default()
+            .with(compute_core::Step::Boot, 1)
+            .with(compute_core::Step::Save, 1),
+        ..HostPolicy::default()
+    };
+    let shapes = vec![
+        SHAPE,
+        Shape {
+            vcpus: 2,
+            memory_mib: 256,
+        },
+        Shape {
+            vcpus: 1,
+            memory_mib: 512,
+        },
+    ];
+    let lab =
+        Lab::start_configured(Lab::root(), Arc::default(), delays, policy, warm(shapes)).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut most = 0;
+    loop {
+        let builds = lab
+            .world
+            .live
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|name| name.starts_with("template-"))
+            .count();
+        most = most.max(builds);
+        let status = lab.status().await;
+        if status.templates.len() == 3
+            && status
+                .templates
+                .iter()
+                .all(|template| template.state == TemplateState::Ready)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "templates never built: {status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    // One booting and one being saved; without the limits all three boot
+    // at once.
+    assert!(most <= 2, "{most} build VMs at once");
     lab.assert_clean();
 }
 

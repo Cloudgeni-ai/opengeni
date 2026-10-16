@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use compute_core::{
-    Action, At, Durability, Failure, HoldId, Host, HostPolicy, Input, Level, MemoryPolicy, Notice,
-    OpId, Outcome, Priority, SandboxId, SleepPolicy, SleepRules, State, Step, StepLimits,
+    Action, At, Durability, Failure, HoldId, Host, HostPolicy, Input, Level, LoanId, MemoryPolicy,
+    Notice, OpId, Outcome, Priority, SandboxId, SleepPolicy, SleepRules, State, Step, StepLimits,
 };
 
 const GIB: u64 = 1 << 30;
@@ -280,6 +280,129 @@ fn wakes_respect_limits_and_priority() {
     assert_eq!(next[0].0, 4);
     let next = started(&rig.finish(2, starts[1].2, Outcome::Done));
     assert_eq!(next[0].0, 3);
+}
+
+/// A wake whose VM already runs and only waits for its guest gives its
+/// place under the limit to the next wake, but stays the sandbox's step:
+/// nothing else starts for that sandbox, and it is not awake, until it
+/// finishes.
+#[test]
+fn an_unthrottled_wake_frees_its_place_but_keeps_its_sandbox() {
+    let limits = StepLimits::default().with(Step::Restore, 1);
+    let mut rig = Rig::new(HostPolicy {
+        limits,
+        ..HostPolicy::default()
+    });
+    for id in 1..=3 {
+        rig.add(id, saved(), recommended());
+    }
+    let first = started(&rig.touch(1));
+    assert_nothing_started(&rig.touch(2));
+    assert_nothing_started(&rig.touch(3));
+    let (_, step, op) = first[0];
+    assert_eq!(step, Step::Restore);
+
+    let next = started(&rig.send(Input::Unthrottled {
+        sandbox: SandboxId(1),
+        op,
+    }));
+    assert_eq!(next.iter().map(|s| s.0).collect::<Vec<_>>(), vec![2]);
+    assert_eq!(rig.host.in_flight(Step::Restore), 1);
+    let view = rig.host.sandbox(SandboxId(1)).unwrap();
+    assert_eq!(view.step, Some(Step::Restore), "still the sandbox's step");
+    assert_eq!(
+        view.state.level,
+        Level::Saved,
+        "not awake before it finishes"
+    );
+
+    // A repeated report frees nothing more, and finishing frees nothing
+    // twice.
+    assert_nothing_started(&rig.send(Input::Unthrottled {
+        sandbox: SandboxId(1),
+        op,
+    }));
+    assert_nothing_started(&rig.finish(1, op, Outcome::Done));
+    assert_eq!(rig.host.in_flight(Step::Restore), 1);
+    assert_eq!(
+        rig.host.sandbox(SandboxId(1)).unwrap().state.level,
+        Level::Running
+    );
+    let last = started(&rig.finish(2, next[0].2, Outcome::Done));
+    assert_eq!(last.iter().map(|s| s.0).collect::<Vec<_>>(), vec![3]);
+
+    // A removed sandbox's unthrottled step has no place left to give back.
+    rig.send(Input::Unthrottled {
+        sandbox: SandboxId(3),
+        op: last[0].2,
+    });
+    assert_eq!(rig.host.in_flight(Step::Restore), 0);
+    rig.send(Input::Remove {
+        sandbox: SandboxId(3),
+    });
+    rig.finish(3, last[0].2, Outcome::Done);
+    assert_eq!(rig.host.in_flight(Step::Restore), 0);
+}
+
+fn lent(actions: &[Action]) -> Vec<LoanId> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Lend { loan } => Some(*loan),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Work outside sandboxes, such as template builds, shares a step kind's
+/// limit with sandboxes' steps and waits behind every one queued.
+#[test]
+fn loans_share_a_limit_and_wait_behind_sandboxes() {
+    let limits = StepLimits::default().with(Step::Boot, 1);
+    let mut rig = Rig::new(HostPolicy {
+        limits,
+        ..HostPolicy::default()
+    });
+    let lend = |rig: &mut Rig, loan: u64| {
+        lent(&rig.send(Input::Borrow {
+            loan: LoanId(loan),
+            step: Step::Boot,
+        }))
+    };
+    assert_eq!(
+        lend(&mut rig, 1),
+        [LoanId(1)],
+        "a free place is lent at once"
+    );
+    assert_eq!(rig.host.in_flight(Step::Boot), 1);
+    assert_eq!(lend(&mut rig, 2), [], "the limit holds");
+    assert_eq!(lend(&mut rig, 2), [], "asked twice, queued once");
+
+    // A sandbox that needs to boot goes before the waiting loan.
+    rig.add(
+        7,
+        state(Level::Saved, Durability::Local, false),
+        recommended(),
+    );
+    assert_nothing_started(&rig.touch(7));
+    let freed = rig.send(Input::Return { loan: LoanId(1) });
+    let boot = started(&freed);
+    assert_eq!(
+        boot.iter().map(|s| (s.0, s.1)).collect::<Vec<_>>(),
+        [(7, Step::Boot)]
+    );
+    assert_eq!(lent(&freed), []);
+    let after = rig.finish(7, boot[0].2, Outcome::Done);
+    assert_eq!(lent(&after), [LoanId(2)]);
+    assert_eq!(rig.host.in_flight(Step::Boot), 1);
+
+    // A withdrawn request is never lent; a returned loan frees its place
+    // once.
+    assert_eq!(lend(&mut rig, 3), []);
+    rig.send(Input::Return { loan: LoanId(3) });
+    assert_eq!(lent(&rig.send(Input::Return { loan: LoanId(2) })), []);
+    rig.send(Input::Return { loan: LoanId(2) });
+    assert_eq!(rig.host.in_flight(Step::Boot), 0);
 }
 
 #[test]

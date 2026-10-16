@@ -150,7 +150,9 @@ struct ServeArgs {
     /// Keep warm templates: a guest vsock port that accepts connections
     /// once a freshly booted guest is ready for work. New sandboxes then
     /// start from a saved, booted guest of their shape instead of booting.
-    #[arg(long)]
+    /// Needs `--restore-notice-port`: a sandbox started from a template is
+    /// used only once its guest has acknowledged which sandbox it is.
+    #[arg(long, requires = "restore_notice_port")]
     template_ready_port: Option<u32>,
     /// A shape, as `VCPUSxMEMORY_MIB` such as `2x1024`, whose template is
     /// built as soon as the agent starts; other shapes get one on first

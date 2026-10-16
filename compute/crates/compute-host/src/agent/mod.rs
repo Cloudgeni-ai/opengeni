@@ -19,7 +19,7 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use compute_core::{
-    Action, At, HoldId, Host, HostPolicy, Input, Level, OpId, Outcome, Priority, SandboxId,
+    Action, At, HoldId, Host, HostPolicy, Input, Level, LoanId, OpId, Outcome, Priority, SandboxId,
     SleepPolicy, Step,
 };
 use compute_engine::{CancellationToken, Engine, VmSpec};
@@ -30,7 +30,7 @@ use tokio::time::{Instant, sleep_until};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
-use crate::pool::{Pool, PoolConfig, Shape, Sources, Template};
+use crate::pool::{Built, Lender, Loaning, Pool, PoolConfig, Shape, Sources, Template};
 
 use crate::protocol::{HostStatus, Id, SandboxConfig, StepStats};
 use crate::state::{Record, Records, StateError, claim_host};
@@ -283,11 +283,11 @@ enum Event<V> {
         /// longer fits today's inputs.
         stale: Option<Arc<Template>>,
     },
-    /// A template build ended; its VM is gone and `ordinal` free again.
+    /// A template build ended; `ordinal` is free again if its VM is gone.
     TemplateBuilt {
         shape: Shape,
         ordinal: u32,
-        result: Result<Template, String>,
+        built: Built,
     },
     StepDone {
         id: Id,
@@ -296,6 +296,14 @@ enum Event<V> {
         after: After<V>,
         /// VM processes the step started, including ones it ended again.
         launches: u32,
+    },
+    /// Work outside any sandbox asks for or gives back a place under a
+    /// step limit.
+    Loan(Loaning),
+    /// Step `op` of `id` no longer does the work its kind's limit protects.
+    Unthrottled {
+        id: Id,
+        op: OpId,
     },
     Exited {
         id: Id,
@@ -429,6 +437,14 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// unknown. Any new sandbox could clash with one, so none is created
     /// while there are any.
     unknown_ordinals: BTreeSet<SandboxId>,
+    /// Template builds an earlier agent left whose VM may still run, as
+    /// the user of an ordinal nothing records. No sandbox is created while
+    /// there are any.
+    unknown_builds: BTreeSet<String>,
+    /// Asks this agent for places under its step limits.
+    lender: Lender,
+    /// Loans waiting for their place, with whom to tell.
+    loans: HashMap<LoanId, oneshot::Sender<()>>,
     /// Dead VM processes of each sandbox still being torn down. Nothing new
     /// starts for a sandbox until its count is back to zero, so no teardown
     /// ever removes files of a newer VM.
@@ -520,6 +536,23 @@ impl Activity for Toucher {
     }
 }
 
+/// Why `config` cannot run an agent, if it cannot.
+fn check_config(config: &HostConfig) -> Result<(), String> {
+    check_root(&config.root)?;
+    if config.first_uid == 0 {
+        return Err("first_uid must not be 0: VMMs run as unprivileged users".into());
+    }
+    if let Some(network) = &config.network {
+        network.check()?;
+    }
+    if config.pool.is_some() && config.restore_notice_port.is_none() {
+        // A sandbox started from a template learns which it is only from
+        // the restore notice; see `Identity::Pending`.
+        return Err("warm templates need a restore notice port".into());
+    }
+    Ok(())
+}
+
 impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Takes over the state root, recovers every sandbox recorded under it,
     /// then runs the agent until every [`Handle`] is dropped.
@@ -535,15 +568,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     ) -> Result<(Handle, JoinHandle<()>), HostError> {
         let core =
             Host::new(config.policy).map_err(|error| HostError::Invalid(format!("{error:?}")))?;
-        check_root(&config.root).map_err(HostError::Invalid)?;
-        if config.first_uid == 0 {
-            return Err(HostError::Invalid(
-                "first_uid must not be 0: VMMs run as unprivileged users".into(),
-            ));
-        }
-        if let Some(network) = &config.network {
-            network.check().map_err(HostError::Invalid)?;
-        }
+        check_config(&config).map_err(HostError::Invalid)?;
         let host_lock = match config.host_lock.clone() {
             Some(path) => Some(claim(path, config.root.clone()).await?),
             None => None,
@@ -571,7 +596,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // Template VMs an earlier agent left are ended before any sandbox
         // can be given the user one of them ran as.
         let networked = config.network.is_some();
-        let (warm, warm_shapes) = Warm::start(
+        let warm::Started {
+            warm,
+            shapes: warm_shapes,
+            held,
+        } = Warm::start(
             config.pool,
             &engine,
             &config.root,
@@ -601,6 +630,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             destroying: HashMap::new(),
             leftovers: HashMap::new(),
             unknown_ordinals: BTreeSet::new(),
+            unknown_builds: BTreeSet::new(),
+            lender: {
+                let events = events_tx.clone();
+                Lender::new(move |loaning| {
+                    let _ = events.send(Event::Loan(loaning));
+                })
+            },
+            loans: HashMap::new(),
             tearing_down: HashMap::new(),
             teardowns: tokio::task::JoinSet::new(),
             shutdown: CancellationToken::new(),
@@ -618,6 +655,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             can_compress,
             commands_tx: commands_tx.downgrade(),
         };
+        agent.hold_builds(held);
         agent.recover(strays).await;
         for shape in warm_shapes {
             agent.want_template(shape);

@@ -14,6 +14,9 @@ pub(crate) struct InFlight {
     pub op: OpId,
     pub step: Step,
     pub cancel_sent: bool,
+    /// Whether it still counts against its kind's concurrency limit; see
+    /// [`crate::Input::Unthrottled`].
+    pub throttled: bool,
 }
 
 /// Backoff state after consecutive transient failures.

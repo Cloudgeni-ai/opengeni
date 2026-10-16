@@ -8,15 +8,25 @@ use compute_engine::Engine;
 use tokio::time::Instant;
 
 use crate::layout::Images;
-use crate::pool::{self, Build, Pool, PoolConfig, Shape, Sources, Template};
+use crate::pool::{self, Build, Built, Held, Pool, PoolConfig, Shape, Sources, Template};
 use crate::store::Store;
 
 use super::{Event, HostAgent, Warm};
 
+/// How a starting agent stands with templates.
+pub(super) struct Started {
+    /// Its templates, if it keeps any.
+    pub warm: Option<Warm>,
+    /// The shapes to build at once.
+    pub shapes: Vec<Shape>,
+    /// Builds an earlier agent left whose VMs may still run.
+    pub held: Vec<Held>,
+}
+
 impl Warm {
-    /// Sets up the templates of a starting agent, if it keeps any: ends the
-    /// VMs of builds an earlier agent left, keeps the templates that still
-    /// fit today's inputs, and returns the shapes to build at once.
+    /// Sets up the templates of a starting agent: ends the VMs of builds an
+    /// earlier agent left (whether or not this one keeps templates), and,
+    /// if it keeps any, keeps the templates that still fit today's inputs.
     pub(super) async fn start<E: Engine>(
         config: Option<PoolConfig>,
         engine: &E,
@@ -24,26 +34,39 @@ impl Warm {
         base_image: &Path,
         networked: bool,
         images: &Images,
-    ) -> (Option<Self>, Vec<Shape>) {
-        let Some(config) = config else {
-            return (None, Vec::new());
-        };
+    ) -> Started {
+        let (depends_on, ready_port) = config.as_ref().map_or((Vec::new(), 0), |config| {
+            (config.depends_on.clone(), config.ready_port)
+        });
         let sources = Arc::new(Sources {
             kernel: images.kernel.clone(),
             base_image: base_image.to_owned(),
-            depends_on: config.depends_on,
+            depends_on,
             boot_args: images.boot_args.clone(),
             networked,
             memory: format!("{:?}", engine.memory_profile()),
+            ready_port,
+            hashes: std::sync::Mutex::default(),
         });
-        let ready = pool::recover(engine, root, &sources, images.first_uid).await;
-        let warm = Self {
-            pool: Pool::new(ready),
-            sources,
-            ready_port: config.ready_port,
-            ready_timeout: config.ready_timeout,
+        let held = pool::end_leftover_builds(engine, root, &sources, images.first_uid).await;
+        let Some(config) = config else {
+            return Started {
+                warm: None,
+                shapes: Vec::new(),
+                held,
+            };
         };
-        (Some(warm), config.shapes)
+        let ready = pool::keep_templates(root, &sources).await;
+        Started {
+            warm: Some(Self {
+                pool: Pool::new(ready),
+                sources,
+                ready_port: config.ready_port,
+                ready_timeout: config.ready_timeout,
+            }),
+            shapes: config.shapes,
+            held,
+        }
     }
 }
 
@@ -81,16 +104,31 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    /// Records a finished build and frees the user its VM ran as.
-    pub(super) fn template_built(
-        &mut self,
-        shape: Shape,
-        ordinal: u32,
-        result: Result<Template, String>,
-    ) {
-        self.ordinals.remove(&ordinal);
+    /// Records a finished build and frees the user its VM ran as, once
+    /// the VM is proven gone. Otherwise the ordinal stays taken until the
+    /// next start of the agent ends the VM.
+    pub(super) fn template_built(&mut self, shape: Shape, ordinal: u32, built: Built) {
+        if built.ended {
+            self.ordinals.remove(&ordinal);
+        }
         if let Some(warm) = &mut self.warm {
-            warm.pool.built(shape, result, Instant::now());
+            warm.pool.built(shape, built.result, Instant::now());
+        }
+    }
+
+    /// Keeps the ordinals of builds an earlier agent left running taken.
+    /// One whose ordinal is unknown could clash with any new sandbox, so
+    /// none is created while it may run.
+    pub(super) fn hold_builds(&mut self, held: Vec<Held>) {
+        for build in held {
+            match build.ordinal {
+                Some(ordinal) => {
+                    self.ordinals.insert(ordinal);
+                }
+                None => {
+                    self.unknown_builds.insert(build.name);
+                }
+            }
         }
     }
 
@@ -114,15 +152,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let _ = self.events_tx.send(Event::TemplateBuilt {
                     shape,
                     ordinal,
-                    result: Err(problem),
+                    built: Built {
+                        result: Err(problem),
+                        ended: true,
+                    },
                 });
                 return;
             }
         };
-        let build = Build {
+        let job = Build {
             root: self.root.clone(),
             sources,
             shape,
+            ordinal,
+            lender: self.lender.clone(),
             uid,
             ready_port,
             ready_timeout,
@@ -130,11 +173,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let engine = Arc::clone(&self.engine);
         let events = self.events_tx.clone();
         tokio::spawn(async move {
-            let result = pool::build(&*engine, build).await;
+            let built = pool::build(&*engine, job).await;
             let _ = events.send(Event::TemplateBuilt {
                 shape,
                 ordinal,
-                result,
+                built,
             });
         });
     }

@@ -10,7 +10,7 @@ use futures::StreamExt;
 
 use crate::layout::{Images, Paths, vm_spec};
 use crate::protocol::Id;
-use crate::state::{Change, Disk, Record, StateError, Stray};
+use crate::state::{Change, Disk, Identity, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory};
 use crate::store::Store;
 
@@ -246,6 +246,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // fault. Its record still says whether a saved image
                 // stands in for it.
                 tracing::warn!(%id, "the VM's memory pager is gone; stopping the VM");
+                self.engine
+                    .stop(vm)
+                    .await
+                    .map_err(|error| HostError::Io(error.to_string()))?;
+                None
+            }
+            Some((vm, _)) if record.identity == Identity::Pending => {
+                // The previous agent restored it but its guest never
+                // acknowledged which sandbox it is: it may still think it
+                // is the template it was taken of, so nothing may use it.
+                // Its record says what its next wake starts from: the
+                // image again if the guest never ran, its disk otherwise.
+                tracing::warn!(%id, "the VM's guest does not know which sandbox it is; stopping the VM");
                 self.engine
                     .stop(vm)
                     .await

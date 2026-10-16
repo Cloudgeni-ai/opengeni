@@ -36,7 +36,7 @@ mod sandbox;
 mod time;
 
 pub use host::{Action, Failure, Host, Input, Notice, Outcome, SandboxView};
-pub use ids::{HoldId, OpId, SandboxId};
+pub use ids::{HoldId, LoanId, OpId, SandboxId};
 pub use level::{Durability, Level, Priority, State, Step};
 pub use policy::{
     Backoff, HostPolicy, MemoryPolicy, PolicyError, Rule, SleepPolicy, SleepRules, StepLimits,
