@@ -8,22 +8,63 @@ use std::io::{BufRead, BufReader};
 
 const MIB: u64 = 1 << 20;
 
-/// Takes `mib` MiB of host memory outside any VM until killed, returning
-/// once it is taken.
-fn hog(mib: u64) -> Child {
-    let mut child = Command::new("python3")
-        .arg("-c")
-        .arg(format!(
-            "import time; b = bytearray(b'x') * ({mib} << 20); print(flush=True); time.sleep(600)"
-        ))
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut line = String::new();
-    BufReader::new(child.stdout.as_mut().unwrap())
-        .read_line(&mut line)
-        .unwrap();
-    child
+/// Host memory taken outside any VM, given back when released or dropped,
+/// so a test that fails part way does not leave the host short for the
+/// tests after it.
+#[derive(Default)]
+struct Hogs(Vec<Child>);
+
+impl Hogs {
+    /// Takes `mib` MiB more, returning once it is taken.
+    fn take(&mut self, mib: u64) {
+        self.0.push(
+            Command::new("python3")
+                .arg("-c")
+                .arg(format!(
+                    "import time; b = bytearray(b'x') * ({mib} << 20); print(flush=True); time.sleep(600)"
+                ))
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let taken = self.0.last_mut().unwrap();
+        let mut line = String::new();
+        BufReader::new(taken.stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+    }
+
+    /// Gives all of it back.
+    fn release(&mut self) {
+        for mut hog in self.0.drain(..) {
+            let _ = hog.kill();
+            let _ = hog.wait();
+        }
+    }
+}
+
+impl Drop for Hogs {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// A test that fails while it holds host memory gives the memory back.
+#[test]
+fn memory_a_failing_test_took_is_given_back() {
+    let mut pid = None;
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut hogs = Hogs::default();
+        hogs.take(1);
+        pid = Some(hogs.0[0].id());
+        panic!("a test failing while it holds memory");
+    }));
+    assert!(failed.is_err());
+    let pid = pid.unwrap();
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "the process holding the memory outlived the test"
+    );
 }
 
 /// MiB of memory available for new guests, read as the agent reads it.
@@ -50,25 +91,25 @@ async fn settle() {
 /// Keeps available memory `mib` MiB below `low` until the agent has
 /// `reacted`, taking more whenever the host frees memory by itself (an
 /// earlier test's VMs still going away), so the shortage lasts until the
-/// agent sees it. Returns the hogs and when the last of them was in place.
+/// agent sees it. Returns when the last of it was in place.
 async fn short_until(
     agent: &Agent,
+    hogs: &mut Hogs,
     low: u64,
     mib: u64,
     what: &str,
     reacted: impl Fn(&HostStatus) -> bool,
-) -> (Vec<Child>, Instant) {
+) -> Instant {
     let deadline = Instant::now() + Duration::from_secs(300);
-    let mut hogs = Vec::new();
     let mut short_since = Instant::now();
     loop {
         if reacted(&agent.status().await) {
-            return (hogs, short_since);
+            return short_since;
         }
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         let available = available_mib();
         if available + mib / 2 > low {
-            hogs.push(hog(available.saturating_sub(low) + mib));
+            hogs.take(available.saturating_sub(low) + mib);
             short_since = Instant::now();
         }
         sleep(Duration::from_millis(50)).await;
@@ -109,10 +150,11 @@ fn untouched(status: &HostStatus, light: Id) {
 /// running. Returns how long that took.
 async fn balloon_gives_way(
     agent: &Agent,
+    hogs: &mut Hogs,
     low: u64,
     heavy: Id,
     light: Id,
-) -> (Duration, Vec<Child>) {
+) -> Duration {
     agent
         .wait_until("the sampler to see the guest's memory", |status| {
             find(status, heavy)
@@ -122,7 +164,7 @@ async fn balloon_gives_way(
         .await;
     let before = find(&agent.status().await, heavy).resident_bytes.unwrap();
     // Short by less than the cache it can give back.
-    let (hogs, begin) = short_until(agent, low, 128, "the balloon to inflate", |status| {
+    let begin = short_until(agent, hogs, low, 128, "the balloon to inflate", |status| {
         find(status, heavy).balloon_bytes.is_some()
     })
     .await;
@@ -143,7 +185,7 @@ async fn balloon_gives_way(
     assert_eq!(found.level, LevelName::Running);
     assert_eq!(found.paused_for_memory, None);
     untouched(&status, light);
-    (gave, hogs)
+    gave
 }
 
 /// When the host runs short with no idle sandbox to push, a sandbox in use
@@ -206,14 +248,19 @@ async fn busy_sandboxes_above_their_request_give_way_when_the_host_runs_short() 
     .await;
     let (uptime, kept) = uptime_and_kept(&agent, heavy).await;
     assert_eq!(kept, (512 * MIB).to_string());
-    let (gave, mut hogs) = balloon_gives_way(&agent, low, heavy, light).await;
+    let mut hogs = Hogs::default();
+    let gave = balloon_gives_way(&agent, &mut hogs, low, heavy, light).await;
     // Short by more than its balloon can give: it is paused and saved,
     // though held.
-    let (more, begin) = short_until(&agent, low, 1024, "it to be paused for memory", |status| {
-        find(status, heavy).paused_for_memory.is_some()
-    })
+    let begin = short_until(
+        &agent,
+        &mut hogs,
+        low,
+        1024,
+        "it to be paused for memory",
+        |status| find(status, heavy).paused_for_memory.is_some(),
+    )
     .await;
-    hogs.extend(more);
     agent
         .wait_until("it to be saved for memory", |status| {
             let found = find(status, heavy);
@@ -225,10 +272,7 @@ async fn busy_sandboxes_above_their_request_give_way_when_the_host_runs_short() 
     let saved = begin.elapsed();
     untouched(&agent.status().await, light);
     // Room comes back: it wakes by itself, its programs intact.
-    for hog in &mut hogs {
-        let _ = hog.kill();
-        let _ = hog.wait();
-    }
+    hogs.release();
     let begin = Instant::now();
     agent
         .wait_until("it to wake by itself", |status| {
