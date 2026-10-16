@@ -116,6 +116,12 @@ impl Shape {
             memory_mib: config.memory_mib,
         }
     }
+
+    /// Guest memory in bytes.
+    #[must_use]
+    pub fn bytes(self) -> u64 {
+        u64::from(self.memory_mib) << 20
+    }
 }
 
 impl fmt::Display for Shape {

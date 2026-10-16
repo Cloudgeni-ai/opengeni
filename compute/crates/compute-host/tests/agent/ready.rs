@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use tokio::time::sleep;
+
 use compute_core::HostPolicy;
 use compute_host::protocol::{
     HostStatus, Id, LevelName, Reply, Request, SandboxConfig, TemplateState,
@@ -198,6 +200,67 @@ async fn a_create_claims_a_ready_sandbox_that_learns_its_id_before_use() {
         .unwrap();
     assert_eq!(removed, Reply::Done);
     assert!(!directories(&lab).contains_key(&dir));
+    lab.assert_clean();
+}
+
+/// A claim gives its id a generation it never had: an id removed and
+/// created again from another ready sandbox, filled before the removal,
+/// never comes back at a generation requests to its old self named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claim_never_gives_an_id_a_generation_it_had() {
+    let lab = ready_lab(Lab::root(), Arc::default(), 2).await;
+    wait_filled(&lab, 2).await;
+    let generation = |lab: &Lab| record_of(lab, id(1)).1["generation"].as_u64().unwrap();
+    lab.create(id(1), NEVER).await;
+    let first = generation(&lab);
+    let removed = lab
+        .client
+        .call(&Request::Remove {
+            id: id(1),
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(removed, Reply::Done);
+    lab.create(id(1), NEVER).await;
+    let (dir, record) = record_of(&lab, id(1));
+    assert_ne!(dir, id(1).to_string(), "it claimed a ready sandbox");
+    assert!(record["generation"].as_u64().unwrap() > first);
+    // A request issued to its old self is refused.
+    let stale = lab
+        .client
+        .call(&Request::Remove {
+            id: id(1),
+            generation: Some(first),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(stale, Reply::Error { .. }), "{stale:?}");
+    lab.assert_clean();
+}
+
+/// A host whose sandbox numbers run out keeps the ready sandboxes it could
+/// fill, and keeps answering.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn running_out_of_sandbox_numbers_stops_filling_and_nothing_else() {
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        |config| {
+            keeping(5)(config);
+            // Users for sandbox numbers 0 to 2 only.
+            config.first_uid = u32::MAX - 3;
+        },
+    )
+    .await;
+    lab.wait_until("three ready sandboxes, and no more", |status| {
+        pool(status) == (3, 0, 5)
+    })
+    .await;
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(pool(&lab.status().await), (3, 0, 5));
     lab.assert_clean();
 }
 

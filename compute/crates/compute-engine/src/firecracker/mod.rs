@@ -942,7 +942,7 @@ impl Engine for Firecracker {
 
     fn resident_bytes(&self, vm: &FirecrackerVm) -> Result<u64, EngineError> {
         vm.cgroup
-            .memory_current()
+            .memory_held(vm.pid(), self.memory.pages == PageSize::Huge)
             .map_err(|error| EngineError::io("resident_bytes", error))
     }
 

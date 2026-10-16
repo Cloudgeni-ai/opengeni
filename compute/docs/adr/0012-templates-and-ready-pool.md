@@ -46,7 +46,8 @@ sandboxes created at once all pay it at the same time.
 - A ready pool (`--template SHAPE:COUNT`) keeps COUNT clones per shape
   restored, warmed until the guest accepts connections, and paused, outside
   the decision core. A create takes the oldest with one compare-and-set
-  record write giving it the sandbox's id and settings. Its host-side names
+  record write giving it the sandbox's id and settings, and a generation
+  above any that id has had, so a claim never reuses one. Its host-side names
   (directory, jail, cgroup, network namespace, user) stay as filled, since
   cgroups and namespaces cannot be renamed; the record keeps both names. Its
   first wake is a resume that sends the notice.
@@ -54,8 +55,10 @@ sandboxes created at once all pay it at the same time.
   goes stale, when memory runs low (before any sandbox is evicted), and when
   the agent starts. Being the cheapest memory to give back, they go first,
   ahead of any idle sandbox. They fill a few at a time, only while memory
-  stays above a reserve. The agent knows their count and resident memory per
-  shape (also in status), for the admission budget to count.
+  stays above a reserve after every fill under way at its full size, and
+  stop when sandbox users run out. The agent knows their count and resident
+  memory per shape (huge pages included; also in status), for the admission
+  budget to count.
 - A shape with no create for a while (`--template-unused-secs`, a week by
   default) retires: its template and ready clones go, and nothing is built
   or filled for it until its next create, which boots cold. The last use is

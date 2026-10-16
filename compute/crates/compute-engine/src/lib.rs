@@ -157,7 +157,7 @@ pub trait Engine: Send + Sync + 'static {
     /// resources. Succeeds when there is none.
     fn clean_up(&self, spec: &VmSpec) -> impl Future<Output = Result<(), EngineError>> + Send;
 
-    /// Bytes of host memory the VM holds right now.
+    /// Bytes of host memory the VM holds right now, huge pages included.
     fn resident_bytes(&self, vm: &Self::Vm) -> Result<u64, EngineError>;
 
     /// Processor time the VM has used since it started, counting every

@@ -16,6 +16,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.available_memory = std::fs::read_to_string("/proc/meminfo")
             .ok()
             .and_then(|meminfo| available_memory(&meminfo, huge));
+        self.ready.sampled();
         let mut batch: Vec<Input> = match self.busy {
             Some(rule) => self
                 .sample_busy(rule)

@@ -687,7 +687,9 @@ impl Records {
     /// one write makes it sandbox `id` with `config`, no longer ready, and
     /// with a guest that has yet to learn which sandbox it is. Its
     /// directory keeps its name, which the record keeps as its host name.
-    /// Returns the record now committed.
+    /// Like a new record it takes a generation no earlier record used, so
+    /// one `id` had before never comes back with it. Returns the record now
+    /// committed.
     ///
     /// The record answers to whichever id its file holds afterwards: `id`
     /// once the write landed, `ready` if it did not, and whatever the file
@@ -712,6 +714,7 @@ impl Records {
             entries.insert(id.0, Arc::clone(&entry));
             entry
         };
+        let generations = Arc::clone(&self.generations);
         let result = self
             .exclusive(Arc::clone(&entry), move |slot| {
                 let current = slot.current().ok_or(StateError::NotFound(ready))?;
@@ -729,6 +732,7 @@ impl Records {
                     ready: false,
                     config,
                     identity: Identity::Pending,
+                    generation: generations.unused().max(current.generation),
                     revision: current.revision + 1,
                     ..current
                 };

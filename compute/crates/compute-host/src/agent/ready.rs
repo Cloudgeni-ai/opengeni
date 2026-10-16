@@ -92,6 +92,9 @@ pub(super) struct Ready<V> {
     freeing: HashMap<SandboxId, u64>,
     /// Memory a fill leaves free besides its own.
     reserve: u64,
+    /// Memory of fills that finished since available memory was last
+    /// read, which that reading does not show yet.
+    unsampled: u64,
     /// Ready sandboxes a create is claiming, by host name, with whether
     /// their VM ended meanwhile.
     claiming: HashMap<SandboxId, bool>,
@@ -108,6 +111,7 @@ impl<V> Ready<V> {
             retry: HashMap::new(),
             freeing: HashMap::new(),
             reserve: memory.map_or(DEFAULT_RESERVE, |memory| memory.high_watermark),
+            unsampled: 0,
             claiming: HashMap::new(),
         }
     }
@@ -143,6 +147,11 @@ impl<V> Ready<V> {
     pub fn freeing(&self) -> u64 {
         self.freeing.values().sum()
     }
+
+    /// Available memory was read afresh: it shows every finished fill.
+    pub fn sampled(&mut self) {
+        self.unsampled = 0;
+    }
 }
 
 /// How a fill ended.
@@ -154,9 +163,12 @@ pub(super) enum Filled<V> {
         memory: LiveMemory,
         template: Arc<Template>,
     },
-    /// It failed before it had a record; nothing of it is left.
+    /// It failed before it had a record. Unless `cleaned`, its network may
+    /// be left, so its directory stays for the next start to tidy and its
+    /// ordinal stays taken until then.
     Unrecorded {
         ordinal: u32,
+        cleaned: bool,
         /// The template no longer fits today's inputs.
         stale: Option<Arc<Template>>,
     },
@@ -183,7 +195,11 @@ impl<E: Engine, S: Store> Fill<E, S> {
     /// waits for its guest and pauses it.
     async fn run(mut self) -> Filled<E::Vm> {
         let (host, ordinal) = (self.job.id, self.job.record.ordinal);
-        let unrecorded = |stale| Filled::Unrecorded { ordinal, stale };
+        let unrecorded = |cleaned, stale| Filled::Unrecorded {
+            ordinal,
+            cleaned,
+            stale,
+        };
         let prepared = {
             let (paths, base) = (self.job.paths.clone(), self.base.clone());
             let (template, sources) = (Arc::clone(&self.template), Arc::clone(&self.sources));
@@ -214,8 +230,8 @@ impl<E: Engine, S: Store> Fill<E, S> {
             Ok(record) => self.job.record = record,
             Err(error) => {
                 tracing::warn!(%host, %error, "could not fill a ready sandbox");
-                self.forget(host, ordinal).await;
-                return unrecorded(stale.then_some(self.template));
+                let cleaned = self.forget(host, ordinal).await;
+                return unrecorded(cleaned, stale.then_some(self.template));
             }
         }
         // Its restore waits behind every restore a sandbox asked for, and
@@ -255,12 +271,22 @@ impl<E: Engine, S: Store> Fill<E, S> {
         }
     }
 
-    /// Removes what a fill made before its record existed.
-    async fn forget(&self, host: Id, ordinal: u32) {
+    /// Removes what a fill made before its record existed. Returns whether
+    /// its network is gone; if not, its directory stays, so the next start
+    /// finds it unrecorded and tidies it.
+    async fn forget(&self, host: Id, ordinal: u32) -> bool {
         if let Some(net) = self.net.clone() {
-            let _ = tokio::task::spawn_blocking(move || net.remove(host, Some(ordinal))).await;
+            let removed = tokio::task::spawn_blocking(move || net.remove(host, Some(ordinal)))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|removed| removed.map_err(|error| error.to_string()));
+            if let Err(error) = removed {
+                tracing::error!(%host, ordinal, %error, "a failed ready sandbox's network is left; it stays until the next start");
+                return false;
+            }
         }
         let _ = tokio::fs::remove_dir_all(&self.job.paths.dir).await;
+        true
     }
 }
 
@@ -322,31 +348,33 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             while self.ready.filling.len() < FILL_AT_ONCE
                 && self.ready.count(shape) < target as usize
                 && self.memory_allows(shape)
-            {
-                self.fill(shape, &template);
-            }
+                && self.fill(shape, &template)
+            {}
         }
     }
 
     /// Whether the host's memory leaves room for one more fill of `shape`
-    /// on top of those under way. Unknown memory allows it.
+    /// on top of those under way and those finished since memory was read.
+    /// Unknown memory allows it.
     fn memory_allows(&self, shape: Shape) -> bool {
         let Some(available) = self.available_memory else {
             return true;
         };
-        let each = u64::from(shape.memory_mib) << 20;
-        let filling = u64::try_from(self.ready.filling.len()).unwrap_or(u64::MAX);
-        let needed = self
+        let pending = self
             .ready
-            .reserve
-            .saturating_add(each.saturating_mul(filling.saturating_add(1)));
-        available >= needed
+            .filling
+            .values()
+            .map(|filling| filling.bytes())
+            .fold(self.ready.unsampled, u64::saturating_add);
+        fits(available, self.ready.reserve, pending, shape.bytes())
     }
 
     /// Starts filling one ready sandbox of `shape` from `template`.
-    fn fill(&mut self, shape: Shape, template: &Arc<Template>) {
+    /// Returns whether it started; one that cannot start has set when its
+    /// shape tries again.
+    fn fill(&mut self, shape: Shape, template: &Arc<Template>) -> bool {
         let Some(warm) = &self.warm else {
-            return;
+            return false;
         };
         let (sources, ready_port, ready_timeout) = (
             Arc::clone(&warm.sources),
@@ -358,7 +386,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             host = fresh_name();
         }
         let Ok(ordinal) = self.take_ordinal() else {
-            return;
+            self.ready.retry.insert(shape, Instant::now() + FILL_RETRY);
+            return false;
         };
         let allocation = match self.images.allocate(ordinal) {
             Ok(allocation) => allocation,
@@ -366,7 +395,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 tracing::warn!(%shape, %problem, "no room for a ready sandbox");
                 self.ordinals.remove(&ordinal);
                 self.ready.retry.insert(shape, Instant::now() + FILL_RETRY);
-                return;
+                return false;
             }
         };
         let config = SandboxConfig {
@@ -402,6 +431,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 filled: Box::new(filled),
             });
         });
+        true
     }
 
     /// Takes in a finished fill.
@@ -416,6 +446,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 template,
             } => {
                 self.ready.retry.remove(&shape);
+                self.ready.unsampled = self.ready.unsampled.saturating_add(shape.bytes());
                 let live = self.own(host, vm, memory);
                 let Some(record) = self.records.get(host) else {
                     tracing::error!(%host, "a ready sandbox lost its record");
@@ -437,8 +468,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     self.discard(idle);
                 }
             }
-            Filled::Unrecorded { ordinal, stale } => {
-                self.ordinals.remove(&ordinal);
+            Filled::Unrecorded {
+                ordinal,
+                cleaned,
+                stale,
+            } => {
+                // Its VMM's user and host link may still be in use.
+                if cleaned {
+                    self.ordinals.remove(&ordinal);
+                }
                 self.ready.retry.insert(shape, Instant::now() + FILL_RETRY);
                 if let Some(template) = stale {
                     self.template_stale(&template);
@@ -722,11 +760,30 @@ pub(super) struct Claimed<V> {
     result: Option<Result<Record, HostError>>,
 }
 
+/// Whether `available` memory leaves `reserve` free once fills under way
+/// or not yet seen in it (`pending`) and one more of `each` have taken
+/// theirs.
+fn fits(available: u64, reserve: u64, pending: u64, each: u64) -> bool {
+    available >= reserve.saturating_add(pending).saturating_add(each)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const MIB: u64 = 1 << 20;
+
+    #[test]
+    fn a_fill_counts_every_fill_under_way_at_its_own_size() {
+        let (reserve, small, big) = (1000 * MIB, 512 * MIB, 2048 * MIB);
+        let available = reserve + 3072 * MIB;
+        assert!(fits(available, reserve, 0, big));
+        assert!(fits(available, reserve, big, small), "2.5 GiB of 3");
+        // Two big fills under way (or one under way and one finished since
+        // memory was read) leave no room for a small one.
+        assert!(!fits(available, reserve, 2 * big, small));
+        assert!(!fits(0, reserve, 0, small));
+    }
 
     #[test]
     fn low_memory_frees_ready_sandboxes_up_to_the_high_watermark() {

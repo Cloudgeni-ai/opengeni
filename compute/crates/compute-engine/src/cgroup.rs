@@ -4,6 +4,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// One cgroup v2 directory.
@@ -52,6 +53,25 @@ impl Cgroup {
     /// Bytes of memory charged to the group, compressed swap included.
     pub fn memory_current(&self) -> io::Result<u64> {
         read_u64(&self.path.join("memory.current"))
+    }
+
+    /// Bytes of memory the group holds: what it is charged, plus, with
+    /// `huge` pages, those the VMM process `vmm` maps when the hierarchy
+    /// does not charge huge pages to memory (cgroup2 mounted without
+    /// `memory_hugetlb_accounting`, the default).
+    pub fn memory_held(&self, vmm: i32, huge: bool) -> io::Result<u64> {
+        let charged = self.memory_current()?;
+        if !huge || hugetlb_charged() {
+            return Ok(charged);
+        }
+        let rollup = fs::read_to_string(format!("/proc/{vmm}/smaps_rollup"))?;
+        let mapped = hugetlb_mapped(&rollup).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "smaps_rollup shows no huge pages",
+            )
+        })?;
+        Ok(charged.saturating_add(mapped))
     }
 
     /// Processor time the group's processes have used since it was created
@@ -198,6 +218,43 @@ impl Cgroup {
     }
 }
 
+/// Whether this host's cgroup2 hierarchy charges huge pages to memory.
+fn hugetlb_charged() -> bool {
+    static CHARGED: OnceLock<bool> = OnceLock::new();
+    *CHARGED.get_or_init(|| {
+        fs::read_to_string("/proc/self/mounts").is_ok_and(|mounts| charges_hugetlb(&mounts))
+    })
+}
+
+/// Whether a cgroup2 mount in `mounts` charges huge pages to memory.
+fn charges_hugetlb(mounts: &str) -> bool {
+    mounts.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields.nth(2) == Some("cgroup2")
+            && fields.next().is_some_and(|options| {
+                options
+                    .split(',')
+                    .any(|option| option == "memory_hugetlb_accounting")
+            })
+    })
+}
+
+/// Bytes of huge pages mapped, shared and private, from `smaps_rollup`.
+fn hugetlb_mapped(rollup: &str) -> Option<u64> {
+    let mut mapped = None;
+    for line in rollup.lines() {
+        let Some(rest) = line
+            .strip_prefix("Shared_Hugetlb:")
+            .or_else(|| line.strip_prefix("Private_Hugetlb:"))
+        else {
+            continue;
+        };
+        let kib: u64 = rest.trim().strip_suffix("kB")?.trim().parse().ok()?;
+        mapped = Some(mapped.unwrap_or(0_u64).saturating_add(kib << 10));
+    }
+    mapped
+}
+
 fn read_u64(path: &Path) -> io::Result<u64> {
     fs::read_to_string(path)?
         .trim()
@@ -244,5 +301,27 @@ mod tests {
                         write_bytes: 0\ncancelled_write_bytes: 0\n";
         assert_eq!(parse_io_bytes(counters).unwrap(), 1234);
         assert!(parse_io_bytes("rchar: 5\n").is_err());
+    }
+
+    #[test]
+    fn huge_pages_count_only_where_memory_is_not_charged_for_them() {
+        let plain =
+            "cgroup2 /sys/fs/cgroup cgroup2 rw,nosuid,nsdelegate,memory_recursiveprot 0 0\n";
+        let charged = "proc /proc proc rw 0 0\n\
+                       cgroup2 /sys/fs/cgroup cgroup2 rw,nsdelegate,memory_hugetlb_accounting 0 0\n";
+        assert!(!charges_hugetlb(plain));
+        assert!(charges_hugetlb(charged));
+        assert!(!charges_hugetlb(
+            "tmpfs /memory_hugetlb_accounting tmpfs rw 0 0\n"
+        ));
+    }
+
+    #[test]
+    fn reads_mapped_huge_pages_from_smaps_rollup() {
+        let rollup = "55d0-7ffd ---p 00000000 00:00 0 [rollup]\nRss: 12 kB\n\
+                      Shared_Hugetlb:     2048 kB\nPrivate_Hugetlb:   4096 kB\nSwap: 0 kB\n";
+        assert_eq!(hugetlb_mapped(rollup), Some(6 << 20));
+        assert_eq!(hugetlb_mapped("Rss: 12 kB\n"), None, "an older kernel");
+        assert_eq!(hugetlb_mapped("Private_Hugetlb: lots\n"), None);
     }
 }
