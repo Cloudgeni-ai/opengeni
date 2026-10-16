@@ -2,6 +2,7 @@ import "./lib/crypto-random-uuid";
 // Must evaluate before ./App creates the router from the current URL.
 import "./lib/signup-attribution-boot";
 import { AppearanceProvider } from "./lib/appearance";
+import { markClassicScrollbars } from "@opengeni/react";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { App, appDestinationRoutePattern, appRoutePattern } from "./App";
@@ -26,6 +27,8 @@ import {
 import "./styles.css";
 
 retainIdentityLinkContinuation(window);
+// Before the first paint: slim scrollbars where the platform draws classic ones.
+markClassicScrollbars(document);
 // Error counter and diagnostics (scrubbed, bounded error text); see
 // lib/client-error-reporting.ts.
 // An undeliverable report is retried once when the browser is next online.
