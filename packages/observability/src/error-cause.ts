@@ -59,6 +59,7 @@ export const PUBLIC_INTERACTION_ERROR_CODES: ReadonlySet<string> = new Set([
   "unsupported",
   "permission_denied",
   "machine_locked",
+  "capacity_exhausted",
   "attempt_stale",
   "operation_conflict",
   "outcome_unknown",

@@ -117,7 +117,10 @@ import {
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { ApiHttpError } from "../http/api-error";
-import { interactionControlApiError } from "../http/interaction-control-error";
+import {
+  interactionControlApiError,
+  legacyInteractionCapacityError,
+} from "../http/interaction-control-error";
 import {
   createInteractionFrameProxyAttachment,
   placementUsesInteractionFrameProxy,
@@ -2181,6 +2184,8 @@ function computerRouteError(error: unknown): HTTPException {
   ) {
     return new HTTPException(409, { message: error.message, cause: error });
   }
+  const legacyCapacity = legacyInteractionCapacityError(error, "computer");
+  if (legacyCapacity) return legacyCapacity;
   if (error instanceof BrowserControlRequestError) {
     return new HTTPException(error.status as ContentfulStatusCode, {
       message: error.error.message,

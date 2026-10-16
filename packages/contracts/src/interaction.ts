@@ -2485,6 +2485,7 @@ export const InteractionError = /* @__PURE__ */ defineSchema(() =>
         "unsupported",
         "permission_denied",
         "machine_locked",
+        "capacity_exhausted",
         "attempt_stale",
         "operation_conflict",
         "outcome_unknown",
