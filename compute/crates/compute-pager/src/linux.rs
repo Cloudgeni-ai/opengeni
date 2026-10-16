@@ -134,14 +134,21 @@ pub struct Stats {
     pub unmap_events: u64,
     /// Pages the prefetch plan copied in.
     pub prefetched_pages: u64,
-    /// Time from queueing the prefetch plan to its last page arriving.
+    /// Time from queueing the prefetch plan to its last page arriving,
+    /// including pages queued with [`Pager::queue_background`].
     pub prefetch_ms: f64,
+    /// Time from queueing the prefetch plan to the last page queued with
+    /// [`Pager::queue_prefetch`] being in place: how long a wake that waits
+    /// for [`Progress::Prefetched`] waited.
+    pub ready_ms: f64,
 }
 
 /// Something the caller of [`Pager::run`] may want to act on.
 #[derive(Debug)]
 pub enum Progress<'a> {
-    /// Every page of the prefetch plan is in place (or was discarded).
+    /// Every page queued with [`Pager::queue_prefetch`] is in place (or was
+    /// discarded). Pages queued with [`Pager::queue_background`] may still
+    /// be arriving.
     Prefetched,
     /// The first-touch recording window closed; these are the image offsets
     /// the guest touched first, in order.
@@ -196,6 +203,10 @@ pub struct Pager<S> {
     parked: Vec<u64>,
     /// Prefetch pages not tried yet, in priority order.
     plan: VecDeque<Page>,
+    /// Indices of the pages the caller waits for, in plan order, and how
+    /// many of them from the front are known to be in place.
+    gate: Vec<usize>,
+    gate_done: usize,
     /// Prefetch runs waiting on the source.
     waiting: Vec<Run>,
     max_batch: u64,
@@ -227,6 +238,8 @@ impl<S: Source> Pager<S> {
             faults: VecDeque::new(),
             parked: Vec::new(),
             plan: VecDeque::new(),
+            gate: Vec::new(),
+            gate_done: 0,
             waiting: Vec::new(),
             max_batch: MAX_BATCH,
             started: Instant::now(),
@@ -259,17 +272,34 @@ impl<S: Source> Pager<S> {
 
     /// Queues `pages` to be copied in ahead of demand, in order, in copies
     /// of at most `max_batch` bytes. Demand faults always go first.
+    /// [`Progress::Prefetched`] waits for these pages.
     pub fn queue_prefetch(&mut self, pages: &[Page], max_batch: u64) -> io::Result<()> {
-        // Revalidate public Page inputs rather than trusting caller indices.
+        self.validate(pages)?;
+        self.max_batch = max_batch.clamp(1, MAX_BATCH);
+        self.gate.extend(pages.iter().map(|page| page.index));
+        self.plan.extend(pages);
+        self.prefetch_started.get_or_insert_with(Instant::now);
+        Ok(())
+    }
+
+    /// Queues `pages` to be copied in after everything already queued,
+    /// without holding back [`Progress::Prefetched`]: the rest of a working
+    /// set, streamed in while the guest already runs.
+    pub fn queue_background(&mut self, pages: &[Page]) -> io::Result<()> {
+        self.validate(pages)?;
+        self.plan.extend(pages);
+        self.prefetch_started.get_or_insert_with(Instant::now);
+        Ok(())
+    }
+
+    /// Revalidates public Page inputs rather than trusting caller indices.
+    fn validate(&self, pages: &[Page]) -> io::Result<()> {
         if pages
             .iter()
             .any(|page| self.layout.offset(page.offset) != Some(*page))
         {
             return Err(invalid("invalid prefetch page"));
         }
-        self.max_batch = max_batch.clamp(1, MAX_BATCH);
-        self.plan.extend(pages);
-        self.prefetch_started.get_or_insert_with(Instant::now);
         Ok(())
     }
 
@@ -277,6 +307,19 @@ impl<S: Source> Pager<S> {
     #[must_use]
     pub fn prefetched(&self) -> bool {
         self.plan.is_empty() && self.waiting.is_empty()
+    }
+
+    /// Whether every page queued with [`Pager::queue_prefetch`] is in place
+    /// or no longer needs to be. Amortized constant time: the pages are
+    /// checked in plan order and each is passed once.
+    pub fn ready(&mut self) -> bool {
+        while let Some(&index) = self.gate.get(self.gate_done) {
+            if self.state[index] & (PRESENT | REMOVED | UNMAPPED) == 0 {
+                return false;
+            }
+            self.gate_done += 1;
+        }
+        true
     }
 
     /// Copies `pages` in ahead of demand and returns once they are all in
@@ -602,7 +645,7 @@ impl<S: Source> Pager<S> {
         stopped: &AtomicBool,
         mut progress: impl FnMut(Progress<'_>),
     ) -> io::Result<()> {
-        let mut reported_prefetch = false;
+        let mut reported_ready = false;
         while !stopped.load(Ordering::Relaxed) {
             if let Err(error) = self.turn() {
                 // The VMM can disappear between the last peer poll and COPY.
@@ -612,10 +655,15 @@ impl<S: Source> Pager<S> {
                 }
                 return Err(error);
             }
-            if !reported_prefetch && self.prefetched() {
-                reported_prefetch = true;
-                self.finish_prefetch();
+            if !reported_ready && self.ready() {
+                reported_ready = true;
+                if let Some(started) = self.prefetch_started {
+                    self.stats.ready_ms = started.elapsed().as_secs_f64() * 1000.0;
+                }
                 progress(Progress::Prefetched);
+            }
+            if self.prefetch_started.is_some() && self.prefetched() {
+                self.finish_prefetch();
             }
             if !self.recorded && self.started.elapsed() > self.record_for {
                 self.recorded = true;
@@ -970,6 +1018,35 @@ mod tests {
         });
         assert!(memory[8192..].iter().all(|byte| *byte == 0x33));
         assert_eq!(pager.stats.prefetched_pages, 2);
+        drop(pager);
+    }
+
+    #[test]
+    #[ignore = "requires Linux userfaultfd permission"]
+    fn kernel_the_wake_waits_only_for_the_gated_prefix() {
+        let (mut pager, memory, _sender) = live_pager();
+        let plan = pager.layout.plan(&[0, 4096, 8192, 12288]).unwrap();
+        assert!(pager.ready(), "nothing queued, nothing to wait for");
+        pager.queue_prefetch(&plan[..1], 4096).unwrap();
+        pager.queue_background(&plan[1..]).unwrap();
+        assert!(!pager.ready());
+        // The gated page is copied first, in plan order; the tail is not
+        // needed for the wake to go on.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pager.ready() {
+            assert!(Instant::now() < deadline, "gated prefix never arrived");
+            pager.turn().unwrap();
+        }
+        assert_eq!(memory[0], 0x5a);
+        while !pager.prefetched() {
+            assert!(Instant::now() < deadline, "background tail never arrived");
+            pager.turn().unwrap();
+        }
+        assert!(memory.iter().all(|byte| *byte == 0x5a));
+        assert_eq!(pager.stats.prefetched_pages, 4);
+        let mut forged = plan[0];
+        forged.index = usize::MAX;
+        assert!(pager.queue_background(&[forged]).is_err());
         drop(pager);
     }
 }

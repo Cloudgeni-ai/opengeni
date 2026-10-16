@@ -10,10 +10,11 @@
 //!
 //! A remote wake runs in three overlapping phases:
 //!
-//! 1. **Prefetch.** The chunks the guest touched first after its previous
-//!    wake (its learned profile) are requested as soon as the source
-//!    exists, before the VMM even starts, and the guest resumes once they
-//!    are in place.
+//! 1. **Prefetch.** The pages the guest touched after its previous wake
+//!    (its learned profile, in first-touch order) are requested as soon as
+//!    the source exists, before the VMM even starts. The guest resumes once
+//!    the first [`READY_BYTES`] of them are in place; the rest stream in
+//!    behind it, still ahead of hydration.
 //! 2. **Demand.** Any other page the guest touches is fetched at once,
 //!    ahead of everything else, with a few chunks after it; the fault
 //!    waits only for its own chunk.
@@ -77,9 +78,16 @@ const RETRY_DELAY_MAX: Duration = Duration::from_secs(2);
 const PROFILE_PAGES: usize = 1 << 16;
 /// How long a pager waits for its VMM to connect.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long the first-touch order is recorded after a wake: long enough to
-/// cover a slow first wake, whose working set the next wake prefetches.
-const RECORD_FOR: Duration = Duration::from_secs(15);
+/// How long the first-touch order is recorded after a wake. A VM that
+/// sleeps sooner reports what it touched when its VMM goes. The window is
+/// wall-clock time, and a first wake on a busy host may take tens of
+/// seconds to reach the working set the next wake should prefetch, so it
+/// is generous; the profile's order keeps the earliest pages first.
+const RECORD_FOR: Duration = Duration::from_secs(120);
+/// How much of the learned profile a wake waits for before the guest
+/// resumes. More is prefetched behind it, but a guest that only needs the
+/// start of its working set to answer should not wait for all of it.
+const READY_BYTES: u64 = 128 << 20;
 
 type Fetched = Result<Arc<Vec<u8>>, Arc<compute_storage::Error>>;
 
@@ -740,7 +748,9 @@ fn serve(
         .iter()
         .filter_map(|offset| pager.layout().offset(*offset))
         .collect();
-    pager.queue_prefetch(&plan, MAX_BATCH)?;
+    let (ready, rest) = plan.split_at(ready_prefix(&plan, READY_BYTES));
+    pager.queue_prefetch(ready, MAX_BATCH)?;
+    pager.queue_background(rest)?;
     let result = pager.run(stop, |progress| match progress {
         Progress::Prefetched => {
             let _ = prefetched.send(true);
@@ -756,6 +766,18 @@ fn serve(
     result
 }
 
+/// How many pages from the front of `plan` fit in `budget` bytes, and at
+/// least one if there are any, so a wake always waits for its first page.
+fn ready_prefix(plan: &[compute_pager::Page], budget: u64) -> usize {
+    let mut bytes = 0_u64;
+    plan.iter()
+        .position(|page| {
+            bytes = bytes.saturating_add(page.size);
+            bytes > budget
+        })
+        .map_or(plan.len(), |over| over.max(1))
+}
+
 /// The chunk map entry for chunk bytes, as [`crate::image`] records it.
 #[allow(dead_code)]
 pub(crate) fn chunk_hash(plain: &[u8]) -> Hash {
@@ -763,5 +785,55 @@ pub(crate) fn chunk_hash(plain: &[u8]) -> Hash {
         ZERO
     } else {
         *blake3::hash(plain).as_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pages(sizes: &[u64]) -> Vec<compute_pager::Page> {
+        let mut offset = 0;
+        sizes
+            .iter()
+            .enumerate()
+            .map(|(index, &size)| {
+                let page = compute_pager::Page {
+                    address: offset,
+                    offset,
+                    size,
+                    index,
+                };
+                offset += size;
+                page
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_wake_waits_for_the_profile_prefix_that_fits_its_budget() {
+        assert_eq!(ready_prefix(&[], 4096), 0);
+        assert_eq!(ready_prefix(&pages(&[4096; 10]), 4 * 4096), 4);
+        assert_eq!(ready_prefix(&pages(&[4096; 3]), 1 << 20), 3);
+        // A huge page larger than the budget is still waited for.
+        assert_eq!(ready_prefix(&pages(&[2 << 20; 4]), 1 << 20), 1);
+        assert_eq!(ready_prefix(&pages(&[2 << 20; 4]), 4 << 20), 2);
+    }
+
+    #[test]
+    fn learning_keeps_the_old_order_first_and_bounds_the_profile() {
+        let old = WakeProfile {
+            version: 1,
+            offsets: vec![8192, 0],
+        };
+        let next = old.learn(&[4096, 0, 12288]);
+        assert_eq!(next.offsets, vec![8192, 0, 4096, 12288]);
+        let many: Vec<u64> = (0..2 * PROFILE_PAGES as u64)
+            .map(|page| page * 4096)
+            .collect();
+        assert_eq!(
+            WakeProfile::default().learn(&many).offsets.len(),
+            PROFILE_PAGES
+        );
     }
 }
