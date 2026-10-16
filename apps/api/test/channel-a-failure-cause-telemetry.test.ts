@@ -41,7 +41,7 @@ describe("Channel-A failure cause telemetry", () => {
   test("an unexpected browser resume failure names the controller refusal", () => {
     const refusal = new BrowserControlRequestError(500, {
       code: "driver_failed",
-      message: "profile /home/someone/.config/browser failed",
+      message: "profile /home/user/.config/browser failed",
       retryable: false,
     });
     const [line] = observedWarnings(refusal);
@@ -53,7 +53,7 @@ describe("Channel-A failure cause telemetry", () => {
       causeCode: "driver_failed",
       causeStatus: 500,
     });
-    expect(JSON.stringify(line)).not.toContain("/home/someone");
+    expect(JSON.stringify(line)).not.toContain("/home/user");
   });
 
   test("a plain programming error is still identified by its class only", () => {
