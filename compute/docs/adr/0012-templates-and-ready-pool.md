@@ -32,9 +32,11 @@ sandboxes created at once all pay it at the same time.
   A guest booted from a disk whose machine id was made for another sandbox
   (the base image's, or a template's when a clone fell back to booting)
   makes its own at startup, and a clone's fallback boot is used only after
-  the same `ok seeded`. Notices apply one at a time and one sent before the
-  latest applied is ignored, so a late attempt never takes back a newer
-  identity.
+  the same `ok seeded`. Notices apply one at a time and carry an order, the
+  sandbox record's generation and revision, which a durable write raises
+  before every new notice; one ordered below the latest applied is ignored,
+  so a late attempt never takes back a newer identity, whatever the host's
+  clock did. The notice's time only sets the guest's clock.
 - The guest helper that answers notices and runs commands must outlast the
   user's programs when the guest runs out of memory: it sets its own
   `oom_score_adj` to -1000, and each command it starts resets it to 0 (the

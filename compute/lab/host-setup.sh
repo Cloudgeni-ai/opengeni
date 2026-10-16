@@ -27,7 +27,8 @@ log() { printf '[host-setup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 # The guest's side of the host agent's identity contract: a booted guest
 # finds its sandbox id on the kernel command line (`opengeni.sandbox=`), a
 # restored one in the restore notice on vsock port 53 (`restored <unix
-# nanoseconds> sandbox=<id> seed=<hex>`), which also sets the clock.
+# nanoseconds> sandbox=<id> seed=<hex> order=<generation>.<revision>`),
+# whose time sets the clock.
 # Either way the id ends up in /run/sandbox-id. The notice's `seed` is
 # mixed into the guest's random number generator, which reseeds before the
 # guest answers `ok seeded` (`ok` if it could not), so no command of the new
@@ -37,8 +38,9 @@ log() { printf '[host-setup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 # id was not made for the sandbox it is (/etc/opengeni-identity names whom
 # it was made for) makes its own, with the hostname, at boot and before it
 # acknowledges a notice: a clone, or a guest booted from a cloned disk.
-# Notices are applied one at a time, and one older than the latest applied
-# is ignored, so a late attempt never takes back a newer identity.
+# Notices are applied one at a time, and one whose order (the host's record
+# fence, never the clock) is below the latest applied is ignored, so a late
+# attempt never takes back a newer identity.
 # A template is snapshotted once the guest accepts on vsock port 54, which
 # opens only when systemd has finished starting everything, so clones wake
 # settled instead of mid-boot.
@@ -85,7 +87,7 @@ def renew_identity(sandbox, seed):
 listener = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
 listener.bind((socket.VMADDR_CID_ANY, 53))
 listener.listen(64)
-latest = 0
+latest = None
 while True:
     connection, _ = listener.accept()
     with connection:
@@ -97,11 +99,13 @@ while True:
                     raise EOFError
                 line += chunk
             word, nanos, *rest = line.decode().split()
-            if word != "restored" or int(nanos) < latest:
-                continue
-            latest = int(nanos)
-            time.clock_settime_ns(time.CLOCK_REALTIME, latest)
             fields = dict(field.partition("=")[::2] for field in rest)
+            # Ordered by the host's record fence, never by the clock.
+            order = tuple(int(part) for part in fields.get("order", "").split("."))
+            if word != "restored" or len(order) != 2 or (latest and order < latest):
+                continue
+            latest = order
+            time.clock_settime_ns(time.CLOCK_REALTIME, int(nanos))
             sandbox, seed = fields.get("sandbox", ""), fields.get("seed", "")
             if sandbox and (sandbox != current_sandbox() or not owns_identity(sandbox)):
                 try:
@@ -281,7 +285,8 @@ if [ -f base.ext4 ] && {
   ! sudo debugfs -R "cat /etc/systemd/system/lab-identity.service" base.ext4 2>/dev/null | grep -q Before=lab-agent ||
     ! sudo debugfs -R "cat /usr/local/bin/lab-identity" base.ext4 2>/dev/null | grep -q "opengeni-identity" ||
     ! sudo debugfs -R "stat /etc/systemd/system/lab-ready.service" base.ext4 2>/dev/null | grep -q Inode ||
-    ! sudo debugfs -R "cat /etc/systemd/system/lab-agent.service" base.ext4 2>/dev/null | grep -q OOMScoreAdjust
+    ! sudo debugfs -R "cat /etc/systemd/system/lab-agent.service" base.ext4 2>/dev/null | grep -q OOMScoreAdjust ||
+    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q 'fields.get("order"'
 }; then
   log "guest services"
   sudo mkdir -p /mnt/lab-base

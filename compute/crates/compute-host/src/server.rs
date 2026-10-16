@@ -156,7 +156,11 @@ struct Wake<'a> {
 /// traffic: once it has been silent both ways for the handle's
 /// `stream_idle`, it lets go of `lease`, so the sandbox may sleep, and the
 /// next byte either way takes a new lease, waking the sandbox, before it is
-/// passed on. A stream whose guest end the sandbox's sleep closed ends.
+/// passed on. A write that waited out the idle time on a reader that
+/// stopped reading does not count as traffic while it waits, but once it
+/// moves bytes the stream takes a new lease, waking the sandbox to handle
+/// them, before it moves any more. A stream whose guest end the sandbox's
+/// sleep closed ends.
 ///
 /// Each direction runs on its own, so one side that is slow to read never
 /// stops the other from draining (a guest echoing an upload back while the
@@ -167,12 +171,7 @@ async fn relay(
     client: impl AsyncRead + AsyncWrite,
     guest: UnixStream,
 ) -> io::Result<()> {
-    let flow = Flow {
-        wake,
-        lease: tokio::sync::Mutex::new(Some(lease)),
-        last: std::sync::Mutex::new(Instant::now()),
-        resumed: Notify::new(),
-    };
+    let flow = Flow::new(wake, lease);
     let (client_read, client_write) = tokio::io::split(client);
     let (guest_read, guest_write) = guest.into_split();
     let mut up = pin!(flow.pump(client_read, guest_write));
@@ -208,19 +207,45 @@ enum End {
     Slept,
 }
 
+/// Takes the lease a stream holds on its sandbox while it carries traffic.
+trait Keeper {
+    type Lease: Send;
+    /// Wakes the sandbox and holds it awake until the lease is dropped.
+    fn acquire(&self) -> impl Future<Output = io::Result<Self::Lease>> + Send;
+}
+
+impl Keeper for Wake<'_> {
+    type Lease = Lease;
+    async fn acquire(&self) -> io::Result<Lease> {
+        self.handle
+            .acquire(self.id, self.generation, self.priority)
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+}
+
 /// What both directions of a relay share: the lease, and when traffic last
 /// moved.
-struct Flow<'a> {
-    wake: &'a Wake<'a>,
-    lease: tokio::sync::Mutex<Option<Lease>>,
+struct Flow<'a, K: Keeper> {
+    keeper: &'a K,
+    lease: tokio::sync::Mutex<Option<K::Lease>>,
     last: std::sync::Mutex<Instant>,
     /// Told when traffic takes a new lease after the stream let go.
     resumed: Notify,
 }
 
-impl Flow<'_> {
+impl<'a, K: Keeper + Sync> Flow<'a, K> {
+    fn new(keeper: &'a K, lease: K::Lease) -> Self {
+        Self {
+            keeper,
+            lease: tokio::sync::Mutex::new(Some(lease)),
+            last: std::sync::Mutex::new(Instant::now()),
+            resumed: Notify::new(),
+        }
+    }
+
     /// Copies `from` to `to` until `from` ends, keeping the sandbox awake
-    /// for each chunk.
+    /// for every write.
     async fn pump(
         &self,
         mut from: impl AsyncRead + Unpin,
@@ -241,7 +266,10 @@ impl Flow<'_> {
                     0 => return Err(io::ErrorKind::WriteZero.into()),
                     written => sent += written,
                 }
-                self.moved();
+                // The write may have waited out the idle time and let the
+                // lease go; the bytes it moved take it back before any more
+                // move, and wake the sandbox to handle them.
+                self.keep_awake().await?;
             }
         }
     }
@@ -251,13 +279,7 @@ impl Flow<'_> {
         let mut lease = self.lease.lock().await;
         self.moved();
         if lease.is_none() {
-            let wake = self.wake;
-            let woken = wake
-                .handle
-                .acquire(wake.id, wake.generation, wake.priority)
-                .await
-                .map_err(|error| io::Error::other(error.to_string()))?;
-            *lease = Some(woken);
+            *lease = Some(self.keeper.acquire().await?);
             self.moved();
             self.resumed.notify_one();
         }
@@ -316,4 +338,88 @@ async fn write_reply(stream: &mut (impl AsyncWrite + Unpin), reply: &Reply) -> i
     line.push(b'\n');
     stream.write_all(&line).await?;
     stream.flush().await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    /// Leases that count themselves, noting how much the reader had read
+    /// when each was taken.
+    #[derive(Default)]
+    struct Counting {
+        held: Arc<AtomicUsize>,
+        read: AtomicUsize,
+        taken_at: Mutex<Vec<usize>>,
+    }
+
+    struct Held(Arc<AtomicUsize>);
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, SeqCst);
+        }
+    }
+
+    impl Counting {
+        fn hold(&self) -> Held {
+            self.held.fetch_add(1, SeqCst);
+            Held(Arc::clone(&self.held))
+        }
+    }
+
+    impl Keeper for Counting {
+        type Lease = Held;
+        fn acquire(&self) -> impl Future<Output = io::Result<Held>> + Send {
+            self.taken_at.lock().unwrap().push(self.read.load(SeqCst));
+            std::future::ready(Ok(self.hold()))
+        }
+    }
+
+    /// A reader that stops reading for longer than the idle time lets the
+    /// lease go while the relay's write waits on it; once it reads again,
+    /// the bytes that move take a new lease before more than the waiting
+    /// write's share has passed.
+    #[tokio::test]
+    async fn a_write_that_waited_out_the_idle_time_takes_a_lease_when_it_moves() {
+        const IDLE: Duration = Duration::from_millis(200);
+        const SIZE: usize = 4 << 10;
+        let keeper = Counting::default();
+        let flow = Flow::new(&keeper, keeper.hold());
+        let data = vec![7_u8; SIZE];
+        // The reader's side buffers 1 KiB.
+        let (to, mut reader) = tokio::io::duplex(1 << 10);
+        let pump = flow.pump(&data[..], to);
+        let reading = async {
+            tokio::time::sleep(IDLE * 3).await;
+            assert_eq!(keeper.held.load(SeqCst), 0, "the stalled stream let go");
+            let (mut got, mut buffer) = (0, [0_u8; 256]);
+            loop {
+                let n = reader.read(&mut buffer).await.unwrap();
+                if n == 0 {
+                    return got;
+                }
+                got += n;
+                keeper.read.store(got, SeqCst);
+            }
+        };
+        let mut watch = pin!(flow.watch(IDLE));
+        let (end, got) = tokio::select! {
+            both = async { tokio::join!(pump, reading) } => both,
+            () = &mut watch => unreachable!("the watch never ends"),
+        };
+        assert_eq!(end.unwrap(), End::Finished, "it ended holding a lease");
+        assert_eq!(got, SIZE);
+        let taken_at = keeper.taken_at.lock().unwrap().clone();
+        assert_eq!(taken_at.len(), 1, "one lease taken when traffic resumed");
+        assert!(
+            taken_at[0] <= 2 << 10,
+            "taken after {} bytes reached the reader",
+            taken_at[0]
+        );
+        assert_eq!(keeper.held.load(SeqCst), 1);
+    }
 }

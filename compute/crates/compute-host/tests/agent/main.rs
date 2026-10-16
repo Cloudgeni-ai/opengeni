@@ -100,6 +100,9 @@ struct World {
     unseeded_notices: AtomicBool,
     /// Restore notices refused or answered without the seed applied.
     notices_turned_down: AtomicUsize,
+    /// Restore notices for another sandbox not ordered above the one the
+    /// guest applied last.
+    notices_out_of_order: AtomicUsize,
     restoring: AtomicUsize,
     max_restoring: AtomicUsize,
     compress_cancelled: AtomicUsize,
@@ -401,14 +404,40 @@ async fn guest(
     }
 }
 
+/// The value of `key` among a notice's `fields`.
+fn notice_field<'a>(fields: &'a str, key: &str) -> Option<&'a str> {
+    fields
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix(key)?.strip_prefix('='))
+}
+
+/// A notice's order: its record's generation, then its revision.
+fn notice_order(fields: &str) -> Option<(u64, u64)> {
+    let (generation, revision) = notice_field(fields, "order")?.split_once('.')?;
+    Some((generation.parse().ok()?, revision.parse().ok()?))
+}
+
 /// How a guest answers the restore notice `fields`, remembering it unless
-/// it refuses.
+/// it refuses. Like a real guest it refuses a notice ordered below the one
+/// it applied last; it also refuses one for another sandbox that is not
+/// ordered above it, which the host must never send.
 fn answer_notice(fields: &str, notice: &Mutex<Option<String>>, world: &World) -> String {
-    if world.refuse_notices.load(Ordering::Relaxed) {
+    let mut last = notice.lock().unwrap();
+    let order = notice_order(fields).expect("every notice carries its order");
+    let out_of_order = last.as_deref().is_some_and(|last| {
+        let before = notice_order(last).unwrap();
+        order < before
+            || (order == before && notice_field(last, "sandbox") != notice_field(fields, "sandbox"))
+    });
+    if out_of_order {
+        world.notices_out_of_order.fetch_add(1, Ordering::Relaxed);
+    }
+    if out_of_order || world.refuse_notices.load(Ordering::Relaxed) {
         world.notices_turned_down.fetch_add(1, Ordering::Relaxed);
         return "what?".into();
     }
-    *notice.lock().unwrap() = Some(fields.to_owned());
+    *last = Some(fields.to_owned());
+    drop(last);
     if fields.contains(" seed=") && !world.unseeded_notices.load(Ordering::Relaxed) {
         "ok seeded".into()
     } else {

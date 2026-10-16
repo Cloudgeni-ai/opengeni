@@ -993,7 +993,10 @@ impl<E: Engine, S: Store> Job<E, S> {
         } else {
             NOTICE_DEADLINE
         };
-        match tell_restored(&self.spec.vsock_path(), port, self.id, deadline).await {
+        // Every way here wrote the record since the guest's last notice, so
+        // its fence is above that notice's.
+        let order = (self.record.generation, self.record.revision);
+        match tell_restored(&self.spec.vsock_path(), port, self.id, order, deadline).await {
             Ok(told) if must && !told.seeded => {
                 // It took its id but draws the numbers every other clone
                 // of its snapshot draws.

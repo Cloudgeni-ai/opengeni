@@ -575,27 +575,53 @@ class GuestInternals(unittest.TestCase):
         # Not taken, so the host's retry renews again.
         self.assertEqual(self.guest.RESTORES.sandbox(), "7e3a")
 
-    def notice(self, nanos: int, sandbox: str) -> bytes:
+    def notice(self, nanos: int, sandbox: str, order: str) -> bytes:
         """Serves one seeded restore notice in-process; returns the answer."""
 
         host, guest = socket.socketpair()
+        line = f"restored {nanos} sandbox={sandbox} seed=5eed order={order}\n"
         with host, mock.patch.object(self.guest, "reseed", return_value=True):
-            host.sendall(f"restored {nanos} sandbox={sandbox} seed=5eed\n".encode())
+            host.sendall(line.encode())
             self.guest.serve_notice(guest, set_clock=False)
             return host.recv(64)
 
     def test_a_late_notice_never_takes_back_a_newer_identity(self) -> None:
         machine_id, hostname = self.scratch / "machine-id", self.scratch / "hostname"
-        start = time.time_ns()
-        # The first notice for ready identity A is delayed; its retry is
-        # acknowledged, then the claim for B, then the first one arrives.
-        self.assertEqual(self.notice(start + 2, "a"), b"ok seeded\n")
-        self.assertEqual(self.notice(start + 3, "b"), b"ok seeded\n")
+        # The host's clock steps back between the attempts: the first
+        # notice for ready identity A is stamped 300 and delayed; its retry
+        # at 100 is acknowledged, then the claim for B at 200, then the
+        # first attempt arrives. Its time is the newest, its order is not.
+        self.assertEqual(self.notice(100, "a", "3.4"), b"ok seeded\n")
+        self.assertEqual(self.notice(200, "b", "3.5"), b"ok seeded\n")
         claimed = machine_id.read_text()
-        self.assertEqual(self.notice(start + 1, "a"), b"", "the late notice is refused")
+        self.assertEqual(self.notice(300, "a", "3.4"), b"", "the late notice is refused")
         self.assertEqual(self.guest.RESTORES.sandbox(), "b")
         self.assertEqual(machine_id.read_text(), claimed)
         self.assertEqual(hostname.read_text(), "b\n")
+        # A later execution orders above any revision of an earlier one.
+        self.assertEqual(self.notice(50, "b", "4.1"), b"ok seeded\n")
+        self.assertEqual(self.notice(400, "b", "3.9"), b"")
+
+    def test_notices_order_by_the_host_not_by_the_clock(self) -> None:
+        # Equal times: the order decides, and a retry of the latest notice
+        # is applied again.
+        self.assertEqual(self.notice(100, "a", "1.2"), b"ok seeded\n")
+        self.assertEqual(self.notice(100, "b", "1.3"), b"ok seeded\n")
+        self.assertEqual(self.notice(100, "a", "1.2"), b"")
+        self.assertEqual(self.notice(100, "b", "1.3"), b"ok seeded\n")
+        self.assertEqual(self.guest.RESTORES.sandbox(), "b")
+        # Revisions compare as numbers, not as text.
+        self.assertEqual(self.notice(100, "c", "1.10"), b"ok seeded\n")
+        self.assertEqual(self.notice(100, "b", "1.9"), b"")
+        self.assertEqual(self.guest.RESTORES.sandbox(), "c")
+
+    def test_a_notice_order_is_two_numbers(self) -> None:
+        order = self.guest.notice_order
+        self.assertEqual(order({"order": "12.345"}), (12, 345))
+        for bad in ("", "12", "12.", ".3", "1.2.3", "a.b", "-1.2"):
+            with self.subTest(order=bad):
+                self.assertIsNone(order({"order": bad}))
+        self.assertIsNone(order({}))
 
     def test_notices_are_applied_one_at_a_time(self) -> None:
         notices = self.guest.Notices()
@@ -612,10 +638,10 @@ class GuestInternals(unittest.TestCase):
             order.append("b")
             return b"ok\n"
 
-        first = threading.Thread(target=notices.apply, args=(2, slow))
+        first = threading.Thread(target=notices.apply, args=((1, 2), slow))
         first.start()
         self.assertTrue(entered.wait(10))
-        second = threading.Thread(target=notices.apply, args=(3, later))
+        second = threading.Thread(target=notices.apply, args=((1, 3), later))
         second.start()
         time.sleep(0.05)
         self.assertEqual(order, [], "the newer notice waits for the one under way")
@@ -623,7 +649,8 @@ class GuestInternals(unittest.TestCase):
         first.join(10)
         second.join(10)
         self.assertEqual(order, ["a", "b"])
-        self.assertIsNone(notices.apply(1, later), "an older one is obsolete")
+        self.assertIsNone(notices.apply((1, 1), later), "an older one is obsolete")
+        self.assertEqual(notices.apply(None, later), b"ok\n", "an unordered one is applied")
 
     def test_a_guest_booted_from_a_cloned_disk_makes_its_own_identity(self) -> None:
         machine_id, hostname = self.scratch / "machine-id", self.scratch / "hostname"
@@ -650,7 +677,7 @@ class GuestInternals(unittest.TestCase):
         self.assertTrue(self.guest.renew_identity("t", "5eed"))
         template = machine_id.read_text()
         self.guest.RESTORES.record("b")
-        self.assertEqual(self.notice(time.time_ns(), "b"), b"ok seeded\n")
+        self.assertEqual(self.notice(time.time_ns(), "b", "1.1"), b"ok seeded\n")
         self.assertNotEqual(machine_id.read_text(), template)
         self.assertTrue(self.guest.owns_identity("b"))
 

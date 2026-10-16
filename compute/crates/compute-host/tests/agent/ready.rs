@@ -172,6 +172,8 @@ async fn a_create_claims_a_ready_sandbox_that_learns_its_id_before_use() {
     // Each claim takes another; the pool fills again.
     lab.create(id(2), NEVER).await;
     assert_eq!(lab.run(id(2), &["sandbox?"]).await, [id(2).to_string()]);
+    // Each claim's notice was ordered after its fill's.
+    assert_eq!(lab.world.notices_out_of_order.load(Ordering::Relaxed), 0);
     assert_eq!(
         lab.run(id(1), &["write mine", "disk"]).await,
         ["ok", "mine"]

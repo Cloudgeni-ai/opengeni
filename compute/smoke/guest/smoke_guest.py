@@ -31,6 +31,14 @@ restores. The id is kept in the state directory before the answer, so a
 restarted service still knows it; a guest booted from its disk finds its id
 on the kernel command line instead, as `opengeni.sandbox=<id>`.
 
+Notices are applied one at a time, in the host's order: the
+`order=<generation>.<revision>` field, which the host raises before every new
+notice and never lowers. One ordered below the latest applied (an attempt the
+host gave up on that arrived late) is refused, whatever its time says, so it
+can never take back a newer identity, even after the host's clock stepped
+back; a retry of the same notice is applied again. The time only sets the
+clock. A notice without the field is applied without being ordered.
+
 A notice naming a sandbox other than the one the guest believes it is comes
 to a clone: before taking the id, the service gives the guest a machine id
 of its own (from the seed and the id, so a retried notice writes the same)
@@ -998,24 +1006,37 @@ def take_identity(sandbox: str | None) -> None:
         print(f"cannot set the hostname: {error}", file=sys.stderr, flush=True)
 
 
+def notice_order(fields: dict[str, str]) -> tuple[int, int] | None:
+    """A notice's `order=<generation>.<revision>`, or None without a valid
+    one."""
+
+    generation, dot, revision = fields.get("order", "").partition(".")
+    if not (dot and generation.isdigit() and revision.isdigit()):
+        return None
+    return int(generation), int(revision)
+
+
 class Notices:
-    """Applies restore notices one at a time, each whole, in the order the
-    host sent them: one sent before the latest applied (an abandoned
-    attempt that arrived or finished late) is obsolete and refused, so it
-    can never take back a newer identity."""
+    """Applies restore notices one at a time, each whole, in the host's
+    order (see the module documentation): one ordered below the latest
+    applied (an abandoned attempt that arrived or finished late) is
+    obsolete and refused, so it can never take back a newer identity. The
+    attempts of one notice share its order, so a retry is applied again."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._latest = 0
+        self._latest: tuple[int, int] | None = None
 
-    def apply(self, nanos: int, act: Callable[[], bytes | None]) -> bytes | None:
-        """Runs `act` unless a newer notice was applied; returns its
-        answer, or None for an obsolete notice."""
+    def apply(self, order: tuple[int, int] | None, act: Callable[[], bytes | None]) -> bytes | None:
+        """Runs `act` unless a notice ordered after `order` was applied;
+        returns its answer, or None for an obsolete notice. A notice
+        without an order is not ordered."""
 
         with self._lock:
-            if nanos < self._latest:
-                return None
-            self._latest = nanos
+            if order is not None:
+                if self._latest is not None and order < self._latest:
+                    return None
+                self._latest = order
             return act()
 
 
@@ -1041,7 +1062,9 @@ def serve_notice(connection: socket.socket, *, set_clock: bool) -> None:
             print(f"ignored restore notice {line[:80]!r}", file=sys.stderr, flush=True)
             return
         nanos, fields = notice
-        answer = NOTICES.apply(nanos, lambda: _act_on_notice(nanos, fields, set_clock=set_clock))
+        answer = NOTICES.apply(
+            notice_order(fields), lambda: _act_on_notice(nanos, fields, set_clock=set_clock)
+        )
         if answer is None:
             print(f"ignored restore notice {line[:80]!r}", file=sys.stderr, flush=True)
             return
