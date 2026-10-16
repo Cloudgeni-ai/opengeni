@@ -6659,6 +6659,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "revertBrowserSessionWorkingCopyAdoption",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId/revert",
+    "request": [],
+    "response": [
+      "BrowserWorkingCopyAdoptionResponse"
+    ]
+  },
+  {
     "id": "reviewAgentInstruction",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/agent-learning/instructions/review",

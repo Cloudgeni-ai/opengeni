@@ -2808,6 +2808,48 @@ export function registerBrowserSessionRoutes(
   );
 
   app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId/revert",
+    async (context) => {
+      const operationId = requireUuidParam(context, "operationId");
+      const result = await withPreservedWorkingCopy(
+        context,
+        async ({ grant, workspaceId, browserSessionId, client, authority }) => {
+          await recordAuditEvent(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            action: "browserSession.working_copy.revert_requested",
+            targetType: "browser_session",
+            targetId: browserSessionId,
+            metadata: { operationId, controllerGeneration: authority.controllerGeneration },
+          });
+          const status = await client.revertWorkingCopyAdoption({ ...authority, operationId });
+          await recordAuditEvent(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: grant.subjectId,
+            action: "browserSession.working_copy.revert_settled",
+            targetType: "browser_session",
+            targetId: browserSessionId,
+            metadata: {
+              operationId,
+              controllerGeneration: authority.controllerGeneration,
+              phase: status.adoption?.phase ?? null,
+              failureCode: status.adoption?.failureCode ?? null,
+            },
+          }).catch(() => undefined);
+          return BrowserWorkingCopyAdoptionResponse.parse({
+            inFlight: status.inFlight,
+            adoption: status.adoption ? publicWorkingCopyAdoption(status.adoption) : null,
+            explanation: workingCopyAdoptionExplanation(status.inFlight, status.adoption),
+          });
+        },
+      );
+      return context.json(result);
+    },
+  );
+
+  app.post(
     "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end",
     async (context) => {
       const workspaceId = context.req.param("workspaceId");
@@ -5674,9 +5716,13 @@ function workingCopyAdoptionExplanation(
     case "failed":
       return `The adoption stopped before the copy took the browser's place${adoption.failureCode ? ` (${adoption.failureCode})` : ""}; the browser's own directory is unchanged.${kept}`;
     case "collision":
-      return `The adoption found the browser's directories in an unexpected state (${adoption.failureCode ?? "unknown"}) and stopped without moving or removing anything more. The browser stays unavailable until a person inspects its machine.${kept}`;
+      return `The adoption found the browser's directories in an unexpected state (${adoption.failureCode ?? "unknown"}) and stopped without moving or removing anything more. The browser stays unavailable until this adoption is reverted with revertBrowserSessionWorkingCopyAdoption, which puts the browser's own directory back and keeps the staged copy. If the revert refuses, the directories need a person on that machine.${kept}`;
+    case "reverting":
+      return "A revert of this adoption stopped part way and is not running. Retry revertBrowserSessionWorkingCopyAdoption with the same operationId to finish it; a retry repeats nothing already done.";
+    case "reverted":
+      return `Reverted. The browser's own directory is back in place and the staged copy was not used.${kept}`;
     default:
-      return "The adoption stopped part way and is not running. Checking it never changes it; retry the same adoption with the same operationId and manifestDigest to settle it. A retry repeats nothing already done. Do not start another.";
+      return "The adoption stopped part way and is not running. Checking it never changes it. To finish it, retry the same adoption with the same operationId and manifestDigest under the authority that approved it; a retry repeats nothing already done. To undo it instead, revert it with revertBrowserSessionWorkingCopyAdoption. Do not start another.";
   }
 }
 

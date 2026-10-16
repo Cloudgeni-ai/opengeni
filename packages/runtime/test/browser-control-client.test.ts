@@ -2700,6 +2700,8 @@ test("inspects and adopts a preserved working copy with its exact authority, nev
         );
       }
       if (path.endsWith("/working-copy/adoptions")) return success(adoption);
+      if (path.endsWith("/revert"))
+        return success({ inFlight: false, adoption: { ...adoption, phase: "reverted" } });
       return success({ inFlight: false, adoption: null });
     },
   });
@@ -2767,6 +2769,17 @@ test("inspects and adopts a preserved working copy with its exact authority, nev
     expect(requests.at(-1)).toMatchObject({
       method: "GET",
       path: `/v1/browser-sessions/${browserSessionId}/working-copy/adoptions/${operationId}`,
+    });
+
+    // A revert carries only the current authority, never a digest.
+    expect(await client.revertWorkingCopyAdoption({ ...authority, operationId })).toEqual({
+      inFlight: false,
+      adoption: { ...adoption, phase: "reverted" },
+    });
+    expect(requests.at(-1)).toEqual({
+      method: "POST",
+      path: `/v1/browser-sessions/${browserSessionId}/working-copy/adoptions/${operationId}/revert`,
+      body: { controllerGeneration, tokenGeneration: 3, controlToken, viewToken },
     });
   } finally {
     await server.stop(true);

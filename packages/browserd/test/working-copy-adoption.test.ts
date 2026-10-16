@@ -13,12 +13,13 @@ import {
   readActiveAdoption,
   readAdoptionRecord,
   observeActiveAdoption,
+  revertWorkingCopyAdoption,
   settleActiveAdoption,
   workingCopyManifest,
   writeAdoptionRecord,
+  type AdoptionBoundary,
   type AdoptionAuthority,
   type AdoptionPaths,
-  type WorkingCopyAdoptionPhase,
 } from "../src/working-copy-adoption";
 import {
   SqliteBrowserWorkingRuntimeJournal,
@@ -81,7 +82,7 @@ async function adopt(
   sequence: number,
   digest: string,
   options: {
-    failAfter?: WorkingCopyAdoptionPhase;
+    failAfter?: AdoptionBoundary;
     receipts?: string[];
     authority?: AdoptionAuthority;
   } = {},
@@ -100,6 +101,24 @@ async function adopt(
     },
   });
 }
+
+async function revert(
+  paths: AdoptionPaths,
+  sequence: number,
+  authority: AdoptionAuthority = AUTHORITY,
+  failAfter?: AdoptionBoundary,
+) {
+  return await revertWorkingCopyAdoption(paths, {
+    operationId: operation(sequence),
+    authority,
+    afterPhase: async (boundary) => {
+      if (boundary === failAfter) throw new Error(`synthetic crash after ${boundary}`);
+    },
+  });
+}
+
+const recordFile = (paths: AdoptionPaths, sequence: number) =>
+  join(paths.recordsDirectory, `${operation(sequence)}.json`);
 
 describe("working copy manifest", () => {
   test("is exact, excludes derived entries and never follows links", async () => {
@@ -356,7 +375,7 @@ describe("working copy adoption", () => {
     ["token authority", STALE],
     ["controller generation", STALE_GENERATION],
   ] as const)(
-    "a changed %s cannot carry an adoption forward before the original moves",
+    "a changed %s changes nothing, and the approving authority can still finish",
     async (_label, stale) => {
       const { paths } = await fixture();
       const original = await identity(paths.live);
@@ -365,18 +384,19 @@ describe("working copy adoption", () => {
         "synthetic crash",
       );
       const record = (await readAdoptionRecord(paths, operation(15)))!;
+      const recordBytes = await readFile(recordFile(paths, 15), "utf8");
       // Neither a launch's settlement nor a retry under the stale authority
-      // makes the staged copy live.
-      expect(await settleActiveAdoption(paths, stale)).toBeNull();
-      expect(await readAdoptionRecord(paths, operation(15))).toMatchObject({
-        phase: "failed",
-        failureCode: "authority_changed",
+      // carries it forward, and neither rewrites or poisons the record.
+      expect(await settleActiveAdoption(paths, stale)).toEqual(record);
+      await expect(adopt(paths, 15, digest, { authority: stale })).rejects.toMatchObject({
+        reason: "authority_changed",
       });
+      expect(await readFile(recordFile(paths, 15), "utf8")).toBe(recordBytes);
       expect(await identity(paths.live)).toEqual(original);
-      expect(await lstat(join(paths.sessionsDirectory, record.stagingName))).toBeTruthy();
-      // The approving authority can no longer revive it either.
-      expect((await adopt(paths, 15, digest)).phase).toBe("failed");
-      expect(await identity(paths.live)).toEqual(original);
+      expect(await readActiveAdoption(paths)).toBe(operation(15));
+      // The authority that approved it finishes it.
+      expect((await adopt(paths, 15, digest)).phase).toBe("adopted");
+      expect(await identity(paths.live)).toEqual(record.staging!.session);
     },
   );
 
@@ -384,7 +404,7 @@ describe("working copy adoption", () => {
     ["before that step was journaled", "receipt"],
     ["after that step was journaled", "source_preserved"],
   ] as const)(
-    "a stale authority after the original moved aside (%s) is a collision that keeps every copy",
+    "a stale authority after the original moved aside (%s) changes nothing and can revert",
     async (_label, phase) => {
       const { paths } = await fixture();
       const original = await identity(paths.live);
@@ -396,21 +416,173 @@ describe("working copy adoption", () => {
       // The process died right after preserving the original.
       await rename(paths.live, join(paths.sessionsDirectory, record.preservedName));
       if (phase === "source_preserved") await writeAdoptionRecord(paths, { ...record, phase });
-      expect(await adopt(paths, 16, digest, { authority: STALE })).toMatchObject({
-        phase: "collision",
-        failureCode: "authority_changed",
+      const recordBytes = await readFile(recordFile(paths, 16), "utf8");
+      await expect(adopt(paths, 16, digest, { authority: STALE })).rejects.toMatchObject({
+        reason: "authority_changed",
       });
+      expect(await settleActiveAdoption(paths, STALE)).toMatchObject({ phase });
+      expect(await readFile(recordFile(paths, 16), "utf8")).toBe(recordBytes);
       // Nothing moved further: the original stays preserved, the copy staged.
       await expect(lstat(paths.live)).rejects.toThrow();
       expect(await identity(join(paths.sessionsDirectory, record.preservedName))).toEqual(original);
       expect(await identity(join(paths.sessionsDirectory, record.stagingName))).toEqual(
         record.staging!.session,
       );
-      expect(await readActiveAdoption(paths)).toBe(operation(16));
-      // A launch under the stale authority stays blocked by it.
-      expect(await settleActiveAdoption(paths, STALE)).toMatchObject({ phase: "collision" });
+      // The current authority's supported way out: revert puts the original
+      // back and keeps the copy, and a later adoption may start fresh.
+      expect(await revert(paths, 16, STALE)).toMatchObject({
+        phase: "reverted",
+        revertedBy: STALE,
+      });
+      expect(await identity(paths.live)).toEqual(original);
+      expect(await identity(join(paths.sessionsDirectory, record.stagingName))).toEqual(
+        record.staging!.session,
+      );
+      expect(await readActiveAdoption(paths)).toBeNull();
+      expect((await adopt(paths, 116, digest, { authority: STALE })).phase).toBe("adopted");
     },
   );
+
+  /** After a receipt crash, the original was moved aside by the first rename
+   * (journaled or not), or both renames happened before the terminal record;
+   * then the preserved original was changed in place or moved away. */
+  const ORIGINAL_DISTURBANCES = [
+    ["changed in place", "original_changed"],
+    ["moved away", "original_missing"],
+  ] as const;
+  const BOUNDARIES = [
+    "first rename, not journaled",
+    "first rename, journaled",
+    "second rename, before the terminal record",
+  ] as const;
+  test.each(
+    BOUNDARIES.flatMap((boundary) =>
+      ORIGINAL_DISTURBANCES.map(([disturbance, code]) => [boundary, disturbance, code] as const),
+    ),
+  )(
+    "after the %s, an original %s is a collision that keeps both copies",
+    async (boundary, disturbance, code) => {
+      const { root, paths } = await fixture();
+      const original = await identity(paths.live);
+      const { digest } = await workingCopyManifest(paths.live);
+      const sequence =
+        30 + BOUNDARIES.indexOf(boundary) * 2 + (code === "original_changed" ? 0 : 1);
+      if (boundary === "second rename, before the terminal record") {
+        await expect(adopt(paths, sequence, digest, { failAfter: "copy_live" })).rejects.toThrow(
+          "synthetic crash",
+        );
+      } else {
+        await expect(adopt(paths, sequence, digest, { failAfter: "receipt" })).rejects.toThrow(
+          "synthetic crash",
+        );
+        const record = (await readAdoptionRecord(paths, operation(sequence)))!;
+        await rename(paths.live, join(paths.sessionsDirectory, record.preservedName));
+        if (boundary === "first rename, journaled")
+          await writeAdoptionRecord(paths, { ...record, phase: "source_preserved" });
+      }
+      const record = (await readAdoptionRecord(paths, operation(sequence)))!;
+      const preserved = join(paths.sessionsDirectory, record.preservedName);
+      const staged = join(paths.sessionsDirectory, record.stagingName);
+      const elsewhere = join(root, "moved-original");
+      if (code === "original_changed") {
+        await writeFile(
+          join(preserved, "profile", "Default", "Cookies"),
+          "written after the receipt",
+        );
+      } else {
+        await rename(preserved, elsewhere);
+      }
+      const settled = await adopt(paths, sequence, digest);
+      expect(settled).toMatchObject({ phase: "collision", failureCode: code });
+      // Both copies are kept exactly where they were; nothing is selected.
+      const copyLive = boundary === "second rename, before the terminal record";
+      expect(await identity(copyLive ? paths.live : staged)).toEqual(record.staging!.session);
+      if (!copyLive) await expect(lstat(paths.live)).rejects.toThrow();
+      expect(await identity(code === "original_changed" ? preserved : elsewhere)).toEqual(original);
+      expect(await readActiveAdoption(paths)).toBe(operation(sequence));
+      // Launches stay blocked, and another retry does not change the outcome.
+      expect(await settleActiveAdoption(paths, AUTHORITY)).toMatchObject({ phase: "collision" });
+      expect((await adopt(paths, sequence, digest)).phase).toBe("collision");
+      if (code === "original_missing") {
+        // A revert cannot put back what is not there; it changes nothing.
+        await expect(revert(paths, sequence)).rejects.toMatchObject({
+          reason: "revert_blocked",
+        });
+        expect(await readAdoptionRecord(paths, operation(sequence))).toMatchObject({
+          phase: "collision",
+        });
+        await rename(elsewhere, preserved);
+      }
+      // Revert puts the original (as it now is) back and keeps the copy.
+      expect((await revert(paths, sequence)).phase).toBe("reverted");
+      expect(await identity(paths.live)).toEqual(original);
+      expect(await identity(staged)).toEqual(record.staging!.session);
+      if (code === "original_changed")
+        expect(await readFile(join(paths.live, "profile", "Default", "Cookies"), "utf8")).toBe(
+          "written after the receipt",
+        );
+      expect(await readActiveAdoption(paths)).toBeNull();
+      expect(await settleActiveAdoption(paths, AUTHORITY)).toBeNull();
+    },
+  );
+
+  test("a crash after the second rename, before the terminal record, is completed forward", async () => {
+    const { paths } = await fixture();
+    const original = await identity(paths.live);
+    const { digest } = await workingCopyManifest(paths.live);
+    await expect(adopt(paths, 40, digest, { failAfter: "copy_live" })).rejects.toThrow(
+      "synthetic crash",
+    );
+    const record = (await readAdoptionRecord(paths, operation(40)))!;
+    expect(record.phase).toBe("source_preserved");
+    expect(await identity(paths.live)).toEqual(record.staging!.session);
+    expect((await adopt(paths, 40, digest)).phase).toBe("adopted");
+    expect(await identity(join(paths.sessionsDirectory, record.preservedName))).toEqual(original);
+  });
+
+  test.each(["reverting", "copy_set_aside"] as const)(
+    "a revert that stopped after %s is finished by retrying it, never by an adoption retry",
+    async (stop) => {
+      const { paths } = await fixture();
+      const original = await identity(paths.live);
+      const { digest } = await workingCopyManifest(paths.live);
+      await expect(adopt(paths, 41, digest, { failAfter: "copy_live" })).rejects.toThrow(
+        "synthetic crash",
+      );
+      const record = (await readAdoptionRecord(paths, operation(41)))!;
+      await expect(revert(paths, 41, AUTHORITY, stop)).rejects.toThrow("synthetic crash");
+      expect((await readAdoptionRecord(paths, operation(41)))?.phase).toBe("reverting");
+      await expect(adopt(paths, 41, digest)).rejects.toMatchObject({
+        reason: "adoption_unresolved",
+      });
+      expect(await settleActiveAdoption(paths, AUTHORITY)).toMatchObject({ phase: "reverting" });
+      expect((await revert(paths, 41)).phase).toBe("reverted");
+      expect(await identity(paths.live)).toEqual(original);
+      expect(await identity(join(paths.sessionsDirectory, record.stagingName))).toEqual(
+        record.staging!.session,
+      );
+      expect((await revert(paths, 41)).phase).toBe("reverted");
+    },
+  );
+
+  test("a revert refuses a finished adoption, an unknown operation and an unknown live directory", async () => {
+    const { paths } = await fixture();
+    const { digest } = await workingCopyManifest(paths.live);
+    await expect(revert(paths, 42)).rejects.toMatchObject({ reason: "adoption_not_found" });
+    expect((await adopt(paths, 42, digest)).phase).toBe("adopted");
+    await expect(revert(paths, 42)).rejects.toMatchObject({ reason: "adoption_complete" });
+    const second = await fixture();
+    const secondDigest = (await workingCopyManifest(second.paths.live)).digest;
+    await expect(adopt(second.paths, 43, secondDigest, { failAfter: "copy_live" })).rejects.toThrow(
+      "synthetic crash",
+    );
+    const record = (await readAdoptionRecord(second.paths, operation(43)))!;
+    // Someone put an unknown directory at the live path.
+    await rename(second.paths.live, join(second.root, "copy-moved-by-hand"));
+    await mkdir(join(second.paths.live, "profile"), { recursive: true });
+    await expect(revert(second.paths, 43)).rejects.toMatchObject({ reason: "revert_blocked" });
+    expect(await readAdoptionRecord(second.paths, operation(43))).toEqual(record);
+  });
 
   test("observing an unsettled adoption changes nothing", async () => {
     const { paths } = await fixture();

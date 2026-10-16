@@ -1668,6 +1668,18 @@ test("working copy routes carry the browser record's exact authority, and only a
         ],
         phase: "adopted",
       },
+      {
+        scenario: "revert",
+        status: 200,
+        calls: ["POST /working-copy/adoptions/:operationId/revert"],
+        exactAuthority: true,
+        audits: [
+          "browserSession.working_copy.revert_requested",
+          "controller",
+          "browserSession.working_copy.revert_settled",
+        ],
+        phase: "reverted",
+      },
       ...["holder-lost", "machine-moved", "access-revoked"].map((scenario) => ({
         scenario,
         // A revoked source session hides the browser instead of refusing it.
@@ -1833,6 +1845,11 @@ async function workingCopyRoutesFixture() {
             exactAuthority = false;
           return success(adoption("adopted"));
         }
+        if (route === "/working-copy/adoptions/:operationId/revert") {
+          if (requestedOperation !== undefined || manifestDigest !== undefined)
+            exactAuthority = false;
+          return success({ inFlight: false, adoption: adoption("reverted") });
+        }
         return success({
           browserSessionId,
           controllerGeneration,
@@ -1908,6 +1925,7 @@ async function workingCopyRoutesFixture() {
       "status",
       "adopt",
       "adopt-token-rotated",
+      "revert",
       "holder-lost",
       "machine-moved",
       "access-revoked",
@@ -1925,18 +1943,26 @@ async function workingCopyRoutesFixture() {
             })
           : next === "status"
             ? await app.request(`${base}/adoptions/${operationId}`)
-            : await app.request(`${base}/adoptions`, {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ operationId, manifestDigest: digest }),
-              });
+            : next === "revert"
+              ? await app.request(`${base}/adoptions/${operationId}/revert`, {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: "{}",
+                })
+              : await app.request(`${base}/adoptions`, {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ operationId, manifestDigest: digest }),
+                });
       const body = (await response.json()) as Record<string, any>;
       const result: Record<string, unknown> = {
         scenario: next,
         status: response.status,
         calls,
         exactAuthority,
-        audits: audits.filter((entry) => entry !== "controller" || next.startsWith("adopt")),
+        audits: audits.filter(
+          (entry) => entry !== "controller" || next.startsWith("adopt") || next === "revert",
+        ),
       };
       if (response.status === 200 && next === "inspect") {
         result.adoptable = body.adoptable;

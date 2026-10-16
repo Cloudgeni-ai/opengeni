@@ -1023,7 +1023,9 @@ export type BrowserWorkingCopyAdoption = {
     | "adopted"
     | "interrupted"
     | "failed"
-    | "collision";
+    | "collision"
+    | "reverting"
+    | "reverted";
   failureCode: string | null;
   retainedDirectories: string[];
   createdAt: string;

@@ -89,8 +89,8 @@ import {
 } from "./working-runtime-journal";
 import {
   ADOPTION_IN_FLIGHT,
-  ADOPTION_UNRECORDED,
   WorkingCopyAdoptionError,
+  activeAdoptionLocked,
   adoptionAuthority,
   adoptionLocked,
   adoptWorkingCopy,
@@ -98,16 +98,18 @@ import {
   assertWorkingCopyJournalsIntact,
   emptyWorkingCopyEvidence,
   observeActiveAdoption,
+  readActiveAdoption,
   readAdoptionRecord,
-  settleActiveAdoption,
+  revertWorkingCopyAdoption,
+  withWorkingDirectoryLock,
   workingCopyAdoptionStatus,
   workingCopyManifest,
   workingCopyRefusalError,
+  type AdoptionBoundary,
   type BrowserWorkingCopyAdoptionStatus,
   type BrowserWorkingCopyAuthorityInput,
   type BrowserWorkingCopyInspection,
   type BrowserWorkingCopyRefusal,
-  type WorkingCopyAdoptionPhase,
 } from "./working-copy-adoption";
 import { SqliteBrowserOperationJournal } from "./journal";
 import { BrowserWorkspaceFileStager } from "./workspace-files";
@@ -332,9 +334,16 @@ export type BrowserSupervisorOptions = {
   /** Proves no process runs a browser on an exact private profile before an
    * interrupted launch is set aside; tests supply the outcome. */
   assertProfileUnused?: typeof assertManagedBrowserProfileUnused;
-  /** Called after each durable phase of a working copy adoption; tests use
-   * it to stop an adoption at an exact boundary, as a crash would. */
-  afterAdoptionPhase?: (phase: WorkingCopyAdoptionPhase) => Promise<void>;
+  /** Called after each durable boundary of a working copy adoption or
+   * revert; tests use it to stop one at an exact boundary, as a crash would. */
+  afterAdoptionPhase?: (boundary: AdoptionBoundary) => Promise<void>;
+  /** Called once an end or launch holds a browser's working directory lock
+   * and has found no adoption owning the directory; tests use it to hold
+   * the lock while another controller tries to act. */
+  afterWorkingDirectoryClaim?: (
+    operation: "end" | "launch",
+    browserSessionId: string,
+  ) => Promise<void>;
 };
 
 type Runtime = {
@@ -402,8 +411,9 @@ export class BrowserSupervisor {
   private readonly inspectOwnedProcess: typeof inspectOwnedManagedBrowserProcess;
   private readonly stopEndedProcess: typeof stopEndedManagedBrowserProcess;
   private readonly assertProfileUnused: typeof assertManagedBrowserProfileUnused;
-  private readonly afterAdoptionPhase:
-    | ((phase: WorkingCopyAdoptionPhase) => Promise<void>)
+  private readonly afterAdoptionPhase: ((boundary: AdoptionBoundary) => Promise<void>) | undefined;
+  private readonly afterWorkingDirectoryClaim:
+    | ((operation: "end" | "launch", browserSessionId: string) => Promise<void>)
     | undefined;
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
@@ -454,6 +464,7 @@ export class BrowserSupervisor {
     this.stopEndedProcess = options.stopEndedProcess ?? stopEndedManagedBrowserProcess;
     this.assertProfileUnused = options.assertProfileUnused ?? assertManagedBrowserProfileUnused;
     this.afterAdoptionPhase = options.afterAdoptionPhase;
+    this.afterWorkingDirectoryClaim = options.afterWorkingDirectoryClaim;
   }
 
   private async createEphemeralDriver(
@@ -618,7 +629,9 @@ export class BrowserSupervisor {
   }
 
   /** Adopt the exact approved bytes of a preserved working copy. See
-   * working-copy-adoption.ts for the durable protocol. */
+   * working-copy-adoption.ts for the durable protocol. A new adoption checks
+   * that the browser is stopped and its copy adoptable while it holds the
+   * working directory lock, so no launch or end can start in between. */
   async adoptWorkingCopy(
     input: BrowserWorkingCopyAuthorityInput & { operationId: string; manifestDigest: string },
   ): Promise<BrowserWorkingCopyAdoptionStatus> {
@@ -632,23 +645,48 @@ export class BrowserSupervisor {
     const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
     if (this.adopting.has(input.browserSessionId))
       throw workingCopyRefusalError("adoption_unresolved");
-    if (
-      this.endingWorkingCopies.has(input.browserSessionId) ||
-      this.sessions.has(input.browserSessionId) ||
-      this.creating.has(input.browserSessionId)
-    )
-      throw workingCopyRefusalError("browser_running");
+    this.assertNotRunning(input.browserSessionId);
     this.adopting.add(input.browserSessionId);
     try {
-      const existing = await readAdoptionRecord(paths, input.operationId);
-      if (!existing) {
-        const evidence = await this.workingCopyEvidence(input);
-        if (evidence.refusal) throw workingCopyRefusalError(evidence.refusal);
-      }
       return await workingCopyAdoptionStatus(paths, await this.performAdoption(paths, input));
     } finally {
       this.adopting.delete(input.browserSessionId);
     }
+  }
+
+  /** Revert an unfinished adoption under the browser's current authority:
+   * the browser's own directory goes back to its live path and the staged
+   * copy is kept. See revertWorkingCopyAdoption. */
+  async revertWorkingCopyAdoption(
+    input: BrowserWorkingCopyAuthorityInput & { operationId: string },
+  ): Promise<BrowserWorkingCopyAdoptionStatus> {
+    this.assertOpen();
+    const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
+    if (this.adopting.has(input.browserSessionId))
+      throw workingCopyRefusalError("adoption_unresolved");
+    this.assertNotRunning(input.browserSessionId);
+    this.adopting.add(input.browserSessionId);
+    try {
+      return await workingCopyAdoptionStatus(
+        paths,
+        await revertWorkingCopyAdoption(paths, {
+          operationId: input.operationId,
+          authority: adoptionAuthority(input),
+          ...(this.afterAdoptionPhase ? { afterPhase: this.afterAdoptionPhase } : {}),
+        }),
+      );
+    } finally {
+      this.adopting.delete(input.browserSessionId);
+    }
+  }
+
+  private assertNotRunning(browserSessionId: string) {
+    if (
+      this.endingWorkingCopies.has(browserSessionId) ||
+      this.sessions.has(browserSessionId) ||
+      this.creating.has(browserSessionId)
+    )
+      throw workingCopyRefusalError("browser_running");
   }
 
   private async performAdoption(
@@ -661,6 +699,11 @@ export class BrowserSupervisor {
       authority: adoptionAuthority(input),
       manifestDigest: input.manifestDigest,
       ...(this.afterAdoptionPhase ? { afterPhase: this.afterAdoptionPhase } : {}),
+      beforeIntent: async () => {
+        this.assertNotRunning(input.browserSessionId);
+        const evidence = await this.workingCopyEvidence(input);
+        if (evidence.refusal) throw workingCopyRefusalError(evidence.refusal);
+      },
       appendReceipt: async (stagingDirectory) => {
         await assertWorkingCopyJournalsIntact(stagingDirectory);
         const writer = await SqliteBrowserWorkingRuntimeJournal.open({
@@ -699,15 +742,20 @@ export class BrowserSupervisor {
    * anything. A missing record proves the operation changed nothing here,
    * because the record precedes every side effect. A recorded adoption that
    * stopped part way is reported in its recorded phase; retrying the same
-   * adoption under the same authority, or a launch under that authority,
-   * settles it. An adoption still running anywhere is reported in flight. */
+   * adoption under the authority that approved it, or a launch under that
+   * authority, settles it, and a revert puts the browser's own directory
+   * back. It is in flight while it holds the browser's active claim and an
+   * operation in any process holds the working directory lock. */
   async workingCopyAdoptionStatus(input: {
     browserSessionId: string;
     operationId: string;
   }): Promise<{ inFlight: boolean; adoption: BrowserWorkingCopyAdoptionStatus | null }> {
     this.assertOpen();
     const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
-    const inFlight = this.adopting.has(input.browserSessionId) || (await adoptionLocked(paths));
+    const inFlight =
+      (this.adopting.has(input.browserSessionId) ||
+        (await readActiveAdoption(paths)) === input.operationId) &&
+      (await adoptionLocked(paths));
     const record = await readAdoptionRecord(paths, input.operationId);
     return {
       inFlight,
@@ -715,49 +763,51 @@ export class BrowserSupervisor {
     };
   }
 
-  /** The adoption that still owns a browser's directory, for a launch: one
-   * running anywhere, or a recorded one that settlement under the launch's
-   * own authority could not bring to a terminal phase. Without a working
-   * runtime authority nothing is settled, only observed. */
-  private async unresolvedAdoption(options: {
-    browserSessionId: string;
-    controllerGeneration: string;
-    workingRuntimeAuthority?: BrowserWorkingRuntimeAuthority;
-  }) {
-    if (this.adopting.has(options.browserSessionId)) return "in_flight" as const;
+  /** Run `body` as the single owner of a browser's working directory: it
+   * holds the directory lock (see withWorkingDirectoryLock) for its whole
+   * duration, after proving no adoption owns the directory. An adoption,
+   * revert, launch or end in any process that holds the lock makes this
+   * refuse as busy; a recorded adoption that is not finished makes it refuse
+   * as unresolved. With the launch's authority, a recorded adoption that
+   * authority approved is carried forward first. */
+  private async withOwnedWorkingDirectory<T>(
+    operation: "end" | "launch",
+    options: {
+      browserSessionId: string;
+      controllerGeneration?: string;
+      workingRuntimeAuthority?: BrowserWorkingRuntimeAuthority | undefined;
+    },
+    body: () => Promise<T>,
+  ): Promise<T> {
+    if (this.adopting.has(options.browserSessionId))
+      throw workingRuntimeUnavailable("working_directory_busy");
     const paths = adoptionPaths(this.rootDirectory, options.browserSessionId);
-    if (!options.workingRuntimeAuthority) return await observeActiveAdoption(paths);
-    return await settleActiveAdoption(
-      paths,
-      adoptionAuthority({
-        controllerGeneration: options.controllerGeneration,
-        authority: options.workingRuntimeAuthority,
-      }),
-    );
+    const authority =
+      options.workingRuntimeAuthority && options.controllerGeneration !== undefined
+        ? adoptionAuthority({
+            controllerGeneration: options.controllerGeneration,
+            authority: options.workingRuntimeAuthority,
+          })
+        : null;
+    const result = await withWorkingDirectoryLock(paths, async () => {
+      if (await activeAdoptionLocked(paths, authority))
+        throw workingRuntimeUnavailable("adoption_unresolved");
+      await this.afterWorkingDirectoryClaim?.(operation, options.browserSessionId);
+      return { value: await body() };
+    });
+    if (result === ADOPTION_IN_FLIGHT) throw workingRuntimeUnavailable("working_directory_busy");
+    return result.value;
   }
 
-  /** Run an end, retire or set-aside of a preserved working copy only while
-   * no adoption owns its directory. The browser is marked first, so an
-   * adoption that starts afterwards in this process refuses. An adoption
-   * running here or in another process, or a recorded one not yet settled
-   * (its original or staged copy may be about to move), makes this refuse
-   * instead; retrying that adoption, or a launch under its authority,
-   * settles it first. A claim with no record changed nothing, so it does not
-   * block. */
+  /** Run an end, retire or set-aside of a preserved working copy as the
+   * single owner of its directory (see withOwnedWorkingDirectory). The
+   * browser is also marked in this process, so an adoption here refuses as
+   * running before it even tries the lock. */
   private async whileNoAdoption(browserSessionId: string, body: () => Promise<void>) {
     const marked = !this.endingWorkingCopies.has(browserSessionId);
     this.endingWorkingCopies.add(browserSessionId);
     try {
-      const paths = adoptionPaths(this.rootDirectory, browserSessionId);
-      const blocking = this.adopting.has(browserSessionId)
-        ? ADOPTION_IN_FLIGHT
-        : (await adoptionLocked(paths))
-          ? ADOPTION_IN_FLIGHT
-          : await observeActiveAdoption(paths);
-      if (blocking !== null && blocking !== ADOPTION_UNRECORDED) {
-        throw workingRuntimeUnavailable("adoption_unresolved");
-      }
-      await body();
+      await this.withOwnedWorkingDirectory("end", { browserSessionId }, body);
     } finally {
       if (marked) this.endingWorkingCopies.delete(browserSessionId);
     }
@@ -1378,17 +1428,29 @@ export class BrowserSupervisor {
     }
   }
 
+  /** A launch is the single owner of its browser's working directory from
+   * the moment it decides which directory to use until its browser process
+   * runs (or the launch fails): no adoption or end in any controller can
+   * move the directory meanwhile. An adoption that owns the directory, and
+   * is not one this launch's authority carries forward, refuses the launch;
+   * the launch never falls back to anything else. */
   private async buildRuntime(options: ValidatedBrowserSupervisorSessionOptions): Promise<Runtime> {
+    return await this.withOwnedWorkingDirectory(
+      "launch",
+      options,
+      async () => await this.buildOwnedRuntime(options),
+    );
+  }
+
+  private async buildOwnedRuntime(
+    options: ValidatedBrowserSupervisorSessionOptions,
+  ): Promise<Runtime> {
     const sessionDirectory = join(this.rootDirectory, "sessions", options.browserSessionId);
     const socketDirectory = join(this.socketRootDirectory, shortDigest(options.browserSessionId));
     const profileDirectory = join(sessionDirectory, "profile");
     const downloadDirectory = join(sessionDirectory, "downloads");
     const uploadDirectory = join(sessionDirectory, "uploads");
     const screenshotDirectory = join(sessionDirectory, "screenshots");
-    // An adoption running here or left unresolved owns this directory; no
-    // launch of any kind may use it until that adoption is reconciled.
-    if (await this.unresolvedAdoption(options))
-      throw workingRuntimeUnavailable("adoption_unresolved");
     if (
       !options.recoverExistingWorkingDirectory &&
       !options.restore &&

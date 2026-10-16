@@ -416,7 +416,8 @@ export type BrowserWorkingRuntimeUnavailableReason =
   | "process_state_unknown"
   | "working_copy_invalid"
   | "adoption_unresolved"
-  | "adoption_conflict";
+  | "adoption_conflict"
+  | "working_directory_busy";
 
 const UNAVAILABLE_EXPLANATIONS: Record<BrowserWorkingRuntimeUnavailableReason, string> = {
   receipt_not_adoptable:
@@ -431,8 +432,10 @@ const UNAVAILABLE_EXPLANATIONS: Record<BrowserWorkingRuntimeUnavailableReason, s
     "it cannot be proven that its last browser process has stopped, so its working copy is left untouched",
   working_copy_invalid: "its working directory is incomplete or is not a plain directory",
   adoption_unresolved:
-    "a working copy adoption for it is unresolved; check it with getBrowserSessionWorkingCopyAdoption, then retry that same adoption with the same operationId to settle it",
+    "a working copy adoption for it is unresolved; check it with getBrowserSessionWorkingCopyAdoption, then either retry that same adoption with the same operationId to settle it, or revert it with revertBrowserSessionWorkingCopyAdoption to put the browser's own directory back",
   adoption_conflict: "a different working copy adoption already used this operation",
+  working_directory_busy:
+    "another operation (a launch, end, adoption or revert) is using its working directory right now; retry once that finishes",
 };
 
 export function unavailable(reason?: BrowserWorkingRuntimeUnavailableReason) {

@@ -446,6 +446,8 @@ export const BROWSER_WORKING_COPY_ADOPTION_PHASES = [
   "interrupted",
   "failed",
   "collision",
+  "reverting",
+  "reverted",
 ] as const;
 export type PlacementBrowserWorkingCopyAdoptionPhase =
   (typeof BROWSER_WORKING_COPY_ADOPTION_PHASES)[number];
@@ -1013,6 +1015,32 @@ export class BrowserControlClient {
     }
     const adoption =
       data.adoption === null ? null : parseWorkingCopyAdoption(data.adoption, binding);
+    if (adoption && adoption.operationId !== id) {
+      throw new BrowserControlProtocolError("browser controller returned another adoption");
+    }
+    return { inFlight: data.inFlight, adoption };
+  }
+
+  /** Revert one unfinished adoption under the browser's current authority:
+   * its own directory goes back to the live path and the staged copy is
+   * kept. Retrying the same revert finishes one that stopped part way. */
+  async revertWorkingCopyAdoption(
+    input: PlacementBrowserWorkingCopyAuthority & { operationId: string },
+  ): Promise<{ inFlight: boolean; adoption: PlacementBrowserWorkingCopyAdoption | null }> {
+    const reference = parseReference(input);
+    const id = requireUuid(input.operationId, "working copy adoption id");
+    const data = await this.requestJson({
+      method: "POST",
+      path: `/v1/browser-sessions/${reference.browserSessionId}/working-copy/adoptions/${id}/revert`,
+      token: this.adminToken,
+      body: workingCopyAuthorityBody(reference, input),
+      timeoutMs: BROWSER_STATE_TRANSFER_TIMEOUT_MS,
+    });
+    if (!isRecord(data) || typeof data.inFlight !== "boolean") {
+      throw new BrowserControlProtocolError("browser controller returned malformed revert status");
+    }
+    const adoption =
+      data.adoption === null ? null : parseWorkingCopyAdoption(data.adoption, reference);
     if (adoption && adoption.operationId !== id) {
       throw new BrowserControlProtocolError("browser controller returned another adoption");
     }
@@ -3971,9 +3999,7 @@ function excludedWorkingCopyEntries(value: unknown): string[] {
   if (
     !Array.isArray(value) ||
     value.length > 16 ||
-    !value.every(
-      (entry) => typeof entry === "string" && entry.length > 0 && entry.length <= 256,
-    )
+    !value.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= 256)
   ) {
     throw new BrowserControlProtocolError(
       "browser controller returned malformed working copy exclusions",

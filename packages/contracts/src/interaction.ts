@@ -2867,6 +2867,8 @@ export const BrowserWorkingCopyAdoption = /* @__PURE__ */ defineSchema(() =>
         "interrupted",
         "failed",
         "collision",
+        "reverting",
+        "reverted",
       ]),
       failureCode: z.string().min(1).max(64).nullable(),
       retainedDirectories: z.array(z.string().min(1).max(256)).max(64),

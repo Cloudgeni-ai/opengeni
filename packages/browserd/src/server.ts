@@ -493,6 +493,18 @@ export class BrowserControlServer {
       if (segments.length === 5 && segments[4] === "adoptions" && request.method === "POST") {
         return await this.adoptWorkingCopy(browserSessionId, request);
       }
+      if (
+        segments.length === 7 &&
+        segments[4] === "adoptions" &&
+        segments[6] === "revert" &&
+        request.method === "POST"
+      ) {
+        return await this.revertWorkingCopyAdoption(
+          browserSessionId,
+          requireUuid(segments[5], "adoption operation id"),
+          request,
+        );
+      }
       if (segments.length === 6 && segments[4] === "adoptions" && request.method === "GET") {
         return success(
           await this.supervisor.workingCopyAdoptionStatus({
@@ -1051,6 +1063,19 @@ export class BrowserControlServer {
     const manifestDigest = body.manifestDigest;
     return await this.withLifecycleLock(browserSessionId, async () =>
       success(await this.supervisor.adoptWorkingCopy({ ...input, operationId, manifestDigest })),
+    );
+  }
+
+  private async revertWorkingCopyAdoption(
+    browserSessionId: string,
+    operationId: string,
+    request: Request,
+  ) {
+    const body = await readJsonObject(request);
+    assertOnlyKeys(body, ["controllerGeneration", "tokenGeneration", "controlToken", "viewToken"]);
+    const input = this.workingCopyAuthority(browserSessionId, body);
+    return await this.withLifecycleLock(browserSessionId, async () =>
+      success(await this.supervisor.revertWorkingCopyAdoption({ ...input, operationId })),
     );
   }
 

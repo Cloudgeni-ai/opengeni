@@ -3418,7 +3418,7 @@ describe("adopting a verified copy of a preserved working directory", () => {
     ["token generation", { controllerGeneration: undefined, tokenGeneration: 2 }],
     ["controller generation", { controllerGeneration: "controller-other", tokenGeneration: 1 }],
   ] as const) {
-    test(`after a restart, a launch under a changed ${stale[0]} ends an interrupted adoption without moving anything`, async () => {
+    test(`after a restart, a launch under a changed ${stale[0]} is refused and changes nothing about an interrupted adoption`, async () => {
       await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
         const live = await restoreAsCopy(rootDirectory, options.browserSessionId);
         const restored = await stat(live);
@@ -3454,10 +3454,10 @@ describe("adopting a verified copy of a preserved working directory", () => {
             }),
           ).rejects.toThrow();
           expect(launched).toHaveLength(0);
-          expect(await readAdoptionRecord(paths, operationId)).toMatchObject({
-            phase: "failed",
-            failureCode: "authority_changed",
-          });
+          // A different request alone does not prove the approving authority is
+          // gone: the record stays exactly as it was, so that authority can
+          // still finish it and any authority can revert it.
+          expect(await readAdoptionRecord(paths, operationId)).toEqual(record);
           // The original stays live; the staged copy is kept, never made live.
           expect((await stat(live)).ino).toBe(restored.ino);
           const staged = await stat(join(rootDirectory, "sessions", record.stagingName));
@@ -3536,4 +3536,76 @@ describe("adopting a verified copy of a preserved working directory", () => {
       }
     });
   });
+
+  for (const operation of ["end", "launch"] as const) {
+    test(`an adoption in another controller is refused while ${operation === "end" ? "an end" : "a launch"} owns the directory`, async () => {
+      await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+        const live = await restoreAsCopy(rootDirectory, options.browserSessionId);
+        const original = await stat(live);
+        const exact = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+          authority: workingAuthority,
+        };
+        let release!: () => void;
+        let reached!: () => void;
+        const barrier = new Promise<void>((resolve) => (release = resolve));
+        const claimed = new Promise<void>((resolve) => (reached = resolve));
+        const owning = await BrowserSupervisor.open({
+          rootDirectory,
+          socketRootDirectory,
+          inspectOwnedProcess: async () => "exited",
+          createDriver: async (context) => fakeDriver(context),
+          afterWorkingDirectoryClaim: async (claimedOperation) => {
+            if (claimedOperation !== operation) return;
+            reached();
+            await barrier;
+          },
+        });
+        const adopting = await BrowserSupervisor.open({
+          rootDirectory,
+          socketRootDirectory: `${socketRootDirectory}-adopting`,
+          inspectOwnedProcess: async () => "exited",
+          createDriver: async (context) => fakeDriver(context),
+        });
+        try {
+          const { manifest } = await adopting.inspectWorkingCopy(exact);
+          expect(manifest).not.toBeNull();
+          // The end or launch has passed its no-adoption check and still holds
+          // the directory when the other controller tries to adopt.
+          const owner =
+            operation === "end"
+              ? owning.endSession(exact, { removeState: false, discardWorkingRuntime: true })
+              : owning.createSession({ ...options, recoverExistingWorkingDirectory: true });
+          await claimed;
+          const operationId = "33333333-3333-4333-8333-000000000014";
+          await expect(
+            adopting.adoptWorkingCopy({
+              ...exact,
+              operationId,
+              manifestDigest: manifest!.digest,
+            }),
+          ).rejects.toThrow("working directory");
+          // Refused before anything was recorded or moved.
+          expect(
+            await adopting.workingCopyAdoptionStatus({
+              browserSessionId: options.browserSessionId,
+              operationId,
+            }),
+          ).toMatchObject({ inFlight: false, adoption: null });
+          expect((await stat(live)).ino).toBe(original.ino);
+          release();
+          // The owner's own outcome on a restored copy (a launch needs an
+          // adoption first) is not what this test measures; only that the
+          // adoption could not act while it owned the directory.
+          await Promise.allSettled([owner]);
+          expect((await stat(live)).ino).toBe(original.ino);
+        } finally {
+          release();
+          await adopting.close();
+          await owning.close();
+        }
+      });
+    });
+  }
 });

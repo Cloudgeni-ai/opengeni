@@ -97,6 +97,7 @@ const agentInteractionMethods = [
   "inspectBrowserSessionWorkingCopy",
   "adoptBrowserSessionWorkingCopy",
   "getBrowserSessionWorkingCopyAdoption",
+  "revertBrowserSessionWorkingCopyAdoption",
 ];
 
 // Server-side integrations replace the Skills a session carries, and hosts that

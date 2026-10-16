@@ -1901,11 +1901,18 @@ appends an adopt receipt naming the staged profile's own identity, then makes
 two journaled renames (original to a preserved name, staged copy into place).
 Only the approving authority carries a stopped adoption forward, by retrying
 the same operation or launching under that authority; inspection and status
-never settle anything. Before the original moves, any doubt fails the adoption
-with the original live; afterwards it is a collision that keeps every copy and
-blocks launches. Ends refuse while an adoption is running or unsettled. Nothing
-is deleted automatically, and an adopted copy never falls back to an older
-checkpoint.
+never settle anything, and a request under another authority changes nothing.
+Before the original moves, any doubt fails the adoption with the original live.
+After that, every step first proves the original is still at its preserved
+name with the approved identity and bytes and the staged copy is unchanged; any
+doubt is a collision that keeps every copy and blocks launches. The supported
+way out of a collision, or of an adoption nobody wants finished, is a revert
+under the browser's current authority: it is journaled, puts the original back
+at its live path, keeps the staged copy, and a retry finishes one that stopped
+part way. Adoption, revert, launch and end each hold one per-browser directory
+lock for their whole transition, across controllers, so only one of them acts
+on the directory at a time. Nothing is deleted automatically, and an adopted
+copy never falls back to an older checkpoint.
 
 Undispatched creates settle under the operation lock; dispatched bindings survive for reconciliation.
 

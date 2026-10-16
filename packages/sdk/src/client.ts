@@ -4915,6 +4915,25 @@ export class OpenGeniClient {
     );
   }
 
+  /** Revert an unfinished adoption: the browser's own directory goes back in
+   * place and the staged copy is kept, never used. The supported way out of
+   * a collision or of an adoption nobody wants finished. Retrying the same
+   * revert finishes one that stopped part way. */
+  async revertBrowserSessionWorkingCopyAdoption(
+    workspaceId: string,
+    browserSessionId: string,
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserWorkingCopyAdoptionResponse> {
+    return await this.requestJson<BrowserWorkingCopyAdoptionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/working-copy/adoptions/${encodeURIComponent(operationId)}/revert`,
+      {},
+      {},
+      options,
+    );
+  }
+
   /** Workspace-wide ComputerSession inventory. Associations express
    * relevance, not access; peer sessions intentionally remain discoverable. */
   async listComputerSessions(
