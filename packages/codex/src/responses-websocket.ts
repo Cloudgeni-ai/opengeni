@@ -15,6 +15,96 @@ import type { FetchLike } from "./fetch";
 
 export const CODEX_RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 
+/**
+ * Response header naming how this transport carried a Responses request, so
+ * the request audit can report it per request. Read with
+ * {@link parseCodexRequestTransport}.
+ */
+export const CODEX_TRANSPORT_HEADER = "x-opengeni-codex-transport";
+
+/**
+ * How one Codex Responses request was carried. A WebSocket request either
+ * opened its connection or reused a warm one. An HTTP request names why the
+ * socket did not carry it: the request was not a streaming Responses POST, the
+ * conversation's connection was busy with another request, a recent handshake
+ * failed (backoff), or this handshake failed. `unavailable` means no socket
+ * transport was in the path at all (disabled, or a runtime without
+ * header-capable WebSockets).
+ */
+export type CodexRequestTransport =
+  | { kind: "websocket"; connection: "new" | "reused" }
+  | {
+      kind: "http";
+      reason:
+        | "not_eligible"
+        | "connection_busy"
+        | "handshake_backoff"
+        | "handshake_failed"
+        | "unavailable";
+    };
+
+const HTTP_REASONS = new Set([
+  "not_eligible",
+  "connection_busy",
+  "handshake_backoff",
+  "handshake_failed",
+  "unavailable",
+]);
+
+export function formatCodexRequestTransport(transport: CodexRequestTransport): string {
+  return transport.kind === "websocket"
+    ? `websocket; connection=${transport.connection}`
+    : `http; reason=${transport.reason}`;
+}
+
+/** The transport a response was carried over; null when it does not say. */
+export function parseCodexRequestTransport(
+  value: string | null | undefined,
+): CodexRequestTransport | null {
+  if (!value) return null;
+  const [kind, ...parameters] = value.split(";").map((part) => part.trim());
+  const fields = new Map(
+    parameters.map((parameter) => {
+      const index = parameter.indexOf("=");
+      return [parameter.slice(0, index), parameter.slice(index + 1)] as const;
+    }),
+  );
+  if (kind === "websocket") {
+    const connection = fields.get("connection");
+    return connection === "new" || connection === "reused"
+      ? { kind: "websocket", connection }
+      : null;
+  }
+  if (kind === "http") {
+    const reason = fields.get("reason");
+    return reason && HTTP_REASONS.has(reason)
+      ? {
+          kind: "http",
+          reason: reason as Extract<CodexRequestTransport, { kind: "http" }>["reason"],
+        }
+      : null;
+  }
+  return null;
+}
+
+/** The same response, labelled with how it was carried. */
+function withTransport(response: Response, transport: CodexRequestTransport): Response {
+  const value = formatCodexRequestTransport(transport);
+  try {
+    response.headers.set(CODEX_TRANSPORT_HEADER, value);
+    return response;
+  } catch {
+    // A fetch response's headers can be immutable; carry the same body.
+    const headers = new Headers(response.headers);
+    headers.set(CODEX_TRANSPORT_HEADER, value);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  }
+}
+
 /** The subset of the WHATWG/Bun WebSocket this transport uses. */
 export type CodexWebSocketLike = {
   readonly readyState: number;
@@ -84,6 +174,8 @@ type Connection = {
   openedAt: number;
   busy: boolean;
   closed: boolean;
+  /** Requests this connection has started carrying. */
+  requests: number;
   idleTimer: ReturnType<typeof setTimeout> | null;
   /** Receives every message while a request is in flight. */
   onEvent: ((event: Record<string, unknown>) => void) | null;
@@ -213,6 +305,7 @@ export function codexResponsesTransport(
         openedAt: now(),
         busy: false,
         closed: false,
+        requests: 0,
         idleTimer: null,
         onEvent: null,
         onClose: null,
@@ -272,23 +365,22 @@ export function codexResponsesTransport(
     const url = requestUrl(input);
     const method = (init?.method ?? "GET").toUpperCase();
     const body = init?.body;
-    if (
-      !url ||
-      method !== "POST" ||
-      typeof body !== "string" ||
-      !/^https:\/\/[^/]+\/.*\/codex\/responses(?:\?|$)/.test(url)
-    ) {
+    if (!url || method !== "POST" || !/^https:\/\/[^/]+\/.*\/codex\/responses(?:\?|$)/.test(url)) {
       return await http(input, init);
     }
+    const viaHttp = async (
+      reason: Extract<CodexRequestTransport, { kind: "http" }>["reason"],
+    ): Promise<Response> => withTransport(await http(input, init), { kind: "http", reason });
+    if (typeof body !== "string") return await viaHttp("not_eligible");
     let payload: Record<string, unknown>;
     try {
       const parsed = JSON.parse(body) as unknown;
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
       payload = parsed as Record<string, unknown>;
     } catch {
-      return await http(input, init);
+      return await viaHttp("not_eligible");
     }
-    if (payload.stream !== true) return await http(input, init);
+    if (payload.stream !== true) return await viaHttp("not_eligible");
 
     const handshake: Record<string, string> = {};
     for (const [name, value] of new Headers(init?.headers).entries()) {
@@ -297,7 +389,7 @@ export function codexResponsesTransport(
     handshake["openai-beta"] = CODEX_RESPONSES_WEBSOCKET_BETA;
     const wsUrl = url.replace(/^https:/, "wss:");
     const key = JSON.stringify([wsUrl, Object.entries(handshake).sort()]);
-    if ((backoffUntil.get(key) ?? 0) > now()) return await http(input, init);
+    if ((backoffUntil.get(key) ?? 0) > now()) return await viaHttp("handshake_backoff");
 
     const signal = init?.signal ?? null;
     signal?.throwIfAborted();
@@ -306,13 +398,13 @@ export function codexResponsesTransport(
       if (!connection.busy) retire(connection);
       connection = undefined;
     }
-    if (connection?.busy) return await http(input, init);
+    if (connection?.busy) return await viaHttp("connection_busy");
     if (!connection) {
       try {
         connection = await connect(wsUrl, key, handshake);
       } catch {
         backoffUntil.set(key, now() + handshakeBackoffMs);
-        return await http(input, init);
+        return await viaHttp("handshake_failed");
       }
       if (pool.has(key)) {
         // A concurrent request of the same conversation opened one first.
@@ -326,15 +418,23 @@ export function codexResponsesTransport(
       } else {
         pool.set(key, connection);
       }
-      if (connection.busy) return await http(input, init);
+      if (connection.busy) return await viaHttp("connection_busy");
     }
     const active = connection;
+    const transport: CodexRequestTransport = {
+      kind: "websocket",
+      connection: active.requests === 0 ? "new" : "reused",
+    };
+    active.requests += 1;
     active.busy = true;
     if (active.idleTimer) clearTimeout(active.idleTimer);
     active.idleTimer = null;
 
     return await new Promise<Response>((resolve, reject) => {
-      const headers = new Headers({ "content-type": "text/event-stream" });
+      const headers = new Headers({
+        "content-type": "text/event-stream",
+        [CODEX_TRANSPORT_HEADER]: formatCodexRequestTransport(transport),
+      });
       let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
       let started = false;
       let finished = false;

@@ -6,6 +6,7 @@
 // time — one cached client, correct per-workspace token, no cross-tenant leak.
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { CodexRequestTransport } from "./responses-websocket";
 
 export type CodexTokenSnapshot = {
   accessToken: string;
@@ -62,6 +63,8 @@ export type CodexModelRequestEvent = {
   willRetry?: boolean;
   /** Only true for a successful response with substantive assistant/tool output. */
   meaningfulOutput?: boolean;
+  /** How the request was carried; reported once its response headers arrive. */
+  transport?: CodexRequestTransport;
 };
 
 export type CodexRequestOpaqueArtifacts = {
