@@ -128,10 +128,23 @@ class GuestService(unittest.TestCase):
 
     def test_a_malformed_restore_notice_is_neither_answered_nor_counted(self) -> None:
         before = self.ok({"op": "ping"})["restores"]
-        for line in (b"restored\n", b"restored soon\n", b"hello 1\n", b""):
+        too_long = f"restored {time.time_ns()} sandbox={'a' * 1024}\n".encode()
+        for line in (b"restored\n", b"restored soon\n", b"hello 1\n", b"", too_long):
             with self.subTest(line=line):
                 self.assertEqual(self.notice(line), b"")
         self.assertEqual(self.ok({"op": "ping"})["restores"], before)
+
+    def test_a_restore_notice_names_the_sandbox_and_unknown_fields_are_ignored(self) -> None:
+        before = self.ok({"op": "ping"})["restores"]
+        sandbox = "0123456789abcdef0123456789abcdef"
+        line = f"restored {time.time_ns()} sandbox={sandbox} later=1 bare\n".encode()
+        self.assertEqual(self.notice(line), b"ok\n")
+        reply = self.ok({"op": "ping"})
+        self.assertEqual(reply["restores"], before + 1)
+        self.assertEqual(reply["sandbox"], sandbox)
+        # A notice without the field keeps the id the guest already has.
+        self.assertEqual(self.notice(f"restored {time.time_ns()}\n".encode()), b"ok\n")
+        self.assertEqual(self.ok({"op": "ping"})["sandbox"], sandbox)
 
     def test_a_command_returns_its_status_and_both_streams(self) -> None:
         reply = self.ok(
@@ -415,6 +428,22 @@ class GuestInternals(unittest.TestCase):
             reply = self.guest.op_signal({"pid": process.pid, "signal": signal.SIGTERM})
         self.assertEqual(reply, {"delivered": False})
         killpg.assert_not_called()
+
+    def test_a_booted_guest_finds_its_sandbox_on_the_kernel_command_line(self) -> None:
+        boot_sandbox = self.guest.boot_sandbox
+        self.assertEqual(
+            boot_sandbox("console=ttyS0 reboot=k opengeni.sandbox=00ff ip=169.254.0.21"),
+            "00ff",
+        )
+        self.assertIsNone(boot_sandbox("console=ttyS0 reboot=k"))
+        self.assertIsNone(boot_sandbox("opengeni.sandbox= opengeni.sandboxes=1"))
+
+    def test_a_restarted_service_keeps_the_id_a_notice_gave(self) -> None:
+        # A clone's kernel command line is its template's; only the notice
+        # names it, so the id must outlive the service process.
+        self.guest.RESTORES.record("0123456789abcdef0123456789abcdef")
+        restarted = _load_guest(self.scratch / "state")
+        self.assertEqual(restarted.RESTORES.sandbox(), "0123456789abcdef0123456789abcdef")
 
     def watcher(self) -> Any:
         """A recursive watcher on a tree with `old/inner`, on a fake clock."""

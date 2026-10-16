@@ -21,7 +21,7 @@ def concurrent_wakes_converge(test: smoke.Ecw) -> None:
     memory image: a count inside the guest could not tell one restore from
     several, since each restored copy starts from the same saved count. The
     guest's count still shows that the restored guest was told of its
-    restore.
+    restore (at least once: the host repeats a notice whose answer it lost).
     """
 
     marker = f"{test.sandbox.sandbox_id}:concurrent"
@@ -73,8 +73,9 @@ def concurrent_wakes_converge(test: smoke.Ecw) -> None:
             expected=1,
             message="concurrent wakes did not share exactly one restored VM",
         )
-        test.verify_equal(
-            actual=test.sandbox.restore_count() - restores_before,
-            expected=1,
-            message="the restored guest was not told of its restore",
+        notices = test.sandbox.restore_count() - restores_before
+        test.verify(
+            notices >= 1,
+            "the restored guest was not told of its restore",
+            notices=notices,
         )

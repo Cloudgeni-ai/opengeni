@@ -17,9 +17,15 @@ saving and restoring the sandbox, and are gone after a fresh boot, exactly
 like the programs themselves.
 
 With `--notice`, the service also answers the host agent's restore notice
-(`restored <unix time in nanoseconds>`, answered with `ok`): it sets the
-clock and counts restores, which `ping` reports, so a scenario can tell how
-many times its own sandbox was restored from a memory image.
+(`restored <unix time in nanoseconds> [key=value ...]`, answered with `ok`):
+it sets the clock, counts restores and takes the `sandbox=<id>` field as its
+own sandbox id, ignoring fields it does not know. `ping` reports both, so a
+scenario can tell that its sandbox was restored from a memory image, and
+which sandbox a guest started from a template believes it is. The host
+retries a notice whose answer got lost, so the count can run ahead of the
+restores. The id is kept in the state directory before the answer, so a
+restarted service still knows it; a guest booted from its disk finds its id
+on the kernel command line instead, as `opengeni.sandbox=<id>`.
 """
 
 from __future__ import annotations
@@ -47,8 +53,12 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 MAX_REQUEST = 64 << 20
-MAX_NOTICE = 64
+# Room for the time, the sandbox id and fields a later host may add.
+MAX_NOTICE = 1024
+SANDBOX_ARG = "opengeni.sandbox"
 OUTPUT_DIR = Path(os.environ.get("SMOKE_GUEST_STATE", "/run/smoke-guest"))
+# The id the latest restore notice gave, kept across restarts of the service.
+SANDBOX_FILE = OUTPUT_DIR / "sandbox"
 _OUTPUT_NAMES = itertools.count()
 
 
@@ -176,26 +186,73 @@ PROCESSES = Processes()
 
 
 class Restores:
-    """How many restore notices this service has acknowledged."""
+    """How many restore notices this service has acknowledged, and which
+    sandbox the latest one (or the kernel command line) said it is. A new id
+    is written to SANDBOX_FILE before it counts, so it outlives the
+    service."""
 
-    def __init__(self) -> None:
+    def __init__(self, sandbox: str | None) -> None:
         self._lock = threading.Lock()
         self._count = 0
+        self._sandbox = sandbox
 
-    def record(self) -> None:
+    def record(self, sandbox: str | None) -> None:
         with self._lock:
+            if sandbox is not None and sandbox != self._sandbox:
+                _keep_sandbox(sandbox)
             self._count += 1
+            if sandbox is not None:
+                self._sandbox = sandbox
 
     def count(self) -> int:
         with self._lock:
             return self._count
 
+    def sandbox(self) -> str | None:
+        with self._lock:
+            return self._sandbox
 
-RESTORES = Restores()
+
+def boot_sandbox(cmdline: str) -> str | None:
+    """The sandbox id the host put on a kernel command line, if any."""
+
+    for word in cmdline.split():
+        key, equals, value = word.partition("=")
+        if equals and key == SANDBOX_ARG and value:
+            return value
+    return None
+
+
+def _keep_sandbox(sandbox: str) -> None:
+    """Writes `sandbox` to SANDBOX_FILE, replacing it whole."""
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    staged = SANDBOX_FILE.with_name(f".{SANDBOX_FILE.name}.{os.getpid()}")
+    staged.write_text(sandbox, encoding="ascii")
+    os.replace(staged, SANDBOX_FILE)
+
+
+def _starting_sandbox() -> str | None:
+    """The id a starting service takes: the one a restore notice gave an
+    earlier run of the service, else the kernel command line's."""
+
+    try:
+        kept = SANDBOX_FILE.read_text(encoding="ascii").strip()
+    except OSError:
+        kept = ""
+    if kept:
+        return kept
+    try:
+        return boot_sandbox(Path("/proc/cmdline").read_text(encoding="ascii", errors="replace"))
+    except OSError:
+        return None
+
+
+RESTORES = Restores(_starting_sandbox())
 
 
 def op_ping(_request: dict[str, Any]) -> dict[str, Any]:
-    return {"pid": os.getpid(), "restores": RESTORES.count()}
+    return {"pid": os.getpid(), "restores": RESTORES.count(), "sandbox": RESTORES.sandbox()}
 
 
 def op_exec(request: dict[str, Any]) -> dict[str, Any]:
@@ -634,23 +691,51 @@ def serve(server: socket.socket) -> None:
         ).start()
 
 
+def parse_notice(line: bytes) -> tuple[int, dict[str, str]] | None:
+    """Splits `restored <nanos> [key=value ...]` into the time and its fields.
+
+    Returns None for anything else, including a line longer than
+    MAX_NOTICE. Words without `=` are skipped like unknown fields, so a later
+    host can add to the line without older guests refusing it."""
+
+    if len(line) > MAX_NOTICE:
+        return None
+    words = line.decode("ascii", errors="replace").split()
+    if len(words) < 2 or words[0] != "restored" or not words[1].isdigit():
+        return None
+    fields = {}
+    for word in words[2:]:
+        key, equals, value = word.partition("=")
+        if equals and key:
+            fields[key] = value
+    return int(words[1]), fields
+
+
 def serve_notice(connection: socket.socket, *, set_clock: bool) -> None:
-    """Acts on one restore notice: sets the clock, counts the restore and
-    answers `ok`. Anything else closes the connection unanswered."""
+    """Acts on one restore notice: sets the clock, counts the restore, takes
+    the sandbox id and answers `ok`. Anything else closes the connection
+    unanswered."""
 
     with connection, connection.makefile("rb") as reader:
         line = reader.readline(MAX_NOTICE + 1)
-        word, _, nanos = line.decode("ascii", errors="replace").strip().partition(" ")
-        if word != "restored" or not nanos.isdigit():
-            print(f"ignored restore notice {line[:MAX_NOTICE]!r}", file=sys.stderr, flush=True)
+        notice = parse_notice(line)
+        if notice is None:
+            print(f"ignored restore notice {line[:80]!r}", file=sys.stderr, flush=True)
             return
+        nanos, fields = notice
         if set_clock:
             try:
-                time.clock_settime_ns(time.CLOCK_REALTIME, int(nanos))
+                time.clock_settime_ns(time.CLOCK_REALTIME, nanos)
             except OSError as error:
                 # A guest that cannot set its clock still counts the restore.
                 print(f"cannot set the clock: {error}", file=sys.stderr, flush=True)
-        RESTORES.record()
+        try:
+            RESTORES.record(fields.get("sandbox") or None)
+        except OSError as error:
+            # Unanswered, the host tries again: an id the guest could not
+            # keep is not taken.
+            print(f"cannot keep the sandbox id: {error}", file=sys.stderr, flush=True)
+            return
         with contextlib.suppress(BrokenPipeError, ConnectionResetError):
             connection.sendall(b"ok\n")
 
