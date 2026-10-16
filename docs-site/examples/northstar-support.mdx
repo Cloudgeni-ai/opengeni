@@ -42,9 +42,10 @@ cd examples/northstar-support && bun run dev
 | File                             | Contents                                                            |
 | -------------------------------- | ------------------------------------------------------------------- |
 | `src/server.ts`                  | Onboarding, session creation, the session proxy, and the MCP server |
+| `src/visitors.ts`                | Anonymous visitor cookie and session ownership                      |
 | `src/support-agent-panel.tsx`    | `OpenGeniProvider` and `SessionConversation`                        |
 | `src/support-tool-renderers.tsx` | Custom renderers for the MCP tool calls                             |
 
-The demo uses one fixed user and pre-approved tools. A real app authenticates users in `resolve` and checks CSRF in `authorizeMutation`.
+The demo uses one fixed user and pre-approved tools. It keeps anonymous browsers apart with a signed visitor cookie: `authorizeSession` lets each browser reach only the sessions it started. A real app authenticates users in `resolve` and checks CSRF in `authorizeMutation`.
 
 [View the source on GitHub](https://github.com/Cloudgeni-ai/opengeni/tree/main/examples/northstar-support).

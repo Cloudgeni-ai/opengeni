@@ -95,11 +95,16 @@ export function useSupportDemo(): SupportDemoResult {
   }, [refresh]);
 
   const reset = useCallback(async () => {
-    const next = await fetchJson<SupportWorkspaceState>("/api/demo/reset", {
-      method: "POST",
-    });
-    setState(next);
-    setLastEvent(null);
+    try {
+      const next = await fetchJson<SupportWorkspaceState>("/api/demo/reset", {
+        method: "POST",
+      });
+      setState(next);
+      setLastEvent(null);
+    } catch (cause) {
+      // For example a rate-limited reset: keep the current data.
+      setError(cause instanceof Error ? cause : new Error(String(cause)));
+    }
   }, []);
 
   const updateTicket = useCallback(

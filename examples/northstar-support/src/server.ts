@@ -1,14 +1,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import {
+  OpenGeniApiError,
   OpenGeniClient,
   createSessionProxyHandler,
   type CreateSessionRequest,
+  type OpenGeniClientOptions,
 } from "@opengeni/sdk";
 import { uuidV5 } from "@opengeni/sdk/chat";
 import { realpath, stat } from "node:fs/promises";
 import { extname, join, resolve, sep } from "node:path";
 import * as z from "zod/v4";
+import { RateLimiter, consumeRateLimits, type RateLimitRefusal } from "./rate-limit";
 import type {
   SupportCase,
   DemoHealth,
@@ -18,6 +21,7 @@ import type {
   TicketPriority,
   TicketStatus,
 } from "./types";
+import { SessionOwners, VisitorCookies, sameOriginRequest } from "./visitors";
 
 const PRODUCT_PORT = Number(process.env.PORT ?? 4100);
 const MCP_PORT = Number(process.env.OPENGENI_DEMO_MCP_PORT ?? 4101);
@@ -33,68 +37,46 @@ const NOT_FOUND_CACHE_CONTROL = "no-store";
 const MCP_TOOLS = ["get_ticket", "get_customer", "update_ticket", "add_internal_note"];
 const encoder = new TextEncoder();
 
-const apiKey = process.env.OPENGENI_API_KEY?.trim() ?? "";
-const workspaceId = process.env.OPENGENI_WORKSPACE_ID?.trim() ?? "";
-const apiBaseUrl = (process.env.OPENGENI_API_BASE_URL ?? "https://app.opengeni.ai").replace(
-  /\/+$/,
-  "",
-);
-const mcpToken = process.env.OPENGENI_DEMO_MCP_TOKEN?.trim() ?? "";
-const openGeni = new OpenGeniClient({ baseUrl: apiBaseUrl, apiKey });
+// Server-side configuration only; none of it reaches the browser.
+const env = {
+  apiKey: process.env.OPENGENI_API_KEY?.trim() ?? "",
+  workspaceId: process.env.OPENGENI_WORKSPACE_ID?.trim() ?? "",
+  apiBaseUrl: (process.env.OPENGENI_API_BASE_URL ?? "https://app.opengeni.ai").replace(/\/+$/, ""),
+  mcpToken: process.env.OPENGENI_DEMO_MCP_TOKEN?.trim() ?? "",
+};
 
-// The demo has one fixed operator instead of a login. A real product resolves
-// this from its own authenticated session on every request.
+// Abuse bounds for an anonymous public demo: every agent run spends model
+// usage. Visitors can drop their cookie, so the global limits are the real cap.
+const AGENT_RUNS_PER_VISITOR = { limit: 6, windowMs: 10 * 60_000 };
+const AGENT_RUNS_GLOBAL = { limit: 30, windowMs: 60 * 60_000 };
+const RESETS_PER_VISITOR = { limit: 5, windowMs: 60_000 };
+const RESETS_GLOBAL = { limit: 30, windowMs: 60_000 };
+// Each run stops before its next model request once it has used $1.00 of
+// API-equivalent model usage (USD micros). Visitors cannot raise it.
+const AGENT_RUN_USAGE_LIMIT_MICROS = 1_000_000;
+// Typed messages only: no uploads or recordings travel through the proxy.
+const PROXY_MAX_BODY_BYTES = 32 * 1024;
+const MAX_INITIAL_MESSAGE_CHARACTERS = 4_000;
+
+// The demo has one fixed Opengeni operator instead of a login. A real product
+// resolves this from its own authenticated session on every request. Anonymous
+// browsers are separated by this server (see `VisitorCookies`), not by Opengeni.
 const DEMO_USER = { externalId: "maya.chen", source: "northstar-demo" } as const;
 const DEMO_USER_PERMISSIONS = [
   "workspace:read",
   "sessions:create",
   "sessions:read",
   "sessions:control",
-  "files:upload",
-  "files:read",
   // Sessions carry a per-session MCP server, which the acting user must be allowed to attach.
   "mcp_servers:attach",
 ] as const;
 const IDEMPOTENCY_NAMESPACE = "6f0b8b2e-3d7c-4f7e-9a51-2f1c5e0d9b44";
 
-// Explicit onboarding: the proxy and asUser never grant membership. A stable
-// operation id makes the grant an exact replay on every server start.
-let demoMembership: Promise<void> | null = null;
-function ensureDemoMembership(): Promise<void> {
-  demoMembership ??= (async () => {
-    await openGeni.addExternalWorkspaceMember(workspaceId, {
-      identity: { externalId: DEMO_USER.externalId, source: DEMO_USER.source },
-      permissions: [...DEMO_USER_PERMISSIONS],
-      operationId: await uuidV5(
-        `membership:${workspaceId}:${DEMO_USER.externalId}:${DEMO_USER_PERMISSIONS.join(",")}`,
-        IDEMPOTENCY_NAMESPACE,
-      ),
-    });
-  })().catch((error: unknown) => {
-    demoMembership = null;
-    throw error;
-  });
-  return demoMembership;
-}
-
 const createDemoSessionInput = z.object({
   ticketId: z.string().trim().min(1),
-  initialMessage: z.string().trim().min(1).optional(),
+  initialMessage: z.string().trim().min(1).max(MAX_INITIAL_MESSAGE_CHARACTERS).optional(),
   // One id per intentional start; retries of the same start reuse it.
   runId: z.string().uuid(),
-});
-
-// The browser's only Opengeni route: the packaged session proxy. It acts as the
-// demo user through asUser, pins the configured workspace, and serves only the
-// routes <OpenGeniProvider> and <SessionConversation> use.
-const openGeniProxy = createSessionProxyHandler(openGeni, {
-  resolve: async () => {
-    if (!apiKey || !workspaceId) {
-      return json({ error: "Opengeni credentials are not configured." }, 503);
-    }
-    await ensureDemoMembership();
-    return { workspaceId, user: DEMO_USER.externalId, source: DEMO_USER.source };
-  },
 });
 
 function minutesAgo(minutes: number): string {
@@ -544,107 +526,297 @@ async function resolvePublicMcpUrl(): Promise<string | null> {
   }
 }
 
-async function health(): Promise<DemoHealth> {
-  const mcpPublicUrl = await resolvePublicMcpUrl();
-  return {
-    ok: Boolean(apiKey && workspaceId && mcpToken && mcpPublicUrl),
-    workspaceId: workspaceId || null,
-    openGeniConfigured: Boolean(apiKey && workspaceId),
-    mcpTokenConfigured: Boolean(mcpToken),
-    mcpPublicUrl,
-  };
-}
+export type ProductHandlerConfig = {
+  apiBaseUrl: string;
+  /** Organization API key; it never leaves this server. */
+  apiKey: string;
+  workspaceId: string;
+  /** Shared only by Opengeni's encrypted per-session MCP credentials and this server. */
+  mcpToken: string;
+  /** The public HTTPS `/mcp` endpoint Opengeni calls, or null when none is reachable. */
+  resolveMcpUrl: () => Promise<string | null>;
+  /** Serve the built UI from `dist` (the single-origin production container). */
+  serveStatic: boolean;
+  /** Public product origin; an https origin gets Secure visitor cookies. */
+  appOrigin?: string | undefined;
+  /** Test seam: the fetch the server-side Opengeni client uses. */
+  fetch?: OpenGeniClientOptions["fetch"];
+  /** Test seam: the clock the rate limits use. */
+  now?: () => number;
+};
 
-async function createAgentSession(request: Request): Promise<Response> {
-  if (!apiKey || !workspaceId || !mcpToken) {
-    return json({ error: "Demo server credentials are not configured." }, 503);
-  }
-  const mcpUrl = await resolvePublicMcpUrl();
-  if (!mcpUrl) {
-    return json(
-      {
-        error: "No public HTTPS MCP endpoint is configured or detected.",
-      },
-      503,
-    );
-  }
-  const parsedInput = createDemoSessionInput.safeParse(await request.json().catch(() => ({})));
-  if (!parsedInput.success) {
-    return json({ error: "Invalid agent start request." }, 400);
-  }
-  const { ticketId, initialMessage: requestedMessage, runId } = parsedInput.data;
-  const supportCase = getCase(ticketId);
-  if (!supportCase) {
-    return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
-  }
-  const { ticket, customer } = supportCase;
-  const initialMessage = requestedMessage
-    ? requestedMessage
-    : `Investigate ${ticket.id}. Use the available support tools, explain the evidence, and take the appropriate actions.`;
+/**
+ * The product backend: the demo's own API plus the packaged Opengeni session
+ * proxy. Each browser is an anonymous visitor that can reach only the agent
+ * sessions it started.
+ */
+export function createProductHandler(
+  config: ProductHandlerConfig,
+): (request: Request) => Promise<Response> {
+  const { workspaceId, mcpToken } = config;
+  const configured = Boolean(config.apiKey && workspaceId);
+  const openGeni = new OpenGeniClient({
+    baseUrl: config.apiBaseUrl,
+    apiKey: config.apiKey,
+    ...(config.fetch ? { fetch: config.fetch } : {}),
+  });
+  const visitors = new VisitorCookies(config.appOrigin ?? PRODUCT_APP_ORIGIN);
+  const owners = new SessionOwners();
+  const limit = (bounds: { limit: number; windowMs: number }, message: string) =>
+    new RateLimiter({ ...bounds, message, ...(config.now ? { now: config.now } : {}) });
+  const runsPerVisitor = limit(AGENT_RUNS_PER_VISITOR, "Too many agent runs from this browser");
+  const runsGlobal = limit(AGENT_RUNS_GLOBAL, "The demo has started too many agent runs recently");
+  const resetsPerVisitor = limit(RESETS_PER_VISITOR, "Too many resets from this browser");
+  const resetsGlobal = limit(RESETS_GLOBAL, "The demo has been reset too often recently");
 
-  const mcpServer = {
-    id: MCP_SERVER_ID,
-    name: "Northstar Support",
-    url: mcpUrl,
-    allowedTools: MCP_TOOLS,
-    cacheToolsList: false,
-    timeoutMs: 60_000,
-    requireApproval: [],
-    headers: { Authorization: `Bearer ${mcpToken}` },
-  };
-  const sessionRequest: CreateSessionRequest = {
-    initialMessage,
-    instructions: `You are the embedded support copilot inside Northstar, a fictional SaaS product. You are working only on ticket ${ticket.id} for ${customer.name}. Always inspect the ticket and customer with Northstar Support tools before drawing conclusions. When evidence warrants action, call update_ticket and add_internal_note immediately. Product actions are pre-approved for this demo, so execute them without asking for confirmation. Never invent customer data. Keep the final answer brief and operational.`,
-    tools: [{ kind: "mcp", id: MCP_SERVER_ID }],
-    mcpServers: [mcpServer] as CreateSessionRequest["mcpServers"],
-    // Explicit selections: only the Northstar MCP server, no first-party tools.
-    // A per-session MCP server must also be selected in `tools` to be usable.
-    firstPartyMcpTools: [],
-    // A pure tool agent: no sandbox to start, and no shell around the product tools.
-    sandboxBackend: "none",
-    metadata: { demo: "northstar-support", ticketId: ticket.id },
-    // Stable per start: a retried request returns the same session.
-    idempotencyKey: `northstar:${ticket.id}:${runId}`,
-  };
-  // The deployment's default model applies; the composer can change it per turn.
-  await ensureDemoMembership();
-  const session = await openGeni
-    .asUser(DEMO_USER.externalId, { source: DEMO_USER.source })
-    .createSession(workspaceId, sessionRequest);
-  return json(session, 201);
-}
-
-async function productRequest(request: Request): Promise<Response> {
-  const url = new URL(request.url);
-  if (request.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "access-control-allow-origin": PRODUCT_APP_ORIGIN,
-        "access-control-allow-methods": "GET, HEAD, POST, PATCH, OPTIONS",
-        "access-control-allow-headers": "content-type",
-        "access-control-max-age": "86400",
-      },
+  // Explicit onboarding: the proxy and asUser never grant membership. A stable
+  // operation id makes the grant an exact replay on every server start.
+  let demoMembership: Promise<void> | null = null;
+  function ensureDemoMembership(): Promise<void> {
+    demoMembership ??= (async () => {
+      try {
+        await openGeni.addExternalWorkspaceMember(workspaceId, {
+          identity: { externalId: DEMO_USER.externalId, source: DEMO_USER.source },
+          permissions: [...DEMO_USER_PERMISSIONS],
+          operationId: await uuidV5(
+            `membership:${workspaceId}:${DEMO_USER.externalId}:${DEMO_USER_PERMISSIONS.join(",")}`,
+            IDEMPOTENCY_NAMESPACE,
+          ),
+        });
+      } catch (error) {
+        // Onboarding never overwrites an existing membership (for example one
+        // granted with an older permission set). Keep it: every asUser request
+        // still checks the live grant.
+        if (
+          !(error instanceof OpenGeniApiError) ||
+          error.status !== 409 ||
+          error.code !== "conflict" ||
+          error.outcomeUnknown
+        ) {
+          throw error;
+        }
+      }
+    })().catch((error: unknown) => {
+      demoMembership = null;
+      throw error;
     });
+    return demoMembership;
   }
-  if (url.pathname.startsWith("/api/opengeni/")) {
-    try {
-      return await openGeniProxy(request);
-    } catch (error) {
-      return json({ error: error instanceof Error ? error.message : String(error) }, 502);
+
+  // The browser's only Opengeni route: the packaged session proxy. It acts as
+  // the demo operator through asUser, pins the configured workspace, and serves
+  // only the conversation routes this panel uses.
+  const openGeniProxy = createSessionProxyHandler(openGeni, {
+    resolve: async () => {
+      if (!configured) {
+        return json({ error: "Opengeni credentials are not configured." }, 503);
+      }
+      await ensureDemoMembership();
+      return {
+        workspaceId,
+        user: DEMO_USER.externalId,
+        source: DEMO_USER.source,
+        // Every browser is anonymous: uploads stay off even if `files` is re-enabled.
+        visitor: true,
+      };
+    },
+    // Visitors are cookie-authenticated, so mutations must be same-origin and
+    // come from an established visitor.
+    authorizeMutation: (request) => sameOriginRequest(request) && visitors.read(request) !== null,
+    // The isolation boundary. The proxy calls this before every session-scoped
+    // route (read, events and stream, send, steer, queue, composer draft,
+    // control, goal, human input, artifacts, realtime). A browser reaches only
+    // the sessions it started through /api/demo/sessions; unknown ids are denied.
+    authorizeSession: (sessionId, { request }) => owners.owns(sessionId, visitors.read(request)),
+    // Browser-initiated creation stays off (no `createSession` hook), and so
+    // does every surface this panel does not use.
+    sessionList: false,
+    archive: false,
+    modelSelection: false,
+    files: false,
+    voiceInput: false,
+    realtimeVoice: false,
+    sandboxFiles: false,
+    artifacts: false,
+    sites: false,
+    maxBodyBytes: PROXY_MAX_BODY_BYTES,
+  });
+
+  async function health(): Promise<DemoHealth> {
+    const mcpPublicUrl = await config.resolveMcpUrl();
+    return {
+      ok: Boolean(configured && mcpToken && mcpPublicUrl),
+      workspaceId: workspaceId || null,
+      openGeniConfigured: configured,
+      mcpTokenConfigured: Boolean(mcpToken),
+      mcpPublicUrl,
+    };
+  }
+
+  async function createAgentSession(request: Request, visitorId: string): Promise<Response> {
+    if (!configured || !mcpToken) {
+      return json({ error: "Demo server credentials are not configured." }, 503);
     }
+    const refusal = consumeRateLimits([
+      [runsPerVisitor, visitorId],
+      [runsGlobal, "all"],
+    ]);
+    if (refusal) return tooManyRequests(refusal);
+    const mcpUrl = await config.resolveMcpUrl();
+    if (!mcpUrl) {
+      return json(
+        {
+          error: "No public HTTPS MCP endpoint is configured or detected.",
+        },
+        503,
+      );
+    }
+    const parsedInput = createDemoSessionInput.safeParse(await request.json().catch(() => ({})));
+    if (!parsedInput.success) {
+      return json({ error: "Invalid agent start request." }, 400);
+    }
+    const { ticketId, initialMessage: requestedMessage, runId } = parsedInput.data;
+    const supportCase = getCase(ticketId);
+    if (!supportCase) {
+      return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
+    }
+    const { ticket, customer } = supportCase;
+    const initialMessage = requestedMessage
+      ? requestedMessage
+      : `Investigate ${ticket.id}. Use the available support tools, explain the evidence, and take the appropriate actions.`;
+
+    const mcpServer = {
+      id: MCP_SERVER_ID,
+      name: "Northstar Support",
+      url: mcpUrl,
+      allowedTools: MCP_TOOLS,
+      cacheToolsList: false,
+      timeoutMs: 60_000,
+      requireApproval: [],
+      headers: { Authorization: `Bearer ${mcpToken}` },
+    };
+    const sessionRequest: CreateSessionRequest = {
+      initialMessage,
+      instructions: `You are the embedded support copilot inside Northstar, a fictional SaaS product. You are working only on ticket ${ticket.id} for ${customer.name}. Always inspect the ticket and customer with Northstar Support tools before drawing conclusions. When evidence warrants action, call update_ticket and add_internal_note immediately. Product actions are pre-approved for this demo, so execute them without asking for confirmation. Never invent customer data. Keep the final answer brief and operational.`,
+      tools: [{ kind: "mcp", id: MCP_SERVER_ID }],
+      mcpServers: [mcpServer] as CreateSessionRequest["mcpServers"],
+      // Explicit selections: only the Northstar MCP server, no first-party tools.
+      // A per-session MCP server must also be selected in `tools` to be usable.
+      firstPartyMcpTools: [],
+      // A pure tool agent: no sandbox to start, and no shell around the product tools.
+      sandboxBackend: "none",
+      // The narrowest session: private to the demo operator, agent reach limited
+      // to its own session tree, and no Knowledge shared between visitors.
+      visibility: "private",
+      agentAccess: "session",
+      memoryScope: "off",
+      usageLimitMicros: AGENT_RUN_USAGE_LIMIT_MICROS,
+      metadata: { demo: "northstar-support", ticketId: ticket.id },
+      // Stable per visitor and start: a retried request returns the same
+      // session, and no other visitor can replay into it.
+      idempotencyKey: `northstar:${ticket.id}:${await uuidV5(
+        `${visitorId}:${runId}`,
+        IDEMPOTENCY_NAMESPACE,
+      )}`,
+    };
+    // The workspace's default model applies; the browser cannot choose one.
+    await ensureDemoMembership();
+    const session = await openGeni
+      .asUser(DEMO_USER.externalId, { source: DEMO_USER.source })
+      .createSession(workspaceId, sessionRequest);
+    if (!owners.claim(session.id, visitorId)) {
+      return json({ error: "This agent run belongs to another visitor." }, 409);
+    }
+    return json(session, 201);
   }
-  if (url.pathname === "/api/demo/health" && request.method === "GET") return json(await health());
+
+  async function apiRequest(request: Request, url: URL, visitorId: string): Promise<Response> {
+    if (url.pathname.startsWith("/api/opengeni/")) {
+      try {
+        return await openGeniProxy(request);
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : String(error) }, 502);
+      }
+    }
+    if (request.method !== "GET" && !sameOriginRequest(request)) {
+      return json({ error: "Cross-site requests are not allowed." }, 403);
+    }
+    if (url.pathname === "/api/demo/health" && request.method === "GET") {
+      return json(await health());
+    }
+    if (url.pathname === "/api/demo/sessions" && request.method === "POST") {
+      try {
+        return await createAgentSession(request, visitorId);
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : String(error) }, 502);
+      }
+    }
+    if (url.pathname === "/api/demo/reset" && request.method === "POST") {
+      const refusal = consumeRateLimits([
+        [resetsPerVisitor, visitorId],
+        [resetsGlobal, "all"],
+      ]);
+      if (refusal) return tooManyRequests(refusal);
+      state = freshState();
+      emit("demo.reset", "Demo data reset", "all");
+      return json(state);
+    }
+    return await productDataRequest(request, url);
+  }
+
+  return async function productRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "access-control-allow-origin": PRODUCT_APP_ORIGIN,
+          "access-control-allow-methods": "GET, HEAD, POST, PATCH, OPTIONS",
+          "access-control-allow-headers": "content-type",
+          "access-control-max-age": "86400",
+        },
+      });
+    }
+    if (!url.pathname.startsWith("/api/")) {
+      if (config.serveStatic && (request.method === "GET" || request.method === "HEAD")) {
+        return await staticResponse(request, url.pathname);
+      }
+      return new Response("Not found", { status: 404 });
+    }
+    // API responses carry the visitor cookie until the browser has one. A
+    // request without a valid cookie is a new visitor that owns no sessions.
+    const known = visitors.read(request);
+    const issued = known === null ? visitors.issue(request) : null;
+    const response = await apiRequest(request, url, known ?? issued!.id);
+    return issued ? withSetCookie(response, issued.setCookie) : response;
+  };
+}
+
+function tooManyRequests({ limiter, retryAfterSeconds }: RateLimitRefusal): Response {
+  const wait =
+    retryAfterSeconds < 90
+      ? `${retryAfterSeconds} seconds`
+      : `${Math.ceil(retryAfterSeconds / 60)} minutes`;
+  const response = json({ error: `${limiter.message}. Try again in ${wait}.` }, 429);
+  response.headers.set("retry-after", String(retryAfterSeconds));
+  return response;
+}
+
+function withSetCookie(response: Response, cookie: string): Response {
+  const headers = new Headers(response.headers);
+  headers.append("set-cookie", cookie);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+/** The fictional product's own data, shared by every visitor. */
+async function productDataRequest(request: Request, url: URL): Promise<Response> {
   if (url.pathname === "/api/demo/state" && request.method === "GET") return json(state);
   if (url.pathname === "/api/demo/events" && request.method === "GET")
     return domainEventStream(request);
-  if (url.pathname === "/api/demo/sessions" && request.method === "POST") {
-    try {
-      return await createAgentSession(request);
-    } catch (error) {
-      return json({ error: error instanceof Error ? error.message : String(error) }, 502);
-    }
-  }
   if (url.pathname === "/api/demo/ticket" && request.method === "PATCH") {
     const input = (await request.json().catch(() => ({}))) as {
       ticketId?: unknown;
@@ -733,14 +905,6 @@ async function productRequest(request: Request): Promise<Response> {
     );
     emit("ticket.replied", `Reply sent to ${customer.primaryContact.name}`, ticket.id);
     return json(state);
-  }
-  if (url.pathname === "/api/demo/reset" && request.method === "POST") {
-    state = freshState();
-    emit("demo.reset", "Demo data reset", "all");
-    return json(state);
-  }
-  if (UNIFIED_SERVER && (request.method === "GET" || request.method === "HEAD")) {
-    return await staticResponse(request, url.pathname);
   }
   return new Response("Not found", { status: 404 });
 }
@@ -879,7 +1043,7 @@ function buildMcpServer(): McpServer {
 async function mcpRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname !== "/mcp") return new Response("Not found", { status: 404 });
-  if (!mcpToken || request.headers.get("authorization") !== `Bearer ${mcpToken}`) {
+  if (!env.mcpToken || request.headers.get("authorization") !== `Bearer ${env.mcpToken}`) {
     return json({ error: "unauthorized" }, 401);
   }
   const transport = new WebStandardStreamableHTTPServerTransport({
@@ -891,6 +1055,12 @@ async function mcpRequest(request: Request): Promise<Response> {
 }
 
 if (import.meta.main) {
+  // One handler per process: its visitor cookie key and session ownership live in memory.
+  const productRequest = createProductHandler({
+    ...env,
+    resolveMcpUrl: resolvePublicMcpUrl,
+    serveStatic: UNIFIED_SERVER,
+  });
   const productServer = Bun.serve({
     hostname: UNIFIED_SERVER ? "0.0.0.0" : "127.0.0.1",
     port: PRODUCT_PORT,
@@ -913,7 +1083,7 @@ if (import.meta.main) {
 
   console.log(`Northstar product API  http://127.0.0.1:${productServer.port}/api/demo/health`);
   console.log(`Northstar MCP server   http://127.0.0.1:${mcpServer.port}/mcp`);
-  console.log("MCP auth               ", mcpToken ? "configured" : "MISSING");
-  console.log("Opengeni auth          ", apiKey ? "configured" : "MISSING");
-  console.log("Opengeni workspace     ", workspaceId || "MISSING");
+  console.log("MCP auth               ", env.mcpToken ? "configured" : "MISSING");
+  console.log("Opengeni auth          ", env.apiKey ? "configured" : "MISSING");
+  console.log("Opengeni workspace     ", env.workspaceId || "MISSING");
 }
