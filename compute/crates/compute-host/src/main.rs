@@ -526,10 +526,13 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     let Some(store) = args.store else {
         return run_agent(config, engine, NoStore, socket).await;
     };
-    match Chunked::from_url(&store)? {
-        Some(chunked) => run_agent(config, engine, chunked, socket).await,
-        None => run_agent(config, engine, Directory::new(store), socket).await,
+    if let Some(chunked) = Chunked::from_url(&store)? {
+        return run_agent(config, engine, chunked, socket).await;
     }
+    // Fine for tests and a single machine, but an archive there does not
+    // survive losing this host.
+    tracing::warn!(%store, "archives go to a directory on this host, not off it");
+    run_agent(config, engine, Directory::new(store), socket).await
 }
 
 async fn run_agent<S: Store>(

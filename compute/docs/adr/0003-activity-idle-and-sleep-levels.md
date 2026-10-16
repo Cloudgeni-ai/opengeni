@@ -37,6 +37,7 @@ it; a later wake cancels it.
   their own; only their traffic and processor use count. This is deliberate.
 - Time keeps passing for a sleeping guest: its monotonic and wall clocks
   include the sleep, so a timer that came due while it slept fires right
-  after it wakes (within 0.1 s in the engine test, after a pause and after a
-  save) and later ones fire on time. A sixty-second timer set before a week's
-  sleep fires once, on waking; nothing replays the timers it missed.
+  after it wakes (the engine test requires under a second after a pause and
+  after a save; it took about 0.1 s) and later ones fire on time. That test
+  uses one-shot sleeps; periodic timers and programs that catch up on
+  missed work were not tested.
