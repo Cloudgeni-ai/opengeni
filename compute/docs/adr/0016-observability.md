@@ -4,72 +4,64 @@ Status: Proposed, 2026-10-16
 
 ## Context
 
-We need to answer, for any host and any sandbox: what happened, how long
-each part took, whether anything unsafe happened, and whether a sandbox felt
-slow. A host may run a thousand sandboxes and runs no extra services
-([1](0001-own-fabric-one-agent-per-host.md)). Today `status` already has
-step counts with total and longest duration, launches, health flags and
-memory totals, and the agent samples every sandbox's cgroup for activity
-([3](0003-activity-idle-and-sleep-levels.md)). Everything below is new.
+For any host and sandbox we need to know what happened, how long each part
+took, whether anything unsafe happened, and whether a sandbox felt slow.
+Today `status` has step counts with total and longest duration, launches,
+health flags and memory totals, and the agent samples live sandbox cgroups
+for activity ([3](0003-activity-idle-and-sleep-levels.md)).
 
 ## Decision
 
 - **One wide event per step, request and stream.** Each step gets an
-  operation id. Its event holds the sandbox, levels before and after, time
-  per phase (queue, fetch, load, resume), bytes moved, outcome, error kind,
-  its cause (a request, idle, memory pressure, recovery) and the initiating
-  caller's W3C trace id if there was one. A request that joins a step
-  already in flight logs that operation id. Request latency ends at the
-  reply; a connection logs once when it is established and once when it
-  closes, with its lifetime and bytes. Requests that change nothing (hold
-  renewals, status reads) are only counted.
+  operation id, and its event holds everything about it (levels, time per
+  phase, bytes, outcome, cause such as a request, idle, pressure or
+  recovery, and the caller's W3C trace id if any). A request that joins a
+  step in flight logs that operation id. Request latency ends at the reply;
+  a connection logs once when established and once when closed. Requests
+  that change nothing (hold renewals, status reads) are only counted.
 - **Metrics with bounded cardinality.** Counters and fixed-bucket
   histograms per step kind, cause and outcome; sandboxes and memory per
   level; host gauges (available memory, zswap, free huge pages, `some` and
-  `full` pressure from `/proc/pressure`, transfer queues and bytes); the age
-  of the oldest unfinished operation per step kind; and the time of the last
-  sample, so a hung loop is visible. Never a sandbox id as a label.
-- **Host-side pressure per sandbox.** The activity sampler also reads each
-  VM cgroup's `memory.pressure` stall total and its major faults. These are
-  stalls of the sandbox's host processes (a vCPU waiting on host memory),
-  not guest response time; a kernel without PSI leaves the field absent, not
-  zero. Each step event carries the stall time since the sandbox's previous
-  event, and an awake sandbox also emits a summary event every hour.
+  `full` pressure, transfer queues); the age of the oldest unfinished
+  operation per step kind; and the time of the last sample, so a hung loop
+  shows. Never a sandbox id as a label.
+- **Host-side pressure per sandbox.** The sampler also reads each VM
+  cgroup's `memory.pressure` stall total and major faults: stalls of the
+  sandbox's host processes, not guest response time. Without PSI the field
+  is absent, not zero. Step events carry the stall time since the previous
+  event, and an awake sandbox emits a summary event every hour.
 - **Zero alarms.** Occurrence counters that must stay at zero: copies kept
   because the only good one was at stake, failed verifications,
   quarantines, trusted local or remote copies lost unexpectedly, sandboxes
   turned broken, and programs actually lost (not every intermediate memory
-  error, since recovery can still restore a valid image). Gauges count the
-  sandboxes currently broken, blocked or unsavable. One incident should
-  raise one alert, so alerting groups by host and sandbox.
-- **A canary that exercises each path.** A small sandbox per host runs, on
-  a fixed rotation with a timeout each: resume from memory, restore from a
-  saved image after being dropped from memory, wake from object storage
-  after the local copy is dropped, and a fresh create from the image
-  currently deployed. Results are metrics with a timestamp, and the
-  collector alarms when they stop arriving, which also catches a dead agent.
+  error, since recovery can still restore a valid image). Gauges count
+  sandboxes currently broken, blocked or unsavable. Each occurrence also
+  writes an event naming the sandbox, which is what alerts group on, so one
+  incident raises one alert.
+- **A canary that exercises each path.** A small sandbox per host rotates,
+  each with a timeout, through resume from memory, restore after being
+  dropped from memory, wake from object storage after the local copy is
+  dropped, and a fresh create from the deployed image. The monitoring
+  backend alerts on failed results and on results that stop arriving, which
+  also catches a dead agent.
 - **OpenTelemetry, with a narrow exporter of our own.** Events are OTLP
-  log records, metrics are OTLP sums, gauges and explicit-bucket histograms,
-  and trace context is attached to log records; no spans are exported.
-  Transport is OTLP over HTTP with its JSON encoding, so it needs only what
-  the agent already depends on. Resource attributes follow the semantic
-  conventions (`service.*`, `host.*`, `cloud.*`); compute concepts use
-  `compute.*` attributes. The exporter owns a bounded buffer, timeouts,
-  retries only for responses OTLP marks retryable, never retries a partial
-  success, and counts what it drops. Events are also written to the local
-  journal, so nothing depends on the collector being up. `status` reads the
-  same counters locally. Compatibility is claimed only after a test against
-  a real OpenTelemetry Collector.
+  log records carrying trace context (no spans are exported); metrics are
+  OTLP sums, gauges and explicit-bucket histograms; transport is OTLP over
+  HTTP with JSON encoding. Resource attributes follow the semantic
+  conventions and compute concepts use `compute.*` attributes. The exporter
+  keeps a bounded buffer, times out, retries retryable transport failures
+  and responses but never a partial success, and counts what it drops.
+  Events also go to the local journal, so nothing depends on the collector.
+  Compatibility is claimed only after a test against a real OpenTelemetry
+  Collector.
 - **Budget targets, not yet measured:** under 0.1% of one core and 2 MiB of
-  memory per host at a thousand sandboxes, at one request per second and the
-  default sampling interval, including sampling, encoding and export but
-  not the canary. Profilers stay tools we run when needed.
+  memory per host at a thousand sandboxes and one request per second per
+  host, including sampling, encoding and export but not the canary.
 
 ## Consequences
 
-- Dashboards show distributions and totals; finding the one slow sandbox
-  means querying events, which needs a log store behind the collector.
-- A guest that is slow for reasons inside itself shows no host pressure;
-  only the canary and Opengeni's own timings see end-to-end latency.
-- The canary costs one small sandbox per host, plus a little storage
-  traffic for its remote wakes.
+Finding the one slow sandbox means querying events in a log store behind
+the collector. A guest slow for reasons inside itself may show no host
+pressure; only the canary and Opengeni's own timings see end-to-end
+latency. The canary costs one small sandbox per host and a little storage
+traffic.
