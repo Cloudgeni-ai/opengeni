@@ -239,7 +239,7 @@ type TargetState = {
   inflightRequests: Set<string>;
   networkTrackingOverflow: boolean;
   failedRequests: Set<string>;
-  requests: Map<string, { method: string; url: string }>;
+  requests: Map<string, { method: string; url: string; browserInitiated: boolean }>;
   lastNetworkActivityAt: number;
   networkActivitySequence: number;
   screencasts: Map<string, TargetScreencast>;
@@ -1958,9 +1958,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               state.inflightRequests.add(requestId);
             }
             const request = isRecord(event.params.request) ? event.params.request : {};
+            const initiator = isRecord(event.params.initiator) ? event.params.initiator : {};
             state.requests.set(requestId, {
               method: boundedMethod(request.method),
               url: boundedUrlField(request.url) ?? "about:blank",
+              // Chrome fetches the page's icon (/favicon.ico or a declared
+              // <link rel=icon>) by itself, reported as type Other with an
+              // "other" initiator. A missing icon is not a page failure and,
+              // being on almost every site, would otherwise show as a failed
+              // request in every observation.
+              browserInitiated: event.params.type === "Other" && initiator.type === "other",
             });
             boundMap(state.requests, 10_000);
           }
@@ -4992,9 +4999,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     details: { message: string; status?: number; url?: string | null },
   ): void {
     if (state.failedRequests.has(requestId)) return;
+    const request = state.requests.get(requestId);
+    if (request?.browserInitiated) return;
     state.failedRequests.add(requestId);
     state.diagnostics.failedRequestCount += 1;
-    const request = state.requests.get(requestId);
     this.appendDiagnostic(state, {
       kind: "failed_request",
       level: "error",
