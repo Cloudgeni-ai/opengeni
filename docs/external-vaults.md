@@ -126,9 +126,12 @@ snapshot changes and excessive counts. Only a full consistent traversal may
 remove absent mirror rows: multiple pages must carry one stable non-null
 snapshot. The native limit remains 2,000 items per vault; the first 2,000 of a
 larger inventory are never certified as complete.
-Overlapping syncs replace a vault's mirror one at a time, keeping each
-replacement consistent with its recorded content version. An older complete
-listing can still finish last; a later sync checks the provider again.
+Overlapping syncs settle the mirror, capabilities, status and freshness
+atomically against the cache epoch captured before provider I/O. Once one
+check settles, a late result from the same epoch is superseded and cannot
+overwrite it, even with a failure or an unchanged listing. This is
+first-settlement-wins, not ordering of opaque provider versions; a later
+deliberate sync checks the provider again.
 
 ## Moving and copying
 
