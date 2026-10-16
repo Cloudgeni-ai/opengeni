@@ -125,7 +125,30 @@ and artifacts afterward. Never print values or commit them to Git.
 
 **Staging:** dispatch `staging-canary-dispatch.yml` with any `main` SHA whose `canary-sha-*` tags already exist. Pending changesets are allowed. Missing tags fail closed; do not rebuild unsigned `:ci` images.
 
-**Canary packages:** dispatch `publish-canary.yml` on `main` with `source_sha` equal to that workflow run's exact `main` commit. The workflow, checked-out source, and publisher must all be that commit; an older ancestor is rejected. The workflow uses pinned Bun to build and pack, then the official publishing library under Bun with registry-token authentication and GitHub OIDC provenance. It publishes `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0` publishes `1.0.2-canary.N`, skipping a retired patch), so canaries sort after the committed release. It does not consume changeset files or move `latest`; a new package with no `latest` tag remains without one.
+**Canary packages:** dispatch `publish-canary.yml` on `main` with an exact
+`source_sha`. Selecting the workflow's own commit retains the ordinary publication
+path. An older source must be an ancestor of that frozen controller, an exact
+merged PR commit into protected `main`, and have successful latest exact-source
+main-push CI including Typecheck and unit tests, Deployment artifacts, and Workload
+image builds. PR heads, foreign repositories, unmerged commits, incomplete CI,
+failed/cancelled checks and unprotected branches are refused before source code
+executes. `package-release` environment approval remains in force.
+
+The controller stays at its real GitHub workflow SHA; a separate admitted-source
+worktree supplies the frozen manifests, build scripts and tarballs. Both use the
+same pinned Bun version, with separate frozen-lockfile installs. Current-head
+publication retains automatic npm provenance. Ancestor publication signs a SLSA
+statement with Sigstore, identifying the actual controller and selected source as
+distinct resolved inputs and the exact tarball SHA-512 as subject. The official
+publishing library verifies this supplied bundle before its registry write. Never
+override `GITHUB_SHA`, dispatch an untrusted workflow, or relabel controller bytes
+as source bytes. Source admission evidence and source-named Site pins are retained.
+The successful publisher run's head is the controller, not necessarily the source;
+consumers must select `site-package-versions-<source_sha>`, not infer source from head.
+
+It publishes `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0`
+publishes `1.0.2-canary.N`, skipping a retired patch), without consuming changesets
+or moving an existing `latest` tag. Registry first-publication behavior is unchanged.
 
 All archives are packed and frozen before the first write. Each topological
 publication retains an intent and a positive library HTTP acknowledgement before
@@ -153,6 +176,12 @@ hashes and official GitHub provenance, then runs the unchanged bounded metadata
 poller and final complete-cohort reread. Unknown writes, expired/ambiguous artifacts,
 unsupported producer protocols, changed latest or superseded canary tags fail
 closed; this command cannot repair tags, rebuild packages or dispatch another run.
+This verifier supports only same-source receipt protocol V1. Ancestor publication
+records truthful split-source V2 identities; if it fails, retain those receipts and
+stop for a separately reviewed V2 recovery path. Do not feed them to V1 recovery,
+manufacture a failed canonical run, replay unknown writes, or rewrite the source.
+Its immutable ops producer closure must be explicitly audited and re-pinned when
+publisher/controller code changes; new hashes are never implicitly trusted.
 The new `canary-publication-reconciliation-*` receipt and
 `reconciled-site-package-versions-*` artifact retain both controller and failed
 origin identities and set `promotionEligible: false`. They never replace the

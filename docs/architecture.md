@@ -2273,6 +2273,12 @@ lanes declare services/credentials.
 
 Manifests/Changesets/CI/release scripts govern evidence-bound npm/image/Helm/Rust
 publication, retaining source identity. Web builds target both CPUs.
+`scripts/canary-source-admission.ts` admits an exact normally merged protected-main
+ancestor only with successful exact-source main CI. The current-main publication
+controller remains separate from its package-source checkout. Ancestor tarballs
+use supplied Sigstore provenance naming both source and controller, without changing
+GitHub's identity environment; ordinary current-head provenance stays unchanged.
+Split-source receipt V2 is explicitly outside canonical V1 receipt-only recovery.
 Canary packages prepack the complete cohort, retain write acknowledgements, then
 perform bounded strict read-only verification before producing Site pins.
 Post-write verification selects current tags and one immutable version manifest;
