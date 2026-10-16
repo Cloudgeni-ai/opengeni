@@ -8,7 +8,7 @@ import {
   type AttachedBrowserDeviceListResponse as AttachedBrowserDeviceListResponseValue,
   type AttachedBrowserInventorySnapshot as AttachedBrowserInventorySnapshotValue,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
 import {
   advanceWorkspaceInteractionRevision,
@@ -235,10 +235,24 @@ export async function reconcileAttachedBrowserInventory(
         }
 
         const now = new Date();
+        // Lock only the rows this heartbeat can touch: this enrollment's devices
+        // plus any announced id (a device reclaimed from a revoked enrollment).
+        // Locking every device in the workspace serialized unrelated machines'
+        // heartbeats behind each other.
+        const announcedIds = snapshot.devices.map((device) => device.id);
+        const ownedOrAnnounced =
+          announcedIds.length > 0
+            ? or(
+                eq(schema.attachedBrowserDevices.enrollmentId, input.enrollmentId),
+                inArray(schema.attachedBrowserDevices.id, announcedIds),
+              )
+            : eq(schema.attachedBrowserDevices.enrollmentId, input.enrollmentId);
         const rows = await tx
           .select()
           .from(schema.attachedBrowserDevices)
-          .where(eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId))
+          .where(
+            and(eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId), ownedOrAnnounced),
+          )
           .for("update");
         const byId = new Map(rows.map((row) => [row.id, row]));
         const generationChangedDeviceIds = new Set<string>();
