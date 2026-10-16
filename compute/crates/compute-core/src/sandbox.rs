@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::ids::{HoldId, OpId, SandboxId};
-use crate::level::{Level, Priority, Step};
+use crate::level::{Durability, Level, Priority, State, Step};
 use crate::policy::SleepPolicy;
 use crate::time::At;
 
@@ -38,15 +38,8 @@ pub(crate) struct QueueKey {
 }
 
 #[derive(Debug)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent facts about one sandbox, not a hidden state machine"
-)]
 pub(crate) struct Sandbox {
-    pub level: Level,
-    /// Whether a saved memory image exists. Only meaningful at levels without
-    /// a VM process; without it, waking means booting from the disk.
-    pub memory_saved: bool,
+    pub state: State,
     pub policy: SleepPolicy,
     pub last_activity: At,
     pub wake: Option<Wake>,
@@ -56,6 +49,9 @@ pub(crate) struct Sandbox {
     pub floor: Level,
     /// Bytes the host expects to regain once the floor is reached.
     pub floor_relief: u64,
+    /// Minimum depth asked for by [`crate::Input::Sleep`]. [`Level::Running`]
+    /// means none.
+    pub requested: Level,
     /// Latest reported resident memory in bytes.
     pub resident: u64,
     pub in_flight: Option<InFlight>,
@@ -69,16 +65,16 @@ pub(crate) struct Sandbox {
 }
 
 impl Sandbox {
-    pub fn new(now: At, level: Level, memory_saved: bool, policy: SleepPolicy) -> Self {
+    pub fn new(now: At, state: State, policy: SleepPolicy) -> Self {
         Self {
-            level,
-            memory_saved: memory_saved && !level.has_process(),
+            state: State::new(state.level, state.durability, state.memory_saved),
             policy,
             last_activity: now,
             wake: None,
             holds: BTreeMap::new(),
             floor: Level::Running,
             floor_relief: 0,
+            requested: Level::Running,
             resident: 0,
             in_flight: None,
             process_lost: false,
@@ -129,18 +125,42 @@ impl Sandbox {
         self.wake.is_some() || !self.holds.is_empty()
     }
 
-    /// How deep an unneeded sandbox should be by now: the policy's level for
-    /// its idle time, or deeper if memory pressure demands it.
-    pub fn sleep_target(&self, now: At) -> Level {
-        let idle = now.saturating_since(self.last_activity);
-        self.policy.deepest_after(idle).max(self.floor)
+    /// Whether the sandbox is needed awake or a step is already waking it.
+    pub fn waking(&self) -> bool {
+        self.wants_awake() || self.in_flight.is_some_and(|flight| flight.step.wakes())
+    }
+
+    /// Asks for at least `level` of depth; [`Level::Running`] or a level
+    /// already reached withdraws the request. A sandbox on its way up counts
+    /// as running, so the request applies once the wake it serves is done.
+    pub fn request_sleep(&mut self, level: Level) {
+        let current = if self.waking() {
+            Level::Running
+        } else {
+            self.state.level
+        };
+        self.requested = if level > current {
+            level
+        } else {
+            Level::Running
+        };
+    }
+
+    /// Whether ending the VM process right now would free its memory without
+    /// losing anything or keeping anyone waiting.
+    pub fn reclaimable(&self) -> bool {
+        self.state.level.has_process()
+            && self.state.level != Level::Running
+            && self.state.durability != Durability::Volatile
+            && !self.wants_awake()
+            && !self.broken
     }
 
     /// The next step to start now, if any.
     ///
     /// A needed sandbox moves straight up to [`Level::Running`]. An unneeded
-    /// one only ever moves deeper: once memory has been compressed or written
-    /// out, there is nothing to gain from moving partway back.
+    /// one only ever moves deeper or gets better protected; see
+    /// [`SleepPolicy::next_step`].
     pub fn next_step(&self, now: At) -> Option<Step> {
         if self.broken || self.in_flight.is_some() {
             return None;
@@ -149,26 +169,17 @@ impl Sandbox {
             return None;
         }
         if self.wants_awake() {
-            return match self.level {
+            return match self.state.level {
                 Level::Running => None,
                 Level::Paused | Level::Compressed => Some(Step::Resume),
-                Level::Saved | Level::Archived if self.memory_saved => Some(Step::Restore),
+                Level::Saved | Level::Archived if self.state.memory_saved => Some(Step::Restore),
                 Level::Saved | Level::Archived => Some(Step::Boot),
                 Level::Remote => Some(Step::Fetch),
             };
         }
-        let target = self.sleep_target(now);
-        if target <= self.level {
-            return None;
-        }
-        match self.level {
-            Level::Running => Some(Step::Pause),
-            Level::Paused if target == Level::Compressed => Some(Step::Compress),
-            Level::Paused | Level::Compressed => Some(Step::Save),
-            Level::Saved => Some(Step::Archive),
-            Level::Archived => Some(Step::Evict),
-            Level::Remote => None,
-        }
+        let idle = now.saturating_since(self.last_activity);
+        self.policy
+            .next_step(self.state, idle, self.floor.max(self.requested))
     }
 
     /// Queue position for `step`: wakes by urgency then age, sleep steps
@@ -201,10 +212,10 @@ impl Sandbox {
         let idle = if self.wants_awake() {
             None
         } else {
-            let reached = self.sleep_target(now).max(self.level);
+            let idle = now.saturating_since(self.last_activity);
             self.policy
-                .next_threshold_beyond(reached)
-                .map(|idle| self.last_activity + idle)
+                .next_threshold(self.state, idle)
+                .map(|after| self.last_activity + after)
         };
         [retry, lease, idle]
             .into_iter()
@@ -213,24 +224,13 @@ impl Sandbox {
             .min()
     }
 
-    /// The memory image is gone: files remain, running programs do not.
-    /// Returns whether anything was lost.
-    pub fn lose_memory(&mut self) -> bool {
-        let had_memory = self.level.has_process() || self.memory_saved;
-        if self.level.has_process() {
-            self.level = Level::Saved;
-        }
-        self.memory_saved = false;
-        had_memory
-    }
-
     /// Bytes expected to be freed by moving from `from` to `to`, given the
     /// actual level and the latest resident size.
     pub fn relief_between(&self, from: Level, to: Level, compressed_percent: u8) -> u64 {
         let remaining = |at: Level| -> u64 {
             if at >= Level::Saved {
                 0
-            } else if at == Level::Compressed && self.level < Level::Compressed {
+            } else if at == Level::Compressed && self.state.level < Level::Compressed {
                 self.resident / 100 * u64::from(compressed_percent)
             } else {
                 self.resident

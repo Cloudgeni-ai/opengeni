@@ -366,6 +366,27 @@ impl Store for Chunked {
             .await
             .map_err(|error| storage_error("delete", error))
     }
+
+    /// Points the sandbox at its disk alone. The memory chunks stay until
+    /// garbage collection finds nothing refers to them.
+    async fn forget_memory(&self, id: Id) -> Result<(), EngineError> {
+        let Some(head) = self.head("forget", id).await? else {
+            return Ok(());
+        };
+        if head.memory.is_none() {
+            return Ok(());
+        }
+        let head = Head {
+            memory: None,
+            ..head
+        };
+        let bytes = serde_json::to_vec(&head)
+            .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, "forget", error))?;
+        self.chunks
+            .put_pointer(&id.to_string(), bytes)
+            .await
+            .map_err(|error| storage_error("forget", error))
+    }
 }
 
 /// What one chunk-sized range of a file turned out to hold.

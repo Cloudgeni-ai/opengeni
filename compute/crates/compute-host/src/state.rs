@@ -542,7 +542,7 @@ mod tests {
         SandboxConfig {
             vcpus: 1,
             memory_mib: 256,
-            sleep: Vec::new(),
+            sleep: crate::protocol::SleepConfig::default(),
         }
     }
 

@@ -15,10 +15,15 @@ const MAX_RESPONSE: usize = 1 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
+    /// The request was never sent, so it cannot have taken effect.
+    #[error("API socket connect: {0}")]
+    Connect(io::Error),
+    /// The request may have been sent and its answer lost.
     #[error("API socket I/O: {0}")]
     Io(#[from] io::Error),
     #[error("malformed API response: {0}")]
     Malformed(&'static str),
+    /// The VMM answered and refused the request.
     #[error("{method} {path} returned {status}: {body}")]
     Status {
         method: &'static str,
@@ -57,7 +62,9 @@ impl Api {
              Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        let mut stream = UnixStream::connect(&self.socket).await?;
+        let mut stream = UnixStream::connect(&self.socket)
+            .await
+            .map_err(ApiError::Connect)?;
         stream.write_all(request.as_bytes()).await?;
         let (status, response) = read_response(&mut stream).await?;
         if (200..300).contains(&status) {

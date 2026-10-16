@@ -48,6 +48,10 @@ pub trait Store: Send + Sync + 'static {
 
     /// Deletes the stored copy; succeeds when there is none.
     fn delete(&self, id: Id) -> impl Future<Output = Result<(), EngineError>> + Send;
+
+    /// Deletes the memory image from the stored copy and keeps its disk;
+    /// succeeds when there is no stored copy or no memory image.
+    fn forget_memory(&self, id: Id) -> impl Future<Output = Result<(), EngineError>> + Send;
 }
 
 /// No store: sandboxes never leave the host.
@@ -80,6 +84,10 @@ impl Store for NoStore {
     }
 
     fn delete(&self, _: Id) -> impl Future<Output = Result<(), EngineError>> + Send {
+        ready(Ok(()))
+    }
+
+    fn forget_memory(&self, _: Id) -> impl Future<Output = Result<(), EngineError>> + Send {
         ready(Ok(()))
     }
 }
@@ -163,6 +171,27 @@ impl Store for Directory {
         blocking("delete", move || match fs::remove_dir_all(&stored) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
+        })
+        .await
+    }
+
+    async fn forget_memory(&self, id: Id) -> Result<(), EngineError> {
+        let stored = self.dir(id);
+        blocking("forget", move || {
+            // The device state goes first: without it, what remains of the
+            // memory image can never be mistaken for a usable one.
+            for name in ["state", "memory"] {
+                match fs::remove_file(stored.join(name)) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(error);
+                    }
+                    _ => {}
+                }
+            }
+            if stored.exists() {
+                sync_file(&stored)?;
+            }
+            Ok(())
         })
         .await
     }

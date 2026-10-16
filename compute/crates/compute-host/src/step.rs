@@ -100,7 +100,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             );
         }
         match step {
-            Step::Pause | Step::Resume | Step::Compress | Step::Save => {
+            Step::Pause | Step::Resume | Step::Compress | Step::Save | Step::Drop => {
                 let Some(live) = self.live.take() else {
                     // The VM vanished between the decision and the step; the
                     // exit notice is on its way.
@@ -108,16 +108,22 @@ impl<E: Engine, S: Store> Job<E, S> {
                 };
                 match step {
                     Step::Pause => self.simple(self.engine.pause(&live.vm).await, live),
-                    Step::Resume => self.simple(self.engine.resume(&live.vm).await, live),
+                    Step::Resume => self.resume(live).await,
                     Step::Compress => self.compress(live).await,
-                    _ => self.save(live).await,
+                    Step::Save => self.save(live).await,
+                    _ => self.end_process(live).await,
                 }
             }
             Step::Restore => self.restore().await,
             Step::Boot => self.boot().await,
-            Step::Archive => (self.archive().await, After::NoVm),
+            // A paused VM stays as it is while its saved copy is archived.
+            Step::Archive => {
+                let outcome = self.archive().await;
+                (outcome, self.live.take().map_or(After::NoVm, After::Kept))
+            }
             Step::Evict => (self.evict().await, After::NoVm),
             Step::Fetch => (self.fetch().await, After::NoVm),
+            Step::Forget => (self.forget().await, After::NoVm),
         }
     }
 
@@ -140,6 +146,36 @@ impl<E: Engine, S: Store> Job<E, S> {
         (outcome, After::Kept(live))
     }
 
+    /// Resumes a paused VM. A saved copy of it goes stale the moment the
+    /// guest runs and its disk moves on, so the record stops vouching for
+    /// it first, and vouches again if the resume was refused: the guest
+    /// never ran, and the core counts on a transient failure having changed
+    /// nothing.
+    async fn resume(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        let (image, archived) = (self.record.image, self.record.archived);
+        if (image || archived)
+            && let Err(error) = self
+                .commit(Change::new().image(false).archived(false))
+                .await
+        {
+            return (state_failure(&error), After::Kept(live));
+        }
+        let result = self.engine.resume(&live.vm).await;
+        if let Err(error) = &result
+            && error.kind == ErrorKind::Transient
+            && (image || archived)
+            && let Err(error) = self
+                .commit(Change::new().image(image).archived(archived))
+                .await
+        {
+            // The copy is still good but no longer recorded, so the host
+            // just stops relying on it; nothing stale can be restored this
+            // way.
+            tracing::error!(id = %self.id, %error, "saved copy not recorded again after a refused resume");
+        }
+        self.simple(result, live)
+    }
+
     async fn compress(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
         let outcome = match self.engine.compress(&live.vm, &self.cancel).await {
             Ok(Completion::Finished) => Outcome::Done,
@@ -150,12 +186,15 @@ impl<E: Engine, S: Store> Job<E, S> {
         (outcome, After::Kept(live))
     }
 
-    /// Snapshot, make it durable, record it as valid, then end the VM process.
-    /// A wake that arrives before the process ends cancels the save and the
-    /// still-paused VM simply resumes.
+    /// Snapshot the paused VM, make the copy durable and record it as
+    /// valid. The VM stays paused in memory, so a wake still only has to
+    /// resume it; the copy lets memory pressure end the process instantly
+    /// and survives the process crashing. A wake that arrives during the
+    /// save cancels it.
     async fn save(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
         // The snapshot overwrites the image files, so no record may vouch
-        // for them meanwhile. A live VM's record never does; this is a guard.
+        // for them meanwhile. The core never saves a VM it already saved;
+        // this is a guard.
         if self.record.image
             && let Err(error) = self.commit(Change::new().image(false)).await
         {
@@ -184,12 +223,28 @@ impl<E: Engine, S: Store> Job<E, S> {
         if let Err(error) = self.commit(valid).await {
             return (state_failure(&error), After::Kept(live));
         }
+        (Outcome::Done, After::Kept(live))
+    }
+
+    /// Ends the VM process of a paused VM whose current state is saved, which
+    /// frees all of its memory at once and loses nothing.
+    async fn end_process(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        if !self.record.image {
+            // The core only drops a VM with a current copy; ending this one
+            // would lose its running programs.
+            tracing::error!(id = %self.id, "no saved copy to fall back on; keeping the VM");
+            return (Outcome::Failed(Failure::Fatal), After::Kept(live));
+        }
         live.stopping.store(true, Ordering::Release);
         match self.engine.stop(live.vm).await {
             Ok(()) => (Outcome::Done, After::NoVm),
-            // The image is safe on disk either way; a VMM that would not die
-            // is a host problem worth surfacing.
-            Err(error) => (failure(&error), After::NoVm),
+            Err(error) => {
+                // The copy is safe on disk either way, so the sandbox moves
+                // on without the process; a VMM that would not die is a host
+                // problem worth surfacing.
+                tracing::error!(id = %self.id, %error, "VM process did not end cleanly");
+                (Outcome::Failed(Failure::MemoryLost), After::NoVm)
+            }
         }
     }
 
@@ -263,6 +318,11 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
+    /// Copies the saved state to the store. The copy runs to its end even
+    /// when cancelled: abandoning the future would leave the store writing in
+    /// the background after the step claimed to have stopped, so it reports
+    /// its real outcome instead. The copy holds memory exactly when the
+    /// record's image is valid, so `image` describes both copies.
     async fn archive(&mut self) -> Outcome {
         if let Err(error) = self.store.archive(self.id, &self.saved_files()).await {
             return failure(&error);
@@ -309,6 +369,26 @@ impl<E: Engine, S: Store> Job<E, S> {
         match self.commit(Change::new().disk(Disk::Local)).await {
             Ok(()) => Outcome::Done,
             Err(error) => state_failure(&error),
+        }
+    }
+
+    /// Deletes the memory image here and in the store, keeping the files.
+    /// The record lets go of the image first, so a crash part-way never
+    /// claims an image that is gone; the archived copy stays current, now
+    /// without memory.
+    async fn forget(&mut self) -> Outcome {
+        if self.record.image
+            && let Err(error) = self.commit(Change::new().image(false)).await
+        {
+            return state_failure(&error);
+        }
+        drop_snapshot(&self.paths);
+        if !self.record.archived {
+            return Outcome::Done;
+        }
+        match self.store.forget_memory(self.id).await {
+            Ok(()) => Outcome::Done,
+            Err(error) => failure(&error),
         }
     }
 }

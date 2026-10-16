@@ -12,9 +12,11 @@ use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
 use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::protocol::{
-    HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepRule, step_name,
+    HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
 };
-use compute_host::{Chunked, Directory, GuestPort, HostAgent, HostConfig, NoStore, Store, serve};
+use compute_host::{
+    BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, NoStore, Store, serve,
+};
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
@@ -41,12 +43,38 @@ enum Command {
         vcpus: u8,
         #[arg(long, default_value_t = 1024)]
         memory_mib: u32,
-        /// A sleep rule such as `paused=30s`; repeat for each level.
+        /// Start from the recommended sleep settings instead of never
+        /// sleeping.
+        #[arg(long)]
+        recommended: bool,
+        /// A sleep rule such as `pause=10s`, `save=30s`, `archive=2m`,
+        /// `drop=1h`, `evict=3d` or `forget=30d`, or `rule=never` to turn
+        /// one off. Repeatable; later rules override earlier ones.
         #[arg(long = "sleep", value_parser = parse_rule)]
-        sleep: Vec<SleepRule>,
+        sleep: Vec<(SleepRuleName, Option<u64>)>,
+        /// Let memory pressure compress the sandbox's memory while paused.
+        #[arg(long)]
+        compress: Option<bool>,
     },
     /// Delete a sandbox.
     Remove { id: Id },
+    /// Put a sandbox at least as deep as a level now.
+    Sleep {
+        id: Id,
+        #[arg(value_parser = parse_level)]
+        level: LevelName,
+    },
+    /// Keep a sandbox awake for a named reason, waking it if it sleeps.
+    Hold {
+        id: Id,
+        /// The reason, such as `turn`.
+        name: String,
+        /// Let the hold lapse after this long unless held again.
+        #[arg(long, value_parser = parse_duration)]
+        ttl: Option<Duration>,
+    },
+    /// End a named hold.
+    Release { id: Id, name: String },
     /// Show every sandbox and the host's step counters.
     Status,
     /// Run a shell script inside a sandbox, waking it first.
@@ -131,13 +159,25 @@ struct ServeArgs {
     /// A name server for guests; repeatable, at most two are used.
     #[arg(long = "dns", default_values_t = [Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)])]
     dns: Vec<Ipv4Addr>,
+    /// A running sandbox whose VM uses at least this percent of one
+    /// processor counts as busy and stays awake; 0 ignores processor use.
+    #[arg(long, default_value_t = BusyRule::DEFAULT.cpu_percent)]
+    busy_cpu_percent: u32,
+    /// ...averaged over this long.
+    #[arg(long, default_value = "5s", value_parser = parse_duration)]
+    busy_window: Duration,
+    /// This host cannot compress paused VMs' memory, for example because
+    /// guest memory uses huge pages.
+    #[arg(long)]
+    no_compress: bool,
 }
 
 #[derive(Args)]
 struct BenchArgs {
     #[arg(long, default_value_t = 100)]
     count: usize,
-    /// The level to wake from.
+    /// The level to wake from. After each wake the bench asks every sandbox
+    /// to sleep this deep, timing the steps that get it there.
     #[arg(long, value_enum, default_value = "compressed")]
     level: BenchLevel,
     #[arg(long, default_value_t = 1)]
@@ -153,8 +193,8 @@ struct BenchArgs {
     /// realistic working set before it sleeps.
     #[arg(long, default_value = "echo ready")]
     warm: String,
-    /// Idle time between sleep levels.
-    #[arg(long, default_value = "3s", value_parser = parse_duration)]
+    /// Idle time after each wake before the sandboxes are sent to sleep.
+    #[arg(long, default_value = "1s", value_parser = parse_duration)]
     settle: Duration,
     /// Burst wakes to run, each after the sandboxes fall asleep again.
     #[arg(long, default_value_t = 1)]
@@ -176,6 +216,43 @@ enum BenchLevel {
     Remote,
 }
 
+impl BenchLevel {
+    const fn level(self) -> LevelName {
+        match self {
+            Self::Paused => LevelName::Paused,
+            Self::Compressed => LevelName::Compressed,
+            Self::Saved => LevelName::Saved,
+            Self::Archived => LevelName::Archived,
+            Self::Remote => LevelName::Remote,
+        }
+    }
+}
+
+/// One rule of [`SleepConfig`], named as on the command line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SleepRuleName {
+    Pause,
+    Save,
+    Archive,
+    Drop,
+    Evict,
+    Forget,
+}
+
+impl SleepRuleName {
+    fn set(self, config: &mut SleepConfig, after_ms: Option<u64>) {
+        let field = match self {
+            Self::Pause => &mut config.pause_after_ms,
+            Self::Save => &mut config.save_after_ms,
+            Self::Archive => &mut config.archive_after_ms,
+            Self::Drop => &mut config.drop_after_ms,
+            Self::Evict => &mut config.evict_after_ms,
+            Self::Forget => &mut config.forget_after_ms,
+        };
+        *field = after_ms;
+    }
+}
+
 fn parse_duration(text: &str) -> Result<Duration, String> {
     let split = text
         .find(|c: char| !c.is_ascii_digit() && c != '.')
@@ -187,7 +264,8 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
         "" | "s" => value,
         "m" => value * 60.0,
         "h" => value * 3600.0,
-        _ => return Err(format!("bad duration unit in {text}; use ms, s, m or h")),
+        "d" => value * 86_400.0,
+        _ => return Err(format!("bad duration unit in {text}; use ms, s, m, h or d")),
     };
     Duration::try_from_secs_f64(seconds).map_err(|error| error.to_string())
 }
@@ -197,15 +275,31 @@ fn parse_level(text: &str) -> Result<LevelName, String> {
         .map_err(|_| format!("unknown level {text}"))
 }
 
-fn parse_rule(text: &str) -> Result<SleepRule, String> {
-    let (level, after) = text
+fn parse_rule(text: &str) -> Result<(SleepRuleName, Option<u64>), String> {
+    let (name, after) = text
         .split_once('=')
-        .ok_or_else(|| format!("expected level=duration, got {text}"))?;
-    let after = parse_duration(after)?;
-    Ok(SleepRule {
-        level: parse_level(level)?,
-        after_ms: u64::try_from(after.as_millis()).unwrap_or(u64::MAX),
-    })
+        .ok_or_else(|| format!("expected rule=duration, got {text}"))?;
+    let rule = match name {
+        "pause" => SleepRuleName::Pause,
+        "save" => SleepRuleName::Save,
+        "archive" => SleepRuleName::Archive,
+        "drop" => SleepRuleName::Drop,
+        "evict" => SleepRuleName::Evict,
+        "forget" => SleepRuleName::Forget,
+        _ => {
+            return Err(format!(
+                "unknown sleep rule {name}; use pause, save, archive, drop, evict or forget"
+            ));
+        }
+    };
+    if after == "never" {
+        return Ok((rule, None));
+    }
+    Ok((rule, Some(millis(parse_duration(after)?))))
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn parse_limit(text: &str) -> Result<(Step, u32), String> {
@@ -236,12 +330,25 @@ async fn main() -> anyhow::Result<()> {
             id,
             vcpus,
             memory_mib,
+            recommended,
             sleep,
+            compress,
         } => {
+            let mut settings = if recommended {
+                SleepConfig::RECOMMENDED
+            } else {
+                SleepConfig::default()
+            };
+            for (rule, after_ms) in sleep {
+                rule.set(&mut settings, after_ms);
+            }
+            if let Some(compress) = compress {
+                settings.compress = compress;
+            }
             let config = SandboxConfig {
                 vcpus,
                 memory_mib,
-                sleep,
+                sleep: settings,
             };
             expect_done(client.call(&Request::Create { id, config }).await?)
         }
@@ -250,6 +357,35 @@ async fn main() -> anyhow::Result<()> {
                 .call(&Request::Remove {
                     id,
                     generation: None,
+                })
+                .await?,
+        ),
+        Command::Sleep { id, level } => expect_done(
+            client
+                .call(&Request::Sleep {
+                    id,
+                    generation: None,
+                    level,
+                })
+                .await?,
+        ),
+        Command::Hold { id, name, ttl } => expect_done(
+            client
+                .call(&Request::Hold {
+                    id,
+                    generation: None,
+                    hold: name,
+                    ttl_ms: ttl.map(millis),
+                    priority: PriorityName::Interactive,
+                })
+                .await?,
+        ),
+        Command::Release { id, name } => expect_done(
+            client
+                .call(&Request::Release {
+                    id,
+                    generation: None,
+                    hold: name,
                 })
                 .await?,
         ),
@@ -313,6 +449,11 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
             blocked: args.blocked,
             dns: args.dns,
         }),
+        busy: (args.busy_cpu_percent > 0).then_some(BusyRule {
+            cpu_percent: args.busy_cpu_percent,
+            window: args.busy_window,
+        }),
+        can_compress: !args.no_compress,
     };
     let Some(store) = args.store else {
         return run_agent(config, engine, NoStore, socket).await;
@@ -509,7 +650,11 @@ fn report(burst: &Burst) {
     );
     println!("  first byte   {}", percentiles(pick(|run| run.first_byte)));
     println!("  done         {}", percentiles(pick(|run| run.done)));
-    for (name, stats) in &burst.steps {
+    report_steps(&burst.steps);
+}
+
+fn report_steps(steps: &[(String, compute_host::protocol::StepStats)]) {
+    for (name, stats) in steps {
         let mean = stats.total_us / stats.done.max(1);
         println!(
             "  step {name:<9} {} started, {} done, {} cancelled, {} failed, mean {:?}, max so far {:?}",
@@ -523,40 +668,9 @@ fn report(burst: &Burst) {
     }
 }
 
-fn ladder(level: BenchLevel, settle: Duration) -> Vec<SleepRule> {
-    let rule = |level, factor: u32| SleepRule {
-        level,
-        after_ms: u64::try_from((settle * factor).as_millis()).unwrap_or(u64::MAX),
-    };
-    match level {
-        BenchLevel::Paused => vec![rule(LevelName::Paused, 1)],
-        BenchLevel::Compressed => vec![rule(LevelName::Paused, 1), rule(LevelName::Compressed, 2)],
-        BenchLevel::Saved => vec![rule(LevelName::Paused, 1), rule(LevelName::Saved, 2)],
-        BenchLevel::Archived => vec![
-            rule(LevelName::Paused, 1),
-            rule(LevelName::Saved, 2),
-            rule(LevelName::Archived, 3),
-        ],
-        BenchLevel::Remote => vec![
-            rule(LevelName::Paused, 1),
-            rule(LevelName::Saved, 2),
-            rule(LevelName::Archived, 3),
-            rule(LevelName::Remote, 4),
-        ],
-    }
-}
-
-fn target(level: BenchLevel) -> LevelName {
-    match level {
-        BenchLevel::Paused => LevelName::Paused,
-        BenchLevel::Compressed => LevelName::Compressed,
-        BenchLevel::Saved => LevelName::Saved,
-        BenchLevel::Archived => LevelName::Archived,
-        BenchLevel::Remote => LevelName::Remote,
-    }
-}
-
-async fn wait_for_level(client: &Client, ids: &[Id], level: LevelName) -> anyhow::Result<()> {
+/// Waits until every sandbox in `ids` is at `level` with no step running,
+/// and reports how long that took.
+async fn wait_for_level(client: &Client, ids: &[Id], level: LevelName) -> anyhow::Result<Duration> {
     let started = Instant::now();
     let mut last_report = Instant::now();
     loop {
@@ -573,12 +687,9 @@ async fn wait_for_level(client: &Client, ids: &[Id], level: LevelName) -> anyhow
             })
             .count();
         if reached == ids.len() {
-            println!(
-                "all {} sandboxes at {level:?} after {:?}",
-                ids.len(),
-                started.elapsed()
-            );
-            return Ok(());
+            let elapsed = started.elapsed();
+            println!("all {} sandboxes at {level:?} after {elapsed:?}", ids.len());
+            return Ok(elapsed);
         }
         if last_report.elapsed() > Duration::from_secs(10) {
             println!("  {reached}/{} at {level:?}", ids.len());
@@ -591,6 +702,73 @@ async fn wait_for_level(client: &Client, ids: &[Id], level: LevelName) -> anyhow
     }
 }
 
+/// Sends every sandbox to `level` at once and reports the steps that took
+/// them there.
+async fn put_to_sleep(
+    client: &Client,
+    ids: &[Id],
+    level: LevelName,
+    label: &str,
+) -> anyhow::Result<Sleep> {
+    let before = client.call(&Request::Status).await.ok();
+    let mut requests = JoinSet::new();
+    for id in ids {
+        let (client, id) = (client.clone(), *id);
+        requests.spawn(async move {
+            client
+                .call(&Request::Sleep {
+                    id,
+                    generation: None,
+                    level,
+                })
+                .await
+        });
+    }
+    while let Some(result) = requests.join_next().await {
+        expect_done(result??)?;
+    }
+    let took = wait_for_level(client, ids, level).await?;
+    let after = client.call(&Request::Status).await.ok();
+    let sleep = Sleep {
+        label: label.to_owned(),
+        took_us: u64::try_from(took.as_micros()).unwrap_or(u64::MAX),
+        resident_bytes: status_of(after.clone()).map(|status| {
+            status
+                .sandboxes
+                .iter()
+                .filter(|sandbox| ids.binary_search(&sandbox.id).is_ok())
+                .filter_map(|sandbox| sandbox.resident_bytes)
+                .sum()
+        }),
+        steps: step_delta(before, after),
+    };
+    println!("\n{label}: {took:?}");
+    if let Some(bytes) = sleep.resident_bytes {
+        println!(
+            "  resident     {} MiB total, {} MiB per sandbox",
+            bytes >> 20,
+            (bytes / ids.len().max(1) as u64) >> 20
+        );
+    }
+    report_steps(&sleep.steps);
+    Ok(sleep)
+}
+
+#[derive(Debug, Serialize)]
+struct Sleep {
+    label: String,
+    took_us: u64,
+    resident_bytes: Option<u64>,
+    steps: Vec<(String, compute_host::protocol::StepStats)>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+enum Phase {
+    Wake(Burst),
+    Sleep(Sleep),
+}
+
 async fn bench(client: &Client, args: &BenchArgs) -> anyhow::Result<()> {
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -600,10 +778,12 @@ async fn bench(client: &Client, args: &BenchArgs) -> anyhow::Result<()> {
         .map(|index| Id(SandboxId((seed << 32) | index as u128)))
         .collect();
     ids.sort_unstable();
+    // Sandboxes only sleep when the bench asks, so each phase is timed on
+    // its own; idle timers would start steps at unpredictable moments.
     let config = SandboxConfig {
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,
-        sleep: ladder(args.level, args.settle),
+        sleep: SleepConfig::default(),
     };
     let started = Instant::now();
     let mut creates = JoinSet::new();
@@ -616,14 +796,23 @@ async fn bench(client: &Client, args: &BenchArgs) -> anyhow::Result<()> {
     }
     println!("created {} sandboxes in {:?}", ids.len(), started.elapsed());
 
-    let mut bursts = vec![burst(client, &ids, args, &args.warm, "first wake (boot)").await];
+    let level = args.level.level();
+    let mut phases = vec![Phase::Wake(
+        burst(client, &ids, args, &args.warm, "first wake (boot)").await,
+    )];
     for round in 1..=args.rounds {
-        wait_for_level(client, &ids, target(args.level)).await?;
-        let label = format!("round {round}: wake from {:?}", target(args.level));
-        bursts.push(burst(client, &ids, args, &args.script, &label).await);
+        tokio::time::sleep(args.settle).await;
+        let label = format!("round {round}: sleep to {level:?}");
+        phases.push(Phase::Sleep(
+            put_to_sleep(client, &ids, level, &label).await?,
+        ));
+        let label = format!("round {round}: wake from {level:?}");
+        phases.push(Phase::Wake(
+            burst(client, &ids, args, &args.script, &label).await,
+        ));
     }
     if let Some(path) = &args.json {
-        std::fs::write(path, serde_json::to_vec_pretty(&bursts)?)?;
+        std::fs::write(path, serde_json::to_vec_pretty(&phases)?)?;
     }
     if !args.keep {
         let mut removes = JoinSet::new();

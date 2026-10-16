@@ -1,15 +1,16 @@
 //! Randomized simulation: a fake engine with random delays, failures, crashes,
 //! removals and memory pressure. After every input it checks the core's
-//! invariants against an independent model of the true state, and at the end
-//! it checks that every sandbox settles where its policy says and wakes when
-//! asked.
+//! invariants against an independent model of the true state, including that
+//! running programs are lost only when a failure leaves no saved copy. At the
+//! end it checks that every sandbox settles where its policy says and wakes
+//! when asked.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use compute_core::{
-    Action, At, Failure, HoldId, Host, HostPolicy, Input, Level, MemoryPolicy, Notice, OpId,
-    Outcome, Priority, SandboxId, SleepPolicy, Step, StepLimits,
+    Action, At, Durability, Failure, HoldId, Host, HostPolicy, Input, Level, MemoryPolicy, Notice,
+    OpId, Outcome, Priority, SandboxId, SleepPolicy, SleepRules, State, Step, StepLimits,
 };
 
 const GIB: u64 = 1 << 30;
@@ -39,21 +40,48 @@ impl Rng {
     }
 }
 
-fn policies() -> [SleepPolicy; 4] {
+fn policies() -> [SleepPolicy; 5] {
     let s = Duration::from_secs;
+    let policy = |rules| SleepPolicy::new(rules).unwrap();
     [
-        SleepPolicy::new([
-            (Level::Paused, s(30)),
-            (Level::Compressed, s(120)),
-            (Level::Saved, s(900)),
-            (Level::Archived, s(3600)),
-            (Level::Remote, s(86_400)),
-        ])
-        .unwrap(),
-        SleepPolicy::new([(Level::Paused, s(5)), (Level::Saved, s(60))]).unwrap(),
-        SleepPolicy::new([(Level::Paused, s(10))]).unwrap(),
+        policy(SleepRules::RECOMMENDED),
+        // A nested host: huge pages cannot be compressed.
+        policy(SleepRules {
+            compress_under_pressure: false,
+            ..SleepRules::RECOMMENDED
+        }),
+        // Ends processes on a timer, without object storage.
+        policy(SleepRules {
+            pause_after: Some(s(5)),
+            save_after: Some(s(20)),
+            drop_after: Some(s(60)),
+            forget_after: Some(s(3600)),
+            ..SleepRules::NEVER
+        }),
+        // Pauses only; pressure may compress it.
+        policy(SleepRules {
+            pause_after: Some(s(10)),
+            compress_under_pressure: true,
+            ..SleepRules::NEVER
+        }),
         SleepPolicy::NEVER,
     ]
+}
+
+/// Every consistent state.
+fn states() -> Vec<State> {
+    let mut states = Vec::new();
+    for level in Level::ALL {
+        for durability in [Durability::Volatile, Durability::Local, Durability::Remote] {
+            for memory_saved in [false, true] {
+                let state = State::new(level, durability, memory_saved);
+                if !states.contains(&state) {
+                    states.push(state);
+                }
+            }
+        }
+    }
+    states
 }
 
 /// What is really true about a sandbox, maintained independently of the core.
@@ -62,8 +90,7 @@ fn policies() -> [SleepPolicy; 4] {
     reason = "a flat test model is easiest to audit"
 )]
 struct Truth {
-    level: Level,
-    memory_saved: bool,
+    state: State,
     policy: SleepPolicy,
     op: Option<(OpId, Step)>,
     holds: BTreeMap<HoldId, Option<At>>,
@@ -71,6 +98,10 @@ struct Truth {
     process_lost: bool,
     broken: bool,
     woke: bool,
+    /// Losses of running programs the core has yet to report.
+    unreported_losses: u32,
+    /// Latest resident memory reported to the core.
+    resident: u64,
 }
 
 impl Truth {
@@ -80,11 +111,10 @@ impl Truth {
             .any(|until| until.is_none_or(|until| until > now))
     }
 
-    fn lose_memory(&mut self) {
-        if self.level.has_process() {
-            self.level = Level::Saved;
-        }
-        self.memory_saved = false;
+    /// Applies a loss computed by the model and expects it to be reported.
+    fn settle(&mut self, (state, lost): (State, bool)) {
+        self.state = state;
+        self.unreported_losses += u32::from(lost);
     }
 }
 
@@ -107,6 +137,10 @@ struct World {
     failures: bool,
     next_id: u128,
     next_hold: u64,
+    /// Steps started, by kind, so the test can prove it reached every path.
+    started: [u64; Step::COUNT],
+    /// Losses of running programs, to prove failures were exercised.
+    losses: u64,
 }
 
 impl World {
@@ -133,12 +167,18 @@ impl World {
             failures: true,
             next_id: 0,
             next_hold: 0,
+            started: [0; Step::COUNT],
+            losses: 0,
         }
     }
 
     fn send(&mut self, input: Input) {
+        self.send_all(vec![input]);
+    }
+
+    fn send_all(&mut self, inputs: Vec<Input>) {
         let mut out = Vec::new();
-        self.host.handle(self.now, input, &mut out);
+        self.host.handle_all(self.now, inputs, &mut out);
         for action in out {
             self.act(action);
         }
@@ -149,6 +189,7 @@ impl World {
         match action {
             Action::Start { sandbox, op, step } => {
                 let now = self.now;
+                self.started[step.index()] += 1;
                 let truth = self
                     .live
                     .get_mut(&sandbox)
@@ -156,10 +197,9 @@ impl World {
                 assert!(truth.op.is_none(), "two steps at once for {sandbox:?}");
                 assert!(!truth.broken, "step for a broken sandbox");
                 assert!(
-                    step.can_start(truth.level, truth.memory_saved),
-                    "{step:?} cannot start from {:?} (memory saved: {})",
-                    truth.level,
-                    truth.memory_saved
+                    step.can_start(truth.state),
+                    "{step:?} cannot start from {:?}",
+                    truth.state
                 );
                 if !step.wakes() {
                     assert!(!truth.held(now), "sleep step {step:?} while held");
@@ -185,16 +225,23 @@ impl World {
             }
             Action::Destroy { sandbox } => assert!(!self.live.contains_key(&sandbox)),
             Action::Notify { sandbox, notice } => {
-                if let (
-                    Notice::Level {
-                        level,
-                        memory_saved,
-                    },
-                    Some(truth),
-                ) = (notice, self.live.get_mut(&sandbox))
-                {
-                    assert_eq!((level, memory_saved), (truth.level, truth.memory_saved));
-                    truth.woke |= level == Level::Running;
+                let Some(truth) = self.live.get_mut(&sandbox) else {
+                    return;
+                };
+                match notice {
+                    Notice::State(state) => {
+                        assert_eq!(state, truth.state, "{sandbox:?}");
+                        truth.woke |= state.level == Level::Running;
+                    }
+                    Notice::MemoryLost => {
+                        assert!(
+                            truth.unreported_losses > 0,
+                            "{sandbox:?} reported a loss that did not happen"
+                        );
+                        truth.unreported_losses -= 1;
+                        self.losses += 1;
+                    }
+                    Notice::Retrying { .. } | Notice::Broken => {}
                 }
             }
         }
@@ -217,21 +264,28 @@ impl World {
             && truth.op.is_some_and(|(op, _)| op == pending.op)
         {
             truth.op = None;
+            if pending.step == Step::Resume
+                && matches!(
+                    outcome,
+                    Outcome::Failed(Failure::MemoryLost | Failure::Fatal)
+                )
+            {
+                // The guest may have run, so the saved copy is stale. A
+                // refused or cancelled resume changed nothing.
+                truth.state = State::new(truth.state.level, Durability::Volatile, false);
+            }
             match outcome {
-                Outcome::Done => {
-                    truth.level = pending.step.target();
-                    if pending.step == Step::Save {
-                        truth.memory_saved = true;
-                    }
-                }
+                Outcome::Done => truth.state = pending.step.apply(truth.state),
                 Outcome::Cancelled | Outcome::Failed(Failure::Transient) => {}
-                Outcome::Failed(Failure::MemoryLost) => truth.lose_memory(),
+                Outcome::Failed(Failure::MemoryLost) => {
+                    truth.settle(truth.state.without_memory_image());
+                }
                 Outcome::Failed(Failure::Fatal) => truth.broken = true,
             }
-            if std::mem::take(&mut truth.process_lost) && truth.level.has_process() {
-                truth.lose_memory();
+            if std::mem::take(&mut truth.process_lost) {
+                truth.settle(truth.state.without_process());
             }
-            if truth.level == Level::Running {
+            if truth.state.level == Level::Running {
                 truth.wake_pending = false;
             }
         }
@@ -285,28 +339,32 @@ impl World {
             );
         }
         assert_eq!(self.host.len(), self.live.len());
+        let mut protected_resident = 0;
         for (id, truth) in &self.live {
             let view = self.host.sandbox(*id).expect("live sandbox is managed");
-            assert_eq!(view.level, truth.level, "{id:?} level");
-            if !truth.level.has_process() {
-                assert_eq!(view.memory_saved, truth.memory_saved, "{id:?} memory image");
-            }
+            assert_eq!(view.state, truth.state, "{id:?} state");
+            assert!(view.state.is_consistent(), "{id:?} {:?}", view.state);
             assert_eq!(view.step, truth.op.map(|(_, step)| step), "{id:?} step");
             assert_eq!(view.broken, truth.broken, "{id:?} broken");
+            assert_eq!(truth.unreported_losses, 0, "{id:?} lost programs silently");
+            if matches!(truth.state.level, Level::Paused | Level::Compressed)
+                && truth.state.durability != Durability::Volatile
+            {
+                protected_resident += truth.resident;
+            }
         }
+        assert!(self.host.reclaimable_memory() <= protected_resident);
     }
 
     fn add(&mut self) {
         self.next_id += 1;
         let id = SandboxId(self.next_id);
         let policy = self.rng.pick(&policies());
-        let level = self.rng.pick(&Level::ALL);
-        let memory_saved = !level.has_process() && self.rng.chance(70);
+        let state = self.rng.pick(&states());
         self.live.insert(
             id,
             Truth {
-                level,
-                memory_saved,
+                state,
                 policy,
                 op: None,
                 holds: BTreeMap::new(),
@@ -314,12 +372,13 @@ impl World {
                 process_lost: false,
                 broken: false,
                 woke: false,
+                unreported_losses: 0,
+                resident: 0,
             },
         );
         self.send(Input::Add {
             sandbox: id,
-            level,
-            memory_saved,
+            state,
             policy,
         });
     }
@@ -342,7 +401,7 @@ impl World {
         match self.rng.below(100) {
             0..30 => {
                 let truth = self.live.get_mut(&id).unwrap();
-                if truth.level != Level::Running || truth.op.is_some() {
+                if truth.state.level != Level::Running || truth.op.is_some() {
                     truth.wake_pending = true;
                 }
                 self.send(Input::Touch {
@@ -359,7 +418,7 @@ impl World {
                     .then(|| self.now + Duration::from_millis(1 + self.rng.below(120_000)));
                 let truth = self.live.get_mut(&id).unwrap();
                 truth.holds.insert(hold, until);
-                if truth.level != Level::Running || truth.op.is_some() {
+                if truth.state.level != Level::Running || truth.op.is_some() {
                     truth.wake_pending = true;
                 }
                 self.send(Input::Hold {
@@ -378,11 +437,11 @@ impl World {
             }
             60..65 => {
                 let truth = self.live.get_mut(&id).unwrap();
-                if truth.level.has_process() {
+                if truth.state.level.has_process() {
                     if truth.op.is_some() {
                         truth.process_lost = true;
                     } else {
-                        truth.lose_memory();
+                        truth.settle(truth.state.without_process());
                     }
                     self.send(Input::Lost { sandbox: id });
                 }
@@ -393,6 +452,7 @@ impl World {
             }
             75..85 => {
                 let bytes = 100 << 20 | self.rng.below(2 * GIB);
+                self.live.get_mut(&id).unwrap().resident = bytes;
                 self.send(Input::Resident { sandbox: id, bytes });
             }
             85..90 => {
@@ -400,12 +460,28 @@ impl World {
                 self.send(Input::Remove { sandbox: id });
             }
             90..95 => self.add(),
+            95..98 => {
+                let level = self.rng.pick(&Level::ALL);
+                self.send(Input::Sleep { sandbox: id, level });
+            }
+            98..100 => {
+                // One sweep of processor readings arrives as one batch.
+                let mut batch = vec![Input::Busy { sandbox: id }];
+                for _ in 0..self.rng.below(3) {
+                    if let Some(sandbox) = self.random_sandbox() {
+                        batch.push(Input::Busy { sandbox });
+                    }
+                }
+                self.send_all(batch);
+            }
             _ => {}
         }
     }
 }
 
-fn run(seed: u64, events: usize) {
+/// Runs one seeded simulation and returns how often each step started and
+/// how many times running programs were lost.
+fn run(seed: u64, events: usize) -> ([u64; Step::COUNT], u64) {
     let mut world = World::new(seed);
     for _ in 0..8 {
         world.add();
@@ -437,11 +513,12 @@ fn run(seed: u64, events: usize) {
     );
     for (id, truth) in &world.live {
         if !truth.broken {
-            let deepest = truth.policy.deepest_after(Duration::MAX);
-            assert!(
-                truth.level >= deepest,
-                "seed {seed}: {id:?} at {:?}, expected {deepest:?}",
-                truth.level
+            let settled = Duration::from_secs(300 * 86_400);
+            assert_eq!(
+                truth.policy.next_step(truth.state, settled, Level::Running),
+                None,
+                "seed {seed}: {id:?} has not settled at {:?}",
+                truth.state
             );
         }
     }
@@ -450,8 +527,8 @@ fn run(seed: u64, events: usize) {
     let ids: BTreeSet<SandboxId> = world.live.keys().copied().collect();
     for id in &ids {
         let truth = world.live.get_mut(id).unwrap();
-        truth.woke = truth.level == Level::Running;
-        if truth.level != Level::Running {
+        truth.woke = truth.state.level == Level::Running;
+        if truth.state.level != Level::Running {
             truth.wake_pending = true;
         }
         world.send(Input::Touch {
@@ -464,14 +541,30 @@ fn run(seed: u64, events: usize) {
         assert!(
             truth.broken || truth.woke,
             "seed {seed}: {id:?} never woke, stuck at {:?}",
-            truth.level
+            truth.state
         );
     }
+    (world.started, world.losses)
 }
 
 #[test]
 fn random_interleavings_keep_every_invariant() {
+    let mut started = [0; Step::COUNT];
+    let mut losses = 0;
     for seed in 0..400 {
-        run(seed, 600);
+        let (counts, lost) = run(seed, 600);
+        for (total, count) in started.iter_mut().zip(counts) {
+            *total += count;
+        }
+        losses += lost;
     }
+    // The simulation proves little unless it reaches every path.
+    for step in Step::ALL {
+        assert!(
+            started[step.index()] >= 100,
+            "{step:?} started only {} times",
+            started[step.index()]
+        );
+    }
+    assert!(losses >= 100, "only {losses} losses");
 }

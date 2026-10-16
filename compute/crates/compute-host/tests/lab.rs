@@ -22,7 +22,8 @@ use std::time::Duration;
 use compute_core::SandboxId;
 use compute_host::client::Client;
 use compute_host::protocol::{
-    HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepRule,
+    DurabilityName, HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
+    SandboxStatus, SleepConfig,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
@@ -144,7 +145,7 @@ impl Agent {
         }
     }
 
-    async fn create(&self, sandbox: Id, sleep: &[(LevelName, u64)]) {
+    async fn create(&self, sandbox: Id, sleep: SleepConfig) {
         create(&self.client, sandbox, sleep).await;
     }
 
@@ -175,15 +176,12 @@ impl Agent {
     }
 }
 
-/// Creates `sandbox` with the sleep ladder `sleep`.
-async fn create(client: &Client, sandbox: Id, sleep: &[(LevelName, u64)]) {
+/// Creates `sandbox` with sleep settings `sleep`.
+async fn create(client: &Client, sandbox: Id, sleep: SleepConfig) {
     let config = SandboxConfig {
         vcpus: 1,
         memory_mib: 512,
-        sleep: sleep
-            .iter()
-            .map(|&(level, after_ms)| SleepRule { level, after_ms })
-            .collect(),
+        sleep,
     };
     let reply = client
         .call(&Request::Create {
@@ -271,28 +269,65 @@ fn firecrackers() -> usize {
 enum Kind {
     Running,
     Paused,
+    /// Paused, with a saved copy on disk.
+    SavedInPlace,
     Saved,
 }
 
+/// Never sleeps on its own.
+const NEVER: SleepConfig = SleepConfig {
+    pause_after_ms: None,
+    save_after_ms: None,
+    archive_after_ms: None,
+    drop_after_ms: None,
+    evict_after_ms: None,
+    forget_after_ms: None,
+    compress: false,
+};
+
+/// Pauses, saves and lets go of the VM soon after each use.
+const SAVE_SOON: SleepConfig = SleepConfig {
+    pause_after_ms: Some(300),
+    save_after_ms: Some(600),
+    drop_after_ms: Some(900),
+    ..NEVER
+};
+
 impl Kind {
     fn of(n: usize) -> Self {
-        [Self::Running, Self::Paused, Self::Saved][n % 3]
+        [Self::Running, Self::Paused, Self::SavedInPlace, Self::Saved][n % 4]
     }
 
-    fn ladder(self) -> &'static [(LevelName, u64)] {
+    fn sleep(self) -> SleepConfig {
         match self {
-            Self::Running => &[],
-            Self::Paused => &[(LevelName::Paused, 500)],
-            Self::Saved => &[(LevelName::Paused, 500), (LevelName::Saved, 1_000)],
+            Self::Running => NEVER,
+            Self::Paused => SleepConfig {
+                pause_after_ms: Some(500),
+                ..NEVER
+            },
+            Self::SavedInPlace => SleepConfig {
+                pause_after_ms: Some(500),
+                save_after_ms: Some(1_000),
+                ..NEVER
+            },
+            Self::Saved => SleepConfig {
+                pause_after_ms: Some(500),
+                save_after_ms: Some(1_000),
+                drop_after_ms: Some(1_500),
+                ..NEVER
+            },
         }
     }
 
-    fn level(self) -> LevelName {
-        match self {
-            Self::Running => LevelName::Running,
-            Self::Paused => LevelName::Paused,
-            Self::Saved => LevelName::Saved,
-        }
+    /// Whether `sandbox` has settled where this kind goes.
+    fn reached(self, sandbox: &SandboxStatus) -> bool {
+        let (level, durability) = match self {
+            Self::Running => (LevelName::Running, DurabilityName::Volatile),
+            Self::Paused => (LevelName::Paused, DurabilityName::Volatile),
+            Self::SavedInPlace => (LevelName::Paused, DurabilityName::Local),
+            Self::Saved => (LevelName::Saved, DurabilityName::Local),
+        };
+        sandbox.step.is_none() && sandbox.level == level && sandbox.durability == durability
     }
 }
 
@@ -313,7 +348,7 @@ async fn sandboxes_survive_the_agent_being_killed() {
     for (n, sandbox) in ids.iter().copied().enumerate() {
         let client = agent.client.clone();
         creates.spawn(async move {
-            create(&client, sandbox, Kind::of(n).ladder()).await;
+            create(&client, sandbox, Kind::of(n).sleep()).await;
             // A background process and a file in memory: both live only in
             // the guest's RAM.
             let script = format!(
@@ -332,7 +367,7 @@ async fn sandboxes_survive_the_agent_being_killed() {
                 .sandboxes
                 .iter()
                 .enumerate()
-                .all(|(n, sandbox)| sandbox.step.is_none() && sandbox.level == Kind::of(n).level())
+                .all(|(n, sandbox)| Kind::of(n).reached(sandbox))
         })
         .await;
     let before = agent.status().await;
@@ -356,8 +391,8 @@ async fn sandboxes_survive_the_agent_being_killed() {
     assert_eq!(after.sandboxes.len(), count);
     for (old, new) in before.sandboxes.iter().zip(&after.sandboxes) {
         assert_eq!(
-            (old.id, old.level, old.generation),
-            (new.id, new.level, new.generation),
+            (old.id, old.level, old.durability, old.generation),
+            (new.id, new.level, new.durability, new.generation),
             "the restart changed a sandbox"
         );
     }
@@ -445,9 +480,8 @@ async fn restored_guests_reach_the_internet_at_once_and_nothing_else() {
     let host = Host::new(&lab, "net", &["--network"]);
     let agent = host.start().await;
     let ids: Vec<Id> = (0..count).map(id).collect();
-    let ladder = [(LevelName::Paused, 300), (LevelName::Saved, 600)];
     for sandbox in &ids {
-        agent.create(*sandbox, &ladder).await;
+        agent.create(*sandbox, SAVE_SOON).await;
     }
     let mut boots = JoinSet::new();
     for sandbox in ids.iter().copied() {
@@ -561,7 +595,7 @@ async fn only_trusted_hosts_let_guests_reach_the_local_network() {
         };
         let host = Host::new(&lab, "lan", flags);
         let agent = host.start().await;
-        agent.create(id(0), &[]).await;
+        agent.create(id(0), NEVER).await;
         let (output, _) = exec(&agent.client, id(0), &script).await;
         assert_eq!(output.trim(), expected, "trusted={trusted}: {target}");
         agent.remove_all().await;
