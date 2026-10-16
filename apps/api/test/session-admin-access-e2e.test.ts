@@ -204,9 +204,25 @@ describe("session admin access end to end", () => {
       ).status,
     ).toBe(403);
     // Never a session a Site page started: it acts with that page's reach.
-    // (`_opengeniSiteOrigin` is where a session records the Site page that started it.)
-    const fromSite = await session(subjectId, {
-      _opengeniSiteOrigin: { siteId: null, title: "Inline page", frame: "inline" },
+    // Use the authenticated inline-frame route: Site provenance alone is not
+    // authority to insert a shared root after the private-audience migration.
+    const fromSiteResponse = await app.request(`/v1/workspaces/${workspaceId}/sessions`, {
+      method: "POST",
+      headers: {
+        ...browser(cookie),
+        "x-opengeni-site-frame": "1",
+        "x-opengeni-site-frame-id": crypto.randomUUID(),
+      },
+      body: JSON.stringify({ startMode: "realtime" }),
+    });
+    expect(fromSiteResponse.status, await fromSiteResponse.clone().text()).toBe(202);
+    const fromSite = ((await fromSiteResponse.json()) as { id: string }).id;
+    const [siteAudience] = await shared.admin`
+      select visibility, owner_subject_id, site_access_root_id from sessions where id = ${fromSite}`;
+    expect(siteAudience).toMatchObject({
+      visibility: "user_private",
+      owner_subject_id: subjectId,
+      site_access_root_id: fromSite,
     });
     const refusedForSite = await app.request(sessionAccess(fromSite), {
       method: "PUT",
