@@ -20,6 +20,7 @@ import {
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
+  BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
   claimSessionWorkForAttempt,
   connectSubscriptionCoreCodexConnection,
   createDb,
@@ -37,6 +38,7 @@ import {
   RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
   SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
   SESSION_USAGE_LIMIT_RUNTIME_ROUTINES,
+  SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
   withSessionRlsActorContext,
   type DbClient,
 } from "../src";
@@ -629,9 +631,23 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "Site cancellation routine begin_site_session_cancellation(uuid, uuid, uuid, uuid) is missing or unsafe",
       "Site cancellation routine end_site_session_cancellation(uuid) is missing or unsafe",
     );
+    // 0796-0798 (subscription plans and billing operations) are held back too.
+    heldBack.push(
+      ...[...BILLING_SUBSCRIPTION_OPERATION_ROUTINES, ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES].map(
+        (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
+      ),
+      "owner-internal target-schema helper set_subscription_plan_catalog(jsonb, text, text) is missing or ambiguous",
+      "runtime role cannot read the subscription plan catalog",
+      "subscription plan maintenance inventory is missing",
+      "subscription plan Free anniversary helper is missing",
+    );
     // 0776 (Site Data), 0782 (published Sites) and 0783 (Site SQL): their tables
     // are in the runtime and protected contracts.
     const siteDataTables = [
+      // 0796 and 0797 (billing operations and subscription plans).
+      "billing_subscription_operations",
+      "organization_plans",
+      "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
       "scheduled_task_blocker_reviews",
       "site_abuse_reports",
