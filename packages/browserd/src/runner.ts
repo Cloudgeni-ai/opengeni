@@ -12,6 +12,7 @@ import {
   readlink,
   realpath,
   rm,
+  stat as fileStatus,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
@@ -730,10 +731,13 @@ async function managedBrowserLaunch(
         options.profileDirectory,
         executable,
         options.systemdScope === false ? null : await linuxUserScopeLauncher(),
+        windowedBrowser(options) ? [] : await linuxHeadlessChromeArguments(executable),
       );
     }
   }
-  if (process.platform === "darwin" && options.offscreen === true && !options.provider) {
+  // Offscreen and headless are the same new-headless Chrome on macOS; both
+  // present the host display and an ordinary User-Agent.
+  if (process.platform === "darwin" && !windowedBrowser(options) && !options.provider) {
     const executable = configured ?? (await firstExecutable(MACOS_BROWSER_EXECUTABLES));
     if (!executable) return undefined;
     return await chromeStderrDrainWrapper(
@@ -853,6 +857,32 @@ export async function macosOffscreenChromeArguments(
   ];
 }
 
+/** A common Linux desktop: a 1080p monitor under a GNOME-style top bar. A
+ * headless browser has no display to measure, and Chrome's own 800x600
+ * screen with no work area is a well-known headless signal. */
+const LINUX_HEADLESS_SCREEN = "{1920x1080 devicePixelRatio=1 workAreaTop=32}";
+
+/** Arguments that make a headless managed Chrome on Linux present like an
+ * ordinary desktop Chrome: the reduced User-Agent every desktop Linux Chrome
+ * sends (always "X11; Linux x86_64"), instead of one naming HeadlessChrome,
+ * and a desktop screen. Same reasoning as the macOS offscreen arguments. A
+ * browser whose version cannot be read still launches, keeping its own
+ * User-Agent rather than one naming a guessed version. */
+export async function linuxHeadlessChromeArguments(
+  executable: string,
+  probes: { chromeMajorVersion?: (executable: string) => Promise<number> } = {},
+): Promise<string[]> {
+  const major = await (probes.chromeMajorVersion ?? chromeMajorVersion)(executable).catch(
+    () => null,
+  );
+  const screen = `--screen-info=${LINUX_HEADLESS_SCREEN}`;
+  if (major === null) return [screen];
+  return [
+    `--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
+    screen,
+  ];
+}
+
 export type MacosDisplayGeometry = {
   width: number;
   height: number;
@@ -932,7 +962,21 @@ export function parseMacosDisplayGeometry(output: string): MacosDisplayGeometry 
   return { width, height, scale, insets };
 }
 
+/** Major versions keyed by executable path and modification time, so each
+ * launch does not start the browser again just to read its version, and an
+ * upgraded browser is read afresh. */
+const chromeMajorVersions = new Map<string, number>();
+
 async function chromeMajorVersion(executable: string): Promise<number> {
+  const key = `${executable}\0${(await fileStatus(executable)).mtimeMs}`;
+  const cached = chromeMajorVersions.get(key);
+  if (cached !== undefined) return cached;
+  const major = await readChromeMajorVersion(executable);
+  chromeMajorVersions.set(key, major);
+  return major;
+}
+
+async function readChromeMajorVersion(executable: string): Promise<number> {
   // An application bundle records its version without starting the browser.
   const bundleInfo = join(dirname(dirname(executable)), "Info.plist");
   try {

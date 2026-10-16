@@ -20,6 +20,7 @@ import {
   assertManagedBrowserProfileUnused,
   browserLaunchArguments,
   browserProfileCryptoPolicy,
+  linuxHeadlessChromeArguments,
   macosOffscreenChromeArguments,
   MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT,
   parseMacosDisplayGeometry,
@@ -54,6 +55,24 @@ describe("managed browser profile cryptography", () => {
       "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
       "--screen-info={1920x1080 devicePixelRatio=1 workAreaLeft=0 workAreaRight=0 workAreaTop=30 workAreaBottom=88}",
     ]);
+  });
+
+  test("headless Linux browsers present an ordinary desktop User-Agent and screen", async () => {
+    expect(
+      await linuxHeadlessChromeArguments("/usr/bin/fixture-chrome", {
+        chromeMajorVersion: async () => 155,
+      }),
+    ).toEqual([
+      "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "--screen-info={1920x1080 devicePixelRatio=1 workAreaTop=32}",
+    ]);
+    expect(
+      await linuxHeadlessChromeArguments("/usr/bin/fixture-chrome", {
+        chromeMajorVersion: async () => {
+          throw new Error("managed browser version is unavailable");
+        },
+      }),
+    ).toEqual(["--screen-info={1920x1080 devicePixelRatio=1 workAreaTop=32}"]);
   });
 
   test("declares only explicitly pinned portable policies", () => {
@@ -247,7 +266,8 @@ describe("managed browser profile cryptography", () => {
         const unreadStderr = await open(unreadStderrPath, constants.O_RDWR);
         await writeFile(
           browserPath,
-          '#!/bin/sh\nset -e\ni=0\nwhile [ "$i" -lt 256 ]; do\n  printf "%01024d" 0 >&2\n  i=$((i + 1))\ndone\nprintf "END_MARKER\\n" >&2\nprintf "%s\\n" "$1"\n',
+          // Echo the forwarded operand, skipping the launch's own switches.
+          '#!/bin/sh\nset -e\ni=0\nwhile [ "$i" -lt 256 ]; do\n  printf "%01024d" 0 >&2\n  i=$((i + 1))\ndone\nprintf "END_MARKER\\n" >&2\nfor argument; do\n  case "$argument" in --*) ;; *) printf "%s\\n" "$argument" ;; esac\ndone\n',
           { mode: 0o700 },
         );
         await writeFile(
