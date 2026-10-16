@@ -976,7 +976,7 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// before anything may use it, so otherwise this reports its memory
     /// lost: the caller's VM is ended, and the sandbox's next wake boots
     /// from its disk, where the guest finds its id on the kernel command
-    /// line.
+    /// line and must still acknowledge the notice (see `boot`).
     async fn tell_guest_restored(&mut self) -> Result<(), Outcome> {
         const LOST: Outcome = Outcome::Failed(Failure::MemoryLost);
         let must = self.record.identity == Identity::Pending;
@@ -1048,13 +1048,20 @@ impl<E: Engine, S: Store> Job<E, S> {
     }
 
     /// Boot fresh from the disk; any old memory image is meaningless now.
+    ///
+    /// The guest finds its id on the kernel command line. A clone that never
+    /// acknowledged its identity (see [`Identity::Pending`]) boots from its
+    /// template's disk, machine identity included, so its guest must
+    /// acknowledge the restore notice here too before the sandbox runs; one
+    /// that does not is ended and the boot retried, as nothing changed.
     async fn boot(&mut self) -> (Outcome, After<E::Vm>) {
-        // The guest finds its id on the kernel command line.
-        let fresh = Change::new()
-            .image(false)
-            .archived(false)
-            .identity(Identity::Known)
-            .execution();
+        let pending = self.record.identity == Identity::Pending;
+        let fresh = Change::new().image(false).archived(false).execution();
+        let fresh = if pending {
+            fresh
+        } else {
+            fresh.identity(Identity::Known)
+        };
         if let Err(error) = self.commit(fresh).await {
             return (state_failure(&error), After::NoVm);
         }
@@ -1076,7 +1083,15 @@ impl<E: Engine, S: Store> Job<E, S> {
             Ok(vm) => {
                 self.launches += 1;
                 self.hold_watch(&vm, &watch).await;
-                (Outcome::Done, After::New(vm, LiveMemory::booted(watch)))
+                let memory = LiveMemory::booted(watch);
+                if pending && self.tell_guest_restored().await.is_err() {
+                    let outcome = self.end(vm, Outcome::Failed(Failure::Transient)).await;
+                    if outcome != Outcome::Failed(Failure::Fatal) {
+                        memory.close().await;
+                    }
+                    return (outcome, After::NoVm);
+                }
+                (Outcome::Done, After::New(vm, memory))
             }
             Err(error) => {
                 self.launches += u32::from(error.launched);

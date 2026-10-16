@@ -9,7 +9,7 @@ use std::time::Duration;
 use compute_core::HostPolicy;
 use compute_host::protocol::{HostStatus, Id, LevelName, Reply, TemplateState};
 use compute_host::{HostConfig, PoolConfig, Shape};
-use tokio::time::Instant;
+use tokio::time::{Instant, sleep};
 
 use super::{Delays, Lab, NEVER, World, id, vm_name};
 
@@ -156,7 +156,10 @@ async fn without_a_ready_template_a_sandbox_boots_cold_at_once() {
 
 /// A guest restored from a template thinks it is the template until it
 /// acknowledges the notice naming its sandbox. One that does not is never
-/// used: its VM is ended, and the sandbox boots from its disk instead.
+/// used: its VM is ended, and the sandbox boots from its disk instead. That
+/// disk is the template's too, machine identity and all, so the booted
+/// guest must acknowledge the same notice before the sandbox runs; until
+/// it does, the boot is retried.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_clone_that_never_learns_which_sandbox_it_is_is_never_used() {
     let lab = warm_lab(Lab::root(), Arc::default(), Delays::default(), vec![SHAPE]).await;
@@ -168,33 +171,51 @@ async fn a_clone_that_never_learns_which_sandbox_it_is_is_never_used() {
         "recorded before restore"
     );
 
-    lab.world.refuse_notices.store(true, Ordering::Relaxed);
-    let woken = lab.wake(id(1)).await;
-    assert!(matches!(woken, Reply::Woken { .. }), "{woken:?}");
-    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
-    assert_eq!(
-        lab.world.boots.load(Ordering::Relaxed),
-        2,
-        "the template, then the sandbox from its disk"
-    );
-    assert_eq!(
-        lab.run(id(1), &["sandbox?"]).await,
-        [""],
-        "the booted guest, never the restored one, answers"
-    );
-    assert_eq!(lab.record(id(1))["identity"], "known", "a boot settles it");
-
-    // One that takes its id but cannot apply the seed would draw the
-    // numbers its siblings draw: it is not used either.
-    lab.world.refuse_notices.store(false, Ordering::Relaxed);
-    lab.world.unseeded_notices.store(true, Ordering::Relaxed);
-    lab.create(id(3), NEVER).await;
-    let woken = lab.wake(id(3)).await;
-    assert!(matches!(woken, Reply::Woken { .. }), "{woken:?}");
-    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 2);
-    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 3);
-    assert_eq!(lab.run(id(3), &["sandbox?"]).await, [""]);
-    lab.world.unseeded_notices.store(false, Ordering::Relaxed);
+    // The restored guest refuses, then the booted one, until it no longer
+    // does. One that takes its id but cannot apply the seed would draw the
+    // numbers its siblings draw: it is turned down the same way.
+    let refuse = |on: bool| lab.world.refuse_notices.store(on, Ordering::Relaxed);
+    let unseed = |on: bool| lab.world.unseeded_notices.store(on, Ordering::Relaxed);
+    let turns: [(Id, &dyn Fn(bool)); 2] = [(id(1), &refuse), (id(3), &unseed)];
+    for (sandbox, turn_down) in turns {
+        if sandbox != id(1) {
+            lab.create(sandbox, NEVER).await;
+        }
+        let (restores, boots) = (
+            lab.world.restores.load(Ordering::Relaxed),
+            lab.world.boots.load(Ordering::Relaxed),
+        );
+        let turned_down = lab.world.notices_turned_down.load(Ordering::Relaxed);
+        turn_down(true);
+        let (woken, ()) = tokio::join!(lab.wake(sandbox), async {
+            while lab.world.notices_turned_down.load(Ordering::Relaxed) < turned_down + 2 {
+                sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(
+                lab.record(sandbox)["identity"],
+                "pending",
+                "a boot whose guest did not acknowledge settles nothing"
+            );
+            turn_down(false);
+        });
+        assert!(matches!(woken, Reply::Woken { .. }), "{woken:?}");
+        assert_eq!(lab.world.restores.load(Ordering::Relaxed), restores + 1);
+        assert_eq!(
+            lab.world.boots.load(Ordering::Relaxed),
+            boots + 2,
+            "a boot that was turned down, then one that was not"
+        );
+        assert_eq!(
+            lab.run(sandbox, &["sandbox?"]).await,
+            [sandbox.to_string()],
+            "the booted guest acknowledged its id"
+        );
+        assert_eq!(
+            lab.record(sandbox)["identity"],
+            "known",
+            "and that settles it"
+        );
+    }
 
     // An acknowledged notice is recorded, so nothing after it repeats it.
     lab.create(id(2), NEVER).await;

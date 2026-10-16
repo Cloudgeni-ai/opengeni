@@ -6,6 +6,9 @@ import time
 import compute_smoke as smoke
 
 LINES = 60
+# A tail past one read's worth (a read returns at most 1 MiB), so the
+# reader drains an ended command's output over several reads.
+TAIL = 3 << 20
 WATCHED = "/root/compute-smoke-restart-watch"
 # How long a live connection may outlast the agent that carried it.
 DROP_LIMIT = 30.0
@@ -22,11 +25,13 @@ def agent_restart_resumes_output(test: smoke.Ecw) -> None:
     the old agent carried ends instead of hanging, and a new one works.
     """
 
-    expected = "".join(f"{n}\n" for n in range(1, LINES + 1))
+    expected = "".join(f"{n}\n" for n in range(1, LINES + 1)) + "x" * TAIL
     with test.phase("start a command and read part of its output"):
         test.sandbox.files.make_dir(WATCHED)
         process = test.sandbox.start_background(
-            f"for n in $(seq 1 {LINES}); do echo $n; sleep 0.1; done", timeout=120
+            f"for n in $(seq 1 {LINES}); do echo $n; sleep 0.1; done; "
+            f"head -c {TAIL} /dev/zero | tr '\\0' x",
+            timeout=120,
         )
         seen, offset, _ = process.read_output()
         watch = test.sandbox.watch_dir(WATCHED)
@@ -55,16 +60,16 @@ def agent_restart_resumes_output(test: smoke.Ecw) -> None:
         test.verify(bool(events), "a new watch after the restart saw no change")
 
     with test.phase("the output resumes from the cursor"):
-        running = True
+        ended = False
         deadline = time.monotonic() + 120
-        while running and time.monotonic() < deadline:
-            data, offset, running = process.read_output(offset)
+        while not ended and time.monotonic() < deadline:
+            data, offset, ended = process.read_output(offset)
             seen += data
-            if running:
+            if not ended and not data:
                 time.sleep(0.2)
-        test.verify_equal(
-            actual=seen.decode(),
-            expected=expected,
-            message="output read by cursor across a host agent restart lost or repeated bytes",
+        test.verify(
+            seen == expected.encode(),
+            "output read by cursor across a host agent restart lost or repeated bytes "
+            f"({len(seen)} read, {len(expected)} written)",
         )
         process.wait()

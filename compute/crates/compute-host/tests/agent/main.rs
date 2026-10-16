@@ -98,6 +98,8 @@ struct World {
     /// While set, every guest takes a restore notice but answers that it
     /// could not apply its seed.
     unseeded_notices: AtomicBool,
+    /// Restore notices refused or answered without the seed applied.
+    notices_turned_down: AtomicUsize,
     restoring: AtomicUsize,
     max_restoring: AtomicUsize,
     compress_cancelled: AtomicUsize,
@@ -320,9 +322,16 @@ async fn guest(
             if write.write_all(b"OK 1073741824\n").await.is_err() {
                 return;
             }
+            let mut flood = None;
             while let Ok(Some(line)) = lines.next_line().await {
                 let reply = match line.split_once(' ').unwrap_or((line.as_str(), "")) {
                     ("exit", _) => break,
+                    // Sends that many bytes while it reads what the client
+                    // sends until it ends, then answers how much it read.
+                    ("flood", size) => {
+                        flood = size.parse::<usize>().ok();
+                        "ok".into()
+                    }
                     ("get", _) => memory.lock().unwrap().clone(),
                     ("set", value) => {
                         value.clone_into(&mut memory.lock().unwrap());
@@ -333,19 +342,7 @@ async fn guest(
                         "ok".into()
                     }
                     ("disk", _) => std::fs::read_to_string(&disk).unwrap_or_default(),
-                    ("restored", _) if world.refuse_notices.load(Ordering::Relaxed) => {
-                        "what?".into()
-                    }
-                    ("restored", fields) => {
-                        *notice.lock().unwrap() = Some(fields.to_owned());
-                        if fields.contains(" seed=")
-                            && !world.unseeded_notices.load(Ordering::Relaxed)
-                        {
-                            "ok seeded".into()
-                        } else {
-                            "ok".into()
-                        }
-                    }
+                    ("restored", fields) => answer_notice(fields, &notice, &world),
                     ("told-restored?", _) => notice.lock().unwrap().is_some().to_string(),
                     // The sandbox id the last restore notice named.
                     ("sandbox?", _) => notice
@@ -392,11 +389,47 @@ async fn guest(
                     .write_all(format!("{reply}\n").as_bytes())
                     .await
                     .is_err()
+                    || flood.is_some()
                 {
                     break;
                 }
             }
+            if let Some(size) = flood {
+                flood_both_ways(lines.into_inner(), write, size).await;
+            }
         });
+    }
+}
+
+/// How a guest answers the restore notice `fields`, remembering it unless
+/// it refuses.
+fn answer_notice(fields: &str, notice: &Mutex<Option<String>>, world: &World) -> String {
+    if world.refuse_notices.load(Ordering::Relaxed) {
+        world.notices_turned_down.fetch_add(1, Ordering::Relaxed);
+        return "what?".into();
+    }
+    *notice.lock().unwrap() = Some(fields.to_owned());
+    if fields.contains(" seed=") && !world.unseeded_notices.load(Ordering::Relaxed) {
+        "ok seeded".into()
+    } else {
+        world.notices_turned_down.fetch_add(1, Ordering::Relaxed);
+        "ok".into()
+    }
+}
+
+/// Sends `size` bytes while it reads what the client sends until it ends,
+/// then answers how much it read.
+async fn flood_both_ways(
+    mut read: BufReader<tokio::net::unix::OwnedReadHalf>,
+    mut write: tokio::net::unix::OwnedWriteHalf,
+    size: usize,
+) {
+    let (reply, mut got) = (vec![7; size], Vec::new());
+    let (sent, read) = tokio::join!(write.write_all(&reply), read.read_to_end(&mut got));
+    if sent.is_ok() && read.is_ok() {
+        let _ = write
+            .write_all(format!("got {}\n", got.len()).as_bytes())
+            .await;
     }
 }
 

@@ -38,10 +38,17 @@
 //! answers costs every restore the whole deadline (and still runs).
 //!
 //! A guest booted from its disk instead finds the same id on its kernel
-//! command line, as `opengeni.sandbox=<sandbox id>`.
+//! command line, as `opengeni.sandbox=<sandbox id>`. One booted from a
+//! clone's disk (a clone that never acknowledged its notice) is told the
+//! same notice and must answer `ok seeded` before it is used: its disk
+//! carries the template's machine identity, which the guest replaces.
 //!
-//! The same port answers one more question, asked of a running guest that
-//! used neither processor nor traffic for a while: the line `activity`,
+//! A guest applies notices one at a time, and ignores one sent before the
+//! latest it applied, so an attempt the host gave up on that arrives late
+//! never takes back a newer identity.
+//!
+//! The same port answers one more question, asked before a running sandbox
+//! sleeps only for being idle: the line `activity`,
 //! answered `commands <n>`, the number of commands started through the
 //! guest's helper that are still running and keep the sandbox awake (a
 //! caller can start one that does not). A sandbox running such a command

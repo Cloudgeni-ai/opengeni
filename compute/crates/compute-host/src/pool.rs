@@ -63,7 +63,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use compute_core::{LoanId, Step};
 use compute_engine::{Engine, SnapshotFiles, SnapshotKind, VmSpec, vsock};
@@ -984,17 +984,40 @@ fn seal(path: &Path) -> io::Result<()> {
     fs::File::open(path)?.sync_all()
 }
 
-/// Removes the directory `dir` and everything in it; succeeds if there is
-/// none.
 /// Removes the files of a retired `template`. Sandboxes started from it
 /// keep theirs: their memory images are their own links to the file.
-pub(crate) async fn remove(template: Arc<Template>) {
+///
+/// The directory leaves its name at once, before this returns, so a build
+/// of the same inputs started any time later publishes there and is never
+/// what the removal, which runs when the returned future does, deletes.
+/// Its new name marks it unfinished, so an agent that stops first removes
+/// it at its next start.
+pub(crate) fn remove(template: &Template) -> impl Future<Output = ()> + Send + 'static {
     let dir = template.dir.clone();
-    if let Err(error) = blocking(move || remove_dir(&dir)).await {
-        tracing::warn!(%error, dir = %template.dir.display(), "could not remove a retired template");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let mut away = dir.clone().into_os_string();
+    away.push(format!(".retired-{nanos}{BUILDING}"));
+    let away = PathBuf::from(away);
+    let moved = fs::rename(&dir, &away);
+    async move {
+        match moved {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(error) => {
+                tracing::warn!(%error, dir = %dir.display(), "could not move a retired template away");
+                return;
+            }
+        }
+        if let Err(error) = blocking(move || remove_dir(&away)).await {
+            tracing::warn!(%error, dir = %dir.display(), "could not remove a retired template");
+        }
     }
 }
 
+/// Removes the directory `dir` and everything in it; succeeds if there is
+/// none.
 fn remove_dir(dir: &Path) -> io::Result<()> {
     match fs::remove_dir_all(dir) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
@@ -1157,145 +1180,4 @@ fn read_inputs(dir: &Path) -> io::Result<Inputs> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn shape(vcpus: u8, memory_mib: u32) -> Shape {
-        Shape { vcpus, memory_mib }
-    }
-
-    fn template(shape: Shape) -> Template {
-        Template {
-            dir: PathBuf::from("/nowhere"),
-            inputs: Inputs {
-                format: FORMAT,
-                shape,
-                files: Vec::new(),
-                boot_args: String::new(),
-                networked: false,
-                memory: String::new(),
-                ready_port: 52,
-            },
-        }
-    }
-
-    #[test]
-    fn kept_shapes_parse_with_an_optional_ready_count() {
-        let keep: Keep = "1x512:16".parse().unwrap();
-        assert_eq!((keep.shape, keep.ready), (shape(1, 512), 16));
-        assert_eq!("2x1024".parse::<Keep>().unwrap().ready, 0);
-        for bad in ["1x512:", "1x512:-1", "1x512:a", "1x64:2"] {
-            assert!(bad.parse::<Keep>().is_err(), "{bad}");
-        }
-    }
-
-    #[test]
-    fn shapes_parse_and_print_alike() {
-        let parsed: Shape = "2x1024".parse().unwrap();
-        assert_eq!(parsed, shape(2, 1024));
-        assert_eq!(parsed.to_string(), "2x1024");
-        for bad in ["2", "x1024", "0x1024", "2x64", "2x1024x1", "ax1024"] {
-            assert!(bad.parse::<Shape>().is_err(), "{bad}");
-        }
-    }
-
-    /// One build per shape at a time; a failed build waits before the next
-    /// try; a ready template is handed out until it turns out stale, and
-    /// only the template found stale is forgotten.
-    #[test]
-    fn the_pool_builds_each_shape_once_and_retries_after_a_pause() {
-        let start = Instant::now();
-        let small = shape(1, 512);
-        let mut pool = Pool::new([]);
-        assert!(pool.take(small, start).1, "first use builds");
-        assert!(!pool.take(small, start).1, "already building");
-        assert!(!pool.want(small, start));
-
-        pool.built(small, Err("boom".into()), start);
-        assert!(!pool.take(small, start).1, "failed just now");
-        let later = start + RETRY_AFTER;
-        assert!(pool.take(small, later).1, "tried again later");
-
-        pool.built(small, Ok(template(small)), later);
-        let (ready, build) = pool.take(small, later);
-        let ready = ready.unwrap();
-        assert!(!build);
-        assert_eq!(pool.status()[0].state, TemplateState::Ready);
-
-        // A newer template replaces the old one; the old one turning out
-        // stale afterwards must not forget the newer.
-        pool.built(small, Ok(template(small)), later);
-        assert!(!pool.stale(&ready, later));
-        assert!(pool.take(small, later).0.is_some());
-
-        let newer = pool.take(small, later).0.unwrap();
-        assert!(pool.stale(&newer, later), "stale: rebuild");
-        let (none, build) = pool.take(small, later);
-        assert!(none.is_none() && !build, "already building");
-        assert_eq!(pool.status()[0].state, TemplateState::Building);
-    }
-
-    /// A file rewritten in place with its length and modification time
-    /// kept is another input; one only touched is not.
-    #[test]
-    fn inputs_follow_file_contents() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = |name: &str, text: &str| {
-            let path = dir.path().join(name);
-            fs::write(&path, text).unwrap();
-            path
-        };
-        let sources = Sources {
-            kernel: file("vmlinux", "kernel"),
-            base_image: file("base.img", "base one"),
-            depends_on: Vec::new(),
-            boot_args: String::new(),
-            networked: false,
-            memory: String::new(),
-            ready_port: 52,
-            hashes: Mutex::default(),
-        };
-        let small = shape(1, 512);
-        let before = sources.inputs(small).unwrap();
-        assert_eq!(sources.inputs(small).unwrap(), before);
-
-        let modified = fs::metadata(&sources.base_image)
-            .unwrap()
-            .modified()
-            .unwrap();
-        fs::write(&sources.base_image, "base two").unwrap();
-        fs::File::options()
-            .write(true)
-            .open(&sources.base_image)
-            .unwrap()
-            .set_modified(modified)
-            .unwrap();
-        let rewritten = sources.inputs(small).unwrap();
-        assert_ne!(
-            rewritten.key(),
-            before.key(),
-            "same length and mtime, new content"
-        );
-
-        fs::write(&sources.base_image, "base one").unwrap();
-        assert_eq!(
-            sources.inputs(small).unwrap(),
-            before,
-            "the same content again"
-        );
-    }
-
-    #[test]
-    fn inputs_name_every_change() {
-        let base = template(shape(1, 512)).inputs;
-        let mut other = base.clone();
-        other.boot_args = "quiet".into();
-        assert_ne!(base.key(), other.key());
-        let mut other = base.clone();
-        other.ready_port = 53;
-        assert_ne!(base.key(), other.key(), "another readiness contract");
-        assert_eq!(base.key(), base.clone().key());
-        assert!(base.dir_name().starts_with("1x512-"));
-        assert!(base.vm_name().len() <= 64);
-    }
-}
+mod tests;

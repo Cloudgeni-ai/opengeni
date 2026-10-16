@@ -15,11 +15,16 @@ use crate::layout::{Paths, vm_spec};
 use crate::net::Networks;
 use crate::pool::Loaning;
 use crate::protocol::Id;
+use crate::restore_notice::ask_commands;
 use crate::state::{Change, Fence, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::Store;
 
 use super::{Event, HostAgent, HostError, Leftover, Reply, Running, TEARDOWN_RETRY, Woke};
+
+/// How long a guest may take to say whether commands still run before its
+/// sandbox sleeps anyway.
+const ASK_LIMIT: Duration = Duration::from_secs(1);
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn on_event(&mut self, event: Event<E::Vm>) {
@@ -65,7 +70,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 outcome,
                 after,
                 launches,
-            } => self.step_done(id, op, outcome, after, launches),
+            } => self.step_done(id, op, outcome, after, launches, false),
             Event::Loan(Loaning::Borrow {
                 loan,
                 step,
@@ -80,10 +85,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             Event::Unthrottled { id, op } => self.input(Input::Unthrottled { sandbox: id.0, op }),
             Event::Exited { id, incarnation } => self.exited(id, incarnation),
-            Event::CommandsRunning {
-                sandbox,
-                incarnation,
-            } => self.commands_running(sandbox, incarnation),
+            Event::Asked {
+                id,
+                op,
+                step,
+                running,
+            } => self.asked(id, op, step, running),
             Event::TemplateChecked { shape, result } => {
                 self.template_checked(shape, *result);
                 self.refill();
@@ -193,6 +200,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     pub(super) fn start_step(&mut self, id: Id, op: OpId, step: Step) {
+        let ask = self
+            .restore_notice_port
+            .filter(|_| self.sleeps_for_idleness(id, step));
         let Some(slot) = self.slots.get_mut(&id.0) else {
             tracing::error!(%id, ?step, "step for a sandbox the host does not have");
             let _ = self.events_tx.send(Event::StepDone {
@@ -217,6 +227,68 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // A dead VM's teardown still owns this sandbox's jail; the step
             // starts once it is done.
             slot.deferred = Some(step);
+            return;
+        }
+        if let Some(port) = ask
+            && slot.vm.is_some()
+        {
+            // A command started through the guest's helper keeps it awake
+            // however quiet it is: ask before the step takes the VM.
+            let vsock = slot.spec.vsock_path();
+            let events = self.events_tx.clone();
+            tokio::spawn(async move {
+                let running = match ask_commands(&vsock, port, ASK_LIMIT).await {
+                    Ok(count) => count > 0,
+                    Err(error) => {
+                        tracing::debug!(%id, %error, "no command count; sleeping");
+                        false
+                    }
+                };
+                let _ = events.send(Event::Asked {
+                    id,
+                    op,
+                    step,
+                    running,
+                });
+            });
+            return;
+        }
+        self.spawn_job(id, op, step);
+    }
+
+    /// Whether `step` would only take the running sandbox to sleep for
+    /// being idle: not for memory pressure, nor because it was asked to.
+    fn sleeps_for_idleness(&self, id: Id, step: Step) -> bool {
+        !step.wakes()
+            && self.core.sandbox(id.0).is_some_and(|view| {
+                view.state.level == Level::Running
+                    && view.floor == Level::Running
+                    && view.requested == Level::Running
+            })
+    }
+
+    /// The guest answered whether a command still runs: one that does
+    /// cancels the step, before it took effect, and counts as activity, so
+    /// the sandbox stays running for another idle period. Otherwise, or if
+    /// the VM ended meanwhile, the step goes ahead.
+    fn asked(&mut self, id: Id, op: OpId, step: Step, running: bool) {
+        let Some(slot) = self.slots.get_mut(&id.0) else {
+            return;
+        };
+        let Some(cancelled) = slot
+            .op
+            .as_ref()
+            .filter(|current| current.op == op)
+            .map(|current| current.cancel.is_cancelled())
+        else {
+            return;
+        };
+        if running
+            && !cancelled
+            && slot.dead.is_none()
+            && let Some(live) = slot.vm.take()
+        {
+            self.step_done(id, op, Outcome::Cancelled, After::Kept(live), 0, true);
             return;
         }
         self.spawn_job(id, op, step);
@@ -304,6 +376,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         outcome: Outcome,
         after: After<E::Vm>,
         launches: u32,
+        busy: bool,
     ) {
         let fresh = match after {
             After::New(vm, memory) => Some(self.own(id, vm, memory)),
@@ -353,11 +426,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if let Some(live) = reap {
             self.reap(id, live);
         }
-        self.input(Input::Finished {
+        // Decided together, so the activity counts before the core picks
+        // the next step.
+        let finished = Input::Finished {
             sandbox: id.0,
             op,
             outcome,
-        });
+        };
+        let activity = busy.then_some(Input::Busy { sandbox: id.0 });
+        self.inputs(std::iter::once(finished).chain(activity));
         if destroy {
             if !self.tearing_down.contains_key(&id.0) {
                 self.destroy_now(id);

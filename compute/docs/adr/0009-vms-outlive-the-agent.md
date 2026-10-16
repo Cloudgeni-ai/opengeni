@@ -30,7 +30,8 @@ died with it, every upgrade would interrupt every sandbox on the host.
   reconnects to its pager process ([8](0008-lazy-wake-with-a-working-set.md)).
 - Streams the agent carries (connections to guest ports) end with it and
   are not resumed; clients reconnect. Command output is read from a cursor
-  in the guest, so it resumes without loss. The guest helper's own list of
+  in the guest, to the end of what the command wrote, so it resumes without
+  loss. The guest helper's own list of
   commands does not survive a restart of the helper.
 - Several small processes per VM are more to reason about than one.
 - Fences are the base for ownership across hosts

@@ -131,7 +131,8 @@ host.
 Streams the agent carries (`connect` to a guest port, so terminals, port
 forwards and requests to the guest helper) end with it; clients reconnect.
 Guest programs keep running, and the reference guest lets a client read a
-command's output from a cursor, so it resumes without loss. The guest
+command's output from a cursor, to the end of what it wrote, so it
+resumes without loss. The guest
 helper keeps its list of commands in memory: if the helper itself restarts,
 its commands keep running but can no longer be listed, read or waited for.
 

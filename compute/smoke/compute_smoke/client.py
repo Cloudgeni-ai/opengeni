@@ -322,10 +322,11 @@ class ProcessHandle:
 
     def read_output(self, offset: int = 0) -> tuple[bytes, int, bool]:
         """The command's standard output from `offset` on, the offset after
-        it, and whether the command still ran when it was read."""
+        it, and whether that was the end of it: the command ended and wrote
+        nothing more. Read again from the new offset until it is."""
 
         reply = self._guest.call("output", pid=self.pid, offset=offset)
-        return _unb64(reply["data"]), int(reply["offset"]), bool(reply["running"])
+        return _unb64(reply["data"]), int(reply["offset"]), bool(reply["eof"])
 
     def wait(self) -> CommandResult:
         reply = self._guest.call(

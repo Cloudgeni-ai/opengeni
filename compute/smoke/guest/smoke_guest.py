@@ -88,8 +88,11 @@ SANDBOX_ARG = "opengeni.sandbox"
 RANDOM_DEVICE = "/dev/urandom"
 RNDRESEEDCRNG = 0x5207  # _IO('R', 0x07)
 OUTPUT_DIR = Path(os.environ.get("SMOKE_GUEST_STATE", "/run/smoke-guest"))
-# Where a clone's own machine id and hostname go.
+# Where a sandbox's own machine id and hostname go.
 MACHINE_ID = Path(os.environ.get("SMOKE_GUEST_MACHINE_ID", "/etc/machine-id"))
+# The sandbox the machine id was made for. It lives on the disk beside the
+# machine id, so a disk cloned from a template still names the template.
+IDENTITY = Path(os.environ.get("SMOKE_GUEST_IDENTITY", "/etc/opengeni-identity"))
 HOSTNAME = Path(os.environ.get("SMOKE_GUEST_HOSTNAME", "/proc/sys/kernel/hostname"))
 _HOSTNAME_LABEL = re.compile(r"[0-9A-Za-z][0-9A-Za-z-]{0,62}")
 # The id the latest restore notice gave, kept across restarts of the service.
@@ -461,18 +464,25 @@ def op_wait(request: dict[str, Any]) -> dict[str, Any]:
 
 def op_output(request: dict[str, Any]) -> dict[str, Any]:
     """A background command's output from a cursor: the bytes from
-    `offset` on (at most `limit`), the cursor after them, and whether the
-    command still runs. Output stays readable until `wait` collects it."""
+    `offset` on (at most `limit`), the cursor after them, whether the
+    command still runs, and `eof`: whether these bytes are the last, as it
+    ended and wrote nothing after them. A reader drains until `eof`, not
+    until the command stops running: a command that ended may have left
+    more than one read's worth. Output stays readable until `wait` collects
+    it."""
 
     process = PROCESSES.get(_field(request, "pid", int))
     offset = _optional(request, "offset", int, 0)
     limit = _optional(request, "limit", int, 1 << 20)
     if offset < 0 or not 0 < limit <= MAX_REQUEST:
         raise RequestError("field 'offset' or 'limit' out of range")
-    # Read whether it runs first: output read after it ended is complete.
-    running = not process.exited.is_set()
-    data = process.output(_optional(request, "stream", str, "stdout"), offset, limit)
-    return {"data": _b64(data), "offset": offset + len(data), "running": running}
+    stream = _optional(request, "stream", str, "stdout")
+    # Read whether it ended first: output read after it ended is complete.
+    ended = process.exited.is_set()
+    data = process.output(stream, offset, limit)
+    after = offset + len(data)
+    eof = ended and not process.output(stream, after, 1)
+    return {"data": _b64(data), "offset": after, "running": not ended, "eof": eof}
 
 
 def op_read(request: dict[str, Any]) -> dict[str, Any]:
@@ -931,30 +941,93 @@ def reseed(seed: str, device: str = RANDOM_DEVICE) -> bool:
     return True
 
 
+def _replace(path: Path, text: str) -> None:
+    """Writes `text` to `path`, replacing it whole."""
+
+    staged = path.with_name(f".{path.name}.{os.getpid()}")
+    staged.write_text(text, encoding="ascii")
+    os.replace(staged, path)
+
+
+def owns_identity(sandbox: str) -> bool:
+    """Whether the machine id on this disk was made for `sandbox`."""
+
+    try:
+        return IDENTITY.read_text(encoding="ascii").strip() == sandbox
+    except OSError:
+        return False
+
+
+def _hostname(sandbox: str, machine_id: str) -> str:
+    return sandbox if _HOSTNAME_LABEL.fullmatch(sandbox) else f"sandbox-{machine_id[:12]}"
+
+
 def renew_identity(sandbox: str, seed: str) -> bool:
-    """Gives a clone that has just learned it is `sandbox` its own machine
-    id and hostname, in place of its template's. The machine id comes from
-    the seed and the id, so a retried notice writes the same one. Returns
-    whether both were set."""
+    """Gives a guest that has just learned it is `sandbox` its own machine
+    id and hostname, in place of its template's: a clone, or one booted
+    from a disk cloned from a template. The machine id comes from the seed
+    and the id, so a retried notice writes the same one; the record of whom
+    it was made for is written last. Returns whether all were set."""
 
     machine_id = hashlib.sha256(f"{seed}:{sandbox}".encode()).hexdigest()[:32]
-    hostname = sandbox if _HOSTNAME_LABEL.fullmatch(sandbox) else f"sandbox-{machine_id[:12]}"
     try:
-        staged = MACHINE_ID.with_name(f".{MACHINE_ID.name}.{os.getpid()}")
-        staged.write_text(machine_id + "\n", encoding="ascii")
-        os.replace(staged, MACHINE_ID)
-        HOSTNAME.write_text(hostname + "\n", encoding="ascii")
+        _replace(MACHINE_ID, machine_id + "\n")
+        HOSTNAME.write_text(_hostname(sandbox, machine_id) + "\n", encoding="ascii")
+        _replace(IDENTITY, sandbox + "\n")
     except OSError as error:
         print(f"cannot renew the machine identity: {error}", file=sys.stderr, flush=True)
         return False
     return True
 
 
+def take_identity(sandbox: str | None) -> None:
+    """At startup: a guest whose disk's machine id was made for another
+    sandbox (its template's, or the base image's) makes its own; one whose
+    was made for it keeps it and only sets the hostname, which a boot does
+    not keep."""
+
+    if sandbox is None:
+        return
+    if not owns_identity(sandbox):
+        renew_identity(sandbox, os.urandom(32).hex())
+        return
+    try:
+        machine_id = MACHINE_ID.read_text(encoding="ascii").strip()
+        HOSTNAME.write_text(_hostname(sandbox, machine_id) + "\n", encoding="ascii")
+    except OSError as error:
+        print(f"cannot set the hostname: {error}", file=sys.stderr, flush=True)
+
+
+class Notices:
+    """Applies restore notices one at a time, each whole, in the order the
+    host sent them: one sent before the latest applied (an abandoned
+    attempt that arrived or finished late) is obsolete and refused, so it
+    can never take back a newer identity."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._latest = 0
+
+    def apply(self, nanos: int, act: Callable[[], bytes | None]) -> bytes | None:
+        """Runs `act` unless a newer notice was applied; returns its
+        answer, or None for an obsolete notice."""
+
+        with self._lock:
+            if nanos < self._latest:
+                return None
+            self._latest = nanos
+            return act()
+
+
+NOTICES = Notices()
+
+
 def serve_notice(connection: socket.socket, *, set_clock: bool) -> None:
     """Acts on one restore notice: sets the clock, counts the restore, takes
-    the sandbox id (a new one after renewing the machine identity), applies
-    the seed and answers `ok seeded`, or `ok` when there was no seed or it or
-    the identity could not be applied. Anything else closes the connection
+    the sandbox id (renewing the machine identity unless it was made for
+    that sandbox), applies the seed and answers `ok seeded`, or `ok` when
+    there was no seed or it or the identity could not be applied. An
+    obsolete notice (see `Notices`) or anything else closes the connection
     unanswered."""
 
     with connection, connection.makefile("rb") as reader:
@@ -968,33 +1041,42 @@ def serve_notice(connection: socket.socket, *, set_clock: bool) -> None:
             print(f"ignored restore notice {line[:80]!r}", file=sys.stderr, flush=True)
             return
         nanos, fields = notice
-        if set_clock:
-            try:
-                time.clock_settime_ns(time.CLOCK_REALTIME, nanos)
-            except OSError as error:
-                # A guest that cannot set its clock still counts the restore.
-                print(f"cannot set the clock: {error}", file=sys.stderr, flush=True)
-        sandbox = fields.get("sandbox") or None
-        if (
-            sandbox is not None
-            and sandbox != RESTORES.sandbox()
-            and not renew_identity(sandbox, fields.get("seed", ""))
-        ):
-            # The id is not taken, so a retry renews again; meanwhile the
-            # host must not use this clone.
-            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-                connection.sendall(b"ok\n")
+        answer = NOTICES.apply(nanos, lambda: _act_on_notice(nanos, fields, set_clock=set_clock))
+        if answer is None:
+            print(f"ignored restore notice {line[:80]!r}", file=sys.stderr, flush=True)
             return
-        try:
-            RESTORES.record(sandbox)
-        except OSError as error:
-            # Unanswered, the host tries again: an id the guest could not
-            # keep is not taken.
-            print(f"cannot keep the sandbox id: {error}", file=sys.stderr, flush=True)
-            return
-        seeded = "seed" in fields and reseed(fields["seed"])
         with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-            connection.sendall(b"ok seeded\n" if seeded else b"ok\n")
+            connection.sendall(answer)
+
+
+def _act_on_notice(nanos: int, fields: dict[str, str], *, set_clock: bool) -> bytes | None:
+    """The whole of one notice's change; returns the answer, or None to
+    leave it unanswered."""
+
+    if set_clock:
+        try:
+            time.clock_settime_ns(time.CLOCK_REALTIME, nanos)
+        except OSError as error:
+            # A guest that cannot set its clock still counts the restore.
+            print(f"cannot set the clock: {error}", file=sys.stderr, flush=True)
+    sandbox = fields.get("sandbox") or None
+    if (
+        sandbox is not None
+        and (sandbox != RESTORES.sandbox() or not owns_identity(sandbox))
+        and not renew_identity(sandbox, fields.get("seed", ""))
+    ):
+        # The id is not taken, so a retry renews again; meanwhile the host
+        # must not use this guest.
+        return b"ok\n"
+    try:
+        RESTORES.record(sandbox)
+    except OSError as error:
+        # Unanswered, the host tries again: an id the guest could not keep
+        # is not taken.
+        print(f"cannot keep the sandbox id: {error}", file=sys.stderr, flush=True)
+        return None
+    seeded = "seed" in fields and reseed(fields["seed"])
+    return b"ok seeded\n" if seeded else b"ok\n"
 
 
 def serve_notices(server: socket.socket, *, set_clock: bool) -> None:
@@ -1024,6 +1106,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     _outlast_user_programs()
+    take_identity(RESTORES.sandbox())
     if args.notice is not None:
         notices = listen(args.notice)
         threading.Thread(

@@ -368,11 +368,14 @@ enum Event<V> {
         /// longer fits today's inputs.
         stale: Option<Arc<Template>>,
     },
-    /// A quiet guest still runs a command started through its helper (see
+    /// A sandbox about to sleep only for being idle told whether a command
+    /// started through its guest's helper still runs (see
     /// [`crate::restore_notice::ask_commands`]).
-    CommandsRunning {
-        sandbox: SandboxId,
-        incarnation: u64,
+    Asked {
+        id: Id,
+        op: OpId,
+        step: Step,
+        running: bool,
     },
     /// The check of a template found on disk ended.
     TemplateChecked {

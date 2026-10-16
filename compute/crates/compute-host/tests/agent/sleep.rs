@@ -11,7 +11,7 @@ use compute_host::BusyRule;
 use compute_host::protocol::{
     DurabilityName, HostStatus, Id, LevelName, PriorityName, Reply, Request, SleepConfig,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Instant, sleep};
 
 use super::{Delays, Lab, NEVER, PAUSE_SOON, SAVE_IN_PLACE, SAVE_QUICKLY, id, thaw, vm_name};
@@ -371,31 +371,47 @@ async fn work_inside_the_guest_keeps_it_awake() {
 }
 
 /// A command started through the guest's helper keeps its sandbox awake
-/// while it runs, however quiet: the host asks a quiet guest how many run.
+/// while it runs, however quiet: before an idle sandbox sleeps, the host
+/// asks its guest how many run. That holds without any processor or
+/// traffic rule, and with one whose window is longer than the idle time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_quiet_command_keeps_its_sandbox_awake_until_it_ends() {
-    let lab = Lab::start_configured(
-        Lab::root(),
-        Arc::default(),
-        Delays::default(),
-        HostPolicy::default(),
-        |config| config.restore_notice_port = Some(53),
-    )
-    .await;
-    let sandbox = id(17);
-    lab.create(sandbox, PAUSE_SOON).await;
-    assert_eq!(lab.run(sandbox, &["start-command"]).await, ["ok"]);
-    sleep(Duration::from_millis(800)).await;
-    assert_eq!(
-        Lab::sandbox(&lab.status().await, sandbox).level,
-        LevelName::Running,
-        "a sandbox running a command stays awake"
-    );
-    assert_eq!(lab.run(sandbox, &["end-command"]).await, ["ok"]);
-    let ended = Instant::now();
-    lab.wait_level(sandbox, LevelName::Paused).await;
-    assert!(ended.elapsed() >= Duration::from_millis(200));
-    lab.assert_clean();
+    for (sandbox, busy) in [
+        (id(17), None),
+        (
+            id(22),
+            Some(BusyRule {
+                cpu_percent: 50,
+                io_bytes_per_second: 100_000,
+                window: Duration::from_secs(5),
+            }),
+        ),
+    ] {
+        let lab = Lab::start_configured(
+            Lab::root(),
+            Arc::default(),
+            Delays::default(),
+            HostPolicy::default(),
+            |config| {
+                config.restore_notice_port = Some(53);
+                config.busy = busy;
+            },
+        )
+        .await;
+        lab.create(sandbox, PAUSE_SOON).await;
+        assert_eq!(lab.run(sandbox, &["start-command"]).await, ["ok"]);
+        sleep(Duration::from_millis(800)).await;
+        assert_eq!(
+            Lab::sandbox(&lab.status().await, sandbox).level,
+            LevelName::Running,
+            "a sandbox running a command stays awake ({busy:?})"
+        );
+        assert_eq!(lab.run(sandbox, &["end-command"]).await, ["ok"]);
+        let ended = Instant::now();
+        lab.wait_level(sandbox, LevelName::Paused).await;
+        assert!(ended.elapsed() >= Duration::from_millis(200));
+        lab.assert_clean();
+    }
 }
 
 /// A stream keeps its sandbox awake while it carries traffic; one left
@@ -453,6 +469,45 @@ async fn only_a_stream_that_carries_traffic_keeps_its_sandbox_awake() {
     stream.get_mut().write_all(b"exit\n").await.unwrap();
     drop(stream);
     lab.wait_level(sandbox, LevelName::Paused).await;
+    lab.assert_clean();
+}
+
+/// A stream moves both ways at once: a client that sends a large upload
+/// before it reads anything gets it all through to a guest that streams a
+/// large reply meanwhile, though the reply does not fit in the buffers on
+/// the way and waits for the client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stream_carries_both_directions_at_once() {
+    const SIZE: usize = 8 << 20;
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(21);
+    lab.create(sandbox, NEVER).await;
+    let (reply, mut stream) = lab
+        .client
+        .connect(sandbox, 52, PriorityName::Interactive)
+        .await
+        .unwrap();
+    assert!(matches!(reply, Reply::Connected { .. }), "{reply:?}");
+    stream
+        .get_mut()
+        .write_all(format!("flood {SIZE}\n").as_bytes())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    stream.read_line(&mut line).await.unwrap();
+    assert_eq!(line, "ok\n");
+
+    let mut received = Vec::with_capacity(SIZE);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        stream.get_mut().write_all(&vec![1; SIZE]).await.unwrap();
+        stream.get_mut().shutdown().await.unwrap();
+        stream.read_to_end(&mut received).await.unwrap();
+    })
+    .await
+    .expect("the relay stalls");
+    let (reply, answer) = received.split_at(SIZE.min(received.len()));
+    assert!(reply.iter().all(|&byte| byte == 7), "the reply is intact");
+    assert_eq!(String::from_utf8_lossy(answer), format!("got {SIZE}\n"));
     lab.assert_clean();
 }
 

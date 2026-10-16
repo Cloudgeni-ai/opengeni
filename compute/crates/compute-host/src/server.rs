@@ -2,11 +2,14 @@
 
 use std::io;
 use std::path::Path;
+use std::pin::pin;
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use compute_core::Priority;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Notify;
 use tokio::time::{Instant, sleep_until};
 
 use crate::agent::{Handle, HostError, Lease};
@@ -154,63 +157,133 @@ struct Wake<'a> {
 /// `stream_idle`, it lets go of `lease`, so the sandbox may sleep, and the
 /// next byte either way takes a new lease, waking the sandbox, before it is
 /// passed on. A stream whose guest end the sandbox's sleep closed ends.
+///
+/// Each direction runs on its own, so one side that is slow to read never
+/// stops the other from draining (a guest echoing an upload back while the
+/// client is still sending it), and the idle clock runs beside both.
 async fn relay(
     wake: &Wake<'_>,
     lease: Lease,
     client: impl AsyncRead + AsyncWrite,
     guest: UnixStream,
 ) -> io::Result<()> {
-    let idle = wake.handle.stream_idle();
-    let mut lease = Some(lease);
-    let (mut client_read, mut client_write) = tokio::io::split(client);
-    let (mut guest_read, mut guest_write) = guest.into_split();
-    let (mut up, mut down) = (vec![0; RELAY_BUFFER], vec![0; RELAY_BUFFER]);
-    let (mut up_open, mut down_open) = (true, true);
-    let mut quiet_from = Instant::now() + idle;
-    while up_open || down_open {
+    let flow = Flow {
+        wake,
+        lease: tokio::sync::Mutex::new(Some(lease)),
+        last: std::sync::Mutex::new(Instant::now()),
+        resumed: Notify::new(),
+    };
+    let (client_read, client_write) = tokio::io::split(client);
+    let (guest_read, guest_write) = guest.into_split();
+    let mut up = pin!(flow.pump(client_read, guest_write));
+    let mut down = pin!(flow.pump(guest_read, client_write));
+    let mut watch = pin!(flow.watch(wake.handle.stream_idle()));
+    let (mut up_done, mut down_done) = (false, false);
+    while !(up_done && down_done) {
         tokio::select! {
-            read = client_read.read(&mut up), if up_open => match read? {
-                0 => {
-                    guest_write.shutdown().await?;
-                    up_open = false;
-                }
-                n => {
-                    keep_awake(wake, &mut lease).await?;
-                    guest_write.write_all(&up[..n]).await?;
-                    quiet_from = Instant::now() + idle;
-                }
-            },
-            read = guest_read.read(&mut down), if down_open => match read? {
+            end = &mut up, if !up_done => {
+                end?;
+                up_done = true;
+            }
+            end = &mut down, if !down_done => {
                 // Ended with the VM the sandbox's sleep ended: nothing
                 // the client sends could reach it.
-                0 if lease.is_none() => return Ok(()),
-                0 => {
-                    client_write.shutdown().await?;
-                    down_open = false;
+                if end? == End::Slept {
+                    return Ok(());
                 }
-                n => {
-                    keep_awake(wake, &mut lease).await?;
-                    client_write.write_all(&down[..n]).await?;
-                    quiet_from = Instant::now() + idle;
-                }
-            },
-            () = sleep_until(quiet_from), if lease.is_some() => lease = None,
+                down_done = true;
+            }
+            () = &mut watch => {}
         }
     }
     Ok(())
 }
 
-/// Takes a new lease for a stream that let its sandbox sleep.
-async fn keep_awake(wake: &Wake<'_>, lease: &mut Option<Lease>) -> io::Result<()> {
-    if lease.is_none() {
-        let woken = wake
-            .handle
-            .acquire(wake.id, wake.generation, wake.priority)
-            .await
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        *lease = Some(woken);
+/// How one direction of a relay ended.
+#[derive(Debug, PartialEq, Eq)]
+enum End {
+    /// Its source finished; the other end was told.
+    Finished,
+    /// Its source closed while the stream had let its sandbox sleep.
+    Slept,
+}
+
+/// What both directions of a relay share: the lease, and when traffic last
+/// moved.
+struct Flow<'a> {
+    wake: &'a Wake<'a>,
+    lease: tokio::sync::Mutex<Option<Lease>>,
+    last: std::sync::Mutex<Instant>,
+    /// Told when traffic takes a new lease after the stream let go.
+    resumed: Notify,
+}
+
+impl Flow<'_> {
+    /// Copies `from` to `to` until `from` ends, keeping the sandbox awake
+    /// for each chunk.
+    async fn pump(
+        &self,
+        mut from: impl AsyncRead + Unpin,
+        mut to: impl AsyncWrite + Unpin,
+    ) -> io::Result<End> {
+        let mut buffer = vec![0; RELAY_BUFFER];
+        loop {
+            let n = from.read(&mut buffer).await?;
+            if n == 0 {
+                let slept = self.lease.lock().await.is_none();
+                to.shutdown().await?;
+                return Ok(if slept { End::Slept } else { End::Finished });
+            }
+            self.keep_awake().await?;
+            let mut sent = 0;
+            while sent < n {
+                match to.write(&buffer[sent..n]).await? {
+                    0 => return Err(io::ErrorKind::WriteZero.into()),
+                    written => sent += written,
+                }
+                self.moved();
+            }
+        }
     }
-    Ok(())
+
+    /// Takes a new lease if the stream let its sandbox sleep, waking it.
+    async fn keep_awake(&self) -> io::Result<()> {
+        let mut lease = self.lease.lock().await;
+        self.moved();
+        if lease.is_none() {
+            let wake = self.wake;
+            let woken = wake
+                .handle
+                .acquire(wake.id, wake.generation, wake.priority)
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            *lease = Some(woken);
+            self.moved();
+            self.resumed.notify_one();
+        }
+        Ok(())
+    }
+
+    fn moved(&self) {
+        *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
+    }
+
+    fn quiet_until(&self, idle: Duration) -> Instant {
+        *self.last.lock().unwrap_or_else(PoisonError::into_inner) + idle
+    }
+
+    /// Lets go of the lease once no traffic has moved for `idle`, then
+    /// waits for traffic to take a new one. Never returns.
+    async fn watch(&self, idle: Duration) {
+        loop {
+            sleep_until(self.quiet_until(idle)).await;
+            let mut lease = self.lease.lock().await;
+            if self.quiet_until(idle) <= Instant::now() && lease.take().is_some() {
+                drop(lease);
+                self.resumed.notified().await;
+            }
+        }
+    }
 }
 
 fn done(result: Result<(), HostError>) -> Reply {

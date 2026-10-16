@@ -79,7 +79,7 @@ impl Warm {
             .into_iter()
             .partition(|template| !unused.contains(&template.shape()));
         for template in retiring {
-            tokio::spawn(pool::remove(Arc::new(template)));
+            tokio::spawn(pool::remove(&template));
         }
         let mut pool = Pool::new(found.iter().map(Template::shape));
         for shape in &unused {
@@ -182,7 +182,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             if let Some(gone) = warm.pool.retire(shape) {
                 retired.push(shape);
                 if let Some(template) = gone.template {
-                    tokio::spawn(pool::remove(template));
+                    tokio::spawn(pool::remove(&template));
                 }
             }
         }

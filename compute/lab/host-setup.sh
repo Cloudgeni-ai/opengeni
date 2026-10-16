@@ -33,9 +33,12 @@ log() { printf '[host-setup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 # guest answers `ok seeded` (`ok` if it could not), so no command of the new
 # sandbox draws numbers another clone of the same snapshot draws; the host
 # uses a clone only after `ok seeded`. (The kernel reseeds by itself when it
-# learns of the VM generation ID's change, but later.) A notice naming a new
-# sandbox comes to a clone, which first takes a machine id and hostname of
-# its own.
+# learns of the VM generation ID's change, but later.) A guest whose machine
+# id was not made for the sandbox it is (/etc/opengeni-identity names whom
+# it was made for) makes its own, with the hostname, at boot and before it
+# acknowledges a notice: a clone, or a guest booted from a cloned disk.
+# Notices are applied one at a time, and one older than the latest applied
+# is ignored, so a late attempt never takes back a newer identity.
 # A template is snapshotted once the guest accepts on vsock port 54, which
 # opens only when systemd has finished starting everything, so clones wake
 # settled instead of mid-boot.
@@ -58,18 +61,31 @@ def current_sandbox():
         return ""
 
 
+def owns_identity(sandbox):
+    try:
+        with open("/etc/opengeni-identity") as file:
+            return file.read().strip() == sandbox
+    except OSError:
+        return False
+
+
 def renew_identity(sandbox, seed):
-    # A clone's own machine id (the same for a retried notice) and hostname.
+    # Its own machine id (the same for a retried notice) and hostname; whom
+    # they were made for goes last.
     machine_id = hashlib.sha256(f"{seed}:{sandbox}".encode()).hexdigest()[:32]
     with open("/etc/.machine-id.new", "w") as file:
         file.write(machine_id + "\n")
     os.replace("/etc/.machine-id.new", "/etc/machine-id")
     socket.sethostname(sandbox[:63])
+    with open("/etc/.opengeni-identity.new", "w") as file:
+        file.write(sandbox + "\n")
+    os.replace("/etc/.opengeni-identity.new", "/etc/opengeni-identity")
 
 
 listener = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
 listener.bind((socket.VMADDR_CID_ANY, 53))
 listener.listen(64)
+latest = 0
 while True:
     connection, _ = listener.accept()
     with connection:
@@ -81,12 +97,13 @@ while True:
                     raise EOFError
                 line += chunk
             word, nanos, *rest = line.decode().split()
-            if word != "restored":
+            if word != "restored" or int(nanos) < latest:
                 continue
-            time.clock_settime_ns(time.CLOCK_REALTIME, int(nanos))
+            latest = int(nanos)
+            time.clock_settime_ns(time.CLOCK_REALTIME, latest)
             fields = dict(field.partition("=")[::2] for field in rest)
             sandbox, seed = fields.get("sandbox", ""), fields.get("seed", "")
-            if sandbox and sandbox != current_sandbox():
+            if sandbox and (sandbox != current_sandbox() or not owns_identity(sandbox)):
                 try:
                     renew_identity(sandbox, seed)
                 except OSError:
@@ -118,15 +135,26 @@ SCRIPT
 #!/bin/bash
 for arg in $(cat /proc/cmdline); do
   case "$arg" in
-    opengeni.sandbox=*) printf '%s\n' "${arg#opengeni.sandbox=}" >/run/sandbox-id ;;
+    opengeni.sandbox=*) id="${arg#opengeni.sandbox=}" ;;
   esac
 done
+[ -n "$id" ] || exit 0
+printf '%s\n' "$id" >/run/sandbox-id
+# A machine id made for another sandbox (a template's, or the base image's)
+# is replaced by one of its own.
+if [ "$(cat /etc/opengeni-identity 2>/dev/null)" != "$id" ]; then
+  tr -d '-' </proc/sys/kernel/random/uuid >/etc/.machine-id.new &&
+    mv -f /etc/.machine-id.new /etc/machine-id &&
+    printf '%s\n' "$id" >/etc/.opengeni-identity.new &&
+    mv -f /etc/.opengeni-identity.new /etc/opengeni-identity
+fi
+hostname "${id:0:63}"
 SCRIPT
   sudo chmod 755 "$root/usr/local/bin/lab-notice" "$root/usr/local/bin/lab-identity"
   sudo tee "$root/etc/systemd/system/lab-notice.service" >/dev/null <<'UNIT'
 [Unit]
 Description=Restore notices from the host agent on vsock port 53
-After=local-fs.target
+After=local-fs.target lab-identity.service
 
 [Service]
 OOMScoreAdjust=-1000
@@ -251,7 +279,7 @@ fi
 
 if [ -f base.ext4 ] && {
   ! sudo debugfs -R "cat /etc/systemd/system/lab-identity.service" base.ext4 2>/dev/null | grep -q Before=lab-agent ||
-    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q "renew_identity" ||
+    ! sudo debugfs -R "cat /usr/local/bin/lab-identity" base.ext4 2>/dev/null | grep -q "opengeni-identity" ||
     ! sudo debugfs -R "stat /etc/systemd/system/lab-ready.service" base.ext4 2>/dev/null | grep -q Inode ||
     ! sudo debugfs -R "cat /etc/systemd/system/lab-agent.service" base.ext4 2>/dev/null | grep -q OOMScoreAdjust
 }; then
