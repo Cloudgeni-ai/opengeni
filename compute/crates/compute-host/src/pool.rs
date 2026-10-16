@@ -77,7 +77,7 @@ use crate::layout::{
     write_atomic,
 };
 use crate::net::Isolated;
-use crate::protocol::{SandboxConfig, TemplateState, TemplateStatus};
+use crate::protocol::{MAX_MEMORY_MIB, SandboxConfig, TemplateState, TemplateStatus};
 use crate::step::{DiskWatch, take_written};
 
 /// Version of the template layout; a change rebuilds every template.
@@ -86,6 +86,9 @@ const FORMAT: u32 = 2;
 const INPUTS: &str = "template.json";
 /// The file in a template VM's directory naming the ordinal it runs as.
 const ORDINAL: &str = "ordinal";
+/// The file in a template VM's directory giving its guest memory in MiB,
+/// so a later agent counts a VM it could not end at its size.
+const MEMORY: &str = "memory_mib";
 /// The disk in a template's directory.
 const DISK: &str = "disk.ext4";
 /// The suffix of a template being put together.
@@ -749,6 +752,9 @@ pub(crate) struct Built {
     /// Whether the build's VM is proven gone. Until it is, its ordinal
     /// stays taken: the VMM may still run as its user.
     pub ended: bool,
+    /// The name of the build's VM, once known: a later build of the same
+    /// name that ends proves an earlier one that did not end gone too.
+    pub vm: Option<String>,
 }
 
 /// The jailer's chroot base for template VMs.
@@ -806,6 +812,7 @@ pub(crate) async fn build<E: Engine>(engine: &E, build: Build) -> Built {
                 return Built {
                     result: Err(error),
                     ended: true,
+                    vm: None,
                 };
             }
         }
@@ -820,6 +827,7 @@ pub(crate) async fn build<E: Engine>(engine: &E, build: Build) -> Built {
         return Built {
             result,
             ended: false,
+            vm: Some(name),
         };
     }
     let dir = paths.dir.clone();
@@ -843,6 +851,7 @@ pub(crate) async fn build<E: Engine>(engine: &E, build: Build) -> Built {
     Built {
         result,
         ended: true,
+        vm: Some(name),
     }
 }
 
@@ -864,6 +873,7 @@ async fn attempt<E: Engine>(
     let disk = {
         let (paths, sources, uid) = (paths.clone(), Arc::clone(&build.sources), build.uid);
         let ordinal = build.ordinal;
+        let memory_mib = build.shape.memory_mib;
         Arc::new(
             blocking(move || {
                 remove_dir(&paths.dir)?;
@@ -872,6 +882,7 @@ async fn attempt<E: Engine>(
                 // it behind for the next agent, and a VM outlives only that,
                 // so it needs no flush to disk.
                 fs::write(paths.dir.join(ORDINAL), ordinal.to_string())?;
+                fs::write(paths.dir.join(MEMORY), memory_mib.to_string())?;
                 copy_sparse(&sources.base_image, &paths.disk)?;
                 link_kernel(&sources.kernel, &paths)?;
                 if let Some(isolated) = isolated {
@@ -1053,6 +1064,9 @@ pub(crate) struct Held {
     pub name: String,
     /// The ordinal its VMM runs as, when its files still say.
     pub ordinal: Option<u32>,
+    /// Host memory it may hold: its guest's, when its files still say,
+    /// otherwise the most any guest may have.
+    pub bytes: u64,
 }
 
 /// Ends the VMs of builds an earlier agent left under `root` and removes
@@ -1082,18 +1096,22 @@ pub(crate) async fn end_leftover_builds<E: Engine>(
             memory_mib: 128,
         };
         let dir = jails.join(&name);
-        let ordinal = {
+        let (ordinal, memory_mib) = {
             let dir = dir.clone();
-            blocking(move || Ok(build_ordinal(&dir, first_uid)))
+            blocking(move || Ok((build_ordinal(&dir, first_uid), build_memory_mib(&dir))))
                 .await
-                .ok()
-                .flatten()
+                .unwrap_or((None, None))
         };
         let uid = ordinal.map_or(first_uid, |ordinal| first_uid.saturating_add(ordinal));
         let (paths, spec) = template_vm(root, &name, shape, uid, sources);
         if let Err(error) = engine.clean_up(&spec).await {
             tracing::error!(%error, %name, ?ordinal, "a template VM left behind may still run; its user stays taken");
-            held.push(Held { name, ordinal });
+            let memory_mib = memory_mib.unwrap_or(MAX_MEMORY_MIB);
+            held.push(Held {
+                name,
+                ordinal,
+                bytes: u64::from(memory_mib) << 20,
+            });
             continue;
         }
         let networked = sources.networked;
@@ -1124,6 +1142,16 @@ fn build_ordinal(dir: &Path, first_uid: u32) -> Option<u32> {
         .ok()?
         .uid();
     owner.checked_sub(first_uid)
+}
+
+/// The guest memory of the build VM in `dir`, in MiB, if its files say.
+/// Blocks.
+fn build_memory_mib(dir: &Path) -> Option<u32> {
+    let text = fs::read_to_string(dir.join(MEMORY)).ok()?;
+    text.trim()
+        .parse()
+        .ok()
+        .filter(|mib| (1..=MAX_MEMORY_MIB).contains(mib))
 }
 
 /// The templates under `root` that still fit today's `sources`; the rest

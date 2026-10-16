@@ -6,11 +6,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use compute_core::Input;
 use compute_engine::Engine;
 use tokio::time::Instant;
 
 use crate::layout::{Images, templates_dir};
 use crate::pool::{self, Build, Built, Held, Pool, PoolConfig, Shape, Sources, Template, Uses};
+use crate::protocol::Id;
 use crate::store::Store;
 
 use super::{Event, HostAgent, Warm};
@@ -211,15 +213,42 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if built.ended {
             self.ordinals.remove(&ordinal);
         }
-        if let Some(name) = self.ready.building.remove(&shape) {
+        let booked = self.ready.building.remove(&shape);
+        if let Some(name) = booked {
             self.spare_gone(name, built.ended);
+        }
+        if let Some(vm) = built.vm {
+            if built.ended {
+                self.build_left(vm, None);
+            } else if booked.is_some() {
+                self.build_left(vm, booked);
+            }
         }
         if let Some(warm) = &mut self.warm {
             warm.pool.built(shape, built.result, Instant::now());
         }
     }
 
-    /// Keeps the ordinals of builds an earlier agent left running taken.
+    /// Keeps one booking of host memory per build VM that may still run:
+    /// `still` names the one its memory is counted under now, or is
+    /// `None` once the VM is proven gone. A build that ends proves gone
+    /// any earlier VM of its name, since it cleans that up first.
+    fn build_left(&mut self, vm: String, still: Option<Id>) {
+        let earlier = match still {
+            Some(name) => self.ready.left_builds.insert(vm, name),
+            None => self.ready.left_builds.remove(&vm),
+        };
+        if let Some(earlier) = earlier.filter(|earlier| Some(*earlier) != still) {
+            self.input(Input::Unmanaged {
+                sandbox: earlier.0,
+                bytes: 0,
+            });
+        }
+    }
+
+    /// Keeps the ordinals of builds an earlier agent left running taken,
+    /// and their memory counted as unmanaged until a build of the same
+    /// name proves them gone or the next start of the agent ends them.
     /// One whose ordinal is unknown could clash with any new sandbox, so
     /// none is created while it may run.
     pub(super) fn hold_builds(&mut self, held: Vec<Held>) {
@@ -229,9 +258,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     self.ordinals.insert(ordinal);
                 }
                 None => {
-                    self.unknown_builds.insert(build.name);
+                    self.unknown_builds.insert(build.name.clone());
                 }
             }
+            let name = self.spare_name();
+            self.input(Input::Unmanaged {
+                sandbox: name.0,
+                bytes: build.bytes,
+            });
+            self.build_left(build.name, Some(name));
         }
     }
 
@@ -275,6 +310,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     built: Built {
                         result: Err(problem),
                         ended: true,
+                        vm: None,
                     },
                 });
                 return;

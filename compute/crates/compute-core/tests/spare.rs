@@ -232,6 +232,38 @@ fn ready_spares_are_the_first_memory_given_back_under_pressure() {
     );
 }
 
+/// A ready spare whose removal failed is counted as unmanaged and freed
+/// nothing: relief goes on at once, without waiting for a reading.
+#[test]
+fn a_spare_that_could_not_be_ended_is_no_relief() {
+    let mut rig = Rig::new(None, Some(watermarks()));
+    rig.add(1, Level::Paused, GIB);
+    rig.spare(2 * GIB, false);
+    rig.later(5);
+    let out = rig.send(Input::Memory {
+        available: 4 * GIB - 1,
+    });
+    assert_eq!(discards(&out), [SPARE], "{out:?}");
+    // Its removal stopped part way: the agent keeps it counted.
+    rig.send_all([
+        Input::Unmanaged {
+            sandbox: SPARE,
+            bytes: 2 * GIB,
+        },
+        Input::Spare {
+            sandbox: SPARE,
+            bytes: 0,
+            filling: false,
+        },
+    ]);
+    rig.send(Input::Tick);
+    assert_ne!(
+        rig.host.sandbox(SandboxId(1)).unwrap().floor,
+        Level::Running,
+        "the idle sandbox gives way instead"
+    );
+}
+
 #[test]
 fn the_buffer_is_kept_by_ending_ready_spares_first() {
     let mut rig = Rig::new(Some(admission(4 * GIB, GIB)), None);

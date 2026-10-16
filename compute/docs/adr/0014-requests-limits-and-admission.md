@@ -119,8 +119,13 @@ pick a VM.
   memory or refused and held, and it is booked before it starts. Ready
   clones are the first relief for a wake, the buffer and memory pressure,
   oldest first, ahead of step 1 of the relief above; one still filling is
-  left to finish. On huge-page hosts available memory is the smaller of
-  `MemAvailable` and the free huge-page pool.
+  left to finish. A ready clone is offered for relief only once it waits
+  to be claimed. One whose removal fails, and a build VM that cannot be
+  proven gone, stay counted as unmanaged at their size (a build's is in
+  its directory, for a later agent) and are no relief, until a later
+  build of the same VM or the next start of the agent ends them. On
+  huge-page hosts available memory is the smaller of `MemAvailable` and
+  the free huge-page pool.
 - Local disk is booked the same way, because a full disk blocks the very
   saves that relieve memory. Every VM whose state is not saved yet books
   its worst-case next save: its memory size once where files share extents

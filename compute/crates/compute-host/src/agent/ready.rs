@@ -100,6 +100,9 @@ pub(super) struct Ready<V> {
     /// The name each template build's VM is counted under as a spare VM,
     /// by shape.
     pub(super) building: HashMap<Shape, Id>,
+    /// Build VMs that may still run, by VM name, with the name their
+    /// memory is counted under as unmanaged.
+    pub(super) left_builds: HashMap<String, Id>,
     /// Ready sandboxes a create is claiming, by host name, with whether
     /// their VM ended meanwhile.
     claiming: HashMap<SandboxId, bool>,
@@ -115,6 +118,7 @@ impl<V> Ready<V> {
             retry: HashMap::new(),
             spares: HashMap::new(),
             building: HashMap::new(),
+            left_builds: HashMap::new(),
             claiming: HashMap::new(),
         }
     }
@@ -315,6 +319,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             || self.hosts.contains_key(&id.0)
             || self.ready.filling.contains_key(&id.0)
             || self.ready.spares.contains_key(&id.0)
+            || self.ready.left_builds.values().any(|name| *name == id)
             || self.records.get(id).is_some()
     }
 
@@ -533,17 +538,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     template,
                     live,
                 };
-                // Ready: what it holds is measured from now on.
-                let bytes = self.ready_resident(&idle).max(1);
-                self.book_spare(host, bytes, false);
                 let current = self.warm.as_ref().and_then(|warm| warm.pool.ready(shape));
                 let wanted = self.ready.targets.get(&shape).copied().unwrap_or(0) as usize;
                 if current.is_some_and(|current| Arc::ptr_eq(&current, &idle.template))
                     && self.ready.count(shape) < wanted
                 {
                     tracing::debug!(%host, %shape, "ready sandbox filled");
+                    // Ready, and only then: the core may end it at once, so
+                    // it must be found waiting. What it holds is measured
+                    // from now on.
+                    let bytes = self.ready_resident(&idle).max(1);
                     self.ready.idle.push_back(idle);
+                    self.book_spare(host, bytes, false);
                 } else {
+                    // Counted as filling until its removal ends it.
                     self.discard(idle);
                 }
             }

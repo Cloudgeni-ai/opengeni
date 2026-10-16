@@ -77,6 +77,14 @@ impl Host {
             self.unmanaged.remove(&sandbox);
             self.removed_claims.remove(&sandbox);
         } else {
+            // A spare VM that could not be ended moves to this book: it
+            // freed nothing, so it is no relief, and what it took while
+            // filling shows only in the next reading.
+            if let Some(spare) = self.spares.vms.remove(&sandbox)
+                && spare.filling
+            {
+                self.unread_claims = self.unread_claims.saturating_add(spare.bytes);
+            }
             self.unmanaged.insert(sandbox, bytes);
         }
     }

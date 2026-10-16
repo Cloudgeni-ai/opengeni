@@ -11,8 +11,8 @@ use tokio::time::sleep;
 
 use compute_core::{Admission, HostPolicy};
 use compute_host::protocol::{
-    DurabilityName, HostStatus, Id, LevelName, Reply, Request, SandboxConfig, SleepConfig,
-    TemplateState,
+    DurabilityName, HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
+    SleepConfig, TemplateState,
 };
 use compute_host::{HostConfig, PoolConfig, Shape};
 
@@ -262,6 +262,58 @@ async fn ready_sandboxes_give_their_room_to_a_wake_and_refill_only_into_free_roo
         .unwrap();
     assert_eq!(removed, Reply::Done);
     wait_filled(&lab, 2).await;
+    lab.assert_clean();
+}
+
+/// A fill that finishes while a held sandbox waits for its room is ended
+/// for it: the core may ask for that the moment the fill is ready.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fill_that_finishes_under_pressure_gives_its_room_to_a_held_sandbox() {
+    let policy = HostPolicy {
+        admission: Some(Admission {
+            budget: 450 << 20,
+            buffer: 0,
+            busy_grace: Duration::from_millis(100),
+        }),
+        ..HostPolicy::default()
+    };
+    let delays = Delays {
+        restore: Duration::from_secs(1),
+        ..Delays::default()
+    };
+    let lab = Lab::start_configured(Lab::root(), Arc::default(), delays, policy, keeping(1)).await;
+    lab.wait_until("a fill under way", |status| pool(status) == (0, 1, 1))
+        .await;
+
+    // 384 MiB do not fit next to the fill's 256: the hold waits.
+    let created = lab
+        .client
+        .call(&Request::Create {
+            id: id(1),
+            config: SandboxConfig::new(1, 384, NEVER),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created, Reply::Done);
+    let hold = Request::Hold {
+        id: id(1),
+        generation: None,
+        hold: "work".into(),
+        ttl_ms: None,
+        priority: PriorityName::Interactive,
+    };
+    assert_eq!(lab.client.call(&hold).await.unwrap(), Reply::Done);
+
+    // Once filled, the ready sandbox ends for it.
+    lab.wait_until("the fill ended and the held sandbox running", |status| {
+        pool(status).0 == 0 && Lab::sandbox(status, id(1)).level == LevelName::Running
+    })
+    .await;
+    sleep(Duration::from_millis(300)).await;
+    let status = lab.status().await;
+    assert_eq!(pool(&status), (0, 0, 1), "no fill into the held room");
+    let capacity = status.capacity.unwrap();
+    assert!(capacity.occupied <= capacity.total, "{capacity:?}");
     lab.assert_clean();
 }
 

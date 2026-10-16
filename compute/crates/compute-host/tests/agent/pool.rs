@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use compute_core::HostPolicy;
+use compute_core::{Admission, HostPolicy};
 use compute_host::protocol::{HostStatus, Id, LevelName, Reply, TemplateState};
 use compute_host::{HostConfig, PoolConfig, Shape};
 use tokio::time::{Instant, sleep};
@@ -328,6 +328,103 @@ fn remove_templates(root: &Path) {
     for template in templates(root) {
         std::fs::remove_dir_all(template).unwrap();
     }
+}
+
+const MIB: u64 = 1 << 20;
+
+/// Admission with room for eight of [`SHAPE`].
+fn admitting() -> HostPolicy {
+    HostPolicy {
+        admission: Some(Admission {
+            budget: 2048 * MIB,
+            buffer: 0,
+            busy_grace: Duration::from_millis(100),
+        }),
+        ..HostPolicy::default()
+    }
+}
+
+fn occupied(status: &HostStatus) -> u64 {
+    status.capacity.expect("admission is on").occupied
+}
+
+/// A build VM that may still run stays counted at its size, also by a
+/// later agent that keeps no templates, until one proves it gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_build_whose_vm_may_survive_stays_counted_until_it_is_gone() {
+    let world = Arc::<World>::default();
+    world.stuck_clean_ups.store(true, Ordering::Relaxed);
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::clone(&world),
+        Delays::default(),
+        admitting(),
+        warm(vec![SHAPE]),
+    )
+    .await;
+    wait_ready(&lab).await;
+    lab.wait_until("the surviving build counted", |status| {
+        occupied(status) == 256 * MIB
+    })
+    .await;
+    let (root, world) = lab.stop().await;
+
+    let lab = Lab::start(root, world, Delays::default(), admitting()).await;
+    assert_eq!(
+        occupied(&lab.status().await),
+        256 * MIB,
+        "a later agent that cannot end it counts it"
+    );
+    let (root, world) = lab.stop().await;
+
+    world.stuck_clean_ups.store(false, Ordering::Relaxed);
+    let lab = Lab::start(root, world, Delays::default(), admitting()).await;
+    assert_eq!(occupied(&lab.status().await), 0, "ended at last");
+    lab.assert_clean();
+}
+
+/// A build that ends proves gone an earlier VM of its name that could not
+/// be, since it cleans that one up first: the memory counted for it is
+/// free again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_build_that_ends_frees_what_an_earlier_vm_of_its_name_kept_counted() {
+    let world = Arc::<World>::default();
+    world.stuck_clean_ups.store(true, Ordering::Relaxed);
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::clone(&world),
+        Delays::default(),
+        admitting(),
+        warm(vec![SHAPE]),
+    )
+    .await;
+    wait_ready(&lab).await;
+    lab.wait_until("the surviving build counted", |status| {
+        occupied(status) == 256 * MIB
+    })
+    .await;
+    world.stuck_clean_ups.store(false, Ordering::Relaxed);
+
+    // Another base image: a template of another VM, which ends.
+    std::fs::write(lab.root.join("base.img"), "base two").unwrap();
+    lab.create(id(1), NEVER).await;
+    lab.wait_until("the second build", |status| {
+        lab.world.boots.load(Ordering::Relaxed) == 2
+            && template_state(status) == Some(TemplateState::Ready)
+    })
+    .await;
+    assert_eq!(occupied(&lab.status().await), 256 * MIB, "the first VM");
+
+    // The first image again: its build ends the first VM, of its name.
+    std::fs::write(lab.root.join("base.img"), "base").unwrap();
+    lab.create(id(2), NEVER).await;
+    lab.wait_until("the third build, and nothing counted", |status| {
+        lab.world.boots.load(Ordering::Relaxed) == 3
+            && template_state(status) == Some(TemplateState::Ready)
+            && occupied(status) == 0
+    })
+    .await;
+    lab.assert_clean();
 }
 
 /// Checks that `lab`, started with an ordinal it cannot know, creates no
