@@ -785,8 +785,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             slot.vm = Some(live);
         }
         // Paused, with no saved copy of what its guest did since the
-        // template: its disk moved on. Its VM's memory moves from the
-        // host name it was counted under to the sandbox, in one decision.
+        // template: its disk moved on. Idle since the claim, as its record
+        // says, so a restart counts from the same moment. Its VM's memory
+        // moves from the host name it was counted under to the sandbox, in
+        // one decision.
+        let last_activity = record
+            .last_used_ms
+            .map_or_else(|| self.now(), |unix_ms| self.at_unix_ms(unix_ms));
         let size = self.size(&record.config);
         self.inputs([
             Input::Add {
@@ -794,7 +799,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 state: State::new(Level::Paused, Durability::Volatile, false),
                 policy,
                 size,
-                last_activity: self.now(),
+                last_activity,
             },
             Input::Unmanaged {
                 sandbox: host.0,
