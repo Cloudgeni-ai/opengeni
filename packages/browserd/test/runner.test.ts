@@ -28,7 +28,7 @@ describe("managed browser profile cryptography", () => {
     expect(browserProfileCryptoPolicy("darwin")).toBe("chromium_mock_keychain");
     expect(browserProfileCryptoPolicy("win32")).toBe("platform_bound");
     expect(browserLaunchArguments("linux")).toBe(
-      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled,--test-type,--password-store=basic",
+      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled,--test-type,--ignore-gpu-blocklist,--enable-unsafe-swiftshader,--password-store=basic",
     );
     expect(browserLaunchArguments("darwin")).toBe(
       "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled,--use-mock-keychain",
