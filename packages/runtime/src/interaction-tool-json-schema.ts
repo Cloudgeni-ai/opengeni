@@ -31,6 +31,45 @@ export function interactionToolInputJsonSchema(schema: z.ZodType): AttemptToolJs
 /** Per-variant field lists of a flattened union, for the enclosing summary. */
 const flattenedVariants = new WeakMap<JsonSchemaNode, Array<[string, string[]]>>();
 
+const LOCATOR_FIELDS = new Set(["locator", "from", "to"]);
+
+/**
+ * Let the model pass an element ref as a bare string wherever a locator is
+ * expected (`"locator":"e1a2b3c4d"`). It is the common case and a third of
+ * the output tokens of `{kind:'ref',ref}`. The tool expands it before
+ * validation.
+ */
+export function withRefShorthandLocators(schema: AttemptToolJsonSchema): AttemptToolJsonSchema {
+  return refShorthand(schema) as AttemptToolJsonSchema;
+}
+
+function refShorthand(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(refShorthand);
+  if (!isNode(node)) return node;
+  const out: JsonSchemaNode = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (key !== "properties" || !isNode(value)) {
+      out[key] = refShorthand(value);
+      continue;
+    }
+    const properties: JsonSchemaNode = {};
+    for (const [field, schema] of Object.entries(value)) {
+      properties[field] =
+        LOCATOR_FIELDS.has(field) && isRefLocator(schema)
+          ? { anyOf: [{ type: "string", description: "An element ref." }, refShorthand(schema)] }
+          : refShorthand(schema);
+    }
+    out[key] = properties;
+  }
+  return out;
+}
+
+function isRefLocator(schema: unknown): boolean {
+  if (!isNode(schema)) return false;
+  if (Array.isArray(schema.anyOf)) return schema.anyOf.some(isRefLocator);
+  return isNode(schema.properties) && (tagValues(schema.properties.kind) ?? []).includes("ref");
+}
+
 function modelFacingSchema(node: unknown): unknown {
   if (Array.isArray(node)) return node.map(modelFacingSchema);
   if (!isNode(node)) return node;
