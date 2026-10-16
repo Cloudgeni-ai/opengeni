@@ -45,7 +45,7 @@ export class AppUpdates {
   private loading: Promise<AppUpdater | null> | null = null;
   private lastUrl: string | null = null;
   private state: UpdateMenuState = { kind: "idle" };
-  private announced = false;
+  private announcedVersion: string | null = null;
   private readonly needsPassword = updateNeedsPassword();
 
   constructor(
@@ -82,14 +82,16 @@ export class AppUpdates {
   }
 
   private async check(interactive: boolean): Promise<void> {
-    if (this.kind() !== "idle") return;
-    this.setState({ kind: "checking" });
+    // A check or a download is already under way.
+    if (this.kind() === "checking" || this.kind() === "downloading") return;
+    // A downloaded update stays ready while the app keeps checking, so an app
+    // that is rarely quit still moves on to the newest release.
+    if (this.kind() === "idle") this.setState({ kind: "checking" });
     try {
       const updater = await this.load();
       const url = await resolveUpdateFeedUrl(this.feed);
       if (!updater || !url) {
-        this.setState({ kind: "idle" });
-        if (interactive) this.upToDate();
+        this.noUpdate(interactive);
         return;
       }
       if (url !== this.lastUrl) updater.setFeedURL({ provider: "generic", url });
@@ -97,8 +99,7 @@ export class AppUpdates {
       const result = await updater.checkForUpdates();
       const version = result?.isUpdateAvailable ? result.updateInfo.version : null;
       if (!version) {
-        this.setState({ kind: "idle" });
-        if (interactive) this.upToDate();
+        this.noUpdate(interactive);
         return;
       }
       // A downloaded update stays ready; otherwise the download is under way.
@@ -111,7 +112,7 @@ export class AppUpdates {
         });
       }
     } catch (error) {
-      this.setState({ kind: "idle" });
+      if (this.kind() !== "ready") this.setState({ kind: "idle" });
       if (interactive) {
         void dialog.showMessageBox({
           type: "warning",
@@ -120,6 +121,11 @@ export class AppUpdates {
         });
       }
     }
+  }
+
+  private noUpdate(interactive: boolean): void {
+    if (this.kind() === "checking") this.setState({ kind: "idle" });
+    if (interactive) this.upToDate();
   }
 
   private upToDate(): void {
@@ -152,8 +158,8 @@ export class AppUpdates {
   }
 
   private announce(version: string): void {
-    if (this.announced || !Notification.isSupported()) return;
-    this.announced = true;
+    if (this.announcedVersion === version || !Notification.isSupported()) return;
+    this.announcedVersion = version;
     const notification = new Notification({
       title: `${this.productName} ${version} is ready`,
       body: this.needsPassword
