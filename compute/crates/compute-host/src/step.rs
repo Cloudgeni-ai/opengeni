@@ -365,6 +365,9 @@ impl<E: Engine, S: Store> Job<E, S> {
         if error.kind != ErrorKind::Transient || !(image || archived) {
             return failure(error);
         }
+        // One record write vouches for both copies at once, so the local
+        // copy is never trusted without the remote one being settled too:
+        // `Failure::RemoteUntrusted` cannot arise here.
         match self
             .commit(Change::new().image(image).archived(archived))
             .await

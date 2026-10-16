@@ -234,7 +234,8 @@ delete table inet {HOST_TABLE}
 table inet {HOST_TABLE} {{
     chain input {{
         type filter hook input priority filter - 10; policy accept;
-        iifname \"{PREFIX}*\" drop
+        iifname \"{PREFIX}*\" meta l4proto tcp reject with tcp reset
+        iifname \"{PREFIX}*\" reject with icmpx type admin-prohibited
     }}
     chain forward {{
         type filter hook forward priority filter - 10; policy accept;
@@ -731,6 +732,9 @@ mod tests {
         assert!(rules.contains("oifname \"uplink\" masquerade"));
         let host = untrusted.host_rules();
         assert!(host.contains("iifname \"ogc*\" oifname \"ogc*\" drop"));
+        // The host refuses its sandboxes at once rather than letting their
+        // connections time out.
+        assert!(host.contains("iifname \"ogc*\" meta l4proto tcp reject with tcp reset"));
         assert!(host.contains("ip saddr 198.18.0.0/15 oifname != \"ogc*\" masquerade"));
     }
 

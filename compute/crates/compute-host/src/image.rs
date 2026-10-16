@@ -333,7 +333,9 @@ impl Images {
     /// Builds, checks and publishes a new generation from `parts`, then
     /// points `current` at it. Blocking: run off the async executor.
     pub fn publish(&self, parts: Parts<'_>) -> Result<Verified, Suspect> {
-        fs::create_dir_all(&self.dir)?;
+        // The record vouches for what is published here, so the directory
+        // itself must survive a crash too.
+        create_dir_durably(&self.dir)?;
         let generation = self.next_generation()?;
         let staging = self.dir.join(format!("{generation}.staging"));
         if staging.exists() {
@@ -763,6 +765,18 @@ fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 fn sync_dir(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
+}
+
+/// Creates `dir` if missing, with its entry in its parent made durable.
+fn create_dir_durably(dir: &Path) -> io::Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(dir)?;
+    match dir.parent() {
+        Some(parent) => sync_dir(parent),
+        None => Ok(()),
+    }
 }
 
 fn invalid(message: &str) -> io::Error {

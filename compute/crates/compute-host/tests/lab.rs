@@ -95,7 +95,7 @@ impl Host {
             .arg("--base-image")
             .arg(lab.join("base.ext4"))
             .arg("--cgroup")
-            .arg("/sys/fs/cgroup/compute-test")
+            .arg(CGROUP)
             .args(["--limit", "boot=32", "--limit", "restore=32"])
             .args(&self.extra)
             .env(
@@ -128,6 +128,25 @@ impl Host {
             );
         }
         let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// The parent cgroup of every VM the lab tests start.
+const CGROUP: &str = "/sys/fs/cgroup/compute-test";
+
+impl Drop for Agent {
+    /// A test that fails part way must not leave its agent holding the
+    /// host lock, nor its VMs holding sandbox networks the next test reuses.
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if std::thread::panicking()
+            && let Ok(vms) = std::fs::read_dir(CGROUP)
+        {
+            for vm in vms.flatten().filter(|vm| vm.path().is_dir()) {
+                let _ = std::fs::write(vm.path().join("cgroup.kill"), "1");
+            }
+        }
     }
 }
 
@@ -462,6 +481,114 @@ fn host_addresses() -> Vec<Ipv4Addr> {
         .collect()
 }
 
+/// The inner end of the second sandbox's link, inside its namespace.
+const NEIGHBOUR_INNER: &str = "198.18.0.3";
+
+/// A TCP listener inside sandbox `id`'s network namespace, on `address`,
+/// proven reachable from inside that namespace. Ends when dropped.
+struct NamespaceListener(Child);
+
+impl NamespaceListener {
+    fn start(id: Id, address: &str, port: u16) -> Self {
+        let namespace = format!("ogc-{id}");
+        let program = format!(
+            "import socket\ns=socket.socket()\ns.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\ns.bind(('{address}',{port}))\ns.listen(512)\nwhile True: s.accept()[0].close()"
+        );
+        let child = Command::new("ip")
+            .args(["netns", "exec", &namespace, "python3", "-c", &program])
+            .spawn()
+            .unwrap();
+        let listener = Self(child);
+        // The positive control: the same connection succeeds from inside.
+        let probe = format!("exec 3<>/dev/tcp/{address}/{port}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let reached = Command::new("ip")
+                .args(["netns", "exec", &namespace, "bash", "-c", &probe])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            if reached {
+                return listener;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the listener in {namespace} never answered"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for NamespaceListener {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Every destination a guest must never reach, whatever the host's trust:
+/// the cloud metadata service, each host address, the host's end of a
+/// sandbox link, and a listening address inside another sandbox's
+/// namespace.
+fn forbidden(port: u16) -> Vec<String> {
+    let mut blocked: Vec<String> = vec!["169.254.169.254:80".into()];
+    blocked.extend(
+        host_addresses()
+            .iter()
+            .map(|address| format!("{address}:{port}")),
+    );
+    blocked.push(format!("198.18.0.0:{port}"));
+    blocked.push(format!("{NEIGHBOUR_INNER}:{port}"));
+    blocked
+}
+
+/// A guest script line probing each of `targets`, printing
+/// `target open|closed micros` per target.
+fn probe_script(targets: &[String]) -> String {
+    format!(
+        "for t in {}; do s=$(date +%s%N); if timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*}}/${{t#*:}}\" 2>/dev/null; then r=open; else r=closed; fi; echo $t $r $(( ($(date +%s%N) - s) / 1000 )); done",
+        targets.join(" ")
+    )
+}
+
+/// Longest a refusal may take: blocked connections are refused with a reset
+/// at once, never left to time out.
+const REFUSAL_LIMIT_US: u64 = 1_000_000;
+
+/// Checks that `lines` hold one row per target, in order, each `closed`
+/// within the refusal limit except those in `open`. Returns the refusal
+/// times in milliseconds.
+fn check_probes(context: &str, lines: &[&str], targets: &[String], open: &[&str]) -> Vec<f64> {
+    assert_eq!(
+        lines.len(),
+        targets.len(),
+        "{context}: missing probe rows: {lines:?}"
+    );
+    let mut refusals = Vec::new();
+    for (line, target) in lines.iter().zip(targets) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields.first(), Some(&target.as_str()), "{context}: {line}");
+        let expected = if open.contains(&target.as_str()) {
+            "open"
+        } else {
+            "closed"
+        };
+        assert_eq!(fields.get(1), Some(&expected), "{context}: {line}");
+        let micros: u64 = fields[2].parse().unwrap();
+        if expected == "closed" {
+            assert!(
+                micros < REFUSAL_LIMIT_US,
+                "{context}: {target} took {micros} us to refuse"
+            );
+            #[allow(clippy::cast_precision_loss)]
+            refusals.push(micros as f64 / 1e3);
+        }
+    }
+    refusals
+}
+
 /// Every restored guest reaches the internet with its very first
 /// connection, and none reaches the cloud metadata service, the host, or
 /// another sandbox.
@@ -471,7 +598,7 @@ async fn restored_guests_reach_the_internet_at_once_and_nothing_else() {
         eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
         return;
     };
-    let count = count();
+    let count = count().max(2);
     // Something to reach on every host address and on the sandboxes' link
     // addresses, which are the host's too.
     let listener = TcpListener::bind("0.0.0.0:0").unwrap();
@@ -499,16 +626,9 @@ async fn restored_guests_reach_the_internet_at_once_and_nothing_else() {
                 .all(|sandbox| sandbox.level == LevelName::Saved && sandbox.step.is_none())
         })
         .await;
+    let _neighbour = NamespaceListener::start(id(1), NEIGHBOUR_INNER, port);
 
-    let mut blocked: Vec<String> = vec!["169.254.169.254:80".into()];
-    blocked.extend(
-        host_addresses()
-            .iter()
-            .map(|address| format!("{address}:{port}")),
-    );
-    // The host's and another sandbox's ends of their links.
-    blocked.push(format!("198.18.0.0:{port}"));
-    blocked.push(format!("198.18.0.3:{port}"));
+    let blocked = forbidden(port);
     // The first command after the restore is the outbound connection, then
     // a second one to tell network latency from the restored guest's first
     // page faults, then a name lookup; then each forbidden destination must
@@ -517,8 +637,8 @@ async fn restored_guests_reach_the_internet_at_once_and_nothing_else() {
         "s=$(date +%s%N); if exec 3<>/dev/tcp/1.1.1.1/80; then echo out $(( ($(date +%s%N) - s) / 1000 )); else echo out-failed; fi
 s=$(date +%s%N); if exec 4<>/dev/tcp/1.1.1.1/80; then echo again $(( ($(date +%s%N) - s) / 1000 )); else echo again-failed; fi
 if getent hosts example.com >/dev/null; then echo dns ok; else echo dns-failed; fi
-for t in {}; do s=$(date +%s%N); if timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*}}/${{t#*:}}\" 2>/dev/null; then r=open; else r=closed; fi; echo $t $r $(( ($(date +%s%N) - s) / 1000 )); done",
-        blocked.join(" ")
+{}",
+        probe_script(&blocked)
     );
     let started = Instant::now();
     let client = Arc::new(agent.client.clone());
@@ -533,27 +653,23 @@ for t in {}; do s=$(date +%s%N); if timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*
     let mut refusal_ms = Vec::new();
     while let Some(done) = wakes.join_next().await {
         let (sandbox, (output, waited)) = done.unwrap();
-        let mut lines = output.lines();
-        let first = lines.next().unwrap_or_default();
+        let lines: Vec<&str> = output.lines().collect();
+        let first = lines.first().copied().unwrap_or_default();
         let Some(micros) = first.strip_prefix("out ") else {
             panic!("{sandbox}: the first connection failed: {output}");
         };
         #[allow(clippy::cast_precision_loss)]
         first_connect_ms.push(micros.trim().parse::<u64>().unwrap() as f64 / 1e3);
-        let second = lines.next().unwrap_or_default();
+        let second = lines.get(1).copied().unwrap_or_default();
         let Some(micros) = second.strip_prefix("again ") else {
             panic!("{sandbox}: the second connection failed: {output}");
         };
         #[allow(clippy::cast_precision_loss)]
         second_connect_ms.push(micros.trim().parse::<u64>().unwrap() as f64 / 1e3);
-        assert_eq!(lines.next(), Some("dns ok"), "{sandbox}: {output}");
+        assert_eq!(lines.get(2).copied(), Some("dns ok"), "{sandbox}: {output}");
         wake_ms.push(waited.as_secs_f64() * 1e3);
-        for line in lines {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            assert_eq!(fields.get(1), Some(&"closed"), "{sandbox}: {line}");
-            #[allow(clippy::cast_precision_loss)]
-            refusal_ms.push(fields[2].parse::<u64>().unwrap() as f64 / 1e3);
-        }
+        let context = format!("sandbox {sandbox}");
+        refusal_ms.extend(check_probes(&context, &lines[3..], &blocked, &[]));
     }
     let total = started.elapsed();
     save_results(
@@ -574,20 +690,24 @@ for t in {}; do s=$(date +%s%N); if timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*
 }
 
 /// On a trusted host guests reach the local network; on any other host the
-/// same address is blocked. Runs only when `COMPUTE_TEST_LAN_TARGET` names a
-/// listening `address:port` on the host's local network (not the host).
+/// same address is blocked. Either way the host, the metadata service and
+/// other sandboxes stay out of reach. Runs only when
+/// `COMPUTE_TEST_LAN_TARGET` names a listening `address:port` on the
+/// host's local network (not the host).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn only_trusted_hosts_let_guests_reach_the_local_network() {
     let (Some(lab), Some(target)) = (lab(), std::env::var_os("COMPUTE_TEST_LAN_TARGET")) else {
         eprintln!("skipped: set COMPUTE_TEST_LAB and COMPUTE_TEST_LAN_TARGET");
         return;
     };
-    let target = target.to_string_lossy().into_owned();
-    let (address, port) = target.rsplit_once(':').unwrap();
-    let script = format!(
-        "if timeout 3 bash -c 'exec 3<>/dev/tcp/{address}/{port}' 2>/dev/null; then echo open; else echo closed; fi"
-    );
-    for (trusted, expected) in [(false, "closed"), (true, "open")] {
+    let lan = target.to_string_lossy().into_owned();
+    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || for _ in listener.incoming() {});
+    let mut targets = vec![lan.clone()];
+    targets.extend(forbidden(port));
+    let script = probe_script(&targets);
+    for trusted in [false, true] {
         let flags: &[&str] = if trusted {
             &["--network", "--trusted"]
         } else {
@@ -596,8 +716,14 @@ async fn only_trusted_hosts_let_guests_reach_the_local_network() {
         let host = Host::new(&lab, "lan", flags);
         let agent = host.start().await;
         agent.create(id(0), NEVER).await;
+        agent.create(id(1), NEVER).await;
+        exec(&agent.client, id(1), "true").await;
+        let neighbour = NamespaceListener::start(id(1), NEIGHBOUR_INNER, port);
         let (output, _) = exec(&agent.client, id(0), &script).await;
-        assert_eq!(output.trim(), expected, "trusted={trusted}: {target}");
+        let lines: Vec<&str> = output.lines().collect();
+        let open: &[&str] = if trusted { &[lan.as_str()] } else { &[] };
+        check_probes(&format!("trusted={trusted}"), &lines, &targets, open);
+        drop(neighbour);
         agent.remove_all().await;
         agent.kill();
         host.finish(&format!("lan-trusted-{trusted}"));
