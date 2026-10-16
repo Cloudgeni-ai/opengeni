@@ -224,7 +224,11 @@ import {
   assertOrganizationUserSetupQueryTransportConfigured,
 } from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
-import { buildOpenGeniMcpServer } from "./mcp/server";
+import {
+  buildOpenGeniMcpProtocolServer,
+  buildOpenGeniMcpServer,
+  isOpenGeniMcpProtocolOnlyMessage,
+} from "./mcp/server";
 import {
   buildWorkspaceToolGatewayMcpServer,
   approveWorkspaceToolGatewayCall,
@@ -273,7 +277,7 @@ import {
   localBrowserRequestHost,
   markLocalInternalDispatch,
 } from "./http/local-browser-boundary";
-import { withAccessGrantSessionRlsContext } from "./access-grant-rls";
+import { requireLiveAgentAttemptGrant, withAccessGrantSessionRlsContext } from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
@@ -1795,6 +1799,28 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = authorization.grant;
+    // MCP handshakes (initialize, ping, notifications) read and disclose
+    // nothing scoped. A session-bound agent attempt still proves it is the
+    // live attempt, but skips the workspace, catalog, Memory and admin reads
+    // that building the tool surface costs on every tools/* POST.
+    if (
+      c.req.method === "POST" &&
+      grant.principalKind === "agent_attempt" &&
+      typeof grant.metadata?.sessionId === "string" &&
+      (await isProtocolOnlyMcpRequest(boundedRequest))
+    ) {
+      await requireLiveAgentAttemptGrant(routeDeps, grant);
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        enableJsonResponse: true,
+      });
+      const mcp = buildOpenGeniMcpProtocolServer(grant);
+      try {
+        await mcp.connect(transport);
+        return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+      } finally {
+        await mcp.close().catch(() => undefined);
+      }
+    }
     // Admin actions dispatch back into this API as a person. Capture the
     // context now, before this request takes on the agent's database and
     // billing scope, so none of it carries into those actions.
@@ -2492,6 +2518,19 @@ async function validateCodexAccountTarget(request: Request): Promise<void> {
       message: 'target is required ("auto" or an account id)',
     });
   }
+}
+
+/** Whether a POST carries only MCP protocol messages that touch no tool. */
+async function isProtocolOnlyMcpRequest(request: Request): Promise<boolean> {
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    // The transport answers malformed bodies itself, on the full path.
+    return false;
+  }
+  const messages = Array.isArray(body) ? body : [body];
+  return messages.length > 0 && messages.every(isOpenGeniMcpProtocolOnlyMessage);
 }
 
 async function requireMcpAccessGrantAuthorization(

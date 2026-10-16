@@ -101,3 +101,28 @@ export async function withAccessGrantSessionRlsContext<T>(
     throw error;
   }
 }
+
+/**
+ * Prove that an agent-attempt grant is the exact live attempt of its bound
+ * session, with the same refusal as {@link withAccessGrantSessionRlsContext},
+ * without installing that request's RLS actor context. For requests that read
+ * and disclose nothing scoped (MCP protocol handshakes), so they need the
+ * liveness fence but none of the actor's data scope.
+ */
+export async function requireLiveAgentAttemptGrant(
+  deps: Pick<ApiRouteDeps, "db">,
+  grant: AccessGrant,
+): Promise<void> {
+  const callerSessionId = grant.metadata?.sessionId;
+  if (grant.principalKind !== "agent_attempt" || typeof callerSessionId !== "string") {
+    throw agentAttemptAuthorityError("malformed");
+  }
+  try {
+    await requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId);
+  } catch (error) {
+    if (error instanceof SessionAuthorizationDeniedError) {
+      throw agentAttemptAuthorityError(error.reason, error);
+    }
+    throw error;
+  }
+}
