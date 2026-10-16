@@ -428,6 +428,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 })
                 .collect(),
             store_stalled_ms,
+            unseen_activity: self.unseen_activity,
         }
     }
 }

@@ -490,6 +490,11 @@ pub struct HostStatus {
     /// answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_stalled_ms: Option<u64>,
+    /// Running sandboxes whose processor use and traffic could not be read
+    /// lately. They count as busy, so none falls asleep unseen; a number
+    /// above zero means the host's sensing is failing.
+    #[serde(default)]
+    pub unseen_activity: usize,
 }
 
 /// A sandbox the host cannot manage.

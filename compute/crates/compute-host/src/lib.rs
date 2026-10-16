@@ -19,6 +19,8 @@ mod lanes;
 mod layout;
 #[cfg(target_os = "linux")]
 mod lazy;
+#[cfg(target_os = "linux")]
+mod logs;
 pub mod net;
 #[cfg(target_os = "linux")]
 mod paging;

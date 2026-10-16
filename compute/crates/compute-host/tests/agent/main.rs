@@ -103,6 +103,8 @@ struct World {
     unadoptable: Mutex<HashSet<String>>,
     /// While set, no VM's processor time can be read.
     unreadable_cpu: AtomicBool,
+    /// While set, no VM's traffic can be read.
+    unreadable_io: AtomicBool,
     /// While set, every pause moves a burst of data, as a VMM writing a
     /// snapshot does: work the host does, not the guest.
     transition_traffic: AtomicBool,
@@ -589,6 +591,13 @@ impl Engine for Fake {
 
     fn io_bytes(&self, vm: &FakeVm) -> Result<u64, EngineError> {
         self.world.samples.fetch_add(1, Ordering::SeqCst);
+        if self.world.unreadable_io.load(Ordering::SeqCst) {
+            return Err(EngineError::new(
+                ErrorKind::Transient,
+                "io_bytes",
+                "io.stat unreadable",
+            ));
+        }
         let streamed = vm.work.lock().unwrap().io.total();
         Ok(u64::try_from(streamed.as_micros()).unwrap_or(u64::MAX))
     }

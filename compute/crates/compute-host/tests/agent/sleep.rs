@@ -413,6 +413,43 @@ async fn traffic_counts_when_processor_use_cannot_be_read() {
     check_traffic_keeps_awake(&lab, id(19)).await;
 }
 
+/// A sandbox none of whose activity can be read counts as busy, since it
+/// may be working, and the host's status counts it; once its activity can
+/// be read again, it falls asleep when idle as usual.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_whose_activity_cannot_be_read_stays_awake() {
+    // Long enough for a whole reading window after the wake and its first
+    // safety save, which restart the window.
+    const PAUSE_AFTER: SleepConfig = SleepConfig {
+        pause_after_ms: Some(1_000),
+        ..NEVER
+    };
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(100);
+    lab.world.unreadable_cpu.store(true, Ordering::SeqCst);
+    lab.world.unreadable_io.store(true, Ordering::SeqCst);
+    lab.create(sandbox, PAUSE_AFTER).await;
+    assert_eq!(lab.run(sandbox, &["still"]).await, ["ok"]);
+    lab.wait_until("its activity counted as unseen", |status| {
+        status.unseen_activity == 1
+    })
+    .await;
+    sleep(Duration::from_millis(2_000)).await;
+    let status = lab.status().await;
+    assert_eq!(
+        Lab::sandbox(&status, sandbox).level,
+        LevelName::Running,
+        "an unseen guest fell asleep"
+    );
+    assert_eq!(status.unseen_activity, 1);
+    lab.world.unreadable_cpu.store(false, Ordering::SeqCst);
+    lab.world.unreadable_io.store(false, Ordering::SeqCst);
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    lab.wait_until("nothing unseen", |status| status.unseen_activity == 0)
+        .await;
+    lab.assert_clean();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rule_that_ignores_the_processor_still_counts_traffic() {
     let lab = Lab::start_configured(

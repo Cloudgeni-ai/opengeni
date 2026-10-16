@@ -404,6 +404,9 @@ struct ActivityWindow {
     cpu: Option<Duration>,
     /// Traffic so far.
     io: Option<u64>,
+    /// Whether nothing the rule watches could be read over the window
+    /// before this one, so the sandbox counted as busy unseen.
+    unseen: bool,
 }
 
 #[derive(Debug)]
@@ -521,6 +524,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     next_incarnation: u64,
     stats: [StepStats; Step::COUNT],
     available_memory: Option<u64>,
+    /// Running sandboxes whose activity could not be read over their last
+    /// window, so they count as busy; see [`HostAgent::sample_busy`].
+    unseen_activity: usize,
     sample_every: Duration,
     pressure: bool,
     guest_ports: Arc<[GuestPort]>,
@@ -652,6 +658,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             next_incarnation: 1,
             stats: [StepStats::default(); Step::COUNT],
             available_memory: None,
+            unseen_activity: 0,
             sample_every: config.sample_every,
             guest_ports: config.guest_ports.into(),
             restore_notice_port: config.restore_notice_port,
@@ -726,6 +733,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     async fn run(mut self) {
         let mut sample = tokio::time::interval(self.sample_every);
         sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        #[cfg(target_os = "linux")]
+        let trimming = tokio::spawn(crate::logs::keep_trimmed(
+            self.root.clone(),
+            self.shutdown.clone(),
+        ));
         loop {
             let deadline = self
                 .core
@@ -733,19 +745,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .map(|at| self.origin + at.since_origin().saturating_sub(CLOCK_BASE));
             tokio::select! {
                 biased;
+                // First, so a steady stream of events and requests cannot
+                // starve it: it is ready at most once per interval.
+                _ = sample.tick() => self.sample(),
                 Some(event) = self.events.recv() => self.on_event(event),
                 command = self.commands.recv() => match command {
                     Some(command) => self.on_command(command),
                     None => break,
                 },
                 () = sleep_until_some(deadline) => self.input(Input::Tick),
-                _ = sample.tick() => self.sample(),
             }
         }
         tracing::info!("every handle dropped; host agent stopping, VMs keep running");
         // Teardowns under way finish their current attempt; the next agent
         // retries any that failed.
         self.shutdown.cancel();
+        #[cfg(target_os = "linux")]
+        let _ = trimming.await;
         while self.teardowns.join_next().await.is_some() {}
     }
 
