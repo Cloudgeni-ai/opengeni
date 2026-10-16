@@ -243,7 +243,8 @@ impl Firecracker {
 
     /// Starts a jailed VMM for `spec` and waits for its API. `owned` are
     /// files the VMM must be able to write, such as its drives; they are
-    /// handed to the VM's user first.
+    /// handed to the VM's user first. A failure once the jailer process
+    /// exists counts as a launch ([`EngineError::launched`]).
     async fn launch(
         &self,
         spec: &VmSpec,
@@ -300,9 +301,10 @@ impl Firecracker {
                 ErrorKind::Transient,
                 operation,
                 format!("the jailer did not finish within {JAILER_TIMEOUT:?}"),
-            ));
+            )
+            .after_launch());
         };
-        let status = status.map_err(|error| EngineError::io(operation, error))?;
+        let status = status.map_err(|error| EngineError::io(operation, error).after_launch())?;
         if !status.success() {
             let _ = self.discard(spec).await;
             return Err(EngineError::new(
@@ -312,13 +314,14 @@ impl Firecracker {
                     "the jailer failed ({status}); see {}",
                     spec.logs.join("vmm.log").display()
                 ),
-            ));
+            )
+            .after_launch());
         }
         let vm = match self.attach(spec, &jail) {
             Ok(vm) => vm,
             Err(error) => {
                 let _ = self.discard(spec).await;
-                return Err(EngineError::new(ErrorKind::Transient, operation, error));
+                return Err(EngineError::new(ErrorKind::Transient, operation, error).after_launch());
             }
         };
         if let Err(error) = vm.wait_for_api(self.startup_timeout).await {
@@ -382,16 +385,17 @@ impl Firecracker {
 
     /// Ends a VM whose start failed with `error` and returns that error, or
     /// a fatal one if the VM would not end: nothing may start in its place
-    /// while it may still run.
+    /// while it may still run. Either way the error records the launch.
     async fn ended(&self, vm: &FirecrackerVm, error: EngineError) -> EngineError {
-        match self.kill(vm).await {
+        let error = match self.kill(vm).await {
             Ok(()) => error,
             Err(stuck) => EngineError::new(
                 ErrorKind::Fatal,
                 error.operation,
                 format!("{error}; then the VM could not be ended: {stuck}"),
             ),
-        }
+        };
+        error.after_launch()
     }
 
     /// Kills whatever runs in the VM's cgroup, for VMMs the host holds no

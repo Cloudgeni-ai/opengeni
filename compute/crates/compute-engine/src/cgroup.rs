@@ -63,10 +63,13 @@ impl Cgroup {
 
     /// Bytes the group's processes have passed through read and write
     /// system calls (`rchar` plus `wchar` in `/proc/<pid>/io`, every thread
-    /// counted). For a VMM that is its disk, network and vsock traffic
-    /// together. A process that ends between listing and reading is left
-    /// out, so only differences between readings of the same processes mean
-    /// anything.
+    /// counted). For a Firecracker VMM that covers its network device (the
+    /// tap's `readv`/`writev`), its synchronous block device, and vsock
+    /// data it copies straight between guest memory and a socket. Vsock
+    /// data it buffers under backpressure leaves through `send(2)`, which
+    /// these counters miss. A process that ends between listing and reading
+    /// is left out, so only differences between readings of the same
+    /// processes mean anything.
     pub fn io_bytes(&self) -> io::Result<u64> {
         let procs = fs::read_to_string(self.path.join("cgroup.procs"))?;
         let mut total = 0_u64;

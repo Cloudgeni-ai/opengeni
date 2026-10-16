@@ -117,6 +117,11 @@ async fn a_refused_restore_of_a_good_image_keeps_it_and_tries_again() {
     assert_eq!(*lab.world.refuse_restores.lock().unwrap(), 0);
     assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1, "never rebooted");
+    assert_eq!(
+        Lab::sandbox(&lab.status().await, sandbox).launches,
+        4,
+        "the boot, two VMMs that refused the image and the restore"
+    );
     assert_eq!(quarantined(&lab, sandbox), Vec::<String>::new());
     lab.assert_clean();
 }
@@ -382,6 +387,111 @@ async fn traffic_keeps_a_guest_awake_while_its_processor_idles() {
     let still = Instant::now();
     lab.wait_level(sandbox, LevelName::Paused).await;
     assert!(still.elapsed() >= Duration::from_millis(200));
+    lab.assert_clean();
+}
+
+/// Runs a background download in `sandbox` and checks the traffic alone
+/// keeps it awake, then that it pauses once the traffic stops.
+async fn check_traffic_keeps_awake(lab: &Lab, sandbox: Id) {
+    lab.create(sandbox, PAUSE_SOON).await;
+    assert_eq!(lab.run(sandbox, &["stream"]).await, ["ok"]);
+    sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        Lab::sandbox(&lab.status().await, sandbox).level,
+        LevelName::Running,
+        "traffic alone keeps the guest awake"
+    );
+    assert_eq!(lab.run(sandbox, &["still"]).await, ["ok"]);
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn traffic_counts_when_processor_use_cannot_be_read() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    lab.world.unreadable_cpu.store(true, Ordering::SeqCst);
+    check_traffic_keeps_awake(&lab, id(19)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rule_that_ignores_the_processor_still_counts_traffic() {
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        |config| {
+            config.busy = Some(BusyRule {
+                cpu_percent: 0,
+                io_bytes_per_second: 100_000,
+                window: Duration::from_millis(100),
+            });
+        },
+    )
+    .await;
+    check_traffic_keeps_awake(&lab, id(20)).await;
+}
+
+/// A pause and a wake that both fall between two readings: the data the
+/// pause moved is the host's work, and must not keep the guest awake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pause_and_wake_between_two_readings_is_not_guest_activity() {
+    const EVERY: Duration = Duration::from_millis(400);
+    const PAUSE_AFTER: Duration = Duration::from_millis(1_000);
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        |config| {
+            config.sample_every = EVERY;
+            // Shorter than a reading's interval: each reading judges the
+            // traffic since the one before.
+            config.busy = Some(BusyRule {
+                cpu_percent: 50,
+                io_bytes_per_second: 100_000,
+                window: Duration::from_millis(1),
+            });
+        },
+    )
+    .await;
+    let sandbox = id(21);
+    let pause_after_ms = u64::try_from(PAUSE_AFTER.as_millis()).unwrap();
+    lab.create(
+        sandbox,
+        SleepConfig {
+            pause_after_ms: Some(pause_after_ms),
+            ..NEVER
+        },
+    )
+    .await;
+    assert_eq!(lab.run(sandbox, &["quiet"]).await, ["ok"]);
+    lab.world.transition_traffic.store(true, Ordering::SeqCst);
+
+    // Right after a reading, pause and wake again well before the next.
+    let seen = lab.world.samples.load(Ordering::SeqCst);
+    while lab.world.samples.load(Ordering::SeqCst) == seen {
+        sleep(Duration::from_millis(1)).await;
+    }
+    let window = Instant::now();
+    assert_eq!(lab.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    assert_eq!(lab.run(sandbox, &["quiet"]).await, ["ok"]);
+    let woke = Instant::now();
+    assert!(
+        woke - window < EVERY / 2,
+        "the pause and wake took {:?}, too long to fall between readings",
+        woke - window
+    );
+
+    // Had the pause's traffic counted, the next reading would have found
+    // the guest busy and put its pause off past this.
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    let idle = woke.elapsed();
+    assert!(
+        idle < PAUSE_AFTER + EVERY / 2,
+        "paused {idle:?} after the wake, later than its {PAUSE_AFTER:?} idle allowance"
+    );
     lab.assert_clean();
 }
 

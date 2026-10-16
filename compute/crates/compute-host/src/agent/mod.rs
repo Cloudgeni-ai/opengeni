@@ -93,7 +93,10 @@ pub struct HostConfig {
 
 /// When a running sandbox counts as busy: over `window`, its VM used at
 /// least `cpu_percent` of one processor on average, or moved at least
-/// `io_bytes_per_second` on average through its disk, network and vsock.
+/// `io_bytes_per_second` on average through its network and disk (see
+/// [`Engine::io_bytes`]). Vsock traffic needs no rule: it always runs over a
+/// stream the agent proxies, and an open stream keeps a sandbox awake on its
+/// own.
 ///
 /// This is how the host sees work nobody told it about, such as a build or
 /// test run an agent left in the background, or a download that mostly
@@ -129,11 +132,20 @@ impl BusyRule {
         if elapsed_us == 0 {
             return false;
         }
+        // Saturating: a product too large to hold is a bar nothing reaches.
         let cpu = self.cpu_percent > 0
-            && used.as_micros() * 100 >= elapsed_us * u128::from(self.cpu_percent);
+            && used.as_micros().saturating_mul(100)
+                >= elapsed_us.saturating_mul(u128::from(self.cpu_percent));
         let io = self.io_bytes_per_second > 0
-            && u128::from(moved) * 1_000_000 >= elapsed_us * u128::from(self.io_bytes_per_second);
+            && u128::from(moved).saturating_mul(1_000_000)
+                >= elapsed_us.saturating_mul(u128::from(self.io_bytes_per_second));
         cpu || io
+    }
+
+    /// Whether the rule reads processor use at all.
+    #[must_use]
+    pub fn watches_cpu(&self) -> bool {
+        self.cpu_percent > 0
     }
 
     /// Whether the rule reads traffic at all.
@@ -315,13 +327,16 @@ struct Running {
     started: Instant,
 }
 
-/// The start of one VM's current activity window.
+/// The start of one VM's current activity window. Each reading is kept only
+/// when the rule wants it and it worked, so one signal failing leaves the
+/// other to judge alone.
 #[derive(Clone, Copy, Debug)]
 struct ActivityWindow {
     incarnation: u64,
     started: Instant,
-    cpu: Duration,
-    /// Traffic so far, when the rule reads it and the reading worked.
+    /// Processor time so far.
+    cpu: Option<Duration>,
+    /// Traffic so far.
     io: Option<u64>,
 }
 

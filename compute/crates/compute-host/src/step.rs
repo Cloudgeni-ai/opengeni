@@ -592,11 +592,14 @@ impl<E: Engine, S: Store> Job<E, S> {
                 self.launches += 1;
                 vm
             }
-            Err(error) if error.kind == ErrorKind::MemoryLost => {
-                let outcome = self.rejected(&images, &image, &live_memory, &error).await;
-                return (outcome, After::NoVm);
+            Err(error) => {
+                self.launches += u32::from(error.launched);
+                if error.kind == ErrorKind::MemoryLost {
+                    let outcome = self.rejected(&images, &image, &live_memory, &error).await;
+                    return (outcome, After::NoVm);
+                }
+                return (failure(&error), After::NoVm);
             }
-            Err(error) => return (failure(&error), After::NoVm),
         };
         let archived = self.record.archived;
         // A restore continues the saved execution: the generation stays.
@@ -836,7 +839,10 @@ impl<E: Engine, S: Store> Job<E, S> {
                 self.launches += 1;
                 (Outcome::Done, After::New(vm, LiveMemory::booted()))
             }
-            Err(error) => (failure(&error), After::NoVm),
+            Err(error) => {
+                self.launches += u32::from(error.launched);
+                (failure(&error), After::NoVm)
+            }
         }
     }
 

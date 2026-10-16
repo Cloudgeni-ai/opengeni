@@ -481,6 +481,41 @@ class GuestInternals(unittest.TestCase):
         names = [event["name"] for event in watcher.read_events()]
         self.assertIn("old/file", names)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_directory_that_leaves_and_returns_renamed_keeps_its_watches(self) -> None:
+        # Out and back in are two moves with two cookies; the kernel gives
+        # the returning directory the watches it left with.
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        os.rename(root / "old", self.scratch / "elsewhere")
+        watcher.read_events()
+        self.assertIsNotNone(watcher.settle_seconds(), "the move away is pending")
+        os.rename(self.scratch / "elsewhere", root / "new")
+        watcher.read_events()
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        watcher.read_events()
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertIn(root / "new", watcher.watched().values())
+        self.assertIn(root / "new" / "inner", watcher.watched().values())
+        (root / "new" / "inner" / "file").touch()
+        names = [event["name"] for event in watcher.read_events()]
+        self.assertIn("new/inner/file", names)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_directory_that_leaves_and_returns_in_one_read_keeps_its_watches(self) -> None:
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        os.rename(root / "old", self.scratch / "elsewhere")
+        os.rename(self.scratch / "elsewhere", root / "new")
+        watcher.read_events()
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        watcher.read_events()
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertIn(root / "new" / "inner", watcher.watched().values())
+        (root / "new" / "inner" / "file").touch()
+        names = [event["name"] for event in watcher.read_events()]
+        self.assertIn("new/inner/file", names)
+
 
 if __name__ == "__main__":
     unittest.main()

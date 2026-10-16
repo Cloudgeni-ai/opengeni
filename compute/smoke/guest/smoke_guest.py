@@ -393,6 +393,9 @@ class Inotify:
     tree comes in a later read; only then does it count as moved out.
     Both outcomes act on the watches the directory had when it left, so a
     new directory made at the old path in the meantime keeps its own.
+    A watch the tree takes back before then, as when the same directory
+    returns under another name (a move with a cookie of its own), belongs
+    to the tree again and is left alone when the departure settles.
     """
 
     def __init__(
@@ -416,6 +419,8 @@ class Inotify:
         # Directories moved away whose arrival is not seen yet: by cookie,
         # their old path, when to give up waiting and the watches they took.
         self._departed: dict[int, tuple[Path, float, list[int]]] = {}
+        # Which pending departure each of those watches still belongs to.
+        self._departing: dict[int, int] = {}
         self._watch(root)
         if recursive:
             self._watch_below(root)
@@ -434,6 +439,9 @@ class Inotify:
             error = ctypes.get_errno()
             raise OSError(error, f"cannot watch {directory}: {os.strerror(error)}")
         self._dirs[descriptor] = directory
+        # The kernel hands back the watch an inode already has: a directory
+        # that left and came back is the tree's again, not its departure's.
+        self._departing.pop(descriptor, None)
 
     def _watch_below(self, top: Path) -> None:
         """Watches every directory below `top`. One that vanishes on the way
@@ -462,6 +470,24 @@ class Inotify:
             if self._dirs.pop(descriptor, None) is not None:
                 self._remove(self._fd, descriptor)
 
+    def _depart(self, cookie: int, path: Path) -> None:
+        """Holds the watches at and below `path` for the move `cookie`."""
+
+        taken = [descriptor for descriptor, _ in self._below(path)]
+        self._departed[cookie] = (path, self._clock() + MOVE_PAIR_SECONDS, taken)
+        for descriptor in taken:
+            self._departing[descriptor] = cookie
+
+    def _settle(self, cookie: int) -> tuple[Path, list[int]]:
+        """Ends the departure `cookie`: its old path and the watches it
+        still holds."""
+
+        old, _, taken = self._departed.pop(cookie)
+        held = [descriptor for descriptor in taken if self._departing.get(descriptor) == cookie]
+        for descriptor in held:
+            del self._departing[descriptor]
+        return old, held
+
     def read_events(self) -> list[dict[str, str]]:
         """The events waiting now, possibly none. Call it again within
         `settle_seconds` even without new events, so a directory moved out
@@ -473,10 +499,10 @@ class Inotify:
             buffer = b""
         events = self.parse(buffer)
         now = self._clock()
-        for cookie, (_, deadline, descriptors) in list(self._departed.items()):
+        for cookie, (_, deadline, _) in list(self._departed.items()):
             if deadline <= now:
-                del self._departed[cookie]
-                self._moved_out(descriptors)
+                _, held = self._settle(cookie)
+                self._moved_out(held)
         return events
 
     def settle_seconds(self) -> float | None:
@@ -501,15 +527,15 @@ class Inotify:
             directory = self._dirs.get(descriptor)
             if mask & IN_IGNORED or directory is None:
                 self._dirs.pop(descriptor, None)
+                self._departing.pop(descriptor, None)
                 continue
             path = directory / os.fsdecode(raw) if raw else directory
             if self._recursive and mask & IN_ISDIR:
                 if mask & IN_MOVED_FROM:
-                    taken = [descriptor for descriptor, _ in self._below(path)]
-                    self._departed[cookie] = (path, self._clock() + MOVE_PAIR_SECONDS, taken)
+                    self._depart(cookie, path)
                 elif mask & IN_MOVED_TO and cookie in self._departed:
-                    old, _, taken = self._departed.pop(cookie)
-                    self._moved_within(old, path, taken)
+                    old, held = self._settle(cookie)
+                    self._moved_within(old, path, held)
                 elif mask & (IN_CREATE | IN_MOVED_TO):
                     # Anything inside may predate the watch: a directory
                     # moved in arrives full, and a new one fills fast.

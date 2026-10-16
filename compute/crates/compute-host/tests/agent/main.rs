@@ -97,6 +97,14 @@ struct World {
     /// VMs that cannot be checked on, by name: adopting one fails as when
     /// its VMM does not answer.
     unadoptable: Mutex<HashSet<String>>,
+    /// While set, no VM's processor time can be read.
+    unreadable_cpu: AtomicBool,
+    /// While set, every pause moves a burst of data, as a VMM writing a
+    /// snapshot does: work the host does, not the guest.
+    transition_traffic: AtomicBool,
+    /// Traffic readings taken, so a test can line up with the agent's
+    /// sampling.
+    samples: AtomicUsize,
 }
 
 /// What a fake VM process is, independent of any agent's handle to it.
@@ -359,11 +367,13 @@ impl Engine for Fake {
             left.checked_sub(1).map(|fewer| *left = fewer)
         };
         if refuse.is_some() {
+            // As Firecracker does: the VMM starts, then refuses the load.
             return Err(EngineError::new(
                 ErrorKind::MemoryLost,
                 "restore",
                 "snapshot load refused",
-            ));
+            )
+            .after_launch());
         }
         let MemorySource::File(path) = &files.memory else {
             panic!("a bare-metal host restores local images from files");
@@ -380,6 +390,10 @@ impl Engine for Fake {
     }
 
     fn pause(&self, vm: &FakeVm) -> impl Future<Output = Result<(), EngineError>> + Send {
+        if self.world.transition_traffic.load(Ordering::SeqCst) {
+            // A second of streaming: a million bytes.
+            vm.work.lock().unwrap().io.used += Duration::from_secs(1);
+        }
         ready(self.set_paused(vm, "pause", true))
     }
 
@@ -521,10 +535,18 @@ impl Engine for Fake {
     }
 
     fn cpu_time(&self, vm: &FakeVm) -> Result<Duration, EngineError> {
+        if self.world.unreadable_cpu.load(Ordering::SeqCst) {
+            return Err(EngineError::new(
+                ErrorKind::Transient,
+                "cpu_time",
+                "cpu.stat unreadable",
+            ));
+        }
         Ok(vm.work.lock().unwrap().cpu.total())
     }
 
     fn io_bytes(&self, vm: &FakeVm) -> Result<u64, EngineError> {
+        self.world.samples.fetch_add(1, Ordering::SeqCst);
         let streamed = vm.work.lock().unwrap().io.total();
         Ok(u64::try_from(streamed.as_micros()).unwrap_or(u64::MAX))
     }

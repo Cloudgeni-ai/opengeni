@@ -24,6 +24,9 @@ pub struct EngineError {
     pub operation: &'static str,
     /// What went wrong, for logs.
     pub message: String,
+    /// Whether a VMM process was started before the failure, so the host
+    /// can count every launch, failed ones included.
+    pub launched: bool,
     #[source]
     source: Option<Box<dyn StdError + Send + Sync>>,
 }
@@ -36,6 +39,7 @@ impl EngineError {
             kind,
             operation,
             message: message.into(),
+            launched: false,
             source: None,
         }
     }
@@ -51,6 +55,7 @@ impl EngineError {
             kind,
             operation,
             message: source.to_string(),
+            launched: false,
             source: Some(Box::new(source)),
         }
     }
@@ -59,5 +64,12 @@ impl EngineError {
     #[must_use]
     pub fn io(operation: &'static str, source: io::Error) -> Self {
         Self::caused_by(ErrorKind::Transient, operation, source)
+    }
+
+    /// The same failure, marked as coming after a VMM process started.
+    #[must_use]
+    pub fn after_launch(mut self) -> Self {
+        self.launched = true;
+        self
     }
 }

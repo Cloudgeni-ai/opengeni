@@ -1,5 +1,7 @@
 //! Periodic sampling of host memory and of VM processor use and traffic.
 
+use std::time::Duration;
+
 use compute_core::{Input, Level, SandboxId};
 use compute_engine::Engine;
 use tokio::time::Instant;
@@ -41,9 +43,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Finds running sandboxes whose VMs used enough processor time, or
     /// moved enough data, over the last window. A window starts afresh
-    /// whenever the sandbox is not simply running, so time spent waking or
-    /// pausing never counts. Traffic that cannot be read leaves the
-    /// processor rule to decide alone.
+    /// whenever the sandbox is not simply running, and whenever a step
+    /// starts for it ([`HostAgent::start_step`]), so the work of waking,
+    /// pausing or saving never counts, even when a whole pause and resume
+    /// falls between two readings. Each signal counts only when it was read
+    /// at both ends of the window, so one that cannot be read leaves the
+    /// other to decide alone.
     pub(super) fn sample_busy(&mut self, rule: BusyRule) -> Vec<SandboxId> {
         let now = Instant::now();
         let mut busy = Vec::new();
@@ -56,15 +61,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 slot.activity = None;
                 continue;
             };
-            let Ok(cpu) = self.engine.cpu_time(&live.vm) else {
-                slot.activity = None;
-                continue;
-            };
-            let io = if rule.watches_io() {
-                self.engine.io_bytes(&live.vm).ok()
-            } else {
-                None
-            };
+            let cpu = rule
+                .watches_cpu()
+                .then(|| self.engine.cpu_time(&live.vm).ok())
+                .flatten();
+            let io = rule
+                .watches_io()
+                .then(|| self.engine.io_bytes(&live.vm).ok())
+                .flatten();
             let fresh = ActivityWindow {
                 incarnation: live.incarnation,
                 started: now,
@@ -75,11 +79,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Some(window) if window.incarnation == live.incarnation => {
                     let elapsed = now.duration_since(window.started);
                     if elapsed >= rule.window {
-                        let moved = match (window.io, io) {
-                            (Some(before), Some(after)) => after.saturating_sub(before),
-                            _ => 0,
-                        };
-                        if rule.is_busy(cpu.saturating_sub(window.cpu), moved, elapsed) {
+                        let used = window
+                            .cpu
+                            .zip(cpu)
+                            .map_or(Duration::ZERO, |(before, after)| {
+                                after.saturating_sub(before)
+                            });
+                        let moved = window
+                            .io
+                            .zip(io)
+                            .map_or(0, |(before, after)| after.saturating_sub(before));
+                        if rule.is_busy(used, moved, elapsed) {
                             busy.push(*id);
                         }
                         slot.activity = Some(fresh);
