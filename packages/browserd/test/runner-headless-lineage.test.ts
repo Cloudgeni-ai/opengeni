@@ -35,6 +35,7 @@ async function fixture() {
     }); setInterval(()=>{},60000);`;
   const daemonScript = `import {writeFile,symlink} from "node:fs/promises";
     const browser=Bun.spawn([process.execPath,"--no-env-file","-e",${JSON.stringify(childScript)},${JSON.stringify(`--user-data-dir=${profileDirectory}`)}],{stdout:"ignore",stderr:"ignore"});
+    browser.exited.then(exitCode=>console.log(JSON.stringify({exitedBrowserPid:browser.pid,exitCode})));
     await writeFile(${JSON.stringify(pidFile)},String(process.pid)+"\\n",{mode:0o600});
     await symlink("synthetic-host-"+browser.pid,${JSON.stringify(join(profileDirectory, "SingletonLock"))});
     console.log(JSON.stringify({browserPid:browser.pid}));setInterval(()=>{},60000);`;
@@ -104,6 +105,27 @@ async function fixture() {
         sessionName: "replacement",
         recoverOwnedProcess: receipt,
       });
+    },
+    async browserExited() {
+      // The runner proves exit, including a Linux zombie; only this synthetic
+      // parent can acknowledge reaping before the stricter PID-absence check.
+      const exitReader = daemon.stdout.getReader();
+      let exitOutput = "";
+      try {
+        for (;;) {
+          const chunk = await exitReader.read();
+          if (chunk.done) throw new Error("synthetic daemon exited before reaping its browser");
+          exitOutput += new TextDecoder().decode(chunk.value);
+          if (exitOutput.includes("\n")) {
+            return JSON.parse(exitOutput.slice(0, exitOutput.indexOf("\n"))) as {
+              exitedBrowserPid: number;
+              exitCode: number;
+            };
+          }
+        }
+      } finally {
+        exitReader.releaseLock();
+      }
     },
     otherProcess() {
       const child = Bun.spawn(
@@ -315,48 +337,62 @@ test.skipIf(!native)(
   15_000,
 );
 
-test.skipIf(!native)(
-  "cleanup birth mismatch preserves both processes; proved browser stop permits exact daemon cleanup retry",
-  async () => {
-    const f = await fixture();
-    try {
-      const receipt = (await f.attest())!;
-      const replacement = await f.reattach(receipt);
-      const other = f.otherProcess();
-      const extraFile = join(f.runDirectory, "appeared-after-attachment.pid");
-      await writeFile(extraFile, String(other.pid), { mode: 0o600 });
-      await expect(replacement.terminate()).rejects.toThrow("lineage");
-      expect(() => process.kill(f.browserPid, 0)).not.toThrow();
-      expect(() => process.kill(f.daemon.pid, 0)).not.toThrow();
-      expect(() => process.kill(other.pid, 0)).not.toThrow();
-      await rm(extraFile);
-      const daemonIdentity = (replacement as unknown as { predecessorDaemon: { birth: string } })
-        .predecessorDaemon;
-      const birth = daemonIdentity.birth;
-      daemonIdentity.birth = "synthetic-reused-pid-birth";
-      await expect(replacement.terminate()).rejects.toThrow("birth");
-      expect(() => process.kill(f.browserPid, 0)).not.toThrow();
-      expect(() => process.kill(f.daemon.pid, 0)).not.toThrow();
-      daemonIdentity.birth = birth;
-      await writeFile(
-        join(f.directory, "corrupt-on-stop.json"),
-        JSON.stringify({ pid: other.pid }),
-        {
-          mode: 0o600,
-        },
-      );
-      await expect(replacement.terminate()).rejects.toThrow("lineage");
-      expect(() => process.kill(f.browserPid, 0)).toThrow();
-      expect(() => process.kill(f.daemon.pid, 0)).not.toThrow();
-      expect(() => process.kill(other.pid, 0)).not.toThrow();
-      await writeFile(f.pidFile, String(f.daemon.pid), { mode: 0o600 });
-      await replacement.terminate();
-      await f.daemon.exited;
-      expect(() => process.kill(f.daemon.pid, 0)).toThrow();
-      expect(() => process.kill(other.pid, 0)).not.toThrow();
-    } finally {
-      await f.close();
-    }
-  },
-  15_000,
-);
+for (const holdReaper of [false, true]) {
+  test.skipIf(!native || (holdReaper && process.platform !== "linux"))(
+    "cleanup birth mismatch preserves both processes; proved browser stop permits exact daemon cleanup retry" +
+      (holdReaper ? " with parent reaping held" : ""),
+    async () => {
+      const f = await fixture();
+      try {
+        const receipt = (await f.attest())!;
+        const replacement = await f.reattach(receipt);
+        const other = f.otherProcess();
+        const extraFile = join(f.runDirectory, "appeared-after-attachment.pid");
+        await writeFile(extraFile, String(other.pid), { mode: 0o600 });
+        await expect(replacement.terminate()).rejects.toThrow("lineage");
+        expect(() => process.kill(f.browserPid, 0)).not.toThrow();
+        expect(() => process.kill(f.daemon.pid, 0)).not.toThrow();
+        expect(() => process.kill(other.pid, 0)).not.toThrow();
+        await rm(extraFile);
+        const daemonIdentity = (replacement as unknown as { predecessorDaemon: { birth: string } })
+          .predecessorDaemon;
+        const birth = daemonIdentity.birth;
+        daemonIdentity.birth = "synthetic-reused-pid-birth";
+        await expect(replacement.terminate()).rejects.toThrow("birth");
+        expect(() => process.kill(f.browserPid, 0)).not.toThrow();
+        expect(() => process.kill(f.daemon.pid, 0)).not.toThrow();
+        daemonIdentity.birth = birth;
+        // Keep the parent alive but unable to reap, deterministically exercising
+        // the exit/reap gap that made the original immediate kill(pid, 0) flaky.
+        if (holdReaper) f.daemon.kill("SIGSTOP");
+        await writeFile(
+          join(f.directory, "corrupt-on-stop.json"),
+          JSON.stringify({ pid: other.pid }),
+          {
+            mode: 0o600,
+          },
+        );
+        await expect(replacement.terminate()).rejects.toThrow("lineage");
+        if (holdReaper) {
+          const stat = await readFile(`/proc/${f.browserPid}/stat`, "utf8");
+          expect(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0]).toBe("Z");
+          expect(() => process.kill(f.browserPid, 0)).not.toThrow();
+          f.daemon.kill("SIGCONT");
+        }
+        expect(await f.browserExited()).toEqual({ exitedBrowserPid: f.browserPid, exitCode: 0 });
+        expect(() => process.kill(f.browserPid, 0)).toThrow();
+        expect(() => process.kill(f.daemon.pid, 0)).not.toThrow();
+        expect(() => process.kill(other.pid, 0)).not.toThrow();
+        await writeFile(f.pidFile, String(f.daemon.pid), { mode: 0o600 });
+        await replacement.terminate();
+        await f.daemon.exited;
+        expect(() => process.kill(f.daemon.pid, 0)).toThrow();
+        expect(() => process.kill(other.pid, 0)).not.toThrow();
+      } finally {
+        if (holdReaper && f.daemon.exitCode === null) f.daemon.kill("SIGCONT");
+        await f.close();
+      }
+    },
+    15_000,
+  );
+}
