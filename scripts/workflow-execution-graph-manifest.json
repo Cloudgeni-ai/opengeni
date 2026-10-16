@@ -21,6 +21,10 @@
       "sha256": "474f26fa2e86ea63beae0c1a2604401e61f74b350d390b5cebad116bfeb6459e"
     },
     {
+      "path": ".github/workflows/browser-engine-pins.yml",
+      "sha256": "db9e34041155dcdd512dabf16dce76b1990f7479ea5d3cc5fcf251306caca928"
+    },
+    {
       "path": ".github/workflows/ci.yml",
       "sha256": "88048193cf7b2691ae30cd07a59c358cd3ad776391e42ff63b55d7cec6177951"
     },
@@ -540,6 +544,18 @@
       "job": "wasm",
       "step": "Verify exact source",
       "sha256": "7c01541f3dc7c536488a007902ea1453cd191ebb6c348edcbac345077c0dcb25"
+    },
+    {
+      "workflow": ".github/workflows/browser-engine-pins.yml",
+      "job": "update",
+      "step": "Open or update the pull request",
+      "sha256": "7bbb7ad1c6768781bd6388bc7b5e1e0c437a3e8789a9b2e4da1db47259c50cd8"
+    },
+    {
+      "workflow": ".github/workflows/browser-engine-pins.yml",
+      "job": "update",
+      "step": "Resolve and rewrite pins",
+      "sha256": "0999ae760fbe71d0a3f60befc4d9ffe416c752e635269ba0399850d883df6e3f"
     },
     {
       "workflow": ".github/workflows/ci.yml",
