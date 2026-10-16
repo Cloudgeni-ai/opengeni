@@ -484,6 +484,8 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   // spent seconds compiling queries that execute in milliseconds (the session
   // list's tree-stats query: 0.4 s of work behind 3.8 s of JIT). Transaction-local,
   // so it is safe behind transaction poolers and never leaks to other work.
+  const sessionActor = sessionRlsActorContext.getStore();
+  const siteViewer = siteViewerRlsContext.getStore();
   await db.execute(sql`select
     set_config('opengeni.account_id', ${context.accountId}, true),
     set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true),
@@ -493,10 +495,7 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
     set_config('opengeni.session_variable_set_attachments_v1', '1', true),
     set_config('opengeni.shared_personal_choice_v1', '1', true),
     set_config('opengeni.site_session_audience_v1', '1', true),
-    set_config('jit', 'off', true)`);
-  const sessionActor = sessionRlsActorContext.getStore();
-  const siteViewer = siteViewerRlsContext.getStore();
-  await db.execute(sql`select
+    set_config('jit', 'off', true),
     set_config('opengeni.agent_root_session_id', ${sessionActor?.agentRootSessionId ?? ""}, true),
     set_config('opengeni.site_id', ${siteViewer?.siteId ?? ""}, true),
     set_config('opengeni.site_viewer_principal', ${siteViewer?.principal ?? ""}, true)`);
