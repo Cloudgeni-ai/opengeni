@@ -609,18 +609,22 @@ const REFUSED: &str = "ECONNREFUSED";
 /// should. IPv4 attempts must meet the firewall's reset; guests have no
 /// IPv6 route beyond their link, so IPv6 attempts may also fail before
 /// leaving the guest or meet the firewall's ICMP refusal. Nothing may be
-/// left to time out, as a dropped packet would be.
+/// left to time out, as a dropped packet would be, except a link-local
+/// address: IPv6 is off in the sandbox's namespace, so neighbour discovery
+/// goes unanswered and gives up after about as long as a probe waits.
 fn blocked_as_expected(target: &str, outcome: &str) -> bool {
+    const V6_FAILURES: [&str; 5] = [
+        "ECONNREFUSED",
+        "ENETUNREACH",
+        "EHOSTUNREACH",
+        "EACCES",
+        "EADDRNOTAVAIL",
+    ];
     let mapped_v4 = target.starts_with("[::ffff:");
-    if target.starts_with('[') && !mapped_v4 {
-        [
-            "ECONNREFUSED",
-            "ENETUNREACH",
-            "EHOSTUNREACH",
-            "EACCES",
-            "EADDRNOTAVAIL",
-        ]
-        .contains(&outcome)
+    if target.starts_with("[fe80:") {
+        outcome == "timeout" || V6_FAILURES.contains(&outcome)
+    } else if target.starts_with('[') && !mapped_v4 {
+        V6_FAILURES.contains(&outcome)
     } else {
         outcome == REFUSED
     }
@@ -656,6 +660,9 @@ fn check_probes(
             blocked_as_expected(target, outcome),
             "{context}: {target} was not blocked as expected: {line}"
         );
+        if outcome == "timeout" {
+            continue;
+        }
         let micros: u64 = fields[2].parse().unwrap();
         #[allow(clippy::cast_precision_loss)]
         refusals.push(micros as f64 / 1e3);
@@ -780,8 +787,9 @@ fn listen_everywhere() -> (TcpListener, u16) {
 
 /// A guest that takes another source address gets nowhere with it, and
 /// one that changes its MAC address still reaches nothing it may not.
-/// Packets from a foreign source are refused with a reset addressed to that
-/// source, which never finds its way back, so such attempts time out.
+/// Packets from a foreign source or MAC are refused with a reset addressed
+/// to the guest's real addresses, which the spoofer never sees, so such
+/// attempts time out; none may ever connect.
 async fn check_spoofing(client: &Client, targets: &[String], lan: &str, trusted: bool) {
     let mut outside = vec!["1.1.1.1:80".to_owned(), lan.to_owned()];
     outside.extend(
@@ -809,15 +817,20 @@ async fn check_spoofing(client: &Client, targets: &[String], lan: &str, trusted:
         "ip link set dev eth0 address 06:00:00:00:00:99\n{}\nip link set dev eth0 address 06:00:a9:fe:00:15",
         probe_script(targets)
     );
+    // Replies go to the MAC the host knows the guest by, so what the new
+    // MAC can see is only whether anything blocked answered at all.
     let (output, _) = exec(client, id(0), &script).await;
     let lines: Vec<&str> = output.lines().collect();
-    let open: &[&str] = if trusted { &[lan] } else { &[] };
-    check_probes(
-        &format!("spoofed MAC, trusted={trusted}"),
-        &lines,
-        targets,
-        open,
-    );
+    assert_eq!(lines.len(), targets.len(), "spoofed MAC: {output}");
+    for (line, target) in lines.iter().zip(targets) {
+        if trusted && target.as_str() == lan {
+            continue;
+        }
+        assert!(
+            line.split_whitespace().nth(1) != Some("open"),
+            "spoofed MAC, trusted={trusted}: {target} got through: {line}"
+        );
+    }
 }
 
 /// On a trusted host guests reach the local network; on any other host the
