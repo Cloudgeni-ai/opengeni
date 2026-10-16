@@ -95,7 +95,7 @@ export class CanaryReceiptStore implements CanaryCustody {
   ) {
     if (
       !/^[a-f0-9]{40}$/.test(identity.source) ||
-      identity.source !== identity.workflowSource ||
+      !/^[a-f0-9]{40}$/.test(identity.workflowSource) ||
       !/^[1-9]\d*$/.test(identity.runId) ||
       !/^[1-9]\d*$/.test(identity.attempt)
     ) {
@@ -114,7 +114,9 @@ export class CanaryReceiptStore implements CanaryCustody {
     const bytes = Buffer.from(
       JSON.stringify(
         {
-          protocol: 1,
+          // V1 is the canonical same-source recovery protocol. Split-source V2
+          // must not be interpreted by that verifier as a canonical publisher.
+          protocol: this.identity.source === this.identity.workflowSource ? 1 : 2,
           kind,
           identity: this.identity,
           recordedAt: new Date().toISOString(),

@@ -1934,10 +1934,14 @@ SDK/React/Codemode/ogtool manifest versions. Before a canary rollout, publish pa
 from the same source using `publish-canary.yml`, then set
 `OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
 `site-package-versions-<sha>` artifact. The publisher runs from protected `main`
-and admits only the exact commit the workflow run is on: npm provenance attests
-that commit, so the workflow, checkout and published source must all match, and
-an older ancestor is rejected. If `main` moves before the dispatch, publish the
-new `main` commit instead. The runtime includes these pins beside
+and accepts its own commit or a normally merged ancestor with successful exact-source
+main CI. For an ancestor, its controller and package source remain separate and
+the signed provenance names both; the run's head SHA is not the package source.
+Select the source-named artifact from the successful canonical publisher run.
+Environment approval and ordinary image/CI/deployment checks remain mandatory.
+Split-source failed receipts use V2 and cannot use the existing V1 receipt-only
+reconciliation lane; stop for reviewed recovery rather than relabel or replay them.
+See `CONTRIBUTING.md` for the admission and provenance contract. The runtime includes these pins beside
 the Sites skill. Never use a mutable dist-tag as the deployment pin. Production
 sandbox images do not include Site package archives; the local development
 image helper alone enables `OPENGENI_LOCAL_SITE_PACKAGES=true` for unreleased work.

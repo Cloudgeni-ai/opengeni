@@ -31,10 +31,10 @@ describe("staging / production split workflows", () => {
     expect(source).toContain("PRs into production must use head main (promote) or hotfix/*.");
   });
 
-  test("canary publication uses the exact workflow source and cannot move latest", () => {
+  test("canary publication separates trusted controller from admitted source and cannot move latest", () => {
     const source = workflow("publish-canary.yml");
     const admission = source.indexOf("name: Admit protected main source");
-    const checkout = source.indexOf("name: Check out source");
+    const checkout = source.indexOf("name: Check out controller");
     const install = source.indexOf("name: Install dependencies");
     const publish = source.indexOf("name: Publish canary versions");
     expect(admission).toBeGreaterThan(-1);
@@ -42,11 +42,19 @@ describe("staging / production split workflows", () => {
     expect(checkout).toBeLessThan(install);
     expect(install).toBeLessThan(publish);
     expect(source).toContain('[[ "$GITHUB_REF" == "refs/heads/main" ]]');
-    expect(source).toContain('[[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]');
+    expect(source.indexOf("name: Admit exact source and CI")).toBeLessThan(
+      source.indexOf("name: Check out admitted source"),
+    );
+    expect(source.indexOf("name: Check out admitted source")).toBeLessThan(install);
+    expect(source).toContain("bun scripts/canary-source-admission.ts");
     expect(source).not.toContain("export GITHUB_SHA=");
     expect(source).toContain('[[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]');
     expect(source).toContain('ref: "${{ github.sha }}"');
-    expect(source).toContain('[[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]');
+    expect(source).toContain(
+      '[[ "$(git -C "$RUNNER_TEMP/canary-source" rev-parse HEAD)" == "$SOURCE_SHA" ]]',
+    );
+    expect(source).toContain("OPENGENI_RELEASE_SOURCE_ROOT: ${{ runner.temp }}/canary-source");
+    expect(source).toContain("environment: package-release");
     expect(source).not.toContain("inputs.source_sha || github.sha");
     expect(source).toContain("bun scripts/publish-canary.ts");
     expect(source).toContain("group: publish-canary");

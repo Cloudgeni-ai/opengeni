@@ -442,6 +442,21 @@ describe("protected recovery admission", () => {
 });
 
 describe("immutable origin receipts and archives", () => {
+  test("split-source V2 receipts cannot masquerade as canonical V1 recovery", () => {
+    const f = fixture();
+    const [path, row] = [...f.members].find(([name]) => name.endsWith(".json"))!;
+    const record = JSON.parse(row.toString());
+    record.protocol = 2;
+    f.members.set(path, bytes(record));
+    expect(() => acknowledgedPlan(f.members, origin, f.cohort)).toThrow(
+      "Unsupported publisher receipt",
+    );
+    const provider = providerFixture();
+    provider.run.head_sha = controller.source;
+    expect(() =>
+      admitFailedPublisher(provider.run, provider.jobs, provider.artifacts, origin),
+    ).toThrow("split-source V2");
+  });
   test("flat ordinal ZIP, complete acknowledgement links and manifest match", () => {
     const f = fixture(),
       retained = publisherZip(zip([...f.members]));
