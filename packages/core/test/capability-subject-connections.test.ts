@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as capabilities from "@opengeni/capabilities";
 import { randomBytes } from "node:crypto";
+import { sql } from "drizzle-orm";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { CapabilityCatalogItem, type AccessGrant } from "@opengeni/contracts";
 import {
@@ -17,6 +18,7 @@ import {
   listConnectorToolPermissionPolicies,
   upsertCapabilityCatalogItem,
   updateWorkspaceSettings,
+  withWorkspaceSubjectRls,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -161,6 +163,41 @@ async function createMcpCapability(
 }
 
 describe("subject-owned capability connection references", () => {
+  test("catalog reads serialize savepoints and preserve the enclosing actor", async () => {
+    if (!available) throw new Error("Catalog transaction regression requires PostgreSQL");
+    const workspace = await freshWorkspace();
+    await withWorkspaceSubjectRls(db, workspace.workspaceId, "catalog-owner", async (tx) => {
+      const transaction = tx.transaction.bind(tx);
+      let active = 0;
+      let maximum = 0;
+      const spy = spyOn(tx, "transaction").mockImplementation(async (...args) => {
+        active += 1;
+        maximum = Math.max(maximum, active);
+        try {
+          return await transaction(...args);
+        } finally {
+          active -= 1;
+        }
+      });
+      try {
+        await buildCapabilityCatalog({ db: tx, ...workspace, settings });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(maximum).toBe(1);
+      expect(active).toBe(0);
+      const rows = await tx.execute(sql`select
+        current_setting('opengeni.account_id') as account,
+        current_setting('opengeni.workspace_id') as workspace,
+        current_setting('opengeni.subject_id') as subject`);
+      expect(rows[0]).toEqual({
+        account: workspace.accountId,
+        workspace: workspace.workspaceId,
+        subject: "catalog-owner",
+      });
+    });
+  });
+
   test.each([
     {
       provider: "gmailmcp.googleapis.com",

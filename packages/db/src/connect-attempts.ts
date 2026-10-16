@@ -385,9 +385,16 @@ export async function finishConnectOperation(
       ...row.receipts,
       [input.operationId]: { digest: input.inputDigest, result: next },
     };
-    await tx.execute(sql`update connect_attempts set projection = ${JSON.stringify(next)}::jsonb,
+    const persisted = await rawRows<{ id: string }>(
+      tx,
+      sql`update connect_attempts set projection = ${JSON.stringify(next)}::jsonb,
       receipts = ${JSON.stringify(receipts)}::jsonb, operation_id = null, operation_digest = null,
-      updated_at = now() where id = ${row.id}::uuid`);
+      updated_at = now() where id = ${row.id}::uuid returning id`,
+    );
+    // A callback that loses the actor scope must roll back its writes, not
+    // report success while RLS silently prevents the completion receipt.
+    if (persisted.length !== 1 || persisted[0]?.id !== row.id)
+      throw new ConnectAttemptConflictError("Connect completion receipt was not persisted");
     transition = [current, next];
     return next;
   });
