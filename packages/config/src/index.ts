@@ -1834,6 +1834,8 @@ const SettingsSchema = z.object({
   stripePublishableKey: z.string().optional(),
   stripeWebhookSecret: z.string().optional(),
   stripeCreditsProductId: z.string().optional(),
+  // Enables subscription service paths only; top-up billing remains independent.
+  subscriptionPlansEnabled: EnvBoolean.default(false),
   mcpServers: z
     .array(
       z.object({
@@ -5248,6 +5250,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     stripePublishableKey: optional("OPENGENI_STRIPE_PUBLISHABLE_KEY"),
     stripeWebhookSecret: optional("OPENGENI_STRIPE_WEBHOOK_SECRET"),
     stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
+    subscriptionPlansEnabled: optional("OPENGENI_SUBSCRIPTION_PLANS_ENABLED"),
     mcpServers: parseMcpServers(optional("OPENGENI_MCP_SERVERS")),
   };
   const parsed = SettingsSchema.parse(raw);

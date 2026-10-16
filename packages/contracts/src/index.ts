@@ -5868,6 +5868,14 @@ export {
   SubscriptionPlanCatalog,
   BillingPlanBalance,
 } from "./subscription-plans";
+export {
+  BillingSubscriptionCatalog,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
+  ChangeBillingSubscriptionRequest,
+  CancelBillingSubscriptionRequest,
+  BillingSubscriptionChange,
+} from "./billing-subscriptions";
 import { BillingPlanBalance } from "./subscription-plans";
 
 export const BillingBalance = /* @__PURE__ */ defineSchema(() =>

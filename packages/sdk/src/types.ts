@@ -9227,6 +9227,12 @@ export type {
   BillingPlanBalance,
   SubscriptionPlan,
   SubscriptionPlanCatalog,
+  BillingSubscriptionCatalog,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
+  ChangeBillingSubscriptionRequest,
+  CancelBillingSubscriptionRequest,
+  BillingSubscriptionChange,
 } from "@opengeni/contracts";
 import type { BillingPlanBalance } from "@opengeni/contracts";
 
