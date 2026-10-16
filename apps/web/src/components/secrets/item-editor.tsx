@@ -189,6 +189,10 @@ export function ItemEditorPage({
   );
   const [errors, setErrors] = useState<Errors>({ fields: {} });
   const [formError, setFormError] = useState<ReactNode>(null);
+  // A completed create must not be submitted again while navigation settles.
+  // The ref also fences two submits before React paints the pending state.
+  const submission = useRef<"idle" | "pending" | "saved">("idle");
+  const [created, setCreated] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const nameId = useId();
 
@@ -287,6 +291,7 @@ export function ItemEditorPage({
   }
 
   async function submit(): Promise<boolean> {
+    if (submission.current !== "idle") return false;
     setFormError(null);
     const found = validate();
     setErrors(found);
@@ -296,6 +301,7 @@ export function ItemEditorPage({
       .filter((input): input is VaultFieldInput => input !== null);
     const cleanWebsites = websites.map((site) => site.value.trim()).filter(Boolean);
     const expiresAt = expires ? new Date(`${expires}T00:00:00Z`).toISOString() : null;
+    submission.current = "pending";
     try {
       if (item) {
         await onUpdate({
@@ -313,6 +319,8 @@ export function ItemEditorPage({
           ...(expiresAt ? { expiresAt } : {}),
           fields,
         });
+        submission.current = "saved";
+        setCreated(true);
       }
       return true;
     } catch (error) {
@@ -337,6 +345,8 @@ export function ItemEditorPage({
       }
       setFormError(vaultErrorText((error as { cause?: unknown }).cause ?? error));
       return false;
+    } finally {
+      if (submission.current !== "saved") submission.current = "idle";
     }
   }
 
@@ -558,6 +568,7 @@ export function ItemEditorPage({
       }
       submitLabel={item ? "Save" : "Save item"}
       pendingLabel="Saving…"
+      submitDisabled={created}
       error={formError}
       onSubmit={async (event) => {
         event.preventDefault();

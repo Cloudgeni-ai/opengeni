@@ -329,6 +329,22 @@ export function isMissingKeyError(error: unknown): boolean {
   return vaultErrorCode(error) === "encryption_key_missing";
 }
 
+/* ------------------------------------------------- confirmed provider writes */
+
+/** A confirmed create awaiting inventory, not a failed or uncertain write. */
+export function savedCreation(
+  caught: unknown,
+  itemName: string,
+  vaultName: string,
+): { title: string; description: string } | null {
+  const error = (caught as { cause?: unknown } | null)?.cause ?? caught;
+  if (vaultErrorDetail(error, "saved") !== true) return null;
+  return {
+    title: `Saved ${itemName}`,
+    description: `It will appear in ${vaultName} after the next successful sync. Don't save it again.`,
+  };
+}
+
 /* ------------------------------------------------- a move that half finished */
 
 /** A move or copy that failed after its copy was saved: what to tell the person. */

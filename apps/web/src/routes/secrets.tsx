@@ -41,6 +41,7 @@ import {
 } from "@/components/secrets/vault-forms";
 import { SecretsListPage, type SecretsListState } from "@/components/secrets/vault-list";
 import {
+  savedCreation,
   savedTransfer,
   secretsCapabilityOff,
   vaultError,
@@ -598,11 +599,28 @@ export function SecretsRoute({
   } else if (view === "new-item" && creatableTypes(vaultOperations(vault)).length > 0) {
     page = (
       <ItemEditorPage
+        key={`${vault.id}/new`}
         vault={vault}
         initialType={parseCreatableType(type)}
         onClose={() => openVault(vault.id)}
         onCreate={async (request) => {
-          const created = await attempt(() => api.createItem(vault.id, request), sourceHome(vault));
+          let created: VaultItem;
+          try {
+            created = await attempt(() => api.createItem(vault.id, request), sourceHome(vault));
+          } catch (error) {
+            const saved = savedCreation(error, request.name, vault.name);
+            if (!saved) throw error;
+            // The write succeeded, only discovery failed. Leave the form now;
+            // a slow/failed refresh must never turn it back into a retry.
+            toast.warning(saved.title, {
+              description: saved.description,
+              duration: Infinity,
+              closeButton: true,
+            });
+            openVault(vault.id);
+            void refreshVaults();
+            return;
+          }
           await vaults.refresh();
           toast.success(`Saved ${created.name}`);
           openItem(vault.id, created.id);

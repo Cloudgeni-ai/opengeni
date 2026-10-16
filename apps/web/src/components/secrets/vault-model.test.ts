@@ -7,6 +7,7 @@ import {
   groupVaults,
   isMissingKeyError,
   itemsLabel,
+  savedCreation,
   savedTransfer,
   secretsCapabilityOff,
   secretsOffIn,
@@ -59,6 +60,32 @@ function vaultApiError(status: number, code: VaultErrorCode, details?: Record<st
     { mutation: false },
   );
 }
+
+describe("a confirmed create awaiting inventory", () => {
+  test("reads the confirmation through the route's wrapper, not the generic retry copy", () => {
+    const original = vaultApiError(503, "provider_inventory_incomplete", { saved: true });
+    const expected = {
+      title: "Saved Example",
+      description:
+        "It will appear in Operations after the next successful sync. Don't save it again.",
+    };
+    expect(savedCreation(original, "Example", "Operations")).toEqual(expected);
+    expect(
+      savedCreation(vaultError(original, undefined, "Proton Pass"), "Example", "Operations"),
+    ).toEqual(expected);
+  });
+
+  test("requires a literal confirmation; an error code alone never proves a save", () => {
+    for (const saved of [undefined, false, "true", 1]) {
+      const error = vaultApiError(503, "provider_inventory_incomplete", { saved });
+      expect(savedCreation(error, "Example", "Operations")).toBeNull();
+    }
+    expect(
+      savedCreation(vaultApiError(503, "provider_outcome_unknown"), "Example", "Operations"),
+    ).toBeNull();
+    expect(savedCreation(null, "Example", "Operations")).toBeNull();
+  });
+});
 
 describe("vault list grouping", () => {
   test("groups by owner whatever the source, the default first, then by name, and hides task vaults", () => {
