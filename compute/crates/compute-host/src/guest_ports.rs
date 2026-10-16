@@ -182,9 +182,10 @@ pub(crate) fn listen<A: Activity>(
 
 /// Hands a listener's socket to the sandbox's own user, the only one its
 /// jailed VMM runs as, so the VMM may connect to it. An agent that is not
-/// root runs VMMs as itself and has nothing to hand over.
+/// root runs VMMs as itself and has nothing to hand over. The jail is the
+/// VMM's, so a link swapped in for the socket is never followed.
 fn give_to(socket: &Path, (uid, gid): (u32, u32)) -> io::Result<()> {
-    match std::os::unix::fs::chown(socket, Some(uid), Some(gid)) {
+    match compute_engine::confined::hand_over(socket, uid, gid) {
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(()),
         result => result,
     }

@@ -8,16 +8,25 @@
 //!
 //! Every record carries a [`Fence`]:
 //!
-//! - its **generation** counts the sandbox's executions. It rises each time
-//!   a VM starts running the sandbox from its files (a boot or a restore),
-//!   so a request can name the execution it was issued under and be refused
-//!   once that execution has been replaced.
+//! - its **generation** names the sandbox's execution: the programs running
+//!   in it. It rises each time they start over, at every boot from the
+//!   disk; a restore continues the execution its memory image saved and
+//!   keeps it. A request can name the execution it was issued under and is
+//!   refused once that execution has been replaced. Generations never
+//!   repeat on a host, even across removing and recreating an id: the root
+//!   keeps the lowest generation not yet used, and a new record starts
+//!   there.
 //! - its **revision** counts committed writes.
 //!
 //! Every write names the fence it expects to replace and fails with
 //! [`StateError::Stale`] when the record has moved on, so an operation
 //! issued against an older state can never overwrite a newer one. The
 //! decision is the pure [`apply`]; [`Records`] adds the disk and ordering.
+//!
+//! The cache always says what the record's file says. A write whose fate is
+//! unknown (the file was replaced, then syncing its directory failed) makes
+//! the cache read the file back and marks the record unsure; the next write
+//! first makes the file durable, or fails without effect.
 //!
 //! Keeping VMs alive across agent restarts and taking them back from
 //! durable per-VM records follows the design of SPACE
@@ -34,6 +43,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -41,11 +51,16 @@ use compute_core::SandboxId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OwnedMutexGuard;
 
-use crate::layout::{Paths, remove_durably, sandboxes_dir, write_atomic};
+use crate::layout::{Paths, remove_durably, sandboxes_dir, sync_parent, write_atomic};
+use crate::net::LinkAddresses;
 use crate::protocol::{Id, SandboxConfig};
 
 /// Name of the lock file in the state root.
 const LOCK: &str = "agent.lock";
+
+/// Name of the file in the state root holding the lowest generation no
+/// record has used.
+const GENERATIONS: &str = "generations";
 
 /// Where a sandbox's disk is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,17 +72,30 @@ pub(crate) enum Disk {
     Remote,
 }
 
+/// What the host gave a sandbox when it was created, fixed for its life.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Allocation {
+    /// The user its VMM runs as.
+    pub uid: u32,
+    /// The group its VMM runs as.
+    pub gid: u32,
+    /// Its link to the host, when it is networked.
+    pub link: Option<LinkAddresses>,
+}
+
 /// Everything the host keeps about one sandbox across restarts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Record {
     pub id: Id,
-    /// Executions so far: raised by every boot and restore.
+    /// The execution: raised by every boot.
     pub generation: u64,
     /// Committed writes so far.
     pub revision: u64,
     /// The sandbox's number on this host, unique among its sandboxes. It
-    /// picks the VMM's user and the sandbox's host-side network addresses.
+    /// names its host-side network link.
     pub ordinal: u32,
+    pub allocation: Allocation,
     pub config: SandboxConfig,
     pub disk: Disk,
     /// A complete memory image exists that matches the disk: locally while
@@ -81,13 +109,15 @@ pub(crate) struct Record {
 }
 
 impl Record {
-    /// A new sandbox: a local disk, nothing saved, no execution yet.
-    pub fn new(id: Id, ordinal: u32, config: SandboxConfig) -> Self {
+    /// A new sandbox: a local disk, nothing saved, no execution yet. Its
+    /// generation is set when it is inserted.
+    pub fn new(id: Id, ordinal: u32, allocation: Allocation, config: SandboxConfig) -> Self {
         Self {
             id,
             generation: 0,
             revision: 1,
             ordinal,
+            allocation,
             config,
             disk: Disk::Local,
             image: false,
@@ -154,7 +184,7 @@ impl Change {
         self
     }
 
-    /// A new execution starts: the generation rises.
+    /// A new execution starts, from the disk: the generation rises.
     pub fn execution(mut self) -> Self {
         self.execution = true;
         self
@@ -286,8 +316,10 @@ struct Entry {
     /// Serializes writes to this record. A write holds it until it is on
     /// disk, so a slow write delays only its own sandbox.
     writing: Arc<tokio::sync::Mutex<()>>,
-    /// The committed record; `None` once removed.
+    /// The record its file holds; `None` once removed.
     current: Mutex<Option<Record>>,
+    /// A write failed part way, so the file may not be durable yet.
+    unsure: AtomicBool,
 }
 
 /// Every sandbox's record under one state root.
@@ -297,6 +329,8 @@ pub(crate) struct Records {
     entries: Mutex<HashMap<SandboxId, Arc<Entry>>>,
     /// The exclusive lock on the root. Every write in flight holds a clone.
     lock: Arc<File>,
+    /// The lowest generation no record has used, kept in [`GENERATIONS`].
+    unused: tokio::sync::Mutex<u64>,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -316,6 +350,15 @@ impl Records {
         let lock = lock_root(&root, wait)?;
         let dir = sandboxes_dir(&root);
         fs::create_dir_all(&dir)?;
+        let generations = root.join(GENERATIONS);
+        let mut unused = match fs::read_to_string(&generations) {
+            Ok(text) => text.trim().parse().map_err(|error| StateError::Corrupt {
+                path: generations.clone(),
+                message: format!("{error}"),
+            })?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
         let mut entries = HashMap::new();
         let mut strays = Vec::new();
         for entry in fs::read_dir(&dir)? {
@@ -328,6 +371,7 @@ impl Records {
             };
             match read(&Paths::new(&root, id).record, id) {
                 Ok(Some(record)) => {
+                    unused = unused.max(record.generation + 1);
                     let entry = Entry {
                         current: Mutex::new(Some(record)),
                         ..Entry::default()
@@ -345,6 +389,7 @@ impl Records {
             root,
             entries: Mutex::new(entries),
             lock: Arc::new(lock),
+            unused: tokio::sync::Mutex::new(unused),
         };
         Ok((records, strays))
     }
@@ -365,11 +410,14 @@ impl Records {
         locked(&entry.current).clone()
     }
 
-    /// Writes the first record of a new sandbox.
-    pub async fn insert(&self, record: Record) -> Result<Record, StateError> {
+    /// Writes the first record of a new sandbox, which starts at a
+    /// generation no earlier record on this host used.
+    pub async fn insert(&self, mut record: Record) -> Result<Record, StateError> {
         let id = record.id;
+        record.generation = *self.unused.lock().await;
         let entry = Arc::clone(locked(&self.entries).entry(id.0).or_default());
         let writing = Arc::clone(&entry.writing).lock_owned().await;
+        self.reconcile(id, &entry).await?;
         if locked(&entry.current).is_some() {
             return Err(StateError::Exists(id));
         }
@@ -388,6 +436,7 @@ impl Records {
     ) -> Result<Record, StateError> {
         let entry = self.entry(id)?;
         let writing = Arc::clone(&entry.writing).lock_owned().await;
+        self.reconcile(id, &entry).await?;
         let current = locked(&entry.current).clone();
         match apply(id, current.as_ref(), expected, change)? {
             Some(next) => {
@@ -401,10 +450,12 @@ impl Records {
     }
 
     /// Deletes the record for `id` if it is still at `expected`. The
-    /// sandbox's directory stays; without a record it is a stray.
+    /// sandbox's directory stays; without a record it is a stray. Its
+    /// generations are never used again.
     pub async fn remove(&self, id: Id, expected: Fence) -> Result<(), StateError> {
         let entry = self.entry(id)?;
         let writing = Arc::clone(&entry.writing).lock_owned().await;
+        self.reconcile(id, &entry).await?;
         let found = locked(&entry.current)
             .as_ref()
             .map(Record::fence)
@@ -416,6 +467,7 @@ impl Records {
                 found,
             });
         }
+        self.retire_generation(found.generation).await?;
         self.persist(id, &entry, writing, None).await?;
         let mut entries = locked(&self.entries);
         if entries
@@ -432,6 +484,46 @@ impl Records {
             .get(&id.0)
             .cloned()
             .ok_or(StateError::NotFound(id))
+    }
+
+    /// Makes sure no record starts at `generation` or below from now on.
+    async fn retire_generation(&self, generation: u64) -> Result<(), StateError> {
+        let mut unused = self.unused.lock().await;
+        let next = generation + 1;
+        if next <= *unused {
+            return Ok(());
+        }
+        let path = self.root.join(GENERATIONS);
+        let lock = Arc::clone(&self.lock);
+        tokio::task::spawn_blocking(move || {
+            let _held = lock;
+            write_atomic(&path, format!("{next}\n").as_bytes())
+        })
+        .await
+        .map_err(|error| StateError::Io(error.to_string()))??;
+        *unused = next;
+        Ok(())
+    }
+
+    /// After a write to `id` failed part way: makes its file durable and
+    /// the cache what the file says, or fails without changing anything.
+    async fn reconcile(&self, id: Id, entry: &Arc<Entry>) -> Result<(), StateError> {
+        if !entry.unsure.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let path = Paths::new(&self.root, id).record;
+        let lock = Arc::clone(&self.lock);
+        let entry = Arc::clone(entry);
+        tokio::task::spawn_blocking(move || {
+            let _held = lock;
+            let found = read(&path, id)?;
+            sync_parent(&path)?;
+            *locked(&entry.current) = found;
+            entry.unsure.store(false, Ordering::Release);
+            Ok(())
+        })
+        .await
+        .map_err(|error| StateError::Io(error.to_string()))?
     }
 
     /// Writes `next` as the record of `id` (or deletes it for `None`), then
@@ -458,12 +550,26 @@ impl Records {
         let entry = Arc::clone(entry);
         tokio::task::spawn_blocking(move || {
             let _held = (lock, writing);
-            match &bytes {
-                Some(bytes) => write_atomic(&path, bytes)?,
-                None => remove_durably(&path)?,
+            let written = match &bytes {
+                Some(bytes) => write_atomic(&path, bytes),
+                None => remove_durably(&path),
+            };
+            match written {
+                Ok(()) => {
+                    *locked(&entry.current) = next;
+                    Ok(())
+                }
+                Err(error) => {
+                    // The file may hold `next` already. Whatever it holds
+                    // is what the cache says, and the next write first
+                    // makes it durable.
+                    entry.unsure.store(true, Ordering::Release);
+                    if let Ok(found) = read(&path, id) {
+                        *locked(&entry.current) = found;
+                    }
+                    Err(error.into())
+                }
             }
-            *locked(&entry.current) = next;
-            Ok(())
         })
         .await
         .map_err(|error| StateError::Io(error.to_string()))?
@@ -473,10 +579,16 @@ impl Records {
 /// Opens `<root>/agent.lock` and takes an exclusive lock on it, retrying
 /// until `wait` has passed.
 fn lock_root(root: &Path, wait: Duration) -> Result<File, StateError> {
+    fs::create_dir_all(root)?;
+    lock_exclusive(&root.join(LOCK), wait)
+}
+
+/// Takes an exclusive `flock` on `path` (created if missing), waiting up to
+/// `wait` for another holder to let go. The lock lasts as long as the file.
+pub(crate) fn lock_exclusive(path: &Path, wait: Duration) -> Result<File, StateError> {
     use rustix::fs::{FlockOperation, flock};
 
-    fs::create_dir_all(root)?;
-    let path = root.join(LOCK);
+    let path = path.to_owned();
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -555,6 +667,14 @@ mod tests {
         Id(SandboxId(n))
     }
 
+    fn allocation() -> Allocation {
+        Allocation {
+            uid: 4_000_000,
+            gid: 4_000_000,
+            link: None,
+        }
+    }
+
     fn random_change(rng: &mut Rng) -> Change {
         let mut change = Change::new();
         if rng.chance(30) {
@@ -600,7 +720,7 @@ mod tests {
         for seed in 0..2_000 {
             let mut rng = Rng(seed);
             let sandbox = id(7);
-            let mut model = Record::new(sandbox, 3, config());
+            let mut model = Record::new(sandbox, 3, allocation(), config());
             let mut seen = Vec::new();
             for _ in 0..200 {
                 let fence = random_fence(&mut rng, model.fence(), &seen);
@@ -639,7 +759,7 @@ mod tests {
 
     #[test]
     fn requests_naming_another_execution_are_refused() {
-        let mut record = Record::new(id(1), 0, config());
+        let mut record = Record::new(id(1), 0, allocation(), config());
         record.generation = 4;
         assert!(check_generation(&record, None).is_ok());
         assert!(check_generation(&record, Some(4)).is_ok());
@@ -661,7 +781,7 @@ mod tests {
     /// writing it.
     fn fresh(root: &Path, n: u128, ordinal: u32) -> Record {
         fs::create_dir_all(Paths::new(root, id(n)).dir).unwrap();
-        Record::new(id(n), ordinal, config())
+        Record::new(id(n), ordinal, allocation(), config())
     }
 
     #[tokio::test]
@@ -731,7 +851,57 @@ mod tests {
             records.commit(id(1), moved.fence(), Change::new()).await,
             Err(StateError::NotFound(_))
         ));
-        records.insert(fresh(root.path(), 1, 0)).await.unwrap();
+        // A new sandbox with the same id never reuses a generation, so a
+        // late request for the old one cannot act on it, even after a
+        // restart.
+        let again = records.insert(fresh(root.path(), 1, 0)).await.unwrap();
+        assert_eq!(again.generation, 2);
+        records.remove(id(1), again.fence()).await.unwrap();
+        drop(records);
+        let (records, _) = Records::open(root.path().into(), Duration::ZERO)
+            .await
+            .unwrap();
+        let third = records.insert(fresh(root.path(), 1, 0)).await.unwrap();
+        assert_eq!(third.generation, 3);
+    }
+
+    /// A write that replaced the file and then failed to sync its directory
+    /// must not leave the cache describing the older record: the next write
+    /// would be decided against a version the file no longer holds.
+    #[tokio::test]
+    async fn a_write_that_fails_after_landing_leaves_the_cache_true_to_the_file() {
+        let root = temp_root("state-unsure");
+        let (records, _) = Records::open(root.path().into(), Duration::ZERO)
+            .await
+            .unwrap();
+        let first = records.insert(fresh(root.path(), 1, 0)).await.unwrap();
+        let path = Paths::new(root.path(), id(1)).record;
+        crate::layout::tests::FAILPOINTS
+            .lock()
+            .unwrap()
+            .push((path.clone(), "renamed"));
+        let failed = records
+            .commit(id(1), first.fence(), Change::new().image(true))
+            .await;
+        crate::layout::tests::FAILPOINTS
+            .lock()
+            .unwrap()
+            .retain(|(failing, _)| failing != &path);
+        assert!(matches!(failed, Err(StateError::Io(_))), "{failed:?}");
+        let cached = records.get(id(1)).unwrap();
+        assert!(cached.image, "the cache lost a write the file holds");
+        assert_eq!(cached, read(&path, id(1)).unwrap().unwrap());
+        // Whoever still holds the old version is refused.
+        assert!(matches!(
+            records
+                .commit(id(1), first.fence(), Change::new().image(false))
+                .await,
+            Err(StateError::Stale { .. })
+        ));
+        records
+            .commit(id(1), cached.fence(), Change::new().image(false))
+            .await
+            .unwrap();
     }
 
     /// One acknowledged write, as its writer saw it.
@@ -745,7 +915,9 @@ mod tests {
 
     /// Many writers race on a few records with fresh and stale fences while
     /// the agent repeatedly "crashes" (every writer is dropped wherever it
-    /// is) and the records are reopened from disk. Checks that
+    /// is) and the records are reopened from disk. In some rounds every
+    /// write to one record fails after replacing its file, as when syncing
+    /// the directory fails. Checks that
     ///
     /// - acknowledged writes form one chain per record: each replaced
     ///   exactly the version before it, so no two writes ever applied
@@ -782,6 +954,15 @@ mod tests {
         let history: History = Arc::default();
         restart_history(&history, &records, SANDBOXES);
         for _round in 0..6 {
+            // Writes to sandbox 0 land, then report failure.
+            let failing = rng.chance(50);
+            let unsure = Paths::new(root.path(), id(0)).record;
+            if failing {
+                crate::layout::tests::FAILPOINTS
+                    .lock()
+                    .unwrap()
+                    .push((unsure.clone(), "renamed"));
+            }
             let mut writers = tokio::task::JoinSet::new();
             for _ in 0..WRITERS {
                 let records = Arc::clone(&records);
@@ -803,6 +984,7 @@ mod tests {
                                 });
                             }
                             Ok(_) | Err(StateError::Stale { .. }) => {}
+                            Err(StateError::Io(_)) if failing && n == 0 => {}
                             Err(error) => panic!("seed {seed}: {error}"),
                         }
                         if rng.chance(10) {
@@ -814,6 +996,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5 + rng.below(25))).await;
             // The crash: every writer stops wherever it is.
             writers.shutdown().await;
+            crate::layout::tests::FAILPOINTS
+                .lock()
+                .unwrap()
+                .retain(|(path, _)| path != &unsure);
             drop(Arc::try_unwrap(records).expect("every writer is gone"));
             let (reopened, strays) = Records::open(root.path().into(), Duration::from_secs(10))
                 .await

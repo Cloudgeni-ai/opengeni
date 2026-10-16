@@ -62,6 +62,13 @@ impl Jail {
                 spec.name
             ));
         }
+        // The jailer accepts any ids, root's too.
+        if spec.uid == 0 || spec.gid == 0 {
+            return Err(format!(
+                "VM {} must run as an unprivileged user, not uid {} gid {}",
+                spec.name, spec.uid, spec.gid
+            ));
+        }
         if !spec.dir.is_absolute()
             || spec
                 .dir
@@ -196,6 +203,15 @@ mod tests {
 
     #[test]
     fn paths_outside_the_jail_are_refused() {
+        let mut root = spec("/srv/vm/firecracker/abc/root", "abc");
+        root.uid = 0;
+        assert!(Jail::new(&root).is_err(), "a VMM may not run as root");
+        root.uid = 7;
+        root.gid = 0;
+        assert!(
+            Jail::new(&root).is_err(),
+            "a VMM may not run in root's group"
+        );
         let jail = Jail::new(&spec("/srv/vm/firecracker/abc/root", "abc")).unwrap();
         assert!(
             jail.inside(Path::new("/srv/vm/firecracker/abc/sandbox.json"))

@@ -9,7 +9,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::time::Instant;
 
 use crate::agent::{Handle, HostError};
-use crate::protocol::{ErrorCode, Reply, Request};
+use crate::protocol::{ErrorCode, Reply, Request, step_name};
 
 /// Requests are small; anything longer is refused.
 const MAX_REQUEST: u64 = 64 << 10;
@@ -65,11 +65,7 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
             let started = Instant::now();
             let mut guest = match lease.connect(port, CONNECT_TIMEOUT).await {
                 Ok(guest) => guest,
-                Err(error) => {
-                    let message = format!("guest port {port} unreachable: {error}");
-                    let code = ErrorCode::Unreachable;
-                    return write_reply(&mut client, &Reply::Error { message, code }).await;
-                }
+                Err(error) => return write_reply(&mut client, &error_reply(&error)).await,
             };
             write_reply(
                 &mut client,
@@ -90,7 +86,7 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
             id,
             generation,
             priority,
-        } => done(handle.touch(id, generation, priority.into())),
+        } => done(handle.touch(id, generation, priority.into()).await),
         Request::Sleep {
             id,
             generation,
@@ -125,6 +121,7 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
         } => match handle.acquire(id, generation, priority.into()).await {
             Ok(lease) => Reply::Woken {
                 waited_us: micros(lease.waited()),
+                during: lease.during().map(|step| step_name(step).to_owned()),
             },
             Err(error) => error_reply(&error),
         },
@@ -151,6 +148,7 @@ fn error_reply(error: &HostError) -> Reply {
             HostError::Removed(_) => ErrorCode::Removed,
             HostError::Invalid(_) => ErrorCode::Invalid,
             HostError::Stale { .. } => ErrorCode::Stale,
+            HostError::Unreachable { .. } => ErrorCode::Unreachable,
             HostError::Io(_) | HostError::Stopped => ErrorCode::Internal,
         },
     }

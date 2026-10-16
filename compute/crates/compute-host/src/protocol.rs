@@ -236,10 +236,11 @@ impl SandboxConfig {
 ///
 /// Requests about an existing sandbox may name the `generation` (the
 /// sandbox's execution, from [`SandboxStatus::generation`]) they were issued
-/// under. Such a request is refused with [`ErrorCode::Stale`] once a boot or
-/// restore has replaced that execution, so a caller relying on programs it
-/// started inside the sandbox learns they are gone instead of acting on a
-/// different execution.
+/// under. Such a request is refused with [`ErrorCode::Stale`] once a boot has
+/// replaced that execution (memory was lost), so a caller relying on programs
+/// it started inside the sandbox learns they are gone instead of acting on a
+/// different execution. Pausing, saving and restoring continue the same
+/// execution and keep the generation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -354,6 +355,11 @@ pub enum Reply {
     Woken {
         /// Microseconds spent waking.
         waited_us: u64,
+        /// The step under way when the wake arrived, if any; a wake during
+        /// a sleep step such as `pause` or `save` cancels it or waits for
+        /// it to finish.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        during: Option<String>,
     },
     /// The stream to the guest port follows this line.
     Connected {
@@ -404,7 +410,8 @@ pub enum ErrorCode {
 pub struct SandboxStatus {
     /// Its id.
     pub id: Id,
-    /// Its execution: raised by every boot and restore.
+    /// Its execution: raised by every boot; pausing, saving and restoring
+    /// keep it.
     pub generation: u64,
     /// How many times its record has been written.
     pub revision: u64,
@@ -418,6 +425,10 @@ pub struct SandboxStatus {
     pub step: Option<String>,
     /// Reasons it is held awake.
     pub holds: usize,
+    /// VM processes started for it, boots and restores alike, since the
+    /// host agent started.
+    #[serde(default)]
+    pub launches: u64,
     /// Host memory it holds, when a VM process exists.
     pub resident_bytes: Option<u64>,
     /// Whether it is beyond recovery on this host.
@@ -456,18 +467,20 @@ pub struct HostStatus {
     /// without losing anything. Placement can count it as available.
     #[serde(default)]
     pub reclaimable_memory: u64,
-    /// Sandboxes whose record could not be read. Their ids are blocked and
-    /// their files and any VM left alone until an operator steps in.
+    /// Sandboxes the host cannot manage: their record could not be read,
+    /// their recovery or removal failed. Their ids are refused for new
+    /// sandboxes and their files and any VM left alone; removing one retries
+    /// when its record is readable.
     #[serde(default)]
-    pub unreadable: Vec<UnreadableSandbox>,
+    pub blocked: Vec<BlockedSandbox>,
 }
 
-/// A sandbox the host cannot manage because its record is unreadable.
+/// A sandbox the host cannot manage.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UnreadableSandbox {
+pub struct BlockedSandbox {
     /// Its id, which the host refuses to reuse.
     pub id: Id,
-    /// What was wrong with its record or directory.
+    /// What went wrong.
     pub problem: String,
 }
 

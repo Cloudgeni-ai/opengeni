@@ -1,0 +1,140 @@
+# Structure rules for the compute workspace, checked by `cargo arch`
+# (crates/archcheck). Existing violations are listed in
+# architecture-baseline.toml and may only shrink: a file listed there may not
+# grow, and the baseline may not gain an entry or a higher cap compared with
+# the base branch's copy at the merge base.
+
+# The branch compute's changes merge into, read with git. Change it when
+# compute moves to another integration branch.
+[base]
+branch = "origin/feat/compute-lab"
+
+# Files past a thousand code lines are hard to review and usually hold more
+# than one idea.
+[rules.file_size]
+limit = 1000                          # code lines per production Rust file
+
+[rules.file_size.no_crossing]         # no file outside the baseline may exceed the limit
+mode = "required"
+
+[rules.file_size.no_new_entries]      # a branch may not add entries to the baseline
+mode = "required"
+
+[rules.file_size.no_raised_caps]      # a branch may not raise a cap in the baseline
+mode = "required"
+
+[rules.file_size.listed_no_growth]    # files in the baseline may not gain code lines
+mode = "required"
+
+[rules.file_size.stale_entries]       # entries whose file shrank, fell under the limit, or is gone
+mode = "advisory"
+
+# compute-core is the pure lifecycle state machine: inputs in, actions out. It
+# never touches files, sockets, threads, processes, the environment or the
+# clock, so the seeded simulation can drive it exactly and replay any failure.
+# Time arrives as an input. Every other crate is allowed; a new crate must be
+# added here on purpose.
+#
+# The patterns match single code lines, so they cover the usual ways of
+# reaching std's I/O: by path, through a grouped `use std::{fs, ...}` on one
+# line or across several, by the module's name afterwards, and under an alias,
+# whose `use` line names the original. They cannot see through macros that
+# build paths or a renamed `std` crate; review is the backstop there.
+[rules.pattern_ratchet.pure_core]
+patterns = [
+  '\btokio\b',
+  # std's I/O, process and environment modules, by path or in a use group.
+  '\bstd::(fs|net|io|os|thread|process|env)\b',
+  '\bstd::\{[^}]*\b(fs|net|io|os|thread|process|env)\b',
+  '^\s*(fs|net|io|os|thread|process|env)(\s+as\s+\w+)?\s*[,}]',
+  # Such a module used by its name after being imported.
+  '(^|[^:\w])(fs|net|io|os|thread|process|env)::',
+  # The clock, under any name: time arrives as an input.
+  '\b(Instant|SystemTime)\b',
+  '::now\b',
+  # Printing is I/O too.
+  '\b(e?print(ln)?|dbg)!',
+  '\brand\b',
+]
+allow = [
+  "crates/archcheck/**",
+  "crates/compute-engine/**",
+  "crates/compute-host/**",
+  "crates/compute-pager/**",
+  "crates/compute-storage/**",
+]
+
+[rules.pattern_ratchet.pure_core.no_crossing]       # only allowed and listed files may match
+mode = "required"
+
+[rules.pattern_ratchet.pure_core.no_new_entries]    # a branch may not add entries to the baseline
+mode = "required"
+
+[rules.pattern_ratchet.pure_core.no_raised_caps]    # a branch may not raise a cap in the baseline
+mode = "required"
+
+[rules.pattern_ratchet.pure_core.listed_no_growth]  # listed files may not gain matching lines
+mode = "required"
+
+[rules.pattern_ratchet.pure_core.stale_entries]     # entries with fewer matches, none, or gone
+mode = "advisory"
+
+# Unsafe code lives in the modules written to hold it, next to the invariant
+# its safety argument rests on, where each block is reviewed: the pager's
+# userfaultfd and mmap handling, the storage crate's FIEMAP ioctl, the
+# engine's pidfd registration, and the host's mappings of sealed memory images
+# (image.rs) and of memory files filling from object storage (lazy.rs).
+# Anything else is listed in the baseline until it moves behind one of them.
+[rules.pattern_ratchet.unsafe_code]
+patterns = ['\bunsafe\b']
+allow = [
+  "crates/compute-engine/src/firecracker/process.rs",
+  "crates/compute-host/src/image.rs",
+  "crates/compute-host/src/lazy.rs",
+  "crates/compute-pager/src/linux.rs",
+  "crates/compute-pager/src/source.rs",
+  "crates/compute-storage/src/fiemap.rs",
+]
+
+[rules.pattern_ratchet.unsafe_code.no_crossing]
+mode = "required"
+
+[rules.pattern_ratchet.unsafe_code.no_new_entries]
+mode = "required"
+
+[rules.pattern_ratchet.unsafe_code.no_raised_caps]
+mode = "required"
+
+[rules.pattern_ratchet.unsafe_code.listed_no_growth]
+mode = "required"
+
+[rules.pattern_ratchet.unsafe_code.stale_entries]
+mode = "advisory"
+
+# The engine owns every process a sandbox needs (the VMM, its jailer, the
+# pager), so their lifetimes, cgroups and cleanup live in one place. The
+# host's network setup (net.rs) runs `ip` and `nft` to completion: tools that
+# configure the host, not processes a sandbox keeps. Lab binaries are listed
+# in the baseline.
+[rules.pattern_ratchet.process_spawn]
+patterns = ['\bCommand::new\b']
+allow = [
+  "crates/archcheck/**",
+  "crates/compute-engine/**",
+  "crates/compute-host/src/net.rs",
+]
+
+[rules.pattern_ratchet.process_spawn.no_crossing]
+mode = "required"
+
+[rules.pattern_ratchet.process_spawn.no_new_entries]
+mode = "required"
+
+[rules.pattern_ratchet.process_spawn.no_raised_caps]
+mode = "required"
+
+[rules.pattern_ratchet.process_spawn.listed_no_growth]
+mode = "required"
+
+[rules.pattern_ratchet.process_spawn.stale_entries]
+mode = "advisory"

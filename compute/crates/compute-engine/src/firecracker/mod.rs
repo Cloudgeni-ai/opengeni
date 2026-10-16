@@ -18,7 +18,6 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep, timeout};
@@ -154,7 +153,8 @@ fn create_request(jail: &Jail, files: &SnapshotFiles, kind: SnapshotKind) -> Res
 /// How [`Firecracker`] runs VMs.
 #[derive(Clone, Debug)]
 pub struct FirecrackerConfig {
-    /// The Firecracker binary. Its file name must be [`BINARY_NAME`].
+    /// The Firecracker binary. Its file name, once every symbolic link is
+    /// resolved, must be [`BINARY_NAME`].
     pub firecracker: PathBuf,
     /// The jailer binary from the same Firecracker release.
     pub jailer: PathBuf,
@@ -180,15 +180,15 @@ impl Firecracker {
     /// VMs use the bare-metal memory profile unless
     /// [`Firecracker::with_memory_profile`] says otherwise.
     pub fn new(config: FirecrackerConfig) -> io::Result<Self> {
-        if config
-            .firecracker
-            .file_name()
-            .is_none_or(|name| name != BINARY_NAME)
-        {
+        // The jailer resolves links in the binary's path and names every
+        // jail after the file it finds, so the name is checked there.
+        let binary = fs::canonicalize(&config.firecracker)?;
+        if binary.file_name().is_none_or(|name| name != BINARY_NAME) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "the Firecracker binary must be named {BINARY_NAME}, not {}",
+                    "the Firecracker binary must be named {BINARY_NAME}, not {} (from {})",
+                    binary.display(),
                     config.firecracker.display()
                 ),
             ));
@@ -215,7 +215,7 @@ impl Firecracker {
             ));
         }
         Ok(Self {
-            binary: config.firecracker,
+            binary,
             jailer: config.jailer,
             cgroups: Cgroup::create_parent(config.cgroup_parent)?,
             cgroup_relative,
@@ -322,8 +322,12 @@ impl Firecracker {
             }
         };
         if let Err(error) = vm.wait_for_api(self.startup_timeout).await {
-            self.kill(&vm).await;
-            return Err(EngineError::new(ErrorKind::Transient, operation, error));
+            return Err(self
+                .ended(
+                    &vm,
+                    EngineError::new(ErrorKind::Transient, operation, error),
+                )
+                .await);
         }
         Ok(vm)
     }
@@ -357,17 +361,37 @@ impl Firecracker {
     }
 
     /// Kills the VMM, waits for it to exit and releases its cgroup and the
-    /// jailer's per-launch files.
-    async fn kill(&self, vm: &FirecrackerVm) {
+    /// jailer's per-launch files. Fails without waiting if the process
+    /// cannot be signalled, and after it exited if releasing fails.
+    async fn kill(&self, vm: &FirecrackerVm) -> Result<(), EngineError> {
+        const OP: &str = "stop";
         // A pidfd only ever signals its own process, even if it is gone.
-        let _ = vm.process.kill();
+        vm.process
+            .kill()
+            .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
         vm.process.exited().await;
         let (cgroup, jail) = (vm.cgroup.clone(), vm.jail.clone());
-        let _ = tokio::task::spawn_blocking(move || {
-            let _ = cgroup.remove();
+        tokio::task::spawn_blocking(move || {
+            cgroup.remove()?;
             tidy(&jail)
         })
-        .await;
+        .await
+        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
+        .map_err(|error| EngineError::io(OP, error))
+    }
+
+    /// Ends a VM whose start failed with `error` and returns that error, or
+    /// a fatal one if the VM would not end: nothing may start in its place
+    /// while it may still run.
+    async fn ended(&self, vm: &FirecrackerVm, error: EngineError) -> EngineError {
+        match self.kill(vm).await {
+            Ok(()) => error,
+            Err(stuck) => EngineError::new(
+                ErrorKind::Fatal,
+                error.operation,
+                format!("{error}; then the VM could not be ended: {stuck}"),
+            ),
+        }
     }
 
     /// Kills whatever runs in the VM's cgroup, for VMMs the host holds no
@@ -398,11 +422,10 @@ impl Firecracker {
         vm: &FirecrackerVm,
         body: impl Future<Output = Result<T, EngineError>>,
     ) -> Result<T, EngineError> {
-        let result = body.await;
-        if result.is_err() {
-            self.kill(vm).await;
+        match body.await {
+            Ok(value) => Ok(value),
+            Err(error) => Err(self.ended(vm, error).await),
         }
-        result
     }
 }
 
@@ -428,8 +451,9 @@ fn prepare(
 ) -> io::Result<(File, File)> {
     fs::create_dir_all(jail.root())?;
     tidy(jail)?;
+    // The jail is the VMM's: an earlier one may have left links in it.
     for path in owned {
-        std::os::unix::fs::chown(path, Some(uid), Some(gid))?;
+        crate::confined::hand_over(path, uid, gid)?;
     }
     fs::create_dir_all(logs)?;
     Ok((
@@ -515,7 +539,7 @@ impl FirecrackerVm {
     async fn wait_for_api(&self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
         loop {
-            if UnixStream::connect(self.api.socket()).await.is_ok() {
+            if crate::confined::connect(self.api.socket()).await.is_ok() {
                 return Ok(());
             }
             if !self.is_running() {
@@ -821,15 +845,14 @@ impl Engine for Firecracker {
     }
 
     async fn stop(&self, vm: FirecrackerVm) -> Result<(), EngineError> {
-        self.kill(&vm).await;
-        Ok(())
+        self.kill(&vm).await
     }
 
     async fn adopt(&self, spec: &VmSpec) -> Result<Option<(FirecrackerVm, Found)>, EngineError> {
         let Some(vm) = self.attached(spec).await? else {
             return Ok(None);
         };
-        Ok(self.answering(vm).await)
+        self.answering(vm).await
     }
 
     async fn adopt_paged<T, F, Fut>(
@@ -853,14 +876,17 @@ impl Engine for Firecracker {
         let served = match served {
             Ok(served) => served,
             Err(error) => {
-                self.kill(&vm).await;
+                // Nothing can serve its memory: the guest would stall on
+                // its next fault.
+                self.kill(&vm).await?;
                 return Err(EngineError::caused_by(ErrorKind::MemoryLost, OP, error));
             }
         };
-        // Without an answer the VM is ended; its handler goes after it.
+        // A VMM left be because it did not answer keeps its own fault
+        // descriptor, so the next start can take its memory over again.
         Ok(self
             .answering(vm)
-            .await
+            .await?
             .map(|(vm, found)| (vm, found, served)))
     }
 
@@ -892,8 +918,8 @@ impl Engine for Firecracker {
 
 impl Firecracker {
     /// The VM process left running for `spec`, without asking it anything
-    /// yet. Whatever is left of one that cannot be used (a jailer that died
-    /// half way, an empty group) is cleared away.
+    /// yet. A VMM is discarded only on proof that no guest ever ran in it
+    /// or that it is gone; anything less is an error and the VM is left be.
     async fn attached(&self, spec: &VmSpec) -> Result<Option<FirecrackerVm>, EngineError> {
         const OP: &str = "adopt";
         let cgroup = self.cgroup_of(spec);
@@ -902,23 +928,53 @@ impl Firecracker {
         }
         let jail =
             Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        if let Ok(vm) = self.attach(spec, &jail) {
-            return Ok(Some(vm));
+        match self.attach(spec, &jail) {
+            Ok(vm) => Ok(Some(vm)),
+            Err(error) => {
+                let populated = cgroup
+                    .is_populated()
+                    .map_err(|error| EngineError::io(OP, error))?;
+                if populated {
+                    return Err(EngineError::new(
+                        ErrorKind::Transient,
+                        OP,
+                        format!("a process runs in the VM's group but is not its VMM: {error}"),
+                    ));
+                }
+                // An empty group: a jailer that died half way, or a VMM
+                // that exited. Nothing runs, so nothing is lost.
+                self.discard(spec)
+                    .await
+                    .map_err(|error| EngineError::io(OP, error))?;
+                Ok(None)
+            }
         }
-        self.discard(spec)
-            .await
-            .map_err(|error| EngineError::io(OP, error))?;
-        Ok(None)
     }
 
     /// `vm` with what it is doing, or `None` once it is ended because it
-    /// never finished starting or does not answer.
-    async fn answering(&self, vm: FirecrackerVm) -> Option<(FirecrackerVm, Found)> {
-        if let Ok(Ok(Some(found))) = timeout(ADOPT_TIMEOUT, vm.found()).await {
-            Some((vm, found))
-        } else {
-            self.kill(&vm).await;
-            None
+    /// never started a guest or has exited. A VMM that runs but does not
+    /// answer is left be and reported.
+    async fn answering(
+        &self,
+        vm: FirecrackerVm,
+    ) -> Result<Option<(FirecrackerVm, Found)>, EngineError> {
+        const OP: &str = "adopt";
+        let unsure = |why: String| EngineError::new(ErrorKind::Transient, OP, why);
+        match timeout(ADOPT_TIMEOUT, vm.found()).await {
+            Ok(Ok(Some(found))) => Ok(Some((vm, found))),
+            // The VMM says it never started a guest: a launch cut short.
+            Ok(Ok(None)) => {
+                self.kill(&vm).await?;
+                Ok(None)
+            }
+            _ if !vm.is_running() => {
+                self.kill(&vm).await?;
+                Ok(None)
+            }
+            Ok(Err(error)) => Err(unsure(format!("the VMM runs but its API failed: {error}"))),
+            Err(_) => Err(unsure(format!(
+                "the VMM runs but did not answer within {ADOPT_TIMEOUT:?}"
+            ))),
         }
     }
 }
@@ -931,244 +987,4 @@ async fn remove_if_present(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::spec::Network;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::UnixListener;
-
-    /// A VMM API that answers `PATCH /vm` with `patch` and `GET /` with
-    /// `get`.
-    fn vmm(patch: Answer, get: Answer) -> (Socket, Api) {
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let socket = std::env::temp_dir().join(format!(
-            "compute-engine-vmm-{}-{}.sock",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_file(&socket);
-        let listener = UnixListener::bind(&socket).unwrap();
-        tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let mut request = vec![0_u8; 4096];
-                let read = stream.read(&mut request).await.unwrap_or(0);
-                let answer = if request[..read].starts_with(b"PATCH") {
-                    patch
-                } else {
-                    get
-                };
-                match answer {
-                    Answer::Reply(reply) => {
-                        let _ = stream.write_all(reply.as_bytes()).await;
-                    }
-                    Answer::Close => {}
-                    Answer::Hang => {
-                        tokio::spawn(async move {
-                            let _open = stream;
-                            std::future::pending::<()>().await;
-                        });
-                    }
-                }
-            }
-        });
-        let limit = Duration::from_millis(200);
-        let api = Api::new(&socket).with_limits(limit, limit);
-        (Socket(socket), api)
-    }
-
-    /// How the fake VMM answers a request.
-    #[derive(Clone, Copy)]
-    enum Answer {
-        Reply(&'static str),
-        /// Drops the connection without answering.
-        Close,
-        /// Keeps the connection open and never answers.
-        Hang,
-    }
-
-    /// Removes the socket file when the test ends.
-    struct Socket(PathBuf);
-
-    impl Drop for Socket {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
-    const NO_CONTENT: &str = "HTTP/1.1 204 \r\n\r\n";
-    const REFUSED: &str = "HTTP/1.1 400 \r\ncontent-length: 2\r\n\r\n{}";
-    const RUNNING: &str = "HTTP/1.1 200 \r\ncontent-length: 19\r\n\r\n{\"state\":\"Running\"}";
-    const PAUSED: &str = "HTTP/1.1 200 \r\ncontent-length: 18\r\n\r\n{\"state\":\"Paused\"}";
-
-    async fn resume(api: &Api, alive: bool) -> Result<(), ErrorKind> {
-        set_run_state(api, || alive, "resume", RunState::Running)
-            .await
-            .map_err(|error| error.kind)
-    }
-
-    #[tokio::test]
-    async fn a_run_state_change_fails_only_when_nothing_changed() {
-        use Answer::{Close, Hang, Reply};
-        let (_s1, api) = vmm(Reply(NO_CONTENT), Close);
-        assert_eq!(resume(&api, true).await, Ok(()));
-        let (_s2, api) = vmm(Reply(REFUSED), Reply(PAUSED));
-        assert_eq!(
-            resume(&api, true).await,
-            Err(ErrorKind::Transient),
-            "refused"
-        );
-        // The answer is lost: the VMM says what actually happened.
-        let (_s3, api) = vmm(Close, Reply(RUNNING));
-        assert_eq!(resume(&api, true).await, Ok(()), "it did resume");
-        let (_s4, api) = vmm(Close, Reply(PAUSED));
-        assert_eq!(resume(&api, true).await, Err(ErrorKind::Transient));
-        // The answer is late: likewise.
-        let (_s5, api) = vmm(Hang, Reply(RUNNING));
-        assert_eq!(resume(&api, true).await, Ok(()), "it did resume");
-        // Nobody can say whether the guest ran.
-        let (_s6, api) = vmm(Close, Close);
-        assert_eq!(resume(&api, true).await, Err(ErrorKind::MemoryLost));
-        assert_eq!(resume(&api, false).await, Err(ErrorKind::MemoryLost));
-        // A VMM that stops answering is beyond control, and noticing that
-        // takes no longer than the deadlines.
-        let (_s7, api) = vmm(Hang, Hang);
-        let started = std::time::Instant::now();
-        assert_eq!(resume(&api, true).await, Err(ErrorKind::MemoryLost));
-        assert!(started.elapsed() < Duration::from_secs(2));
-        // Never sent: nothing changed.
-        let gone = Api::new(std::env::temp_dir().join("compute-engine-no-such-vmm.sock"));
-        assert_eq!(resume(&gone, true).await, Err(ErrorKind::Transient));
-    }
-
-    #[test]
-    fn boot_pins_the_clock_source_restore_can_correct() {
-        assert_eq!(
-            boot_args("console=ttyS0 quiet"),
-            "console=ttyS0 quiet clocksource=kvm-clock"
-        );
-        assert_eq!(boot_args(""), "clocksource=kvm-clock");
-        assert_eq!(
-            boot_args("console=ttyS0 clocksource=tsc"),
-            "console=ttyS0 clocksource=tsc"
-        );
-    }
-
-    #[test]
-    fn restore_takes_host_paths_from_the_spec_not_the_snapshot() {
-        let jail_dir = "/lab/vm/firecracker/a/root";
-        let mut spec = VmSpec {
-            name: "a".into(),
-            dir: jail_dir.into(),
-            logs: "/lab/vm/firecracker/a".into(),
-            uid: 4_000_000,
-            gid: 4_000_000,
-            vcpus: 1,
-            memory_mib: 512,
-            kernel: format!("{jail_dir}/vmlinux").into(),
-            boot_args: String::new(),
-            drives: Vec::new(),
-            network: None,
-            free_page_reporting: true,
-        };
-        let files = RestoreFiles {
-            state: format!("{jail_dir}/vm.state").into(),
-            memory: MemorySource::File(format!("{jail_dir}/vm.mem").into()),
-        };
-        let jail = Jail::new(&spec).unwrap();
-        let bare = MemoryProfile::bare_metal();
-        let body = load_request(&spec, &jail, &files, bare).unwrap();
-        assert_eq!(body["clock_realtime"], true);
-        assert_eq!(body["resume_vm"], false);
-        assert_eq!(body["snapshot_path"], "/vm.state");
-        assert_eq!(body["mem_backend"]["backend_path"], "/vm.mem");
-        assert_eq!(body["vsock_override"]["uds_path"], "/vsock.sock");
-        assert!(body.get("network_overrides").is_none());
-
-        spec.network = Some(Network {
-            tap: "tap0".into(),
-            mac: "06:00:ac:10:00:02".into(),
-            namespace: None,
-        });
-        let body = load_request(&spec, &jail, &files, bare).unwrap();
-        assert_eq!(
-            body["network_overrides"],
-            json!([{ "iface_id": "eth0", "host_dev_name": "tap0" }])
-        );
-
-        let outside = RestoreFiles {
-            state: "/elsewhere/vm.state".into(),
-            memory: MemorySource::File(format!("{jail_dir}/vm.mem").into()),
-        };
-        assert!(load_request(&spec, &jail, &outside, bare).is_err());
-    }
-
-    fn spec() -> VmSpec {
-        VmSpec {
-            name: "a".into(),
-            dir: "/lab/vm/firecracker/a/root".into(),
-            logs: "/lab/vm/firecracker/a".into(),
-            uid: 4_000_000,
-            gid: 4_000_000,
-            vcpus: 2,
-            memory_mib: 512,
-            kernel: "/lab/vm/firecracker/a/root/vmlinux".into(),
-            boot_args: String::new(),
-            drives: Vec::new(),
-            network: None,
-            free_page_reporting: true,
-        }
-    }
-
-    #[test]
-    fn the_profile_decides_page_size_and_dirty_tracking() {
-        let bare = machine_config(&spec(), MemoryProfile::bare_metal());
-        assert_eq!(bare["track_dirty_pages"], true);
-        assert_eq!(bare["huge_pages"], "None");
-        let nested = machine_config(&spec(), MemoryProfile::nested());
-        assert_eq!(nested["track_dirty_pages"], false);
-        assert_eq!(nested["huge_pages"], "2M");
-
-        let jail = Jail::new(&spec()).unwrap();
-        let paged = RestoreFiles {
-            state: "/lab/vm/firecracker/a/root/vm.state".into(),
-            memory: MemorySource::Pager("/lab/vm/firecracker/a/root/uffd.sock".into()),
-        };
-        let body = load_request(&spec(), &jail, &paged, MemoryProfile::nested()).unwrap();
-        assert_eq!(body["mem_backend"]["backend_type"], "Uffd");
-        assert_eq!(body["mem_backend"]["backend_path"], "/uffd.sock");
-        assert_eq!(body["huge_pages"], "2M");
-        assert_eq!(body["track_dirty_pages"], false);
-        let body = load_request(&spec(), &jail, &paged, MemoryProfile::bare_metal()).unwrap();
-        assert_eq!(body["huge_pages"], "None");
-        assert_eq!(body["track_dirty_pages"], true);
-    }
-
-    #[test]
-    fn huge_pages_are_never_restored_from_a_mapped_file() {
-        let mapped = MemorySource::File("/lab/vm/firecracker/a/root/vm.mem".into());
-        assert_eq!(
-            check_source(&mapped, MemoryProfile::nested()),
-            Err(ProfileError::FileBackedHugePages)
-        );
-        assert_eq!(check_source(&mapped, MemoryProfile::bare_metal()), Ok(()));
-        let paged = MemorySource::Pager("/lab/vm/firecracker/a/root/uffd.sock".into());
-        assert_eq!(check_source(&paged, MemoryProfile::nested()), Ok(()));
-    }
-
-    #[test]
-    fn snapshots_are_durable_and_name_their_kind() {
-        let jail = Jail::new(&spec()).unwrap();
-        let files = SnapshotFiles {
-            state: "/lab/vm/firecracker/a/root/diff.state".into(),
-            memory: "/lab/vm/firecracker/a/root/diff.mem".into(),
-        };
-        let diff = create_request(&jail, &files, SnapshotKind::Diff).unwrap();
-        assert_eq!(diff["snapshot_type"], "Diff");
-        assert_eq!(diff["sync_snapshot_files"], true);
-        assert_eq!(diff["mem_file_path"], "/diff.mem");
-        assert_eq!(
-            create_request(&jail, &files, SnapshotKind::Full).unwrap()["snapshot_type"],
-            "Full"
-        );
-    }
-}
+mod tests;

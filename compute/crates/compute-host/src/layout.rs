@@ -39,8 +39,9 @@ use std::path::{Path, PathBuf};
 
 use compute_engine::{Drive, SnapshotFiles, VmSpec};
 
-use crate::net::{Link, NetworkConfig, PoolFull};
-use crate::protocol::{Id, SandboxConfig};
+use crate::net::{Link, NetworkConfig};
+use crate::protocol::Id;
+use crate::state::{Allocation, Record};
 
 /// Directory name the jailer gives each VM's chroot, inside the sandbox
 /// directory.
@@ -126,48 +127,77 @@ pub(crate) struct Images {
     /// configuration when sandboxes are networked.
     pub boot_args: String,
     /// The user id of the sandbox with ordinal 0; each sandbox's VMM runs
-    /// as `first_uid + ordinal`, with the same group id.
+    /// as `first_uid + ordinal`, with the same group id. Never 0.
     pub first_uid: u32,
     /// How sandboxes are networked; `None` leaves them without a network.
     pub network: Option<NetworkConfig>,
 }
 
 impl Images {
-    /// The user and group id the VMM of the sandbox numbered `ordinal` runs as.
-    pub fn owner(&self, ordinal: u32) -> (u32, u32) {
-        let uid = self.first_uid.saturating_add(ordinal);
-        (uid, uid)
+    /// What this host gives the sandbox numbered `ordinal`: its VMM's user
+    /// and group, and its link when sandboxes are networked.
+    pub fn allocate(&self, ordinal: u32) -> Result<Allocation, String> {
+        let uid = self
+            .first_uid
+            .checked_add(ordinal)
+            .filter(|&uid| self.first_uid != 0 && uid != u32::MAX)
+            .ok_or_else(|| format!("no unprivileged user id left for sandbox number {ordinal}"))?;
+        let link = match &self.network {
+            Some(config) => Some(config.addresses(ordinal).map_err(|full| full.to_string())?),
+            None => None,
+        };
+        Ok(Allocation {
+            uid,
+            gid: uid,
+            link,
+        })
     }
 
-    /// The network of the sandbox numbered `ordinal`, or `None` when
-    /// sandboxes are not networked.
-    pub fn link(&self, id: Id, ordinal: u32) -> Result<Option<Link>, PoolFull> {
-        let Some(config) = &self.network else {
-            return Ok(None);
-        };
-        let (uid, gid) = self.owner(ordinal);
-        Link::new(config, id, ordinal, uid, gid).map(Some)
+    /// Checks that a sandbox recorded earlier fits this host's settings:
+    /// its user and link are what this host would give it now, so no new
+    /// sandbox can be given the same. A sandbox made without a network
+    /// stays without one.
+    pub fn check(&self, record: &Record) -> Result<(), String> {
+        let now = self.allocate(record.ordinal)?;
+        let had = record.allocation;
+        if (had.uid, had.gid) != (now.uid, now.gid) {
+            return Err(format!(
+                "sandbox {} runs as uid {} gid {}, but this host's first uid gives {}",
+                record.id, had.uid, had.gid, now.uid
+            ));
+        }
+        match (had.link, now.link) {
+            (None, _) => Ok(()),
+            (Some(link), Some(now)) if link == now => Ok(()),
+            (Some(link), None) => Err(format!(
+                "sandbox {} has a network ({}), but this host networks none",
+                record.id, link.host
+            )),
+            (Some(link), Some(now)) => Err(format!(
+                "sandbox {} has link {}, but this host's pool gives {}",
+                record.id, link.host, now.host
+            )),
+        }
+    }
+
+    /// The network `record` was given, if any.
+    pub fn link(record: &Record) -> Option<Link> {
+        let Allocation { uid, gid, link } = record.allocation;
+        link.map(|addresses| Link::new(record.id, record.ordinal, addresses, uid, gid))
     }
 }
 
-/// The VM description for one sandbox, whose ordinal on this host is
-/// `ordinal`.
-pub(crate) fn vm_spec(
-    id: Id,
-    ordinal: u32,
-    config: &SandboxConfig,
-    paths: &Paths,
-    images: &Images,
-) -> VmSpec {
-    let (uid, gid) = images.owner(ordinal);
+/// The VM description for the sandbox `record` describes, from what the
+/// record says it was given.
+pub(crate) fn vm_spec(record: &Record, paths: &Paths, images: &Images) -> VmSpec {
     VmSpec {
-        name: id.to_string(),
+        name: record.id.to_string(),
         dir: paths.jail.clone(),
         logs: paths.dir.clone(),
-        uid,
-        gid,
-        vcpus: config.vcpus,
-        memory_mib: config.memory_mib,
+        uid: record.allocation.uid,
+        gid: record.allocation.gid,
+        vcpus: record.config.vcpus,
+        memory_mib: record.config.memory_mib,
         kernel: paths.kernel.clone(),
         boot_args: images.boot_args.clone(),
         drives: vec![Drive {
@@ -176,11 +206,7 @@ pub(crate) fn vm_spec(
             root: true,
             read_only: false,
         }],
-        network: images
-            .link(id, ordinal)
-            .ok()
-            .flatten()
-            .map(|link| link.vm_network()),
+        network: Images::link(record).map(|link| link.vm_network()),
         free_page_reporting: true,
     }
 }
@@ -208,7 +234,30 @@ pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
         file.sync_all()?;
     }
     fs::rename(&staging, path)?;
+    failpoint(path, "renamed")?;
     sync_parent(path)
+}
+
+/// Fails the write to `path` at `point` in tests that ask for it.
+#[cfg(test)]
+pub(crate) fn failpoint(path: &Path, point: &'static str) -> io::Result<()> {
+    if tests::FAILPOINTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|(failing, at)| failing == path && *at == point)
+    {
+        Err(io::Error::other(format!("simulated failure at {point}")))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(test))]
+#[allow(clippy::unnecessary_wraps)]
+#[inline]
+pub(crate) fn failpoint(_: &Path, _: &'static str) -> io::Result<()> {
+    Ok(())
 }
 
 /// Removes `path` durably; succeeds if it does not exist.
@@ -230,10 +279,12 @@ pub(crate) fn remove_if_present(path: &Path) -> io::Result<()> {
 
 /// Flushes a written file's data to disk.
 pub(crate) fn sync_file(path: &Path) -> io::Result<()> {
+    failpoint(path, "sync")?;
     File::open(path)?.sync_all()
 }
 
-fn sync_parent(path: &Path) -> io::Result<()> {
+/// Makes the directory entry of `path` durable.
+pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
     match path.parent() {
         Some(parent) => File::open(parent)?.sync_all(),
         None => Ok(()),
@@ -267,27 +318,47 @@ fn copy_contents(source: &File, target: &File) -> io::Result<()> {
             Err(error) => return Err(error.into()),
         };
         let end = rustix::fs::seek(source, SeekFrom::Hole(start)).map_err(io::Error::from)?;
-        let mut from = start;
-        let mut into = start;
-        while from < end {
-            let chunk = usize::try_from(end - from)
-                .unwrap_or(usize::MAX)
-                .min(1 << 30);
-            let copied = rustix::fs::copy_file_range(
-                source,
-                Some(&mut from),
-                target,
-                Some(&mut into),
-                chunk,
-            )?;
-            if copied == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "source shrank while copying",
-                ));
-            }
-        }
+        copy_range(source, target, start, end)?;
         offset = end;
+    }
+    Ok(())
+}
+
+/// Copies bytes `start..end` of `source` to the same place in `target`:
+/// inside the kernel where it can, which shares extents on XFS, otherwise
+/// through a buffer, as across filesystems or where `copy_file_range` is
+/// not supported.
+#[cfg(target_os = "linux")]
+fn copy_range(source: &File, target: &File, start: u64, end: u64) -> io::Result<()> {
+    use std::os::unix::fs::FileExt;
+
+    use rustix::io::Errno;
+
+    let shrank = || io::Error::new(io::ErrorKind::UnexpectedEof, "source shrank while copying");
+    let mut from = start;
+    let mut into = start;
+    while from < end {
+        let chunk = usize::try_from(end - from)
+            .unwrap_or(usize::MAX)
+            .min(1 << 30);
+        match rustix::fs::copy_file_range(source, Some(&mut from), target, Some(&mut into), chunk) {
+            Ok(0) => return Err(shrank()),
+            Ok(_) => {}
+            Err(Errno::XDEV | Errno::OPNOTSUPP | Errno::INVAL | Errno::NOSYS) => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut buffer = vec![0_u8; 1 << 20];
+    while from < end {
+        let want = usize::try_from(end - from)
+            .unwrap_or(usize::MAX)
+            .min(buffer.len());
+        let read = source.read_at(&mut buffer[..want], from)?;
+        if read == 0 {
+            return Err(shrank());
+        }
+        target.write_all_at(&buffer[..read], from)?;
+        from += read as u64;
     }
     Ok(())
 }
@@ -298,8 +369,12 @@ fn copy_contents(mut source: &File, mut target: &File) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Writes that fail on purpose: a path and the point it fails at.
+    pub(crate) static FAILPOINTS: std::sync::Mutex<Vec<(PathBuf, &'static str)>> =
+        std::sync::Mutex::new(Vec::new());
 
     #[test]
     fn sparse_copy_keeps_contents() {

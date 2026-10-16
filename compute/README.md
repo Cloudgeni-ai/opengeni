@@ -12,6 +12,8 @@ Status: design and prototype phase. Nothing here is used by Opengeni yet.
 | --- | --- |
 | `crates/` | Rust crates; each joins the workspace automatically |
 | `lab/` | Throwaway measurement harness (Bun scripts) used to size the design |
+| `ARCHITECTURE.toml` | Structure rules checked by `cargo arch`, with existing exceptions in `architecture-baseline.toml` |
+| `NOTICE` | What is derived from other projects, and how it was changed |
 
 ## Building
 
@@ -19,6 +21,7 @@ The crates target Linux hosts with KVM. Build and test on Linux:
 
 ```sh
 cargo test --workspace
+cargo arch        # structure rules: file size, a pure core, where unsafe code lives
 ```
 
 Tests that drive a real Firecracker run as root on a KVM host prepared by
