@@ -25,6 +25,7 @@ import {
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import {
   createObservability,
+  installCpuSamplingSignal,
   logStartupDependencyRetry,
   type Observability,
 } from "@opengeni/observability";
@@ -626,6 +627,10 @@ if (import.meta.main) {
     const settings = getSettings();
     const observability = createObservability(settings, { component: "api" });
     fatalBoundary.attachObservability(observability);
+    // `kill -USR2 <pid>` samples the API for 30 s and logs where the event loop was busy.
+    installCpuSamplingSignal({
+      log: (message, attributes) => observability.info(message, attributes),
+    });
     const api = await startApi({ settings, observability });
     installApiShutdownHandlers({
       close: api.close,
