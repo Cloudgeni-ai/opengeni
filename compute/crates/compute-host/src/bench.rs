@@ -9,14 +9,16 @@
 //! Every wake in a burst is timed from one shared release, so a request the
 //! bench itself dispatches late still counts that delay. A script counts as
 //! finished only when the guest reports its exit status, and only a zero
-//! status counts as a success. Sandboxes are removed afterwards even when a
-//! phase fails, unless `--keep` asks otherwise.
+//! status counts as a success. Scripts run under bash, like the lab guest
+//! service. Sandboxes are removed afterwards even when a phase fails, unless
+//! `--keep` asks otherwise, and the results record every failure, cleanup's
+//! included.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail};
+use anyhow::{Context, anyhow, bail};
 use clap::{Args, ValueEnum};
 use compute_core::SandboxId;
 use compute_host::client::Client;
@@ -44,8 +46,8 @@ const SLEEP_LIMIT: Duration = Duration::from_secs(1800);
 /// the sandbox before the next measurement starts.
 const DRAIN_LIMIT: Duration = Duration::from_secs(10);
 
-/// How long sandboxes may stay held awake after a burst before the bench
-/// sends them to sleep regardless, with a warning.
+/// How long sandboxes may stay held awake after a burst. Past it the bench
+/// stops, since the next sleep would not be timed from a quiet start.
 const RELEASE_LIMIT: Duration = Duration::from_secs(60);
 
 /// How often a removal the host calls busy (still creating) is retried.
@@ -183,30 +185,24 @@ pub(crate) async fn run_script(
         .await?;
     let mut buffer = Vec::new();
     let mut printed = 0;
-    let mut first_byte = None;
+    // The stream is the script's output, then the completion record, so
+    // the first byte to arrive is the first byte of output, if there is
+    // any; bytes held back until the record is told apart keep that time.
+    let mut first_read = None;
     let mut chunk = [0_u8; 8192];
     let (printed, status, done) = loop {
         let read = stream.read(&mut chunk).await?;
         if read == 0 {
             bail!("the guest closed the connection before the script ended");
         }
+        first_read.get_or_insert_with(|| started.elapsed());
         buffer.extend_from_slice(&chunk[..read]);
         match scan(&buffer, printed)? {
-            Scan::Running { output } => {
-                if output > 0 {
-                    first_byte.get_or_insert_with(|| started.elapsed());
-                }
-                printed = output;
-            }
-            Scan::Done { output, status } => {
-                let done = started.elapsed();
-                if output > 0 {
-                    first_byte.get_or_insert(done);
-                }
-                break (output, status, done);
-            }
+            Scan::Running { output } => printed = output,
+            Scan::Done { output, status } => break (output, status, started.elapsed()),
         }
     };
+    let first_byte = first_read.filter(|_| printed > 0);
     // Let the guest close the stream, outside the timing, so the host has
     // let go of the sandbox before whatever the caller measures next. A
     // guest that never closes is caught by the release check before sleep.
@@ -228,7 +224,7 @@ pub(crate) async fn run_script(
     })
 }
 
-/// What the guest shell receives for `script`. The script runs in a shell
+/// What the guest shell receives for `script`. The script runs in a bash
 /// of its own, so its `exit`, `exec` or syntax errors cannot swallow the
 /// completion record, and without stdin, so it cannot read the lines after
 /// it. Then the shell prints the record with the script's exit status and
@@ -237,7 +233,9 @@ fn framed(script: &str) -> String {
     // Inside single quotes only the quote itself needs care: end the quoted
     // text, add an escaped quote and start a new quoted text.
     let quoted = script.replace('\'', r"'\''");
-    format!("sh -c '{quoted}' </dev/null\nprintf '\\036compute-bench-done %d\\036' \"$?\"\nexit\n")
+    format!(
+        "bash -c '{quoted}' </dev/null\nprintf '\\036compute-bench-done %d\\036' \"$?\"\nexit\n"
+    )
 }
 
 /// How far a script's output has been read.
@@ -568,7 +566,8 @@ async fn wait_for_level(
 
 /// Waits until nothing holds any of `ids` (sorted) awake, a finished wake's
 /// stream in particular, so the next sleep is timed from a quiet start.
-/// Warns and carries on after [`RELEASE_LIMIT`].
+/// Fails after [`RELEASE_LIMIT`]: a measurement from a busy start would be
+/// wrong.
 async fn wait_for_release(client: &Client, ids: &[Id]) -> anyhow::Result<()> {
     let started = Instant::now();
     loop {
@@ -582,8 +581,10 @@ async fn wait_for_release(client: &Client, ids: &[Id]) -> anyhow::Result<()> {
             return Ok(());
         }
         if started.elapsed() > RELEASE_LIMIT {
-            println!("  warning: {held} sandboxes still held awake after {RELEASE_LIMIT:?}");
-            return Ok(());
+            bail!(
+                "{held} sandboxes still held awake after {RELEASE_LIMIT:?}, \
+                 so the next sleep could not be timed from a quiet start"
+            );
         }
         tokio::time::sleep(POLL).await;
     }
@@ -601,7 +602,9 @@ async fn put_to_sleep(
     let before = status(client).await.ok();
     let started = Instant::now();
     // Watch from the first request on, so a sandbox that settles while
-    // others are still being asked gets its own time.
+    // others are still being asked gets its own time. The level is
+    // reached when the last sandbox gets there, whenever the host got
+    // round to answering every request.
     let ask = async {
         let mut requests = JoinSet::new();
         for id in ids {
@@ -619,15 +622,16 @@ async fn put_to_sleep(
         while let Some(result) = requests.join_next().await {
             expect_done(result??)?;
         }
-        anyhow::Ok(())
+        anyhow::Ok(started.elapsed())
     };
-    let ((), reached) = tokio::try_join!(ask, wait_for_level(client, ids, level, started))?;
-    let took = started.elapsed();
+    let (accepted, reached) = tokio::try_join!(ask, wait_for_level(client, ids, level, started))?;
+    let took = reached.iter().copied().max().unwrap_or_default();
     let after = status(client).await.ok();
     let memory = HostMemory::sample();
     let sleep = Sleep {
         label: label.to_owned(),
         took_us: micros_of(took),
+        accepted_us: micros_of(accepted),
         reached_us: reached.iter().copied().map(micros_of).collect(),
         resident_bytes: after.as_ref().map(|status| {
             status
@@ -643,7 +647,7 @@ async fn put_to_sleep(
             .map(|(now, before)| now.per_sandbox(before, ids.len())),
         steps: step_delta(before, after),
     };
-    println!("\n{label}: all there after {took:?}");
+    println!("\n{label}: all there after {took:?}, all requests accepted after {accepted:?}");
     println!("  each         {}", percentiles(reached));
     if let Some(bytes) = sleep.resident_bytes {
         println!(
@@ -669,6 +673,8 @@ struct Sleep {
     label: String,
     /// Until the last sandbox reached the level.
     took_us: u64,
+    /// Until the host had accepted every request.
+    accepted_us: u64,
     /// Until each sandbox reached the level.
     reached_us: Vec<u64>,
     /// VM processes' resident memory, summed.
@@ -698,8 +704,9 @@ struct Results {
     /// How long the create requests took, all at once.
     create_us: Option<u64>,
     phases: Vec<Phase>,
-    /// Why the bench stopped early, if it did.
-    error: Option<String>,
+    /// What went wrong: why the bench stopped early, or why cleaning up
+    /// failed. Empty after a clean run.
+    errors: Vec<String>,
 }
 
 pub(crate) async fn bench(client: &Client, args: &BenchArgs) -> anyhow::Result<()> {
@@ -718,25 +725,34 @@ pub(crate) async fn bench(client: &Client, args: &BenchArgs) -> anyhow::Result<(
         baseline: HostMemory::sample(),
         create_us: None,
         phases: Vec::new(),
-        error: None,
+        errors: Vec::new(),
     };
     let outcome = run(client, args, &ids, &mut results).await;
-    results.error = outcome.as_ref().err().map(|error| format!("{error:#}"));
-    let written = match &args.json {
-        Some(path) => serde_json::to_vec_pretty(&results)
-            .map_err(anyhow::Error::from)
-            .and_then(|json| Ok(std::fs::write(path, json)?)),
-        None => Ok(()),
-    };
     // Whatever failed, the sandboxes go, so they cannot skew the next run.
     let removed = if args.keep {
         Ok(())
     } else {
-        remove_all(client, &ids).await
+        remove_all(client, &ids).await.context("cleaning up")
     };
-    outcome?;
-    written?;
-    removed
+    results.errors = [outcome, removed]
+        .into_iter()
+        .filter_map(Result::err)
+        .map(|error| format!("{error:#}"))
+        .collect();
+    if let Some(path) = &args.json {
+        let written = serde_json::to_vec_pretty(&results)
+            .map_err(anyhow::Error::from)
+            .and_then(|json| {
+                std::fs::write(path, json).with_context(|| format!("writing {}", path.display()))
+            });
+        if let Err(error) = written {
+            results.errors.push(format!("{error:#}"));
+        }
+    }
+    match results.errors.as_slice() {
+        [] => Ok(()),
+        errors => bail!("{}", errors.join("\n")),
+    }
 }
 
 /// Creates the sandboxes and runs every phase, recording each in `results`
@@ -1013,6 +1029,14 @@ Hugepagesize:       2048 kB
         assert_eq!(run_framed("echo 'a  b' \"c'd\""), ("a  b c'd\n".into(), 0));
         // Reading stdin finds nothing instead of the record's own lines.
         assert_eq!(run_framed("cat; echo after"), ("after\n".into(), 0));
+    }
+
+    #[test]
+    fn scripts_run_under_bash_whatever_the_outer_shell() {
+        assert_eq!(
+            run_framed("for i in {1..3}; do printf x; done"),
+            ("xxx".into(), 0)
+        );
     }
 
     #[test]
