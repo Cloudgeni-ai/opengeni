@@ -1,5 +1,27 @@
 # @opengeni/core
 
+## 3.4.0
+
+### Patch Changes
+
+- Updated dependencies [462fa87]
+- Updated dependencies [ad17c9e]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+  - @opengeni/runtime@3.4.0
+  - @opengeni/db@3.4.0
+  - @opengeni/contracts@3.4.0
+  - @opengeni/config@3.4.0
+  - @opengeni/documents@3.4.0
+  - @opengeni/events@3.4.0
+  - @opengeni/capabilities@3.4.0
+  - @opengeni/codex@3.4.0
+  - @opengeni/observability@3.4.0
+  - @opengeni/storage@3.4.0
+  - @opengeni/vaults@3.4.0
+  - @opengeni/network@3.4.0
+
 ## 3.3.0
 
 ### Patch Changes

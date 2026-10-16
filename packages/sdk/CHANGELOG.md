@@ -1,5 +1,20 @@
 # @opengeni/sdk
 
+## 3.4.0
+
+### Minor Changes
+
+- 7998676: Add an inert subscription-plan catalog, organization plan state, non-rollover period credit accounting, and database-enforced human seat caps. Expose optional plan funding and seat information in billing balances without enrolling existing organizations.
+- 7998676: Add default-off organization subscription checkout, paid-invoice plan synchronization, immediate paid upgrades, period-end changes/cancellation, and hosted portal endpoints with typed SDK methods. Serialize Stripe customer creation across billing entry points and recover duplicate subscriptions without treating their payments as prepaid credit purchases.
+
+### Patch Changes
+
+- 60191f6: No API changes. Republishes the 3.3.0 packages on a main whose CI is green again: Site test fixtures and the generated MCP action catalog are aligned, the desktop artifact browser test is mapped in the change-impact plan, and changesets that name only ignored packages no longer block Version PRs.
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+  - @opengeni/contracts@3.4.0
+  - @opengeni/connect@3.4.0
+
 ## 3.3.0
 
 ### Minor Changes
