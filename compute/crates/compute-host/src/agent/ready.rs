@@ -740,12 +740,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             slot.vm = Some(live);
         }
         // Paused, with no saved copy of what its guest did since the
-        // template: its disk moved on.
+        // template: its disk moved on. Idle since the claim, as its record
+        // says, so a restart counts from the same moment.
+        let last_activity = record
+            .last_used_ms
+            .map_or_else(|| self.now(), |unix_ms| self.at_unix_ms(unix_ms));
         self.input(Input::Add {
             sandbox: id.0,
             state: State::new(Level::Paused, Durability::Volatile, false),
             policy,
-            last_activity: self.now(),
+            last_activity,
         });
         if died {
             self.exited(id, incarnation);

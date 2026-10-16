@@ -805,6 +805,10 @@ impl Records {
                     identity: Identity::Pending,
                     generation: generations.unused().max(current.generation),
                     revision: current.revision + 1,
+                    // Its idle time starts at the claim, not at the fill, so
+                    // a restart never finds it overdue for a sleep it never
+                    // had the time to earn.
+                    last_used_ms: Some(unix_ms_now()),
                     ..current
                 };
                 slot.write(Some(next.clone()))?;

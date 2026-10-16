@@ -11,7 +11,8 @@ use tokio::time::sleep;
 
 use compute_core::HostPolicy;
 use compute_host::protocol::{
-    HostStatus, Id, LevelName, Reply, Request, SandboxConfig, TemplateState,
+    DurabilityName, HostStatus, Id, LevelName, Reply, Request, SandboxConfig, SleepConfig,
+    TemplateState,
 };
 use compute_host::{HostConfig, PoolConfig, Shape};
 
@@ -330,6 +331,55 @@ async fn a_restart_removes_ready_sandboxes_and_keeps_claimed_ones() {
     assert_eq!([record_of(&lab, id(1)).0, record_of(&lab, id(2)).0], hosts);
     let host: Id = hosts[1].parse().unwrap();
     assert!(matches!(create(&lab, host).await, Reply::Error { .. }));
+    lab.assert_clean();
+}
+
+/// A ready sandbox kept long before its claim is idle only from the claim:
+/// an agent restarted before its first wake does not find it overdue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claimed_sandbox_is_idle_from_its_claim_across_a_restart() {
+    // Wide enough that a restart on a loaded host fits well inside the save
+    // time, and the fill is older than it.
+    const SAVE_SOON: SleepConfig = SleepConfig {
+        pause_after_ms: Some(100),
+        save_after_ms: Some(4_000),
+        ..NEVER
+    };
+    let lab = ready_lab(Lab::root(), Arc::default(), 1).await;
+    wait_filled(&lab, 1).await;
+    // Older than the policy allows before the claim.
+    sleep(Duration::from_millis(5_000)).await;
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    lab.create(id(1), SAVE_SOON).await;
+    let used = record_of(&lab, id(1)).1["last_used_ms"].as_u64().unwrap();
+    assert!(
+        u128::from(used) >= before,
+        "the record keeps the fill's last use"
+    );
+    let claimed = std::time::Instant::now();
+    let (root, world) = lab.stop().await;
+
+    let lab = ready_lab(root, world, 1).await;
+    sleep(Duration::from_millis(500)).await;
+    let view = lab.current(id(1)).await;
+    assert!(
+        claimed.elapsed() < Duration::from_secs(3),
+        "the restart took too long"
+    );
+    assert_eq!(
+        (view.level, view.durability),
+        (LevelName::Paused, DurabilityName::Volatile),
+        "saved at once, as if idle since its fill: {view:?}"
+    );
+    // Its own idle time still saves it.
+    lab.wait_until("saved once idle", |status| {
+        Lab::sandbox(status, id(1)).durability == DurabilityName::Local
+    })
+    .await;
+    assert_eq!(lab.run(id(1), &["sandbox?"]).await, [id(1).to_string()]);
     lab.assert_clean();
 }
 

@@ -46,8 +46,9 @@ sandboxes created at once all pay it at the same time.
 - A ready pool (`--template SHAPE:COUNT`) keeps COUNT clones per shape
   restored, warmed until the guest accepts connections, and paused, outside
   the decision core. A create takes the oldest with one compare-and-set
-  record write giving it the sandbox's id and settings, and a generation
-  above any that id has had, so a claim never reuses one. Its host-side names
+  record write giving it the sandbox's id and settings, a generation above
+  any that id has had, so a claim never reuses one, and the claim's time as
+  its last use, so its idle time starts there. Its host-side names
   (directory, jail, cgroup, network namespace, user) stay as filled, since
   cgroups and namespaces cannot be renamed; the record keeps both names. Its
   first wake is a resume that sends the notice.
