@@ -7,6 +7,7 @@ import { createApp } from "../src/app";
 import {
   interactionControlApiError,
   legacyInteractionCapacityError,
+  legacyInteractionCapacityFailure,
   publicControlFailureCode,
 } from "../src/http/interaction-control-error";
 
@@ -141,6 +142,11 @@ describe("legacy supervisor capacity errors", () => {
     const mapped = legacyInteractionCapacityError(legacy, "browser");
     expect(mapped?.status).toBe(409);
     expect(mapped?.message).toContain("End browser sessions that are no longer needed");
+    // A failed create records the same definite, non-retryable failure.
+    expect(legacyInteractionCapacityFailure(legacy, "browser")).toMatchObject({
+      code: "capacity_exhausted",
+      retryable: false,
+    });
     expect(
       legacyInteractionCapacityError(
         new BrowserControlRequestError(503, {

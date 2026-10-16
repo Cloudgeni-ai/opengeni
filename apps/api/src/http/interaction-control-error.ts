@@ -17,10 +17,10 @@ export type InteractionControlSurface = "browser" | "computer";
  * Present it as the current agents do, a 409 that says what to do, instead of
  * the generic "temporarily unavailable" every 5xx becomes.
  */
-export function legacyInteractionCapacityError(
+export function legacyInteractionCapacityFailure(
   error: unknown,
   surface: InteractionControlSurface,
-): HTTPException | null {
+): { code: "capacity_exhausted"; message: string; retryable: false } | null {
   if (
     !(error instanceof BrowserControlRequestError) ||
     error.error.code !== "resource_unavailable" ||
@@ -30,10 +30,19 @@ export function legacyInteractionCapacityError(
   }
   const sessions = surface === "browser" ? "browsers" : "computer sessions";
   const ended = surface === "browser" ? "browser sessions" : "computer sessions";
-  return new HTTPException(409, {
+  return {
+    code: "capacity_exhausted",
     message: `This machine is already running its limit of Opengeni ${sessions}. End ${ended} that are no longer needed, then open a new one; retrying will not help until one ends.`,
-    cause: error,
-  });
+    retryable: false,
+  };
+}
+
+export function legacyInteractionCapacityError(
+  error: unknown,
+  surface: InteractionControlSurface,
+): HTTPException | null {
+  const failure = legacyInteractionCapacityFailure(error, surface);
+  return failure ? new HTTPException(409, { message: failure.message, cause: error }) : null;
 }
 
 /**

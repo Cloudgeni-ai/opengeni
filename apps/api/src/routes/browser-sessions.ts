@@ -240,6 +240,7 @@ import { ApiHttpError } from "../http/api-error";
 import {
   interactionControlApiError,
   legacyInteractionCapacityError,
+  legacyInteractionCapacityFailure,
 } from "../http/interaction-control-error";
 import {
   createInteractionFrameProxyAttachment,
@@ -592,9 +593,14 @@ export function registerBrowserSessionRoutes(
               );
               stages.mark("placement_cache_write");
             } catch (error) {
+              // A full supervisor from an older agent claims to be retryable,
+              // but nothing frees capacity on its own: fail the create so it
+              // does not sit in "starting" until the transition expires.
               if (
                 error instanceof BrowserControlTransportError ||
-                (error instanceof BrowserControlRequestError && error.retryable) ||
+                (error instanceof BrowserControlRequestError &&
+                  error.retryable &&
+                  !legacyInteractionCapacityError(error, "browser")) ||
                 isAbort(error)
               )
                 throw error;
@@ -5512,7 +5518,9 @@ function browserUploadSha256(value: string | null): string | null {
 }
 
 function interactionFailure(error: unknown) {
-  if (error instanceof BrowserControlRequestError) return error.error;
+  if (error instanceof BrowserControlRequestError) {
+    return legacyInteractionCapacityFailure(error, "browser") ?? error.error;
+  }
   if (
     error instanceof BrowserControlUnsupportedError ||
     error instanceof BrowserControlServerUnsupportedError
