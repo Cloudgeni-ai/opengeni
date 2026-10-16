@@ -3182,6 +3182,42 @@ describe("runtime event normalization", () => {
       },
     );
 
+    test.each([
+      ["one account", undefined, false],
+      ["several accounts", "alice@example.test", true],
+    ] as const)(
+      "connector tool descriptions name the account only to tell several apart (%s)",
+      async (_case, account, named) => {
+        const serverId = `account-${"b".repeat(64)}`;
+        const accountLabel: McpAccountRouteLabel = {
+          model: "Documents — Personal: alice@example.test",
+          connector: "Documents",
+          providerDomain: "docs.example.test",
+          ...(account ? { account } : {}),
+        };
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "allow",
+          serverId,
+          accountLabel,
+        });
+        try {
+          const tools = await fixture.prepared.mcpServers[0]!.listTools();
+          expect(tools.length).toBeGreaterThan(0);
+          for (const tool of tools) {
+            expect((tool.description ?? "").startsWith("Account: ")).toBe(named);
+          }
+          if (named) {
+            expect(tools[0]!.description).toStartWith(
+              "Account: Documents — Personal: alice@example.test. Use only this account; if the intended account for a write is unclear, ask before calling.\n",
+            );
+          }
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      },
+    );
+
     test("prepared account display facts enrich event copies without changing catalog authority", async () => {
       const serverId = `account-${"a".repeat(64)}`;
       const accountLabel: McpAccountRouteLabel = {

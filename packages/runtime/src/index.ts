@@ -8504,7 +8504,10 @@ export class PrefixedMcpServer implements MCPServer {
           return {
             ...tool,
             name,
-            ...(this.accountLabel
+            // Name the account only when the turn has several accounts of this
+            // connector to tell apart. With one account the line adds nothing
+            // the model can act on, and it would repeat on every tool.
+            ...(this.accountLabel?.account
               ? {
                   description:
                     `Account: ${this.accountLabel.model}. Use only this account; if the intended account for a write is unclear, ask before calling.\n${tool.description ?? ""}`.trimEnd(),
