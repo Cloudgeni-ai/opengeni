@@ -146,10 +146,14 @@ describe("turn claim organization-membership fence", () => {
     }
   }, 180_000);
 
-  test("membership-lock triggers are retired host-MCP writers or insert-only Site binding", async () => {
+  test("membership-key triggers are confined to authority, membership and Site creation writes", async () => {
     // The claim can stay fence-free only while no trigger it can fire takes
     // the membership key. Pin the complete trigger set so a new one is a
     // deliberate review of the claim's lock order, not a silent inversion.
+    // Plan seat triggers run only on membership/invitation writes, never turn
+    // claim writes; the blocking controls above keep that separation proven.
+    // The Site audience trigger returns before taking the key for every UPDATE,
+    // including claim transitions; its fence applies only to Site creation.
     if (!available) return;
     const admin = postgres(shared!.adminUrl, { max: 1, onnotice: () => undefined });
     try {
@@ -165,6 +169,8 @@ describe("turn claim organization-membership fence", () => {
         "host_mcp_turn_authorities.host_mcp_inherited_turn_authority_guard",
         "host_mcp_turn_authorities.host_mcp_scheduled_turn_authority_guard",
         "host_mcp_turn_authorities.host_mcp_turn_authority_guard",
+        "organization_membership_invitations.organization_invitations_plan_seat_limit",
+        "organization_memberships.organization_memberships_plan_seat_limit",
         "sessions.zz_sessions_site_audience",
       ]);
       // Claims update sessions, never insert them. The Site audience trigger

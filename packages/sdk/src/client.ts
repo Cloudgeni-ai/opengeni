@@ -415,6 +415,12 @@ import type {
   InstalledSkill,
   ListInstalledSkillsResponse,
   CreateBillingPortalRequest,
+  BillingSubscriptionCatalog,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
+  ChangeBillingSubscriptionRequest,
+  CancelBillingSubscriptionRequest,
+  BillingSubscriptionChange,
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
   BillingCheckoutStatus,
@@ -10455,6 +10461,45 @@ export class OpenGeniClient {
       "/v1/billing/portal",
       request,
     );
+  }
+
+  /** Current runtime catalog, USD prices, self-service availability and plan balance. */
+  async getBillingSubscriptionPlans(
+    options: { accountId?: string } = {},
+  ): Promise<BillingSubscriptionCatalog> {
+    return await this.requestJson("GET", "/v1/billing/subscription/plans", undefined, options);
+  }
+
+  async createSubscriptionCheckout(
+    request: CreateSubscriptionCheckoutRequest,
+  ): Promise<CreateSubscriptionCheckoutResponse> {
+    return await this.requestJson("POST", "/v1/billing/subscription/checkout", request);
+  }
+
+  /** Charge immediately, reset the monthly anchor and replace plan credit after payment. */
+  async upgradeBillingSubscription(
+    request: ChangeBillingSubscriptionRequest,
+  ): Promise<BillingSubscriptionChange> {
+    return await this.requestJson("POST", "/v1/billing/subscription/upgrade", request);
+  }
+
+  /** Schedule a lower-priced plan at the end of the already-paid period. */
+  async changeBillingSubscription(
+    request: ChangeBillingSubscriptionRequest,
+  ): Promise<BillingSubscriptionChange> {
+    return await this.requestJson("POST", "/v1/billing/subscription/change", request);
+  }
+
+  async cancelBillingSubscription(
+    request: CancelBillingSubscriptionRequest,
+  ): Promise<BillingSubscriptionChange> {
+    return await this.requestJson("POST", "/v1/billing/subscription/cancel", request);
+  }
+
+  async createSubscriptionPortalSession(
+    request: CreateBillingPortalRequest = {},
+  ): Promise<CreateBillingPortalResponse> {
+    return await this.requestJson("POST", "/v1/billing/subscription/portal", request);
   }
 
   // --- Embedding transport -----------------------------------------------------

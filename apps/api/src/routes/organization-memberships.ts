@@ -247,6 +247,18 @@ function parseId(schema: z.ZodString, value: string, label: string): string {
 
 function rethrowMembershipError(error: unknown, resourceLimitMessage?: string): never {
   const sqlState = nestedPostgresSqlState(error);
+  if (sqlState === "P0S01") {
+    throw new HTTPException(402, {
+      res: Response.json(
+        {
+          error: "seat_limit_reached",
+          message: "Organization seat limit reached. Upgrade your plan to add people.",
+          action: { type: "upgrade", href: "/billing" },
+        },
+        { status: 402 },
+      ),
+    });
+  }
   if (sqlState === "54000" && resourceLimitMessage) {
     throw new HTTPException(409, {
       message: resourceLimitMessage,

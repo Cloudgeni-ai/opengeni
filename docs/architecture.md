@@ -9,6 +9,12 @@ Overview: §2–4/§6; subsystems: §13; updates: §14.
 ---
 
 Keys/coupons: [providers](model-providers.md), [billing](deployment.md).
+Organization subscription plans (runtime catalog, period credit and seats):
+[foundation contract](subscription-plans.md). No plan row preserves existing behavior.
+`apps/api/src/billing-subscriptions.ts` owns Stripe subscription synchronization;
+`billing-subscription-store.ts` composes the accounting seams in one org-fenced
+transaction. `/v1/billing/subscription/*` and webhook plan writes are default-off
+behind `OPENGENI_SUBSCRIPTION_PLANS_ENABLED`; prepaid credit billing is independent.
 
 ## 1. Startup
 

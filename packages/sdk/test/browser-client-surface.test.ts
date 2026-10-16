@@ -159,6 +159,17 @@ const retiredSettingsMethods = [
 // remove each entry when its browser consumer lands (the equality below enforces it).
 const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
+// Subscription backend ships default-off before its separately reviewed billing
+// UI. Remove these entries as that UI adopts them; equality below enforces it.
+const pendingSubscriptionMethods = [
+  "getBillingSubscriptionPlans",
+  "createSubscriptionCheckout",
+  "upgradeBillingSubscription",
+  "changeBillingSubscription",
+  "cancelBillingSubscription",
+  "createSubscriptionPortalSession",
+];
+
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return source.match(new RegExp(`\\b${escaped}\\b`, "g"))?.length ?? 0;
@@ -225,6 +236,7 @@ describe("browser client runtime surface", () => {
         ...nativeAppMethods,
         ...retiredSettingsMethods,
         ...pendingModelAccountMethods,
+        ...pendingSubscriptionMethods,
       ].sort(),
     );
   });

@@ -1,4 +1,8 @@
-import type { BillingBalance, PromotionalCreditBalance } from "@opengeni/contracts";
+import type {
+  BillingBalance,
+  BillingPlanBalance,
+  PromotionalCreditBalance,
+} from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withAccountRls } from "./database";
@@ -11,12 +15,14 @@ export async function getBillingBalance(
   db: Database,
   accountId: string,
   policyRevision?: number,
+  settlementAt?: string,
 ): Promise<CreditBalanceSnapshot> {
   return await withAccountRls(db, accountId, async (tx) => {
     const [row] = await rawRows<{
       balance: string;
       grants: PromotionalCreditBalance[];
       revision: number;
+      plan: BillingPlanBalance | null;
     }>(
       tx,
       sql`
@@ -27,6 +33,7 @@ export async function getBillingBalance(
       )
       select
         coalesce((select revision from current_policy), 0)::int as revision,
+        read_organization_plan_balance(${accountId}::uuid, ${settlementAt ?? null}::timestamptz) as plan,
         (select coalesce(sum(amount_micros), 0)::text
           from ${schema.creditLedgerEntries} where account_id = ${accountId}) as balance,
         coalesce((select jsonb_agg(jsonb_build_object(
@@ -52,7 +59,9 @@ export async function getBillingBalance(
         ), '[]'::jsonb) as grants
     `,
     );
-    const balanceMicros = Number(row?.balance ?? 0);
+    // Expiry cannot depend on a maintenance worker being awake. Keep this read
+    // lock-free; writers settle the same expiry under the account lock first.
+    const balanceMicros = Number(row?.balance ?? 0) - (row?.plan?.creditPendingExpiryMicros ?? 0);
     const promotionalCredits = row?.grants ?? [];
     return {
       accountId,
@@ -61,6 +70,7 @@ export async function getBillingBalance(
       generalBalanceMicros:
         balanceMicros - promotionalCredits.reduce((sum, grant) => sum + grant.remainingMicros, 0),
       promotionalCredits,
+      plan: row?.plan ?? null,
       currency: "usd",
       updatedAt: new Date().toISOString(),
     };
@@ -99,18 +109,20 @@ export async function getSpendableCreditBalance(
   accountId: string,
   usage?: CreditUsage,
   policyRevision?: number,
+  settlementAt?: string,
 ): Promise<CreditBalanceSnapshot> {
-  const balance = await getBillingBalance(db, accountId, policyRevision);
+  const balance = await getBillingBalance(db, accountId, policyRevision, settlementAt);
   return { ...balance, balanceMicros: spendableCreditMicros(balance, usage) };
 }
 
-/** Covering grants pay first, oldest first; the rest is general credit. */
+/** Monthly plan credit pays first; then covering grants, oldest first. */
 function allocateToCoveringGrants(
   balance: BillingBalance,
   amountMicros: number,
   usage: CreditUsage,
+  planBudgetMicros = balance.plan?.creditRemainingMicros ?? 0,
 ) {
-  let remaining = amountMicros;
+  let remaining = Math.max(0, amountMicros - Math.max(0, planBudgetMicros));
   const allocations: { grantEntryId: string; amountMicros: number }[] = [];
   for (const grant of balance.promotionalCredits ?? []) {
     if (!remaining || !grantCovers(grant, usage) || grant.remainingMicros <= 0) continue;
@@ -130,13 +142,23 @@ export function planCreditDebit(
     throw new Error("credit debit requires a positive, safe integer micro amount");
   }
   const debitedMicros = Math.min(requestedMicros, spendableCreditMicros(balance, usage));
-  return { debitedMicros, allocations: allocateToCoveringGrants(balance, debitedMicros, usage) };
+  // Existing general-credit debt can leave less spendable general funding than
+  // the derived allowance. Prepaid admission must never mint spendable credit
+  // by repeatedly preserving promotional grants while overdrawing general.
+  const planBudget = Math.min(
+    balance.plan?.creditRemainingMicros ?? 0,
+    Math.max(0, balance.generalBalanceMicros ?? balance.balanceMicros),
+  );
+  return {
+    debitedMicros,
+    allocations: allocateToCoveringGrants(balance, debitedMicros, usage, planBudget),
+  };
 }
 
 /**
- * Allocations for an already-consumed charge of the full amount: covering
- * grants pay what they can and general credit takes the rest, possibly going
- * negative.
+ * Allocations for an already-consumed charge of the full amount: the monthly
+ * plan pays first, covering grants pay beyond it, and other general credit
+ * takes the rest, possibly going negative.
  */
 export function planPostUseCreditAllocations(
   balance: BillingBalance,
@@ -146,5 +168,12 @@ export function planPostUseCreditAllocations(
   if (!Number.isSafeInteger(amountMicros) || amountMicros <= 0) {
     throw new Error("credit debit requires a positive, safe integer micro amount");
   }
-  return allocateToCoveringGrants(balance, amountMicros, usage);
+  // Funding reversals/dispute holds can remove general funds without reducing
+  // derived period usage. Do not preserve covering promotions by charging an
+  // allowance that is no longer backed by a positive general balance.
+  const planBudget = Math.min(
+    balance.plan?.creditRemainingMicros ?? 0,
+    Math.max(0, balance.generalBalanceMicros ?? balance.balanceMicros),
+  );
+  return allocateToCoveringGrants(balance, amountMicros, usage, planBudget);
 }
