@@ -747,8 +747,28 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         Ok((handle, tokio::spawn(agent.run())))
     }
 
-    /// The lowest ordinal no sandbox holds.
-    fn take_ordinal(&mut self) -> u32 {
+    /// Refuses while some ordinal is unknown: any ordinal that looks free
+    /// could then belong to a VM that still runs as its user.
+    fn ordinals_known(&self) -> Result<(), String> {
+        if let Some(unknown) = self.unknown_ordinals.first() {
+            return Err(format!(
+                "sandbox {}'s record is unreadable and the user and network it holds unknown; \
+                 no sandbox is created until it is resolved",
+                Id(*unknown)
+            ));
+        }
+        if let Some(build) = self.unknown_builds.first() {
+            return Err(format!(
+                "template build {build} may still run as a user nothing records; \
+                 no sandbox is created until a restart of the agent ends it"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The lowest ordinal no sandbox holds, unless some ordinal is unknown.
+    fn take_ordinal(&mut self) -> Result<u32, String> {
+        self.ordinals_known()?;
         let mut free = 0;
         for taken in &self.ordinals {
             if *taken != free {
@@ -757,7 +777,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             free += 1;
         }
         self.ordinals.insert(free);
-        free
+        Ok(free)
     }
 
     fn insert(&mut self, id: Id, paths: Paths, spec: VmSpec) {

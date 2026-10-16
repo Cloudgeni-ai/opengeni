@@ -263,10 +263,39 @@ async fn a_build_whose_vm_may_survive_keeps_its_user_taken() {
     assert_eq!(lab.record(id(2))["ordinal"], 0);
     let (root, world) = lab.stop().await;
 
-    // One whose ordinal nothing records could clash with any sandbox.
+    // One whose ordinal nothing records could clash with any sandbox, and
+    // with any template build: neither a create nor a configured shape's
+    // build takes an ordinal while it may run.
     std::fs::create_dir_all(jails.join("template-feedface/root")).unwrap();
     world.stuck_clean_ups.store(true, Ordering::Relaxed);
+    let lab = warm_lab(root, world, Delays::default(), vec![SHAPE]).await;
+    refuse_creates_and_builds(&lab).await;
+    let (root, world) = lab.stop().await;
+    world.stuck_clean_ups.store(false, Ordering::Relaxed);
     let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    lab.create(id(3), NEVER).await;
+    let (root, world) = lab.stop().await;
+
+    // The same for a sandbox whose record is unreadable and whose user is
+    // unknown.
+    let record = root
+        .join("state/vm/firecracker")
+        .join(id(3).to_string())
+        .join("sandbox.json");
+    std::fs::write(record, b"{").unwrap();
+    let lab = warm_lab(root, world, Delays::default(), vec![SHAPE]).await;
+    refuse_creates_and_builds(&lab).await;
+    lab.stop().await;
+}
+
+/// Checks that `lab`, started with an ordinal it cannot know, creates no
+/// sandbox and builds no template.
+async fn refuse_creates_and_builds(lab: &Lab) {
+    let boots = lab.world.boots.load(Ordering::Relaxed);
+    lab.wait_until("a template build refused", |status| {
+        template_state(status) == Some(TemplateState::Failed)
+    })
+    .await;
     let config = compute_host::protocol::SandboxConfig {
         vcpus: 1,
         memory_mib: 256,
@@ -274,15 +303,15 @@ async fn a_build_whose_vm_may_survive_keeps_its_user_taken() {
     };
     let refused = lab
         .client
-        .call(&compute_host::protocol::Request::Create { id: id(3), config })
+        .call(&compute_host::protocol::Request::Create { id: id(4), config })
         .await
         .unwrap();
     assert!(matches!(refused, Reply::Error { .. }), "{refused:?}");
-    let (root, world) = lab.stop().await;
-    world.stuck_clean_ups.store(false, Ordering::Relaxed);
-    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
-    lab.create(id(3), NEVER).await;
-    lab.assert_clean();
+    assert_eq!(
+        lab.world.boots.load(Ordering::Relaxed),
+        boots,
+        "nothing booted"
+    );
 }
 
 /// A template a file of which is gone is not kept as ready: the sandbox

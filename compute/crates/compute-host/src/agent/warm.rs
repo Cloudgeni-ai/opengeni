@@ -152,7 +152,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }) else {
             return;
         };
-        let ordinal = self.take_ordinal();
+        let ordinal = match self.take_ordinal() {
+            Ok(ordinal) => ordinal,
+            Err(problem) => {
+                if let Some(warm) = &mut self.warm {
+                    warm.pool.built(shape, Err(problem), Instant::now());
+                }
+                return;
+            }
+        };
         let uid = match self.images.allocate(ordinal) {
             Ok(allocation) => allocation.uid,
             Err(problem) => {

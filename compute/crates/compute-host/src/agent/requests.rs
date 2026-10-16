@@ -286,19 +286,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if self.blocked.contains_key(&id.0) {
             return Err(HostError::Broken(id));
         }
-        if let Some(unknown) = self.unknown_ordinals.first() {
-            return Err(HostError::Io(format!(
-                "sandbox {}'s record is unreadable and the user and network it holds unknown; \
-                 no sandbox is created until it is resolved",
-                Id(*unknown)
-            )));
-        }
-        if let Some(build) = self.unknown_builds.first() {
-            return Err(HostError::Io(format!(
-                "template build {build} may still run as a user nothing records; \
-                 no sandbox is created until a restart of the agent ends it"
-            )));
-        }
+        self.ordinals_known().map_err(HostError::Io)?;
         if self.slots.contains_key(&id.0)
             || self.preparing.contains(&id.0)
             || self.destroying.contains_key(&id.0)
@@ -329,8 +317,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Some((config, reply)) = self.claim(id, config, reply) else {
             return;
         };
+        let ordinal = match self.take_ordinal() {
+            Ok(ordinal) => ordinal,
+            Err(problem) => {
+                let _ = reply.send(Err(HostError::Io(problem)));
+                return;
+            }
+        };
         self.preparing.insert(id.0);
-        let ordinal = self.take_ordinal();
         let allocation = match self.images.allocate(ordinal) {
             Ok(allocation) => allocation,
             Err(problem) => {

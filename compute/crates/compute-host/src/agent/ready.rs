@@ -291,10 +291,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Starts filling ready sandboxes wherever fewer are kept than asked
     /// for, the shape's template is ready, and memory allows.
     pub(super) fn refill(&mut self) {
-        if self.ready.targets.is_empty()
-            || !self.unknown_ordinals.is_empty()
-            || !self.unknown_builds.is_empty()
-        {
+        if self.ready.targets.is_empty() || self.ordinals_known().is_err() {
             return;
         }
         let now = Instant::now();
@@ -355,7 +352,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         while self.name_taken(host) {
             host = fresh_name();
         }
-        let ordinal = self.take_ordinal();
+        let Ok(ordinal) = self.take_ordinal() else {
+            return;
+        };
         let allocation = match self.images.allocate(ordinal) {
             Ok(allocation) => allocation,
             Err(problem) => {
