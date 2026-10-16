@@ -17,8 +17,8 @@ use compute_host::protocol::{
     Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
 };
 use compute_host::{
-    BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, Keep, NoStore, PoolConfig,
-    Store, serve,
+    BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, Keep, NoStore, PagerConfig,
+    PoolConfig, Store, serve,
 };
 
 use crate::bench::{BenchArgs, bench, exec};
@@ -118,6 +118,14 @@ struct ServeArgs {
     /// Parent cgroup for VMs.
     #[arg(long, default_value = "/sys/fs/cgroup/compute")]
     cgroup: PathBuf,
+    /// The program VMs' memory pagers run as, given `pager` as its first
+    /// argument. Defaults to this agent's own binary.
+    #[arg(long)]
+    pager: Option<PathBuf>,
+    /// How long after a wake each pager records the order the guest
+    /// touches memory in, for the next wake to prefetch.
+    #[arg(long, default_value_t = 120_000)]
+    pager_record_ms: u64,
     #[arg(
         long,
         default_value = "console=ttyS0 reboot=k panic=1 quiet loglevel=1 page_reporting.page_reporting_order=0"
@@ -292,8 +300,34 @@ fn parse_limit(text: &str) -> Result<(Step, u32), String> {
     Ok((step, limit))
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Runs as a VM's memory pager when the first argument is `pager` (the
+/// agent starts its pagers from its own binary; see
+/// [`compute_host::PagerConfig`]), and as the agent or its client
+/// otherwise.
+fn main() -> std::process::ExitCode {
+    let mut args = std::env::args_os().skip(1);
+    #[cfg(target_os = "linux")]
+    if args.next().is_some_and(|first| first == "pager") {
+        return compute_pager::linux::serve::main(args);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = args.next();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build();
+    let result = runtime
+        .map_err(anyhow::Error::from)
+        .and_then(|runtime| runtime.block_on(agent_main()));
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn agent_main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -442,6 +476,14 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
             window: args.busy_window,
         }),
         can_compress: !args.no_compress,
+        // The running binary even once an upgrade has replaced its file,
+        // so a pager always speaks its agent's protocol.
+        pager: PagerConfig {
+            program: args
+                .pager
+                .unwrap_or_else(|| PathBuf::from("/proc/self/exe")),
+            record_for: Duration::from_millis(args.pager_record_ms),
+        },
     };
     let Some(store) = args.store else {
         return run_agent(config, engine, NoStore, socket).await;

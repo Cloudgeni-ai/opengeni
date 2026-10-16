@@ -6,9 +6,14 @@
 //!
 //! Chunks are named by their content and shared by every sandbox holding the
 //! same bytes, so a bad chunk would poison all of them. Uploads are verified
-//! (see [`crate::upload`]), every read checks the content hash, and a stored
-//! object found to be bad is moved to `quarantine/v1/` rather than deleted,
-//! so the next upload of the same content repairs it.
+//! (see [`crate::upload`]), and every read checks the content hash.
+//!
+//! A stored object found to be bad is copied to `quarantine/v1/` for
+//! inspection and left where it is: nothing here ever deletes a chunk or a
+//! manifest. The next upload of the same content writes the right bytes over
+//! it. Names include the hash of the stored bytes, so every writer of a name
+//! writes exactly the same bytes: two repairs racing write the same object,
+//! and no operation can undo another's repair.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -187,25 +192,54 @@ impl ChunkStore {
     pub async fn put_chunk(&self, chunk: &EncodedChunk) -> Result<bool> {
         // Public structs may have been modified since encoding.
         decode(&chunk.reference, &chunk.bytes)?;
+        if chunk
+            .reference
+            .checksums
+            .as_ref()
+            .is_some_and(|checksums| *checksums != crate::upload::checksums(&chunk.bytes))
+        {
+            return Err(Error::Integrity);
+        }
         self.put_immutable(&chunk.object_key(), Bytes::copy_from_slice(&chunk.bytes))
             .await
     }
 
     async fn put_immutable(&self, key: &str, bytes: Bytes) -> Result<bool> {
         let path = self.path(key);
-        // An object already stored under this name may be the remains of a
-        // bad write or a corrupted copy. Verify it; if it is bad, move it to
-        // quarantine and store ours once more.
-        for _ in 0..2 {
-            if self.create(&path, &bytes).await? == Created::New {
-                return Ok(true);
-            }
-            if self.holds(&path, &bytes).await? {
-                return Ok(false);
-            }
-            self.quarantine(&path).await?;
+        if self.create(&path, &bytes).await? == Created::New {
+            return Ok(true);
         }
-        Err(Error::Integrity)
+        if self.holds(&path, &bytes).await? {
+            return Ok(false);
+        }
+        // Something else is stored under our name: the remains of a bad
+        // write or a damaged copy. Keep it for inspection and write ours
+        // over it; the name allows no other bytes, so this cannot replace
+        // a good object.
+        self.quarantine(&path).await?;
+        self.replace(&path, &bytes).await?;
+        if self.holds(&path, &bytes).await? {
+            Ok(true)
+        } else {
+            Err(Error::Integrity)
+        }
+    }
+
+    /// Writes `bytes` at `path` whatever is stored there, verified in
+    /// transit as [`Self::create`] is. Only for repairing an object whose
+    /// name allows no other bytes.
+    async fn replace(&self, path: &Path, bytes: &Bytes) -> Result<()> {
+        if let Uploader::Gcs(gcs) = &self.uploader {
+            return gcs.replace(path, bytes).await;
+        }
+        let options = PutOptions {
+            mode: PutMode::Overwrite,
+            ..Default::default()
+        };
+        self.backend
+            .put_opts(path, bytes.clone().into(), options)
+            .await?;
+        Ok(())
     }
 
     /// Creates the object unless one exists. `New` means our bytes are
@@ -252,8 +286,9 @@ impl ChunkStore {
         Ok(result.bytes().await? == *bytes)
     }
 
-    /// Moves the object at `path` under `quarantine/v1/`, keeping it for
-    /// inspection; never deletes it outright.
+    /// Copies the object at `path` under `quarantine/v1/` for inspection.
+    /// The object itself stays: only a write of the bytes its name allows
+    /// replaces it, so a copy repaired meanwhile is never lost.
     async fn quarantine(&self, path: &Path) -> Result<()> {
         // Unique per move, so quarantining the same name twice keeps both.
         static MOVES: AtomicU64 = AtomicU64::new(0);
@@ -272,20 +307,41 @@ impl ChunkStore {
             .join("/");
         let target = self.path(&format!("quarantine/v1/{relative}.{nanos}-{moves}"));
         match self.backend.copy(path, &target).await {
-            Ok(()) => {}
-            Err(object_store::Error::NotFound { .. }) => return Ok(()),
-            Err(error) => return Err(error.into()),
-        }
-        match self.backend.delete(path).await {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
             Err(error) => Err(error.into()),
         }
     }
 
+    /// Whether the chunk `reference` names is stored with exactly the bytes
+    /// it names. A local copy may be deleted on this answer, so a stored
+    /// length is not enough: same-length damage must be found too.
+    ///
+    /// GCS keeps the CRC32C and MD5 it computed when the object was stored;
+    /// matching them against the checksums recorded in `reference` proves
+    /// the bytes without downloading them, and any write that changed the
+    /// bytes changed them. Other stores, and references recorded without
+    /// checksums, are read and hashed in full.
+    pub async fn has_chunk(&self, reference: &ChunkRef) -> Result<bool> {
+        reference.validate()?;
+        let path = self.path(&reference.key());
+        if let (Uploader::Gcs(gcs), Some(expected)) = (&self.uploader, &reference.checksums) {
+            return Ok(gcs.stored(&path).await?.as_deref() == Some(expected.as_str()));
+        }
+        match self.read_chunk(&path, reference).await {
+            Ok(_) => Ok(true),
+            Err(
+                Error::Integrity
+                | Error::Truncated { .. }
+                | Error::Object(object_store::Error::NotFound { .. }),
+            ) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Reads and decodes a chunk, checking its length and content hash. A
     /// read that fails the checks is tried once more, since the damage may
-    /// have happened in transit; a chunk that is bad twice is quarantined so
-    /// a later upload of the same content can repair it.
+    /// have happened in transit; a chunk that is bad twice is copied to
+    /// quarantine, and a later upload of the same content repairs it.
     pub async fn get_chunk(&self, reference: &ChunkRef) -> Result<Vec<u8>> {
         reference.validate()?;
         let path = self.path(&reference.key());
@@ -458,19 +514,73 @@ mod tests {
                 "{error}"
             );
             assert!(matches!(error, Error::Truncated { .. } | Error::Integrity));
-            // Moved aside, not deleted.
+            // A copy is kept for inspection.
             assert!(quarantined(&backend).await.contains(&bad));
-            assert!(matches!(
-                backend.head(&path).await,
-                Err(object_store::Error::NotFound { .. })
-            ));
+            // The object itself stays until the right bytes replace it, and
+            // neither a short nor a same-length damaged copy counts as held.
+            assert!(!store.has_chunk(&chunk.reference).await.unwrap());
             // The next upload of the same content repairs the shared chunk.
             assert!(store.put_chunk(&chunk).await.unwrap());
+            assert!(store.has_chunk(&chunk.reference).await.unwrap());
             assert_eq!(
                 store.get_chunk(&chunk.reference).await.unwrap(),
                 vec![7; 65536]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_truncated_chunk_is_not_held() {
+        let backend = Arc::new(InMemory::new());
+        let store = ChunkStore::new(backend.clone(), Path::from("tenant/test"));
+        let chunk = EncodedChunk::encode(&[4; 8192], 1).unwrap();
+        assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+        store.put_chunk(&chunk).await.unwrap();
+        assert!(store.has_chunk(&chunk.reference).await.unwrap());
+        let path = store.path(&chunk.object_key());
+        backend
+            .put(&path, Bytes::from(chunk.bytes[1..].to_vec()).into())
+            .await
+            .unwrap();
+        assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+        backend.delete(&path).await.unwrap();
+        assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn gcs_checksums_prove_a_chunk_without_reading_it() {
+        use crate::upload::tests::{Fake, gcs};
+        let fake = Arc::new(Fake::default());
+        let store = ChunkStore {
+            // Never read: GCS answers from the checksums it keeps.
+            backend: Arc::new(InMemory::new()),
+            prefix: Path::from("p"),
+            uploader: Uploader::Gcs(gcs(&fake)),
+        };
+        let chunk = EncodedChunk::encode(&[9; 16384], 1).unwrap();
+        assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+        assert!(store.put_chunk(&chunk).await.unwrap());
+        assert!(store.has_chunk(&chunk.reference).await.unwrap());
+        // Same-length damage under the chunk's name is not held...
+        let key = format!("/bucket/p/{}", chunk.object_key());
+        let mut damaged = chunk.bytes.clone();
+        damaged[1] ^= 0x10;
+        fake.objects
+            .lock()
+            .unwrap()
+            .insert(key.clone(), Bytes::from(damaged));
+        assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+        // ...and the next upload of the same content replaces it.
+        assert!(store.put_chunk(&chunk).await.unwrap());
+        assert_eq!(fake.objects.lock().unwrap()[&key], chunk.bytes);
+        assert!(store.has_chunk(&chunk.reference).await.unwrap());
+        // A reference whose checksums disagree with its bytes is refused.
+        let mut forged = chunk.clone();
+        forged.reference.checksums = Some(crate::upload::checksums(b"other"));
+        assert!(matches!(
+            store.put_chunk(&forged).await,
+            Err(Error::Integrity)
+        ));
     }
 
     #[tokio::test]

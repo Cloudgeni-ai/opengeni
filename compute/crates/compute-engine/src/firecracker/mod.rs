@@ -10,6 +10,7 @@
 mod api;
 mod holder;
 mod jail;
+mod pager;
 mod process;
 
 use std::fs::{self, File};
@@ -113,8 +114,8 @@ fn load_request(
         MemorySource::File(path) => {
             json!({ "backend_type": "File", "backend_path": jail.inside(path)? })
         }
-        MemorySource::Pager(socket) => {
-            json!({ "backend_type": "Uffd", "backend_path": jail.inside(socket)? })
+        MemorySource::Pager(pager) => {
+            json!({ "backend_type": "Uffd", "backend_path": jail.inside(&pager.socket)? })
         }
     };
     let mut body = json!({
@@ -289,14 +290,7 @@ impl Firecracker {
             .stdin(Stdio::null())
             .stdout(console)
             .stderr(log);
-        // SAFETY: the closure runs in the forked child before exec and makes
-        // one setsid(2) call, which is async-signal-safe. A new session keeps
-        // the jailer, and through it Firecracker, away from the agent's
-        // terminal and process group, so signals aimed at the agent (such as
-        // Ctrl-C) never reach a VM.
-        unsafe {
-            command.pre_exec(|| rustix::process::setsid().map(drop).map_err(io::Error::from));
-        }
+        process::detach(&mut command);
         let mut jailer = command
             .spawn()
             .map_err(|error| EngineError::io(operation, error))?;
@@ -386,6 +380,7 @@ impl Firecracker {
             .kill()
             .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
         vm.process.exited().await;
+        // A pager may still run in the group; it goes with the VM.
         let (cgroup, jail) = (vm.cgroup.clone(), vm.jail.clone());
         tokio::task::spawn_blocking(move || {
             cgroup.end_all()?;
@@ -798,19 +793,24 @@ impl Engine for Firecracker {
             Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
         let body = load_request(spec, &jail, files, self.memory)
             .map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        let mut owned: Vec<(PathBuf, Owned)> = spec
+        let owned: Vec<(PathBuf, Owned)> = spec
             .drives
             .iter()
             .filter(|drive| !drive.read_only)
             .map(|drive| (drive.path.clone(), Owned::File))
             .collect();
         // Saved state and memory are only read; they stay the host's, so the
-        // VMM cannot change an image it restores from. A pager's socket must
-        // be the VMM's to connect to.
-        if let MemorySource::Pager(socket) = &files.memory {
-            owned.push((socket.clone(), Owned::Socket));
-        }
+        // VMM cannot change an image it restores from.
         let vm = self.launch(spec, OP, owned).await?;
+        if let MemorySource::Pager(pager) = &files.memory {
+            // The host's own failure: the image is not in question.
+            let started = async {
+                pager::start(pager, &vm, &spec.logs, spec.uid, spec.gid)
+                    .await
+                    .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))
+            };
+            self.or_kill(&vm, started).await?;
+        }
         // A rejected image means the memory state is unusable; the disk is not
         // involved.
         let load = vm.call(OP, ErrorKind::MemoryLost, "PUT", "/snapshot/load", &body);
@@ -884,49 +884,37 @@ impl Engine for Firecracker {
 
     async fn adopt(&self, spec: &VmSpec) -> Result<Option<(FirecrackerVm, Found)>, EngineError> {
         const OP: &str = "adopt";
-        // A VMM is discarded only on proof that no guest ever ran in it or
-        // that it is gone; anything less is an error and the VM is left be.
-        let unsure = |why: String| EngineError::new(ErrorKind::Transient, OP, why);
-        let cgroup = self.cgroup_of(spec);
-        if !cgroup.path().exists() {
+        let Some(vm) = self.attached(spec).await? else {
             return Ok(None);
-        }
-        let jail =
-            Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        let vm = match self.attach(spec, &jail) {
-            Ok(vm) => vm,
-            Err(error) => {
-                if holder::besides_holders(&cgroup, &self.cgroup_name(&spec.name))
-                    .map_err(|error| EngineError::io(OP, error))?
-                {
-                    return Err(unsure(format!(
-                        "a process runs in the VM's group but is not its VMM: {error}"
-                    )));
-                }
-                // A group with no VMM: a jailer that died half way, or a
-                // VMM that exited, perhaps leaving its holders. No guest
-                // runs, so nothing is lost.
-                self.discard(spec)
-                    .await
-                    .map_err(|error| EngineError::io(OP, error))?;
-                return Ok(None);
-            }
         };
-        match timeout(ADOPT_TIMEOUT, vm.found()).await {
-            Ok(Ok(Some(found))) => Ok(Some((vm, found))),
-            // The VMM says it never started a guest: a launch cut short.
-            Ok(Ok(None)) => {
+        // The pager comes first: a VMM whose pager died can be stuck on
+        // guest memory and never answer its API, which alone proves nothing.
+        let (vmm, group, api) = (
+            vm.process.pid(),
+            vm.cgroup.clone(),
+            vm.api.socket().to_owned(),
+        );
+        let lost = tokio::task::spawn_blocking(move || pager::lost(vmm, &group, &api))
+            .await
+            .map_err(io::Error::other)
+            .and_then(|lost| lost);
+        match lost {
+            Ok(false) => self.answering(vm).await,
+            Ok(true) => {
+                // Established: its next missing page would wait forever.
+                self.kill(&vm).await?;
+                Err(EngineError::new(
+                    ErrorKind::MemoryLost,
+                    OP,
+                    "the VM's memory pager died while the guest still needed it",
+                ))
+            }
+            Err(_) if !vm.is_running() => {
                 self.kill(&vm).await?;
                 Ok(None)
             }
-            _ if !vm.is_running() => {
-                self.kill(&vm).await?;
-                Ok(None)
-            }
-            Ok(Err(error)) => Err(unsure(format!("the VMM runs but its API failed: {error}"))),
-            Err(_) => Err(unsure(format!(
-                "the VMM runs but did not answer within {ADOPT_TIMEOUT:?}"
-            ))),
+            // Nothing established: the VM is left as it is.
+            Err(error) => Err(EngineError::caused_by(ErrorKind::Transient, OP, error)),
         }
     }
 
@@ -974,6 +962,75 @@ impl Engine for Firecracker {
         let mut exit = vm.exit_watch();
         async move {
             let _ = exit.wait_for(|exit| *exit == Exit::Exited).await;
+        }
+    }
+}
+
+impl Firecracker {
+    /// The VM process left running for `spec`, without asking it anything
+    /// yet. A VMM is discarded only on proof that no guest ever ran in it
+    /// or that it is gone; anything less is an error and the VM is left be.
+    async fn attached(&self, spec: &VmSpec) -> Result<Option<FirecrackerVm>, EngineError> {
+        const OP: &str = "adopt";
+        let cgroup = self.cgroup_of(spec);
+        if !cgroup.path().exists() {
+            return Ok(None);
+        }
+        let jail =
+            Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
+        match self.attach(spec, &jail) {
+            Ok(vm) => Ok(Some(vm)),
+            Err(error) => {
+                // The VM's own helpers, its pager and the engine's
+                // holders, may outlive its VMM; anything else may be it.
+                let api = spec.api_socket();
+                let besides =
+                    holder::besides_holders(&cgroup, &self.cgroup_name(&spec.name), |pid| {
+                        pager::certainly_pager(pid, &api)
+                    })
+                    .map_err(|error| EngineError::io(OP, error))?;
+                if besides {
+                    return Err(EngineError::new(
+                        ErrorKind::Transient,
+                        OP,
+                        format!("a process runs in the VM's group but is not its VMM: {error}"),
+                    ));
+                }
+                // A group with no VMM: a jailer that died half way, or a
+                // VMM that exited, perhaps leaving its pager and holders.
+                // No guest runs, so nothing is lost.
+                self.discard(spec)
+                    .await
+                    .map_err(|error| EngineError::io(OP, error))?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// `vm` with what it is doing, or `None` once it is ended because it
+    /// never started a guest or has exited. A VMM that runs but does not
+    /// answer is left be and reported.
+    async fn answering(
+        &self,
+        vm: FirecrackerVm,
+    ) -> Result<Option<(FirecrackerVm, Found)>, EngineError> {
+        const OP: &str = "adopt";
+        let unsure = |why: String| EngineError::new(ErrorKind::Transient, OP, why);
+        match timeout(ADOPT_TIMEOUT, vm.found()).await {
+            Ok(Ok(Some(found))) => Ok(Some((vm, found))),
+            // The VMM says it never started a guest: a launch cut short.
+            Ok(Ok(None)) => {
+                self.kill(&vm).await?;
+                Ok(None)
+            }
+            _ if !vm.is_running() => {
+                self.kill(&vm).await?;
+                Ok(None)
+            }
+            Ok(Err(error)) => Err(unsure(format!("the VMM runs but its API failed: {error}"))),
+            Err(_) => Err(unsure(format!(
+                "the VMM runs but did not answer within {ADOPT_TIMEOUT:?}"
+            ))),
         }
     }
 }

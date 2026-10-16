@@ -22,7 +22,9 @@ use std::time::Duration;
 
 pub use error::{EngineError, ErrorKind};
 pub use profile::{MemoryProfile, PageSize, ProfileError, SaveMode};
-pub use spec::{Drive, MemorySource, Network, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
+pub use spec::{
+    Drive, MemorySource, Network, PagerSpec, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
+};
 pub use tokio_util::sync::CancellationToken;
 
 /// How an interruptible operation ended.
@@ -64,9 +66,11 @@ pub trait Engine: Send + Sync + 'static {
     fn boot(&self, spec: &VmSpec) -> impl Future<Output = Result<Self::Vm, EngineError>> + Send;
 
     /// Starts a VM from saved state and leaves it paused. Memory is loaded
-    /// lazily, as the guest touches it, from `files.memory`. A
-    /// [`MemorySource::Pager`] must already be listening, and must keep
-    /// serving until the VM ends: restoring devices touches guest memory.
+    /// lazily, as the guest touches it, from `files.memory`. The process of
+    /// a [`MemorySource::Pager`] is started here, after the VMM and before
+    /// the VMM loads the state; it runs with the VM from then on and ends
+    /// with it at the latest. It may exit earlier, once the VM needs it no
+    /// more.
     ///
     /// The VM stays paused so the caller can mark the saved image as stale
     /// before the guest runs: once the guest writes to its disk, the old
@@ -124,7 +128,9 @@ pub trait Engine: Send + Sync + 'static {
     /// found provably never started its guest or has exited, and has been
     /// cleaned up. A VM that may hold a running guest but cannot be taken
     /// over (it does not answer, say) is an error and is left alone, so
-    /// its memory is never lost to a slow probe.
+    /// its memory is never lost to a slow probe. A VM whose memory pager
+    /// has died while the guest still depended on it can never run again:
+    /// it is ended and the error is [`ErrorKind::MemoryLost`].
     fn adopt(
         &self,
         spec: &VmSpec,

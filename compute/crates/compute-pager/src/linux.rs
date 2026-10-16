@@ -1,5 +1,11 @@
 //! Linux UFFD transport and serialized pager. The owner must keep the image
 //! immutable and supervise both the pager and VMM: a dead pager stalls the VM.
+//!
+//! [`serve`] runs a pager as a process of its own, one per VM, so the VM's
+//! memory never depends on the host agent that started it.
+
+pub mod quiesce;
+pub mod serve;
 
 use crate::source::Source;
 use crate::{Layout, Mapping, Page, Profile};
@@ -17,12 +23,18 @@ use std::{
 
 const COPY: libc::c_ulong = 0xc028_aa03;
 const WAKE: libc::c_ulong = 0x8010_aa02;
+const UNREGISTER: libc::c_ulong = 0x8010_aa01;
 const PRESENT: u8 = 1;
 const REMOVED: u8 = 2;
 const UNMAPPED: u8 = 4;
 const RECORDED: u8 = 8;
 /// Queued for prefetch and waiting on the source.
 const WAITING: u8 = 16;
+/// Never copied in because the image holds zeros there: once the range is
+/// unregistered, the kernel's own zero page serves it.
+const ZERO: u8 = 32;
+/// Needs nothing more from the pager.
+const SETTLED: u8 = PRESENT | REMOVED | UNMAPPED | ZERO;
 /// Largest single copy, and largest range asked of a source.
 pub const MAX_BATCH: u64 = 2 << 20;
 /// Prefetch runs waiting on the source at once. Each one asks the source
@@ -134,18 +146,33 @@ pub struct Stats {
     pub unmap_events: u64,
     /// Pages the prefetch plan copied in.
     pub prefetched_pages: u64,
-    /// Time from queueing the prefetch plan to its last page arriving.
+    /// Time from queueing the prefetch plan to its last page arriving,
+    /// including pages queued with [`Pager::queue_background`].
     pub prefetch_ms: f64,
+    /// Time from queueing the prefetch plan to the last page queued with
+    /// [`Pager::queue_prefetch`] being in place: how long a wake that waits
+    /// for [`Progress::Prefetched`] waited.
+    pub ready_ms: f64,
+    /// Pages left to the kernel's zero page rather than copied.
+    pub zero_pages: u64,
+    /// Time from the pager starting to every page being settled.
+    pub settled_ms: f64,
 }
 
 /// Something the caller of [`Pager::run`] may want to act on.
 #[derive(Debug)]
 pub enum Progress<'a> {
-    /// Every page of the prefetch plan is in place (or was discarded).
+    /// Every page queued with [`Pager::queue_prefetch`] is in place (or was
+    /// discarded). Pages queued with [`Pager::queue_background`] may still
+    /// be arriving.
     Prefetched,
     /// The first-touch recording window closed; these are the image offsets
     /// the guest touched first, in order.
     Recorded(&'a [u64]),
+    /// Every page is in place and the guest's memory is no longer
+    /// registered with the UFFD (see [`Pager::finish_when_complete`]): the
+    /// VM needs no pager any more, and [`Pager::run`] returns.
+    Settled,
 }
 
 /// How one copy attempt went.
@@ -177,14 +204,43 @@ impl Run {
     }
 }
 
+/// A way for an exiting pager to prove that the VMM has no discard in
+/// flight whose event the pager has not read.
+///
+/// Unregistering the guest's memory stops new events, but not one from a
+/// discard that already looked at the registration: the kernel queues its
+/// event later, outside the address-space lock, and the discarding thread
+/// waits until the event is read. The VMM keeps its own reference to the
+/// UFFD, so after the pager exits nobody would read it and that thread
+/// would wait forever. A proof is an answer from whatever issues the
+/// discards, given after the unregistering; until it comes the pager
+/// keeps reading events.
+pub trait Quiesce: std::fmt::Debug + Send {
+    /// Asks for the proof and returns a descriptor that turns readable when
+    /// [`Quiesce::answered`] may have an answer.
+    ///
+    /// # Errors
+    ///
+    /// The question could not be asked; the pager asks again later.
+    fn ask(&mut self) -> io::Result<RawFd>;
+
+    /// `true` once the answer has come; `false` while it has not.
+    ///
+    /// # Errors
+    ///
+    /// No proof will come of this question; the pager asks again later.
+    fn answered(&mut self) -> io::Result<bool>;
+}
+
 /// One memory image served to one VMM through its UFFD. A single owner
 /// serializes demand faults, discard events and prefetch; nothing here
 /// blocks on the source.
 #[derive(Debug)]
 pub struct Pager<S> {
     fd: OwnedFd,
-    // Keep the stream alive; its HUP signals VMM exit, unlike the shared UFFD.
-    peer: UnixStream,
+    /// The socket the VMM's handshake arrived on, which hangs up when the
+    /// VMM exits. The UFFD cannot say: the VMM shares it with the pager.
+    vmm: UnixStream,
     source: S,
     zero: MmapMut,
     layout: Layout,
@@ -196,6 +252,10 @@ pub struct Pager<S> {
     parked: Vec<u64>,
     /// Prefetch pages not tried yet, in priority order.
     plan: VecDeque<Page>,
+    /// Indices of the pages the caller waits for, in plan order, and how
+    /// many of them from the front are known to be in place.
+    gate: Vec<usize>,
+    gate_done: usize,
     /// Prefetch runs waiting on the source.
     waiting: Vec<Run>,
     max_batch: u64,
@@ -203,6 +263,12 @@ pub struct Pager<S> {
     record_for: Duration,
     recorded: bool,
     prefetch_started: Option<Instant>,
+    /// Whether to settle every page once the source is complete.
+    finish: bool,
+    /// Whether every unsettled page has been queued.
+    completing: bool,
+    /// How an exiting pager proves no discard is in flight.
+    quiesce: Option<Box<dyn Quiesce>>,
     pub stats: Stats,
 }
 
@@ -218,7 +284,7 @@ impl<S: Source> Pager<S> {
         let state = vec![0; layout.page_count()];
         Ok(Self {
             fd,
-            peer,
+            vmm: peer,
             source,
             zero,
             layout,
@@ -227,14 +293,33 @@ impl<S: Source> Pager<S> {
             faults: VecDeque::new(),
             parked: Vec::new(),
             plan: VecDeque::new(),
+            gate: Vec::new(),
+            gate_done: 0,
             waiting: Vec::new(),
             max_batch: MAX_BATCH,
             started: Instant::now(),
             record_for,
             recorded: false,
             prefetch_started: None,
+            finish: false,
+            completing: false,
+            quiesce: None,
             stats: Stats::default(),
         })
+    }
+
+    /// Makes [`Pager::run`] bring every page of the image in once the
+    /// source is complete and the first-touch recording window has closed,
+    /// leaving zero pages to the kernel, then unregister the guest's
+    /// memory from the UFFD, read events until `quiesce` proves none is
+    /// still coming, and return with [`Progress::Settled`]. From then on
+    /// the kernel serves the VM's memory on its own: a page the guest
+    /// discards reads as zeros without anyone's help.
+    #[must_use]
+    pub fn finish_when_complete(mut self, quiesce: Box<dyn Quiesce>) -> Self {
+        self.finish = true;
+        self.quiesce = Some(quiesce);
+        self
     }
 
     #[must_use]
@@ -259,17 +344,34 @@ impl<S: Source> Pager<S> {
 
     /// Queues `pages` to be copied in ahead of demand, in order, in copies
     /// of at most `max_batch` bytes. Demand faults always go first.
+    /// [`Progress::Prefetched`] waits for these pages.
     pub fn queue_prefetch(&mut self, pages: &[Page], max_batch: u64) -> io::Result<()> {
-        // Revalidate public Page inputs rather than trusting caller indices.
+        self.validate(pages)?;
+        self.max_batch = max_batch.clamp(1, MAX_BATCH);
+        self.gate.extend(pages.iter().map(|page| page.index));
+        self.plan.extend(pages);
+        self.prefetch_started.get_or_insert_with(Instant::now);
+        Ok(())
+    }
+
+    /// Queues `pages` to be copied in after everything already queued,
+    /// without holding back [`Progress::Prefetched`]: the rest of a working
+    /// set, streamed in while the guest already runs.
+    pub fn queue_background(&mut self, pages: &[Page]) -> io::Result<()> {
+        self.validate(pages)?;
+        self.plan.extend(pages);
+        self.prefetch_started.get_or_insert_with(Instant::now);
+        Ok(())
+    }
+
+    /// Revalidates public Page inputs rather than trusting caller indices.
+    fn validate(&self, pages: &[Page]) -> io::Result<()> {
         if pages
             .iter()
             .any(|page| self.layout.offset(page.offset) != Some(*page))
         {
             return Err(invalid("invalid prefetch page"));
         }
-        self.max_batch = max_batch.clamp(1, MAX_BATCH);
-        self.plan.extend(pages);
-        self.prefetch_started.get_or_insert_with(Instant::now);
         Ok(())
     }
 
@@ -277,6 +379,19 @@ impl<S: Source> Pager<S> {
     #[must_use]
     pub fn prefetched(&self) -> bool {
         self.plan.is_empty() && self.waiting.is_empty()
+    }
+
+    /// Whether every page queued with [`Pager::queue_prefetch`] is in place
+    /// or no longer needs to be. Amortized constant time: the pages are
+    /// checked in plan order and each is passed once.
+    pub fn ready(&mut self) -> bool {
+        while let Some(&index) = self.gate.get(self.gate_done) {
+            if self.state[index] & SETTLED == 0 {
+                return false;
+            }
+            self.gate_done += 1;
+        }
+        true
     }
 
     /// Copies `pages` in ahead of demand and returns once they are all in
@@ -333,7 +448,7 @@ impl<S: Source> Pager<S> {
             if address != page.address || end - address < page.size {
                 return Err(invalid("unaligned discard range"));
             }
-            self.state[page.index] &= !PRESENT;
+            self.state[page.index] &= !(PRESENT | ZERO);
             self.state[page.index] |= if unmapped { UNMAPPED } else { REMOVED };
             address += page.size;
         }
@@ -436,7 +551,7 @@ impl<S: Source> Pager<S> {
             let Some(first) = self.plan.pop_front() else {
                 break;
             };
-            if self.state[first.index] & (PRESENT | UNMAPPED | WAITING) != 0 {
+            if self.state[first.index] & (PRESENT | UNMAPPED | WAITING | ZERO) != 0 {
                 continue;
             }
             let region_end = self
@@ -453,7 +568,7 @@ impl<S: Source> Pager<S> {
                 if length > self.max_batch
                     || first.address + length > region_end
                     || next != expected
-                    || self.state[next.index] & (PRESENT | REMOVED | UNMAPPED | WAITING) != 0
+                    || self.state[next.index] & (SETTLED | WAITING) != 0
                 {
                     break;
                 }
@@ -566,7 +681,7 @@ impl<S: Source> Pager<S> {
                 revents: 0,
             },
             libc::pollfd {
-                fd: self.peer.as_raw_fd(),
+                fd: self.vmm.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -594,30 +709,51 @@ impl<S: Source> Pager<S> {
 
     /// Serves the VMM until `stopped` is set or the VMM disconnects,
     /// reporting [`Progress`] as it happens. Intended for a dedicated
-    /// thread, never an async executor's poll thread.
+    /// thread, never an async executor's poll thread. A recording window
+    /// still open when the VMM goes is reported then, so a VM that sleeps
+    /// again quickly still teaches the next wake what it touched.
     pub fn run(
         &mut self,
         stopped: &AtomicBool,
         mut progress: impl FnMut(Progress<'_>),
     ) -> io::Result<()> {
-        let mut reported_prefetch = false;
+        let mut reported_ready = false;
         while !stopped.load(Ordering::Relaxed) {
             if let Err(error) = self.turn() {
                 // The VMM can disappear between the last peer poll and COPY.
                 // ESRCH means its mm no longer exists, not a paging failure.
                 if error.raw_os_error() == Some(libc::ESRCH) {
-                    return Ok(());
+                    break;
                 }
                 return Err(error);
             }
-            if !reported_prefetch && self.prefetched() {
-                reported_prefetch = true;
-                self.finish_prefetch();
+            if !reported_ready && self.ready() {
+                reported_ready = true;
+                if let Some(started) = self.prefetch_started {
+                    self.stats.ready_ms = started.elapsed().as_secs_f64() * 1000.0;
+                }
                 progress(Progress::Prefetched);
+            }
+            if self.prefetch_started.is_some() && self.prefetched() {
+                self.finish_prefetch();
             }
             if !self.recorded && self.started.elapsed() > self.record_for {
                 self.recorded = true;
                 progress(Progress::Recorded(&self.trace));
+            }
+            if self.finish && self.recorded {
+                if !self.completing && self.source.complete() {
+                    self.complete()?;
+                }
+                if self.completing && self.settled() {
+                    self.unregister()?;
+                    if !self.quiet(stopped)? {
+                        return Ok(());
+                    }
+                    self.stats.settled_ms = self.started.elapsed().as_secs_f64() * 1000.0;
+                    progress(Progress::Settled);
+                    return Ok(());
+                }
             }
             let busy = !self.faults.is_empty()
                 || (!self.plan.is_empty() && self.waiting.len() < LOOKAHEAD);
@@ -629,341 +765,191 @@ impl<S: Source> Pager<S> {
                 Duration::from_millis(100)
             };
             if self.wait(timeout)? {
-                return Ok(());
+                break;
             }
+        }
+        if !self.recorded {
+            self.recorded = true;
+            progress(Progress::Recorded(&self.trace));
         }
         Ok(())
     }
 }
 
+impl<S: Source> Pager<S> {
+    /// Queues every page that is neither in place nor discarded, after
+    /// everything already queued, except pages the image holds zeros for:
+    /// those are left to the kernel's zero page. Call once the source is
+    /// complete.
+    fn complete(&mut self) -> io::Result<()> {
+        self.completing = true;
+        let regions = self.layout.regions().to_vec();
+        for region in regions {
+            let mut offset = region.offset;
+            while offset < region.offset + region.size {
+                let page = self
+                    .layout
+                    .offset(offset)
+                    .ok_or_else(|| invalid("page outside the memory layout"))?;
+                offset += region.page_size;
+                if self.state[page.index] & (SETTLED | WAITING) != 0 {
+                    continue;
+                }
+                let zero = matches!(
+                    self.source.get(page.offset, page.size, false)?,
+                    Some(bytes) if bytes.iter().all(|byte| *byte == 0)
+                );
+                if zero {
+                    self.state[page.index] |= ZERO;
+                    self.stats.zero_pages += 1;
+                } else {
+                    self.plan.push_back(page);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether nothing is left to do and every page is in place, discarded
+    /// or zero in the image.
+    fn settled(&self) -> bool {
+        self.faults.is_empty()
+            && self.parked.is_empty()
+            && self.plan.is_empty()
+            && self.waiting.is_empty()
+            && self.state.iter().all(|state| state & SETTLED != 0)
+    }
+
+    /// Unregisters the guest's memory from the UFFD, which wakes any fault
+    /// still waiting so the kernel serves it. Events may still come (see
+    /// [`Quiesce`]); [`Pager::quiet`] reads them.
+    fn unregister(&mut self) -> io::Result<()> {
+        for region in self.layout.regions() {
+            let mut range = [region.base_host_virt_addr, region.size];
+            // SAFETY: repr-compatible uffdio_range over a region the VMM
+            // registered. Unregistering acts on the UFFD's own address
+            // space, whichever process asks.
+            if unsafe { libc::ioctl(self.fd.as_raw_fd(), UNREGISTER, range.as_mut_ptr()) } < 0 {
+                let error = io::Error::last_os_error();
+                // The VMM's address space is gone with it: nothing to do.
+                if error.raw_os_error() == Some(libc::ESRCH) {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads events after [`Pager::unregister`] until the [`Quiesce`] proof
+    /// comes or the VMM has gone, asking again every second while a
+    /// question fails. `false` if `stopped` was set first: nothing is
+    /// proven then.
+    fn quiet(&mut self, stopped: &AtomicBool) -> io::Result<bool> {
+        const AGAIN: Duration = Duration::from_secs(1);
+        let mut quiesce = self
+            .quiesce
+            .take()
+            .ok_or_else(|| invalid("finishing without a way to quiesce"))?;
+        let mut asking: Option<RawFd> = None;
+        let mut ask_at = Instant::now();
+        while !stopped.load(Ordering::Relaxed) {
+            if asking.is_none() && Instant::now() >= ask_at {
+                match quiesce.ask() {
+                    Ok(fd) => asking = Some(fd),
+                    Err(error) => {
+                        eprintln!("pager: cannot ask the VMM yet: {error}");
+                        ask_at = Instant::now() + AGAIN;
+                    }
+                }
+            }
+            let ready = poll(
+                &[
+                    self.fd.as_raw_fd(),
+                    self.vmm.as_raw_fd(),
+                    asking.unwrap_or(-1),
+                ],
+                Duration::from_millis(100),
+            )?;
+            // Every event is read, whatever else happens: a discard waits
+            // until its event is. Faults no longer come, and any that
+            // were queued were woken by the unregistering.
+            self.drain_events()?;
+            self.faults.clear();
+            if ready[1] && vmm_gone(&self.vmm) {
+                return Ok(true);
+            }
+            if ready[2] && asking.is_some() {
+                match quiesce.answered() {
+                    Ok(true) => {
+                        self.drain_events()?;
+                        self.faults.clear();
+                        return Ok(true);
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!("pager: the VMM did not answer: {error}");
+                        asking = None;
+                        ask_at = Instant::now() + AGAIN;
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// Whether the VMM's handshake socket has hung up: the VMM has exited.
+fn vmm_gone(vmm: &UnixStream) -> bool {
+    let mut byte = [0_u8; 1];
+    matches!(
+        nix::sys::socket::recv(
+            vmm.as_raw_fd(),
+            &mut byte,
+            MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT
+        ),
+        Ok(0)
+    )
+}
+
+/// Waits up to `timeout` for `fd` to turn readable; returns whether it did.
+fn poll_in(fd: RawFd, timeout: Duration) -> io::Result<bool> {
+    Ok(poll(&[fd], timeout)?[0])
+}
+
+/// Waits up to `timeout` for any of `fds` to turn readable or hang up, and
+/// says which did. Negative descriptors are ignored. An interrupted wait
+/// reports every descriptor, which costs a look but misses nothing.
+pub(crate) fn poll(fds: &[RawFd], timeout: Duration) -> io::Result<Vec<bool>> {
+    let mut poll: Vec<libc::pollfd> = fds
+        .iter()
+        .map(|&fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    let millis = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
+    let count = libc::nfds_t::try_from(poll.len()).map_err(|_| invalid("too many descriptors"))?;
+    // SAFETY: a valid pollfd array and its element count.
+    let result = unsafe { libc::poll(poll.as_mut_ptr(), count, millis) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            return Ok(fds.iter().map(|fd| *fd >= 0).collect());
+        }
+        return Err(error);
+    }
+    Ok(poll
+        .iter()
+        .map(|entry| entry.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0)
+        .collect())
+}
+
 /// Whether `fd` is readable right now.
 fn readable(fd: RawFd) -> io::Result<bool> {
-    let mut poll = [libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    }];
-    // SAFETY: one valid pollfd; a zero timeout never blocks.
-    let result = unsafe { libc::poll(poll.as_mut_ptr(), 1, 0) };
-    if result < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(poll[0].revents & libc::POLLIN != 0)
+    poll_in(fd, Duration::ZERO)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::source::MappedFile;
-    use std::fs::File;
-
-    #[test]
-    fn event_decoding_is_strict() {
-        let mut bytes = [0; 32];
-        bytes[0] = 0x12;
-        bytes[16..24].copy_from_slice(&0x1234_u64.to_ne_bytes());
-        assert_eq!(decode(&bytes).unwrap(), Event::Fault(0x1234));
-        bytes[8] = 2;
-        assert!(decode(&bytes).is_err());
-        bytes[0] = 0x15;
-        bytes[8..16].copy_from_slice(&0x1000_u64.to_ne_bytes());
-        bytes[16..24].copy_from_slice(&0x2000_u64.to_ne_bytes());
-        assert_eq!(decode(&bytes).unwrap(), Event::Remove(0x1000, 0x2000));
-        bytes[0] = 0x16;
-        assert_eq!(decode(&bytes).unwrap(), Event::Unmap(0x1000, 0x2000));
-    }
-
-    #[test]
-    fn copy_abi_size() {
-        assert_eq!(size_of::<CopyRange>(), 40);
-    }
-
-    #[test]
-    fn fragmented_handshake_retains_owned_descriptor() {
-        use nix::sys::socket::{ControlMessage, sendmsg};
-        use std::io::{IoSlice, Write};
-        let (peer, mut sender) = UnixStream::pair().unwrap();
-        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        let file = File::open("/dev/null").unwrap();
-        let json = br#"[{"base_host_virt_addr":4096,"size":4096,"offset":0,"page_size":4096}]"#;
-        std::thread::scope(|scope| {
-            let writer = scope.spawn(|| {
-                sendmsg::<()>(
-                    sender.as_raw_fd(),
-                    &[IoSlice::new(&json[..8])],
-                    &[ControlMessage::ScmRights(&[file.as_raw_fd()])],
-                    MsgFlags::empty(),
-                    None,
-                )
-                .unwrap();
-                std::thread::sleep(Duration::from_millis(5));
-                sender.write_all(&json[8..]).unwrap();
-            });
-            let (received, mappings) = handshake(&peer).unwrap();
-            assert_eq!(mappings.len(), 1);
-            assert_eq!(mappings[0].size, 4096);
-            assert_ne!(received.as_raw_fd(), file.as_raw_fd());
-            writer.join().unwrap();
-        });
-    }
-
-    #[test]
-    fn handshake_rejects_multiple_descriptors() {
-        use nix::sys::socket::{ControlMessage, sendmsg};
-        use std::io::IoSlice;
-        let (peer, sender) = UnixStream::pair().unwrap();
-        let file = File::open("/dev/null").unwrap();
-        sendmsg::<()>(
-            sender.as_raw_fd(),
-            &[IoSlice::new(b"[]")],
-            &[ControlMessage::ScmRights(&[
-                file.as_raw_fd(),
-                file.as_raw_fd(),
-            ])],
-            MsgFlags::empty(),
-            None,
-        )
-        .unwrap();
-        assert!(handshake(&peer).is_err());
-    }
-
-    /// A UFFD registered over 16 KiB of fresh anonymous memory, and the
-    /// VMM end of the handshake socket, as Firecracker would send them.
-    fn registered_memory() -> (OwnedFd, MmapMut, UnixStream, UnixStream) {
-        use nix::sys::socket::{ControlMessage, sendmsg};
-        use std::io::IoSlice;
-        // SAFETY: standard Linux UFFD syscall with nonblocking and CLOEXEC flags.
-        let raw = unsafe {
-            libc::syscall(
-                libc::SYS_userfaultfd,
-                libc::O_CLOEXEC | libc::O_NONBLOCK | 1,
-            )
-        };
-        assert!(raw >= 0, "UFFD unavailable: {}", io::Error::last_os_error());
-        // SAFETY: successful syscall returned a new owned FD.
-        let fd = unsafe { OwnedFd::from_raw_fd(i32::try_from(raw).unwrap()) };
-        let mut api = [0xaa_u64, (1 << 3) | (1 << 6), 0];
-        // SAFETY: three u64s match uffdio_api; features request REMOVE and UNMAP.
-        assert_eq!(
-            unsafe { libc::ioctl(fd.as_raw_fd(), 0xc018_aa3f, api.as_mut_ptr()) },
-            0
-        );
-        let memory = MmapMut::map_anon(16384).unwrap();
-        let mut register = [memory.as_ptr() as u64, 16384, 1, 0];
-        // SAFETY: four u64s match uffdio_register with a live anonymous mapping.
-        assert_eq!(
-            unsafe { libc::ioctl(fd.as_raw_fd(), 0xc020_aa00, register.as_mut_ptr()) },
-            0
-        );
-        let (peer, sender) = UnixStream::pair().unwrap();
-        let mapping = vec![Mapping {
-            base_host_virt_addr: memory.as_ptr() as u64,
-            size: 16384,
-            offset: 0,
-            page_size: 4096,
-            page_size_kib: 4096,
-        }];
-        let data = serde_json::to_vec(&mapping).unwrap();
-        sendmsg::<()>(
-            sender.as_raw_fd(),
-            &[IoSlice::new(&data)],
-            &[ControlMessage::ScmRights(&[fd.as_raw_fd()])],
-            MsgFlags::empty(),
-            None,
-        )
-        .unwrap();
-        (fd, memory, peer, sender)
-    }
-
-    fn image_file(byte: u8) -> File {
-        use std::io::Write;
-        // SAFETY: nul-terminated name, valid memfd flags.
-        let raw = unsafe { libc::memfd_create(c"pager-test".as_ptr(), libc::MFD_CLOEXEC) };
-        assert!(raw >= 0);
-        // SAFETY: memfd_create returned a new owned FD.
-        let mut file = unsafe { File::from_raw_fd(raw) };
-        file.write_all(&[byte; 16384]).unwrap();
-        file
-    }
-
-    fn live_pager() -> (Pager<MappedFile>, MmapMut, UnixStream) {
-        let (_fd, memory, peer, sender) = registered_memory();
-        let image = image_file(0x5a);
-        // SAFETY: the image is private to this test and never changed.
-        let source = unsafe { MappedFile::new(&image) }.unwrap();
-        let pager = Pager::new(peer, source, Duration::from_secs(60)).unwrap();
-        (pager, memory, sender)
-    }
-
-    /// A source whose bytes arrive only when the test says so, signalled
-    /// through an eventfd as a real remote source would.
-    struct Delayed {
-        bytes: Vec<u8>,
-        arrived: bool,
-        asked: Vec<(u64, bool)>,
-        event: OwnedFd,
-    }
-
-    impl Delayed {
-        fn new(fill: u8) -> Self {
-            // SAFETY: eventfd with valid flags returns a new owned descriptor.
-            let raw = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-            assert!(raw >= 0);
-            Self {
-                bytes: vec![fill; 16384],
-                arrived: false,
-                asked: Vec::new(),
-                // SAFETY: eventfd returned a new owned descriptor.
-                event: unsafe { OwnedFd::from_raw_fd(raw) },
-            }
-        }
-
-        fn arrive(fd: RawFd) {
-            let one = 1_u64.to_ne_bytes();
-            // SAFETY: eight bytes to a valid eventfd.
-            assert_eq!(unsafe { libc::write(fd, one.as_ptr().cast(), 8) }, 8);
-        }
-    }
-
-    impl Source for Delayed {
-        fn len(&self) -> u64 {
-            self.bytes.len() as u64
-        }
-
-        fn get(&mut self, offset: u64, len: u64, urgent: bool) -> io::Result<Option<&[u8]>> {
-            self.asked.push((offset, urgent));
-            if !self.arrived {
-                return Ok(None);
-            }
-            let start = usize::try_from(offset).unwrap();
-            Ok(Some(
-                &self.bytes[start..start + usize::try_from(len).unwrap()],
-            ))
-        }
-
-        fn ready_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
-            use std::os::fd::AsFd;
-            Some(self.event.as_fd())
-        }
-
-        fn acknowledge(&mut self) -> io::Result<()> {
-            let mut count = [0_u8; 8];
-            // SAFETY: eight writable bytes from a valid eventfd.
-            unsafe { libc::read(self.event.as_raw_fd(), count.as_mut_ptr().cast(), 8) };
-            self.arrived = true;
-            Ok(())
-        }
-    }
-
-    /// Run with `cargo test -- --include-ignored` on a UFFD-enabled Linux host.
-    #[test]
-    #[ignore = "requires Linux userfaultfd permission"]
-    fn kernel_partial_copy_existing_and_remove_zero_fill() {
-        let (mut pager, memory, _sender) = live_pager();
-        let plan = pager.layout.plan(&[0, 4096, 8192, 12288]).unwrap();
-        let mut forged = plan[0];
-        forged.index = usize::MAX;
-        assert!(pager.prefetch(&[forged], 4096).is_err());
-        pager.prefetch(&plan[1..2], 16384).unwrap();
-        // Force the real partial-progress and EEXIST ioctl paths, not mocks.
-        pager.state.fill(0);
-        pager.prefetch(&plan, 16384).unwrap();
-        assert!(memory.iter().all(|byte| *byte == 0x5a));
-        assert_eq!(pager.stats.existing_pages, 1);
-        std::thread::scope(|scope| {
-            let discard = scope.spawn(|| {
-                // SAFETY: live mapping, page-aligned range, valid advice.
-                assert_eq!(
-                    unsafe {
-                        libc::madvise(
-                            memory.as_ptr().cast_mut().cast(),
-                            memory.len(),
-                            libc::MADV_DONTNEED,
-                        )
-                    },
-                    0
-                );
-            });
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while pager.stats.remove_events == 0 {
-                assert!(Instant::now() < deadline, "REMOVE notification timed out");
-                pager.turn().unwrap();
-                std::thread::yield_now();
-            }
-            discard.join().unwrap();
-        });
-        pager.prefetch(&plan, 16384).unwrap();
-        assert!(memory.iter().all(|byte| *byte == 0));
-        assert_eq!(pager.stats.zero_bytes, 16384);
-        // Closing the last UFFD reference releases UNMAP monitoring before
-        // this same thread drops its mapping; otherwise teardown waits on us.
-        drop(pager);
-    }
-
-    #[test]
-    #[ignore = "requires Linux userfaultfd permission"]
-    fn kernel_demand_fault_and_unmap_retirement() {
-        let (mut pager, memory, _sender) = live_pager();
-        std::thread::scope(|scope| {
-            let reader = scope.spawn(|| memory[0]);
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while !reader.is_finished() {
-                assert!(Instant::now() < deadline, "demand fault timed out");
-                pager.turn().unwrap();
-                std::thread::yield_now();
-            }
-            assert_eq!(reader.join().unwrap(), 0x5a);
-        });
-        assert_eq!(pager.profile("test".into()).offsets, vec![0]);
-        std::thread::scope(|scope| {
-            let unmapper = scope.spawn(move || drop(memory));
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while pager.stats.unmap_events == 0 {
-                assert!(Instant::now() < deadline, "UNMAP notification timed out");
-                pager.turn().unwrap();
-                std::thread::yield_now();
-            }
-            unmapper.join().unwrap();
-        });
-        let calls = pager.stats.copy_calls;
-        let plan = pager.layout.plan(&[0, 4096, 8192, 12288]).unwrap();
-        pager.prefetch(&plan, 16384).unwrap();
-        assert_eq!(pager.stats.copy_calls, calls);
-    }
-
-    #[test]
-    #[ignore = "requires Linux userfaultfd permission"]
-    fn kernel_faults_wait_for_a_slow_source_without_blocking_the_pager() {
-        let (fd, memory, peer, _sender) = registered_memory();
-        let mut pager = Pager::new(peer, Delayed::new(0x33), Duration::from_secs(60)).unwrap();
-        // Only the pager may hold the UFFD when the memory is unmapped, or the
-        // unmap waits for someone to read its event.
-        drop(fd);
-        let event = pager.source().event.as_raw_fd();
-        let plan = pager.layout.plan(&[8192, 12288]).unwrap();
-        pager.queue_prefetch(&plan, 8192).unwrap();
-        std::thread::scope(|scope| {
-            let reader = scope.spawn(|| memory[4096]);
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while pager.stats.parked_faults == 0 {
-                assert!(Instant::now() < deadline, "fault never parked");
-                pager.turn().unwrap();
-                std::thread::yield_now();
-            }
-            // The demand fault asked urgently; prefetch asked as a batch.
-            assert!(pager.source().asked.contains(&(4096, true)));
-            assert!(pager.source().asked.contains(&(8192, false)));
-            assert!(!reader.is_finished());
-            Delayed::arrive(event);
-            while !reader.is_finished() || !pager.prefetched() {
-                assert!(Instant::now() < deadline, "parked work never resumed");
-                pager.turn().unwrap();
-                std::thread::yield_now();
-            }
-            assert_eq!(reader.join().unwrap(), 0x33);
-        });
-        assert!(memory[8192..].iter().all(|byte| *byte == 0x33));
-        assert_eq!(pager.stats.prefetched_pages, 2);
-        drop(pager);
-    }
-}
+mod tests;

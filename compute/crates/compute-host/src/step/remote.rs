@@ -1,6 +1,5 @@
-//! Steps that move a sandbox's saved image between the host and the
-//! store: archiving it, evicting the local copy, fetching it back and
-//! forgetting the store's copy.
+//! The steps that move a sandbox's saved copy to and from the object
+//! store, or forget it: archive, evict, fetch and forget.
 
 use std::fs;
 use std::io;
@@ -16,7 +15,7 @@ use super::{
 use crate::image::{Parts, Suspect};
 use crate::layout::{remove_if_present, write_atomic};
 use crate::state::{Change, Disk};
-use crate::store::{FetchInto, FetchedMemory, JailedFile, SavedFiles, SavedImage, Store};
+use crate::store::{Archive, FetchInto, FetchedMemory, JailedFile, SavedFiles, SavedImage, Store};
 
 impl<E: Engine, S: Store> Job<E, S> {
     pub(super) async fn archive(&mut self) -> Outcome {
@@ -72,8 +71,12 @@ impl<E: Engine, S: Store> Job<E, S> {
             }),
             profile: profile.exists().then_some(profile),
         };
-        let receipt = match self.store.archive(self.id, &files).await {
-            Ok(receipt) => receipt,
+        // The VM stays paused and owned by this step until it returns, and a
+        // cancelled archive returns only once nothing is still reading the
+        // files, so the disk read here is the disk as it was saved.
+        let receipt = match self.store.archive(self.id, &files, &self.cancel).await {
+            Ok(Archive::Stored(receipt)) => receipt,
+            Ok(Archive::Cancelled) => return Outcome::Cancelled,
             Err(error) => return failure(&error),
         };
         let marker = Archived {
@@ -183,12 +186,14 @@ impl<E: Engine, S: Store> Job<E, S> {
                     memory_len,
                     chunks,
                     manifest,
+                    prefilled,
                 } => images
                     .publish(Parts::Remote {
                         state,
                         memory_len: *memory_len,
                         chunks: crate::image::ChunkMap(chunks.clone()),
                         manifest,
+                        prefilled: prefilled.as_ref(),
                     })
                     .map(Some),
             };
@@ -227,8 +232,12 @@ impl<E: Engine, S: Store> Job<E, S> {
         {
             return state_failure(&error);
         }
-        // A paused VM loses the base its next diff would be merged over.
+        // A paused VM loses the base its next diff would be merged over;
+        // the image its pager reads stays until the pager holds all of it.
         if let Some(live) = self.live.as_mut() {
+            if let Err(error) = live.memory.settled(OP).await {
+                return failure(&error);
+            }
             live.memory.base = Base::Unknown;
         }
         let paths = self.paths.clone();

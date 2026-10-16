@@ -1,0 +1,122 @@
+//! The order a guest touches its memory after a wake, learned by one wake
+//! and prefetched by the next.
+
+use std::collections::HashSet;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+use crate::Page;
+
+/// Most pages a learned profile keeps.
+const PROFILE_PAGES: usize = 1 << 16;
+
+/// The pages a guest touched first after a wake, in order, as image
+/// offsets. Prefetched before the next wake.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WakeProfile {
+    pub version: u32,
+    pub offsets: Vec<u64>,
+    /// Bytes per page; 0 in profiles recorded before it was kept.
+    #[serde(default)]
+    pub page_size: u64,
+}
+
+impl WakeProfile {
+    /// Reads a profile, or an empty one if there is none or it is unusable.
+    #[must_use]
+    pub fn load(path: &Path) -> Self {
+        std::fs::read(path).map_or_else(|_| Self::default(), |bytes| Self::parse(&bytes))
+    }
+
+    /// Decodes a stored profile, or an empty one if it is unusable.
+    #[must_use]
+    pub fn parse(bytes: &[u8]) -> Self {
+        serde_json::from_slice::<Self>(bytes)
+            .ok()
+            .filter(|profile| profile.version == 1)
+            .unwrap_or_default()
+    }
+
+    /// The profile after a wake that prefetched `self` and then faulted on
+    /// `touched`, pages of `page_size` bytes: pages prefetched never fault,
+    /// so the old order is kept and new pages follow it, up to a bound.
+    #[must_use]
+    pub fn learn(&self, touched: &[u64], page_size: u64) -> Self {
+        let mut seen = HashSet::new();
+        let offsets = self
+            .offsets
+            .iter()
+            .chain(touched)
+            .copied()
+            .filter(|offset| seen.insert(*offset))
+            .take(PROFILE_PAGES)
+            .collect();
+        Self {
+            version: 1,
+            offsets,
+            page_size,
+        }
+    }
+}
+
+/// How many pages from the front of `plan` fit in `budget` bytes, and at
+/// least one if there are any, so a wake always waits for its first page.
+#[must_use]
+pub fn ready_prefix(plan: &[Page], budget: u64) -> usize {
+    let mut bytes = 0_u64;
+    plan.iter()
+        .position(|page| {
+            bytes = bytes.saturating_add(page.size);
+            bytes > budget
+        })
+        .map_or(plan.len(), |over| over.max(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pages(sizes: &[u64]) -> Vec<Page> {
+        let mut offset = 0;
+        sizes
+            .iter()
+            .enumerate()
+            .map(|(index, &size)| {
+                let page = Page {
+                    address: offset,
+                    offset,
+                    size,
+                    index,
+                };
+                offset += size;
+                page
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_wake_waits_for_the_profile_prefix_that_fits_its_budget() {
+        assert_eq!(ready_prefix(&[], 4096), 0);
+        assert_eq!(ready_prefix(&pages(&[4096; 10]), 4 * 4096), 4);
+        assert_eq!(ready_prefix(&pages(&[4096; 3]), 1 << 20), 3);
+        // A huge page larger than the budget is still waited for.
+        assert_eq!(ready_prefix(&pages(&[2 << 20; 4]), 1 << 20), 1);
+        assert_eq!(ready_prefix(&pages(&[2 << 20; 4]), 4 << 20), 2);
+    }
+
+    #[test]
+    fn learning_keeps_the_old_order_first_and_each_page_once() {
+        let old = WakeProfile {
+            version: 1,
+            offsets: vec![8192, 0],
+            page_size: 4096,
+        };
+        let learned = old.learn(&[4096, 0, 12288], 4096);
+        assert_eq!(learned.offsets, vec![8192, 0, 4096, 12288]);
+        assert_eq!(
+            WakeProfile::parse(b"{\"version\":2,\"offsets\":[]}"),
+            WakeProfile::default()
+        );
+    }
+}

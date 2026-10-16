@@ -14,6 +14,7 @@
 //!     memory                 guest memory, sparse
 //!     chunks                 BLAKE3 of each 256 KiB chunk of memory; zeros for a zero chunk
 //!     remote.json            only while memory is still in object storage: its manifest
+//!     filled                 memory ranges a working-set pack filled before hydration
 //!   <generation>.staging/    a generation being built; removed on recovery
 //!   quarantine/              suspect generations, kept for inspection, never used
 //! ```
@@ -40,6 +41,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::{remove_durably, write_atomic};
+use crate::store::Prefilled;
+use crate::working_set::{decode_filled, encode_filled};
 
 /// Bytes per memory chunk: the unit of hashing, upload and lazy fetch.
 pub const CHUNK_BYTES: u64 = 256 << 10;
@@ -56,6 +59,7 @@ const STATE: &str = "state";
 const MEMORY: &str = "memory";
 const CHUNKS: &str = "chunks";
 const REMOTE: &str = "remote.json";
+const FILLED: &str = "filled";
 const CURRENT: &str = "current";
 const QUARANTINE: &str = "quarantine";
 /// Quarantined generations kept per sandbox; older ones are removed so a
@@ -73,7 +77,7 @@ impl fmt::Display for Generation {
 }
 
 impl Generation {
-    fn parse(name: &str) -> Option<Self> {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
         if name.len() != 16 {
             return None;
         }
@@ -99,6 +103,10 @@ pub(crate) struct Meta {
     /// Whether the memory file is still being filled from object storage;
     /// `remote.json` then names the manifest the rest comes from.
     pub remote: bool,
+    /// BLAKE3 of the `filled` file, hex, when a fetch filled part of a
+    /// remote image's memory ahead of hydration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filled_hash: Option<String>,
 }
 
 /// Per-chunk hashes of a memory image.
@@ -156,6 +164,15 @@ pub(crate) enum Suspect {
 }
 
 impl Suspect {
+    /// Whether this proves the image unusable. A read that failed in a way
+    /// that may pass proves nothing: the image is kept and checked again.
+    pub fn is_verdict(&self) -> bool {
+        match self {
+            Self::Missing(_) | Self::Damaged { .. } => true,
+            Self::Io(error) => proves_damage(error),
+        }
+    }
+
     /// A short tag for the quarantine directory's name.
     fn tag(&self) -> &'static str {
         match self {
@@ -197,12 +214,14 @@ pub(crate) enum Parts<'a> {
         image: &'a Verified,
     },
     /// Device state only; memory stays in object storage under `manifest`
-    /// (its JSON), to be paged in on demand.
+    /// (its JSON), to be paged in on demand, apart from what `prefilled`
+    /// already holds (its file is moved in).
     Remote {
         state: &'a Path,
         memory_len: u64,
         chunks: ChunkMap,
         manifest: &'a [u8],
+        prefilled: Option<&'a Prefilled>,
     },
 }
 
@@ -234,18 +253,6 @@ impl Images {
     /// The memory file of `generation`.
     pub fn memory(&self, generation: Generation) -> PathBuf {
         self.path(generation).join(MEMORY)
-    }
-
-    /// Maps the memory file of `generation`, a published image held on this
-    /// host, for the pager to serve.
-    #[cfg(target_os = "linux")]
-    pub fn map_memory(&self, generation: Generation) -> io::Result<compute_pager::MappedFile> {
-        let file = File::open(self.memory(generation))?;
-        // SAFETY: a published image is sealed read-only and never modified
-        // or truncated: a new save always writes a new generation, merges
-        // write into a copy, and removing a generation only unlinks its
-        // files, which leaves a live mapping intact.
-        unsafe { compute_pager::MappedFile::new(&file) }
     }
 
     /// The manifest the rest of `generation`'s memory comes from.
@@ -323,6 +330,12 @@ impl Images {
         if meta.remote && !dir.join(REMOTE).exists() {
             return Err(damaged("remote memory without its manifest".into()));
         }
+        if let Some(expected) = &meta.filled_hash {
+            let filled = fs::read(dir.join(FILLED))?;
+            if blake3::hash(&filled).to_hex().as_str() != expected {
+                return Err(damaged("filled ranges do not match their hash".into()));
+            }
+        }
         if depth == Depth::Deep && !meta.remote {
             let all: Vec<usize> = (0..chunks.0.len()).collect();
             let hashed = hash_chunks(&memory, meta.memory_len, &all)?;
@@ -340,6 +353,19 @@ impl Images {
             return Err(invalid("chunk map changed after it was verified"));
         }
         ChunkMap::decode(&bytes, image.meta.memory_len)
+    }
+
+    /// The memory ranges a fetch filled ahead of hydration in a verified
+    /// remote generation; none for any other.
+    pub fn filled(&self, image: &Verified) -> io::Result<Vec<Range<u64>>> {
+        let Some(expected) = &image.meta.filled_hash else {
+            return Ok(Vec::new());
+        };
+        let bytes = fs::read(self.path(image.generation()).join(FILLED))?;
+        if blake3::hash(&bytes).to_hex().as_str() != expected {
+            return Err(invalid("filled ranges changed after they were verified"));
+        }
+        decode_filled(&bytes, image.meta.memory_len)
     }
 
     /// The newest generation `current` names, if it passes a light check.
@@ -363,7 +389,7 @@ impl Images {
         }
         fs::create_dir(&staging)?;
         let memory = staging.join(MEMORY);
-        let (parent, state, memory_len, chunks, remote) = match parts {
+        let (parent, state, memory_len, chunks, remote, filled) = match parts {
             Parts::Whole {
                 state,
                 memory: whole,
@@ -373,11 +399,11 @@ impl Images {
                 let len = file.metadata()?.len();
                 let all: Vec<usize> = (0..chunk_count(len)).collect();
                 let chunks = ChunkMap(hash_chunks(&file, len, &all)?);
-                (None, Some(state), len, chunks, None)
+                (None, Some(state), len, chunks, None, None)
             }
             Parts::Shared { from, image } => {
                 let chunks = share_image(from, image, &staging)?;
-                (None, None, image.meta.memory_len, chunks, None)
+                (None, None, image.meta.memory_len, chunks, None, None)
             }
             Parts::Diff { base, state, diff } => {
                 let parent = self.verify(base, Depth::Light)?;
@@ -395,17 +421,24 @@ impl Images {
                     chunks.0[*index] = hash;
                 }
                 fs::remove_file(diff)?;
-                (Some(base), Some(state), len, chunks, None)
+                (Some(base), Some(state), len, chunks, None, None)
             }
             Parts::Remote {
                 state,
                 memory_len,
                 chunks,
                 manifest,
+                prefilled,
             } => {
-                let file = File::create(&memory)?;
-                file.set_len(memory_len)?;
-                (None, Some(state), memory_len, chunks, Some(manifest))
+                let filled = remote_memory(&memory, memory_len, prefilled)?;
+                (
+                    None,
+                    Some(state),
+                    memory_len,
+                    chunks,
+                    Some(manifest),
+                    filled,
+                )
             }
         };
         if let Some(state) = state {
@@ -417,8 +450,10 @@ impl Images {
             return Err(invalid("chunk map does not cover memory").into());
         }
         write_synced(&staging.join(CHUNKS), &chunk_bytes)?;
-        if let Some(manifest) = remote {
-            write_synced(&staging.join(REMOTE), manifest)?;
+        for (name, bytes) in [(REMOTE, remote), (FILLED, filled.as_deref())] {
+            if let Some(bytes) = bytes {
+                write_synced(&staging.join(name), bytes)?;
+            }
         }
         let meta = Meta {
             version: VERSION,
@@ -429,6 +464,7 @@ impl Images {
             state_hash: blake3::hash(&state_bytes).to_hex().to_string(),
             chunks_hash: blake3::hash(&chunk_bytes).to_hex().to_string(),
             remote: remote.is_some(),
+            filled_hash: filled.map(|filled| blake3::hash(&filled).to_hex().to_string()),
         };
         write_synced(
             &staging.join(META),
@@ -457,6 +493,8 @@ impl Images {
         seal(&dir.join(MEMORY))?;
         let meta = Meta {
             remote: false,
+            // Every chunk is in place and checked, filled pages included.
+            filled_hash: None,
             ..image.meta.clone()
         };
         write_atomic(
@@ -464,6 +502,7 @@ impl Images {
             &serde_json::to_vec_pretty(&meta).map_err(io::Error::other)?,
         )?;
         remove_durably(&dir.join(REMOTE))?;
+        remove_durably(&dir.join(FILLED))?;
         self.verify(image.generation(), Depth::Light)
     }
 
@@ -518,9 +557,16 @@ impl Images {
     /// removed, a damaged current generation is quarantined, and once the
     /// current generation checks out, leftovers older or newer than it are
     /// removed. Without a good current generation nothing is removed.
+    ///
+    /// `Ok(None)` means there is proven to be no usable image: none was
+    /// published, or the current one is missing parts or damaged. An error
+    /// means the images could not be looked at (a read failed in a way that
+    /// may pass); nothing is quarantined then, and the image may be good.
     pub fn recover(&self) -> io::Result<Option<Verified>> {
-        let Ok(entries) = fs::read_dir(&self.dir) else {
-            return Ok(None);
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
         };
         for entry in entries {
             let entry = entry?;
@@ -530,13 +576,23 @@ impl Images {
                 fs::remove_dir_all(entry.path())?;
             }
         }
-        let current = match self.current_verified() {
-            Ok(current) => current,
-            Err(why) => {
-                if let Ok(Some(generation)) = self.current() {
+        let generation = match self.current() {
+            Ok(generation) => generation,
+            // The pointer is written whole; one that does not parse is
+            // damaged.
+            Err(error) if proves_damage(&error) => {
+                remove_durably(&self.dir.join(CURRENT))?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let current = match generation.map(|generation| self.verify(generation, Depth::Light)) {
+            None => None,
+            Some(Ok(current)) => Some(current),
+            Some(Err(Suspect::Io(error))) if !proves_damage(&error) => return Err(error),
+            Some(Err(why)) => {
+                if let Some(generation) = generation {
                     self.quarantine(generation, &why)?;
-                } else {
-                    remove_durably(&self.dir.join(CURRENT))?;
                 }
                 return Ok(None);
             }
@@ -758,6 +814,27 @@ fn move_in(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+/// Makes `memory` for a remote image of `memory_len` bytes: the file a
+/// fetch `prefilled`, moved in, or an empty sparse one. Returns the filled
+/// ranges as stored, if any.
+fn remote_memory(
+    memory: &Path,
+    memory_len: u64,
+    prefilled: Option<&Prefilled>,
+) -> io::Result<Option<Vec<u8>>> {
+    let Some(prefilled) = prefilled else {
+        File::create(memory)?.set_len(memory_len)?;
+        return Ok(None);
+    };
+    let filled = encode_filled(&prefilled.pages);
+    decode_filled(&filled, memory_len)?;
+    move_in(&prefilled.memory, memory)?;
+    if File::open(memory)?.metadata()?.len() != memory_len {
+        return Err(invalid("prefilled memory has the wrong length"));
+    }
+    Ok(Some(filled))
+}
+
 /// Puts `image`, published in `from`, into `staging` as shared files and
 /// returns its chunk map.
 fn share_image(from: &Images, image: &Verified, staging: &Path) -> Result<ChunkMap, Suspect> {
@@ -801,11 +878,22 @@ fn share(from: &Path, to: &Path) -> io::Result<()> {
 
 /// Makes a published file read-only and owned by the host agent, so a VMM
 /// that maps it (through a hard link in its jail) cannot change it.
+/// A file already sealed is left untouched: it may be an inode shared by
+/// hard links with other sandboxes, such as a warm pool's template.
 fn seal(path: &Path) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
+        use std::os::unix::fs::MetadataExt as _;
+
         let uid = rustix::process::geteuid();
         let gid = rustix::process::getegid();
+        let found = fs::metadata(path)?;
+        if found.uid() == uid.as_raw()
+            && found.gid() == gid.as_raw()
+            && found.mode() & 0o7777 == 0o444
+        {
+            return Ok(());
+        }
         rustix::fs::chown(path, Some(uid), Some(gid))?;
     }
     fs::set_permissions(path, fs::Permissions::from_mode(0o444))
@@ -823,6 +911,15 @@ fn sync_dir(path: &Path) -> io::Result<()> {
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_owned())
+}
+
+/// Whether a failed read shows an image is damaged (a file is missing, or
+/// its bytes do not parse) rather than unreadable for now.
+fn proves_damage(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+    )
 }
 
 /// Where tests stop a publish or retire as if the host had crashed there.
@@ -844,374 +941,4 @@ fn failpoint(_: &'static str) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::cell::Cell;
-
-    use super::*;
-
-    thread_local! {
-        pub(super) static FAILPOINT: Cell<Option<&'static str>> = const { Cell::new(None) };
-    }
-
-    const PAGE: u64 = 4096;
-    const PAGE_BYTES: usize = 4096;
-    /// Small images keep the tests fast; three and a half chunks, so the
-    /// last chunk is partial.
-    const LEN: u64 = CHUNK_BYTES * 3 + CHUNK_BYTES / 2;
-
-    /// A deterministic pseudo-random sequence (xorshift), so failures replay.
-    struct Rng(u64);
-
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            self.0
-        }
-
-        fn below(&mut self, bound: u64) -> u64 {
-            self.next() % bound
-        }
-    }
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("compute-image-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    /// Writes a sparse diff: `pages` as (page number, fill byte), the rest holes.
-    fn write_diff(path: &Path, pages: &[(u64, u8)]) {
-        let file = File::create(path).unwrap();
-        file.set_len(LEN).unwrap();
-        for (page, fill) in pages {
-            file.write_all_at(&[*fill; PAGE_BYTES], page * PAGE)
-                .unwrap();
-        }
-        file.sync_all().unwrap();
-    }
-
-    fn write_state(path: &Path, content: &[u8]) {
-        fs::write(path, content).unwrap();
-    }
-
-    fn random_pages(rng: &mut Rng) -> Vec<(u64, u8)> {
-        let pages = LEN / PAGE;
-        let count = rng.below(12);
-        (0..count)
-            // Zero fills included: zeros a guest wrote must survive the merge.
-            .map(|_| (rng.below(pages), u8::try_from(rng.below(4)).unwrap() * 85))
-            .collect()
-    }
-
-    fn apply(model: &mut [u8], pages: &[(u64, u8)]) {
-        for (page, fill) in pages {
-            let at = usize::try_from(page * PAGE).unwrap();
-            model[at..at + PAGE_BYTES].fill(*fill);
-        }
-    }
-
-    fn content(images: &Images, generation: Generation) -> Vec<u8> {
-        fs::read(images.memory(generation)).unwrap()
-    }
-
-    #[test]
-    fn merged_images_equal_their_base_with_the_diff_laid_over_it() {
-        let dir = scratch("merge");
-        let images = Images::new(dir.join("images"));
-        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-        let mut model = vec![0_u8; usize::try_from(LEN).unwrap()];
-        let mut base = None;
-        for round in 0..40 {
-            let pages = random_pages(&mut rng);
-            let diff = dir.join("diff");
-            let state = dir.join("state");
-            write_diff(&diff, &pages);
-            write_state(&state, format!("state {round}").as_bytes());
-            apply(&mut model, &pages);
-            let image = match base {
-                // The first diff stands on zeros: it is the whole image.
-                None => images.publish(Parts::Whole {
-                    state: &state,
-                    memory: &diff,
-                }),
-                Some(base) => images.publish(Parts::Diff {
-                    base,
-                    state: &state,
-                    diff: &diff,
-                }),
-            }
-            .unwrap();
-            let generation = image.generation();
-            assert_eq!(content(&images, generation), model, "round {round}");
-            // The incrementally maintained chunk map equals a fresh one.
-            images.verify(generation, Depth::Deep).unwrap();
-            assert_eq!(images.current().unwrap(), Some(generation));
-            assert!(!diff.exists(), "the diff is consumed");
-            images.retire(&image, &[]).unwrap();
-            assert_eq!(images.generations().unwrap(), vec![generation]);
-            base = Some(generation);
-        }
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn a_diff_of_the_wrong_length_is_refused() {
-        let dir = scratch("length");
-        let images = Images::new(dir.join("images"));
-        let (diff, state) = (dir.join("diff"), dir.join("state"));
-        write_diff(&diff, &[(1, 7)]);
-        write_state(&state, b"s");
-        let base = images
-            .publish(Parts::Whole {
-                state: &state,
-                memory: &diff,
-            })
-            .unwrap();
-        File::create(&diff).unwrap().set_len(LEN - PAGE).unwrap();
-        write_state(&state, b"t");
-        assert!(
-            images
-                .publish(Parts::Diff {
-                    base: base.generation(),
-                    state: &state,
-                    diff: &diff,
-                })
-                .is_err()
-        );
-        assert_eq!(images.current().unwrap(), Some(base.generation()));
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A sandbox started from a template publishes the template's image as
-    /// its own: the same memory file. A later save of one sandbox merges
-    /// over it without touching the template or a sibling, and a sibling
-    /// that never saved keeps a whole image after the template is gone.
-    #[test]
-    fn a_shared_image_is_the_same_file_and_survives_its_source() {
-        use std::os::unix::fs::MetadataExt;
-
-        let dir = scratch("shared");
-        let template = Images::new(dir.join("template"));
-        let (memory, state) = (dir.join("memory"), dir.join("state"));
-        write_diff(&memory, &[(1, 7), (40, 9)]);
-        write_state(&state, b"template state");
-        let source = template
-            .publish(Parts::Whole {
-                state: &state,
-                memory: &memory,
-            })
-            .unwrap();
-        let before = content(&template, source.generation());
-
-        let share = |name: &str| {
-            let sandbox = Images::new(dir.join(name));
-            let image = sandbox
-                .publish(Parts::Shared {
-                    from: &template,
-                    image: &source,
-                })
-                .unwrap();
-            (sandbox, image)
-        };
-        let (modified, image) = share("modified");
-        let (untouched, kept) = share("untouched");
-        assert_eq!(modified.current().unwrap(), Some(image.generation()));
-        modified.verify(image.generation(), Depth::Deep).unwrap();
-        let inode = |path: PathBuf| fs::metadata(path).unwrap().ino();
-        for (sandbox, image) in [(&modified, &image), (&untouched, &kept)] {
-            assert_eq!(
-                inode(sandbox.memory(image.generation())),
-                inode(template.memory(source.generation())),
-                "one file, one page cache"
-            );
-        }
-
-        let diff = dir.join("diff");
-        write_diff(&diff, &[(2, 5)]);
-        write_state(&state, b"sandbox state");
-        let saved = modified
-            .publish(Parts::Diff {
-                base: image.generation(),
-                state: &state,
-                diff: &diff,
-            })
-            .unwrap();
-        modified.retire(&saved, &[]).unwrap();
-        assert_eq!(content(&template, source.generation()), before);
-        assert_eq!(content(&untouched, kept.generation()), before);
-        template.verify(source.generation(), Depth::Deep).unwrap();
-
-        // The template is removed, as when it is rebuilt: the clone that
-        // still shares its file loses nothing.
-        fs::remove_dir_all(dir.join("template")).unwrap();
-        untouched.verify(kept.generation(), Depth::Deep).unwrap();
-        assert_eq!(content(&untouched, kept.generation()), before);
-        modified.verify(saved.generation(), Depth::Deep).unwrap();
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// Simulates many save cycles in which the host crashes at any point of
-    /// publishing or retiring, and in which stored files get corrupted. After
-    /// every recovery, the current image is either exactly the last
-    /// committed state or, if that image was damaged, absent and kept in
-    /// quarantine; a damaged image is never used.
-    #[test]
-    fn crashes_and_corruption_never_lose_or_misuse_the_committed_image() {
-        const POINTS: [Option<&str>; 5] = [
-            None,
-            Some("staged"),
-            Some("renamed"),
-            Some("pointed"),
-            Some("retiring"),
-        ];
-        for seed in 1..=25_u64 {
-            let dir = scratch(&format!("crash-{seed}"));
-            let images = Images::new(dir.join("images"));
-            let mut rng = Rng(seed.wrapping_mul(0x2545_f491_4f6c_dd1d) | 1);
-            let mut model = vec![0_u8; usize::try_from(LEN).unwrap()];
-            // The content `current` must have, if it exists.
-            let mut committed: Option<Vec<u8>> = None;
-            for _ in 0..30 {
-                let pages = random_pages(&mut rng);
-                let (diff, state) = (dir.join("diff"), dir.join("state"));
-                write_diff(&diff, &pages);
-                write_state(&state, b"state");
-                let point = POINTS[usize::try_from(rng.below(POINTS.len() as u64)).unwrap()];
-                FAILPOINT.with(|cell| cell.set(point));
-                let base = images.current().unwrap();
-                let result = match base {
-                    None => images.publish(Parts::Whole {
-                        state: &state,
-                        memory: &diff,
-                    }),
-                    Some(base) => images.publish(Parts::Diff {
-                        base,
-                        state: &state,
-                        diff: &diff,
-                    }),
-                };
-                let mut next = if base.is_some() {
-                    model.clone()
-                } else {
-                    vec![0; model.len()]
-                };
-                apply(&mut next, &pages);
-                match result {
-                    Ok(image) => {
-                        committed = Some(next.clone());
-                        model = next;
-                        let _ = images.retire(&image, &[]);
-                    }
-                    // Crashed after the pointer moved: committed anyway.
-                    Err(_) if point == Some("pointed") => {
-                        committed = Some(next.clone());
-                        model = next;
-                    }
-                    Err(_) => {}
-                }
-                FAILPOINT.with(|cell| cell.set(None));
-                // Now and then, damage the current image on disk.
-                let mut damaged = false;
-                if rng.below(6) == 0
-                    && let Some(generation) = images.current().unwrap()
-                {
-                    let victim = images.path(generation).join(match rng.below(3) {
-                        0 => STATE,
-                        1 => CHUNKS,
-                        _ => META,
-                    });
-                    let mut bytes = fs::read(&victim).unwrap();
-                    let at = usize::try_from(rng.below(bytes.len() as u64)).unwrap();
-                    bytes[at] ^= 0x5a;
-                    fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
-                    fs::write(&victim, bytes).unwrap();
-                    damaged = true;
-                }
-                let recovered = images.recover().unwrap();
-                match (&committed, recovered) {
-                    (Some(_), None) => {
-                        assert!(damaged, "seed {seed}: a good committed image was lost");
-                        assert!(
-                            fs::read_dir(images.dir().join(QUARANTINE)).unwrap().count() > 0,
-                            "seed {seed}: damaged image deleted instead of quarantined"
-                        );
-                        committed = None;
-                        model.fill(0);
-                    }
-                    (Some(expected), Some(image)) => {
-                        assert!(!damaged, "seed {seed}: a damaged image was trusted");
-                        assert_eq!(&content(&images, image.generation()), expected);
-                        images.verify(image.generation(), Depth::Deep).unwrap();
-                        assert_eq!(images.generations().unwrap(), vec![image.generation()]);
-                    }
-                    (None, None) => {}
-                    (None, Some(_)) => panic!("seed {seed}: an uncommitted image became current"),
-                }
-            }
-            fs::remove_dir_all(&dir).unwrap();
-        }
-    }
-
-    #[test]
-    fn retiring_needs_a_newer_good_image_and_spares_images_in_use() {
-        let all = [Generation(1), Generation(2), Generation(3), Generation(4)];
-        assert_eq!(
-            retirable(&all, Generation(3), &[Generation(1)]),
-            vec![Generation(2)]
-        );
-        assert_eq!(retirable(&all, Generation(1), &[]), Vec::new());
-        // Exhaustively: never the proven image, never anything newer.
-        for newest in 1..=4 {
-            for mask in 0..16_u32 {
-                let in_use: Vec<_> = all
-                    .iter()
-                    .copied()
-                    .filter(|generation| mask & (1 << (generation.0 - 1)) != 0)
-                    .collect();
-                for gone in retirable(&all, Generation(newest), &in_use) {
-                    assert!(gone.0 < newest && !in_use.contains(&gone));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn remote_images_become_local_once_hydrated() {
-        let dir = scratch("remote");
-        let images = Images::new(dir.join("images"));
-        let state = dir.join("state");
-        write_state(&state, b"s");
-        let mut chunks = ChunkMap::zeros(LEN);
-        let fill = vec![9_u8; usize::try_from(CHUNK_BYTES).unwrap()];
-        chunks.0[1] = *blake3::hash(&fill).as_bytes();
-        let image = images
-            .publish(Parts::Remote {
-                state: &state,
-                memory_len: LEN,
-                chunks,
-                manifest: b"{}",
-            })
-            .unwrap();
-        assert!(image.meta().remote);
-        let generation = image.generation();
-        assert!(images.remote(generation).exists());
-        {
-            let memory = images.memory(generation);
-            fs::set_permissions(&memory, fs::Permissions::from_mode(0o644)).unwrap();
-            fs::OpenOptions::new()
-                .write(true)
-                .open(&memory)
-                .unwrap()
-                .write_all_at(&fill, CHUNK_BYTES)
-                .unwrap();
-        }
-        let local = images.mark_local(&image).unwrap();
-        assert!(!local.meta().remote);
-        assert!(!images.remote(generation).exists());
-        images.verify(generation, Depth::Deep).unwrap();
-        fs::remove_dir_all(&dir).unwrap();
-    }
-}
+mod tests;

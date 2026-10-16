@@ -11,8 +11,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::image::Generation;
 use crate::layout::Paths;
+use compute_engine::{EngineError, ErrorKind};
+
 #[cfg(target_os = "linux")]
-use crate::lazy::Paging;
+use crate::paging::Paging;
 
 /// What the VM's memory equals, page for page, apart from what it changed
 /// since: what a diff snapshot is relative to.
@@ -32,7 +34,8 @@ pub(crate) enum Base {
 #[derive(Debug)]
 pub(crate) struct LiveMemory {
     pub base: Base,
-    /// The pager thread serving its memory, if a pager does.
+    /// The agent's side of the pager process serving its memory, if one
+    /// does.
     #[cfg(target_os = "linux")]
     pub paging: Option<Paging>,
     /// Sees every write to the disk that was lost while the VM ran.
@@ -60,6 +63,19 @@ impl LiveMemory {
         }
     }
 
+    /// A VM found running after an agent restart whose pager the agent
+    /// reconnected to: what its memory is based on is unknown.
+    pub fn reconnected(disk: DiskWatch, pager: Reconnected) -> Self {
+        #[cfg(not(target_os = "linux"))]
+        let Reconnected {} = pager;
+        Self {
+            base: Base::Unknown,
+            #[cfg(target_os = "linux")]
+            paging: Some(pager.paging),
+            disk: Arc::new(disk),
+        }
+    }
+
     /// Resolves if the VM's memory can no longer be served, so the VM must
     /// be stopped.
     pub fn failed(&self) -> impl Future<Output = ()> + Send + 'static {
@@ -68,6 +84,75 @@ impl LiveMemory {
             return futures::future::Either::Left(paging.failed());
         }
         futures::future::Either::Right(std::future::pending())
+    }
+
+    /// Waits until the image this VM's memory comes from is whole and its
+    /// pager, if it has one, holds every byte: until then the image must
+    /// stay the current one, unsealed and in place, so an agent that
+    /// restarts can still fill it by name. Saves and forgetting the image
+    /// wait for this.
+    pub async fn settled(&self, operation: &'static str) -> Result<(), EngineError> {
+        #[cfg(target_os = "linux")]
+        if let Some(paging) = &self.paging {
+            if let Some(hydration) = paging.hydration.clone() {
+                hydration.finished().await.map_err(|why| {
+                    let kind = if why.permanent {
+                        ErrorKind::MemoryLost
+                    } else {
+                        ErrorKind::Transient
+                    };
+                    EngineError::caused_by(kind, operation, why)
+                })?;
+            }
+            paging.complete().await.map_err(|why| {
+                let kind = match why {
+                    crate::paging::Incomplete::Failed => ErrorKind::MemoryLost,
+                    crate::paging::Incomplete::Stopped => ErrorKind::Transient,
+                };
+                EngineError::new(kind, operation, "the pager does not hold the whole image")
+            })?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = operation;
+        Ok(())
+    }
+
+    /// For a VM that has ended and whose files are about to be deleted:
+    /// stops serving and fetching its memory and returns once nothing more
+    /// will be written for it.
+    pub async fn close(self) {
+        #[cfg(target_os = "linux")]
+        if let Some(paging) = &self.paging {
+            paging.close().await;
+        }
+    }
+}
+
+/// The pager of a VM found running after an agent restart, reconnected
+/// before the VM itself is taken back.
+#[derive(Debug)]
+pub(crate) struct Reconnected {
+    #[cfg(target_os = "linux")]
+    pub paging: Paging,
+}
+
+impl Reconnected {
+    /// For a VM that was not taken back after all: stops serving and
+    /// fetching its memory.
+    pub async fn close(self) {
+        #[cfg(target_os = "linux")]
+        self.paging.close().await;
+    }
+
+    /// For a VM that may still run but was not taken back: goes on serving
+    /// and fetching its memory in the background until the pager holds all
+    /// of it, or ends with the VM, so its guest never waits forever on a
+    /// page. The pager needs no agent after that.
+    pub fn serve_detached(self) {
+        #[cfg(target_os = "linux")]
+        tokio::spawn(async move {
+            let _ = self.paging.complete().await;
+        });
     }
 }
 
