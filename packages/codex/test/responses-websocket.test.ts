@@ -156,6 +156,52 @@ test("streams a response over one reused connection as SSE with usage headers", 
   expect(httpCalls).toEqual([]);
 });
 
+function streamedRequest(body: Record<string, unknown>) {
+  const bytes = new TextEncoder().encode(JSON.stringify(body));
+  return request(body, {
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.subarray(0, 7));
+        controller.enqueue(bytes.subarray(7));
+        controller.close();
+      },
+    }),
+    duplex: "half",
+  });
+}
+
+test("a streamed request body, as the model client sends it, goes over the socket", async () => {
+  const sockets: FakeSocket[] = [];
+  const httpBodies: string[] = [];
+  const transport = codexResponsesTransport(
+    async (_input, init) => {
+      httpBodies.push(await new Response(init?.body).text());
+      return new Response("http", { status: 200 });
+    },
+    {
+      createSocket: (url, headers) => {
+        const socket = new FakeSocket(url, headers);
+        sockets.push(socket);
+        queueMicrotask(() => socket.open());
+        return socket;
+      },
+      connectTimeoutMs: 1_000,
+    },
+  );
+  const body = { model: "m", input: [{ role: "user", content: "hi" }], stream: true };
+  const pending = transport(URL, streamedRequest(body));
+  const socket = await nextSend(() => sockets[0]);
+  expect(socket.sent[0]).toMatchObject({ type: "response.create", ...body });
+  // While the socket is busy, the same kind of request still reaches HTTP whole.
+  const busy = await transport(URL, streamedRequest(body));
+  expect(busy.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=connection_busy");
+  expect(httpBodies).toEqual([JSON.stringify(body)]);
+  socket.emit({ type: "response.completed", response: { id: "r1" } });
+  const response = await pending;
+  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe("websocket; connection=new");
+  await response.text();
+});
+
 test("a concurrent request of the same conversation uses HTTP while the socket is busy", async () => {
   const { transport, sockets, httpCalls } = harness();
   const first = transport(URL, request());

@@ -202,6 +202,24 @@ function eventData(data: unknown): string | null {
 }
 
 /** Translate the WebSocket rate-limit event into the SSE endpoint's headers. */
+/**
+ * The request body as text when it is a complete JSON body the socket can
+ * carry (a string, bytes, or the client's replayable stream). Anything else,
+ * such as form data, stays on HTTP untouched.
+ */
+async function requestBodyText(body: RequestInit["body"] | undefined): Promise<string | null> {
+  if (typeof body === "string") return body;
+  if (
+    body instanceof ReadableStream ||
+    body instanceof Uint8Array ||
+    body instanceof ArrayBuffer ||
+    body instanceof Blob
+  ) {
+    return await new Response(body).text();
+  }
+  return null;
+}
+
 export function codexRateLimitHeaders(event: Record<string, unknown>): Array<[string, string]> {
   const limits = event.rate_limits;
   if (!limits || typeof limits !== "object") return [];
@@ -368,13 +386,18 @@ export function codexResponsesTransport(
     if (!url || method !== "POST" || !/^https:\/\/[^/]+\/.*\/codex\/responses(?:\?|$)/.test(url)) {
       return await http(input, init);
     }
+    // The model client streams its JSON body so it can be sent again; a socket
+    // message needs the whole text, and once read the HTTP fallback sends that
+    // same text.
+    const text = await requestBodyText(body);
+    const httpInit = text === null || typeof body === "string" ? init : { ...init, body: text };
     const viaHttp = async (
       reason: Extract<CodexRequestTransport, { kind: "http" }>["reason"],
-    ): Promise<Response> => withTransport(await http(input, init), { kind: "http", reason });
-    if (typeof body !== "string") return await viaHttp("not_eligible");
+    ): Promise<Response> => withTransport(await http(input, httpInit), { kind: "http", reason });
+    if (text === null) return await viaHttp("not_eligible");
     let payload: Record<string, unknown>;
     try {
-      const parsed = JSON.parse(body) as unknown;
+      const parsed = JSON.parse(text) as unknown;
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
       payload = parsed as Record<string, unknown>;
     } catch {
