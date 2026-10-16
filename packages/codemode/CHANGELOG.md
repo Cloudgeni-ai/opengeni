@@ -1,5 +1,23 @@
 # @opengeni/codemode
 
+## 3.1.2
+
+### Patch Changes
+
+- 99d545d: Browser observe, act, tab and attached-browser discovery results default to a lean shape: empty, zero and default fields are omitted, and tab targets carry only identity, page, selection and fences. Pass `view: "full"` (or use `observeFull()`) for the complete contract objects.
+
+  `browser.open({ placement: { kind: "attached_device" } })` without a `deviceId` opens the person's own connected Chrome: the only connected profile, or the most recently active one.
+
+- Updated dependencies [17d61c6]
+- Updated dependencies [74a259d]
+- Updated dependencies [1e67711]
+- Updated dependencies [0bdb953]
+- Updated dependencies [79af429]
+- Updated dependencies [877c70d]
+  - @opengeni/contracts@3.1.0
+  - @opengeni/sdk@3.1.0
+  - @opengeni/tool-gateway@3.1.0
+
 ## 3.0.0
 
 ### Minor Changes

@@ -1,5 +1,18 @@
 # @opengeni/contracts
 
+## 3.1.2
+
+### Minor Changes
+
+- 1e67711: An MCP server can recommend Ask for a tool with `_meta: { "opengeni/recommendedPermission": "ask" }` in `tools/list` (`MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY`). It applies on model and Codemode calls from the next attempt of every session, and only when the workspace has saved no choice for the tool. A tool asks when either this or the session's `requireApproval` says so. Connector permission settings show the same recommendation.
+
+### Patch Changes
+
+- 17d61c6: Schedules no longer stay stuck without anyone knowing. When no later run can start until a person acts (its chat is paused or gone, a pinned account or machine is unavailable, or the run is refused for good), the schedule pauses itself and its owner gets one inbox notice saying why and what would unblock it. When runs keep failing or being skipped for a reason that may clear by itself, the owner is told once after three in a row. The notice goes away when a run succeeds or the schedule is resumed, paused or deleted, and the schedule page and API show the current blocker.
+- 0bdb953: Photo-heavy chats no longer compact over and over. After compaction only the newest user message that has attachments keeps its images inline; photos of older retained messages move to the dated attachment catalog, where the agent can reopen them, and those messages are charged only for their text. Newly sent photos are shown to every model at most 2000 px on the longest side (the file itself stays full resolution, and the receipt says so); photos sent before this change keep their original projection, so requests already sent are unchanged. The local image token estimate now prices images by the patches they cover at the sent resolution, so a full-resolution phone photo counts as about 15k tokens instead of 765.
+- 79af429: Restore direct connector tools on published Site pages for signed-in workspace members, including older bundled SDKs. Page catalogs and calls use exact immutable Site declarations, live viewer permissions and account-qualified connections through the normal console gateway. Keep approvals and revocation enforced, deny nonmembers, and make page tools independent of the embedded agent's configuration.
+- 877c70d: Scheduled runs now tell the agent what to do when something blocks the task: try to fix it, otherwise notify the schedule's owner once under the schedule's notice key, and pause the schedule when no later run can succeed. Only occurrences delivered after this change carry the new sentence.
+
 ## 3.0.0
 
 ### Minor Changes
