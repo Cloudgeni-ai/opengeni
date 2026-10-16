@@ -12,7 +12,7 @@ use compute_host::protocol::{
     DurabilityName, HostStatus, Id, LevelName, PriorityName, Reply, Request, SleepConfig,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, sleep_until};
 
 use super::{Delays, Lab, NEVER, PAUSE_SOON, SAVE_IN_PLACE, SAVE_QUICKLY, id, thaw, vm_name};
 
@@ -689,7 +689,9 @@ async fn a_named_hold_wakes_a_sandbox_and_keeps_it_awake_until_it_lapses() {
     // Holding wakes it: a turn starting is a good moment to boot.
     lab.wait_level(sandbox, LevelName::Running).await;
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
-    sleep(Duration::from_millis(450)).await;
+    // Midway through the hold, counted from when it was taken: a slow boot
+    // must not use up the time the hold still has.
+    sleep_until(started + Duration::from_millis(300)).await;
     let status = lab.status().await;
     assert_eq!(Lab::sandbox(&status, sandbox).level, LevelName::Running);
     assert_eq!(Lab::sandbox(&status, sandbox).holds, 1);
