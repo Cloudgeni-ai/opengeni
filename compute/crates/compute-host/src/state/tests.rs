@@ -340,6 +340,70 @@ async fn an_unsure_record_is_settled_before_anyone_relies_on_it() {
     assert_eq!(settled, read(&path, id(1)).unwrap().unwrap());
 }
 
+/// A record found when the root is opened may be a write the previous
+/// owner never made durable, so it is settled before it is relied on.
+#[tokio::test]
+async fn a_record_found_at_open_is_settled_before_it_is_relied_on() {
+    let root = temp_root("state-reopen");
+    let (records, _) = Records::open(root.path().into(), Duration::ZERO, None)
+        .await
+        .unwrap();
+    records.insert(fresh(root.path(), 1, 0)).await.unwrap();
+    drop(records);
+    let path = Paths::new(root.path(), id(1)).record;
+    crate::layout::tests::FAILPOINTS
+        .lock()
+        .unwrap()
+        .push((path.clone(), "parent"));
+    let (records, _) = Records::open(root.path().into(), Duration::ZERO, None)
+        .await
+        .unwrap();
+    assert!(records.get(id(1)).is_some(), "the record was not read");
+    assert!(
+        records.settle(id(1)).await.is_err(),
+        "a record found at open was taken as durable"
+    );
+    crate::layout::tests::FAILPOINTS
+        .lock()
+        .unwrap()
+        .retain(|(failing, _)| failing != &path);
+    records.settle(id(1)).await.unwrap();
+}
+
+/// The state root is only as durable as its entry in its parent: a root
+/// whose parent is missing is refused rather than made with unsynced
+/// ancestors, and an entry that failed to sync is synced on the next open.
+#[tokio::test]
+async fn the_state_root_is_made_durably_in_a_parent_that_exists() {
+    let parent = temp_root("state-parent");
+    let missing = parent.path().join("missing").join("root");
+    let refused = Records::open(missing.clone(), Duration::ZERO, None).await;
+    assert!(matches!(refused, Err(StateError::Io(_))), "{refused:?}");
+    assert!(!missing.parent().unwrap().exists(), "an ancestor was made");
+
+    let root = parent.path().join("root");
+    crate::layout::tests::FAILPOINTS
+        .lock()
+        .unwrap()
+        .push((root.clone(), "parent"));
+    let failed = Records::open(root.clone(), Duration::ZERO, None).await;
+    assert!(
+        failed.is_err(),
+        "a root whose entry is not durable was used"
+    );
+    assert!(
+        Records::open(root.clone(), Duration::ZERO, None)
+            .await
+            .is_err(),
+        "an existing root was taken as durable"
+    );
+    crate::layout::tests::FAILPOINTS
+        .lock()
+        .unwrap()
+        .retain(|(failing, _)| failing != &root);
+    Records::open(root, Duration::ZERO, None).await.unwrap();
+}
+
 /// Work on a record whose caller gave up keeps the record's lock until
 /// it is done: a writer after it waits, and then sees its effect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -568,5 +632,141 @@ fn check_chain(seed: u64, chain: &[Acked]) {
                 "seed {seed}: a write applied against a version that was not current"
             );
         }
+    }
+}
+
+/// A write of a record, as the boundary tests make it.
+#[derive(Clone, Copy, Debug)]
+enum Write {
+    Insert,
+    Commit,
+    Remove,
+}
+
+/// Where a write of a record can stop: the failpoint it fails at (`None`
+/// for a write that finished), and whether the file had been replaced or
+/// removed by then. `staged` is after the new file is written and synced,
+/// `renamed` after it replaced the record, `parent` when syncing the
+/// directory fails.
+const BOUNDARIES: [(Option<&str>, bool); 4] = [
+    (Some("staged"), false),
+    (Some("renamed"), true),
+    (Some("parent"), true),
+    (None, true),
+];
+
+/// A deterministic model of the filesystem across a power loss: file
+/// contents that were synced survive, and a directory change (a rename or
+/// a removal) survives only if its directory was synced, or may survive
+/// anyway. Every write is stopped at every boundary, the power is cut
+/// with each outcome the model allows, and the root is opened again.
+/// Whatever happened, the record is whole, it is either what was there
+/// before or what was being written, a write reported done is never
+/// undone, and the reopened record settles and takes the next write.
+#[tokio::test]
+async fn a_power_loss_at_any_write_boundary_leaves_one_whole_record() {
+    for write in [Write::Insert, Write::Commit, Write::Remove] {
+        for (point, replaced) in BOUNDARIES {
+            // A removal writes nothing to stage or rename.
+            if matches!(write, Write::Remove) && matches!(point, Some("staged" | "renamed")) {
+                continue;
+            }
+            let survives: &[bool] = match (point, replaced) {
+                (None, _) => &[true],
+                (_, false) => &[false],
+                _ => &[true, false],
+            };
+            for &survives in survives {
+                power_loss(write, point, replaced, survives).await;
+            }
+        }
+    }
+}
+
+/// Stops `write` at `point`, which `replaced` the file or not, then cuts
+/// the power, keeping the change to
+/// the record's directory entry if `survives`, and checks the reopened
+/// root.
+async fn power_loss(write: Write, point: Option<&'static str>, replaced: bool, survives: bool) {
+    let case = format!("{write:?} at {point:?}, survives={survives}");
+    let root = temp_root("state-power");
+    let (records, _) = Records::open(root.path().into(), Duration::ZERO, None)
+        .await
+        .unwrap();
+    let path = Paths::new(root.path(), id(1)).record;
+    let before = match write {
+        Write::Insert => {
+            fs::create_dir_all(Paths::new(root.path(), id(1)).dir).unwrap();
+            None
+        }
+        Write::Commit | Write::Remove => {
+            Some(records.insert(fresh(root.path(), 1, 0)).await.unwrap())
+        }
+    };
+    if let Some(point) = point {
+        crate::layout::tests::FAILPOINTS
+            .lock()
+            .unwrap()
+            .push((path.clone(), point));
+    }
+    let fence = before.as_ref().map(Record::fence);
+    let result = match write {
+        Write::Insert => records.insert(fresh(root.path(), 1, 0)).await.map(Some),
+        Write::Commit => records
+            .commit(id(1), fence.unwrap(), Change::new().image(true))
+            .await
+            .map(Some),
+        Write::Remove => records.remove(id(1), fence.unwrap()).await.map(|()| None),
+    };
+    crate::layout::tests::FAILPOINTS
+        .lock()
+        .unwrap()
+        .retain(|(failing, _)| failing != &path);
+    assert_eq!(result.is_ok(), point.is_none(), "{case}: {result:?}");
+    let attempted = read(&path, id(1)).unwrap();
+    match write {
+        Write::Insert => assert_eq!(attempted.is_some(), replaced, "{case}"),
+        Write::Commit => assert_eq!(attempted.as_ref().unwrap().image, replaced, "{case}"),
+        Write::Remove => assert!(attempted.is_none(), "{case}"),
+    }
+    drop(records);
+
+    // The power loss: a directory change that was never synced is undone.
+    if !survives {
+        match &before {
+            Some(record) => {
+                let mut bytes = serde_json::to_vec(record).unwrap();
+                bytes.push(b'\n');
+                fs::write(&path, bytes).unwrap();
+            }
+            None => crate::layout::remove_if_present(&path).unwrap(),
+        }
+    }
+    let expected = if survives { attempted } else { before };
+    let (records, strays) = Records::open(root.path().into(), Duration::ZERO, None)
+        .await
+        .unwrap();
+    if let Ok(Some(done)) = &result {
+        assert_eq!(
+            expected.as_ref(),
+            Some(done),
+            "{case}: a finished write was undone"
+        );
+    }
+    if let Some(expected) = expected {
+        assert!(strays.is_empty(), "{case}: {strays:?}");
+        let settled = records.settle(id(1)).await.unwrap();
+        assert_eq!(settled, expected, "{case}");
+        assert_eq!(read(&path, id(1)).unwrap(), Some(settled.clone()), "{case}");
+        records
+            .commit(id(1), settled.fence(), Change::new().archived(true))
+            .await
+            .unwrap();
+    } else {
+        assert!(records.get(id(1)).is_none(), "{case}");
+        assert!(
+            strays.len() == 1 && strays[0].id == id(1) && strays[0].problem.is_none(),
+            "{case}: {strays:?}"
+        );
     }
 }

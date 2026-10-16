@@ -251,10 +251,6 @@ pub enum StateError {
     /// whose VMs may still run.
     #[error("this host's sandboxes belong to state root {0}, which still has sandboxes")]
     HostOwned(PathBuf),
-    /// Whether the record's last write is durable is unknown, and making
-    /// sure failed: nothing can rely on the record until it is settled.
-    #[error("the record of sandbox {0} is not known to be durable")]
-    Unsure(Id),
     /// A record could not be read as one.
     #[error("record {path} is unreadable: {message}")]
     Corrupt {
@@ -498,8 +494,12 @@ impl Records {
             match read(&Paths::new(&root, id).record, id) {
                 Ok(Some(record)) => {
                     unused = unused.max(record.generation + 1);
+                    // A record found on disk may be a write the previous
+                    // owner never made durable: nothing relies on it before
+                    // it is settled.
                     let entry = Entry {
                         current: Mutex::new(Some(record)),
+                        unsure: AtomicBool::new(true),
                         ..Entry::default()
                     };
                     entries.insert(id.0, Arc::new(entry));
@@ -681,8 +681,24 @@ impl Records {
 /// Opens `<root>/agent.lock` and takes an exclusive lock on it, retrying
 /// until `wait` has passed.
 fn lock_root(root: &Path, wait: Duration) -> Result<File, StateError> {
-    fs::create_dir_all(root)?;
+    create_root(root)?;
     lock_exclusive(&root.join(LOCK), wait)
+}
+
+/// Creates the state root, durably, in a parent that must exist already:
+/// records are only as durable as every directory above them, and the
+/// agent can vouch only for the entries it makes.
+fn create_root(root: &Path) -> Result<(), StateError> {
+    create_dir_durably(root).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            StateError::Io(format!(
+                "the state root {} needs an existing parent directory",
+                root.display()
+            ))
+        } else {
+            error.into()
+        }
+    })
 }
 
 /// Takes the host's lock at `path` for the agent of state root `root`.
@@ -699,7 +715,7 @@ pub(crate) fn claim_host(path: &Path, root: &Path, wait: Duration) -> Result<Fil
     use std::os::unix::ffi::OsStrExt;
 
     let mut file = lock_exclusive(path, wait)?;
-    fs::create_dir_all(root)?;
+    create_root(root)?;
     let root = fs::canonicalize(root)?;
     let mut named = Vec::new();
     file.read_to_end(&mut named)?;
