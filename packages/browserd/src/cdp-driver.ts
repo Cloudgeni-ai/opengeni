@@ -92,6 +92,7 @@ import {
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 const BROWSER_START_TIMEOUT_MS = 30_000;
 const TARGET_CREATION_SETTLE_TIMEOUT_MS = 5_000;
+const TARGET_CLOSE_SETTLE_TIMEOUT_MS = 2_000;
 // A screenshot stream is the compatibility floor for every Chromium build.
 // Keep it interactive even when Page.startScreencast is unavailable or a
 // background target never produces screencast events.
@@ -651,10 +652,26 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.removeState(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
     try {
-      await connection.send("Target.closeTarget", { targetId });
+      await this.closeTargetAndSettle(connection, targetId);
     } catch {
       // Best effort: the tab may already be gone, and the original failure
       // is what the caller needs to see.
+    }
+  }
+
+  /** Target.closeTarget is acknowledged before the browser drops the tab from
+   * Target.getTargets, and a cold or loaded browser can keep listing it for a
+   * moment. Wait until it is gone, so a tab list returned after a close never
+   * shows the closed tab. */
+  private async closeTargetAndSettle(
+    connection: BrowserCdpConnection,
+    targetId: string,
+  ): Promise<void> {
+    await connection.send("Target.closeTarget", { targetId });
+    const deadline = Date.now() + TARGET_CLOSE_SETTLE_TIMEOUT_MS;
+    while ((await this.targetInfos(connection)).some((info) => info.targetId === targetId)) {
+      if (Date.now() >= deadline) return;
+      await delay(25);
     }
   }
 
@@ -674,7 +691,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
-    await connection.send("Target.closeTarget", { targetId });
+    await this.closeTargetAndSettle(connection, targetId);
     this.removeState(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
     return await this.listTargets();
