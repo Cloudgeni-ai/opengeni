@@ -21,6 +21,8 @@ import {
 import {
   stageVaultPolicyColumns,
   stageConnectionAccountIntentColumns,
+  stageSiteSessionAudienceColumns,
+  dropSiteSessionAudienceColumns,
   dropConnectionAccountIntentColumns,
 } from "./vault-policy-column-fixture";
 
@@ -101,6 +103,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     await migrate(owned.ownerUrl);
     await stageVaultPolicyColumns(owned.ownerUrl);
     await stageConnectionAccountIntentColumns(owned.ownerUrl);
+    await stageSiteSessionAudienceColumns(owned.ownerUrl);
     // Current adapters need nullable reader fields, not the deferred import
     // lifecycle. Remove these before the real ordered migration replay.
     await owner`ALTER TABLE sessions
@@ -358,6 +361,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       await owner.unsafe(`ALTER TABLE ${table} DROP COLUMN subscription_authority`);
     await owner`ALTER TABLE scheduled_tasks DROP COLUMN visibility`;
     await dropConnectionAccountIntentColumns(owned.ownerUrl);
+    await dropSiteSessionAudienceColumns(owned.ownerUrl);
     for (const name of planningSuffix)
       await owner`delete from schema_migrations where name=${name}`;
     await migrate(owned.ownerUrl);
