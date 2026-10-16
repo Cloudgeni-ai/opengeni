@@ -119,7 +119,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // removal stops whatever VM it has and retries any removal that
             // stopped part way.
             let Some(record) = self.records.get(id) else {
-                let _ = reply.send(Err(HostError::Broken(id)));
+                match self.leftovers.get(&id.0) {
+                    Some(&ordinal) => self.remove_leftovers(id, ordinal, reply),
+                    None => {
+                        let _ = reply.send(Err(HostError::Broken(id)));
+                    }
+                }
                 return;
             };
             if let Err(error) = check_generation(&record, generation) {
@@ -246,6 +251,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(HostError::Broken(id)));
             return;
         }
+        if let Some(unknown) = self.unknown_ordinals.first() {
+            let _ = reply.send(Err(HostError::Io(format!(
+                "sandbox {}'s record is unreadable and the user and network it holds unknown; \
+                 no sandbox is created until it is resolved",
+                Id(*unknown)
+            ))));
+            return;
+        }
         if self.slots.contains_key(&id.0)
             || self.preparing.contains(&id.0)
             || self.destroying.contains_key(&id.0)
@@ -298,12 +311,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // The directory must be new: one already there belongs to a
                 // sandbox this agent does not know, and is left alone.
                 std::fs::create_dir(&paths.dir)?;
-                std::fs::create_dir_all(&paths.jail)?;
+                std::fs::create_dir(&paths.jail)?;
                 copy_sparse(&base, &paths.disk)?;
                 // The record, written next, vouches for these: their
-                // directory entries must outlast a crash first.
+                // directory entries must outlast a crash first, all the way
+                // up to the one in the sandboxes' directory.
                 sync_parent(&paths.disk)?;
                 sync_parent(&paths.jail)?;
+                sync_parent(&paths.dir)?;
                 if let (Some(net), Some(link)) = (&networks, &link) {
                     net.ensure(link)?;
                 }

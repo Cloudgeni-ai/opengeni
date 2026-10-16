@@ -250,6 +250,65 @@ async fn an_unreadable_record_blocks_its_id() {
     lab.assert_clean();
 }
 
+/// A record so damaged that the user and network its sandbox holds cannot
+/// be told stops all creation: any newcomer could be handed the same ones.
+/// Creation resumes once the damaged sandbox is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unknown_ordinal_stops_creation_until_it_is_resolved() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let (broken, other) = (id(42), id(43));
+    lab.create(broken, NEVER).await;
+    let (root, world) = lab.stop().await;
+    let dir = root.join("state/vm/firecracker").join(broken.to_string());
+    std::fs::write(dir.join("sandbox.json"), b"{ not a record").unwrap();
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+
+    assert_eq!(lab.status().await.blocked.len(), 1);
+    let reply = lab.client.call(&create_request(other)).await.unwrap();
+    assert!(is_error(&reply, ErrorCode::Internal), "{reply:?}");
+
+    let (root, world) = lab.stop().await;
+    world.live.lock().unwrap().remove(&vm_name(broken));
+    std::fs::remove_dir_all(&dir).unwrap();
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    lab.create(other, NEVER).await;
+    lab.assert_clean();
+}
+
+/// A removal that deleted the record but not the files can be retried
+/// with Remove, and a successful retry unblocks the id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removal_that_left_files_behind_is_retried_by_removing_again() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let doomed = id(44);
+    lab.create(doomed, NEVER).await;
+    let stuck = lab.sandbox_dir(doomed).join("stuck");
+    std::fs::create_dir(&stuck).unwrap();
+    std::fs::write(stuck.join("file"), b"").unwrap();
+    if !super::freeze(&stuck) {
+        // Root deletes it anyway; nothing to test.
+        super::thaw(&stuck);
+        return;
+    }
+    let remove = Request::Remove {
+        id: doomed,
+        generation: None,
+    };
+    let reply = lab.client.call(&remove).await.unwrap();
+    assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+    let status = lab.status().await;
+    assert_eq!(status.blocked.len(), 1, "{status:?}");
+    assert!(!lab.sandbox_dir(doomed).join("sandbox.json").exists());
+
+    super::thaw(&stuck);
+    assert_eq!(lab.client.call(&remove).await.unwrap(), Reply::Done);
+    let status = lab.status().await;
+    assert!(status.blocked.is_empty(), "{status:?}");
+    assert!(!lab.sandbox_dir(doomed).exists());
+    lab.create(doomed, NEVER).await;
+    lab.assert_clean();
+}
+
 fn create_request(id: Id) -> Request {
     Request::Create {
         id,
