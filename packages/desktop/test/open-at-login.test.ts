@@ -42,6 +42,7 @@ function computer(
     dataDir,
     logDir: dataDir,
     mintEnrollToken: unused,
+    allowAgents: unused,
     openSystemSettings: () => undefined,
     trash: async () => undefined,
     ...(onScreenControlHandedOver ? { onScreenControlHandedOver } : {}),

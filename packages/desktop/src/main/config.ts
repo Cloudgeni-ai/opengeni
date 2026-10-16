@@ -9,7 +9,10 @@ export interface DesktopAppConfig {
   appId: string;
   /** The custom URL scheme the app registers, e.g. "opengeni". */
   scheme: string;
-  /** The server the first-run page suggests, e.g. https://app.opengeni.ai. */
+  /**
+   * The server the first-run page suggests, e.g. https://app.opengeni.ai.
+   * An app installed by a server's install script suggests that server instead.
+   */
   defaultServerUrl: string;
   /** Absolute paths to the bundled preload scripts and the first-run page. */
   preloadPath: string;

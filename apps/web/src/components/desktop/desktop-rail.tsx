@@ -432,8 +432,9 @@ function ThisComputerDialog({
         <DialogHeader>
           <DialogTitle>Use this computer</DialogTitle>
           <DialogDescription>
-            Your agents can work on {status.machineName}: run commands, edit files and use your
-            browser. No one else can use it, and you can pause it any time from the {trayName()}.
+            Your agents can work on {status.machineName} in your chats in this workspace: run
+            commands, edit files and use your browser. Only you can start that work, and you can
+            pause it any time from the {trayName()}.
           </DialogDescription>
         </DialogHeader>
         <label className="mt-4 flex cursor-pointer items-start justify-between gap-4 rounded-lg border border-border p-3">
@@ -459,7 +460,9 @@ function ThisComputerDialog({
         ) : null}
         <DialogFooter className="mt-5 items-center">
           {connecting && status.setupProgress !== undefined ? (
-            <span className="mr-auto text-xs text-fg-muted">Downloading the agent, once.</span>
+            <span className="mr-auto whitespace-nowrap text-xs text-fg-muted">
+              Downloading the agent, once.
+            </span>
           ) : null}
           <Button
             type="button"
@@ -469,7 +472,12 @@ function ThisComputerDialog({
           >
             Cancel
           </Button>
-          <Button type="button" disabled={connecting} onClick={() => void connect()}>
+          <Button
+            type="button"
+            className="min-w-24 tabular-nums"
+            disabled={connecting}
+            onClick={() => void connect()}
+          >
             {connecting
               ? status.setupProgress !== undefined
                 ? `Setting up…${setupPercent(status)}`

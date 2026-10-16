@@ -87,6 +87,11 @@ export interface ThisComputerDeps {
   logDir: string;
   /** A single-use personal enroll token for the account's workspace. */
   mintEnrollToken(accountId: string, workspaceId: string, screenControl: boolean): Promise<string>;
+  /**
+   * Lets the account's agents use this computer (its enrollment) in their
+   * chats in the workspace, without asking again in every chat.
+   */
+  allowAgents(accountId: string, workspaceId: string, enrollmentId: string): Promise<void>;
   /** Opens a page of the system settings, e.g. one Privacy & Security list. */
   openSystemSettings(url: string): void;
   /** Moves a file or folder to the Trash. */
@@ -304,6 +309,9 @@ export class ThisComputer {
       // A running agent reads its connections when it starts.
       if (this.agent.state === "stopped") this.agent.start(baseUrl);
       else await this.agent.restart();
+      const connection = connectionFor(await this.connections(true), baseUrl, workspaceId);
+      if (!connection) throw new Error("Couldn't connect this computer. Try again.");
+      await this.deps.allowAgents(accountId, workspaceId, connection.agentId);
     });
     return await this.status(baseUrl, workspaceId);
   }
