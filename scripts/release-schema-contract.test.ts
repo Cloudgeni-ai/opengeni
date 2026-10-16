@@ -2326,8 +2326,8 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0796_billing_subscription_operations.sql",
-      "0794_subscription_plan_maintenance.sql",
-      "0793_subscription_plan_foundation.sql",
+      "0798_subscription_plan_maintenance.sql",
+      "0797_subscription_plan_foundation.sql",
       "0792_scheduled_task_blocker_reviews.sql",
       "0791_site_limit_profiles_new_defaults.sql",
       "0790_site_limits_and_platform_usage.sql",

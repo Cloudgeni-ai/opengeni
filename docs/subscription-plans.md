@@ -10,7 +10,7 @@ enrolls all organizations in Free, including embedded organizations; only actual
 verified-signup-trial recipients receive monthly Free credit. Enterprise is
 operator-assigned only.
 
-Migration 0793 is **maintenance**, despite adding only new structures: the
+Migration 0797 is **maintenance**, despite adding only new structures: the
 preceding binary's closed readiness contract rejects unknown RLS tables and
 their runtime SELECT privileges. A rolling deployment would require an earlier
 compatibility-binary release. Drain the old API/workers before migrating and
@@ -90,7 +90,7 @@ the frozen receipt and never recompute usage or remove a later top-up.
 It expires the old period and grants the full new amount atomically. Retries
 check the grant receipt before expiring anything, so a duplicated upgrade
 cannot expire its own or a successor period. A failed new grant rolls the
-expiry back. A replacement cannot move behind the open period. Use this path
+expiry back. A replacement cannot move behind the open period. It also works
 even when Stripe retains the same integer-second anchor: a different plan has
 a distinct receipt at that anchor, but repeating that plan/anchor never refills.
 This refines the design's subscription/start-only key to reconcile paid
@@ -241,6 +241,28 @@ charges refunded idempotently. Historical legitimate invoices are excluded.
 Stripe products/prices, webhook activation and period-end portal configuration
 are operator prerequisites; ordinary subscription refunds/disputes are manual.
 
+## Durable mutation retries
+
+Mutation retries use the durable journal described in
+[Stripe subscription operation receipts](billing-subscription-operations.md).
+`billing_subscription_operations` has composite primary key
+`(account_id, operation_key)` and fields `kind`, `request`, `intent`, nullable
+`result`, `created_at`, nullable `completed_at`. The original target/parameters
+commit before provider mutation. Completed results are immutable; conflicting
+UUID reuse is rejected. Pending outcomes require retrying the same UUID, rather
+than issuing another action that could overwrite recovery metadata. SQL seams:
+
+```sql
+begin_billing_subscription_operation(uuid, uuid, text, jsonb, jsonb) -> jsonb
+complete_billing_subscription_operation(uuid, uuid, jsonb) -> jsonb
+```
+
+Corresponding DB exports are `beginBillingSubscriptionOperation`,
+`completeBillingSubscriptionOperation`, `getBillingSubscriptionOperation` and
+`assertBillingSubscriptionOperationRoot`. Use the existing Stripe service rather
+than wrapping it in an outer transaction: its two phases must independently
+commit the intent and then the result. Receipt migration 0796 is also maintenance.
+
 ## Maintenance
 
 When enabled, `subscription-plan-maintenance` runs at startup and every 60
@@ -269,5 +291,5 @@ opengeni_private.subscription_plan_free_anniversary(timestamptz, timestamptz)
 
 The per-account helpers are trusted backend primitives; the deployment switch
 is enforced at the API and worker scheduling boundaries, not by database env
-configuration. Migration 0794 adds the inventory capability after maintenance
-migration 0793; deploy both together with the compatible binary.
+configuration. Migration 0798 adds the inventory capability after maintenance
+migration 0797; deploy both together with the compatible binary.

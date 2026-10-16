@@ -1707,7 +1707,7 @@ describe("runtime database posture evaluator", () => {
           // 0748: the five legacy Claude pool tables and its usage table too.
           (tables === RUNTIME_FULL_DML_TABLES ? 6 : 0) +
           embeddingTableCount +
-          // 0793 adds two account-isolated read-only plan tables.
+          // 0797 adds two account-isolated read-only plan tables.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_READ_ONLY_TABLES ||
           tables === RUNTIME_DML_TABLES
@@ -1760,7 +1760,7 @@ describe("runtime database posture evaluator", () => {
         5 + // 0783 Site SQL tables: full-DML, FORCE-RLS.
         4 + // 0790 Site platform usage tables: full-DML, FORCE-RLS.
         1 + // 0792 schedule blocker reviews: full-DML, FORCE-RLS.
-        2 + // 0793 subscription plan state and periods: read-only, FORCE-RLS.
+        2 + // 0797 subscription plan state and periods: read-only, FORCE-RLS.
         1; // 0796 subscription operation receipts: read-only, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_FULL_DML_TABLES).toContain("organization_model_defaults");
