@@ -2067,9 +2067,14 @@ chromiumE2e(
       runner,
     });
     try {
-      // Nothing listens on the discard port, so both pages fail to load.
-      const unreachableSelected = "http://127.0.0.1:9/selected";
-      const unreachableOther = "http://127.0.0.1:9/other";
+      // A real unreachable site in both common forms: a refused connection
+      // (a port that was just freed) and a host that doesn't resolve (.invalid
+      // is reserved and never resolves).
+      const freed = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+      const refusedPort = freed.port;
+      freed.stop(true);
+      const unreachableSelected = `http://127.0.0.1:${refusedPort}/selected`;
+      const unreachableOther = "https://saved-site.invalid/other";
       const reachable = dataUrl("<!doctype html><h1>Reachable saved tab</h1>");
       await restoreTabs(driver, [
         { url: reachable, selected: false },
@@ -2088,9 +2093,14 @@ chromiumE2e(
       expect(snapshot.tabs).toContainEqual({ url: unreachableOther, selected: false });
       expect(snapshot.tabs).toContainEqual({ url: reachable, selected: false });
       // Opening a tab outside restore still reports a page that can't load.
-      await expect(driver.openTarget("http://127.0.0.1:9/opened")).rejects.toMatchObject({
-        code: "resource_unavailable",
-      });
+      await expect(
+        driver.openTarget(`http://127.0.0.1:${refusedPort}/opened`),
+      ).rejects.toMatchObject({ code: "resource_unavailable" });
+      // A malformed URL is never kept, even when restoring: the browser has no
+      // page for it.
+      await expect(driver.openTarget("http://[::1/", { keepTabOnLoadError: true })).rejects.toThrow(
+        "Cannot navigate to invalid URL",
+      );
     } finally {
       await driver.close();
       await rm(directory, { recursive: true, force: true });
