@@ -94,6 +94,10 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       add column execution_authority_epoch integer not null default 1,
       add column execution_context_turn_id uuid,
       add column initial_mcp_account_bindings jsonb,
+      add column site_id uuid,
+      add column site_access_root_id uuid,
+      add column site_viewer_principal text,
+      add column site_owner_subject_id text,
       add column initial_claude_provider_account_authority_snapshot jsonb not null
         default '{"version":1,"scope":"workspace"}'::jsonb,
       add column code_search_enabled boolean,
@@ -376,6 +380,10 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       drop column execution_authority_epoch,
       drop column execution_context_turn_id,
       drop column initial_mcp_account_bindings,
+      drop column site_id,
+      drop column site_access_root_id,
+      drop column site_viewer_principal,
+      drop column site_owner_subject_id,
       drop column initial_claude_provider_account_authority_snapshot,
       drop column code_search_enabled,
       drop column agent_config`;

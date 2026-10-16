@@ -371,6 +371,14 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     await stageVaultPolicyColumns(database.ownerUrl);
     await stageConnectionAccountIntentColumns(database.ownerUrl);
+    // Current adapters project the immutable Site audience. This fixture never
+    // advances through 0793: expose nullable columns only, without installing
+    // later audience triggers or changing the historical lock topology.
+    await owner`alter table sessions
+      add column site_id uuid,
+      add column site_access_root_id uuid,
+      add column site_viewer_principal text,
+      add column site_owner_subject_id text`;
     await owner`delete from schema_migrations where name = any(${heldBack}::text[])`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
