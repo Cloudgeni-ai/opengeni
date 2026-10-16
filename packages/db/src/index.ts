@@ -1278,6 +1278,7 @@ export {
   createDb,
   databaseReconnectBackoffSeconds,
   defaultDatabasePreparedStatements,
+  isTransactionHandle,
   registerDbBinding,
   retrySessionActivityRls,
   rlsContextForWorkspace,

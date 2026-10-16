@@ -689,6 +689,49 @@ describe("durable Connect attempts", () => {
     expect((await claimConnectOperation(client.db, scope, input)).status).toBe("replayed");
   });
 
+  test("completion rolls back callback writes when actor scope hides its receipt", async () => {
+    const value = await begin();
+    const sideEffect = attempt();
+    const input = {
+      attemptId: value.id,
+      operationId: crypto.randomUUID(),
+      expectedRevision: value.revision,
+      inputDigest: digest,
+    };
+    await claimConnectOperation(client.db, scope, input);
+    await expect(
+      finishConnectOperation(client.db, scope, {
+        ...input,
+        commit: async (tx, current) => {
+          await beginConnectAttempt(tx, scope, {
+            idempotencyKey: sideEffect.id,
+            requestDigest: digest,
+            returnUrl: "https://host.example.com/callback",
+            attempt: sideEffect,
+          });
+          await tx.execute(sql`select set_config('opengeni.subject_id', 'wrong-owner', true)`);
+          return {
+            ...current,
+            revision: current.revision + 1,
+            state: "complete",
+            credentialsCommitted: true,
+            integrationInstalled: true,
+            nextAction: { type: "none" },
+          };
+        },
+      }),
+    ).rejects.toThrow("Connect completion receipt was not persisted");
+    const [stored] = await shared.admin`select return_url, operation_id, receipts, projection
+      from connect_attempts where id = ${value.id}::uuid`;
+    expect(stored!.return_url).toBe("https://host.example.com/callback?opaque=%2f#original");
+    expect(stored!.operation_id).toBe(input.operationId);
+    expect(stored!.receipts).toEqual({});
+    expect(stored!.projection).toEqual(value);
+    expect(
+      await shared.admin`select id from connect_attempts where id = ${sideEffect.id}::uuid`,
+    ).toHaveLength(0);
+  });
+
   test("prepared MCP configuration cannot change after credential submission is claimed", async () => {
     const mcpSetup = {
       name: "Records",
