@@ -1445,6 +1445,9 @@ describe("BrowserSession route discipline", () => {
     expect(continuation).toContain("binding.placementInstanceId");
     expect(continuation).toContain("controllerGeneration: binding.controllerGeneration");
     expect(continuation).toContain("recoverExistingWorkingDirectory: true");
+    // Its operation is recorded only after adoption, so the heartbeat holds the
+    // expired resume itself rather than a not-yet-recorded operation.
+    expect(continuation).toContain("continuesExpiredBrowserResume: true");
     expect(continuation).not.toContain("restore:");
     expect(continuation).not.toContain("endSession");
     expect(continuation).not.toContain("removeState");
