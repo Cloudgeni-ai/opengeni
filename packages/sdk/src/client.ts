@@ -793,6 +793,11 @@ export type SessionListPageOptions = {
   needsYouOnly?: boolean;
   /** Only read-only sessions moved to the idle-session archive. */
   contentArchivedOnly?: boolean;
+  /**
+   * Only workstreams the caller started or messaged directly (any session in
+   * the tree). Agent-relayed messages do not count.
+   */
+  mineOnly?: boolean;
   /** Created through this Site. In a Site-bound client, "current" resolves to its own Site. */
   originSiteId?: string;
   limit?: number;
@@ -847,6 +852,7 @@ function hasSessionPageFilters(options: SessionListPageOptions): boolean {
   return (
     Boolean(options.needsYouOnly) ||
     Boolean(options.contentArchivedOnly) ||
+    Boolean(options.mineOnly) ||
     SESSION_PAGE_FILTER_KEYS.some((key) => options[key] !== undefined)
   );
 }
@@ -1945,6 +1951,7 @@ export class OpenGeniClient {
       if (options.includeTotals) query.includeTotals = "true";
       if (options.needsYouOnly) query.needsYouOnly = "true";
       if (options.contentArchivedOnly) query.contentArchivedOnly = "true";
+      if (options.mineOnly) query.mineOnly = "true";
       if (options.includePinned === false) query.includePinned = "false";
       if (options.archivedOnly) query.archivedOnly = "true";
       result = await this.requestJson<SessionListResponse | SessionListEntryResponse | Session[]>(
@@ -2006,6 +2013,8 @@ export class OpenGeniClient {
       throw unsupportedSessionPage("attention session filtering");
     if (options.contentArchivedOnly && response.contentArchivedOnly !== true)
       throw unsupportedSessionPage("read-only session filtering");
+    if (options.mineOnly && response.mineOnly !== true)
+      throw unsupportedSessionPage("your-sessions filtering");
     if (filtered && response.filtersApplied !== true) {
       throw unsupportedSessionPage("filtered session lists");
     }

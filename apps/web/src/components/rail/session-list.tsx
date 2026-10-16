@@ -368,6 +368,7 @@ export function SessionList() {
     groupBy: browseGroupBy,
     sortBy: browseSortBy,
     status: browseStatusPreference,
+    mineOnly,
     showEmptyGroups,
   } = browsePreferences;
   // Attention filtering belongs before pagination, including project windows.
@@ -417,6 +418,7 @@ export function SessionList() {
     includePinned: needsYouOnly || !hierarchyMode,
     includeTotals: hierarchyMode && browseStatus !== "archived",
     needsYouOnly,
+    mineOnly,
     search,
     ...(hierarchyMode ? { parentSessionId: null } : {}),
     archiveStatus: browseStatus,
@@ -2370,6 +2372,7 @@ export function SessionList() {
           limit,
           includePinned: false,
           ...(needsYouOnly && group.kind !== "archived" ? { needsYouOnly: true } : {}),
+          ...(mineOnly ? { mineOnly: true } : {}),
           ...(pageCursor ? { cursor: pageCursor } : {}),
           ...(group.kind !== "archived" && search ? { search } : {}),
           ...(group.kind === "archived" || hierarchyMode ? { parentSessionId: null } : {}),
@@ -2574,6 +2577,7 @@ export function SessionList() {
       pageGeneration,
       paginationBrowseFilter,
       needsYouOnly,
+      mineOnly,
       rail.workspaceId,
       search,
       browseSortBy,
@@ -3180,6 +3184,8 @@ export function SessionList() {
               status={browseStatusPreference}
               needsYouCount={needsYouCount}
               onStatusChange={(status) => updateBrowsePreferences({ status })}
+              mineOnly={mineOnly}
+              onMineOnlyChange={(next) => updateBrowsePreferences({ mineOnly: next })}
               showEmptyGroups={showEmptyGroups}
               onShowEmptyGroupsChange={(show) => updateBrowsePreferences({ showEmptyGroups: show })}
             />

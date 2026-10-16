@@ -6,12 +6,15 @@ export type SessionBrowsePreferences = {
   groupBy: SessionBrowseGroupBy;
   sortBy: SessionBrowseSortBy;
   status: SessionBrowseStatus;
+  /** Only workstreams the person started or messaged. */
+  mineOnly: boolean;
   showEmptyGroups: boolean;
 };
 export const DEFAULT_SESSION_BROWSE_PREFERENCES: SessionBrowsePreferences = {
   groupBy: "project",
   sortBy: "updatedAt",
   status: "active",
+  mineOnly: false,
   showEmptyGroups: false,
 };
 
@@ -25,6 +28,7 @@ export function sessionBrowsePreferencesCustomized(value: SessionBrowsePreferenc
     value.groupBy !== DEFAULT_SESSION_BROWSE_PREFERENCES.groupBy ||
     value.sortBy !== DEFAULT_SESSION_BROWSE_PREFERENCES.sortBy ||
     value.status !== DEFAULT_SESSION_BROWSE_PREFERENCES.status ||
+    value.mineOnly !== DEFAULT_SESSION_BROWSE_PREFERENCES.mineOnly ||
     value.showEmptyGroups !== DEFAULT_SESSION_BROWSE_PREFERENCES.showEmptyGroups
   );
 }
@@ -100,6 +104,7 @@ export function readSessionBrowsePreferences(
       status: ["active", "needs-you", "archived", "all"].includes(parsed.status)
         ? parsed.status
         : "active",
+      mineOnly: parsed.mineOnly === true,
       showEmptyGroups: parsed.showEmptyGroups === true,
     };
   } catch {

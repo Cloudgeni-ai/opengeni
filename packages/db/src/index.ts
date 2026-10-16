@@ -31417,6 +31417,11 @@ export type SessionListFilterOptions = {
   needsYouOnly?: boolean;
   /** Only sessions moved to the idle-session archive (read-only). */
   contentArchivedOnly?: boolean;
+  /**
+   * Only workstreams the listing subject started or messaged: a session in
+   * the tree was created by them, or they prompted a turn in it directly.
+   */
+  mineOnly?: boolean;
   /** Exact opaque end-user label pair (both parts). */
   scopeSubjectId?: SessionScopeSubjectId;
 };
@@ -32393,6 +32398,42 @@ function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): S
 }
 
 /**
+ * A workstream is the subject's when any session in its tree was created by
+ * them or received a prompt they sent directly. Agent-relayed and service
+ * turns do not count, even when they carry the human's causal authority.
+ * Applies to every row through its root, so a root page and its children
+ * agree. The turn probe is served by session_turns_human_prompt_subject_idx.
+ */
+function sessionMineSql(subjectId: string): SQL {
+  return sql`(
+    exists (
+      select 1 from ${schema.sessions} mine_created
+      where mine_created.workspace_id = ${schema.sessions.workspaceId}
+        and mine_created.root_session_id = ${schema.sessions.rootSessionId}
+        and mine_created.created_by_kind = 'subject'
+        and mine_created.created_by_subject_id = ${subjectId}
+    )
+    or exists (
+      select 1 from ${schema.sessions} mine_tree
+      join ${schema.sessionTurns} mine_turn
+        on mine_turn.workspace_id = mine_tree.workspace_id
+        and mine_turn.session_id = mine_tree.id
+      where mine_tree.workspace_id = ${schema.sessions.workspaceId}
+        and mine_tree.root_session_id = ${schema.sessions.rootSessionId}
+        and ${sessionTurnHumanPromptSql(sql`mine_turn`)}
+        and mine_turn.initiator_subject_id = ${subjectId}
+    )
+  )`;
+}
+
+/** Exact partial-index predicate for a prompt a person sent directly. */
+function sessionTurnHumanPromptSql(turn: SQL): SQL {
+  return sql`${turn}.initiator_kind = 'subject'
+        and ${turn}.source in ('user', 'api')
+        and ${turn}.surface is distinct from 'agent'`;
+}
+
+/**
  * One content-free graph aggregation, before pagination. Each root owns a
  * disjoint tree: a single-parent cycle cannot be reachable from a parentless
  * root. UNION also deduplicates defensive legacy edges. Exact target scopes
@@ -32567,6 +32608,7 @@ function sessionFilters(
     | "scopeSubjectId"
     | "needsYouOnly"
     | "contentArchivedOnly"
+    | "mineOnly"
   >,
 ): SQL[] {
   const filters: SQL[] = [
@@ -32583,6 +32625,7 @@ function sessionFilters(
   if (options.contentArchivedOnly) {
     filters.push(sql`${schema.sessions.contentArchiveState} = 'archived'`);
   }
+  if (options.mineOnly) filters.push(sessionMineSql(options.subjectId));
   if (options.originSiteId) {
     filters.push(
       eq(schema.sessions.siteId, options.originSiteId),
@@ -32841,7 +32884,8 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     !options.createdBefore &&
     !options.scopeSubjectId &&
     !options.needsYouOnly &&
-    !options.contentArchivedOnly
+    !options.contentArchivedOnly &&
+    !options.mineOnly
   ) {
     return "all";
   }
@@ -32856,6 +32900,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     options.scopeSubjectId ? ["scopeSubjectId", options.scopeSubjectId] : null,
     ...(options.needsYouOnly ? [["needsYouOnly", true]] : []),
     ...(options.contentArchivedOnly ? [["contentArchivedOnly", true]] : []),
+    ...(options.mineOnly ? [["mineOnly", true]] : []),
   ]);
 }
 
@@ -33636,6 +33681,7 @@ async function readSessionListForSubject(
             ...(totals ? { totals } : {}),
             ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
             ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
+            ...(options.mineOnly ? { mineOnly: true as const } : {}),
             pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
             pinnedTruncated,
             sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
@@ -33647,6 +33693,7 @@ async function readSessionListForSubject(
           ...(totals ? { totals } : {}),
           ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
           ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
+          ...(options.mineOnly ? { mineOnly: true as const } : {}),
           pinned: pinnedRows.map(mapListSession),
           pinnedTruncated,
           sessions: pageRows.map(mapListSession),

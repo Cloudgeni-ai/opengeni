@@ -1924,6 +1924,8 @@ export type SessionListResponse = {
   needsYouOnly?: true;
   /** Receipt for the read-only (archived idle session) filter. */
   contentArchivedOnly?: true;
+  /** Receipt for the started-or-messaged-by-you filter. */
+  mineOnly?: true;
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;

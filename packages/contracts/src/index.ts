@@ -15815,6 +15815,8 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
     needsYouOnly: z.literal(true).optional(),
     /** Explicit receipt for the read-only (archived idle session) filter. */
     contentArchivedOnly: z.literal(true).optional(),
+    /** Explicit receipt for the started-or-messaged-by-you filter. */
+    mineOnly: z.literal(true).optional(),
     totals: SessionListTotals.optional(),
     /** Effective server ordering; name uses ASCII-space trim, ASCII case fold,
      * UTF-8 byte order, then id ASC. Date keys and their id ties use DESC. */
