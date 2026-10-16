@@ -188,8 +188,7 @@ function SupportAgentPanelView({
             </div>
 
             <p className="mt-5 text-[10px] leading-4 text-[#96929c]">
-              Runs on the workspace&apos;s default model. Change model and reasoning per turn from
-              the composer.
+              Runs on the workspace&apos;s default model.
             </p>
           </div>
 
