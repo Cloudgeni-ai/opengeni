@@ -1,4 +1,5 @@
-import type { AttemptToolDefinition } from "@opengeni/codemode";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { AttemptToolDefinition, AttemptToolScope } from "@opengeni/codemode";
 import { usableJevApiKey, type Settings } from "@opengeni/config";
 import {
   CODE_SEARCH_TOOL_DESCRIPTION,
@@ -14,6 +15,7 @@ import {
   parseCodeSearchArguments,
   renderCodeSearchError,
   runCodeSearch,
+  type JevFetch,
   type CodeSearchWorkspace,
   type JevCircuitLease,
 } from "@opengeni/jev";
@@ -88,6 +90,25 @@ export type CodeSearchUsage = {
   jevCostUsd: number;
 };
 
+/** Trusted host correlation only; never part of the model-facing tool or Jev payload. */
+export type CodeSearchTransportInvocation = Readonly<AttemptToolScope & { operationId: string }>;
+
+/**
+ * Optional in-process transport seam. The wrapper sees every physical fetch, including retries and
+ * health GETs. It owns any observation/admission policy; this seam adds no ledger or request cap.
+ * Returning the original Response preserves streaming/body errors and cancellation. A resolved
+ * fetch is only a headers observation, not proof of a completed or unbilled provider request.
+ */
+export type CodeSearchFetchWrapper = (
+  invocation: CodeSearchTransportInvocation,
+  next: JevFetch,
+) => JevFetch;
+
+export type CodeSearchTransport = {
+  scope: AttemptToolScope;
+  wrapFetch: CodeSearchFetchWrapper;
+};
+
 function textResult(text: string, isError: boolean) {
   return { isError, content: [{ type: "text" as const, text }] };
 }
@@ -107,14 +128,29 @@ export function createCodeSearchAttemptToolDefinition(input: {
   recordUsage?: (usage: CodeSearchUsage) => Promise<void>;
   breaker?: JevCircuitBreaker;
   fetch?: typeof fetch;
+  transport?: CodeSearchTransport;
 }): AttemptToolDefinition {
   const breaker = input.breaker ?? codeSearchCircuitBreaker;
+  const transport = input.transport;
+  const scope = transport ? Object.freeze({ ...transport.scope }) : undefined;
+  const invocationFetch = transport ? new AsyncLocalStorage<JevFetch>() : undefined;
+  const nextFetch: JevFetch = input.fetch ?? ((url, init) => fetch(url, init));
   const jev = new JevClient({
     apiKey: input.apiKey,
     baseUrl: input.settings.jevBaseUrl,
     model: input.settings.jevModel,
     timeoutMs: input.settings.jevRequestTimeoutMs,
-    ...(input.fetch ? { fetch: input.fetch } : {}),
+    ...(invocationFetch
+      ? {
+          fetch: (url: string, init: RequestInit) => {
+            const current = invocationFetch.getStore();
+            if (!current) throw new Error("code_search transport is outside its invocation");
+            return current(url, init);
+          },
+        }
+      : input.fetch
+        ? { fetch: input.fetch }
+        : {}),
   });
   return {
     identity: { serverId: "opengeni", toolName: CODE_SEARCH_TOOL_NAME },
@@ -154,12 +190,22 @@ export function createCodeSearchAttemptToolDefinition(input: {
           );
         }
         const workspace = await input.workspace();
-        const result = await runCodeSearch({
-          ...request,
-          workspace,
-          jev,
-          ...(context.signal ? { signal: context.signal } : {}),
-        });
+        const search = () =>
+          runCodeSearch({
+            ...request,
+            workspace,
+            jev,
+            ...(context.signal ? { signal: context.signal } : {}),
+          });
+        const result = await (transport && scope && invocationFetch
+          ? invocationFetch.run(
+              transport.wrapFetch(
+                Object.freeze({ ...scope, operationId: context.operationId }),
+                nextFetch,
+              ),
+              search,
+            )
+          : search());
         const held = lease;
         lease = null;
         // A pack whose final status check hit an outage still counts against Jev.
@@ -255,6 +301,8 @@ export function codeSearchToolDefinitions(input: {
   workspace: () => Promise<CodeSearchWorkspace>;
   recordUsage?: (usage: CodeSearchUsage) => Promise<void>;
   breaker?: JevCircuitBreaker;
+  fetch?: typeof fetch;
+  transport?: CodeSearchTransport;
 }): AttemptToolDefinition[] {
   const apiKey = usableJevApiKey(input.settings);
   const breaker = input.breaker ?? codeSearchCircuitBreaker;
@@ -270,6 +318,8 @@ export function codeSearchToolDefinitions(input: {
       observability: input.observability,
       ...(input.recordUsage ? { recordUsage: input.recordUsage } : {}),
       breaker,
+      ...(input.fetch ? { fetch: input.fetch } : {}),
+      ...(input.transport ? { transport: input.transport } : {}),
     }),
   ];
 }
