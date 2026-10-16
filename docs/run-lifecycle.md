@@ -215,6 +215,22 @@ session, so the same turn reruns its idempotent setup. Nothing is replayed.
 Running, NotFound, a different box, or a lease still on that epoch is never
 proof, and a refused reconciliation backs off by turn.
 
+That box must actually go away. Its setup request never settles while the box
+lives (no exit can be observed for an unknown Start), and the idle drain
+refuses to capture around an unsettled request, so before October 16, 2026 a
+box with no holder ran until the provider deadline. The draining capture claim
+now treats the request as abandoned once its owner attempt has been closed for
+the idle grace (`OPENGENI_SANDBOX_IDLE_GRACE_MS`, at least one minute), its turn
+holds the exact `sandboxSetupOutcomeUnknown` marker for that attempt, and no
+process of that attempt is active. It is recorded in
+`deadline_forced_admission_ids` and handled exactly like the mandatory
+pre-deadline save: the workspace is captured around it, the box is terminated,
+and the cold commit settles it. Any other unsettled request still blocks. The
+mandatory pre-deadline save itself no longer requires a stamped rotation on a
+draining lease: due rotations are only stamped on warm leases, so a lease that
+was already draining was killed uncaptured at the deadline and its resumed turn
+failed as unrecoverable.
+
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its
 own batch's durable history-item receipt; a turn-wide update query can therefore
