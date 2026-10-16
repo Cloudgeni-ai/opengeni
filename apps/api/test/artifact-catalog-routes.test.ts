@@ -71,6 +71,30 @@ function fixture(
         return [];
       }
       if (compiled.sql.includes("WITH candidates AS")) return pages.shift() ?? [];
+      if (compiled.sql.includes("target.id as target_id")) {
+        expect(compiled.params).toContain(workspaceId);
+        expect(compiled.params).toContain(sessionId);
+        // The consolidated authorization read returns target facts even when
+        // no caller attempt is present. Missing/RLS-hidden targets stay absent;
+        // missing caller/turn facts must not grant an agent live authority.
+        return options.absentSession
+          ? []
+          : [
+              {
+                target_id: sessionId,
+                target_account_id: accountId,
+                target_root_session_id: sessionId,
+                target_visibility: options.privateSession ? "user_private" : "workspace_shared",
+                target_authority_epoch: 1,
+                target_owner_subject_id: options.privateSession ? "user:someone-else" : null,
+                target_agent_access: "workspace",
+                target_memory_scope: "workspace",
+                caller_account_id: null,
+                caller_root_session_id: null,
+                turn_id: null,
+              },
+            ];
+      }
       if (
         compiled.sql.includes("current_setting('opengeni.account_id'") ||
         compiled.sql.includes("current_setting('opengeni.subject_id'")
@@ -87,7 +111,6 @@ function fixture(
             personal_resource_actor_subject_id: "",
           },
         ];
-      if (compiled.sql.includes('session.root_session_id as "rootSessionId"')) return [];
       if (
         compiled.sql.includes("set_config") ||
         compiled.sql.includes("pg_advisory_xact_lock_shared")
@@ -123,6 +146,8 @@ function fixture(
             return options.image && options.file
               ? [{ artifact: options.image, file: options.file, uploadStatus: "uploaded" }]
               : [];
+          // Catalog provenance also checks the exact source projection after
+          // session authorization; keep its RLS-hidden case independent.
           if (tableName === "sessions" && options.absentSession) return [];
           if (tableName === "sessions" && fields)
             return [
