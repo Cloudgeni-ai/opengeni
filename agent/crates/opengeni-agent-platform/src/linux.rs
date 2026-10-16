@@ -2042,6 +2042,53 @@ pub fn validate_linux_named_key_chord(name: &str) -> PlatformResult<()> {
     parse_named_key_chord(name).map(|_| ())
 }
 
+/// The keysyms of one named key or chord, modifiers first, for compositors
+/// that accept keysym input directly (GNOME Wayland remote desktop).
+///
+/// # Errors
+///
+/// The same unsupported-input failures as [`validate_linux_named_key_chord`].
+pub fn linux_named_key_chord_keysyms(name: &str) -> PlatformResult<Vec<u32>> {
+    parse_named_key_chord(name)
+}
+
+/// The keysym that types each character of `text` in the active keyboard
+/// layout, for compositors that accept keysym input directly but silently drop
+/// keysyms the layout lacks.
+///
+/// `layout_display` names an X display that mirrors the compositor's layout
+/// (Xwayland). When it is reachable every character is checked against that
+/// layout; otherwise each character maps to its canonical keysym unchecked.
+///
+/// # Errors
+///
+/// Returns an unsupported-input failure naming the first character the layout
+/// cannot type.
+pub fn linux_layout_text_keysyms(
+    layout_display: Option<&str>,
+    text: &str,
+) -> PlatformResult<Vec<u32>> {
+    let mapping = layout_display
+        .and_then(|display| x11rb::connect(Some(display)).ok())
+        .and_then(|(conn, _)| keyboard_mapping(&conn));
+    text.chars()
+        .map(|character| match &mapping {
+            None => Ok(keysyms::text_keysym(character)),
+            Some(mapping) => match character {
+                '\n' | '\r' | '\t' => Ok(keysyms::text_keysym(character)),
+                _ => keysyms::character_keysyms(character)
+                    .find(|&keysym| mapping.resolve(keysym).is_some())
+                    .ok_or_else(|| {
+                        PlatformError::Unsupported(format!(
+                            "the active keyboard layout cannot type U+{:04X}; use clipboard paste",
+                            u32::from(character)
+                        ))
+                    }),
+            },
+        })
+        .collect()
+}
+
 fn parse_named_key_chord(name: &str) -> PlatformResult<Vec<u32>> {
     let parts: Vec<&str> = name.split('+').map(str::trim).collect();
     if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {

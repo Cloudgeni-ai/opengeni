@@ -2089,6 +2089,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengeni-agent-pipewire-ffi"
+version = "0.1.76"
+dependencies = [
+ "libc",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "opengeni-agent-platform"
 version = "0.1.76"
 dependencies = [
@@ -2186,6 +2194,7 @@ dependencies = [
  "image",
  "indexmap",
  "opengeni-agent-macos-ffi",
+ "opengeni-agent-pipewire-ffi",
  "opengeni-agent-platform",
  "opengeni-agent-proto",
  "proc-macro-crate",
