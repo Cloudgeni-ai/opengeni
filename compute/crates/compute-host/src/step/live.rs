@@ -143,6 +143,17 @@ impl Reconnected {
         #[cfg(target_os = "linux")]
         self.paging.close().await;
     }
+
+    /// For a VM that may still run but was not taken back: goes on serving
+    /// and fetching its memory in the background until the pager holds all
+    /// of it, or ends with the VM, so its guest never waits forever on a
+    /// page. The pager needs no agent after that.
+    pub fn serve_detached(self) {
+        #[cfg(target_os = "linux")]
+        tokio::spawn(async move {
+            let _ = self.paging.complete().await;
+        });
+    }
 }
 
 /// The host's watch on a VM's disk, which decides whether a snapshot of

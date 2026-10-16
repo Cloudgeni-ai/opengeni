@@ -186,9 +186,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// A VM whose memory a pager serves keeps that pager, a process of its
     /// own; the agent reconnects to it first, so filling resumes before
     /// anything asks the VMM. A VM whose pager died while the guest still
-    /// needed it can never run again: the engine ends it, and the record
-    /// still says whether a saved image stands in for it. Anything less
-    /// certain leaves the VM as it is.
+    /// needed it can never run again: it is ended, and the record still
+    /// says whether a saved image stands in for it. Anything less certain
+    /// leaves the VM as it is, its memory still served.
     async fn adopt_local(
         &self,
         id: Id,
@@ -199,40 +199,46 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             match self.reconnect_paging(paths).await {
                 Ok(memory) => memory,
                 Err(error) if error.kind == ErrorKind::MemoryLost => {
-                    // Its pager runs but nothing it waits for can come.
+                    // Its pager runs but nothing it waits for can come, so
+                    // the VMM may be stuck on a fault and never answer:
+                    // it is ended without being asked.
                     tracing::warn!(%id, %error, "the VM's memory cannot be served; ending it");
-                    return match self.engine.adopt(spec).await {
-                        Ok(Some((vm, _))) => self.engine.stop(vm).await.map(|()| None),
-                        Ok(None) => Ok(None),
-                        // The engine saw the same loss and ended the VM itself.
-                        Err(error) if error.kind == ErrorKind::MemoryLost => Ok(None),
-                        Err(error) => Err(error),
-                    };
+                    return self.engine.clean_up(spec).await.map(|()| None);
                 }
                 Err(error) => return Err(error),
             }
         } else {
             None
         };
-        let found = self.engine.adopt(spec).await;
-        match found {
+        match self.engine.adopt(spec).await {
             Ok(Some((vm, how))) => {
                 if memory.is_some() {
                     tracing::info!(%id, "reconnected to the VM's memory pager");
                 }
                 Ok(Some((vm, how, memory)))
             }
-            other => {
+            Ok(None) => {
                 if let Some(memory) = memory {
                     memory.close().await;
                 }
-                match other {
-                    Err(error) if error.kind == ErrorKind::MemoryLost => {
-                        tracing::warn!(%id, %error, "the VM's memory pager died; the VM was ended");
-                        Ok(None)
-                    }
-                    other => other.map(|found| found.map(|(vm, how)| (vm, how, None))),
+                Ok(None)
+            }
+            // The engine saw the loss and ended the VM itself.
+            Err(error) if error.kind == ErrorKind::MemoryLost => {
+                if let Some(memory) = memory {
+                    memory.close().await;
                 }
+                tracing::warn!(%id, %error, "the VM's memory pager died; the VM was ended");
+                Ok(None)
+            }
+            // The VM may still run and its guest wait on a page: the
+            // sandbox is blocked, but its memory keeps coming until the
+            // pager holds all of it.
+            Err(error) => {
+                if let Some(memory) = memory {
+                    memory.serve_detached();
+                }
+                Err(error)
             }
         }
     }
