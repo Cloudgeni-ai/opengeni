@@ -47,3 +47,35 @@ redelivered activity replays it and an occurrence never gets two runs. It
 carries no accepted execution, session, or raw exception text (the worker only
 logs the detail). A paused or deleted task still refuses without a run, since
 no occurrence is due.
+
+## Blocked schedules
+
+A schedule never stays stuck without its owner knowing. The API's scheduled-task
+lifecycle pump reviews each schedule's newest settled scheduled run once
+(migration `0792_scheduled_task_blocker_reviews.sql`, rolling; manual runs and
+runs from before the last edit or resume do not count):
+
+- When no later run can start until a person acts, the schedule pauses itself
+  in the same pass (Temporal follows through the schedule outbox) and its owner
+  gets one inbox/phone notice naming the schedule, the reason and what would
+  unblock it. That covers a pinned connected account that can no longer be used
+  (`admissionDiagnostic`), any non-retryable refusal above, a paused chat
+  (`scheduled_session_paused`), a chat that ended or no longer exists
+  (`session_cancelled` outside new-chat-per-run mode,
+  `scheduled_target_session_unavailable`) and an unavailable model.
+- When runs fail or are skipped for a reason that may clear by itself (a busy
+  chat, a retryable refusal, a failed turn), the owner is told once after three
+  in a row. The schedule keeps running; a single skip or failure stays quiet.
+
+The notice is a `session.notification.posted` event with key
+`schedule-<task id>` on the blocked run's chat, else the chat the schedule runs
+in, else its most recent run's chat. It is withdrawn when a later run succeeds or
+a person resumes, pauses or deletes the schedule. `GET /scheduled-tasks` and
+`GET /scheduled-tasks/:id` return the current `blocker` (`state` `paused` or
+`notified`, `reason`, `message`, `runId`, `since`), and the schedule page shows it.
+
+Agents cover what the platform cannot see, a run that starts but cannot do its
+job: each new scheduled occurrence tells the agent to try to fix a blocker,
+otherwise notify the owner once under the same `schedule-<task id>` key, and
+pause the schedule when no later occurrence can succeed. Already delivered
+occurrences keep their original text.
