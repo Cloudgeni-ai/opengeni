@@ -35,8 +35,8 @@ export function SiteAiUsageSection({
   }, [client, workspaceId, range]);
   if (failed)
     return (
-      <Section title="Site AI">
-        <p className="text-sm text-fg-muted">Couldn’t load Site AI usage.</p>
+      <Section title="Model costs" headingLevel={3}>
+        <p className="text-sm text-fg-muted">Couldn’t load Site model costs.</p>
       </Section>
     );
   if (!usage) return null;
@@ -46,11 +46,12 @@ export function SiteAiUsageSection({
 export function SiteAiUsageView({ usage }: { usage: InsightsSiteUsageResponse }) {
   return (
     <Section
-      title="Site AI"
-      description="All Site AI in this period, without conversation details. API-equivalent amounts are estimates, not additional charges."
+      title="Model costs"
+      headingLevel={3}
+      description="Model costs in this period. API-equivalent amounts are estimates, not additional charges."
     >
       {usage.rows.length === 0 ? (
-        <p className="text-sm text-fg-muted">No attributed Site AI usage in this period.</p>
+        <p className="text-sm text-fg-muted">No model usage attributed to Sites in this period.</p>
       ) : (
         <div className="min-w-0 overflow-x-auto">
           <table className="w-full text-sm tabular-nums">

@@ -51,6 +51,8 @@ test("Site AI distinguishes actual charges and incomplete estimates without conv
   const root = createRoot(container);
   try {
     await act(async () => root.render(<components.SiteAiUsageView usage={usage} />));
+    expect(container.querySelector("h3")?.textContent).toBe("Model costs");
+    expect(container.textContent).not.toContain("Site AI");
     expect(container.textContent).toContain("Credits charged");
     expect(container.textContent).toContain("API-equivalent");
     expect(container.textContent).toContain("partial");
@@ -74,7 +76,7 @@ test("Site AI gives an explicit empty state and a bounded failure state", async 
     await act(async () =>
       root.render(<components.SiteAiUsageView usage={{ ...usage, rows: [] }} />),
     );
-    expect(container.textContent).toContain("No attributed Site AI usage");
+    expect(container.textContent).toContain("No model usage attributed to Sites");
     await act(async () =>
       root.render(
         <components.SiteAiUsageSection
@@ -88,7 +90,7 @@ test("Site AI gives an explicit empty state and a bounded failure state", async 
         />,
       ),
     );
-    expect(container.textContent).toContain("Couldn’t load Site AI usage.");
+    expect(container.textContent).toContain("Couldn’t load Site model costs.");
     expect(container.textContent).not.toContain("private diagnostics");
   } finally {
     await act(async () => root.unmount());
