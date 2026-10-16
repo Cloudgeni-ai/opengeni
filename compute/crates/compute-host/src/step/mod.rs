@@ -965,7 +965,9 @@ impl<E: Engine, S: Store> Job<E, S> {
     async fn end_with_memory(&self, vm: E::Vm, memory: LiveMemory, outcome: Outcome) -> Outcome {
         memory.ending();
         let outcome = self.end(vm, outcome).await;
-        if outcome != Outcome::Failed(Failure::Fatal) {
+        if outcome == Outcome::Failed(Failure::Fatal) {
+            memory.serve_detached();
+        } else {
             memory.close().await;
         }
         outcome

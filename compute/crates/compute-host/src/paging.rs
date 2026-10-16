@@ -344,6 +344,12 @@ impl Paging {
     /// Says the agent is about to end the VM: its pager going away is then
     /// expected, and ends the conversation without counting as lost memory.
     /// Call it before stopping the VM, and [`Paging::close`] once it is gone.
+    ///
+    /// A pager that died just before, unnoticed so far, then also counts
+    /// as expected. That loses nothing: whatever the agent ends a VM after
+    /// does not rest on its pager. A save first waits for the pager to hold
+    /// every byte ([`Paging::complete`]), and an image still being filled
+    /// from the store stays current, so the next wake fetches it again.
     pub fn ending(&self) {
         self.ending.cancel();
     }

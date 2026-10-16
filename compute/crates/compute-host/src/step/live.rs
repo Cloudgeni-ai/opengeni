@@ -135,6 +135,17 @@ impl LiveMemory {
             paging.close().await;
         }
     }
+
+    /// For a VM that would not end and so may still run: goes on serving
+    /// and fetching its memory in the background, as
+    /// [`Reconnected::serve_detached`] does, so its guest never waits
+    /// forever on a page. Dropping the memory instead stops serving it.
+    pub fn serve_detached(self) {
+        #[cfg(target_os = "linux")]
+        if let Some(paging) = self.paging {
+            Reconnected { paging }.serve_detached();
+        }
+    }
 }
 
 /// The pager of a VM found running after an agent restart, reconnected

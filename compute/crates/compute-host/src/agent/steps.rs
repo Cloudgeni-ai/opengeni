@@ -591,9 +591,16 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
             Some((vm, memory)) => {
                 memory.ending();
                 let stopped = self.engine.stop(vm).await;
-                // Whatever serves or fetches its memory writes into the
-                // directory about to go, so it ends first.
-                memory.close().await;
+                if stopped.is_ok() {
+                    // Whatever serves or fetches its memory writes into
+                    // the directory about to go, so it ends first.
+                    memory.close().await;
+                } else {
+                    // The VM may still run, and then still fault on its
+                    // memory; the directory stays, since removal stops
+                    // here.
+                    memory.serve_detached();
+                }
                 stopped
             }
             None => self.engine.clean_up(spec).await,

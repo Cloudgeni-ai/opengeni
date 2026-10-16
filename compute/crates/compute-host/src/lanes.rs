@@ -7,12 +7,13 @@
 //! hundred sandboxes waking at once would otherwise wait behind the
 //! background filling of those that woke first. While any foreground
 //! transfer runs, background ones are held to a few, enough that copies
-//! still complete and saves waiting on them still finish.
+//! still complete and saves waiting on them still finish. Once nothing
+//! foreground remains, every background transfer may run again, those
+//! queued for one of the few included.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::sync::{Semaphore, SemaphorePermit};
+use tokio::sync::{Semaphore, SemaphorePermit, watch};
 
 /// Background transfers in flight on the whole host when nothing waits.
 const BACKGROUND: usize = 128;
@@ -23,7 +24,8 @@ const BACKGROUND_WHILE_WAITED_ON: usize = 32;
 /// The host's two transfer classes; see the module documentation.
 #[derive(Debug)]
 pub struct Lanes {
-    foreground: AtomicUsize,
+    /// How many foreground transfers are under way.
+    foreground: watch::Sender<usize>,
     background: Semaphore,
     while_waited_on: Semaphore,
 }
@@ -31,7 +33,7 @@ pub struct Lanes {
 impl Default for Lanes {
     fn default() -> Self {
         Self {
-            foreground: AtomicUsize::new(0),
+            foreground: watch::Sender::new(0),
             background: Semaphore::new(BACKGROUND),
             while_waited_on: Semaphore::new(BACKGROUND_WHILE_WAITED_ON),
         }
@@ -42,20 +44,24 @@ impl Lanes {
     /// Marks foreground transfers under way until the guard drops.
     #[must_use]
     pub fn foreground(self: &Arc<Self>) -> Foreground {
-        self.foreground.fetch_add(1, Ordering::AcqRel);
+        self.foreground.send_modify(|waited_on| *waited_on += 1);
         Foreground(Arc::clone(self))
     }
 
     /// Waits for a background transfer slot. A slot taken while anything
     /// foreground is under way also takes one of the few kept for that
-    /// time; one taken while all was quiet keeps going if foreground work
-    /// starts, which costs at most one transfer's time.
+    /// time, or waits until nothing foreground remains; one taken while
+    /// all was quiet keeps going if foreground work starts, which costs at
+    /// most one transfer's time.
     pub async fn background(&self) -> Background<'_> {
         let slot = self.background.acquire().await.ok();
-        let narrow = if self.foreground.load(Ordering::Acquire) > 0 {
-            self.while_waited_on.acquire().await.ok()
-        } else {
-            None
+        let mut quiet = self.foreground.subscribe();
+        // Both waits can be dropped unfinished: a permit granted to the
+        // losing one goes back to its semaphore.
+        let narrow = tokio::select! {
+            biased;
+            _ = quiet.wait_for(|waited_on| *waited_on == 0) => None,
+            narrow = self.while_waited_on.acquire() => narrow.ok(),
         };
         Background {
             _slot: slot,
@@ -65,7 +71,7 @@ impl Lanes {
 
     #[cfg(test)]
     fn waited_on(&self) -> usize {
-        self.foreground.load(Ordering::Acquire)
+        *self.foreground.borrow()
     }
 }
 
@@ -75,7 +81,7 @@ pub struct Foreground(Arc<Lanes>);
 
 impl Drop for Foreground {
     fn drop(&mut self) {
-        self.0.foreground.fetch_sub(1, Ordering::AcqRel);
+        self.0.foreground.send_modify(|waited_on| *waited_on -= 1);
     }
 }
 
@@ -128,5 +134,34 @@ mod tests {
         assert_eq!(width(&lanes).await, BACKGROUND_WHILE_WAITED_ON);
         drop(waited_on);
         assert_eq!(width(&lanes).await, BACKGROUND);
+    }
+
+    /// Transfers queued for one of the few slots kept while something
+    /// waits all start once the last wait ends, rather than one by one as
+    /// the narrowed ones finish.
+    #[tokio::test]
+    async fn queued_transfers_widen_once_nothing_waits() {
+        let lanes = Arc::new(Lanes::default());
+        let waited_on = lanes.foreground();
+        let mut running = Vec::new();
+        for _ in 0..BACKGROUND_WHILE_WAITED_ON {
+            running.push(lanes.background().await);
+        }
+        let queued = futures::future::join_all(
+            (0..BACKGROUND - BACKGROUND_WHILE_WAITED_ON).map(|_| lanes.background()),
+        );
+        tokio::pin!(queued);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut queued)
+                .await
+                .is_err(),
+            "queued transfers ran beyond the narrow width while a wait was under way"
+        );
+        drop(waited_on);
+        let started = tokio::time::timeout(Duration::from_secs(5), queued)
+            .await
+            .expect("queued transfers stayed narrow after the last wait ended");
+        assert_eq!(started.len(), BACKGROUND - BACKGROUND_WHILE_WAITED_ON);
+        assert_eq!(running.len(), BACKGROUND_WHILE_WAITED_ON);
     }
 }
