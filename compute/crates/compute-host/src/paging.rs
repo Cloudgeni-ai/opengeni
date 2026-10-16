@@ -19,6 +19,10 @@
 //! pager says it holds every byte ([`Paging::complete`]): only then may a
 //! save seal it, replace it or retire it. So an agent that restarts at any
 //! point finds the image the pager still misses bytes of, by name.
+//!
+//! A pager runs as its VM's user, so the agent trusts nothing it says: no
+//! message may be longer than what a pager of that image could need to say
+//! ([`Frames`]), and a greeting must name ranges inside the image.
 
 use std::io;
 use std::ops::Range;
@@ -29,13 +33,14 @@ use std::time::Duration;
 
 use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_pager::control::{self, ToHost, ToPager};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, sleep, timeout};
 
 use crate::image::{CHUNK_BYTES, Depth, Generation, Images, Verified, chunk_count, chunk_range};
 use crate::lazy::{Fetcher, Hydration};
+use crate::protocol::MAX_MEMORY_MIB;
 use crate::working_set::PageSet;
 
 /// How long a starting pager may take to listen.
@@ -46,6 +51,23 @@ const RECONNECT_WITHIN: Duration = Duration::from_secs(1);
 const HELLO_WITHIN: Duration = Duration::from_secs(5);
 /// The pause between attempts to connect.
 const RETRY_EVERY: Duration = Duration::from_millis(5);
+/// The longest message a pager sends after its greeting. The longest it
+/// needs is a `want` of two 20-digit numbers, under 100 bytes.
+const MESSAGE_BYTES: usize = 1024;
+
+/// The longest greeting a pager may send for an image of `len` bytes
+/// that had `launched` ranges in place when the pager started. Every
+/// range it misses then ends at one of those ranges, at a filled chunk or
+/// at the end, and a range is at most two 20-digit numbers with their
+/// punctuation.
+fn greeting_bytes(len: u64, launched: usize) -> usize {
+    const PER_RANGE: usize = 48;
+    chunk_count(len)
+        .saturating_add(launched)
+        .saturating_add(1)
+        .saturating_mul(PER_RANGE)
+        .saturating_add(MESSAGE_BYTES)
+}
 
 /// Names one pager launch: the image generation it serves and a nonce, so
 /// a pager left over from an earlier launch of the same image is never
@@ -112,16 +134,75 @@ struct Link {
     tag: String,
     /// Device and inode of the memory file the agent fills.
     identity: (u64, u64),
+    /// The memory file's length, if known.
+    len: Option<u64>,
+    /// The longest greeting the pager may send.
+    greeting: usize,
 }
 
 /// A connection to a pager that has greeted it.
 struct Connected {
-    lines: Lines<BufReader<OwnedReadHalf>>,
+    frames: Frames,
     write: OwnedWriteHalf,
     missing: Vec<(u64, u64)>,
     prefetched: bool,
     /// Device and inode of the memory file the pager reads.
     reads: (u64, u64),
+}
+
+/// A pager's messages, one per line, read so that a line longer than its
+/// bound is refused before more than the bound is held: a pager runs as
+/// its VM's user and must never make the agent allocate at will.
+struct Frames {
+    read: BufReader<OwnedReadHalf>,
+    /// A line read in part, kept across a cancelled read.
+    line: Vec<u8>,
+}
+
+impl Frames {
+    fn new(read: OwnedReadHalf) -> Self {
+        Self {
+            read: BufReader::new(read),
+            line: Vec::new(),
+        }
+    }
+
+    /// The next whole line, of at most `limit` bytes before its newline;
+    /// `None` at the end of the stream. Cancel-safe: what was read of a
+    /// line stays for the next call.
+    async fn next(&mut self, limit: usize) -> io::Result<Option<Vec<u8>>> {
+        loop {
+            let room = (limit + 1).saturating_sub(self.line.len());
+            let read = (&mut self.read)
+                .take(u64::try_from(room).unwrap_or(u64::MAX))
+                .read_until(b'\n', &mut self.line)
+                .await?;
+            if self.line.last() == Some(&b'\n') {
+                return Ok(Some(std::mem::take(&mut self.line)));
+            }
+            if self.line.len() > limit {
+                self.line = Vec::new();
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("the pager sent a line longer than {limit} bytes"),
+                ));
+            }
+            if read == 0 {
+                return Ok(None);
+            }
+        }
+    }
+}
+
+/// Whether `missing` can be what a pager of an image of `len` bytes still
+/// misses: ordered, disjoint, non-empty ranges inside the image.
+fn plausible(missing: &[(u64, u64)], len: Option<u64>) -> bool {
+    let mut at = 0;
+    missing.iter().all(|&(start, end)| {
+        let fits = start >= at && start < end && len.is_none_or(|len| end <= len);
+        at = end;
+        fits
+    })
 }
 
 /// Why connecting failed.
@@ -169,13 +250,13 @@ pub(crate) enum Incomplete {
 impl Paging {
     /// Starts talking to the pager about to be launched as `tag` on
     /// `control`, for the memory file whose device and inode are
-    /// `identity`. `filled` are byte ranges of the file in place already;
-    /// `hydration` fills the rest. Returns at once: the conversation waits
-    /// for the pager to listen.
+    /// `identity` and length is `len`. `filled` are byte ranges of the
+    /// file in place already; `hydration` fills the rest. Returns at once:
+    /// the conversation waits for the pager to listen.
     pub fn start(
         control: PathBuf,
         tag: String,
-        identity: (u64, u64),
+        (identity, len): ((u64, u64), u64),
         hydration: Option<(Arc<Hydration>, mpsc::UnboundedReceiver<usize>)>,
         filled: Vec<Range<u64>>,
     ) -> Self {
@@ -183,6 +264,8 @@ impl Paging {
             control,
             tag,
             identity,
+            len: Some(len),
+            greeting: greeting_bytes(len, filled.len()),
         };
         let filled = filled.into_iter().map(|range| (range.start, range.end));
         Self::spawn(link, None, hydration, filled.collect())
@@ -214,10 +297,16 @@ impl Paging {
             return Ok(None);
         };
         let memory = images.memory(generation);
+        let (len, launched) = launched(&images, generation, &memory).await;
+        // Without its image, the pager may have started with as many
+        // ranges in place as the file has chunks.
+        let bound = len.unwrap_or(u64::from(MAX_MEMORY_MIB) << 20);
         let mut link = Link {
             control: control.to_owned(),
             tag,
             identity: (0, 0),
+            len,
+            greeting: greeting_bytes(bound, launched.unwrap_or_else(|| chunk_count(bound))),
         };
         let connected = match connect(&link, None, RECONNECT_WITHIN).await {
             Ok(connected) => connected,
@@ -406,6 +495,30 @@ impl Drop for Paging {
     }
 }
 
+/// For reconnecting to the pager of image `generation`: its memory file's
+/// length and how many ranges of it were in place at launch, each if it
+/// can be read.
+async fn launched(
+    images: &Images,
+    generation: Generation,
+    memory: &Path,
+) -> (Option<u64>, Option<usize>) {
+    let (images, memory) = (images.clone(), memory.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let len = std::fs::metadata(&memory)
+            .ok()
+            .map(|metadata| metadata.len());
+        let launched = images
+            .verify(generation, Depth::Light)
+            .ok()
+            .and_then(|image| images.filled(&image).ok())
+            .map(|filled| filled.len());
+        (len, launched)
+    })
+    .await
+    .unwrap_or((None, None))
+}
+
 /// The pages and chunks in place already, for a pager that misses only
 /// `missing` of an image of `len` bytes.
 fn resumed(missing: &[(u64, u64)], len: u64) -> (PageSet, Vec<bool>) {
@@ -460,14 +573,17 @@ async fn greet(link: &Link) -> Result<Connected, Refused> {
         .await
         .map_err(Refused::Gone)?;
     let (read, write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
-    let greeting = match timeout(HELLO_WITHIN, lines.next_line()).await {
+    let mut frames = Frames::new(read);
+    let greeting = match timeout(HELLO_WITHIN, frames.next(link.greeting)).await {
         Ok(Ok(Some(greeting))) => greeting,
         Ok(Ok(None)) => return Err(Refused::Gone(io::ErrorKind::UnexpectedEof.into())),
+        Ok(Err(error)) if error.kind() == io::ErrorKind::InvalidData => {
+            return Err(Refused::Wrong(error.to_string()));
+        }
         Ok(Err(error)) => return Err(Refused::Gone(error)),
         Err(_) => return Err(Refused::Wrong("the pager did not greet".into())),
     };
-    match control::parse::<ToHost>(greeting.as_bytes()) {
+    match control::parse::<ToHost>(&greeting) {
         Ok(ToHost::Hello {
             tag,
             device,
@@ -480,8 +596,13 @@ async fn greet(link: &Link) -> Result<Connected, Refused> {
                     "the pager reads another file than the one filled".into(),
                 ));
             }
+            if !plausible(&missing, link.len) {
+                return Err(Refused::Wrong(
+                    "the pager misses ranges outside its image".into(),
+                ));
+            }
             Ok(Connected {
-                lines,
+                frames,
                 write,
                 missing,
                 prefetched,
@@ -558,7 +679,7 @@ impl Talk {
     /// Talks over one connection.
     async fn converse(&mut self, connected: Connected) -> Ended {
         let Connected {
-            mut lines,
+            mut frames,
             mut write,
             missing,
             prefetched,
@@ -590,11 +711,16 @@ impl Talk {
             tokio::select! {
                 biased;
                 () = self.cancel.cancelled() => return Ended::Cancelled,
-                line = lines.next_line() => {
-                    let Ok(Some(line)) = line else {
-                        return Ended::Lost;
+                line = frames.next(MESSAGE_BYTES) => {
+                    let line = match line {
+                        Ok(Some(line)) => line,
+                        Ok(None) => return Ended::Lost,
+                        Err(error) => {
+                            tracing::warn!(%error, "the pager's connection failed");
+                            return Ended::Lost;
+                        }
                     };
-                    match control::parse::<ToHost>(line.as_bytes()) {
+                    match control::parse::<ToHost>(&line) {
                         Ok(ToHost::Want { offset, len, urgent }) => self.ask(offset, len, urgent),
                         Ok(ToHost::Prefetched) => {
                             let _ = self.prefetched.send(true);
@@ -604,6 +730,7 @@ impl Talk {
                         }
                         Ok(ToHost::Done) => return Ended::Done,
                         Ok(ToHost::Hello { .. }) | Err(_) => {
+                            let line = String::from_utf8_lossy(&line);
                             tracing::warn!(%line, "the pager said something unexpected");
                             return Ended::Lost;
                         }
@@ -863,5 +990,100 @@ mod tests {
         assert_eq!(generation_of(&tag), Some(generation));
         assert_ne!(tag, super::tag(generation));
         assert_eq!(generation_of("00000000000000a7"), None);
+    }
+
+    #[tokio::test]
+    async fn a_line_longer_than_its_bound_is_refused_before_it_is_held() {
+        let (agent, pager) = tokio::net::UnixStream::pair().unwrap();
+        let (read, _write) = agent.into_split();
+        let mut frames = Frames::new(read);
+        let (_pager_read, mut pager) = pager.into_split();
+        // A line read in part survives a read that gave up waiting.
+        pager.write_all(b"{\"want\":{\"offset\":0,").await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(50), frames.next(MESSAGE_BYTES))
+                .await
+                .is_err()
+        );
+        pager
+            .write_all(b"\"len\":4096,\"urgent\":true}}\n")
+            .await
+            .unwrap();
+        let line = frames.next(MESSAGE_BYTES).await.unwrap().unwrap();
+        assert_eq!(
+            control::parse::<ToHost>(&line).unwrap(),
+            ToHost::Want {
+                offset: 0,
+                len: 4096,
+                urgent: true
+            }
+        );
+        // Megabytes without a newline: refused after the bound, and the
+        // rest is never read.
+        let flood = tokio::spawn(async move {
+            let spaces = vec![b' '; 64 << 10];
+            let mut sent = 0_usize;
+            while sent < 8 << 20 {
+                if pager.write_all(&spaces).await.is_err() {
+                    break;
+                }
+                sent += spaces.len();
+            }
+        });
+        let error = frames.next(MESSAGE_BYTES).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(frames.line.capacity() <= MESSAGE_BYTES + 1);
+        drop(frames);
+        flood.abort();
+    }
+
+    #[test]
+    fn a_greeting_names_ordered_ranges_inside_the_image() {
+        let len = Some(3 * 4096);
+        assert!(plausible(&[], len));
+        assert!(plausible(&[(0, 4096), (8192, 3 * 4096)], len));
+        assert!(plausible(&[(0, u64::MAX)], None));
+        assert!(!plausible(&[(0, 4 * 4096)], len));
+        assert!(!plausible(&[(4096, 4096)], len));
+        assert!(!plausible(&[(8192, 3 * 4096), (0, 4096)], len));
+        assert!(!plausible(&[(0, 8192), (4096, 3 * 4096)], len));
+    }
+
+    #[tokio::test]
+    async fn a_pager_whose_greeting_cannot_be_true_is_not_believed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (images, generation, marker, control, tag) = local_image(dir.path());
+        let (device, inode) = identity(&images.memory(generation)).unwrap();
+        let outside = ToHost::Hello {
+            tag: tag.clone(),
+            device,
+            inode,
+            missing: vec![(0, 1 << 40)],
+            prefetched: false,
+        };
+        let crowded = ToHost::Hello {
+            tag,
+            device,
+            inode,
+            missing: (0..100)
+                .map(|page| (page * 8192, page * 8192 + 4096))
+                .collect(),
+            prefetched: false,
+        };
+        for hello in [outside, crowded] {
+            let _ = std::fs::remove_file(&control);
+            let listener = tokio::net::UnixListener::bind(&control).unwrap();
+            // Greets every attempt the same way, and hangs up.
+            let pager = tokio::spawn(async move {
+                while let Ok((mut stream, _)) = listener.accept().await {
+                    let _ = stream.write_all(&control::line(&hello).unwrap()).await;
+                }
+            });
+            let refused = Paging::reconnect(&marker, &control, images.clone(), None)
+                .await
+                .unwrap_err();
+            assert_eq!(refused.kind, ErrorKind::Transient);
+            pager.abort();
+        }
     }
 }

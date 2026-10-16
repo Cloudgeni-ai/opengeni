@@ -76,6 +76,9 @@ pub(crate) struct Sandbox {
     /// as after a step that may have left the balloon as it was, or for a
     /// VM found running: it is then set once the VM runs again.
     pub balloon_sent: Option<u64>,
+    /// When a balloon setting the VM did not take is asked again, and how
+    /// many in a row it did not take.
+    pub balloon_retry: Option<(At, u32)>,
     /// Whether it was paused for host memory while in use.
     pub squeeze: Squeeze,
     pub in_flight: Option<InFlight>,
@@ -116,6 +119,7 @@ impl Sandbox {
             room: WakeRoom::Open,
             balloon: None,
             balloon_sent: None,
+            balloon_retry: None,
             squeeze: Squeeze::None,
             in_flight: None,
             process_lost: false,
@@ -267,6 +271,7 @@ impl Sandbox {
         self.resident = None;
         self.balloon = None;
         self.balloon_sent = None;
+        self.balloon_retry = None;
     }
 
     /// Latest reported resident memory in bytes, 0 if none was.
@@ -390,7 +395,8 @@ impl Sandbox {
                 .next_threshold(self.state, idle)
                 .map(|after| self.last_activity + after)
         };
-        [retry, lease, idle]
+        let balloon = self.balloon_retry.map(|(at, _)| at);
+        [retry, lease, idle, balloon]
             .into_iter()
             .flatten()
             .filter(|at| *at > now)

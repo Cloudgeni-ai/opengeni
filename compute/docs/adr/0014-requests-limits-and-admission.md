@@ -64,7 +64,9 @@ pick a VM.
      out (`deflate_on_oom`). Relief waits a short grace
      (`balloon_grace`, 3 s) for a balloon to fill before going further,
      and lets balloons go, oldest first, once memory is back above the
-     high watermark;
+     high watermark. A balloon let go claims the room it will take back,
+     like a wake, until a reading shows it, so the two never spend the
+     same free memory;
   3. if that is still not enough, the sandbox furthest above its request
      is paused and saved, held or not. It loses nothing: once its recorded
      footprint fits above the high watermark, next to the footprints of
@@ -73,8 +75,9 @@ pick a VM.
   Sandboxes within their request are never touched by any of these.
   A VM's balloon is let go again once it runs after any step and after
   adoption, since a restored image or an earlier agent may have left it
-  set, and no balloon request reaches a VM after the one it was meant for
-  has been stopped.
+  set. A setting the VM did not take is sent again after a backoff. Each
+  request goes only to the VMM it was made for: the agent checks the
+  process answering on the API socket before sending anything.
 - Congestion is visible: the status shows `balloon_bytes` for a sandbox
   whose balloon is out and `paused_for_memory` (the bytes it held) for one
   saved for host memory, with `waiting_for_room` while it waits; refused
@@ -98,7 +101,10 @@ pick a VM.
   64 MiB and a few inodes. Bookings plus a kept-back reserve
   (`--disk-reserve-mib`, `--disk-reserve-inodes`; by default a twentieth
   of the filesystem, at least 1 GiB and 1024 inodes) stay within what the
-  filesystem has free, read every sample. A wake that cannot book its save
+  filesystem has free, read every sample. A booking whose save has written
+  stays counted until a reading taken after it shows what the save used,
+  and before the first reading after a start nothing that needs disk is
+  admitted. A wake that cannot book its save
   gets `host_full` at once, naming disk or inodes and how much. In the
   background, while refused held sandboxes cannot book, idle sandboxes
   that are already archived to object storage give up their local copies,

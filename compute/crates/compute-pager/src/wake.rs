@@ -10,6 +10,8 @@ use crate::Page;
 
 /// Most pages a learned profile keeps.
 const PROFILE_PAGES: usize = 1 << 16;
+/// The page sizes a guest's memory comes in.
+const PAGE_SIZES: std::ops::RangeInclusive<u64> = 4 << 10..=2 << 20;
 
 /// The pages a guest touched first after a wake, in order, as image
 /// offsets. Prefetched before the next wake.
@@ -36,6 +38,25 @@ impl WakeProfile {
             .ok()
             .filter(|profile| profile.version == 1)
             .unwrap_or_default()
+    }
+
+    /// Whether this profile can describe memory of `memory_len` bytes: a
+    /// page size guest memory comes in, no more pages than a profile keeps,
+    /// each the start of a page inside the memory. Whoever reads a profile
+    /// written by a pager checks this first: a pager runs as its VM's user.
+    #[must_use]
+    pub fn fits(&self, memory_len: u64) -> bool {
+        let page = self.page_size;
+        self.version == 1
+            && page.is_power_of_two()
+            && PAGE_SIZES.contains(&page)
+            && self.offsets.len() <= PROFILE_PAGES
+            && self.offsets.iter().all(|offset| {
+                offset.is_multiple_of(page)
+                    && offset
+                        .checked_add(page)
+                        .is_some_and(|end| end <= memory_len)
+            })
     }
 
     /// The profile after a wake that prefetched `self` and then faulted on
@@ -118,5 +139,26 @@ mod tests {
             WakeProfile::parse(b"{\"version\":2,\"offsets\":[]}"),
             WakeProfile::default()
         );
+    }
+
+    #[test]
+    fn a_profile_fits_only_memory_it_can_describe() {
+        let profile = |offsets: Vec<u64>, page_size| WakeProfile {
+            version: 1,
+            offsets,
+            page_size,
+        };
+        let len = 4 << 20;
+        assert!(profile(vec![0, 4096, len - 4096], 4096).fits(len));
+        assert!(profile(vec![2 << 20], 2 << 20).fits(len));
+        assert!(!profile(vec![len], 4096).fits(len));
+        assert!(!profile(vec![u64::MAX - 4095], 4096).fits(len));
+        assert!(!profile(vec![u64::MAX], 4096).fits(len));
+        assert!(!profile(vec![100], 4096).fits(len));
+        assert!(!profile(vec![0], 0).fits(len));
+        assert!(!profile(vec![0], 3 << 10).fits(len));
+        assert!(!profile(vec![0], 4 << 20).fits(len));
+        assert!(!profile(vec![0; PROFILE_PAGES + 1], 4096).fits(len));
+        assert!(!WakeProfile::default().fits(len));
     }
 }

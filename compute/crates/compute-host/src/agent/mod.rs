@@ -413,6 +413,11 @@ enum Event<V> {
     TornDown {
         id: Id,
     },
+    /// The VM of `id` did not take a balloon setting of `bytes`.
+    BalloonFailed {
+        id: Id,
+        bytes: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -705,6 +710,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             commands_tx: commands_tx.downgrade(),
         };
         agent.recover(strays).await;
+        // Admission refuses what needs disk until it has a reading, so one
+        // is taken before any request is served.
+        agent.sample();
         let handle = Handle {
             commands: commands_tx,
             holds: Arc::new(AtomicU64::new(1)),

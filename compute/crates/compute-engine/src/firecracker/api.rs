@@ -7,6 +7,10 @@
 //! Every request has a deadline. The VMM answers one request at a time, so a
 //! VMM that stops answering would otherwise hold up every step on its VM for
 //! good, including the one that would notice and end it.
+//!
+//! A client made for one VMM process sends nothing to any other: a request
+//! still on its way when that VMM ends can never reach a later one behind
+//! the same socket path.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -54,6 +58,8 @@ pub enum ApiError {
 #[derive(Clone, Debug)]
 pub struct Api {
     socket: PathBuf,
+    /// The process that must serve the socket, in the host's PID namespace.
+    server: Option<i32>,
     control_limit: Duration,
     snapshot_limit: Duration,
 }
@@ -62,8 +68,17 @@ impl Api {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
             socket: socket.into(),
+            server: None,
             control_limit: CONTROL_LIMIT,
             snapshot_limit: SNAPSHOT_LIMIT,
+        }
+    }
+
+    /// The same client, sending only to the socket's server `pid`.
+    pub fn served_by(self, pid: i32) -> Self {
+        Self {
+            server: Some(pid),
+            ..self
         }
     }
 
@@ -110,6 +125,14 @@ impl Api {
             .await
             .map_err(|_| ApiError::Connect(io::ErrorKind::TimedOut.into()))?
             .map_err(ApiError::Connect)?;
+        if let Some(server) = self.server {
+            let peer = stream.peer_cred().map_err(ApiError::Connect)?.pid();
+            if peer != Some(server) {
+                return Err(ApiError::Connect(io::Error::other(format!(
+                    "the API socket is served by process {peer:?}, not the VMM {server}"
+                ))));
+            }
+        }
         let exchange = async {
             stream.write_all(request.as_bytes()).await?;
             read_response(&mut stream).await

@@ -71,7 +71,8 @@ fn page_of(profile: &WakeProfile) -> u64 {
 }
 
 /// The pages to pack from an image of `memory_len` bytes: `profile`'s
-/// first pages, each once, up to [`READY_BYTES`].
+/// first pages, each once, up to [`READY_BYTES`]. Offsets outside the
+/// image are left out.
 fn packed(profile: &WakeProfile, memory_len: u64) -> Vec<u64> {
     let page = page_of(profile);
     let mut seen = HashSet::new();
@@ -79,7 +80,12 @@ fn packed(profile: &WakeProfile, memory_len: u64) -> Vec<u64> {
         .offsets
         .iter()
         .map(|offset| offset / page * page)
-        .filter(|offset| offset + page <= memory_len && seen.insert(*offset))
+        .filter(|offset| {
+            offset
+                .checked_add(page)
+                .is_some_and(|end| end <= memory_len)
+                && seen.insert(*offset)
+        })
         .take(usize::try_from(READY_BYTES / page).unwrap_or(usize::MAX))
         .collect()
 }

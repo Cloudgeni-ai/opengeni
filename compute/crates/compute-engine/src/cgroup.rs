@@ -152,8 +152,13 @@ impl Cgroup {
             }
             match fs::read_to_string(entry.path().join("memory.low")) {
                 Ok(low) => total = total.saturating_add(low.trim().parse().unwrap_or(0)),
-                // A child group removed meanwhile claims nothing.
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                // A child group removed meanwhile claims nothing: its
+                // directory is gone, or its files answer that it no
+                // longer exists while the kernel takes it down.
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound
+                        || error.raw_os_error()
+                            == Some(rustix::io::Errno::NODEV.raw_os_error()) => {}
                 Err(error) => return Err(error),
             }
         }

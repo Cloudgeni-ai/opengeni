@@ -96,6 +96,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             Event::TornDown { id } => self.torn_down(id),
+            Event::BalloonFailed { id, bytes } => self.input(Input::BalloonFailed {
+                sandbox: id.0,
+                bytes,
+            }),
         }
     }
 
@@ -147,17 +151,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Asks the guest of `id`'s running VM to give `bytes` back through its
-    /// balloon, in the background: a VM that fails to only keeps its
-    /// memory, and the host relieves pressure further if it must.
+    /// balloon, in the background: a VM that fails to keeps its memory, the
+    /// host relieves pressure further if it must, and the setting is asked
+    /// again after a backoff.
     fn set_balloon(&self, id: Id, bytes: u64) {
         let Some(live) = self.slots.get(&id.0).and_then(|slot| slot.vm.as_ref()) else {
             return;
         };
         let set = self.engine.set_balloon(&live.vm, bytes);
+        let events = self.events_tx.clone();
         tokio::spawn(async move {
             match set.await {
                 Ok(()) => tracing::info!(%id, mib = bytes >> 20, "balloon set"),
-                Err(error) => tracing::warn!(%id, %error, "could not set the balloon"),
+                Err(error) => {
+                    tracing::warn!(%id, %error, "could not set the balloon");
+                    let _ = events.send(Event::BalloonFailed { id, bytes });
+                }
             }
         });
     }

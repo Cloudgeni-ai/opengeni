@@ -126,8 +126,8 @@ async fn a_small_disk_books_saves_and_reports_a_save_it_cannot_write() {
         booked.booked / MIB
     );
 
-    // Once one VM's state is saved it books nothing, and the refused wake
-    // goes through.
+    // Once one VM's state is saved and a disk reading shows what the save
+    // wrote, it books nothing, and the refused wake goes through.
     let begin = Instant::now();
     sleep_to_saved(&agent, awake[0]).await;
     agent
@@ -136,10 +136,22 @@ async fn a_small_disk_books_saves_and_reports_a_save_it_cannot_write() {
         })
         .await;
     let saved = begin.elapsed();
+    let others = SAVE * (awake.len() as u64 - 1);
+    agent
+        .wait_until("a reading to show the save", |status| {
+            status
+                .disk
+                .as_ref()
+                .is_some_and(|disk| disk.booked == others)
+        })
+        .await;
+    let read = begin.elapsed();
     super::admission::connect(&agent.client, refused)
         .await
         .expect("wakes once a save freed its booking");
-    eprintln!("saved the first in {saved:?}; the refused one then woke");
+    eprintln!(
+        "saved the first in {saved:?}, read the disk after {read:?}; the refused one then woke"
+    );
 
     // A save the disk cannot hold shows in the status and is retried.
     let hog = disk.fill(16 * MIB);

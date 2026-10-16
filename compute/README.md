@@ -123,7 +123,8 @@ On start the agent settles every record, then takes each VM back
 ([ADR 9](docs/adr/0009-vms-outlive-the-agent.md)). A VM whose memory is still
 being paged in keeps its pager, a small process of its own, and the restarted
 agent reconnects to it. The pager runs as its VM's own user, with no
-capabilities ([ADR 8](docs/adr/0008-lazy-wake-with-a-working-set.md)). If
+capabilities, and the agent bounds and checks everything it reads from it
+([ADR 8](docs/adr/0008-lazy-wake-with-a-working-set.md)). If
 the pager itself dies, the VM is ended and the
 sandbox recovers as [ADR 10](docs/adr/0010-crash-safety-bar.md) says: from a
 valid saved image if one exists, else fresh from its disk. One agent runs per
@@ -168,7 +169,9 @@ that relieve memory: every VM whose state is not saved yet books its next
 save (its memory once on XFS, where the merge shares extents, otherwise
 twice, plus 64 MiB), and bookings plus `--disk-reserve-mib` and
 `--disk-reserve-inodes` (default a twentieth of the filesystem) stay within
-what is free. A wake the disk cannot book gets `host_full` naming disk or
+what is free. A booking stays until a reading after its save shows what
+the save used, and nothing needing disk is admitted before the first
+reading. A wake the disk cannot book gets `host_full` naming disk or
 inodes; archived idle sandboxes give up their local copies in the background
 to make room. The status shows the disk (available, booked, reserve, free),
 and a sandbox's `failed_step` with the error while a step such as a save

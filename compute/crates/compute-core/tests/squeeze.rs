@@ -298,3 +298,75 @@ fn sandboxes_paused_for_memory_wake_one_at_a_time_as_room_returns() {
     let actions = rig.available(8 * GIB);
     assert_eq!(started(&actions, second)[0].0, Step::Restore);
 }
+
+#[test]
+fn a_balloon_let_go_and_a_wake_never_share_the_same_room() {
+    let mut rig = Rig::new();
+    rig.running(1, size(GIB, 8 * GIB), 3 * GIB);
+    rig.running(2, size(GIB, 8 * GIB), 4 * GIB);
+    // Both balloons, then, with the guests giving nothing, 2 is paused and
+    // saved while 1 keeps its balloon.
+    assert_eq!(balloons(&rig.available(0)), [(1, 7 * GIB), (2, 7 * GIB)]);
+    rig.at(3);
+    let actions = rig.available(3 * GIB);
+    assert_eq!(started(&actions, 2)[0].0, Step::Pause);
+    assert!(started(&actions, 1).is_empty(), "{actions:?}");
+    rig.settle(2, actions);
+    assert!(rig.host.waits_for_room(SandboxId(2)));
+    // 4 GiB above the high watermark: room for 2's 4 GiB, or for the
+    // 2 GiB 1's guest may take back, not both.
+    rig.at(4);
+    let actions = rig.available(9 * GIB);
+    let released = balloons(&actions).contains(&(1, 0));
+    let woke = !started(&actions, 2).is_empty();
+    assert!(released != woke, "{actions:?}");
+    // A reading taken once it has taken its room lets the other through.
+    if woke {
+        rig.settle(2, actions);
+        rig.resident(2, 4 * GIB);
+        assert!(balloons(&rig.available(9 * GIB)).contains(&(1, 0)));
+    } else {
+        assert_eq!(started(&rig.available(9 * GIB), 2)[0].0, Step::Restore);
+    }
+}
+
+#[test]
+fn a_balloon_the_vm_did_not_take_is_set_again_after_a_backoff() {
+    let mut rig = Rig::new();
+    let sandbox = SandboxId(1);
+    // Found running: its balloon is let go, in case it was left set.
+    let actions = rig.send(Input::Add {
+        sandbox,
+        state: State::new(Level::Running, Durability::Volatile, true),
+        policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
+        size: size(GIB, 4 * GIB),
+    });
+    assert_eq!(balloons(&actions), [(1, 0)]);
+    rig.send(Input::Hold {
+        sandbox,
+        hold: HoldId(1),
+        until: None,
+        priority: Priority::Interactive,
+    });
+    // An older setting failing changes nothing.
+    assert_eq!(
+        rig.send(Input::BalloonFailed {
+            sandbox,
+            bytes: GIB
+        }),
+        []
+    );
+    // This one failing: not at once, but after a backoff, and longer after
+    // each failure.
+    let mut waited = Duration::ZERO;
+    for _ in 0..3 {
+        let actions = rig.send(Input::BalloonFailed { sandbox, bytes: 0 });
+        assert_eq!(balloons(&actions), []);
+        let failed = rig.now;
+        let due = rig.host.next_deadline().unwrap();
+        assert!(due.saturating_since(failed) > waited);
+        waited = due.saturating_since(failed);
+        rig.now = due;
+        assert_eq!(balloons(&rig.send(Input::Tick)), [(1, 0)]);
+    }
+}

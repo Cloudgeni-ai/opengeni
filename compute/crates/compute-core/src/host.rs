@@ -105,6 +105,14 @@ pub enum Input {
         /// The sandbox.
         sandbox: SandboxId,
     },
+    /// The sandbox's VM did not take an [`Action::Balloon`] of `bytes`: what
+    /// its balloon takes is not known. It is asked again after a backoff.
+    BalloonFailed {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// What it was asked to take.
+        bytes: u64,
+    },
     /// The VM process ended unexpectedly. Files survive, and so do running
     /// programs if a current copy was saved.
     Lost {
@@ -341,6 +349,9 @@ pub struct Host {
     /// Whether that reading was taken after local copies last went, so it
     /// shows what they freed.
     disk_fresh: bool,
+    /// Bookings that steps finished since that reading gave up: what they
+    /// wrote shows only in the next one.
+    disk_spent: DiskSpace,
 }
 
 impl Host {
@@ -363,6 +374,7 @@ impl Host {
             unmanaged: HashMap::new(),
             disk: None,
             disk_fresh: false,
+            disk_spent: DiskSpace::default(),
         })
     }
 
@@ -526,6 +538,7 @@ impl Host {
                 outcome,
             } => self.finish(now, sandbox, op, outcome, out),
             Input::Lost { sandbox } => self.lost(sandbox, out),
+            Input::BalloonFailed { sandbox, bytes } => self.balloon_failed(now, sandbox, bytes),
             Input::Unsavable { sandbox } => {
                 if self
                     .sandboxes
@@ -543,6 +556,7 @@ impl Host {
             Input::Disk { available } => {
                 self.disk = Some(available);
                 self.disk_fresh = true;
+                self.disk_spent = DiskSpace::default();
             }
             Input::Resident { sandbox, bytes } => {
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox)
@@ -657,6 +671,7 @@ impl Host {
         self.in_flight[flight.step.index()] -= 1;
         // What deleting local files freed shows only in a later reading.
         self.disk_fresh &= !matches!(flight.step, Step::Evict | Step::Forget);
+        let booked = slot.books_save();
         let before = slot.state;
         let backoff = if flight.step.wakes() {
             &self.policy.wake_backoff
@@ -664,6 +679,9 @@ impl Host {
             &self.policy.sleep_backoff
         };
         let settled = slot.settle_step(flight.step, outcome, now, backoff);
+        if booked && !slot.books_save() {
+            self.disk_spent = self.disk_spent.add(slot.save_space());
+        }
         if let Some(notice) = settled.notice {
             out.push(Action::Notify {
                 sandbox: id,
@@ -837,14 +855,8 @@ impl Host {
             }
             slot.queued = wanted;
         }
-        if slot.state.level == Level::Running && slot.in_flight.is_none() {
-            let bytes = slot.balloon.map_or(0, |balloon| balloon.bytes);
-            // A balloon not known to be as asked is set again, deflated
-            // when nothing is asked of it.
-            if slot.balloon_sent != Some(bytes) {
-                slot.balloon_sent = Some(bytes);
-                out.push(Action::Balloon { sandbox: id, bytes });
-            }
+        if let Some(bytes) = slot.balloon_due(now) {
+            out.push(Action::Balloon { sandbox: id, bytes });
         }
         let deadline = slot.next_deadline(now);
         if deadline != slot.timer {

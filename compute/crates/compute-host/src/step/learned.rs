@@ -4,7 +4,9 @@
 //! [`compute_engine::PagerSpec::dir`]), so the agent trusts what it finds
 //! there no more than what a VM wrote: it reads only a regular file of one
 //! name, never through a link, of bounded size, and keeps a copy of its own
-//! only of a valid profile.
+//! only of a profile that fits the memory it describes. Anything else is
+//! dropped with a warning: a learned profile only makes wakes faster, and
+//! never stops one or an archive.
 
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -28,8 +30,9 @@ pub(super) fn make_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// Moves the profile a pager wrote at `learned` to `profile`, the copy the
-/// agent keeps and archives, if it is valid; drops it either way.
-pub(super) fn take(learned: &Path, profile: &Path) -> io::Result<()> {
+/// agent keeps and archives, if it fits memory of `memory_len` bytes (none:
+/// there is no memory image for it to describe); drops it either way.
+pub(super) fn take(learned: &Path, profile: &Path, memory_len: Option<u64>) -> io::Result<()> {
     let bytes = match read_untrusted(learned) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -39,13 +42,13 @@ pub(super) fn take(learned: &Path, profile: &Path) -> io::Result<()> {
         }
     };
     let parsed = WakeProfile::parse(&bytes);
-    if parsed == WakeProfile::default() {
-        tracing::warn!(path = %learned.display(), "learned profile is not valid");
-    } else {
+    if memory_len.is_some_and(|len| parsed.fits(len)) {
         write_atomic(
             profile,
             &serde_json::to_vec(&parsed).map_err(io::Error::other)?,
         )?;
+    } else {
+        tracing::warn!(path = %learned.display(), "learned profile does not fit the memory; ignored");
     }
     remove_if_present(learned)
 }
@@ -81,6 +84,8 @@ fn read_untrusted(path: &Path) -> io::Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    const LEN: Option<u64> = Some(1 << 20);
+
     fn profile(offsets: Vec<u64>) -> WakeProfile {
         WakeProfile {
             version: 1,
@@ -96,7 +101,7 @@ mod tests {
             dir.path().join("learned.json"),
             dir.path().join("wake.json"),
         );
-        take(&learned, &kept).unwrap();
+        take(&learned, &kept, LEN).unwrap();
         assert!(!kept.exists(), "nothing learned, nothing kept");
 
         fs::write(
@@ -104,15 +109,23 @@ mod tests {
             serde_json::to_vec(&profile(vec![0, 4096])).unwrap(),
         )
         .unwrap();
-        take(&learned, &kept).unwrap();
+        take(&learned, &kept, LEN).unwrap();
         assert_eq!(WakeProfile::load(&kept), profile(vec![0, 4096]));
         assert!(!learned.exists());
 
-        // Garbage leaves the kept profile as it was.
-        fs::write(&learned, b"{not json").unwrap();
-        take(&learned, &kept).unwrap();
-        assert_eq!(WakeProfile::load(&kept), profile(vec![0, 4096]));
-        assert!(!learned.exists());
+        // Garbage, and pages the memory does not have, leave the kept
+        // profile as it was.
+        let outside = serde_json::to_vec(&profile(vec![u64::MAX])).unwrap();
+        for (bytes, memory) in [
+            (&b"{not json"[..], LEN),
+            (&outside[..], LEN),
+            (&serde_json::to_vec(&profile(vec![0])).unwrap()[..], None),
+        ] {
+            fs::write(&learned, bytes).unwrap();
+            take(&learned, &kept, memory).unwrap();
+            assert_eq!(WakeProfile::load(&kept), profile(vec![0, 4096]));
+            assert!(!learned.exists());
+        }
     }
 
     #[test]
@@ -126,18 +139,18 @@ mod tests {
         fs::write(&host, serde_json::to_vec(&profile(vec![8192])).unwrap()).unwrap();
 
         std::os::unix::fs::symlink(&host, &learned).unwrap();
-        take(&learned, &kept).unwrap();
+        take(&learned, &kept, LEN).unwrap();
         assert!(!kept.exists(), "read through a link");
         assert!(!learned.exists() && host.exists());
 
         fs::hard_link(&host, &learned).unwrap();
-        take(&learned, &kept).unwrap();
+        take(&learned, &kept, LEN).unwrap();
         assert!(!kept.exists(), "read a host file's second name");
         assert!(host.exists());
 
         let large = File::create(&learned).unwrap();
         large.set_len(MOST + 1).unwrap();
-        take(&learned, &kept).unwrap();
+        take(&learned, &kept, LEN).unwrap();
         assert!(!kept.exists(), "read a file without bound");
     }
 }

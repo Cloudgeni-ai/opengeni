@@ -30,7 +30,12 @@ guest's first-touched pages are scattered across most of its chunks.
   (its control socket, done mark and learned order) lives in a directory
   of its own owned by that user, and the agent reads it as it reads
   anything from a jail: never through a link, only a bounded regular file
-  of one name, and keeps only a valid profile.
+  of one name, and keeps only a profile whose page size is real and whose
+  pages lie inside the VM's memory; anything else is dropped with a
+  warning and never stops a wake or an archive. The agent reads the
+  pager's control messages the same way: a greeting no longer than a
+  pager of that image could need, naming ordered ranges inside the image,
+  and no later message over 1 KiB, each refused before more is held.
 
 ## Consequences
 

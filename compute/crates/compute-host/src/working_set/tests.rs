@@ -458,6 +458,9 @@ fn packing_follows_the_page_size_and_stops_at_the_ready_bytes() {
     assert_eq!(packed(&profile(vec![PAGE + 1], 0), 4 * huge), vec![PAGE]);
     let all = profile((0..10_000).map(|page| page * huge).collect(), huge);
     assert_eq!(packed(&all, u64::MAX / 2).len() as u64, READY_BYTES / huge);
+    // A page past the end of the address space is no page of the image.
+    let wild = profile(vec![u64::MAX, u64::MAX - PAGE + 1, 0], PAGE);
+    assert_eq!(packed(&wild, 4 * huge), vec![0]);
 }
 
 #[test]

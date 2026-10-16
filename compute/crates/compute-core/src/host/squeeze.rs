@@ -44,8 +44,10 @@ pub(crate) enum Squeeze {
         /// Host memory its VM held.
         bytes: u64,
     },
-    /// It was let through to wake and claims `bytes` of the room above the
-    /// high watermark until a reading taken while it runs shows them.
+    /// It was let through to wake, or its balloon was let go, and it claims
+    /// `bytes` of the room above the high watermark, what it may take back,
+    /// until a reading taken while it runs shows them. Wakes and balloons
+    /// thus never spend the same room.
     Returning {
         /// Host memory its VM held.
         bytes: u64,
@@ -79,9 +81,42 @@ impl Sandbox {
             && self.floor == Level::Running
             && self.above_request() > 0
     }
+
+    /// What its running VM's balloon is to be set to now, if it is not
+    /// known to be so and no backoff after a failed setting holds it back.
+    /// Nothing asked of it lets the balloon go.
+    pub(super) fn balloon_due(&mut self, now: At) -> Option<u64> {
+        if self.state.level != Level::Running || self.in_flight.is_some() {
+            return None;
+        }
+        let bytes = self.balloon.map_or(0, |balloon| balloon.bytes);
+        let held = self.balloon_retry.is_some_and(|(at, _)| at > now);
+        if self.balloon_sent == Some(bytes) || held {
+            return None;
+        }
+        self.balloon_sent = Some(bytes);
+        Some(bytes)
+    }
 }
 
 impl Host {
+    /// `id`'s VM did not take a balloon setting of `bytes`: it is asked
+    /// again after the sleep backoff, longer after each failure in a row.
+    pub(super) fn balloon_failed(&mut self, now: At, id: SandboxId, bytes: u64) {
+        let backoff = self.policy.sleep_backoff;
+        let Some(slot) = self.sandboxes.get_mut(&id) else {
+            return;
+        };
+        if slot.balloon_sent != Some(bytes) {
+            // An older request; a newer one stands.
+            return;
+        }
+        let failures = slot.balloon_retry.map_or(0, |(_, failures)| failures) + 1;
+        slot.balloon_sent = None;
+        slot.balloon_retry = Some((now + backoff.delay(failures), failures));
+        self.mark(id);
+    }
+
     /// Frees `needed` bytes that pushing idle sandboxes could not: asks the
     /// guests of sandboxes in use above their request to give memory back
     /// through their balloons, furthest above first, and when even all of
@@ -174,6 +209,9 @@ impl Host {
             room -= relief;
             if let Some(slot) = self.sandboxes.get_mut(&id) {
                 slot.balloon = None;
+                if slot.squeeze == Squeeze::None {
+                    slot.squeeze = Squeeze::Returning { bytes: relief };
+                }
             }
             changed = true;
             self.mark(id);

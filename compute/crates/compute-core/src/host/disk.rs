@@ -45,7 +45,7 @@ pub struct DiskSpace {
 }
 
 impl DiskSpace {
-    fn add(self, other: Self) -> Self {
+    pub(super) fn add(self, other: Self) -> Self {
         Self {
             bytes: self.bytes.saturating_add(other.bytes),
             inodes: self.inodes.saturating_add(other.inodes),
@@ -126,13 +126,13 @@ impl DiskRoom {
 impl Sandbox {
     /// Whether it books disk for its next save: its VM holds state no copy
     /// has yet, or it is waking into one.
-    fn books_save(&self) -> bool {
+    pub(super) fn books_save(&self) -> bool {
         self.reserves()
             || (self.state.level.has_process() && self.state.durability == Durability::Volatile)
     }
 
     /// What its next save may need at most.
-    fn save_space(&self) -> DiskSpace {
+    pub(super) fn save_space(&self) -> DiskSpace {
         DiskSpace {
             bytes: self.size.save,
             inodes: SAVE_INODES,
@@ -151,7 +151,8 @@ impl Sandbox {
 
 impl Host {
     /// How much of the host's local disk saves have booked, or `None`
-    /// without a disk policy or a reading.
+    /// without a disk policy or a reading. What steps that finished since
+    /// that reading wrote stays booked until the next one.
     #[must_use]
     pub fn disk(&self) -> Option<DiskCapacity> {
         let policy = self.policy.disk?;
@@ -160,7 +161,7 @@ impl Host {
             .sandboxes
             .values()
             .filter(|slot| slot.books_save())
-            .fold(DiskSpace::default(), |sum, slot| sum.add(slot.save_space()));
+            .fold(self.disk_spent, |sum, slot| sum.add(slot.save_space()));
         Some(DiskCapacity {
             available,
             booked,
@@ -171,9 +172,16 @@ impl Host {
         })
     }
 
-    /// What wakes may still book in one decision.
+    /// What wakes may still book in one decision: nothing before the first
+    /// reading.
     pub(super) fn disk_room(&self) -> Option<DiskRoom> {
-        let disk = self.disk()?;
+        self.policy.disk?;
+        let Some(disk) = self.disk() else {
+            return Some(DiskRoom {
+                bytes: 0,
+                inodes: 0,
+            });
+        };
         let room = |available: u64, booked: u64, reserve: u64| {
             i128::from(available) - i128::from(booked) - i128::from(reserve)
         };

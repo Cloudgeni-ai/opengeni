@@ -157,9 +157,9 @@ fn a_wake_the_disk_cannot_book_is_refused_at_once_and_retried_once_it_can() {
     assert_eq!(host_full(&actions, 3), Some((Resource::Disk, GIB, 0)));
     assert_eq!(rig.level(3), Level::Saved);
 
-    // Sandbox 1 sleeps; once its state is saved it books nothing more,
-    // and the held wake goes ahead. What the save wrote shows in the
-    // next reading.
+    // Sandbox 1 sleeps; once its state is saved it books nothing more, but
+    // what the save wrote stays booked until a reading shows it. Only then
+    // does the held wake go ahead, if the disk still has room.
     rig.release(1);
     let actions = rig.at(10);
     let [(1, Step::Pause, op)] = started(&actions)[..] else {
@@ -176,11 +176,34 @@ fn a_wake_the_disk_cannot_book_is_refused_at_once_and_retried_once_it_can() {
         panic!("no save: {actions:?}");
     };
     let actions = rig.finish(1, op);
+    assert_eq!(started(&actions), []);
+    assert_eq!(rig.booked(), 2 * GIB);
+    // The save took half a GiB: still short.
+    let actions = rig.disk(2 * GIB + GIB / 2, 10_000);
+    assert_eq!(started(&actions), []);
+    assert_eq!(rig.booked(), GIB);
+    // It replaced an older copy as large: the wake goes ahead.
+    let actions = rig.disk(3 * GIB, 10_000);
     assert!(
         matches!(started(&actions)[..], [(3, Step::Restore, _)]),
         "{actions:?}"
     );
     assert_eq!(rig.booked(), 2 * GIB);
+}
+
+#[test]
+fn nothing_is_booked_before_the_first_reading() {
+    let mut rig = Rig::new();
+    rig.add(1, saved());
+    rig.add(2, State::new(Level::Paused, Durability::Volatile, false));
+    let actions = rig.hold(1);
+    assert_eq!(started(&actions), []);
+    assert_eq!(host_full(&actions, 1), Some((Resource::Disk, GIB, 0)));
+    // Resuming a VM that books already needs nothing more.
+    let actions = rig.hold(2);
+    assert!(matches!(started(&actions)[..], [(2, Step::Resume, _)]));
+    let actions = rig.disk(10 * GIB, 10_000);
+    assert!(matches!(started(&actions)[..], [(1, Step::Restore, _)]));
 }
 
 #[test]

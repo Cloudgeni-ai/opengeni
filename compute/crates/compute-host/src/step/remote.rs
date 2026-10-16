@@ -64,7 +64,8 @@ impl<E: Engine, S: Store> Job<E, S> {
         let profile = wake_profile(&self.paths);
         // The order the last wake learned, if its pager wrote one.
         let (written, kept) = (pager_learned(&self.paths), profile.clone());
-        if let Err(error) = blocking(move || learned::take(&written, &kept))
+        let memory_len = memory.as_ref().map(|(image, _)| image.meta().memory_len);
+        if let Err(error) = blocking(move || learned::take(&written, &kept, memory_len))
             .await
             .and_then(|taken| taken)
         {

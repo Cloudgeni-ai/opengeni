@@ -915,16 +915,19 @@ impl<E: Engine, S: Store> Job<E, S> {
         let memory = images.memory(generation);
         let control = pager_control(paths);
         let tag = crate::paging::tag(generation);
-        let identity = crate::paging::identity(&memory).map_err(io)?;
+        let file = (
+            crate::paging::identity(&memory).map_err(io)?,
+            std::fs::metadata(&memory).map_err(io)?.len(),
+        );
         learned::make_dir(&pager_dir(paths)).map_err(io)?;
         // What the last pager learned, the one this pager starts from.
-        learned::take(&pager_learned(paths), &wake_profile(paths)).map_err(io)?;
+        learned::take(&pager_learned(paths), &wake_profile(paths), Some(file.1)).map_err(io)?;
         remove_if_present(&crate::paging::done_file(&control)).map_err(io)?;
         // Written before the pager starts, so an agent that restarts knows
         // the VM's memory may need it, and which launch to look for.
         write_atomic(&paged_marker(paths), tag.as_bytes()).map_err(io)?;
         if !image.meta().remote {
-            let paging = Paging::start(control, tag.clone(), identity, None, Vec::new());
+            let paging = Paging::start(control, tag.clone(), file, None, Vec::new());
             return Ok((paging, tag));
         }
         let Some(fetcher) = &self.fetcher else {
@@ -947,7 +950,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             &first,
         )
         .map_err(io)?;
-        let paging = Paging::start(control, tag.clone(), identity, Some(hydration), filled);
+        let paging = Paging::start(control, tag.clone(), file, Some(hydration), filled);
         Ok((paging, tag))
     }
 

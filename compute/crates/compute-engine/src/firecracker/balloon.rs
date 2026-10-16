@@ -175,6 +175,10 @@ mod tests {
             while let Ok((mut stream, _)) = listener.accept().await {
                 let mut request = vec![0_u8; 4096];
                 let read = stream.read(&mut request).await.unwrap();
+                if read == 0 {
+                    // A client that sent nothing.
+                    continue;
+                }
                 let request = String::from_utf8_lossy(&request[..read]).into_owned();
                 kept.lock().unwrap().push(request);
                 stream.write_all(b"HTTP/1.1 204 \r\n\r\n").await.unwrap();
@@ -210,5 +214,19 @@ mod tests {
         drop(other);
         late.await.unwrap();
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_request_reaches_only_the_vmm_it_was_made_for() {
+        let (_dir, api, seen) = api();
+        let me = i32::try_from(std::process::id()).unwrap();
+        // Another process now serves the socket path of an ended VMM.
+        let old = Balloon::unknown(&api.clone().served_by(me + 1), true);
+        assert!(old.set(1 << 30).await.is_err());
+        let new = Balloon::unknown(&api.served_by(me), true);
+        new.set(0).await.unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(seen[0].contains("\"amount_mib\":0"), "{seen:?}");
     }
 }
