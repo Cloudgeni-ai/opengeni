@@ -109,6 +109,7 @@ async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> 
         base_image: lab.join("base.ext4"),
         policy: HostPolicy::default(),
         sample_every: Duration::from_secs(1),
+        stream_idle: HostConfig::STREAM_IDLE,
         guest_ports: Vec::new(),
         restore_notice_port: None,
         first_uid,

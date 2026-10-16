@@ -4,12 +4,16 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use compute_core::Priority;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::time::Instant;
+use tokio::time::{Instant, sleep_until};
 
-use crate::agent::{Handle, HostError};
-use crate::protocol::{ErrorCode, Reply, Request, step_name};
+use crate::agent::{Handle, HostError, Lease};
+use crate::protocol::{ErrorCode, Id, Reply, Request, step_name};
+
+/// Bytes relayed per read, each way.
+const RELAY_BUFFER: usize = 16 << 10;
 
 /// Requests are small; anything longer is refused.
 const MAX_REQUEST: u64 = 64 << 10;
@@ -63,7 +67,7 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
                 Err(error) => return write_reply(&mut client, &error_reply(&error)).await,
             };
             let started = Instant::now();
-            let mut guest = match lease.connect(port, CONNECT_TIMEOUT).await {
+            let guest = match lease.connect(port, CONNECT_TIMEOUT).await {
                 Ok(guest) => guest,
                 Err(error) => return write_reply(&mut client, &error_reply(&error)).await,
             };
@@ -75,10 +79,13 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
                 },
             )
             .await?;
-            // The lease keeps the sandbox awake until the stream closes.
-            tokio::io::copy_bidirectional(&mut client, &mut guest).await?;
-            drop(lease);
-            return Ok(());
+            let wake = Wake {
+                handle,
+                id,
+                generation,
+                priority: priority.into(),
+            };
+            return relay(&wake, lease, client, guest).await;
         }
         Request::Create { id, config } => done(handle.create(id, config).await),
         Request::Remove { id, generation } => done(handle.remove(id, generation).await),
@@ -131,6 +138,79 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
         },
     };
     write_reply(&mut client, &reply).await
+}
+
+/// How a stream wakes its sandbox again.
+struct Wake<'a> {
+    handle: &'a Handle,
+    id: Id,
+    generation: Option<u64>,
+    priority: Priority,
+}
+
+/// Relays bytes both ways between a client and a guest until both sides
+/// have finished. The stream keeps its sandbox awake while it carries
+/// traffic: once it has been silent both ways for the handle's
+/// `stream_idle`, it lets go of `lease`, so the sandbox may sleep, and the
+/// next byte either way takes a new lease, waking the sandbox, before it is
+/// passed on. A stream whose guest end the sandbox's sleep closed ends.
+async fn relay(
+    wake: &Wake<'_>,
+    lease: Lease,
+    client: impl AsyncRead + AsyncWrite,
+    guest: UnixStream,
+) -> io::Result<()> {
+    let idle = wake.handle.stream_idle();
+    let mut lease = Some(lease);
+    let (mut client_read, mut client_write) = tokio::io::split(client);
+    let (mut guest_read, mut guest_write) = guest.into_split();
+    let (mut up, mut down) = (vec![0; RELAY_BUFFER], vec![0; RELAY_BUFFER]);
+    let (mut up_open, mut down_open) = (true, true);
+    let mut quiet_from = Instant::now() + idle;
+    while up_open || down_open {
+        tokio::select! {
+            read = client_read.read(&mut up), if up_open => match read? {
+                0 => {
+                    guest_write.shutdown().await?;
+                    up_open = false;
+                }
+                n => {
+                    keep_awake(wake, &mut lease).await?;
+                    guest_write.write_all(&up[..n]).await?;
+                    quiet_from = Instant::now() + idle;
+                }
+            },
+            read = guest_read.read(&mut down), if down_open => match read? {
+                // Ended with the VM the sandbox's sleep ended: nothing
+                // the client sends could reach it.
+                0 if lease.is_none() => return Ok(()),
+                0 => {
+                    client_write.shutdown().await?;
+                    down_open = false;
+                }
+                n => {
+                    keep_awake(wake, &mut lease).await?;
+                    client_write.write_all(&down[..n]).await?;
+                    quiet_from = Instant::now() + idle;
+                }
+            },
+            () = sleep_until(quiet_from), if lease.is_some() => lease = None,
+        }
+    }
+    Ok(())
+}
+
+/// Takes a new lease for a stream that let its sandbox sleep.
+async fn keep_awake(wake: &Wake<'_>, lease: &mut Option<Lease>) -> io::Result<()> {
+    if lease.is_none() {
+        let woken = wake
+            .handle
+            .acquire(wake.id, wake.generation, wake.priority)
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        *lease = Some(woken);
+    }
+    Ok(())
 }
 
 fn done(result: Result<(), HostError>) -> Reply {

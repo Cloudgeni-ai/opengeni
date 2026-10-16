@@ -73,6 +73,13 @@ impl Handle {
         .await?
     }
 
+    /// How long a stream may stay silent and still keep its sandbox awake
+    /// (see [`super::HostConfig::stream_idle`]).
+    #[must_use]
+    pub fn stream_idle(&self) -> Duration {
+        self.stream_idle
+    }
+
     /// Wakes a sandbox and keeps it awake until the lease is dropped.
     /// Dropping the returned future early releases the sandbox too. With a
     /// `generation`, only while the sandbox is still at it, so a caller

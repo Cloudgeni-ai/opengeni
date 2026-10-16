@@ -694,6 +694,7 @@ impl Lab {
             base_image: root.join("base.img"),
             policy,
             sample_every: Duration::from_millis(50),
+            stream_idle: HostConfig::STREAM_IDLE,
             guest_ports: Vec::new(),
             restore_notice_port: None,
             first_uid: 1 << 30,

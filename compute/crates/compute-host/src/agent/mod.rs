@@ -110,6 +110,16 @@ pub struct HostConfig {
     pub pool: Option<PoolConfig>,
     /// How VMs whose memory needs a fault handler get one.
     pub pager: PagerConfig,
+    /// How long a stream into a sandbox (see [`crate::protocol::Request::Connect`])
+    /// may stay silent both ways and still keep it awake. A forgotten
+    /// browser tab or terminal then lets its sandbox sleep; the next byte
+    /// either way wakes it again.
+    pub stream_idle: Duration,
+}
+
+impl HostConfig {
+    /// The default for [`HostConfig::stream_idle`].
+    pub const STREAM_IDLE: Duration = Duration::from_secs(10 * 60);
 }
 
 /// How VMs whose memory needs a fault handler get one: a pager process of
@@ -500,6 +510,7 @@ struct Woke {
 pub struct Handle {
     commands: mpsc::UnboundedSender<Command>,
     holds: Arc<AtomicU64>,
+    stream_idle: Duration,
 }
 
 /// Keeps a sandbox awake while it lives. Dropping it lets the sandbox go
@@ -693,6 +704,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let core =
             Host::new(config.policy).map_err(|error| HostError::Invalid(format!("{error:?}")))?;
         check_config(&config).map_err(HostError::Invalid)?;
+        let stream_idle = config.stream_idle;
         let host_lock = match config.host_lock.clone() {
             Some(path) => Some(claim(path, config.root.clone()).await?),
             None => None,
@@ -785,6 +797,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let handle = Handle {
             commands: commands_tx,
             holds: Arc::new(AtomicU64::new(1)),
+            stream_idle,
         };
         Ok((handle, tokio::spawn(agent.run())))
     }

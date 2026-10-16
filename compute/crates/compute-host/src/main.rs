@@ -151,6 +151,10 @@ struct ServeArgs {
     /// Repeatable.
     #[arg(long = "guest-port")]
     guest_ports: Vec<GuestPort>,
+    /// Seconds a stream into a sandbox (a terminal, a preview, a forwarded
+    /// port) may stay silent both ways and still keep it awake.
+    #[arg(long, default_value_t = HostConfig::STREAM_IDLE.as_secs())]
+    stream_idle_secs: u64,
     /// Guest vsock port to tell about each restore from a memory image, so
     /// the guest can set its clock, reconnect and learn its sandbox id.
     #[arg(long)]
@@ -448,6 +452,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         base_image: args.base_image,
         policy,
         sample_every: Duration::from_secs(1),
+        stream_idle: Duration::from_secs(args.stream_idle_secs),
         guest_ports: args.guest_ports,
         restore_notice_port: args.restore_notice_port,
         first_uid: args.first_uid,

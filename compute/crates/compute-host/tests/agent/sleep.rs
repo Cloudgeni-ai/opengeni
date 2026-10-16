@@ -11,6 +11,7 @@ use compute_host::BusyRule;
 use compute_host::protocol::{
     DurabilityName, HostStatus, Id, LevelName, PriorityName, Reply, Request, SleepConfig,
 };
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::time::{Instant, sleep};
 
 use super::{Delays, Lab, NEVER, PAUSE_SOON, SAVE_IN_PLACE, SAVE_QUICKLY, id, thaw, vm_name};
@@ -394,6 +395,64 @@ async fn a_quiet_command_keeps_its_sandbox_awake_until_it_ends() {
     let ended = Instant::now();
     lab.wait_level(sandbox, LevelName::Paused).await;
     assert!(ended.elapsed() >= Duration::from_millis(200));
+    lab.assert_clean();
+}
+
+/// A stream keeps its sandbox awake while it carries traffic; one left
+/// silent (a forgotten browser tab) stops counting after the stream idle
+/// time, and its next byte wakes the sandbox again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_a_stream_that_carries_traffic_keeps_its_sandbox_awake() {
+    const IDLE: Duration = Duration::from_millis(300);
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        |config| config.stream_idle = IDLE,
+    )
+    .await;
+    let sandbox = id(19);
+    lab.create(sandbox, PAUSE_SOON).await;
+    let (reply, mut stream) = lab
+        .client
+        .connect(sandbox, 52, PriorityName::Interactive)
+        .await
+        .unwrap();
+    assert!(matches!(reply, Reply::Connected { .. }), "{reply:?}");
+
+    // Typing every 100 ms, for longer than both the idle time and the
+    // pause rule.
+    let mut line = String::new();
+    for _ in 0..10 {
+        stream.get_mut().write_all(b"get\n").await.unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        Lab::sandbox(&lab.status().await, sandbox).level,
+        LevelName::Running,
+        "a stream with traffic keeps it awake"
+    );
+
+    // Left open and silent, it stops counting and the sandbox pauses.
+    let silent = Instant::now();
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    assert!(silent.elapsed() >= IDLE, "not before the idle time");
+
+    // The next keystroke wakes it and is answered.
+    stream.get_mut().write_all(b"set again\n").await.unwrap();
+    line.clear();
+    stream.read_line(&mut line).await.unwrap();
+    assert_eq!(line, "ok\n");
+    assert_eq!(
+        Lab::sandbox(&lab.status().await, sandbox).level,
+        LevelName::Running
+    );
+    stream.get_mut().write_all(b"exit\n").await.unwrap();
+    drop(stream);
+    lab.wait_level(sandbox, LevelName::Paused).await;
     lab.assert_clean();
 }
 

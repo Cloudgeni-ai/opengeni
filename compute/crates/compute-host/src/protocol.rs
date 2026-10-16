@@ -284,7 +284,10 @@ pub enum Request {
         priority: PriorityName,
     },
     /// Wake a sandbox, then turn this connection into a byte stream to
-    /// `port` inside it. The sandbox stays awake while the stream is open.
+    /// `port` inside it. The sandbox stays awake while the stream carries
+    /// traffic; once it has been silent both ways for the host's stream
+    /// idle time it may sleep, and the next byte either way wakes it. A
+    /// stream whose sandbox slept past Paused ends.
     Connect {
         /// Its id.
         id: Id,

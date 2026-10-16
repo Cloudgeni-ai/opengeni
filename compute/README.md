@@ -79,8 +79,9 @@ Paused in RAM while already having both copies, so ending it later is instant.
 A sandbox is **in use** while any of these holds: a caller holds it (an agent
 turn), its VM uses a quarter of a processor or moves 4 KiB/s over five
 seconds, a command started through its guest helper still runs (unless
-started as fire-and-forget), a stream into it is open, or one of its ports
-saw recent traffic. Idle means none of them. Holds should carry a lease the caller renews.
+started as fire-and-forget), a stream into it carries traffic (one silent
+both ways for 10 minutes stops counting until its next byte, which wakes the
+sandbox), or one of its ports saw recent traffic. Idle means none of them. Holds should carry a lease the caller renews.
 
 Recommended rules (per sandbox, all optional): pause after 10 s idle; save to
 local disk after 30 s while staying paused in RAM; archive after 2 minutes;

@@ -13,7 +13,9 @@ human. Sleep also has to be cheap to undo, or nobody will let it happen early.
 A sandbox is in use while any of these holds: a caller holds it (an agent
 turn), its VM uses a quarter of a processor or moves 4 KiB/s over five
 seconds, a command started through its guest helper still runs, a stream
-into it is open, or a port saw recent traffic. A quiet command (a long poll,
+into it carries traffic, or a port saw recent traffic. A stream silent both
+ways for 10 minutes (configurable) stops counting, so a forgotten browser
+tab or terminal does not keep a sandbox awake; its next byte wakes it. A quiet command (a long poll,
 `sleep 300 && deploy`) uses neither processor nor traffic, so the host asks
 a guest that looks idle how many such commands run (`activity` on the
 notice port); a caller can start one as fire-and-forget, which does not
