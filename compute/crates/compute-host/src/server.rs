@@ -4,6 +4,7 @@ use std::io;
 use std::path::Path;
 use std::pin::pin;
 use std::sync::PoisonError;
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::time::Duration;
 
 use compute_core::Priority;
@@ -156,11 +157,13 @@ struct Wake<'a> {
 /// traffic: once it has been silent both ways for the handle's
 /// `stream_idle`, it lets go of `lease`, so the sandbox may sleep, and the
 /// next byte either way takes a new lease, waking the sandbox, before it is
-/// passed on. A write that waited out the idle time on a reader that
-/// stopped reading does not count as traffic while it waits, but once it
-/// moves bytes the stream takes a new lease, waking the sandbox to handle
-/// them, before it moves any more. A stream whose guest end the sandbox's
-/// sleep closed ends.
+/// passed on. A write to a client that stopped reading does not count as
+/// traffic while it waits, but once it moves bytes the stream takes a new
+/// lease, waking the sandbox to handle them, before it moves any more. A
+/// write to the guest holds the lease while it waits: only a guest that
+/// runs takes those bytes, and while the relay waits on it, it reads
+/// nothing more from the client that could wake it. A stream whose guest
+/// end the sandbox's sleep closed ends.
 ///
 /// Each direction runs on its own, so one side that is slow to read never
 /// stops the other from draining (a guest echoing an upload back while the
@@ -174,8 +177,8 @@ async fn relay(
     let flow = Flow::new(wake, lease);
     let (client_read, client_write) = tokio::io::split(client);
     let (guest_read, guest_write) = guest.into_split();
-    let mut up = pin!(flow.pump(client_read, guest_write));
-    let mut down = pin!(flow.pump(guest_read, client_write));
+    let mut up = pin!(flow.pump(client_read, guest_write, Hold::WhileWriting));
+    let mut down = pin!(flow.pump(guest_read, client_write, Hold::WhenMoved));
     let mut watch = pin!(flow.watch(wake.handle.stream_idle()));
     let (mut up_done, mut down_done) = (false, false);
     while !(up_done && down_done) {
@@ -207,6 +210,17 @@ enum End {
     Slept,
 }
 
+/// How a direction of a relay keeps the sandbox awake while it writes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hold {
+    /// For each write that moves bytes: a write the reader keeps waiting
+    /// is silence. Toward the client, whose reading needs no sandbox.
+    WhenMoved,
+    /// For the whole of each write as well. Toward the guest, which reads
+    /// only while it runs.
+    WhileWriting,
+}
+
 /// Takes the lease a stream holds on its sandbox while it carries traffic.
 trait Keeper {
     type Lease: Send;
@@ -232,6 +246,10 @@ struct Flow<'a, K: Keeper> {
     last: std::sync::Mutex<Instant>,
     /// Told when traffic takes a new lease after the stream let go.
     resumed: Notify,
+    /// Bytes for the guest wait on it to read them.
+    delivering: AtomicBool,
+    /// Told when they are delivered.
+    delivered: Notify,
 }
 
 impl<'a, K: Keeper + Sync> Flow<'a, K> {
@@ -241,15 +259,18 @@ impl<'a, K: Keeper + Sync> Flow<'a, K> {
             lease: tokio::sync::Mutex::new(Some(lease)),
             last: std::sync::Mutex::new(Instant::now()),
             resumed: Notify::new(),
+            delivering: AtomicBool::new(false),
+            delivered: Notify::new(),
         }
     }
 
     /// Copies `from` to `to` until `from` ends, keeping the sandbox awake
-    /// for every write.
+    /// for every write as `hold` says.
     async fn pump(
         &self,
         mut from: impl AsyncRead + Unpin,
         mut to: impl AsyncWrite + Unpin,
+        hold: Hold,
     ) -> io::Result<End> {
         let mut buffer = vec![0; RELAY_BUFFER];
         loop {
@@ -258,6 +279,9 @@ impl<'a, K: Keeper + Sync> Flow<'a, K> {
                 let slept = self.lease.lock().await.is_none();
                 to.shutdown().await?;
                 return Ok(if slept { End::Slept } else { End::Finished });
+            }
+            if hold == Hold::WhileWriting {
+                self.delivering.store(true, SeqCst);
             }
             self.keep_awake().await?;
             let mut sent = 0;
@@ -270,6 +294,10 @@ impl<'a, K: Keeper + Sync> Flow<'a, K> {
                 // lease go; the bytes it moved take it back before any more
                 // move, and wake the sandbox to handle them.
                 self.keep_awake().await?;
+            }
+            if hold == Hold::WhileWriting {
+                self.delivering.store(false, SeqCst);
+                self.delivered.notify_one();
             }
         }
     }
@@ -294,13 +322,23 @@ impl<'a, K: Keeper + Sync> Flow<'a, K> {
         *self.last.lock().unwrap_or_else(PoisonError::into_inner) + idle
     }
 
-    /// Lets go of the lease once no traffic has moved for `idle`, then
-    /// waits for traffic to take a new one. Never returns.
+    /// Lets go of the lease once no traffic has moved for `idle` and no
+    /// bytes wait on the guest, then waits for traffic to take a new one.
+    /// Never returns.
     async fn watch(&self, idle: Duration) {
         loop {
             sleep_until(self.quiet_until(idle)).await;
+            if self.delivering.load(SeqCst) {
+                self.delivered.notified().await;
+                continue;
+            }
             let mut lease = self.lease.lock().await;
-            if self.quiet_until(idle) <= Instant::now() && lease.take().is_some() {
+            // A write to the guest that began meanwhile took the lease
+            // before it wrote, and keeps it.
+            if self.quiet_until(idle) <= Instant::now()
+                && !self.delivering.load(SeqCst)
+                && lease.take().is_some()
+            {
                 drop(lease);
                 self.resumed.notified().await;
             }
@@ -342,7 +380,7 @@ async fn write_reply(stream: &mut (impl AsyncWrite + Unpin), reply: &Reply) -> i
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -379,12 +417,12 @@ mod tests {
         }
     }
 
-    /// A reader that stops reading for longer than the idle time lets the
+    /// A client that stops reading for longer than the idle time lets the
     /// lease go while the relay's write waits on it; once it reads again,
     /// the bytes that move take a new lease before more than the waiting
     /// write's share has passed.
     #[tokio::test]
-    async fn a_write_that_waited_out_the_idle_time_takes_a_lease_when_it_moves() {
+    async fn a_write_to_a_client_that_waited_out_the_idle_time_takes_a_lease_when_it_moves() {
         const IDLE: Duration = Duration::from_millis(200);
         const SIZE: usize = 4 << 10;
         let keeper = Counting::default();
@@ -392,7 +430,7 @@ mod tests {
         let data = vec![7_u8; SIZE];
         // The reader's side buffers 1 KiB.
         let (to, mut reader) = tokio::io::duplex(1 << 10);
-        let pump = flow.pump(&data[..], to);
+        let pump = flow.pump(&data[..], to, Hold::WhenMoved);
         let reading = async {
             tokio::time::sleep(IDLE * 3).await;
             assert_eq!(keeper.held.load(SeqCst), 0, "the stalled stream let go");
@@ -421,5 +459,56 @@ mod tests {
             taken_at[0]
         );
         assert_eq!(keeper.held.load(SeqCst), 1);
+    }
+
+    /// A guest takes bytes only while it runs, and behind a write waiting
+    /// on it the relay reads nothing that could wake it: so the write holds
+    /// the lease however long it waits, and the stream lets go only once it
+    /// is silent with nothing waiting.
+    #[tokio::test]
+    async fn a_write_to_the_guest_holds_the_lease_while_it_waits() {
+        const IDLE: Duration = Duration::from_millis(200);
+        const SIZE: usize = 4 << 10;
+        let keeper = Counting::default();
+        let flow = Flow::new(&keeper, keeper.hold());
+        let data = vec![7_u8; SIZE];
+        let (to, mut guest) = tokio::io::duplex(1 << 10);
+        let pump = flow.pump(&data[..], to, Hold::WhileWriting);
+        let reading = async {
+            // Busy for longer than the idle time, then reads only while it
+            // is kept awake.
+            tokio::time::sleep(IDLE * 3).await;
+            let (mut got, mut buffer) = (0, [0_u8; 256]);
+            loop {
+                let untaken = SIZE - got;
+                assert_eq!(
+                    keeper.held.load(SeqCst),
+                    1,
+                    "asleep, {untaken} bytes untaken"
+                );
+                let n = guest.read(&mut buffer).await.unwrap();
+                if n == 0 {
+                    return got;
+                }
+                got += n;
+            }
+        };
+        let mut watch = pin!(flow.watch(IDLE));
+        let (end, got) = tokio::select! {
+            both = async { tokio::join!(pump, reading) } => both,
+            () = &mut watch => unreachable!("the watch never ends"),
+        };
+        assert_eq!(end.unwrap(), End::Finished);
+        assert_eq!(got, SIZE);
+        assert!(
+            keeper.taken_at.lock().unwrap().is_empty(),
+            "it never let go"
+        );
+        // Silent with nothing waiting, it lets go.
+        tokio::select! {
+            () = tokio::time::sleep(IDLE * 3) => {}
+            () = &mut watch => unreachable!("the watch never ends"),
+        }
+        assert_eq!(keeper.held.load(SeqCst), 0);
     }
 }

@@ -15,9 +15,10 @@ turn), its VM uses a quarter of a processor or moves 4 KiB/s over five
 seconds, a command started through its guest helper still runs, a stream
 into it carries traffic, or a port saw recent traffic. A stream silent both
 ways for 10 minutes (configurable) stops counting, so a forgotten browser
-tab or terminal does not keep a sandbox awake (a write waiting on a reader
-that stopped reading is silence too); any byte it moves after that,
-including the rest of that write, wakes the sandbox again. A quiet command (a long poll,
+tab or terminal does not keep a sandbox awake (a write waiting on a client
+that stopped reading is silence too; one waiting on the guest is not, as
+only a running guest takes it); any byte it moves after that, including the
+rest of that write, wakes the sandbox again. A quiet command (a long poll,
 `sleep 300 && deploy`) uses neither processor nor traffic, so before a
 sandbox sleeps only for being idle the host asks its guest how many such
 commands run (`activity` on the notice port), whatever the processor and
