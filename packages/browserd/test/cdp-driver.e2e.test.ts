@@ -101,6 +101,63 @@ e2e(
   60_000,
 );
 
+e2e(
+  "counts a page's own failed request but not the browser's missing-icon fetch",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-icon-failure-");
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        if (new URL(request.url).pathname === "/") {
+          return new Response(
+            '<!doctype html><title>Icons</title><link rel="icon" href="/brand.png"><img src="/missing.png" alt="Missing">',
+            { headers: { "content-type": "text/html" } },
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `icon_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      binary: await resolvePinnedAgentBrowserBinary(
+        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
+          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
+          : {},
+      ),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: `controller-${randomUUID()}`,
+      runner,
+    });
+    try {
+      let observation = await driver.start(`http://127.0.0.1:${server.port}/`);
+      // The icon fetches (declared and /favicon.ico) settle after load.
+      await Bun.sleep(1_000);
+      observation = await driver.observe(observation.target.id);
+      expect(observation.diagnostics.failedRequestCount).toBe(1);
+      const diagnostics = await driver.debug(observation.target.id);
+      const failed = diagnostics.entries.filter((entry) => entry.kind === "failed_request");
+      expect(failed.map((entry) => new URL(entry.url!).pathname)).toEqual(["/missing.png"]);
+    } finally {
+      await driver.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
 headedE2e(
   "opens a slow-response tab without applying the blank-document creation deadline to navigation",
   async () => {
