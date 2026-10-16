@@ -321,7 +321,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _records = records;
             let mut result = engine.stop(live.vm).await;
             let mut delay = Duration::from_millis(100);
-            while let Err(error) = result {
+            while let Err(error) = &result {
                 tracing::error!(%id, %error, "could not tear down a dead VM; retrying");
                 let Some(spec) = &spec else {
                     break;
@@ -333,6 +333,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
                 delay = (delay * 2).min(TEARDOWN_RETRY);
                 result = engine.clean_up(spec).await;
+            }
+            // Only once the process is gone: its pager may still serve it.
+            // A wake from the same image starts only after this teardown,
+            // so the old hydration never writes beside a new one.
+            if result.is_ok() {
+                live.memory.close().await;
             }
             let _ = events.send(Event::TornDown { id });
         });

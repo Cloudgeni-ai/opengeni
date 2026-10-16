@@ -875,11 +875,17 @@ impl Engine for Firecracker {
         };
         let served = match served {
             Ok(served) => served,
-            Err(error) => {
-                // Nothing can serve its memory: the guest would stall on
-                // its next fault.
+            Err(error) if matches!(error.kind, ErrorKind::MemoryLost | ErrorKind::Fatal) => {
+                // Established that nothing can serve its memory: the guest
+                // would stall on its next fault.
                 self.kill(&vm).await?;
                 return Err(EngineError::caused_by(ErrorKind::MemoryLost, OP, error));
+            }
+            Err(error) => {
+                // The handover may work next time. Until then the VMM keeps
+                // its own fault descriptor and its faults wait: blocked,
+                // not lost.
+                return Err(EngineError::caused_by(ErrorKind::Transient, OP, error));
             }
         };
         // A VMM left be because it did not answer keeps its own fault

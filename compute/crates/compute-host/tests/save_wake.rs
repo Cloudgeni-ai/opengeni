@@ -132,6 +132,78 @@ async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> 
     }
 }
 
+/// An agent running as its own process, as in production: killing it runs
+/// no destructor, so its pager thread dies wherever it was.
+struct Process {
+    client: Client,
+    child: std::process::Child,
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Process {
+    /// Starts `compute-host serve` on the state root `name`, keeping what
+    /// it holds, with `store` if given.
+    async fn start(lab: &Path, name: &str, first_uid: u32, store: Option<&str>) -> Self {
+        let root = lab.join("ht").join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("agent.sock");
+        let _ = std::fs::remove_file(&socket);
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_compute-host"));
+        command
+            .arg("--socket")
+            .arg(&socket)
+            .arg("serve")
+            .arg("--root")
+            .arg(root.join("s"))
+            .arg("--firecracker")
+            .arg(lab.join("bin/firecracker"))
+            .arg("--jailer")
+            .arg(lab.join("bin/jailer"))
+            .arg("--first-uid")
+            .arg(first_uid.to_string())
+            .arg("--host-lock")
+            .arg(root.join("host.lock"))
+            .arg("--kernel")
+            .arg(lab.join("vmlinux"))
+            .arg("--base-image")
+            .arg(lab.join("base.ext4"))
+            .arg("--cgroup")
+            .arg("/sys/fs/cgroup/compute-host-test")
+            .arg("--memory-profile")
+            .arg(profile().to_string())
+            .arg("--busy-cpu-percent")
+            .arg("0");
+        if let Some(store) = store {
+            command.arg("--store").arg(store);
+        }
+        let child = command.spawn().unwrap();
+        let started = Instant::now();
+        while !socket.exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the agent never listened"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Self {
+            client: Client::new(&socket),
+            child,
+        }
+    }
+
+    /// Ends the agent at once with SIGKILL.
+    fn kill(mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+    }
+}
+
 /// Runs `script` in the guest's shell, waking the sandbox first.
 async fn exec(client: &Client, id: Id, script: &str) -> String {
     let (reply, mut stream) = client
@@ -321,19 +393,16 @@ async fn guest_processes_survive_waking_from_object_storage() {
     }
 }
 
-/// Wakes the sandbox through a pager, then lets the agent (and with it the
-/// pager) go while the guest is about to read memory it has not touched
-/// since the wake. The guest must wait rather than read zeros, and a new
-/// agent on the same state must take the pager over so the guest goes on.
-async fn survive_restart<S: Store>(
-    lab: &Path,
-    name: &str,
-    deepest: LevelName,
-    store: impl Fn() -> S,
-) {
+/// Wakes the sandbox through a pager, then kills the agent process (and
+/// with it the pager) while the guest is about to read memory it has not
+/// touched since the wake. The guest must wait rather than read zeros, and
+/// a new agent process on the same state must take the pager over so the
+/// guest goes on.
+async fn survive_restart(lab: &Path, name: &str, deepest: LevelName, store: Option<&str>) {
     const UID: u32 = (1 << 30) + 2000;
     let id: Id = "00000000-0000-4000-8000-0000000000b3".parse().unwrap();
-    let agent = start(lab, name, UID, store()).await;
+    let _ = std::fs::remove_dir_all(lab.join("ht").join(name));
+    let agent = Process::start(lab, name, UID, store).await;
     let config = SandboxConfig {
         vcpus: 2,
         memory_mib: 512,
@@ -360,10 +429,10 @@ echo started=yes"
     );
     let output = exec(&agent.client, id, &later).await;
     assert_eq!(field(&output, "alive"), "yes", "{output}");
-    drop(agent);
+    agent.kill();
     tokio::time::sleep(Duration::from_secs(4)).await;
 
-    let agent = restart(lab, name, UID, store()).await;
+    let agent = Process::start(lab, name, UID, store).await;
     let read = "\
 for _ in $(seq 100); do [ -s /dev/shm/later ] && break; sleep 0.1; done
 echo later=$(cat /dev/shm/later)";
@@ -399,7 +468,7 @@ async fn a_paged_guest_survives_its_agent_restarting() {
     let name = format!("p{}", short());
     if profile().needs_pager() {
         // Every restore on a huge-page host goes through a pager.
-        survive_restart(&lab, &name, LevelName::Saved, || NoStore).await;
+        survive_restart(&lab, &name, LevelName::Saved, None).await;
         return;
     }
     let Ok(url) = std::env::var("COMPUTE_TEST_STORE") else {
@@ -411,8 +480,5 @@ async fn a_paged_guest_survives_its_agent_restarting() {
         eprintln!("skipped: only a chunked store pages memory in");
         return;
     }
-    survive_restart(&lab, &name, LevelName::Remote, || {
-        Chunked::from_url(&url).unwrap().unwrap()
-    })
-    .await;
+    survive_restart(&lab, &name, LevelName::Remote, Some(&url)).await;
 }

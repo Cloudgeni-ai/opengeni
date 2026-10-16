@@ -9,9 +9,10 @@
 //! host deletes its local files only after [`Store::verify`] confirms the
 //! store still holds that copy: the local files may be the only good copy.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::future::ready;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use compute_engine::{CancellationToken, EngineError, ErrorKind};
@@ -244,7 +245,58 @@ impl Directory {
     }
 }
 
-const RECEIPT: &str = "receipt";
+/// The list of a stored copy's files and their hashes; its own hash is the
+/// copy's receipt, so a receipt vouches for the files' contents, not only
+/// their names.
+const CONTENTS: &str = "contents";
+
+/// The contents list for `files` (name and path) as stored in `dir`, with
+/// `made` telling apart copies of the same bytes.
+fn contents(dir: &Path, names: &[&str], made: &str) -> std::io::Result<String> {
+    let mut listed = String::new();
+    for name in names {
+        writeln!(listed, "{name} {}", hash_file(&dir.join(name))?)
+            .map_err(std::io::Error::other)?;
+    }
+    writeln!(listed, "made {made}").map_err(std::io::Error::other)?;
+    Ok(listed)
+}
+
+fn hash_file(path: &Path) -> std::io::Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_reader(fs::File::open(path)?)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Whether the copy in `dir` is the one `receipt` names, with every file
+/// as it was stored.
+fn holds(dir: &Path, receipt: &str) -> std::io::Result<bool> {
+    let listed = match fs::read_to_string(dir.join(CONTENTS)) {
+        Ok(listed) => listed,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if blake3::hash(listed.as_bytes()).to_hex().as_str() != receipt {
+        return Ok(false);
+    }
+    let mut disk = false;
+    for line in listed.lines() {
+        let Some((name, hash)) = line.split_once(' ') else {
+            return Ok(false);
+        };
+        if name == "made" {
+            continue;
+        }
+        disk |= name == "disk";
+        match hash_file(&dir.join(name)) {
+            Ok(found) if found == hash => {}
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(disk)
+}
 
 async fn blocking<T: Send + 'static>(
     operation: &'static str,
@@ -284,22 +336,22 @@ impl Store for Directory {
                 }
             }
             fs::create_dir_all(&staging)?;
-            let mut summary = blake3::Hasher::new();
+            let mut names = Vec::with_capacity(pairs.len());
             for (local, name) in &pairs {
                 if cancel.is_cancelled() {
                     fs::remove_dir_all(&staging)?;
                     return Ok(Archive::Cancelled);
                 }
                 copy_sparse(local, &staging.join(name))?;
-                summary.update(name.as_bytes());
+                names.push(*name);
             }
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_nanos());
-            summary.update(&nanos.to_le_bytes());
-            let receipt = summary.finalize().to_hex().to_string();
-            fs::write(staging.join(RECEIPT), &receipt)?;
-            sync_file(&staging.join(RECEIPT))?;
+            let listed = contents(&staging, &names, &nanos.to_string())?;
+            let receipt = blake3::hash(listed.as_bytes()).to_hex().to_string();
+            fs::write(staging.join(CONTENTS), &listed)?;
+            sync_file(&staging.join(CONTENTS))?;
             sync_file(&staging)?;
             if cancel.is_cancelled() {
                 fs::remove_dir_all(&staging)?;
@@ -321,22 +373,16 @@ impl Store for Directory {
     async fn verify(&self, id: Id, receipt: &Receipt) -> Result<bool, EngineError> {
         let stored = self.dir(id);
         let expected = receipt.0.clone();
-        blocking("verify", move || {
-            Ok(
-                fs::read_to_string(stored.join(RECEIPT)).is_ok_and(|found| found == expected)
-                    && stored.join("disk").exists(),
-            )
-        })
-        .await
+        blocking("verify", move || holds(&stored, &expected)).await
     }
 
     async fn fetch(&self, id: Id, into: &FetchInto) -> Result<FetchedMemory, EngineError> {
         let stored = self.dir(id);
         let into = into.clone();
         blocking("fetch", move || {
-            let staging = into.disk.with_extension("fetching");
-            copy_sparse(&stored.join("disk"), &staging)?;
-            fs::rename(&staging, &into.disk)?;
+            let staging = crate::layout::Staging::beside(&into.disk)?;
+            copy_sparse(&stored.join("disk"), staging.path())?;
+            staging.publish()?;
             if stored.join("profile").exists() {
                 copy_sparse(&stored.join("profile"), &into.profile)?;
             }
@@ -385,12 +431,24 @@ impl Store for Directory {
                 return Ok(None);
             }
             sync_file(&stored)?;
-            // The receipt names the copy, which still holds the same disk.
-            match fs::read_to_string(stored.join(RECEIPT)) {
-                Ok(receipt) => Ok(Some(Receipt(receipt))),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(error),
+            // The copy now holds the same disk without the image: list what
+            // is left, under the same `made`, as a new receipt.
+            let listed = match fs::read_to_string(stored.join(CONTENTS)) {
+                Ok(listed) => listed,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let mut kept = String::with_capacity(listed.len());
+            for line in listed.lines() {
+                if !line.starts_with("state ") && !line.starts_with("memory ") {
+                    kept.push_str(line);
+                    kept.push('\n');
+                }
             }
+            crate::layout::write_atomic(&stored.join(CONTENTS), kept.as_bytes())?;
+            Ok(Some(Receipt(
+                blake3::hash(kept.as_bytes()).to_hex().to_string(),
+            )))
         })
         .await
     }
@@ -426,5 +484,49 @@ mod tests {
         assert!(store.verify(id, &first).await.unwrap());
         assert_eq!(fs::read(store.dir(id).join("disk")).unwrap(), b"first");
         assert!(!store.dir(id).with_extension("staging").exists());
+    }
+
+    #[tokio::test]
+    async fn a_directory_receipt_vouches_for_the_stored_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = SavedFiles {
+            disk: dir.path().join("disk"),
+            memory: Some(SavedImage {
+                state: dir.path().join("state"),
+                memory: dir.path().join("memory"),
+                chunks: None,
+            }),
+            profile: None,
+        };
+        for (path, bytes) in [
+            (&files.disk, &b"disk"[..]),
+            (&files.memory.as_ref().unwrap().state, b"state"),
+            (&files.memory.as_ref().unwrap().memory, b"memory"),
+        ] {
+            fs::write(path, bytes).unwrap();
+        }
+        let store = Directory::new(dir.path().join("store"));
+        let id: Id = "00000000000000000000000000000006".parse().unwrap();
+        let archive = || async {
+            store
+                .archive(id, &files, &CancellationToken::new())
+                .await
+                .unwrap()
+                .stored()
+                .unwrap()
+        };
+        let first = archive().await;
+        assert!(store.verify(id, &first).await.unwrap());
+        // Same names, other bytes: not the copy the receipt names.
+        fs::write(store.dir(id).join("memory"), b"memorX").unwrap();
+        assert!(!store.verify(id, &first).await.unwrap());
+        fs::remove_file(store.dir(id).join("memory")).unwrap();
+        assert!(!store.verify(id, &first).await.unwrap());
+
+        let second = archive().await;
+        assert!(store.verify(id, &second).await.unwrap());
+        let disk_only = store.forget_memory(id).await.unwrap().unwrap();
+        assert!(!store.verify(id, &second).await.unwrap());
+        assert!(store.verify(id, &disk_only).await.unwrap());
     }
 }

@@ -246,6 +246,11 @@ fn paged_marker(paths: &Paths) -> PathBuf {
     paths.dir.join("paged")
 }
 
+/// The pages the paged VM discarded, for a pager taking it over.
+fn discard_record(paths: &Paths) -> PathBuf {
+    paths.dir.join("paged.discards")
+}
+
 /// Whether the sandbox's last VM had its memory served by a pager, which
 /// does not outlive the agent that ran it.
 pub(crate) fn paged(paths: &Paths) -> bool {
@@ -331,8 +336,22 @@ pub(crate) async fn take_over_paging(
     .await
     .map_err(|error| EngineError::io(OP, error))??;
     let (memory, hydration) = served_memory(&images_of(paths), &image, fetcher, &[])?;
-    let paging = Paging::adopt(handed, regions, memory, hydration)
-        .map_err(|error| EngineError::io(OP, error))?;
+    let filling = hydration.clone();
+    let paging = match Paging::adopt(handed, regions, &discard_record(paths), memory, hydration) {
+        Ok(paging) => paging,
+        Err(error) => {
+            if let Some(hydration) = filling {
+                hydration.stop().await;
+            }
+            // Without a matching record of discards, which pages must read
+            // as zeros cannot be known, now or later.
+            let kind = match error.kind() {
+                io::ErrorKind::NotFound | io::ErrorKind::InvalidData => ErrorKind::MemoryLost,
+                _ => ErrorKind::Transient,
+            };
+            return Err(EngineError::caused_by(kind, OP, error));
+        }
+    };
     Ok(LiveMemory {
         base: Base::Unknown,
         paging: Some(paging),
@@ -348,15 +367,10 @@ fn diff_files(paths: &Paths) -> SnapshotFiles {
 }
 
 /// Makes the sandbox's images consistent after a host restart and reports
-/// whether a good current image exists.
-pub(crate) fn recover_images(paths: &Paths) -> bool {
-    match images_of(paths).recover() {
-        Ok(current) => current.is_some(),
-        Err(error) => {
-            tracing::error!(dir = %paths.dir.display(), %error, "could not check memory images");
-            false
-        }
-    }
+/// whether a good current image exists. An error means they could not be
+/// checked, which proves nothing about them.
+pub(crate) fn recover_images(paths: &Paths) -> io::Result<bool> {
+    images_of(paths).recover().map(|current| current.is_some())
 }
 
 /// Points `link` at `target` with a hard link, replacing what was there.
@@ -383,8 +397,12 @@ impl<E: Engine, S: Store> Job<E, S> {
                 }
                 After::New(vm, memory) => Some((vm, memory)),
             };
-            if let Some((vm, _memory)) = ended {
+            if let Some((vm, memory)) = ended {
                 outcome = self.end(vm, outcome).await;
+                // A VM that would not end may still need its pager.
+                if outcome != Outcome::Failed(Failure::Fatal) {
+                    memory.close().await;
+                }
             }
             after = After::NoVm;
         }
@@ -566,7 +584,11 @@ impl<E: Engine, S: Store> Job<E, S> {
             return (Outcome::Failed(Failure::Fatal), After::Kept(live));
         }
         live.stopping.store(true, Ordering::Release);
-        (self.end(live.vm, Outcome::Done).await, After::NoVm)
+        let outcome = self.end(live.vm, Outcome::Done).await;
+        if outcome == Outcome::Done {
+            live.memory.close().await;
+        }
+        (outcome, After::NoVm)
     }
 
     /// Snapshots the paused VM and publishes the result as a new image
@@ -686,7 +708,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             Err(error) => return (io_failure(OP, error), After::NoVm),
         };
         let verified = started.elapsed();
-        let (memory, live_memory) = match self.memory_source(&images, &image) {
+        let (memory, live_memory) = match self.memory_source(&images, &image).await {
             Ok(prepared) => prepared,
             Err(error) => return (failure(&error), After::NoVm),
         };
@@ -699,6 +721,9 @@ impl<E: Engine, S: Store> Job<E, S> {
             state: self.paths.snapshot.state.clone(),
             memory,
         };
+        // On any failure below the VM process is gone before its memory's
+        // pager and hydration are stopped and joined, so a retry never
+        // fills the same file beside them.
         let vm = match self.engine.restore(&self.spec, &files).await {
             Ok(vm) => {
                 self.launches += 1;
@@ -706,16 +731,24 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
             Err(error) if error.kind == ErrorKind::MemoryLost => {
                 let outcome = self.rejected(&images, &image, &live_memory, &error).await;
+                live_memory.close().await;
                 return (outcome, After::NoVm);
             }
-            Err(error) => return (failure(&error), After::NoVm),
+            Err(error) => {
+                live_memory.close().await;
+                return (failure(&error), After::NoVm);
+            }
         };
         let loaded = started.elapsed();
         let archived = self.record.archived;
         // A restore continues the saved execution: the generation stays.
         let running = Change::new().image(false).archived(false);
         if let Err(error) = self.commit(running).await {
-            return (self.end(vm, state_failure(&error)).await, After::NoVm);
+            let outcome = self.end(vm, state_failure(&error)).await;
+            if outcome != Outcome::Failed(Failure::Fatal) {
+                live_memory.close().await;
+            }
+            return (outcome, After::NoVm);
         }
         let committed = started.elapsed();
         #[cfg(target_os = "linux")]
@@ -730,6 +763,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             if ended != Outcome::Done {
                 return (ended, After::NoVm);
             }
+            live_memory.close().await;
             return (
                 self.after_failed_wake(&error, true, archived).await,
                 After::NoVm,
@@ -820,7 +854,7 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// served: mapped straight from the file where the profile allows,
     /// otherwise through a pager, fetching from the store if the image's
     /// memory is still there.
-    fn memory_source(
+    async fn memory_source(
         &self,
         images: &Images,
         image: &Verified,
@@ -853,17 +887,25 @@ impl<E: Engine, S: Store> Job<E, S> {
             let wake = WakeProfile::load(&learned);
             let (memory, hydration) =
                 served_memory(images, image, self.fetcher.as_ref(), &wake.offsets)?;
-            live.paging = Some(
-                Paging::start(
-                    &socket,
-                    memory,
-                    hydration,
-                    wake,
-                    learned,
-                    paged_marker(paths),
-                )
-                .map_err(io)?,
+            let filling = hydration.clone();
+            let paging = Paging::start(
+                &socket,
+                memory,
+                hydration,
+                wake,
+                learned,
+                paged_marker(paths),
+                discard_record(paths),
             );
+            match paging {
+                Ok(paging) => live.paging = Some(paging),
+                Err(error) => {
+                    if let Some(hydration) = filling {
+                        hydration.stop().await;
+                    }
+                    return Err(io(error));
+                }
+            }
             Ok((MemorySource::Pager(socket), live))
         }
         #[cfg(not(target_os = "linux"))]
@@ -881,8 +923,8 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// sandbox has no usable memory image. A failure to read the image is
     /// no verdict on it: the image is kept.
     async fn quarantine_current(&mut self, images: &Images, suspect: &Suspect) {
-        if let Suspect::Io(error) = suspect {
-            tracing::warn!(id = %self.id, %error, "memory image unreadable for now; keeping it");
+        if !suspect.is_verdict() {
+            tracing::warn!(id = %self.id, error = %suspect, "memory image unreadable for now; keeping it");
             return;
         }
         if let Ok(Some(generation)) = images.current()
@@ -1003,6 +1045,7 @@ pub(crate) async fn clear_local(paths: &Paths) -> io::Result<()> {
         remove_if_present(&paths.snapshot.state)?;
         remove_if_present(&paths.snapshot.memory)?;
         remove_if_present(&paged_marker(&paths))?;
+        remove_if_present(&discard_record(&paths))?;
         images_of(&paths).clear()
     })
     .await
@@ -1013,6 +1056,7 @@ fn drop_snapshot(paths: &Paths) {
     let _ = remove_if_present(&paths.snapshot.state);
     let _ = remove_if_present(&paths.snapshot.memory);
     let _ = remove_if_present(&paged_marker(paths));
+    let _ = remove_if_present(&discard_record(paths));
     let _ = remove_if_present(&archive_receipt(paths));
     let files = diff_files(paths);
     let _ = remove_if_present(&files.state);

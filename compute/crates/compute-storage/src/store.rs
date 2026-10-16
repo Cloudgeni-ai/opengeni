@@ -6,9 +6,14 @@
 //!
 //! Chunks are named by their content and shared by every sandbox holding the
 //! same bytes, so a bad chunk would poison all of them. Uploads are verified
-//! (see [`crate::upload`]), every read checks the content hash, and a stored
-//! object found to be bad is moved to `quarantine/v1/` rather than deleted,
-//! so the next upload of the same content repairs it.
+//! (see [`crate::upload`]), and every read checks the content hash.
+//!
+//! A stored object found to be bad is copied to `quarantine/v1/` for
+//! inspection and left where it is: nothing here ever deletes a chunk or a
+//! manifest. The next upload of the same content writes the right bytes over
+//! it. Names include the hash of the stored bytes, so every writer of a name
+//! writes exactly the same bytes: two repairs racing write the same object,
+//! and no operation can undo another's repair.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -193,19 +198,40 @@ impl ChunkStore {
 
     async fn put_immutable(&self, key: &str, bytes: Bytes) -> Result<bool> {
         let path = self.path(key);
-        // An object already stored under this name may be the remains of a
-        // bad write or a corrupted copy. Verify it; if it is bad, move it to
-        // quarantine and store ours once more.
-        for _ in 0..2 {
-            if self.create(&path, &bytes).await? == Created::New {
-                return Ok(true);
-            }
-            if self.holds(&path, &bytes).await? {
-                return Ok(false);
-            }
-            self.quarantine(&path).await?;
+        if self.create(&path, &bytes).await? == Created::New {
+            return Ok(true);
         }
-        Err(Error::Integrity)
+        if self.holds(&path, &bytes).await? {
+            return Ok(false);
+        }
+        // Something else is stored under our name: the remains of a bad
+        // write or a damaged copy. Keep it for inspection and write ours
+        // over it; the name allows no other bytes, so this cannot replace
+        // a good object.
+        self.quarantine(&path).await?;
+        self.replace(&path, &bytes).await?;
+        if self.holds(&path, &bytes).await? {
+            Ok(true)
+        } else {
+            Err(Error::Integrity)
+        }
+    }
+
+    /// Writes `bytes` at `path` whatever is stored there, verified in
+    /// transit as [`Self::create`] is. Only for repairing an object whose
+    /// name allows no other bytes.
+    async fn replace(&self, path: &Path, bytes: &Bytes) -> Result<()> {
+        if let Uploader::Gcs(gcs) = &self.uploader {
+            return gcs.replace(path, bytes).await;
+        }
+        let options = PutOptions {
+            mode: PutMode::Overwrite,
+            ..Default::default()
+        };
+        self.backend
+            .put_opts(path, bytes.clone().into(), options)
+            .await?;
+        Ok(())
     }
 
     /// Creates the object unless one exists. `New` means our bytes are
@@ -252,8 +278,9 @@ impl ChunkStore {
         Ok(result.bytes().await? == *bytes)
     }
 
-    /// Moves the object at `path` under `quarantine/v1/`, keeping it for
-    /// inspection; never deletes it outright.
+    /// Copies the object at `path` under `quarantine/v1/` for inspection.
+    /// The object itself stays: only a write of the bytes its name allows
+    /// replaces it, so a copy repaired meanwhile is never lost.
     async fn quarantine(&self, path: &Path) -> Result<()> {
         // Unique per move, so quarantining the same name twice keeps both.
         static MOVES: AtomicU64 = AtomicU64::new(0);
@@ -272,20 +299,28 @@ impl ChunkStore {
             .join("/");
         let target = self.path(&format!("quarantine/v1/{relative}.{nanos}-{moves}"));
         match self.backend.copy(path, &target).await {
-            Ok(()) => {}
-            Err(object_store::Error::NotFound { .. }) => return Ok(()),
-            Err(error) => return Err(error.into()),
-        }
-        match self.backend.delete(path).await {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Whether the chunk `reference` names is stored at its full length.
+    /// Its bytes were verified when they were stored and are checked again
+    /// by every read; this finds what removing, truncating or failing to
+    /// store it would leave, without downloading it.
+    pub async fn has_chunk(&self, reference: &ChunkRef) -> Result<bool> {
+        reference.validate()?;
+        match self.backend.head(&self.path(&reference.key())).await {
+            Ok(meta) => Ok(meta.size == u64::from(reference.stored_len)),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
             Err(error) => Err(error.into()),
         }
     }
 
     /// Reads and decodes a chunk, checking its length and content hash. A
     /// read that fails the checks is tried once more, since the damage may
-    /// have happened in transit; a chunk that is bad twice is quarantined so
-    /// a later upload of the same content can repair it.
+    /// have happened in transit; a chunk that is bad twice is copied to
+    /// quarantine, and a later upload of the same content repairs it.
     pub async fn get_chunk(&self, reference: &ChunkRef) -> Result<Vec<u8>> {
         reference.validate()?;
         let path = self.path(&reference.key());
@@ -458,19 +493,40 @@ mod tests {
                 "{error}"
             );
             assert!(matches!(error, Error::Truncated { .. } | Error::Integrity));
-            // Moved aside, not deleted.
+            // A copy is kept for inspection.
             assert!(quarantined(&backend).await.contains(&bad));
-            assert!(matches!(
-                backend.head(&path).await,
-                Err(object_store::Error::NotFound { .. })
-            ));
+            // The object itself stays until the right bytes replace it: a
+            // short one is not held, a damaged one is caught by every read.
+            assert_eq!(
+                store.has_chunk(&chunk.reference).await.unwrap(),
+                !truncation
+            );
             // The next upload of the same content repairs the shared chunk.
             assert!(store.put_chunk(&chunk).await.unwrap());
+            assert!(store.has_chunk(&chunk.reference).await.unwrap());
             assert_eq!(
                 store.get_chunk(&chunk.reference).await.unwrap(),
                 vec![7; 65536]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_truncated_chunk_is_not_held() {
+        let backend = Arc::new(InMemory::new());
+        let store = ChunkStore::new(backend.clone(), Path::from("tenant/test"));
+        let chunk = EncodedChunk::encode(&[4; 8192], 1).unwrap();
+        assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+        store.put_chunk(&chunk).await.unwrap();
+        assert!(store.has_chunk(&chunk.reference).await.unwrap());
+        let path = store.path(&chunk.object_key());
+        backend
+            .put(&path, Bytes::from(chunk.bytes[1..].to_vec()).into())
+            .await
+            .unwrap();
+        assert!(!store.has_chunk(&chunk.reference).await.unwrap());
+        backend.delete(&path).await.unwrap();
+        assert!(!store.has_chunk(&chunk.reference).await.unwrap());
     }
 
     #[tokio::test]

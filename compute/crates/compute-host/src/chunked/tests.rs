@@ -4,8 +4,11 @@ use std::sync::Arc;
 use object_store::memory::InMemory;
 use object_store::{ObjectStore, path::Path as ObjectPath};
 
+use super::files::extents;
 use super::*;
+use crate::image::overlaps;
 use crate::protocol::Id;
+use futures::TryStreamExt as _;
 
 fn id(value: &str) -> Id {
     value.parse().unwrap()
@@ -265,7 +268,14 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
     let file = File::open(&snapshot.memory).unwrap();
     let all: Vec<usize> = (0..chunk_count(big)).collect();
     assert_eq!(map, crate::image::hash_chunks(&file, big, &all).unwrap());
-    assert!(!staging_path(&into.disk).exists());
+    let leftovers = fs::read_dir(into.disk.parent().unwrap())
+        .unwrap()
+        .filter(|entry| {
+            let name = entry.as_ref().unwrap().file_name();
+            name.to_string_lossy().contains(".fetching")
+        })
+        .count();
+    assert_eq!(leftovers, 0, "staging files left behind");
 
     store.delete(sandbox).await.unwrap();
     assert!(!store.verify(sandbox, &second).await.unwrap());
@@ -448,7 +458,10 @@ fn hex_hashes_round_trip() {
 #[tokio::test]
 async fn a_cancelled_archive_publishes_nothing_and_keeps_the_earlier_copy() {
     let dir = tempfile::tempdir().unwrap();
-    let saved = files(dir.path(), true);
+    let mut saved = files(dir.path(), true);
+    let profile = dir.path().join("profile");
+    fs::write(&profile, b"[0,1]").unwrap();
+    saved.profile = Some(profile);
     sparse(&saved.disk, 4 * CHUNK_BYTES, &[(0, b"disk")]);
     let image = saved.memory.clone().unwrap();
     sparse(&image.state, 10, &[(0, b"s")]);
@@ -487,4 +500,51 @@ async fn a_cancelled_archive_publishes_nothing_and_keeps_the_earlier_copy() {
         .unwrap();
     assert_ne!(first, second);
     assert!(store.verify(sandbox, &second).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_copy_missing_a_chunk_fails_verification_until_archived_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let saved = files(dir.path(), true);
+    sparse(&saved.disk, 2 * CHUNK_BYTES, &[(0, b"disk")]);
+    let image = saved.memory.clone().unwrap();
+    sparse(&image.state, 10, &[(0, b"s")]);
+    sparse(&image.memory, 3 * CHUNK_BYTES, &[(CHUNK_BYTES, b"memory")]);
+    let backend = Arc::new(InMemory::new());
+    let store = Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")));
+    let sandbox = id("00000000000000000000000000000005");
+    let archive = |store: &Chunked| {
+        let store = store.clone();
+        let saved = saved.clone();
+        async move {
+            store
+                .archive(sandbox, &saved, &CancellationToken::new())
+                .await
+                .unwrap()
+                .stored()
+                .unwrap()
+        }
+    };
+    let first = archive(&store).await;
+    assert!(store.verify(sandbox, &first).await.unwrap());
+
+    // Lose the memory chunk: the manifests are all there, the copy is not.
+    let memory_chunk = EncodedChunk::encode(
+        &{
+            let mut plain = vec![0; usize::try_from(CHUNK_BYTES).unwrap()];
+            plain[..6].copy_from_slice(b"memory");
+            plain
+        },
+        ZSTD_LEVEL,
+    )
+    .unwrap();
+    let key = ObjectPath::from(format!("t/{}", memory_chunk.object_key()));
+    backend.delete(&key).await.unwrap();
+    assert!(!store.verify(sandbox, &first).await.unwrap());
+
+    // The same content archived again stores the chunk once more instead
+    // of naming the lost one.
+    let second = archive(&store).await;
+    assert!(store.verify(sandbox, &second).await.unwrap());
+    backend.head(&key).await.unwrap();
 }

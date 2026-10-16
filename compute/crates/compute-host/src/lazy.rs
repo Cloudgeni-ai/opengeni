@@ -38,7 +38,7 @@ use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -78,6 +78,13 @@ const CACHE_BYTES: usize = 1 << 30;
 const RETRY_FOR: Duration = Duration::from_secs(60);
 /// The longest pause between two tries of a chunk.
 const RETRY_DELAY_MAX: Duration = Duration::from_secs(2);
+/// How long one try at a chunk may take once it has its transfer slot.
+/// Every slot is held for at most this long, so a try waiting for one
+/// waits a bounded time too.
+const FETCH_DEADLINE: Duration = Duration::from_secs(30);
+/// Blocking writes into one memory file that can be under way at once:
+/// more than one VM's fetches can ever start.
+const WRITERS: u32 = 1024;
 /// How long a pager waits for its VMM to connect.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the first-touch order is recorded after a wake. A VM that
@@ -119,13 +126,53 @@ impl Unavailable {
 
 /// Fetches chunks for every VM on the host: one request per chunk however
 /// many VMs want it at once, and a bounded cache of recent chunks.
+///
+/// Each request runs as a task of its own, which releases its transfer
+/// slot when it ends, and is aborted once nobody waits for it any more, so
+/// requests a cancelled VM left behind never hold the host's slots.
 #[derive(Debug)]
 pub(crate) struct Fetcher {
     chunks: ChunkStore,
-    inflight: Mutex<HashMap<String, Shared<BoxFuture<'static, Fetched>>>>,
-    cache: Mutex<Cache>,
+    inflight: Arc<Mutex<HashMap<String, Inflight>>>,
+    cache: Arc<Mutex<Cache>>,
+    /// Tells requests for the same chunk apart over time.
+    requests: AtomicU64,
     all: Arc<Semaphore>,
     background: Arc<Semaphore>,
+}
+
+/// A chunk request under way and how many wait for it.
+#[derive(Debug)]
+struct Inflight {
+    id: u64,
+    fetch: Shared<BoxFuture<'static, Fetched>>,
+    waiters: usize,
+    task: tokio::task::AbortHandle,
+}
+
+/// One caller waiting for an [`Inflight`] request; the last one to go
+/// before the request ends aborts it.
+struct Waiting<'a> {
+    inflight: &'a Mutex<HashMap<String, Inflight>>,
+    key: &'a str,
+    id: u64,
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        let mut inflight = lock(self.inflight);
+        let Some(entry) = inflight
+            .get_mut(self.key)
+            .filter(|entry| entry.id == self.id)
+        else {
+            return;
+        };
+        entry.waiters -= 1;
+        if entry.waiters == 0 {
+            entry.task.abort();
+            inflight.remove(self.key);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -158,8 +205,9 @@ impl Fetcher {
     pub fn new(chunks: ChunkStore) -> Self {
         Self {
             chunks,
-            inflight: Mutex::default(),
-            cache: Mutex::default(),
+            inflight: Arc::default(),
+            cache: Arc::default(),
+            requests: AtomicU64::new(0),
             all: Arc::new(Semaphore::new(FETCHES_PER_HOST)),
             background: Arc::new(Semaphore::new(BACKGROUND_PER_HOST)),
         }
@@ -168,41 +216,87 @@ impl Fetcher {
     /// The plain bytes of `reference`, checked against its hashes.
     async fn get(&self, reference: &ChunkRef, background: bool) -> Fetched {
         let key = reference.key();
-        if let Some(chunk) = lock(&self.cache).chunks.get(&key) {
-            return Ok(Arc::clone(chunk));
+        let cached = || lock(&self.cache).chunks.get(&key).cloned();
+        if let Some(chunk) = cached() {
+            return Ok(chunk);
         }
         let _slot = if background {
             Some(self.background.acquire().await)
         } else {
             None
         };
-        let shared = {
-            let mut inflight = lock(&self.inflight);
-            inflight
-                .entry(key.clone())
-                .or_insert_with(|| {
-                    let chunks = self.chunks.clone();
-                    let all = Arc::clone(&self.all);
-                    let reference = reference.clone();
-                    async move {
-                        let _permit = all.acquire_owned().await;
-                        chunks
-                            .get_chunk(&reference)
-                            .await
-                            .map(Arc::new)
-                            .map_err(Arc::new)
-                    }
-                    .boxed()
-                    .shared()
-                })
-                .clone()
-        };
-        let result = shared.await;
-        lock(&self.inflight).remove(&key);
-        if let Ok(chunk) = &result {
-            lock(&self.cache).insert(key, Arc::clone(chunk));
+        // Another VM may have brought it in meanwhile.
+        if let Some(chunk) = cached() {
+            return Ok(chunk);
         }
-        result
+        let (id, fetch) = {
+            let mut inflight = lock(&self.inflight);
+            let entry = inflight
+                .entry(key.clone())
+                .or_insert_with(|| self.request(&key, reference));
+            entry.waiters += 1;
+            (entry.id, entry.fetch.clone())
+        };
+        let _waiting = Waiting {
+            inflight: &self.inflight,
+            key: &key,
+            id,
+        };
+        fetch.await
+    }
+
+    /// Starts fetching `reference`, stored under `key`.
+    fn request(&self, key: &str, reference: &ChunkRef) -> Inflight {
+        let id = self.requests.fetch_add(1, Ordering::Relaxed);
+        let (chunks, all, reference) = (
+            self.chunks.clone(),
+            Arc::clone(&self.all),
+            reference.clone(),
+        );
+        let (inflight, cache, key) = (
+            Arc::clone(&self.inflight),
+            Arc::clone(&self.cache),
+            key.to_owned(),
+        );
+        let task = tokio::spawn(async move {
+            let fetched = match all.acquire_owned().await {
+                Ok(_slot) => {
+                    match tokio::time::timeout(FETCH_DEADLINE, chunks.get_chunk(&reference)).await {
+                        Ok(fetched) => fetched.map(Arc::new).map_err(Arc::new),
+                        Err(_) => Err(Arc::new(compute_storage::Error::Transfer(format!(
+                            "no answer within {FETCH_DEADLINE:?}"
+                        )))),
+                    }
+                }
+                Err(error) => Err(Arc::new(compute_storage::Error::Transfer(
+                    error.to_string(),
+                ))),
+            };
+            if let Ok(chunk) = &fetched {
+                lock(&cache).insert(key.clone(), Arc::clone(chunk));
+            }
+            let mut inflight = lock(&inflight);
+            if inflight.get(&key).is_some_and(|entry| entry.id == id) {
+                inflight.remove(&key);
+            }
+            fetched
+        });
+        let abort = task.abort_handle();
+        let fetch = async move {
+            task.await.unwrap_or_else(|error| {
+                Err(Arc::new(compute_storage::Error::Transfer(format!(
+                    "chunk request ended: {error}"
+                ))))
+            })
+        }
+        .boxed()
+        .shared();
+        Inflight {
+            id,
+            fetch,
+            waiters: 0,
+            task: abort,
+        }
     }
 }
 
@@ -235,6 +329,10 @@ pub(crate) struct Hydration {
     present: Vec<AtomicBool>,
     requested: Vec<AtomicU8>,
     missing: AtomicUsize,
+    /// Taken by the one fetch of a chunk that stores it: a chunk can be
+    /// fetched twice at once (hydration's, then a demand's), but is written
+    /// and counted once.
+    claimed: Vec<AtomicBool>,
     /// Pages the working-set pack filled before the VM started: readable
     /// at once and never written again.
     filled: PageSet,
@@ -245,6 +343,11 @@ pub(crate) struct Hydration {
     done: watch::Sender<Option<Result<(), Unavailable>>>,
     /// Set when the image is going away: fetching stops.
     cancelled: compute_engine::CancellationToken,
+    /// A permit for each write into the memory file under way, so stopping
+    /// can wait for writes that started before it.
+    writers: Arc<Semaphore>,
+    /// The task that fetches and writes; joined when stopping.
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Hydration {
@@ -291,12 +394,15 @@ impl Hydration {
             present,
             requested: (0..count).map(|_| AtomicU8::new(NOT_ASKED)).collect(),
             missing: AtomicUsize::new(missing),
+            claimed: (0..count).map(|_| AtomicBool::new(false)).collect(),
             filled,
             arrived,
             requests,
             failure: Mutex::new(None),
             done,
             cancelled: compute_engine::CancellationToken::new(),
+            writers: Arc::new(Semaphore::new(WRITERS as usize)),
+            task: Mutex::new(None),
         });
         if missing == 0 {
             hydration.done.send_replace(Some(Ok(())));
@@ -306,7 +412,8 @@ impl Hydration {
                 hydration.ask(usize::try_from(offset / CHUNK_BYTES).unwrap_or(0), false);
             }
         }
-        tokio::spawn(fill(fetcher, Arc::clone(&hydration), receiver));
+        let task = tokio::spawn(fill(fetcher, Arc::clone(&hydration), receiver));
+        *lock(&hydration.task) = Some(task);
         Ok(hydration)
     }
 
@@ -337,8 +444,9 @@ impl Hydration {
     }
 
     /// Stops filling: the image is going away. Anyone waiting for the fill
-    /// to finish is told it will not.
-    pub fn cancel(&self) {
+    /// to finish is told it will not. Writes may still be under way: see
+    /// [`Self::stop`].
+    fn cancel(&self) {
         self.cancelled.cancel();
         self.done.send_if_modified(|done| {
             if done.is_some() {
@@ -347,6 +455,30 @@ impl Hydration {
             *done = Some(Err(Unavailable::passing("filling cancelled".to_owned())));
             true
         });
+    }
+
+    /// Stops filling for good and returns once nothing writes into the
+    /// memory file any more: the fetch task has ended and every write it
+    /// started has finished. Only then may another hydration of the same
+    /// file start, or the file go.
+    pub async fn stop(&self) {
+        self.cancel();
+        let task = lock(&self.task).take();
+        if let Some(task) = task {
+            // An error means the task panicked or was aborted: ended too.
+            let _ = task.await;
+        }
+        // Writes run on blocking threads that outlive the task's futures;
+        // each holds a permit until it is done.
+        if let Ok(all) = self.writers.acquire_many(WRITERS).await {
+            all.forget();
+        }
+        self.writers.close();
+    }
+
+    /// Takes the right to store chunk `index`, unless another fetch has.
+    fn claim(&self, index: usize) -> bool {
+        !self.claimed[index].swap(true, Ordering::AcqRel)
     }
 
     /// Writes chunk `index`, fetched as `plain`, around the pages already
@@ -362,6 +494,9 @@ impl Hydration {
             return Err(Unavailable::permanent(format!(
                 "chunk {index} does not match the image's chunk map"
             )));
+        }
+        if !self.claim(index) {
+            return Ok(());
         }
         let failed = |error: io::Error| Unavailable::passing(format!("chunk {index}: {error}"));
         let within = |at: u64| usize::try_from(at - range.start).unwrap_or(usize::MAX);
@@ -392,6 +527,9 @@ impl Hydration {
     /// Checks chunk `index`, which the pack filled entirely, against the
     /// image's chunk map in place, instead of fetching it.
     fn check_filled(&self, index: usize) -> Result<(), Unavailable> {
+        if !self.claim(index) {
+            return Ok(());
+        }
         let range = chunk_range(index, self.len);
         let mut held = vec![0; usize::try_from(range.end - range.start).unwrap_or(0)];
         self.file
@@ -427,6 +565,10 @@ impl Hydration {
 }
 
 /// Fetches what `hydration` asks for, demand first, and then the rest.
+///
+/// A chunk hydration has queued (it may wait behind other VMs' background
+/// fetches for a slot) is fetched again in the foreground when a fault
+/// asks for it; whichever fetch comes back first stores it.
 async fn fill(
     fetcher: Arc<Fetcher>,
     hydration: Arc<Hydration>,
@@ -435,7 +577,9 @@ async fn fill(
     let mut urgent = VecDeque::new();
     let mut asked = VecDeque::new();
     let mut sweep = 0_usize;
-    let mut inflight = vec![false; hydration.refs.len()];
+    let count = hydration.refs.len();
+    let mut in_foreground = vec![false; count];
+    let mut in_background = vec![false; count];
     let mut foreground = FuturesUnordered::new();
     let mut background = FuturesUnordered::new();
     let mut open = true;
@@ -444,23 +588,29 @@ async fn fill(
             return;
         }
         while foreground.len() < FOREGROUND_PER_VM {
-            let Some(Request { index, .. }) = urgent.pop_front().or_else(|| asked.pop_front())
+            let Some(Request { index, urgent }) = urgent.pop_front().or_else(|| asked.pop_front())
             else {
                 break;
             };
-            if inflight[index] || hydration.present[index].load(Ordering::Acquire) {
+            if in_foreground[index]
+                || (in_background[index] && !urgent)
+                || hydration.present[index].load(Ordering::Acquire)
+            {
                 continue;
             }
-            inflight[index] = true;
+            in_foreground[index] = true;
             foreground.push(fetch_one(&fetcher, &hydration, index, false));
         }
-        while background.len() < BACKGROUND_PER_VM && sweep < inflight.len() {
+        while background.len() < BACKGROUND_PER_VM && sweep < count {
             let index = sweep;
             sweep += 1;
-            if inflight[index] || hydration.present[index].load(Ordering::Acquire) {
+            if in_foreground[index]
+                || in_background[index]
+                || hydration.present[index].load(Ordering::Acquire)
+            {
                 continue;
             }
-            inflight[index] = true;
+            in_background[index] = true;
             background.push(fetch_one(&fetcher, &hydration, index, true));
         }
         tokio::select! {
@@ -469,7 +619,7 @@ async fn fill(
             request = requests.recv(), if open => match request {
                 Some(request) if request.urgent => {
                     urgent.push_back(request);
-                    let last = (request.index + READAHEAD_CHUNKS).min(inflight.len().saturating_sub(1));
+                    let last = (request.index + READAHEAD_CHUNKS).min(count.saturating_sub(1));
                     for index in request.index + 1..=last {
                         asked.push_back(Request { index, urgent: false });
                     }
@@ -484,13 +634,13 @@ async fn fill(
                 }
             },
             Some((index, result)) = foreground.next(), if !foreground.is_empty() => {
-                inflight[index] = false;
+                in_foreground[index] = false;
                 if let Err(reason) = result {
                     hydration.fail(reason);
                 }
             }
             Some((index, result)) = background.next(), if !background.is_empty() => {
-                inflight[index] = false;
+                in_background[index] = false;
                 if let Err(reason) = result {
                     hydration.fail(reason);
                 }
@@ -523,31 +673,16 @@ fn fetch_one(
             return (index, Ok(()));
         };
         if hydration.filled.covers(chunk_range(index, hydration.len)) {
-            let checking = Arc::clone(&hydration);
-            let checked = tokio::task::spawn_blocking(move || checking.check_filled(index))
-                .await
-                .unwrap_or_else(|error| {
-                    Err(Unavailable::passing(format!(
-                        "checking chunk {index}: {error}"
-                    )))
-                });
-            return (index, checked);
+            let checked = write(&hydration, move |hydration| hydration.check_filled(index));
+            return (index, checked.await);
         }
         let started = tokio::time::Instant::now();
         let mut delay = Duration::from_millis(50);
         loop {
             match fetcher.get(&reference, background).await {
                 Ok(plain) => {
-                    let hydration = Arc::clone(&hydration);
-                    let stored =
-                        tokio::task::spawn_blocking(move || hydration.store(index, &plain))
-                            .await
-                            .unwrap_or_else(|error| {
-                                Err(Unavailable::passing(format!(
-                                    "storing chunk {index}: {error}"
-                                )))
-                            });
-                    return (index, stored);
+                    let stored = write(&hydration, move |hydration| hydration.store(index, &plain));
+                    return (index, stored.await);
                 }
                 Err(error) if error.is_permanent() => {
                     return (
@@ -568,6 +703,34 @@ fn fetch_one(
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(RETRY_DELAY_MAX);
         }
+    }
+}
+
+/// Runs `body`, which writes into the memory file or marks chunks
+/// present, on a blocking thread, holding a writer permit throughout so
+/// [`Hydration::stop`] can wait for it. Nothing runs once stopping began.
+fn write<F>(
+    hydration: &Arc<Hydration>,
+    body: F,
+) -> impl Future<Output = Result<(), Unavailable>> + use<F>
+where
+    F: FnOnce(&Hydration) -> Result<(), Unavailable> + Send + 'static,
+{
+    let hydration = Arc::clone(hydration);
+    async move {
+        let stopped = || Unavailable::passing("filling stopped".to_owned());
+        if hydration.cancelled.is_cancelled() {
+            return Err(stopped());
+        }
+        let Ok(permit) = Arc::clone(&hydration.writers).try_acquire_owned() else {
+            return Err(stopped());
+        };
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            body(hydration.as_ref())
+        })
+        .await
+        .unwrap_or_else(|error| Err(Unavailable::passing(format!("writing memory: {error}"))))
     }
 }
 
@@ -691,7 +854,8 @@ impl Paging {
     /// `memory` to the first VMM that connects, prefetching `profile`'s
     /// pages first. The order the guest then touches pages is learned into
     /// `learned`. Once the VMM has connected, its memory layout is written
-    /// to `layout`, so another pager can take over if this one goes.
+    /// to `layout`, so another pager can take over if this one goes, and
+    /// the pages the VM discards are recorded in `discards` for that pager.
     pub fn start(
         socket: &Path,
         memory: Memory,
@@ -699,15 +863,19 @@ impl Paging {
         profile: WakeProfile,
         learned: PathBuf,
         layout: PathBuf,
+        discards: PathBuf,
     ) -> io::Result<Self> {
         let _ = std::fs::remove_file(socket);
         let listener = std::os::unix::net::UnixListener::bind(socket)?;
         listener.set_nonblocking(true)?;
         let socket = socket.to_owned();
         Self::spawn(hydration, move |stop, prefetched| {
-            let result = serve(
-                &listener, memory, &profile, &learned, &layout, stop, prefetched,
-            );
+            let files = Files {
+                learned: &learned,
+                layout: &layout,
+                discards: &discards,
+            };
+            let result = serve(&listener, memory, &profile, &files, stop, prefetched);
             let _ = std::fs::remove_file(&socket);
             result
         })
@@ -715,17 +883,25 @@ impl Paging {
 
     /// Takes over serving `memory` to a running VM whose pager has gone,
     /// through what its engine handed over and the `regions` its first
-    /// pager recorded. Nothing is learned: what this VM touches next is no
-    /// wake's working set.
+    /// pager recorded, honouring the discards recorded in `discards`.
+    /// Nothing is learned: what this VM touches next is no wake's working
+    /// set.
     pub fn adopt(
         handed: compute_engine::PagedMemory,
         regions: Vec<compute_pager::Mapping>,
+        discards: &Path,
         memory: Memory,
         hydration: Option<Arc<Hydration>>,
     ) -> io::Result<Self> {
         use compute_pager::linux::Pager;
 
-        let mut pager = Pager::adopt(handed.uffd, regions, handed.vmm, memory, RECORD_FOR)?;
+        // Without the record, which pages must read as zeros is unknown.
+        let record = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(discards)?;
+        let mut pager = Pager::adopt(handed.uffd, regions, handed.vmm, memory, RECORD_FOR)?
+            .keep_discards(record)?;
         Self::spawn(hydration, move |stop, prefetched| {
             let result = pager.run(stop, |progress| {
                 if let compute_pager::linux::Progress::Prefetched = progress {
@@ -768,12 +944,13 @@ impl Paging {
     }
 
     /// Stops serving and filling for good, for a VM that has ended and whose
-    /// files are about to go, and returns once the pager thread has ended,
-    /// so nothing writes into the sandbox's directory any more.
+    /// files are about to go (or whose image another wake will serve), and
+    /// returns once the pager thread and hydration have ended, so nothing
+    /// writes into the sandbox's directory any more.
     pub async fn close(&self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(hydration) = &self.hydration {
-            hydration.cancel();
+            hydration.stop().await;
         }
         let mut ended = self.ended.clone();
         // An error means the thread is gone, which is just as good.
@@ -805,12 +982,19 @@ impl Drop for Paging {
     }
 }
 
+/// Where a pager keeps what the next wake, or another pager of the same
+/// VM, needs.
+struct Files<'a> {
+    learned: &'a Path,
+    layout: &'a Path,
+    discards: &'a Path,
+}
+
 fn serve(
     listener: &std::os::unix::net::UnixListener,
     memory: Memory,
     profile: &WakeProfile,
-    learned: &Path,
-    layout: &Path,
+    files: &Files<'_>,
     stop: &AtomicBool,
     prefetched: &watch::Sender<bool>,
 ) -> io::Result<()> {
@@ -830,10 +1014,13 @@ fn serve(
         }
     };
     peer.set_nonblocking(false)?;
-    let mut pager = Pager::new(peer, memory, RECORD_FOR)?;
+    // Fresh for this VM, and in place before the layout that lets another
+    // pager take over.
+    let record = std::fs::File::create(files.discards)?;
+    let mut pager = Pager::new(peer, memory, RECORD_FOR)?.keep_discards(record)?;
     match serde_json::to_vec(pager.layout().regions()) {
         Ok(regions) => {
-            if let Err(error) = crate::layout::write_atomic(layout, &regions) {
+            if let Err(error) = crate::layout::write_atomic(files.layout, &regions) {
                 tracing::warn!(%error, "memory layout not recorded; a restarted agent cannot take this VM over");
             }
         }
@@ -859,7 +1046,7 @@ fn serve(
         Progress::Recorded(touched) => {
             let next = profile.learn(touched, page_size);
             if let Ok(bytes) = serde_json::to_vec(&next) {
-                let _ = crate::layout::write_atomic(learned, &bytes);
+                let _ = crate::layout::write_atomic(files.learned, &bytes);
             }
         }
     });

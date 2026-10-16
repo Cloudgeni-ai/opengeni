@@ -358,11 +358,28 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     return Err(HostError::Io("the recorded local disk is missing".into()));
                 }
                 let mut image = record.image;
-                if image && !crate::step::recover_images(paths) {
-                    tracing::warn!(id = %record.id, "recorded memory image is missing; its programs are lost");
-                    let lost = Change::new().image(false);
-                    self.records.commit(record.id, record.fence(), lost).await?;
-                    image = false;
+                if image {
+                    let images = paths.clone();
+                    let recovered =
+                        tokio::task::spawn_blocking(move || crate::step::recover_images(&images))
+                            .await
+                            .map_err(|error| HostError::Io(error.to_string()))?;
+                    match recovered {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::warn!(id = %record.id, "recorded memory image is missing; its programs are lost");
+                            let lost = Change::new().image(false);
+                            self.records.commit(record.id, record.fence(), lost).await?;
+                            image = false;
+                        }
+                        // The record keeps vouching for the image: a wake
+                        // checks it again, and never boots fresh over it.
+                        Err(error) => tracing::warn!(
+                            id = %record.id,
+                            %error,
+                            "memory image unreadable for now; keeping it"
+                        ),
+                    }
                 }
                 Ok(if record.archived {
                     State::new(Level::Archived, Durability::Remote, image)
