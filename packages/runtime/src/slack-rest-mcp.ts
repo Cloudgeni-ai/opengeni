@@ -3,6 +3,9 @@ import {
   OFFICIAL_SLACK_MCP_URL,
   SLACK_REST_API_BASE,
   SLACK_CONVERSATION_READ_SCOPE_BY_TYPE,
+  SLACK_PRIVATE_FILE_ORIGIN,
+  SLACK_PRIVATE_FILE_PATH_PREFIX,
+  isSlackPrivateFileUrl,
   normalizeSlackScopes,
   slackRestMcpToolsForScopes,
 } from "@opengeni/contracts/slack-rest-mcp";
@@ -13,8 +16,17 @@ import {
   type LocalMcpBridgeDescriptor,
   type LocalMcpBridgeServer,
 } from "@opengeni/capabilities";
-import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
+import {
+  readResponseBodyBounded,
+  readResponseJsonBounded,
+  type FetchLike,
+} from "@opengeni/network";
 import type { MCPServer } from "@openai/agents";
+import { isRoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
+import {
+  connectorAttachmentFileName,
+  type ConnectorFileMaterializationRequest,
+} from "./connector-attachments";
 
 export {
   OFFICIAL_SLACK_MCP_URL,
@@ -24,6 +36,11 @@ export {
 
 const RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
+/** Files are buffered once in the worker before exact-byte materialization. */
+export const SLACK_FILE_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024;
+const FILE_DOWNLOAD_TIMEOUT_MS = 120_000;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const MEDIA_TYPE_PATTERN = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/iu;
 const AUTH_ERRORS = new Set([
   "invalid_auth",
   "not_authed",
@@ -86,6 +103,8 @@ export type SlackRestMcpServerOptions = {
   onAuthNeeded?: (payload: ToolAuthNeededPayload) => void | Promise<void>;
   onResolvedConnectionId?: (connectionId: string) => void;
   fetchImpl?: FetchLike;
+  /** Private host callback; file bytes and transfer URLs never enter model results. */
+  materializeConnectorFile?: (request: ConnectorFileMaterializationRequest) => Promise<unknown>;
 };
 export type SlackRestMcpBridgeConfig = {
   readonly url: string;
@@ -100,7 +119,10 @@ export const SLACK_REST_MCP_BRIDGE_DESCRIPTOR = defineLocalMcpBridgeDescriptor({
   authority: "connection",
   toolSurface: "static_reviewed",
   mutationReplay: "safe_reads_only",
-  destinations: [{ origin: "https://slack.com", pathPrefix: "/api/" }],
+  destinations: [
+    { origin: "https://slack.com", pathPrefix: "/api/" },
+    { origin: SLACK_PRIVATE_FILE_ORIGIN, pathPrefix: SLACK_PRIVATE_FILE_PATH_PREFIX },
+  ],
 });
 
 export function isOfficialSlackMcpConfig(
@@ -147,14 +169,29 @@ export class SlackRestMcpServer implements LocalMcpBridgeServer {
     return slackRestMcpToolsForScopes(credential.grantedScopes!);
   }
 
-  async callTool(toolName: string, args: Record<string, unknown> | null): Promise<any> {
-    return (await this.callToolResult(toolName, args)).content;
+  async callTool(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<any> {
+    return (await this.callToolResult(toolName, args, meta, options)).content;
   }
 
-  async callToolResult(toolName: string, args: Record<string, unknown> | null): Promise<any> {
+  async callToolResult(
+    toolName: string,
+    args: Record<string, unknown> | null,
+    meta?: Record<string, unknown> | null,
+    options?: { signal?: AbortSignal },
+  ): Promise<any> {
     try {
       // Validate the complete input before even an identity request is dispatched.
       const plan = requestPlan(toolName, args ?? {});
+      const operationId = toolName === "slack_download_file" ? trustedOperationId(meta) : undefined;
+      if (toolName === "slack_download_file" && !this.options.materializeConnectorFile)
+        throw new SlackInputError(
+          "Slack file download requires an available agent filesystem in this chat.",
+        );
       await this.verifyIdentity(toolName);
       const credential = await this.resolve(plan.method, toolName, false);
       if (
@@ -185,7 +222,10 @@ export class SlackRestMcpServer implements LocalMcpBridgeServer {
         plan.params.types = allowed.join(",");
       }
       const payload = await this.request(plan, credential, toolName, false);
-      const output = projectResult(toolName, payload);
+      const output =
+        toolName === "slack_download_file"
+          ? await this.downloadFile(String(plan.params.file), payload, operationId!, options)
+          : projectResult(toolName, payload);
       return {
         content: [{ type: "text", text: JSON.stringify(output) }],
         structuredContent: output,
@@ -193,7 +233,11 @@ export class SlackRestMcpServer implements LocalMcpBridgeServer {
     } catch (error) {
       // The ordinary connector lifecycle must settle an ambiguous write as
       // uncertain, rather than treating a returned tool error as completed.
-      if (error instanceof SlackMutationOutcomeUnknownError) throw error;
+      if (
+        error instanceof SlackMutationOutcomeUnknownError ||
+        isRoutingMutationOutcomeUnknownError(error)
+      )
+        throw error;
       const message =
         error instanceof SlackInputError ||
         error instanceof SlackProviderError ||
@@ -220,12 +264,13 @@ export class SlackRestMcpServer implements LocalMcpBridgeServer {
     method: string,
     toolName: string | undefined,
     forceRefresh: boolean,
+    destinationUrl = `${SLACK_REST_API_BASE}${method}`,
   ): Promise<Credential> {
     const result = await this.options.resolveCredential({
       workspaceId: this.options.workspaceId,
       serverId: this.options.serverId,
       connectionRef: this.options.connectionRef,
-      destinationUrl: `${SLACK_REST_API_BASE}${method}`,
+      destinationUrl,
       forceRefresh,
       ...(toolName ? { toolName } : {}),
       ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
@@ -274,6 +319,172 @@ export class SlackRestMcpServer implements LocalMcpBridgeServer {
       userId: payload.user_id,
       connectionId: credential.connectionId,
     };
+  }
+
+  /**
+   * Fetches the private bytes named by a files.info result with the same user
+   * token, then hands them to the host to materialize as a connector
+   * attachment. Only the resulting sandbox path reaches the model.
+   */
+  private async downloadFile(
+    fileId: string,
+    payload: Payload,
+    operationId: string,
+    options: { signal?: AbortSignal } | undefined,
+  ): Promise<Record<string, unknown>> {
+    const toolName = "slack_download_file";
+    const file = payload.file;
+    if (!file || typeof file !== "object" || Array.isArray(file))
+      throw new SlackProviderError("Slack returned no file metadata.");
+    const record = file as Record<string, unknown>;
+    if (record.id !== fileId) throw new SlackProviderError("Slack returned a different file.");
+    if (record.is_external === true || record.mode === "external")
+      throw new SlackInputError(
+        "This Slack file is a link to an external service, so Slack has no copy to download.",
+      );
+    if (record.mode === "tombstone") throw new SlackInputError("This Slack file was deleted.");
+    const declaredSize = typeof record.size === "number" ? record.size : undefined;
+    if (declaredSize !== undefined && declaredSize > SLACK_FILE_DOWNLOAD_MAX_BYTES)
+      throw new SlackInputError("Slack file exceeds the 50 MiB download limit.");
+    const rawUrl =
+      typeof record.url_private_download === "string"
+        ? record.url_private_download
+        : typeof record.url_private === "string"
+          ? record.url_private
+          : undefined;
+    if (!rawUrl || !isSlackPrivateFileUrl(rawUrl))
+      throw new SlackProviderError("Slack did not provide a downloadable copy of this file.");
+    const response = await this.fetchFile(new URL(rawUrl), options?.signal, 1);
+    const declaredType = typeof record.mimetype === "string" ? record.mimetype.trim() : "";
+    const servedType = normalizedContentType(response.headers.get("content-type"));
+    if (servedType === "text/html" && declaredType.toLowerCase() !== "text/html") {
+      // Slack answers a token without access to the file with its sign-in page.
+      await response.body?.cancel().catch(() => undefined);
+      throw new SlackProviderError(
+        "Slack did not return the file. The connected account may not have access to it.",
+      );
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = await readResponseBodyBounded(
+        response,
+        SLACK_FILE_DOWNLOAD_MAX_BYTES,
+        "Slack file download",
+        options?.signal ? { signal: options.signal } : {},
+      );
+    } catch {
+      throw new SlackProviderError("Slack file download could not be completed or exceeds 50 MiB.");
+    }
+    const mediaType = MEDIA_TYPE_PATTERN.test(declaredType)
+      ? declaredType.toLowerCase()
+      : MEDIA_TYPE_PATTERN.test(servedType)
+        ? servedType
+        : "application/octet-stream";
+    const identity = this.identity!;
+    const fileName = connectorAttachmentFileName(
+      typeof record.name === "string" && record.name.trim()
+        ? record.name
+        : typeof record.title === "string"
+          ? record.title
+          : "",
+      `${fileId}.bin`,
+    );
+    let materialized: unknown;
+    try {
+      materialized = await this.options.materializeConnectorFile!({
+        serverId: this.options.serverId,
+        toolName,
+        connectionId: identity.connectionId,
+        operationId,
+        providerAttachmentId: {
+          provider: "slack",
+          kind: "attachment",
+          value: `file:${identity.teamId}:${fileId}`,
+        },
+        fileName,
+        mediaType,
+        bytes,
+        authorizeProviderRequest: async () => {
+          if (options?.signal?.aborted) return false;
+          const current = await this.options.resolveCredential({
+            workspaceId: this.options.workspaceId,
+            ...(this.options.subjectId ? { subjectId: this.options.subjectId } : {}),
+            serverId: this.options.serverId,
+            toolName,
+            connectionRef: this.options.connectionRef,
+            destinationUrl: rawUrl,
+          });
+          return (
+            current.status === "ok" &&
+            current.connectionId === identity.connectionId &&
+            (!current.authorizeProviderRequest || (await current.authorizeProviderRequest()))
+          );
+        },
+      });
+    } catch (error) {
+      if (isRoutingMutationOutcomeUnknownError(error)) throw error;
+      throw new SlackProviderError("Slack file could not be saved to the agent filesystem.");
+    }
+    const attachments =
+      materialized && typeof materialized === "object" && "attachments" in materialized
+        ? (materialized as { attachments: unknown }).attachments
+        : undefined;
+    if (!Array.isArray(attachments) || attachments.length !== 1)
+      throw new SlackProviderError("Slack file could not be saved to the agent filesystem.");
+    return {
+      file: {
+        id: fileId,
+        ...(typeof record.name === "string" ? { name: record.name } : {}),
+        ...(typeof record.title === "string" ? { title: record.title } : {}),
+        mimetype: mediaType,
+        size: bytes.byteLength,
+      },
+      attachments,
+    };
+  }
+
+  private async fetchFile(
+    url: URL,
+    signal: AbortSignal | undefined,
+    redirectsLeft: number,
+  ): Promise<Response> {
+    const toolName = "slack_download_file";
+    const credential = await this.resolve("files.info", toolName, false, url.toString());
+    if (credential.authorizeProviderRequest && !(await credential.authorizeProviderRequest()))
+      throw new SlackAuthError("Slack connection authority is no longer available.");
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "GET",
+        headers: { ...credential.headers },
+        redirect: "manual",
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(FILE_DOWNLOAD_TIMEOUT_MS)])
+          : AbortSignal.timeout(FILE_DOWNLOAD_TIMEOUT_MS),
+      });
+    } catch {
+      throw new SlackProviderError("Slack file download could not be completed. Try again later.");
+    }
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      await response.body?.cancel().catch(() => undefined);
+      let next: URL | undefined;
+      try {
+        next = location ? new URL(location, url) : undefined;
+      } catch {
+        next = undefined;
+      }
+      if (next && redirectsLeft > 0 && isSlackPrivateFileUrl(next))
+        return await this.fetchFile(next, signal, redirectsLeft - 1);
+      throw new SlackProviderError(
+        "Slack did not return the file. The connected account may not have access to it.",
+      );
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new SlackProviderError(`Slack file download failed: http_${response.status}`);
+    }
+    return response;
   }
 
   private async request(
@@ -444,6 +655,7 @@ function requestPlan(toolName: string, input: Record<string, unknown>): Plan {
     ...Object.values(SLACK_CONVERSATION_READ_SCOPE_BY_TYPE),
     "channels:history",
     "users:read",
+    "files:read",
     "im:write",
     "chat:write",
   ]);
@@ -523,6 +735,11 @@ function requestPlan(toolName: string, input: Record<string, unknown>): Plan {
     case "slack_read_thread":
       copyTimestamp("ts", true);
       return { method: "conversations.replies", params, mutation: false };
+    case "slack_download_file":
+      copyString("file", true, 80);
+      if (!/^F[A-Z0-9]+$/u.test(String(params.file)))
+        throw new SlackInputError("file must be a Slack file ID");
+      return { method: "files.info", params, mutation: false };
     case "slack_open_dm":
       params.users = params.user!;
       delete params.user;
@@ -546,6 +763,15 @@ function boundedString(value: unknown, name: string, max: number): string {
 function parseSlackRetryAfter(value: string | null): number {
   const seconds = Number(value);
   return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(Math.min(seconds, 86400)) : 60;
+}
+function trustedOperationId(meta: Record<string, unknown> | null | undefined): string {
+  const operationId = meta?.opengeniOperationId;
+  if (typeof operationId !== "string" || !UUID_PATTERN.test(operationId))
+    throw new SlackInputError("Slack file download requires trusted operation context.");
+  return operationId;
+}
+function normalizedContentType(value: string | null): string {
+  return (value ?? "application/octet-stream").split(";", 1)[0]!.trim().toLowerCase();
 }
 function projectResult(toolName: string, payload: Payload): Record<string, unknown> {
   if (toolName === "slack_send_message")

@@ -98,6 +98,7 @@ if (process.env.OPENGENI_VERIFY_SERVER_RUNTIME === "1") {
             const report = JSON.parse(admission.stdout.toString());
             if (admission.exitCode !== 0 || report.sourceSha !== 'runtime-smoke' || report.emails?.[0] !== 'a@example.com') throw new Error('admission settings probe failed');
             if (!existsSync('./apps/api/dist/process/assets/agent-install/install.sh')) throw new Error('missing installer');
+            if (!existsSync('./apps/api/dist/process/assets/desktop-install/install.sh')) throw new Error('missing desktop installer');
           }
           process.stdout.write('runtime-ready');
         `;

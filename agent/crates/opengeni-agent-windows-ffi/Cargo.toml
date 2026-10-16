@@ -1,0 +1,37 @@
+[package]
+name = "opengeni-agent-windows-ffi"
+description = "Windows-only leaf FFI crate: display probe, GDI screen capture and SendInput for the Opengeni agent's desktop backend, wrapped behind a safe API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Like `opengeni-agent-macos-ffi`, this crate does not inherit the workspace
+# lints: the workspace forbids `unsafe_code`, and Win32 calls are inherently
+# unsafe. It lowers itself to `deny` and confines every `unsafe` to the single
+# `#[allow(unsafe_code)] mod ffi`. Every other crate keeps `forbid`.
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_StationsAndDesktops",
+  "Win32_System_Threading",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }

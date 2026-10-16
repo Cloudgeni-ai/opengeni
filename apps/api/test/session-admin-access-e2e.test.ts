@@ -64,6 +64,7 @@ describe("session admin access end to end", () => {
         productAccessMode: "managed",
         betterAuthSecret: "session-admin-access-e2e-secret-32-bytes",
         publicBaseUrl: origin,
+        sandboxSelfhostedEnabled: true,
       }),
       db: client.db,
       bus: new MemoryEventBus(),
@@ -102,17 +103,17 @@ describe("session admin access end to end", () => {
     const organizationId = access.accountGrants[0]!.accountId;
     const workspaceId = access.workspaceGrants[0]!.workspaceId;
 
-    const session = async (createdBySubjectId: string) => {
+    const session = async (createdBySubjectId: string, metadata: Record<string, unknown> = {}) => {
       const id = crypto.randomUUID();
       await withWorkspaceSessionActivityRls(client.db, workspaceId, async (scoped) => {
         await scoped.execute(sql`
           insert into sessions (id, account_id, workspace_id, initial_message, model,
             reasoning_effort, latency_mode, sandbox_backend, sandbox_group_id, tool_policy,
-            root_session_id, status, created_by_kind, created_by_subject_id)
+            root_session_id, status, created_by_kind, created_by_subject_id, metadata)
           values (${id}, ${organizationId}, ${workspaceId}, 'fixture', 'test-model', 'medium',
             'standard', 'none', ${id},
             jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null), ${id}, 'idle',
-            'subject', ${createdBySubjectId})`);
+            'subject', ${createdBySubjectId}, ${JSON.stringify(metadata)}::jsonb)`);
       });
       return id;
     };
@@ -202,6 +203,23 @@ describe("session admin access end to end", () => {
         })
       ).status,
     ).toBe(403);
+    // Never a session a Site page started: it acts with that page's reach.
+    // (`_opengeniSiteOrigin` is where a session records the Site page that started it.)
+    const fromSite = await session(subjectId, {
+      _opengeniSiteOrigin: { siteId: null, title: "Inline page", frame: "inline" },
+    });
+    const refusedForSite = await app.request(sessionAccess(fromSite), {
+      method: "PUT",
+      headers: browser(cookie),
+      body: "{}",
+    });
+    expect(refusedForSite.status).toBe(409);
+    expect(
+      ((await refusedForSite.json()) as { error: { message: string } }).error.message,
+    ).toContain("A session started from a Site page cannot get admin access");
+    expect(
+      await (await app.request(sessionAccess(fromSite), { headers: { cookie } })).json(),
+    ).toMatchObject({ active: false });
 
     const granted = await app.request(sessionAccess(own), {
       method: "PUT",
@@ -316,6 +334,59 @@ describe("session admin access end to end", () => {
       { name: "Made by an agent", access: "read" },
     );
     expect(key).toMatchObject({ status: 201, body: { apiKey: { name: "Made by an agent" } } });
+
+    // Who can use a connected machine, as the person: preview, then make it
+    // Only me. An agent with less than their full access is refused.
+    const [machine] = (await shared.admin.begin(async (tx) => {
+      await tx`select
+        set_config('opengeni.account_id', ${organizationId}, true),
+        set_config('opengeni.workspace_id', ${workspaceId}, true),
+        set_config('opengeni.subject_id', ${subjectId}, true)`;
+      return await tx<Array<{ enrollmentId: string }>>`
+        select enrollment_id as "enrollmentId"
+        from finalize_scoped_enrollment(
+          ${organizationId}::uuid, ${workspaceId}::uuid, 'workspace',
+          ${`ed25519:admin-access-${crypto.randomUUID()}`},
+          true, false, 'linux', 'x86_64', 'Build box', false
+        )`;
+    })) as Array<{ enrollmentId: string }>;
+    const machinePath = { workspaceId, enrollmentId: machine!.enrollmentId };
+    const preview = await asPerson("previewMachineAudience", machinePath, {
+      audience: "only_me",
+    });
+    expect(preview).toMatchObject({ status: 200, body: { ready: true } });
+    const audienceBody = JSON.stringify({ audience: "only_me" });
+    const limitedAudience = new Request(
+      new URL(
+        `/v1/workspaces/${workspaceId}/machines/${machine!.enrollmentId}/audience/preview`,
+        origin,
+      ),
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(audienceBody.length),
+        },
+        body: audienceBody,
+      },
+    );
+    stampDelegatedHumanAuthorization(limitedAudience, {
+      organizationId,
+      subjectId,
+      permissions: organizationAccessPresetPermissions("full"),
+      workspaceScope: { kind: "selected", workspaceIds: [workspaceId] },
+    });
+    const refusedAudience = await app.fetch(limitedAudience);
+    expect(refusedAudience.status).toBe(403);
+    expect(
+      ((await refusedAudience.json()) as { error: { message: string } }).error.message,
+    ).toContain("this agent's access is limited");
+    expect(
+      await asPerson("changeMachineAudience", machinePath, {
+        audience: "only_me",
+        expectedGeneration: preview.body.generation,
+      }),
+    ).toMatchObject({ status: 200, body: { audience: "only_me" } });
 
     // Turning the organization setting off ends it.
     expect(

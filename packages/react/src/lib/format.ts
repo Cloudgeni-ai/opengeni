@@ -196,6 +196,26 @@ export function isModelUnavailableSubmissionError(error: Error): boolean {
   );
 }
 
+/**
+ * What a published Site's assistant tells a viewer it refused, by the
+ * refusal's `details.code`. The draft is kept in every case.
+ */
+export const COMPOSER_SITE_REFUSAL_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+  not_available_for_viewer: "This Site's assistant can't do that for you. Your message is saved.",
+  site_budget_exhausted:
+    "This Site's assistant has reached its usage limit for now. Your message is saved.",
+  site_budget_busy: "This Site's assistant is busy. Try again in a moment. Your message is saved.",
+  site_platform_brake_engaged:
+    "This Site's assistant is paused for visitors right now. Your message is saved.",
+});
+
+/** The Site refusal code of a send refusal, if it is one. */
+export function siteRefusalCode(error: Error): string | null {
+  if (!(error instanceof OpenGeniApiError)) return null;
+  const code = error.details?.code;
+  return typeof code === "string" && code in COMPOSER_SITE_REFUSAL_MESSAGES ? code : null;
+}
+
 export function composerSubmissionErrorMessage(error: Error): string {
   if (error instanceof ComposerReconciliationRequiredError) {
     return "This client cannot safely retry this uncertain request after remount; reconcile the session before sending again.";
@@ -207,6 +227,8 @@ export function composerSubmissionErrorMessage(error: Error): string {
   if (error instanceof OpenGeniApiError && error.outcomeUnknown) return formatErrorMessage(error);
   if (isModelUnavailableSubmissionError(error)) return COMPOSER_MODEL_UNAVAILABLE_MESSAGE;
   if (isSessionUsageLimitSubmissionError(error)) return COMPOSER_SESSION_USAGE_LIMIT_MESSAGE;
+  const siteRefusal = siteRefusalCode(error);
+  if (siteRefusal) return COMPOSER_SITE_REFUSAL_MESSAGES[siteRefusal]!;
   if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
     // OpenGeniAllowanceExhaustedError carries the scope; read it structurally
     // so this startup-path helper adds no SDK or wording imports.
@@ -233,7 +255,9 @@ export function composerSubmissionCanRetry(error: Error): boolean {
     isComposerCreditRefusal(error) ||
     isModelUnavailableSubmissionError(error) ||
     isSessionUsageLimitSubmissionError(error) ||
-    (error instanceof OpenGeniApiError && error.code === "allowance_exhausted")
+    (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") ||
+    // Only a busy Site assistant is worth an unchanged retry.
+    (siteRefusalCode(error) !== null && siteRefusalCode(error) !== "site_budget_busy")
   );
 }
 

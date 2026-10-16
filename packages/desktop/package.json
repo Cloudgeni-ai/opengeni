@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/desktop",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "private": true,
   "description": "Electron kit for Opengeni desktop apps: several accounts on several servers, the server's own web app in a native window, native notifications, deep links, the menu bar item, updates, and one-click connection of the computer it runs on.",
   "license": "Apache-2.0",
@@ -21,6 +21,10 @@
       "types": "./src/contract.ts",
       "default": "./src/contract.ts"
     },
+    "./mac-login-agent": {
+      "types": "./src/main/mac-login-agent.ts",
+      "default": "./src/main/mac-login-agent.ts"
+    },
     "./preload": {
       "types": "./src/preload/content.ts",
       "default": "./src/preload/content.ts"
@@ -35,6 +39,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@noble/hashes": "1.8.0",
     "@opengeni/sdk": "workspace:*"
   },
   "devDependencies": {

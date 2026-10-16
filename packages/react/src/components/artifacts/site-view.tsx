@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { SiteViewer } from "@opengeni/sdk";
 
 import { loadSiteSnapshot } from "../../sites-ui";
 import {
@@ -18,6 +19,8 @@ export type SiteViewProps = {
   siteId: string;
   /** Host-owned Site API access. Omit it and the Site renders without workspace tools. */
   toolBridge?: SiteToolBridgeFactory | undefined;
+  /** Who is viewing, answered to the Site's `site.viewer`. */
+  viewer?: SiteViewer | undefined;
   theme?: "light" | "dark" | undefined;
   /** Shown instead of the archived notice; the console links to its full page. */
   archivedMessage?: string | undefined;
@@ -39,6 +42,7 @@ export function SiteView({
   workspaceId,
   siteId,
   toolBridge,
+  viewer,
   theme,
   archivedMessage,
   showTitle = true,
@@ -107,6 +111,7 @@ export function SiteView({
       showTitle={showTitle}
       versionLabel={`v${snapshot.detail.artifact.currentVersion?.revision}`}
       toolBridge={bridge}
+      viewer={viewer}
       connectedToolCount={content.requestedTools.length}
       theme={theme}
       fill

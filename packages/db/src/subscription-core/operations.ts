@@ -33,9 +33,13 @@ import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config"
 
 import {
   applyQuotaObservation,
+  quotaBlockClaim,
   quotaCapacity,
+  storedQuotaDocument,
   subscriptionCoreCredentialRefresher,
+  type StoredQuotaDocument,
   type SubscriptionQuota,
+  type SubscriptionQuotaBlock,
 } from "@opengeni/subscriptions";
 
 import { rawRows, withRlsContext, withSessionRlsActorContext, type Database } from "../database";
@@ -206,15 +210,52 @@ export type SubscriptionCoreUsageMergeOptions = {
    * a stored quota exhaustion.
    */
   confirmsAvailability?: boolean | undefined;
+  /**
+   * The adapter's `usageReadEndsClaimedBlock` for the response that was
+   * decoded (undefined: no cooldown ends early, and an adapter that defines
+   * the hook ends no quota exhaustion deadline either). Applied only with a
+   * reading that may end a stored quota exhaustion, to each stored block
+   * with its claim as the store holds it now (under the row lock).
+   */
+  endsClaimedBlock?: ((block: SubscriptionQuotaBlock) => boolean) | undefined;
 };
+
+/** The merge options one decoded `fetchUsage` response carries, from the adapter. */
+export function subscriptionCoreUsageMergeOptions(
+  adapter: SubscriptionCoreProvider["adapter"],
+  response: unknown,
+): SubscriptionCoreUsageMergeOptions {
+  return {
+    confirmsAvailability: adapter.usageReadConfirmsAvailability?.(response),
+    endsClaimedBlock: adapter.usageReadEndsClaimedBlock?.(response),
+  };
+}
+
+/**
+ * A stored quota a usage re-read can end now: it is exhausted, or (for an
+ * adapter whose reading can end claimed blocks) a model cooldown runs whose
+ * claim still explains it. A cooldown without a claim runs to its own end,
+ * so it never warrants a read.
+ */
+export function subscriptionCoreQuotaBlocksNow(
+  adapter: SubscriptionCoreProvider["adapter"],
+  quota: SubscriptionQuota | null,
+  now: number,
+): boolean {
+  if (!quota) return false;
+  if (quotaCapacity(quota, now).kind === "exhausted") return true;
+  return (
+    adapter.usageReadEndsClaimedBlock !== undefined &&
+    Object.entries(quota.modelCooldowns).some(
+      ([modelId, until]) => until > now && quotaBlockClaim(quota, modelId) !== null,
+    )
+  );
+}
 
 /** The quota write one usage observation makes. */
 export type SubscriptionCoreUsageObservationWrite = {
   /** The quota document to store. */
-  stored: Pick<
-    SubscriptionQuota,
-    "windows" | "modelCooldowns" | "exhaustedUntil" | "exhaustedKind" | "source"
-  >;
+  stored: StoredQuotaDocument;
   /** When it was observed (the row's `updated_at`). */
   observedAt: number;
   /** It ends a stored exhaustion (the caller wakes waiters after commit). */
@@ -866,28 +907,55 @@ export const subscriptionCoreOperations = memoByProvider((provider: Subscription
     // (adapter opt-in; the caller holds the row, and the write bumps its
     // revision). An at-limit read without a known reset is not below the limit,
     // and neither is a reading the adapter says does not confirm availability.
-    const next =
+    const authoritative =
       provider.adapter.usageReadEndsQuotaExhaustion === true &&
       options.confirmsAvailability !== false &&
       observation.source === "usage_endpoint" &&
       observation.exhaustedUntil === null &&
-      observation.exhaustedKind === null &&
-      observed.exhaustedKind === "quota"
-        ? { ...observed, exhaustedUntil: null, exhaustedKind: null }
-        : observed;
+      observation.exhaustedKind === null;
+    // With the adapter's claim judgement, every block is judged from the
+    // claim the store holds now (under the row lock), so a newer refusal
+    // stored while the reading was in flight keeps its own block.
+    const claimed = provider.adapter.usageReadEndsClaimedBlock !== undefined;
+    const endsBlock = authoritative ? options.endsClaimedBlock : undefined;
+    const ends = (modelId: string | null, until: number): boolean =>
+      endsBlock?.({ modelId, until, claim: quotaBlockClaim(observed, modelId) }) ?? false;
+    const endsExhaustion =
+      authoritative &&
+      observed.exhaustedKind === "quota" &&
+      (!claimed || (observed.exhaustedUntil !== null && ends(null, observed.exhaustedUntil)));
+    const ended: SubscriptionQuota = endsExhaustion
+      ? { ...observed, exhaustedUntil: null, exhaustedKind: null, exhaustedClaim: null }
+      : observed;
+    // The same reading ends the stored model cooldowns whose claimed limits
+    // it shows below the limit (a limit reset early that a refusal cooled
+    // the model for); a cooldown the reading itself reports stands, and so
+    // does one without a claim (an unrecognized limit, or a refusal without
+    // usage evidence), until its own end.
+    const next: SubscriptionQuota = endsBlock
+      ? {
+          ...ended,
+          modelCooldowns: Object.fromEntries(
+            Object.entries(ended.modelCooldowns).filter(
+              ([modelId, until]) =>
+                observation.modelCooldowns[modelId] !== undefined || !ends(modelId, until),
+            ),
+          ),
+        }
+      : ended;
     const observedAt = observation.observedAt ?? Date.now();
-    const recovered =
+    const cooldownEnded =
       current !== null &&
-      quotaCapacity(current, observedAt).kind === "exhausted" &&
-      quotaCapacity(next, observedAt).kind !== "exhausted";
+      Object.entries(current.modelCooldowns).some(
+        ([modelId, until]) => until > observedAt && next.modelCooldowns[modelId] === undefined,
+      );
+    const recovered =
+      cooldownEnded ||
+      (current !== null &&
+        quotaCapacity(current, observedAt).kind === "exhausted" &&
+        quotaCapacity(next, observedAt).kind !== "exhausted");
     return {
-      stored: {
-        windows: next.windows,
-        modelCooldowns: next.modelCooldowns,
-        exhaustedUntil: next.exhaustedUntil,
-        exhaustedKind: next.exhaustedKind,
-        source: next.source,
-      },
+      stored: storedQuotaDocument(next),
       observedAt,
       recovered,
     };

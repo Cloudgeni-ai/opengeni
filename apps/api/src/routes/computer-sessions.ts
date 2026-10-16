@@ -65,6 +65,7 @@ import {
   requireAccessGrant,
   requireSessionAuthorization,
   relayConfigFromSettings,
+  resolveChannelAMachineConnection,
   resolveSessionSandboxRuntime,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
@@ -107,7 +108,10 @@ import {
   shouldPersistControllerDataPlaneUrl,
   withCachedController,
 } from "../controller-data-plane";
-import { filterInteractionSessionsForGrant } from "../interaction-agent-access";
+import {
+  filterInteractionSessionsForGrant,
+  parseInteractionSessionListQuery,
+} from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { ApiHttpError } from "../http/api-error";
@@ -129,6 +133,7 @@ import {
   resolveInteractionSecretValues,
   type InteractionSecretsPort,
 } from "../interaction-secrets";
+import { requirePlacementAcceptsSecretValues } from "../interaction-agent-version";
 
 type ComputerPlacement = {
   placement: InteractionPlacement;
@@ -231,6 +236,7 @@ export function registerComputerSessionRoutes(
     const listed = await listComputerSessions(deps.db, {
       accountId: grant.accountId,
       workspaceId,
+      ...parseInteractionSessionListQuery(context.req.query()),
     });
     return context.json(
       ComputerSessionListResponse.parse({
@@ -631,6 +637,12 @@ export function registerComputerSessionRoutes(
             grant,
             texts: collectStringsDeep(request.arguments),
             use: { surface: "desktop", toolName: request.tool, operationId: request.operationId },
+            beforeResolve: requirePlacementAcceptsSecretValues(
+              deps.db,
+              grant,
+              workspaceId,
+              record.session.placement,
+            ),
           });
           return await sessionClient.nativeCall(
             ComputerNativeCommand.parse({
@@ -686,6 +698,12 @@ export function registerComputerSessionRoutes(
             grant,
             texts: computerActionSecretTexts(request.action),
             use: { surface: "desktop", toolName: "computer_act", operationId: request.operationId },
+            beforeResolve: requirePlacementAcceptsSecretValues(
+              deps.db,
+              grant,
+              workspaceId,
+              record.session.placement,
+            ),
           });
           return await sessionClient.action(
             ComputerActionCommand.parse({
@@ -1219,14 +1237,32 @@ export function registerComputerSessionRoutes(
         const resolved = await handle.routingSession.prime();
         let screenControlAllowed = false;
         if (operation !== "computer.end" && resolved.kind === "selfhosted" && resolved.sandboxId) {
-          const sandbox = await getSandbox(deps.db, grant, resolved.sandboxId);
+          // Look the routed machine up as the routing did: an agent acts for
+          // the person who started its turn, so a personal (Only me) machine
+          // stays reachable, subject to that attempt's per-chat permission.
+          const machineAuthority = await handle.machineAuthority();
+          const sandbox = await getSandbox(
+            deps.db,
+            {
+              accountId: grant.accountId,
+              workspaceId: sourceSession.workspaceId,
+              subjectId: machineAuthority.subjectId,
+            },
+            resolved.sandboxId,
+          );
           if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
             throw new ComputerSessionStateError("Connected Machine placement is unavailable");
           }
-          const enrollment = await getLiveEnrollmentConnection(
+          const enrollment = await resolveChannelAMachineConnection(
             deps.db,
-            grant,
-            sandbox.enrollmentId,
+            {
+              accountId: grant.accountId,
+              workspaceId: sourceSession.workspaceId,
+              sessionId: sourceSession.id,
+              machineWorkspaceId: sandbox.workspaceId,
+              enrollmentId: sandbox.enrollmentId,
+            },
+            machineAuthority,
           );
           if (!enrollment?.connectionInstanceId) {
             throw new ComputerSessionStateError("Connected Machine is unavailable");

@@ -57,7 +57,10 @@ import {
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import type { ProviderErrorOutcome } from "@opengeni/subscriptions";
 import { CODEX_USAGE_EXHAUSTED_PCT } from "./codex-usage-policy";
-import { RetainedAttachmentTransportLimitError } from "../run-input";
+import {
+  RetainedAttachmentTransportLimitError,
+  RetainedAttachmentUnavailableError,
+} from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
   CODEX_USAGE_LIMIT_ERROR_TYPE,
@@ -144,6 +147,21 @@ export function providerRecoveryJitterMs(delayMs: number, sample: number): numbe
   return Math.floor(Math.min(5_000, delayMs * 0.2) * bounded);
 }
 export const POST_COMPACTION_CONTINUATION_EMPTY_CODE = "post_compaction_continuation_empty";
+export const RETAINED_ATTACHMENT_UNAVAILABLE_CODE = "retained_attachment_unavailable";
+
+function findRetainedAttachmentUnavailableError(
+  error: unknown,
+): RetainedAttachmentUnavailableError | null {
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof RetainedAttachmentUnavailableError) return current;
+    if (seen.has(current)) break;
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
 
 export class PostCompactionContinuationEmptyError extends Error {
   readonly code = POST_COMPACTION_CONTINUATION_EMPTY_CODE;
@@ -221,6 +239,7 @@ export function providerRecoveryResult(input: {
           input.failureCode === "provider_unavailable" ||
           input.failureCode === "upstream_connectivity_unavailable" ||
           input.failureCode === "sandbox_command_start_unavailable" ||
+          input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
           input.failureCode === "mcp_transport_timeout" ||
           input.failureCode === "mcp_transport_unavailable" ||
           input.failureCode === "turn_execution_policy_definition_mismatch" ||
@@ -944,6 +963,24 @@ export function modelPreparationFailureEventPayload(error: unknown, durationMs: 
 }
 
 /**
+ * The turn's first model request could not be dispatched until the context
+ * was compacted (proactive threshold or an operator-requested Compact). That
+ * is an expected step of preparation, not a failure: the same activity
+ * compacts and then reopens preparation for the retried request.
+ */
+export function compactionFirstPreparationEventPayload(durationMs: number) {
+  return {
+    phase: "model_preparation",
+    durationMs: Math.max(0, Math.round(durationMs)),
+    expectedTransition: true,
+    failureCategory: "context_compaction",
+    failureStage: "context_compaction",
+    failureCode: "compaction_required",
+    retryable: true,
+  } as const;
+}
+
+/**
  * Recognize active-route transitions that cannot finish inside their
  * originating attempt. A Modal-home session may start on a Connected Machine
  * without creating or leasing its managed home box. When an explicit attach
@@ -1206,6 +1243,11 @@ export function isCompactionSummaryFailure(error: unknown): boolean {
 
 export function shouldRecoverCompactionProviderFailure(error: unknown): boolean {
   if (!(error instanceof CompactionProviderResponseError)) return false;
+  // The worker's own included-usage refusal (usage exhausted or unverifiable)
+  // happens before dispatch, so the checkpoint request was never sent. It
+  // settles exactly like the same refusal on an ordinary request: recorded
+  // against the account, then the same turn re-places or waits for capacity.
+  if (findCodexCreditPolicyError(error)) return true;
   if (isCodexTransportError(error) && classifyCodexUsageLimitError(error)) return true;
   // A Claude subscription refusal (rate limit or reconnect) on the checkpoint
   // request recovers exactly like one on an ordinary request: failure
@@ -1785,6 +1827,16 @@ function baseAgentRunFailurePayload(
   }
   if (error instanceof RetainedAttachmentTransportLimitError) {
     return { error: error.message, code: "retained_attachment_transport_limit", retryable: false };
+  }
+  if (findRetainedAttachmentUnavailableError(error)) {
+    // Storage may lag after a replica outage. The same turn retries with the
+    // connectivity backoff and never continues without the image's pixels.
+    return {
+      error:
+        "An image attached earlier in this conversation can't be read from storage right now. The same turn will retry after a short delay.",
+      code: RETAINED_ATTACHMENT_UNAVAILABLE_CODE,
+      retryable: true,
+    };
   }
   if (error instanceof MandatoryHistoryPersistenceError) {
     const databaseFailure =

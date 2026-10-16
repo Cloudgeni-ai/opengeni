@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { LinuxVirtualComputerEnvironmentAllocator, nativeComputerEnvironment } from "../src";
 
 test.skipIf(process.platform !== "linux")(
-  "cleans started display processes when the window manager executable is missing",
+  "cleans started display processes when the window manager fails to start",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "og-missing-desktop-tool-"));
     const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -21,8 +21,13 @@ test.skipIf(process.platform !== "linux")(
         );
         await chmod(path, 0o700);
       }
+      // Installed, but never reached: the window manager exits first.
+      for (const name of ["failing-window-manager", "xterm", "x11vnc"]) {
+        await writeFile(join(root, name), "#!/bin/sh\nexit 1\n");
+        await chmod(join(root, name), 0o700);
+      }
       const allocator = new LinuxVirtualComputerEnvironmentAllocator({
-        windowManagerBinary: join(root, "missing-window-manager"),
+        windowManagerBinary: join(root, "failing-window-manager"),
       });
       await expect(
         allocator.allocate({
@@ -45,6 +50,37 @@ test.skipIf(process.platform !== "linux")(
           } catch {}
         }
       }
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "names the missing desktop programs and how to install them before starting anything",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "og-missing-desktop-programs-"));
+    try {
+      const xvfb = join(root, "Xvfb");
+      await writeFile(xvfb, `#!/bin/sh\ntouch '${root}/started'\nexec sleep 60\n`);
+      await chmod(xvfb, 0o700);
+      for (const name of ["dbus-daemon", "xterm"]) {
+        await writeFile(join(root, name), "#!/bin/sh\nexit 1\n");
+        await chmod(join(root, name), 0o700);
+      }
+      const allocation = new LinuxVirtualComputerEnvironmentAllocator().allocate({
+        computerSessionId: crypto.randomUUID(),
+        controllerGeneration: crypto.randomUUID(),
+        sessionDirectory: root,
+        baseEnvironment: { ...process.env, PATH: root },
+      });
+      await expect(allocation).rejects.toMatchObject({
+        code: "resource_unavailable",
+        retryable: false,
+        message:
+          "this machine can't start a virtual desktop because xfwm4 and x11vnc aren't installed. On Debian or Ubuntu, install with: sudo apt install xfwm4 x11vnc",
+      });
+      expect(await readFile(join(root, "started"), "utf8").catch(() => null)).toBeNull();
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   },

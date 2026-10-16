@@ -235,6 +235,9 @@ ingress:
         - path: /opengeni-agent-minisign.pub
           pathType: Exact
           service: api
+        - path: /desktop
+          pathType: Prefix
+          service: api
     # The bring-your-own-compute stream relay — wss long-lived sockets. The
     # global proxy-read/send-timeout:3600 + proxy-buffering:off annotations above
     # already make these websocket-friendly (nginx upgrades Connection/Upgrade

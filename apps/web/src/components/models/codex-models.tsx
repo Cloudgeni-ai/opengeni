@@ -137,21 +137,23 @@ function organizationOthersAvailable(source: CodexSubscriptions["source"]): bool
 }
 
 /**
- * Which pool new work uses, and which accounts are set aside. A workspace
- * uses exactly one Codex pool, its own accounts or the organization's, never
- * both (docs/codex-subscription-rotation.md).
+ * Which accounts new work uses, and which are set aside. Picked
+ * automatically, new work uses this workspace's own accounts and the
+ * organization's together; only an explicit choice of one pool sets the other
+ * aside.
  */
 function poolState(codex: CodexSubscriptions) {
   const source = codex.source;
   const inUse = source?.effectiveSource ?? "workspace";
+  const mode = source?.mode ?? "automatic";
   return {
     inUse,
-    mode: source?.mode ?? "automatic",
+    mode,
     /** The organization shares accounts that new work here doesn't use. */
-    organizationSetAside: inUse === "workspace" && organizationOthersAvailable(source),
+    organizationSetAside: mode === "workspace" && organizationOthersAvailable(source),
     /** This workspace has accounts that new work here doesn't use. */
     workspaceSetAside:
-      inUse === "organization" && Boolean(source?.workspaceSetAside ?? source?.workspaceAvailable),
+      mode === "organization" && Boolean(source?.workspaceSetAside ?? source?.workspaceAvailable),
   };
 }
 
@@ -210,7 +212,7 @@ export function codexListedCount(
   return own + shared + (codex.pending ? 1 : 0) + (pool.workspaceSetAside ? 1 : 0);
 }
 
-/** The ⋯ item that keeps new work on the organization's accounts, when it would change something. */
+/** The ⋯ item that keeps new work on only the organization's accounts, when it would change something. */
 function alwaysOrganizationItem(codex: CodexSubscriptions, places: CodexPlaces): ReactNode {
   const mode = codex.source?.mode;
   if (!codex.canManage || (mode !== "automatic" && mode !== "workspace")) return null;
@@ -220,12 +222,12 @@ function alwaysOrganizationItem(codex: CodexSubscriptions, places: CodexPlaces):
       onSelect={() =>
         void codex.setSourceMode(
           "organization",
-          `New work in ${places.workspaceName} now uses the organization's Codex accounts`,
+          `New work in ${places.workspaceName} now uses only the organization's Codex accounts`,
         )
       }
     >
       <BuildingIcon />
-      Always use the organization's accounts
+      Use only the organization's accounts
     </DropdownMenuItem>
   );
 }
@@ -700,7 +702,9 @@ export function codexPoolCopy({
       };
     }
     return {
-      text: canConnect ? `${used}. Connect an account here to use your own instead.` : `${used}.`,
+      text: canConnect
+        ? `${used}. Accounts connected here are used together with ${orgOne ? "it" : "them"}.`
+        : `${used}.`,
       blocked: false,
     };
   }
@@ -725,16 +729,19 @@ export function codexPoolCopy({
     const kept = `${keptNames}, kept as this workspace's own, ${
       keptOne ? "serves only the people chosen for it" : "serve only the people chosen for them"
     }.`;
-    const others = `The organization's other ${orgOne ? "account is" : "accounts are"}`;
     return {
       text:
         mode === "workspace"
           ? `New work uses ${here}. ${kept}${
-              organizationAvailable ? ` ${others} never used here.` : ""
+              organizationAvailable
+                ? ` The organization's other ${orgOne ? "account is" : "accounts are"} never used here.`
+                : ""
             }`
-          : `New work uses ${here}. ${kept}${
-              organizationAvailable ? ` ${others} set aside while this workspace has its own.` : ""
-            }`,
+          : `New work uses ${here}${
+              organizationAvailable
+                ? ` together with the organization's other ${orgOne ? "account" : "accounts"}`
+                : ""
+            }. ${kept}`,
       blocked: false,
     };
   }
@@ -747,7 +754,7 @@ export function codexPoolCopy({
     };
   }
   return {
-    text: `New work uses ${here}. ${capitalize(orgAccounts)} ${orgOne ? "is" : "are"} set aside while this workspace has its own.`,
+    text: `New work uses ${here} together with ${orgAccounts}.`,
     blocked: false,
   };
 }
@@ -1449,9 +1456,11 @@ export function CodexConnectPage({
   blockedReason?: string | null;
 }) {
   const source = codex.source;
-  // Connecting while the organization's pool is in use asks which to use.
-  const askSource = source?.effectiveSource === "organization";
-  const [useFor, setUseFor] = useState<"workspace" | "organization" | "">("");
+  // Picked automatically, a new account is used together with the
+  // organization's. Only a workspace set to use just the organization's
+  // accounts asks, so the account isn't parked unnoticed.
+  const askSource = source?.mode === "organization";
+  const [useFor, setUseFor] = useState<"together" | "organization" | "">("");
   const [useError, setUseError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const active = useRef(true);
@@ -1482,7 +1491,7 @@ export function CodexConnectPage({
       onSubmit={async () => {
         if (signingIn) return false;
         if (askSource && !useFor) {
-          setUseError("Choose which subscriptions new work should use.");
+          setUseError("Choose whether new work should use this account.");
           return false;
         }
         await codex.connect({
@@ -1501,25 +1510,25 @@ export function CodexConnectPage({
         {fields}
         {askSource ? (
           <ChoiceCards
-            label="Use this account instead of the organization's subscriptions?"
-            description={`New work in ${places.workspaceName} uses one or the other, never both.`}
+            label="Use this account for new work?"
+            description={`${places.workspaceName} is set to use only the organization's subscriptions.`}
             value={useFor}
             disabled={signingIn}
             onValueChange={(value) => {
-              setUseFor(value as "workspace" | "organization");
+              setUseFor(value as "together" | "organization");
               setUseError(null);
             }}
             error={useError}
           >
             <ChoiceCard
-              value="workspace"
-              title="Use this account"
-              description={`New work here switches to this workspace's accounts and stops using subscriptions from ${places.organizationName}.`}
+              value="together"
+              title="Use it with the organization's subscriptions"
+              description={`New work here uses this account and the subscriptions from ${places.organizationName}.`}
             />
             <ChoiceCard
               value="organization"
-              title="Keep the organization's subscriptions"
-              description="This account stays connected but isn't used until you switch."
+              title="Keep using only the organization's"
+              description="This account stays connected but isn't used until you change this."
             />
           </ChoiceCards>
         ) : null}

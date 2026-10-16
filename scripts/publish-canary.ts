@@ -15,6 +15,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import libnpmpublish from "libnpmpublish";
+import { admitCanarySource, canaryGit, verifyCanaryController } from "./canary-source-admission";
+import { signCanarySource, type SuppliedCanaryProvenance } from "./canary-source-provenance";
 
 import {
   boundedCanaryBody,
@@ -174,7 +176,9 @@ export function verifyCanarySourceBinding(
   actualHead: string,
   sourceRoot: string,
   scriptRoot: string,
+  controllerHead = actualHead,
 ): void {
+  verifyCanaryController(env, controllerHead);
   const sha = env.GITHUB_SHA;
   if (
     env.GITHUB_ACTIONS !== "true" ||
@@ -187,9 +191,8 @@ export function verifyCanarySourceBinding(
     !sha ||
     !/^[0-9a-f]{40}$/.test(sha) ||
     sha !== env.GITHUB_WORKFLOW_SHA ||
-    sha !== env.SOURCE_SHA ||
-    sha !== actualHead ||
-    resolve(sourceRoot) !== resolve(scriptRoot) ||
+    env.SOURCE_SHA !== actualHead ||
+    (sha !== actualHead && resolve(sourceRoot) === resolve(scriptRoot)) ||
     !env.GITHUB_RUN_ID ||
     !env.GITHUB_RUN_ATTEMPT ||
     !env.ACTIONS_ID_TOKEN_REQUEST_URL ||
@@ -352,6 +355,7 @@ export async function publishCanaryArtifact(
   publish: typeof libnpmpublish.publish = libnpmpublish.publish,
   targetRegistry = registry,
   timeoutMs = 120_000,
+  supplied?: SuppliedCanaryProvenance,
 ): Promise<{ status: number; transparencyLogUrl: string; headers: Record<string, string> }> {
   assertCanaryManifest(manifest);
   if (
@@ -379,7 +383,8 @@ export async function publishCanaryArtifact(
         forceAuth: { token },
         defaultTag: "canary",
         access: "public",
-        provenance: true,
+        provenance: !supplied,
+        ...(supplied ? { provenanceFile: supplied.file } : {}),
         retry: { retries: 0 },
         timeout: Math.min(30_000, timeoutMs),
         signal: controller.signal,
@@ -394,13 +399,15 @@ export async function publishCanaryArtifact(
     !Number.isInteger(response.status) ||
     response.status < 200 ||
     response.status >= 300 ||
-    !/^https:\/\/search\.sigstore\.dev\/\?logIndex=\d+$/.test(response.transparencyLogUrl ?? "")
+    !/^https:\/\/search\.sigstore\.dev\/\?logIndex=\d+$/.test(
+      supplied?.transparencyLogUrl ?? response.transparencyLogUrl ?? "",
+    )
   ) {
     throw new Error(`Canary provenance publication was not confirmed for ${manifest.name}`);
   }
   return {
     status: response.status,
-    transparencyLogUrl: response.transparencyLogUrl!,
+    transparencyLogUrl: supplied?.transparencyLogUrl ?? response.transparencyLogUrl!,
     headers: canaryResponseHeaders(response.headers),
   };
 }
@@ -491,6 +498,7 @@ export async function publishPreparedCanaries(
   read: typeof readRegistryPackage = readRegistryPackage,
   publish: typeof libnpmpublish.publish = libnpmpublish.publish,
   timeoutMs = 120_000,
+  provenance?: (pkg: FrozenCanaryArtifact) => Promise<SuppliedCanaryProvenance>,
 ): Promise<void> {
   for (const pkg of packages) {
     if (
@@ -518,6 +526,7 @@ export async function publishPreparedCanaries(
       archiveBytes: pkg.archiveBytes,
       manifestSha256: pkg.manifestSha256,
     };
+    const supplied = await provenance?.(pkg);
     const intent = custody.record("WRITE_INTENT", binding);
     try {
       const acknowledgement = await publishCanaryArtifact(
@@ -527,6 +536,7 @@ export async function publishPreparedCanaries(
         publish,
         registry,
         timeoutMs,
+        supplied,
       );
       custody.record("WRITE_ACKNOWLEDGED", {
         ...binding,
@@ -774,6 +784,7 @@ export async function publishAndVerifyCanaryCohort(
     read?: typeof readRegistryPackage;
     publish?: typeof libnpmpublish.publish;
     writeTimeoutMs?: number;
+    provenance?: (pkg: FrozenCanaryArtifact) => Promise<SuppliedCanaryProvenance>;
   } = {},
 ): Promise<Record<string, string>> {
   const read = options.read ?? readRegistryPackage;
@@ -784,6 +795,7 @@ export async function publishAndVerifyCanaryCohort(
     read,
     options.publish,
     options.writeTimeoutMs,
+    options.provenance,
   );
   await confirmCanaryCohort(packages, read, { ...options, custody });
   const pins = Object.fromEntries(
@@ -819,11 +831,18 @@ export async function main(): Promise<void> {
     encoding: "utf8",
   });
   if (head.status !== 0) throw new Error("Canary source HEAD cannot be resolved");
-  verifyCanarySourceBinding(process.env, head.stdout.trim(), repoRoot, scriptRoot);
-  mkdirSync(join(repoRoot, ".release"), { recursive: true });
-  const pinsPath = join(repoRoot, ".release/site-package-versions.json");
+  verifyCanarySourceBinding(
+    process.env,
+    head.stdout.trim(),
+    repoRoot,
+    scriptRoot,
+    canaryGit(scriptRoot, ["rev-parse", "HEAD"]),
+  );
+  await admitCanarySource(scriptRoot);
+  mkdirSync(join(scriptRoot, ".release"), { recursive: true });
+  const pinsPath = join(scriptRoot, ".release/site-package-versions.json");
   if (existsSync(pinsPath)) throw new Error("Canary Site pins already exist; no replay is allowed");
-  const custody = new CanaryReceiptStore(join(repoRoot, ".release/canary-receipts"), {
+  const custody = new CanaryReceiptStore(join(scriptRoot, ".release/canary-receipts"), {
     source: process.env.SOURCE_SHA!,
     workflowSource: process.env.GITHUB_WORKFLOW_SHA!,
     runId: process.env.GITHUB_RUN_ID!,
@@ -912,7 +931,14 @@ export async function main(): Promise<void> {
     }
     const frozen = freezeCanaryCohort(prepared, custody);
     phase = "publication_and_receipts";
-    const pins = await publishAndVerifyCanaryCohort(frozen, custody, process.env.NODE_AUTH_TOKEN!);
+    const pins = await publishAndVerifyCanaryCohort(frozen, custody, process.env.NODE_AUTH_TOKEN!, {
+      ...(process.env.SOURCE_SHA !== process.env.GITHUB_SHA
+        ? {
+            provenance: (pkg: FrozenCanaryArtifact) =>
+              signCanarySource(pkg.manifest, pkg.packed, packDir),
+          }
+        : {}),
+    });
     phase = "site_pins";
     writeFileSync(pinsPath, JSON.stringify(pins, null, 2), { flag: "wx", mode: 0o600 });
     custody.record("SITE_PINS_WRITTEN", {

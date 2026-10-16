@@ -63,6 +63,8 @@ mod supervisor;
 mod uninstall;
 mod update;
 mod uploads;
+mod windows_control;
+mod windows_task;
 
 use std::{path::Path, sync::Arc};
 
@@ -272,6 +274,13 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
         Command::Stop(args) => service::stop(&args).map_err(string_err),
         Command::Status(args) => service::show_status(&args).map_err(string_err),
         Command::Service(args) => service::run(&args).map_err(string_err),
+        Command::Permissions(args) => {
+            if let Some(permission) = args.request {
+                request_permission(permission);
+            }
+            println!("{}", permissions_json());
+            Ok(())
+        }
         Command::Update(args) => {
             // The updater is synchronous (download → verify → swap); run it on a
             // blocking thread so it never stalls the async runtime.
@@ -447,6 +456,12 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // and never blocks the serve loop. No-op on every non-macOS / feature-off build.
     ensure_macos_desktop_grants();
 
+    // A desktop app starts this agent as its own helper. Chrome's attached-browser
+    // bridge then has to point at this copy, since no service install wrote it.
+    if hosted_by_desktop_app() {
+        register_hosted_native_host();
+    }
+
     // Connect if we have no persisted connection yet ("connect-if-needed").
     let existing_connections = config::load_connections(api_url).map_err(to_boxed)?;
     let connections = if existing_connections.is_empty() {
@@ -513,6 +528,16 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     let (next_platform, browser_sidecars) =
         attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone());
     platform = next_platform;
+    // Only the agent holding the instance lock may remove helper generations
+    // that earlier releases left behind; the removal runs off the startup path.
+    if instance_lock_guard.is_some() {
+        std::thread::spawn(|| {
+            let removed = embedded_runtime::prune_stale_generations();
+            if removed > 0 {
+                info!(removed, "removed earlier interaction runtime generations");
+            }
+        });
+    }
     // Clone connection platforms only after browser control is attached. Existing
     // links and links added by the watcher must expose the identical controller.
     // A successor image keeps its predecessor's connection instance, so the
@@ -649,6 +674,12 @@ fn restart_after_verified_update(handover: &CarriedHandover) -> anyhow_lite::Res
     #[cfg(windows)]
     {
         let _ = handover;
+        // The desktop app supervises this process and starts the replaced file
+        // itself. A detached successor would hold the instance lock outside it.
+        if hosted_by_desktop_app() {
+            info!("verified self-update installed; asking the desktop app to restart the agent");
+            std::process::exit(HOSTED_RESTART_EXIT_CODE);
+        }
         std::process::Command::new(executable)
             .args(&args)
             .spawn()
@@ -659,6 +690,81 @@ fn restart_after_verified_update(handover: &CarriedHandover) -> anyhow_lite::Res
     Err(string_err(
         "self-update restart is unsupported on this platform".to_string(),
     ))
+}
+
+/// Set by a desktop app that runs this agent as its own helper process. The app
+/// owns the operating-system permission prompts and restarts the agent itself.
+const DESKTOP_HOST_ENV: &str = "OPENGENI_AGENT_HOST";
+
+/// The screen-control permissions as JSON. A fresh process reads macOS's current
+/// answer; a long-running one can keep seeing a Screen Recording denial that the
+/// person has since changed, until it restarts.
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+fn permissions_json() -> String {
+    let grants = opengeni_agent_platform::desktop_grants();
+    serde_json::json!({
+        "required": true,
+        "screenRecording": grants.screen_recording,
+        "accessibility": grants.accessibility,
+        "inputMonitoring": grants.input_monitoring,
+    })
+    .to_string()
+}
+
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+fn request_permission(permission: cli::PermissionRequest) {
+    use opengeni_agent_platform::DesktopPermission;
+    opengeni_agent_platform::request_desktop_permission(match permission {
+        cli::PermissionRequest::ScreenRecording => DesktopPermission::ScreenRecording,
+        cli::PermissionRequest::Accessibility => DesktopPermission::Accessibility,
+        cli::PermissionRequest::InputMonitoring => DesktopPermission::InputMonitoring,
+    });
+}
+
+#[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
+fn request_permission(_permission: cli::PermissionRequest) {}
+
+/// Other platforms ask for no screen-control permission.
+#[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
+fn permissions_json() -> String {
+    serde_json::json!({ "required": false }).to_string()
+}
+
+/// The exit status that asks a desktop host to start the (updated) agent again.
+#[cfg(windows)]
+const HOSTED_RESTART_EXIT_CODE: i32 = 75;
+
+fn hosted_by_desktop_app() -> bool {
+    hosted_by_desktop_app_value(std::env::var_os(DESKTOP_HOST_ENV).as_deref())
+}
+
+fn hosted_by_desktop_app_value(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| value == "desktop-app")
+}
+
+fn register_hosted_native_host() {
+    let binary = match update::installed_executable() {
+        Ok(binary) => binary,
+        Err(error) => {
+            warn!(%error, "could not resolve this agent's path for the attached-browser bridge");
+            return;
+        }
+    };
+    let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .filter(|home| !home.is_empty())
+        .map(std::path::PathBuf::from)
+    else {
+        warn!("no home directory; the attached-browser bridge is not registered");
+        return;
+    };
+    match browser_bridge::install_native_host_manifests(binary, &home) {
+        Ok(manifests) => {
+            for manifest in manifests {
+                info!(path = %manifest.display(), "registered Chrome Native Messaging host");
+            }
+        }
+        Err(error) => warn!(%error, "could not register the attached-browser bridge"),
+    }
 }
 
 fn attach_browser_controller(
@@ -806,6 +912,11 @@ fn ensure_macos_desktop_grants() {
 
     let grants = opengeni_agent_platform::desktop_grants();
     if grants.all_granted() {
+        return;
+    }
+    // A desktop host asks for these itself, one at a time with an explanation,
+    // under its own name. Prompts from its helper would arrive unexplained.
+    if hosted_by_desktop_app() {
         return;
     }
     REQUESTED.call_once(|| {
@@ -1028,7 +1139,8 @@ fn spawn_signal_handler(shutdown: supervisor::ShutdownSignal) {
     });
 }
 
-/// Resolves once an OS stop signal arrives (Ctrl-C everywhere; SIGTERM on unix).
+/// Resolves once an OS stop signal arrives (Ctrl-C everywhere; SIGTERM on unix;
+/// on Windows also a closing console and `opengeni-agent stop`'s pipe request).
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
@@ -1046,7 +1158,29 @@ async fn wait_for_shutdown_signal() {
             _ = sigterm.recv() => {}
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let stop_request = async {
+            match config::config_dir() {
+                Ok(dir) => windows_control::wait_for_stop_request(&dir).await,
+                Err(_) => std::future::pending().await,
+            }
+        };
+        let console_closing = async {
+            match tokio::signal::windows::ctrl_close() {
+                Ok(mut close) => {
+                    close.recv().await;
+                }
+                Err(_) => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            () = stop_request => {}
+            () = console_closing => {}
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = tokio::signal::ctrl_c().await;
     }
@@ -1067,6 +1201,20 @@ mod anyhow_lite {
     pub type Result = std::result::Result<(), BoxError>;
     /// A handler result returning a value.
     pub type ResultOf<T> = std::result::Result<T, BoxError>;
+}
+
+#[cfg(test)]
+mod desktop_host_tests {
+    use super::hosted_by_desktop_app_value;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn only_the_exact_desktop_app_value_marks_a_hosted_agent() {
+        assert!(hosted_by_desktop_app_value(Some(OsStr::new("desktop-app"))));
+        assert!(!hosted_by_desktop_app_value(None));
+        assert!(!hosted_by_desktop_app_value(Some(OsStr::new(""))));
+        assert!(!hosted_by_desktop_app_value(Some(OsStr::new("1"))));
+    }
 }
 
 #[cfg(test)]

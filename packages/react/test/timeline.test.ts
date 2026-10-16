@@ -391,6 +391,24 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("a disabled explicit pin is actionable rather than a healthy quota wait", () => {
+    reset();
+    const error =
+      "The account pinned to this chat is turned off. Turn it back on or choose another account.";
+    const [item] = buildTimeline([
+      event("codex.capacity.waiting", {
+        waitReason: "pinned_account_disabled",
+        actionRequired: true,
+        error,
+      }),
+    ]);
+    expect(item).toMatchObject({
+      text: error,
+      capacityWait: { label: "Needs you", detail: error },
+    });
+    expect(JSON.stringify(item)).not.toMatch(/limit reached|automatically/i);
+  });
+
   test.each([
     [{ waitReason: "no_eligible_capacity" }],
     [{ waitReason: "pinned_account_unavailable" }],

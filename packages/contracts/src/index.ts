@@ -16,6 +16,8 @@ export {
 export * from "./direct-model-provider";
 export * from "./artifact-catalog";
 export * from "./site-data";
+export * from "./site-publishing";
+export * from "./site-sql";
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
 export * from "./model-account-settings";
@@ -1093,6 +1095,20 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "site_files_list",
   "site_files_upload",
   "site_files_delete",
+  "site_publication_get",
+  "site_publication_update",
+  "site_publication_apply_fix",
+  "site_hostname_check",
+  "site_sql_inspect",
+  "site_sql_enable",
+  "site_sql_migrate",
+  "site_sql_define_query",
+  "site_sql_query",
+  "site_sql_run",
+  "site_sql_execute",
+  "site_sql_export",
+  "site_sql_import",
+  "site_sql_reset",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
@@ -6125,11 +6141,30 @@ export const MODEL_ATTACHMENT_REFS_FIELD = "opengeni_attachment_refs" as const;
 /** Private marker for the compact attachment-reference carrier created by compaction. */
 export const MODEL_ATTACHMENT_CATALOG_MARKER = "opengeni_attachment_catalog" as const;
 /**
+ * Private marker on catalogs whose model-visible text is already complete in
+ * `content` (provenance and upload times were frozen when compaction created
+ * them). Projection must not append per-reference receipts to such a catalog.
+ * Catalogs without it keep their original projection byte for byte.
+ */
+export const MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD =
+  "opengeni_attachment_catalog_rendered" as const;
+/**
  * Structured timeline annotations retained beside the deterministic user-text
  * projection in canonical history. Provider adapters remove this Opengeni
  * extension field; the numbered projection in `content` remains model-visible.
  */
 export const MODEL_TIMELINE_ANNOTATIONS_FIELD = "opengeni_timeline_annotations" as const;
+/**
+ * Private durable field on user history items: the longest side, in pixels,
+ * at which this message's image attachments are shown to the model. It is
+ * stamped when the message is accepted, so a later change of the bound never
+ * re-renders images that an earlier request already sent. Items without it
+ * keep their original full-resolution projection.
+ */
+export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD =
+  "opengeni_attachment_image_max_dimension" as const;
+/** Bound stamped on newly accepted user messages with attachments. */
+export const MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION = 2000;
 
 export const ResourceRef = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]),
@@ -7012,6 +7047,9 @@ export const ToolRef = /* @__PURE__ */ defineSchema(() =>
     // configure the id, validation drops the ref. Auto-attached workspace-default
     // capability MCPs also use this marker.
     optional: z.boolean().optional(),
+    // Optional narrowing of this connection's tools. Empty means no tools;
+    // omission preserves the connection's authorized catalog.
+    allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
   }),
 );
 export type ToolRef = z.infer<typeof ToolRef>;
@@ -7321,11 +7359,18 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
     // per-turn tool selections are combined.
     const optional = prior.optional === true && tool.optional === true ? true : undefined;
     const eager = prior.eager === true || tool.eager === true ? true : undefined;
+    const allowedTools =
+      prior.allowedTools === undefined
+        ? tool.allowedTools
+        : tool.allowedTools === undefined
+          ? prior.allowedTools
+          : prior.allowedTools.filter((name) => tool.allowedTools!.includes(name));
     byKey.set(key, {
       kind: "mcp",
       id: prior.id,
       ...(optional ? { optional } : {}),
       ...(eager ? { eager } : {}),
+      ...(allowedTools !== undefined ? { allowedTools } : {}),
     });
   }
   return order.map((key) => byKey.get(key)!);
@@ -10235,6 +10280,16 @@ export function renderSessionSystemUpdateBatch(
 export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[Opengeni scheduled task occurrence]" as const;
 
 /**
+ * A schedule must never stay stuck without its owner knowing. The platform
+ * pauses a schedule and tells its owner when runs cannot start; this covers
+ * what only the agent can see: a run that starts but cannot do its job. The
+ * key matches the platform's own schedule notice, so either updates the other
+ * in place. Rendered only into new occurrences; delivered ones keep their text.
+ */
+export const SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE =
+  "If something blocks this task, first try to fix it within your authority. If it stays blocked, notify the schedule's owner once with what blocks it and exactly what would unblock it, using the notification key schedule-<scheduled task ID> so a later occurrence updates that notice instead of alerting again. If no later occurrence can succeed until a person acts, also pause this schedule. If you cannot notify or pause, say so in your result.";
+
+/**
  * A pure scheduled-occurrence batch is a new task boundary for the model, not
  * merely background context. The user role here is conversational only: the
  * owning turn retains its immutable scheduler/service initiator and frozen
@@ -10272,6 +10327,7 @@ function renderScheduledOccurrenceTaskBatch(
     introduction,
     ...renderSessionSystemUpdateDeliveredAt(options),
     "The scheduled instructions below are the task for this turn. Earlier completed goals, occurrences, conversation, and tool outputs are historical context and do not complete this occurrence. When the task depends on mutable external state, query that state during this occurrence instead of reusing an earlier result.",
+    SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE,
     ...occurrences.flatMap((occurrence, index) => {
       if (!occurrence) return [];
       return [
@@ -11853,6 +11909,27 @@ export const ScheduledTaskAccountPlan = /* @__PURE__ */ /* @__PURE__ */ defineSc
 );
 export type ScheduledTaskAccountPlan = z.infer<typeof ScheduledTaskAccountPlan>;
 
+/**
+ * What blocks a schedule. `paused`: no later run could start until a person
+ * acts, so the schedule paused itself; resume it once the cause is fixed.
+ * `notified`: its scheduled runs kept failing or being skipped and its owner
+ * was told once; it keeps running. `message` says what would unblock it.
+ */
+export const ScheduledTaskBlocker = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      state: z.enum(["paused", "notified"]),
+      /** Stable machine reason, such as `scheduled_session_paused`. Readers must tolerate new ones. */
+      reason: z.string().min(1).max(128),
+      message: z.string().min(1).max(1000),
+      /** The run that showed the blocker (the first of a failing streak). */
+      runId: z.string().uuid(),
+      since: z.string(),
+    })
+    .strict(),
+);
+export type ScheduledTaskBlocker = z.infer<typeof ScheduledTaskBlocker>;
+
 export const ScheduledTask = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: z.string().uuid(),
@@ -11903,6 +11980,13 @@ export const ScheduledTask = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
      * authority. Absent when it could not be computed.
      */
     accountPlan: ScheduledTaskAccountPlan.optional(),
+    /**
+     * Read-only response projection: why this schedule paused itself
+     * (`paused`, shown while it stays paused) or why its owner was told its
+     * runs keep failing or being skipped (`notified`, shown while it stays
+     * active and until a run succeeds). Absent when nothing blocks it.
+     */
+    blocker: ScheduledTaskBlocker.optional(),
   }),
 );
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
@@ -19735,6 +19819,25 @@ export const UpdateGitHubActionPolicyRequest = /* @__PURE__ */ defineSchema(() =
 );
 export type UpdateGitHubActionPolicyRequest = z.infer<typeof UpdateGitHubActionPolicyRequest>;
 
+/** Published Sites facts the console needs to offer publishing (from OPENGENI_SITES_*). */
+export const ClientSitesConfig = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Sites live at `<label>.<domain>`. */
+      domain: z.string().min(1),
+      /** `public` access may be chosen. */
+      publicEnabled: z.boolean(),
+      /** Agents may run for signed-out guests of public Sites. */
+      publicAgentsEnabled: z.boolean(),
+      /** `public` means any signed-in user; there are no guests. */
+      loginOnly: z.boolean(),
+      /** Every Site is served with noindex. */
+      forceNoindex: z.boolean(),
+    })
+    .strict(),
+);
+export type ClientSitesConfig = z.infer<typeof ClientSitesConfig>;
+
 export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.discriminatedUnion("mode", [
     z.object({
@@ -20827,6 +20930,8 @@ export const SwapActiveSandboxResponse = /* @__PURE__ */ defineSchema(() =>
         "unsupported_backend_context",
         "transient_establishment",
         "concurrent_swap",
+        "personal_machine_permission_required",
+        "personal_machine_not_permitted",
         "recovery_in_progress",
         "recovery_degraded",
         "recovery_unrecoverable",
@@ -21614,6 +21719,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
         terminalEvents: z.boolean(),
       })
       .default({ fileSystem: false, git: false, terminalEvents: false }),
+    // Published Sites on this deployment (OPENGENI_SITES_*): null when
+    // publishing is off; absent from servers that predate published Sites.
+    sites: ClientSitesConfig.nullable().optional(),
   }),
 );
 export type ClientConfig = z.infer<typeof ClientConfig>;

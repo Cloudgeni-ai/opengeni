@@ -7,8 +7,7 @@ import {
 } from "@opengeni/contracts";
 import { boundComputerNativeReceipt } from "@opengeni/interaction";
 import {
-  AttachedBrowserBridge,
-  AttachedBrowserDevice,
+  AttachedBrowserDeviceListResponse,
   AuthRun,
   AuthRunListResponse,
   AuthRunMutationResponse,
@@ -29,6 +28,13 @@ import {
   BrowserIdentityListResponse,
   BrowserIdentityMutationResponse,
   BrowserObservation,
+  BrowserActionResolvedTarget,
+  BrowserDialog,
+  InteractionDiagnosticSummary,
+  InteractionError,
+  InteractionOperationState,
+  InteractionRect,
+  RetainedArtifactReferenceSchema,
   InteractionSemanticNode,
   BrowserRevisionListResponse,
   BrowserSession,
@@ -119,31 +125,70 @@ const BrowserAgentNode = z
         z.object({ redacted: z.literal(true), reason: z.string().max(32) }).strict(),
       ])
       .optional(),
-    states: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).max(6),
-    actions: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).max(6),
+    // Omitted when empty: most nodes have no states or actions, and repeating
+    // empty arrays on every node only costs the model tokens.
+    states: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).min(1).max(6).optional(),
+    actions: z.array(z.string().max(BROWSER_AGENT_MAX_FIELD_LENGTH)).min(1).max(6).optional(),
   })
   .strict();
+/** The model-facing view keeps only what a next call can use: what is on the
+ * page, the refs to act on, the fences an action may pass, and explicit budget
+ * omissions. Zero counts and constant limits are left out. */
 const BrowserAgentView = z
   .object({
-    kind: z.literal("compact"),
     sourceKind: z.enum(["snapshot", "diff", "none"]),
     nodes: z.array(BrowserAgentNode).max(BROWSER_AGENT_MAX_NODES),
-    sourceNodeCount: z.number().int().nonnegative(),
-    omittedNodeCount: z.number().int().nonnegative(),
-    removedRefCount: z.number().int().nonnegative(),
-    clippedFieldCount: z.number().int().nonnegative(),
-    maxNodes: z.number().int().positive(),
-    maxNodeBytes: z.number().int().positive(),
+    omittedNodeCount: z.number().int().positive().optional(),
+    removedRefCount: z.number().int().positive().optional(),
+    clippedFieldCount: z.number().int().positive().optional(),
   })
   .strict();
-const CompactBrowserObservation = BrowserObservation.safeExtend({
-  semantic: z.null(),
-  agentView: BrowserAgentView,
-});
+/** A tab as the model needs it: identity, page, selection and the generations
+ * an action or human request may pass as fences. Timestamps stay out. */
+const AgentBrowserTarget = z
+  .object({
+    id: z.string().max(512),
+    kind: z.enum(["page", "popup", "background_page", "worker"]),
+    title: z.string().max(4_096),
+    url: z.string().max(16_384),
+    selected: z.boolean(),
+    controllerGeneration: z.string().max(256),
+    targetGeneration: z.string().max(256),
+    documentGeneration: z.string().max(256).nullable(),
+  })
+  .strict();
+const CompactBrowserObservation = z
+  .object({
+    target: AgentBrowserTarget,
+    frameId: z.string().max(256).optional(),
+    viewport: z
+      .object({
+        width: z.number().int().positive(),
+        height: z.number().int().positive(),
+        deviceScaleFactor: z.number().positive().optional(),
+        maxTouchPoints: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    focusedRef: z.string().max(512).optional(),
+    changedRegions: z.array(InteractionRect).min(1).optional(),
+    diagnostics: InteractionDiagnosticSummary.optional(),
+    dialog: BrowserDialog.optional(),
+    screenshot: RetainedArtifactReferenceSchema.optional(),
+    agentView: BrowserAgentView,
+  })
+  .strict();
 const BrowserAgentObservation = z.union([BrowserObservation, CompactBrowserObservation]);
-const BrowserAgentActionReceipt = BrowserActionReceipt.safeExtend({
-  observation: BrowserAgentObservation.nullable(),
-});
+const CompactBrowserActionReceipt = z
+  .object({
+    targetId: z.string().max(512),
+    state: InteractionOperationState,
+    error: InteractionError.optional(),
+    targets: z.array(BrowserActionResolvedTarget).optional(),
+    observation: CompactBrowserObservation.optional(),
+  })
+  .strict();
+const BrowserAgentActionReceipt = z.union([BrowserActionReceipt, CompactBrowserActionReceipt]);
 const BrowserScreenshotInput = z
   .object({
     browserSessionId: z.string().uuid(),
@@ -283,6 +328,7 @@ type FlatBrowserNode = {
   depth: number;
   index: number;
   withinScope: boolean;
+  parentName?: string;
 };
 
 const TOOL_PERMISSION = {
@@ -318,6 +364,28 @@ const DiscoveryInput = z
     includeDisconnectedDevices: z.boolean().optional(),
   })
   .strict();
+/** An attached Chrome profile as the model needs it to choose one: identity,
+ * labels, state and any capability it lacks. Enrollment, generation and
+ * timestamp bookkeeping stay out. */
+const AgentAttachedBrowser = z
+  .object({
+    id: z.string().uuid(),
+    name: z.string().max(200),
+    profileLabel: z.string().max(200).optional(),
+    browserName: z.string().max(100),
+    platform: z.enum(["linux", "macos", "windows"]),
+    state: z.enum(["connected", "disconnected"]),
+    tabCount: z.number().int().nonnegative(),
+    unsupported: z.array(z.string().max(64)).min(1).optional(),
+  })
+  .strict();
+/** An online machine that can host the extension but has no attached profile. */
+const AgentAttachedBrowserBridge = z
+  .object({
+    enrollmentId: z.string().uuid(),
+    connectedProfileCount: z.number().int().nonnegative(),
+  })
+  .strict();
 const DiscoveryOutput = z
   .object({
     browserRevision: z.number().int().nonnegative(),
@@ -327,8 +395,23 @@ const DiscoveryOutput = z
     browsers: z.array(BrowserSession),
     computers: z.array(ComputerSession),
     identities: z.array(BrowserIdentity),
-    attachedBrowserBridges: z.array(AttachedBrowserBridge),
-    attachedBrowsers: z.array(AttachedBrowserDevice),
+    attachedBrowserBridges: z.array(AgentAttachedBrowserBridge),
+    attachedBrowsers: z.array(AgentAttachedBrowser),
+  })
+  .strict();
+
+/** browser_open may name the person's connected Chrome without a profile id;
+ * the tool then resolves it (see chooseAttachedProfile). */
+const BrowserOpenPlacement = z.union([
+  InteractionPlacement,
+  z.object({ kind: z.literal("attached_device") }).strict(),
+]);
+/** The Chrome profile browser_open chose when the request named none. */
+const AgentAttachedProfile = z
+  .object({
+    id: z.string().uuid(),
+    name: z.string(),
+    profileLabel: z.string().optional(),
   })
   .strict();
 
@@ -340,7 +423,7 @@ const BrowserOpenInput = z
     initialUrl: z.string().url().max(16_384).optional(),
     headless: z.boolean().optional(),
     storageMode: BrowserStorageMode.optional(),
-    placement: InteractionPlacement.optional(),
+    placement: BrowserOpenPlacement.optional(),
     identityId: z.string().uuid().optional(),
     baseRevisionId: z.string().uuid().optional(),
     networkRouteId: z.string().uuid().optional(),
@@ -384,7 +467,14 @@ const BrowserOpenInput = z
     }
   });
 const BrowserOpenOutput = z
-  .object({ session: BrowserSession, targets: z.array(BrowserTarget) })
+  .object({
+    session: BrowserSession,
+    targets: z.array(AgentBrowserTarget),
+    otherTabCount: z.number().int().nonnegative().optional(),
+    observation: CompactBrowserObservation.optional(),
+    attachedProfile: AgentAttachedProfile.optional(),
+    otherAttachedProfiles: z.array(AgentAttachedProfile).optional(),
+  })
   .strict();
 
 const BrowserTabsInput = z.discriminatedUnion("operation", [
@@ -411,9 +501,13 @@ const BrowserTabsInput = z.discriminatedUnion("operation", [
     })
     .strict(),
 ]);
-const BrowserTabsOutput = BrowserTargetListResponse.safeExtend({
-  mutationObservation: CompactBrowserObservation.optional(),
-});
+const BrowserTabsOutput = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    targets: z.array(AgentBrowserTarget),
+    mutationObservation: CompactBrowserObservation.optional(),
+  })
+  .strict();
 
 const BrowserObserveInput = z
   .object({
@@ -722,7 +816,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "interaction_discover",
     codemodePath: ["interaction", "discover"],
     title: "Discover browsers and computers",
-    description: `Discover browsers and computers. For the user's existing/current/personal Chrome, use scope=attached_browsers before browser_open and select an actual attachedBrowsers device. This reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. If none exist, the person needs a Connected Machine first (post the Connected Machine card with capability_authorization_request api:connected-machine) and then the Opengeni Browser Chrome extension: ${OPENGENI_BROWSER_EXTENSION_URL}. Leave includeTerminal=false unless ended history is specifically required.`,
+    description: `Discover browsers and computers. To use the user's existing/current/personal Chrome, call browser_open with placement={kind:'attached_device'} directly; use scope=attached_browsers only to pick a specific Chrome profile or to see why none is connected. That scope reads only Chrome profiles and extension bridges, avoiding unrelated sessions and saved identities. The default current_session scope lists this agent session's BrowserSessions and ComputerSessions. Use scope=workspace only for reusable identities or peer/child resources; that inventory can be large. An attachedBrowserBridge only means the machine is ready for the extension; only attachedBrowsers are real user Chrome profiles/tabs. If none exist, the person needs a Connected Machine first (post the Connected Machine card with capability_authorization_request api:connected-machine) and then the Opengeni Browser Chrome extension: ${OPENGENI_BROWSER_EXTENSION_URL}. Leave includeTerminal=false unless ended history is specifically required.`,
     input: DiscoveryInput,
     output: DiscoveryOutput,
     readOnly: true,
@@ -743,13 +837,18 @@ export function createInteractionAttemptToolDefinitions(
           browsers: [],
           computers: [],
           identities: [],
-          attachedBrowserBridges: attached.bridges,
-          attachedBrowsers: attached.devices,
+          ...agentAttachedInventory(attached),
         };
       }
+      // Narrow in SQL: a workspace can retain thousands of ended sessions, and
+      // current_session discovery only ever returns this session's own.
+      const listFilter = {
+        ...(scope === "current_session" ? { associatedSessionId: input.sessionId } : {}),
+        ...((value.includeTerminal ?? false) ? {} : { includeTerminal: false }),
+      };
       const [browsers, computers, identities, attached] = await Promise.all([
-        input.transport.listBrowserSessions(input.workspaceId),
-        input.transport.listComputerSessions(input.workspaceId),
+        input.transport.listBrowserSessions(input.workspaceId, listFilter),
+        input.transport.listComputerSessions(input.workspaceId, listFilter),
         input.transport.listBrowserIdentities(input.workspaceId, {
           includeArchived: value.includeArchivedIdentities ?? false,
         }),
@@ -775,8 +874,9 @@ export function createInteractionAttemptToolDefinitions(
           value.includeTerminal ?? false,
         ),
         identities: scope === "workspace" ? identities.identities : [],
-        attachedBrowserBridges: scope === "workspace" ? attached.bridges : [],
-        attachedBrowsers: scope === "workspace" ? attached.devices : [],
+        ...(scope === "workspace"
+          ? agentAttachedInventory(attached)
+          : { attachedBrowserBridges: [], attachedBrowsers: [] }),
       };
     },
   });
@@ -785,7 +885,7 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open an attached Chrome profile by passing placement={kind:'attached_device',deviceId}. This does not infer or attach the user's existing Chrome: for requests about 'my browser', 'my tabs', or current Chrome, call interaction_discover first and select an actual attachedBrowsers device; if none exists, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state, plus observation: a compact snapshot of the opened (or selected) tab when one is available. With initialUrl, targets holds only the opened tab and otherTabCount counts the rest (browser_tabs list shows them). Reuse its refs and generations for the first action instead of observing again.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
@@ -819,10 +919,12 @@ export function createInteractionAttemptToolDefinitions(
           value.targetId,
         );
       } else if (value.operation === "close") {
-        return await input.transport.closeBrowserTarget(
-          input.workspaceId,
-          value.browserSessionId,
-          value.targetId,
+        return agentTargetList(
+          await input.transport.closeBrowserTarget(
+            input.workspaceId,
+            value.browserSessionId,
+            value.targetId,
+          ),
         );
       }
       const tabs = await input.transport.listBrowserTargets(
@@ -831,10 +933,10 @@ export function createInteractionAttemptToolDefinitions(
       );
       return mutationObservation
         ? {
-            ...tabs,
+            ...agentTargetList(tabs),
             mutationObservation: projectBrowserObservation(mutationObservation, "compact"),
           }
-        : tabs;
+        : agentTargetList(tabs);
     },
   });
 
@@ -843,7 +945,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "observe"],
     title: "Observe browser tab",
     description:
-      "Read one tab's URL, title, viewport, causal generations, and a bounded accessibility view. Compact view is the default: agentView lists selected refs and reports omitted nodes and clipped fields; it is not a complete page tree. Set view=full for the complete accessibility snapshot. Set includeScreenshot=true to add a current still image as tool image content; browser_screenshot is faster when only pixels are needed.",
+      "Read one tab's URL, title, viewport, causal generations, and a bounded accessibility view. Compact view is the default: agentView lists selected refs, and omittedNodeCount or clippedFieldCount appear only when something was left out; it is not a complete page tree. Empty and default fields are omitted. Set view=full for the complete accessibility snapshot. Set includeScreenshot=true to add a current still image as tool image content; browser_screenshot is faster when only pixels are needed.",
     input: BrowserObserveInput,
     output: BrowserAgentObservation,
     readOnly: true,
@@ -1016,42 +1118,34 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from tab open/select or a prior action; browser_open returns only session/tab metadata, so observe when page content is needed. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
     output: BrowserAgentActionReceipt,
     readOnly: false,
     idempotent: true,
     execute: async (value, context) => {
-      const current =
-        value.expectedTargetGeneration !== undefined &&
-        value.expectedDocumentGeneration !== undefined &&
-        value.expectedFrameId !== undefined
-          ? null
-          : await input.transport.getBrowserTargetState(
-              input.workspaceId,
-              value.browserSessionId,
-              value.targetId,
-            );
+      // Omitted fences are resolved by the API from the live target in the same
+      // request, so acting on the current document costs one round trip.
       const receipt = await input.transport.actInBrowser(
         input.workspaceId,
         value.browserSessionId,
         {
           operationId: context.operationId,
           targetId: value.targetId,
-          expectedTargetGeneration: value.expectedTargetGeneration ?? current!.targetGeneration,
-          expectedDocumentGeneration:
-            value.expectedDocumentGeneration === undefined
-              ? current!.documentGeneration
-              : value.expectedDocumentGeneration,
-          expectedFrameId:
-            value.expectedFrameId === undefined ? current!.frameId : value.expectedFrameId,
+          ...(value.expectedTargetGeneration === undefined
+            ? {}
+            : { expectedTargetGeneration: value.expectedTargetGeneration }),
+          ...(value.expectedDocumentGeneration === undefined
+            ? {}
+            : { expectedDocumentGeneration: value.expectedDocumentGeneration }),
+          ...(value.expectedFrameId === undefined
+            ? {}
+            : { expectedFrameId: value.expectedFrameId }),
           ...(value.view === "none" ? { observationMode: "none" as const } : {}),
           action: value.action,
         },
       );
-      return receipt.observation && (value.view ?? "compact") === "compact"
-        ? { ...receipt, observation: projectBrowserObservation(receipt.observation, "compact") }
-        : receipt;
+      return value.view === "full" ? receipt : compactActionReceipt(receipt);
     },
   });
 
@@ -1659,12 +1753,66 @@ export function createInteractionAttemptToolDefinitions(
   return definitions;
 }
 
-/** Preserve exact platform alternatives instead of flattening away constraints. */
-function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToolJsonSchema {
+/**
+ * One top-level object schema for every platform variant of a native CUA tool.
+ * Model providers require a plain object at the top level of a function schema
+ * (a top-level anyOf is rejected or ignored, so the model loses every argument
+ * type). Properties are the union across platforms; a property whose platform
+ * schemas differ in more than wording keeps those alternatives at property
+ * level. Only properties every platform requires stay required. The session's
+ * CUA worker still validates arguments against its own exact platform schema.
+ */
+export function nativeCuaSchema(variants: Record<string, unknown>[]): AttemptToolJsonSchema {
   const unique = [...new Map(variants.map((schema) => [JSON.stringify(schema), schema])).values()];
-  return (
-    unique.length === 1 ? unique[0] : { type: "object", anyOf: unique }
-  ) as AttemptToolJsonSchema;
+  if (unique.length === 1) return unique[0] as AttemptToolJsonSchema;
+  const properties: Record<string, unknown> = {};
+  const names = [...new Set(unique.flatMap((schema) => Object.keys(objectProperties(schema))))];
+  for (const name of names) {
+    const alternatives = unique
+      .map((schema) => objectProperties(schema)[name])
+      .filter((value): value is Record<string, unknown> => isJsonObject(value));
+    // The first platform's wording wins for constraint-identical schemas.
+    const distinct = new Map<string, Record<string, unknown>>();
+    for (const schema of alternatives) {
+      const key = JSON.stringify(withoutWording(schema));
+      if (!distinct.has(key)) distinct.set(key, schema);
+    }
+    const options = [...distinct.values()];
+    properties[name] = options.length === 1 ? options[0] : { anyOf: options };
+  }
+  const required = names.filter((name) =>
+    unique.every((schema) =>
+      Array.isArray(schema.required) ? schema.required.includes(name) : false,
+    ),
+  );
+  return {
+    type: "object",
+    properties,
+    ...(required.length > 0 ? { required } : {}),
+    ...(unique.every((schema) => schema.additionalProperties === false)
+      ? { additionalProperties: false }
+      : {}),
+  } as AttemptToolJsonSchema;
+}
+
+function objectProperties(schema: Record<string, unknown>): Record<string, unknown> {
+  return isJsonObject(schema.properties) ? schema.properties : {};
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Compare platform property schemas by constraint, not by explanatory text. */
+function withoutWording(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutWording);
+  if (!isJsonObject(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "description" && key !== "title" && key !== "default")
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entry]) => [key, withoutWording(entry)]),
+  );
 }
 
 function filterDiscoveredSessions<
@@ -1764,13 +1912,28 @@ async function openBrowser(
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
   let created = false;
+  let profileChoice: AttachedProfileChoice | undefined;
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
     if (value.storageMode && browserSessionStorageMode(session) !== value.storageMode)
       throw new Error("existing BrowserSession storage mode does not match request");
   } else {
-    const listed =
-      value.mode === "new" ? { sessions: [] } : await transport.listBrowserSessions(workspaceId);
+    // placement={kind:'attached_device'} without a deviceId means "the person's
+    // own Chrome". Read the profile inventory alongside the reuse lookup so the
+    // resolution adds no sequential round trip.
+    const resolveProfile =
+      value.placement?.kind === "attached_device" && !("deviceId" in value.placement);
+    const [listed, attachedInventory] = await Promise.all([
+      value.mode === "new"
+        ? { sessions: [] }
+        : transport.listBrowserSessions(workspaceId, {
+            associatedSessionId: sourceSessionId,
+            includeTerminal: false,
+          }),
+      resolveProfile
+        ? transport.listAttachedBrowsers(workspaceId, { includeDisconnected: false })
+        : null,
+    ]);
     // The agent-facing browser is human-capable by default. A headless session
     // is a deliberately narrower execution mode and must never be silently
     // reused for an omitted/default headed request: OAuth providers such as
@@ -1799,6 +1962,11 @@ async function openBrowser(
       session = reusable;
     } else {
       created = true;
+      if (attachedInventory) profileChoice = chooseAttachedProfile(attachedInventory);
+      // Without a deviceId, chooseAttachedProfile has resolved one (or thrown).
+      const placement = profileChoice
+        ? { kind: "attached_device" as const, deviceId: profileChoice.chosen.id }
+        : (value.placement as z.infer<typeof InteractionPlacement> | undefined);
       session = (
         await transport.createBrowserSession(workspaceId, {
           operationId: context.operationId,
@@ -1807,7 +1975,7 @@ async function openBrowser(
           ...(value.initialUrl ? { initialUrl: value.initialUrl } : {}),
           headless: requestedHeadless,
           ...(value.storageMode ? { storageMode: value.storageMode } : {}),
-          ...(value.placement ? { placement: value.placement } : {}),
+          ...(placement ? { placement } : {}),
           ...(value.identityId ? { identityId: value.identityId } : {}),
           ...(value.baseRevisionId ? { baseRevisionId: value.baseRevisionId } : {}),
           ...(value.networkRouteId ? { networkRouteId: value.networkRouteId } : {}),
@@ -1825,7 +1993,15 @@ async function openBrowser(
       })
     ).session;
   }
-  if (session.lifecycle !== "active") return { session, targets: [] };
+  const chosenProfile = profileChoice
+    ? {
+        attachedProfile: agentAttachedProfile(profileChoice.chosen),
+        ...(profileChoice.others.length > 0
+          ? { otherAttachedProfiles: profileChoice.others.map(agentAttachedProfile) }
+          : {}),
+      }
+    : {};
+  if (session.lifecycle !== "active") return { session, targets: [], ...chosenProfile };
   let targets = (await transport.listBrowserTargets(workspaceId, session.id)).targets;
   if (
     value.initialUrl &&
@@ -1854,7 +2030,101 @@ async function openBrowser(
     }
     targets = inventory.targets;
   }
-  return { session, targets };
+  const primary = openedBrowserTarget(targets, value.initialUrl);
+  const observation = primary
+    ? await observeOpenedBrowserTarget(transport, workspaceId, session.id, primary)
+    : undefined;
+  // A browser opened on a URL is about that tab. A person's own Chrome profile
+  // can hold dozens of unrelated tabs; listing them all costs context on every
+  // later step, so only the opened tab is returned with a count of the rest
+  // (browser_tabs list shows them).
+  const opened =
+    value.initialUrl && primary && sameBrowserUrl(primary.url, value.initialUrl)
+      ? primary
+      : undefined;
+  const shown = opened && targets.length > 1 ? [opened] : targets;
+  return {
+    session,
+    targets: shown.map(agentBrowserTarget),
+    ...(shown.length < targets.length ? { otherTabCount: targets.length - shown.length } : {}),
+    ...(observation ? { observation } : {}),
+    ...chosenProfile,
+  };
+}
+
+type AttachedProfileChoice = {
+  chosen: z.infer<typeof AttachedBrowserDeviceListResponse>["devices"][number];
+  others: z.infer<typeof AttachedBrowserDeviceListResponse>["devices"];
+};
+
+/** The person's own Chrome when browser_open names no profile: the only
+ * connected profile, else the one whose tabs changed most recently (a device's
+ * updatedAt moves with its tab inventory, not with heartbeats). */
+function chooseAttachedProfile(
+  inventory: z.infer<typeof AttachedBrowserDeviceListResponse>,
+): AttachedProfileChoice {
+  const usable = inventory.devices
+    .filter((device) => device.state === "connected" && device.capabilities.debuggerAttachment)
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+  const [chosen, ...others] = usable;
+  if (!chosen) {
+    throw new OpenGeniApiError(
+      409,
+      `No Chrome profile is connected through the Opengeni Browser extension. The person needs a Connected Machine, then the extension: ${OPENGENI_BROWSER_EXTENSION_URL}`,
+      { code: "attached_browser_unavailable", retryable: false },
+    );
+  }
+  return { chosen, others };
+}
+
+function agentAttachedProfile(
+  device: AttachedProfileChoice["chosen"],
+): z.infer<typeof AgentAttachedProfile> {
+  return {
+    id: device.id,
+    name: device.name,
+    ...(device.profileLabel && device.profileLabel !== device.name
+      ? { profileLabel: device.profileLabel }
+      : {}),
+  };
+}
+
+/**
+ * The tab the agent most likely acts on next: the tab showing the requested
+ * URL, else the selected page.
+ */
+function openedBrowserTarget(
+  targets: z.infer<typeof BrowserTarget>[],
+  initialUrl: string | undefined,
+): z.infer<typeof BrowserTarget> | undefined {
+  const pages = targets.filter((target) => target.kind === "page");
+  return (
+    (initialUrl ? pages.find((target) => sameBrowserUrl(target.url, initialUrl)) : undefined) ??
+    pages.find((target) => target.selected) ??
+    (pages.length === 1 ? pages[0] : undefined)
+  );
+}
+
+/**
+ * A compact observation of the opened tab. Opening a browser is almost always
+ * followed by reading it, so this saves that model round trip. It is a
+ * read-only convenience: if it fails, the open still succeeds and the agent can
+ * observe explicitly.
+ */
+async function observeOpenedBrowserTarget(
+  transport: InteractionTransport,
+  workspaceId: string,
+  browserSessionId: string,
+  primary: z.infer<typeof BrowserTarget>,
+): Promise<z.infer<typeof CompactBrowserObservation> | undefined> {
+  try {
+    return projectBrowserObservation(
+      await transport.observeBrowserTarget(workspaceId, browserSessionId, primary.id),
+      "compact",
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 function sameBrowserUrl(left: string, right: string): boolean {
@@ -1877,7 +2147,12 @@ async function openComputer(
     session = await transport.getComputerSession(workspaceId, value.computerSessionId);
   } else {
     const listed =
-      value.mode === "new" ? { sessions: [] } : await transport.listComputerSessions(workspaceId);
+      value.mode === "new"
+        ? { sessions: [] }
+        : await transport.listComputerSessions(workspaceId, {
+            associatedSessionId: sourceSessionId,
+            includeTerminal: false,
+          });
     const reusable = newestRelevant(
       listed.sessions.filter((candidate) =>
         compatibleInteractionPlacement(candidate.placement, value.placement),
@@ -1906,7 +2181,7 @@ async function openComputer(
 
 function compatibleInteractionPlacement(
   candidate: z.infer<typeof InteractionPlacement>,
-  requested: z.infer<typeof InteractionPlacement> | undefined,
+  requested: z.infer<typeof BrowserOpenPlacement> | undefined,
 ): boolean {
   if (!requested) return candidate.kind !== "attached_device";
   return Object.entries(requested).every(
@@ -1962,7 +2237,12 @@ function flattenBrowserNodes(
   scopeRef?: string,
 ): FlatBrowserNode[] {
   const flattened: FlatBrowserNode[] = [];
-  const stack = [...roots].reverse().map((node) => ({ node, depth: 0, withinScope: !scopeRef }));
+  const stack: Array<{
+    node: BrowserSemanticNodeValue;
+    depth: number;
+    withinScope: boolean;
+    parentName?: string;
+  }> = [...roots].reverse().map((node) => ({ node, depth: 0, withinScope: !scopeRef }));
   while (stack.length > 0) {
     const next = stack.pop()!;
     const withinScope = next.withinScope || next.node.ref === scopeRef;
@@ -1971,12 +2251,51 @@ function flattenBrowserNodes(
       depth: next.depth,
       index: flattened.length,
       withinScope,
+      ...(next.parentName !== undefined ? { parentName: next.parentName } : {}),
     });
     for (const child of [...(next.node.children ?? [])].reverse()) {
-      stack.push({ node: child, depth: next.depth + 1, withinScope });
+      stack.push({
+        node: child,
+        depth: next.depth + 1,
+        withinScope,
+        ...(next.node.name !== undefined ? { parentName: next.node.name } : {}),
+      });
     }
   }
   return flattened;
+}
+
+/** Container roles that help the model orient even without a name. */
+const BROWSER_AGENT_STRUCTURAL_ROLES = new Set([
+  "dialog",
+  "alertdialog",
+  "alert",
+  "status",
+  "navigation",
+  "main",
+  "form",
+  "table",
+  "grid",
+  "list",
+  "listbox",
+  "menu",
+  "menubar",
+  "tablist",
+  "radiogroup",
+]);
+
+/** Nodes that add nothing to the compact view: static text repeating its
+ * parent's accessible name, and unnamed, stateless, non-actionable containers.
+ * Their children keep their own depth, so the outline stays readable. */
+function redundantAgentNode(flat: FlatBrowserNode): boolean {
+  const { node } = flat;
+  if (node.actions.length > 0 || node.states.length > 0) return false;
+  const hasValue = node.value !== undefined && node.value !== null && node.value !== "";
+  if (node.role === "text" || node.role === "StaticText") {
+    return !hasValue && !node.description && (!node.name || node.name === flat.parentName);
+  }
+  if (BROWSER_AGENT_STRUCTURAL_ROLES.has(node.role)) return false;
+  return !node.name && !node.description && !hasValue;
 }
 
 function boundedAgentField(value: string, onClip: () => void): string {
@@ -2008,8 +2327,12 @@ function projectAgentNode(flat: FlatBrowserNode): {
             typeof source.value === "string" ? boundedAgentField(source.value, clip) : source.value,
         }
       : {}),
-    states: source.states.slice(0, 6).map((state) => boundedAgentField(state, clip)),
-    actions: source.actions.slice(0, 6).map((action) => boundedAgentField(action, clip)),
+    ...(source.states.length > 0
+      ? { states: source.states.slice(0, 6).map((state) => boundedAgentField(state, clip)) }
+      : {}),
+    ...(source.actions.length > 0
+      ? { actions: source.actions.slice(0, 6).map((action) => boundedAgentField(action, clip)) }
+      : {}),
   };
   if (source.states.length > 6) clippedFieldCount += source.states.length - 6;
   if (source.actions.length > 6) clippedFieldCount += source.actions.length - 6;
@@ -2072,26 +2395,123 @@ function projectBrowserObservation(
       : semantic?.kind === "diff"
         ? semantic.changed
         : [];
-  const flattened = flattenBrowserNodes(roots);
+  const flattened = flattenBrowserNodes(roots).filter((flat) => !redundantAgentNode(flat));
   const projected = selectAgentNodes(
     flattened,
     BROWSER_AGENT_MAX_NODES,
     BROWSER_AGENT_MAX_NODE_BYTES,
   );
+  const omittedNodeCount = flattened.length - projected.nodes.length;
+  const removedRefCount = semantic?.kind === "diff" ? semantic.removedRefs.length : 0;
+  const viewport = observation.viewport;
+  const diagnostics = observation.diagnostics;
+  const hasDiagnostics =
+    diagnostics.consoleErrorCount > 0 ||
+    diagnostics.failedRequestCount > 0 ||
+    diagnostics.downloadCount > 0 ||
+    diagnostics.pageErrorCount > 0;
   return {
-    ...observation,
-    semantic: null,
+    target: agentBrowserTarget(observation.target),
+    ...(observation.frameId ? { frameId: observation.frameId } : {}),
+    ...(viewport
+      ? {
+          viewport: {
+            width: viewport.width,
+            height: viewport.height,
+            ...(viewport.deviceScaleFactor !== 1
+              ? { deviceScaleFactor: viewport.deviceScaleFactor }
+              : {}),
+            ...(viewport.maxTouchPoints > 0 ? { maxTouchPoints: viewport.maxTouchPoints } : {}),
+          },
+        }
+      : {}),
+    ...(observation.focusedRef ? { focusedRef: observation.focusedRef } : {}),
+    ...(observation.changedRegions.length > 0
+      ? { changedRegions: observation.changedRegions }
+      : {}),
+    ...(hasDiagnostics ? { diagnostics } : {}),
+    ...(observation.dialog ? { dialog: observation.dialog } : {}),
+    ...(observation.screenshot ? { screenshot: observation.screenshot } : {}),
     agentView: {
-      kind: "compact",
       sourceKind: semantic?.kind ?? "none",
       nodes: projected.nodes,
-      sourceNodeCount: flattened.length,
-      omittedNodeCount: flattened.length - projected.nodes.length,
-      removedRefCount: semantic?.kind === "diff" ? semantic.removedRefs.length : 0,
-      clippedFieldCount: projected.clippedFieldCount,
-      maxNodes: BROWSER_AGENT_MAX_NODES,
-      maxNodeBytes: BROWSER_AGENT_MAX_NODE_BYTES,
+      ...(omittedNodeCount > 0 ? { omittedNodeCount } : {}),
+      ...(removedRefCount > 0 ? { removedRefCount } : {}),
+      ...(projected.clippedFieldCount > 0
+        ? { clippedFieldCount: projected.clippedFieldCount }
+        : {}),
     },
+  };
+}
+
+function agentBrowserTarget(
+  target: z.infer<typeof BrowserTarget>,
+): z.infer<typeof AgentBrowserTarget> {
+  return {
+    id: target.id,
+    kind: target.kind,
+    title: target.title,
+    url: target.url,
+    selected: target.selected,
+    controllerGeneration: target.controllerGeneration,
+    targetGeneration: target.targetGeneration,
+    documentGeneration: target.documentGeneration,
+  };
+}
+
+/** Attached profiles are what the model selects. Bridges only explain why
+ * none is available, so they are listed (online only) when no profile is. */
+function agentAttachedInventory(inventory: z.infer<typeof AttachedBrowserDeviceListResponse>): {
+  attachedBrowserBridges: z.infer<typeof AgentAttachedBrowserBridge>[];
+  attachedBrowsers: z.infer<typeof AgentAttachedBrowser>[];
+} {
+  const attachedBrowsers = inventory.devices.map((device) => {
+    const unsupported = Object.entries(device.capabilities)
+      .filter(([, supported]) => !supported)
+      .map(([capability]) => capability);
+    return {
+      id: device.id,
+      name: device.name,
+      ...(device.profileLabel ? { profileLabel: device.profileLabel } : {}),
+      browserName: device.browserName,
+      platform: device.platform,
+      state: device.state,
+      tabCount: device.tabCount,
+      ...(unsupported.length > 0 ? { unsupported } : {}),
+    };
+  });
+  const anyConnected = inventory.devices.some((device) => device.state === "connected");
+  const attachedBrowserBridges = anyConnected
+    ? []
+    : inventory.bridges
+        .filter((bridge) => bridge.state === "online")
+        .map((bridge) => ({
+          enrollmentId: bridge.enrollmentId,
+          connectedProfileCount: bridge.connectedProfileCount,
+        }));
+  return { attachedBrowserBridges, attachedBrowsers };
+}
+
+function agentTargetList(
+  list: z.infer<typeof BrowserTargetListResponse>,
+): z.infer<typeof BrowserTabsOutput> {
+  return {
+    browserSessionId: list.browserSessionId,
+    targets: list.targets.map(agentBrowserTarget),
+  };
+}
+
+function compactActionReceipt(
+  receipt: z.infer<typeof BrowserActionReceipt>,
+): z.infer<typeof CompactBrowserActionReceipt> {
+  return {
+    targetId: receipt.targetId,
+    state: receipt.state,
+    ...(receipt.error ? { error: receipt.error } : {}),
+    ...(receipt.targets && receipt.targets.length > 0 ? { targets: receipt.targets } : {}),
+    ...(receipt.observation
+      ? { observation: projectBrowserObservation(receipt.observation, "compact") }
+      : {}),
   };
 }
 

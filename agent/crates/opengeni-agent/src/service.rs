@@ -5,7 +5,7 @@
 //! [`opengeni_agent_platform::service`] (one trait, cargo-unit-tested); this module
 //! is the thin binary-side glue that resolves the installed binary path, writes the
 //! rendered unit/plist, and drives the platform service tool (`systemctl` /
-//! `launchctl` / `sc.exe`).
+//! `launchctl` / `schtasks`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -588,7 +588,10 @@ fn install(args: &ServiceInstallArgs) -> Result<(), String> {
     match ServiceSpec::backend() {
         ServiceBackend::Systemd => install_systemd(&spec, args.restart),
         ServiceBackend::Launchd => install_launchd(&spec, args.restart),
-        ServiceBackend::WindowsScm => install_windows(&spec, args.restart),
+        ServiceBackend::WindowsTask => {
+            windows_user_scope(install_scope)?;
+            crate::windows_task::install(&spec, args.restart)
+        }
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
     }?;
     if install_scope == ServiceScope::User {
@@ -818,90 +821,18 @@ fn launchctl_service_is_absent(code: Option<i32>, stderr: &str, target: &str) ->
     code == Some(113) && stderr.contains(&format!("Could not find service \"{label}\""))
 }
 
-/// Windows: register the SCM service + set restart-on-failure recovery. The binary
-/// hosts the SCM service via the windows-service crate on its native build. The
-/// `Result` return is uniform with the other backends (it only ever fails on the
-/// Windows build, where `sc.exe` can error).
-#[cfg_attr(not(windows), allow(clippy::unnecessary_wraps, unused_variables))]
-fn install_windows(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
-    // We invoke sc.exe with the rendered argument vectors. On non-Windows builds
-    // this code is still compiled (so the surface never rots) but only runs on
-    // Windows; the commands are exactly what `--print` shows.
-    println!("{}", service::windows_create_command(spec));
-    println!("{}", service::windows_recovery_command());
-    #[cfg(windows)]
-    {
-        let bin_path = format!("\"{}\" run", spec.binary_path.to_string_lossy());
-        let prior = capture("sc.exe", &["query", service::ids::WINDOWS_SERVICE]).ok();
-        if prior.is_some() {
-            run_tool(
-                "sc.exe",
-                &[
-                    "config",
-                    service::ids::WINDOWS_SERVICE,
-                    "binPath=",
-                    &bin_path,
-                    "start=",
-                    "delayed-auto",
-                ],
-            )?;
-        } else {
-            run_tool(
-                "sc.exe",
-                &[
-                    "create",
-                    service::ids::WINDOWS_SERVICE,
-                    "binPath=",
-                    &bin_path,
-                    "start=",
-                    "delayed-auto",
-                ],
-            )?;
-        }
-        run_tool(
-            "sc.exe",
-            &[
-                "failure",
-                service::ids::WINDOWS_SERVICE,
-                "reset=",
-                "0",
-                "actions=",
-                "restart/5000/restart/5000/restart/5000",
-            ],
-        )?;
-        let was_running = prior
-            .as_deref()
-            .is_some_and(|output| output.contains("RUNNING"));
-        if restart && was_running {
-            run_tool("sc.exe", &["stop", service::ids::WINDOWS_SERVICE])?;
-            wait_for_windows_service_state("STOPPED")?;
-        }
-        if !was_running || restart {
-            run_tool("sc.exe", &["start", service::ids::WINDOWS_SERVICE])?;
-            wait_for_windows_service_state("RUNNING")?;
-        }
+/// Windows runs the agent per user, at sign-in, in the user's desktop session
+/// (see [`crate::windows_task`]). There is no machine-wide variant: a Windows
+/// Service runs in session 0, out of reach of the screen and the user's browser.
+fn windows_user_scope(install_scope: ServiceScope) -> Result<(), String> {
+    match install_scope {
+        ServiceScope::User => Ok(()),
+        ServiceScope::System => Err(
+            "on Windows the agent runs for the signed-in user; run `opengeni-agent start` \
+             without --system, as the user whose desktop agents should use"
+                .to_string(),
+        ),
     }
-    println!("registered the OpengeniAgent Windows Service.");
-    Ok(())
-}
-
-/// `sc stop` returns while the service is still stopping. Starting immediately
-/// after that races the SCM and intermittently leaves an upgraded machine
-/// offline, so native Windows installs wait for the authoritative state.
-#[cfg(windows)]
-fn wait_for_windows_service_state(wanted: &str) -> Result<(), String> {
-    for _ in 0..100 {
-        if capture("sc.exe", &["query", service::ids::WINDOWS_SERVICE])
-            .is_ok_and(|output| output.contains(wanted))
-        {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    Err(format!(
-        "Windows Service {} did not reach {wanted} within 10 seconds",
-        service::ids::WINDOWS_SERVICE
-    ))
 }
 
 fn uninstall(install_scope: ServiceScope) -> Result<(), String> {
@@ -939,14 +870,9 @@ fn uninstall(install_scope: ServiceScope) -> Result<(), String> {
             println!("uninstalled the opengeni-agent LaunchAgent.");
             Ok(())
         }
-        ServiceBackend::WindowsScm => {
-            #[cfg(windows)]
-            {
-                let _ = run_tool("sc.exe", &["stop", service::ids::WINDOWS_SERVICE]);
-                let _ = run_tool("sc.exe", &["delete", service::ids::WINDOWS_SERVICE]);
-            }
-            println!("uninstalled the OpengeniAgent Windows Service.");
-            Ok(())
+        ServiceBackend::WindowsTask => {
+            windows_user_scope(install_scope)?;
+            crate::windows_task::uninstall()
         }
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
     }?;
@@ -991,13 +917,13 @@ fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {
             println!("{action}ed the opengeni-agent LaunchAgent.");
             Ok(())
         }
-        ServiceBackend::WindowsScm => {
-            #[cfg(windows)]
-            {
-                run_tool("sc.exe", &[action, service::ids::WINDOWS_SERVICE])?;
+        ServiceBackend::WindowsTask => {
+            windows_user_scope(install_scope)?;
+            if action == "start" {
+                crate::windows_task::install(&spec_for(install_scope)?, false)
+            } else {
+                crate::windows_task::stop()
             }
-            println!("{action}ed the OpengeniAgent Windows Service.");
-            Ok(())
         }
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
     }
@@ -1025,19 +951,9 @@ fn status(install_scope: ServiceScope) -> Result<(), String> {
             }
             Ok(())
         }
-        ServiceBackend::WindowsScm => {
-            #[cfg(windows)]
-            {
-                let out = capture("sc.exe", &["query", service::ids::WINDOWS_SERVICE]);
-                match out {
-                    Ok(s) => println!("{s}"),
-                    Err(_) => println!("OpengeniAgent Windows Service: not installed"),
-                }
-            }
-            #[cfg(not(windows))]
-            {
-                println!("OpengeniAgent Windows Service: (status available on Windows)");
-            }
+        ServiceBackend::WindowsTask => {
+            windows_user_scope(install_scope)?;
+            crate::windows_task::print_status();
             Ok(())
         }
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),

@@ -24,6 +24,8 @@ import {
   type RetainedScreenshotMaintenanceActivityOptions,
 } from "../src/activities/retained-screenshot-reaper";
 import {
+  compactRetainedScreenshotHistory,
+  inlineImagesFromToolResultItem,
   materializeRetainedScreenshotHistory,
   retainComputerScreenshot,
   retainSessionScreenshot,
@@ -742,6 +744,105 @@ describe("retained screenshot lifecycle fences", () => {
       reservedBytes: 0,
       readyBytes: PNG.byteLength,
     });
+  }, 180_000);
+
+  test("any tool's images are stored once and reach the model with the same pixels", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const pngData = Buffer.from(PNG).toString("base64");
+    const resultItem = {
+      type: "function_call_result",
+      id: "output-integration",
+      callId: "call-integration",
+      output: {
+        content: [
+          { type: "text", text: "captured" },
+          { type: "image", data: pngData, mimeType: "image/png" },
+          { type: "image", data: "not-an-image", mimeType: "image/png" },
+          { type: "image", data: pngData, mimeType: "image/png" },
+        ],
+      },
+    };
+    const receipts = [];
+    for (const image of inlineImagesFromToolResultItem(resultItem)) {
+      const receipt = image
+        ? await retainSessionScreenshot({
+            db,
+            objectStorage: memory.storage,
+            ...fixture,
+            output: image,
+            retentionMs: 60_000,
+            workspaceQuotaBytes: 1024 * 1024,
+          })
+        : null;
+      receipts.push(receipt?.available ? receipt : null);
+    }
+    expect(receipts.map((receipt) => receipt !== null)).toEqual([true, false, true]);
+    expect(receipts[0]!.artifactId).not.toBe(receipts[2]!.artifactId);
+    expect(memory.objects.size).toBe(2);
+
+    const [durable] = compactRetainedScreenshotHistory(
+      [resultItem],
+      new Map([["call-integration", receipts]]),
+    );
+    expect(JSON.stringify(durable)).not.toContain(pngData);
+    const [materialized] = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: memory.storage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history: [durable!],
+    });
+    expect((materialized!.output as { content: unknown[] }).content).toEqual([
+      { type: "text", text: "captured" },
+      { type: "input_image", image: `data:image/png;base64,${pngData}` },
+      { type: "image", data: "not-an-image", mimeType: "image/png" },
+      { type: "input_image", image: `data:image/png;base64,${pngData}` },
+    ]);
+  }, 180_000);
+
+  test("an integration result stored as SDK content round-trips to the identical model input", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const resultItem = {
+      name: "mcp_server__capture",
+      type: "function_call_result",
+      callId: "call-sdk-content",
+      output: [
+        { text: '{"width":1,"height":1}', type: "input_text" },
+        {
+          type: "input_image",
+          image: `data:image/png;base64,${Buffer.from(PNG).toString("base64")}`,
+        },
+      ],
+    };
+    const [image] = inlineImagesFromToolResultItem(resultItem);
+    expect(image).toMatchObject({ callId: "call-sdk-content", toolOutputId: "call-sdk-content" });
+    const receipt = await retainSessionScreenshot({
+      db,
+      objectStorage: memory.storage,
+      ...fixture,
+      output: image!,
+      retentionMs: 60_000,
+      workspaceQuotaBytes: 1024 * 1024,
+    });
+    expect(receipt.available).toBe(true);
+    const [durable] = compactRetainedScreenshotHistory(
+      [resultItem],
+      new Map([["call-sdk-content", [receipt]]]),
+    );
+    expect(JSON.stringify(durable)).not.toContain("base64");
+    const [materialized] = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: memory.storage,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history: [durable!],
+    });
+    // Same item, same key order, same bytes: the provider request is unchanged.
+    expect(JSON.stringify(materialized)).toBe(JSON.stringify(resultItem));
   }, 180_000);
 
   test("materialize re-resolves a sticky unavailable receipt from a ready artifact", async () => {

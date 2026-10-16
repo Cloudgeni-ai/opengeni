@@ -3640,6 +3640,16 @@ function startupPhaseFromPayload(value: unknown): StartupPhase | null {
 function startupLifecycleWaitReason(
   payload: Record<string, unknown>,
 ): StartupPhaseItem["blockedReason"] {
+  // The first model request waited for context compaction: an expected step
+  // of preparation that reopens after compacting, never a failure.
+  if (
+    payload.expectedTransition === true &&
+    payload.failureStage === "context_compaction" &&
+    payload.failureCategory === "context_compaction" &&
+    payload.failureCode === "compaction_required"
+  ) {
+    return "compaction_required";
+  }
   if (
     payload.expectedTransition !== true ||
     payload.failureStage !== "lifecycle_wait" ||
@@ -3710,6 +3720,7 @@ function rememberPendingWaitOutcome(
 
 /** Wait reasons that need a person or a policy change, not only time. */
 const ACTION_CAPACITY_WAIT_REASONS: ReadonlySet<string> = new Set([
+  "pinned_account_disabled",
   "pinned_account_ineligible",
   "model_not_allowed",
   // Only sending the work again ends it (design 5.3 decision 4).
@@ -3746,7 +3757,13 @@ function capacityWaitPresentation(
         ? [payload.error, payload.detail]
         : [payload.detail, payload.error];
     const detail = stringValue(first) || stringValue(second) || "Waiting for an account.";
-    return { turnId, label: "Waiting", detail, text: detail };
+    return {
+      turnId,
+      label:
+        stringValue(payload.waitReason) === "pinned_account_disabled" ? "Needs you" : "Waiting",
+      detail,
+      text: detail,
+    };
   }
   return {
     turnId,
@@ -3907,7 +3924,10 @@ function stringList(value: unknown): string[] {
  * ("**Checking the workspace**", then "**Inspecting guidance**"). Joined
  * as-is the parts run together and their bold markers collide ("****"), so a
  * new part that opens bold right after one that closed bold starts a new
- * paragraph. Ordinary token deltas are joined unchanged.
+ * paragraph. Ordinary token deltas are joined unchanged. The worker's
+ * write-time merge and the read-side coalescer apply the same rule
+ * (`reasoningDeltaSeparator` in @opengeni/events), so stored, coalesced and
+ * live fragments render identically.
  */
 function reasoningDeltaJoiner(previous: string, next: string): string {
   return previous.endsWith("**") && next.startsWith("**") ? "\n\n" : "";

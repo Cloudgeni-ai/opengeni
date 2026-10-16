@@ -58,9 +58,11 @@ describe("database boot connect grace", () => {
     socket.destroy();
   });
 
-  test("after reaching the server once, a refused connection fails immediately", async () => {
+  test("after reaching the server once, connections take postgres.js's own path", async () => {
     const clock = fakeClock();
     let calls = 0;
+    const opened: DatabaseConnectEndpoint[] = [];
+    const pending = new net.Socket();
     const factory = createBootGraceDatabaseSocket({
       now: clock.now,
       sleep: clock.sleep,
@@ -69,27 +71,43 @@ describe("database boot connect grace", () => {
         if (calls === 1) return new net.Socket();
         throw refused();
       },
+      open: (endpoint) => {
+        opened.push(endpoint);
+        return pending;
+      },
     });
     (await factory(target)).destroy();
-    await expect(factory(target)).rejects.toMatchObject({ code: "ECONNREFUSED" });
-    expect(calls).toBe(2);
+    // A later connection is handed back still connecting, so a refusal reaches
+    // postgres.js as a socket error it recovers from, never as a rejection.
+    expect(await factory(target)).toBe(pending);
+    expect(calls).toBe(1);
+    expect(opened).toEqual([{ kind: "tcp", host: "db.internal", port: 5432 }]);
+    expect((pending as unknown as { host: string }).host).toBe("db.internal");
     expect(clock.sleeps).toEqual([]);
+    pending.destroy();
   });
 
-  test("other connect errors and an expired window are not retried", async () => {
+  test("other connect errors and an expired window are not retried, and never reject", async () => {
     const clock = fakeClock();
+    let openedNotFound = 0;
     const notFound = createBootGraceDatabaseSocket({
       now: clock.now,
       sleep: clock.sleep,
       connect: async () => {
         throw Object.assign(new Error("getaddrinfo ENOTFOUND db"), { code: "ENOTFOUND" });
       },
+      open: () => {
+        openedNotFound += 1;
+        return new net.Socket();
+      },
     });
-    await expect(notFound(target)).rejects.toMatchObject({ code: "ENOTFOUND" });
+    (await notFound(target)).destroy();
+    expect(openedNotFound).toBe(1);
     expect(clock.sleeps).toEqual([]);
 
     const late = fakeClock();
     let calls = 0;
+    let openedLate = 0;
     const expired = createBootGraceDatabaseSocket({
       graceMs: 1_000,
       now: late.now,
@@ -98,11 +116,17 @@ describe("database boot connect grace", () => {
         calls += 1;
         throw refused();
       },
+      open: () => {
+        openedLate += 1;
+        return new net.Socket();
+      },
     });
-    await expect(expired(target)).rejects.toMatchObject({ code: "ECONNREFUSED" });
-    // Sleeps never overshoot the window, and the last attempt happens at its end.
+    (await expired(target)).destroy();
+    // Sleeps never overshoot the window, and the last attempt happens at its
+    // end through postgres.js's own path.
     expect(late.sleeps.reduce((sum, ms) => sum + ms, 0)).toBe(1_000);
-    expect(calls).toBe(late.sleeps.length + 1);
+    expect(calls).toBe(late.sleeps.length);
+    expect(openedLate).toBe(1);
   });
 
   test("a multi-host URL keeps postgres.js host failover", () => {
@@ -153,6 +177,84 @@ describe("database boot connect grace against real Postgres", () => {
         }),
     };
   }
+
+  /** A TCP forwarder to the real database that can go down and come back on the same port. */
+  function restartableForwarder(port: number, upstream: URL) {
+    const sockets = new Set<net.Socket>();
+    let server: net.Server | null = null;
+    return {
+      start: async () => {
+        server = net.createServer((client) => {
+          const backend = net.connect(Number(upstream.port || 5432), upstream.hostname);
+          sockets.add(client).add(backend);
+          client.pipe(backend).pipe(client);
+          client.on("error", () => backend.destroy());
+          backend.on("error", () => client.destroy());
+        });
+        await new Promise<void>((resolve) => server!.listen(port, "127.0.0.1", resolve));
+      },
+      /** Drops every open connection and refuses new ones, like a stopped database. */
+      stop: async () => {
+        const closing = server;
+        server = null;
+        for (const socket of sockets) socket.destroy();
+        sockets.clear();
+        if (closing) await new Promise<void>((resolve) => closing.close(() => resolve()));
+      },
+    };
+  }
+
+  async function settleWithin<T>(promise: PromiseLike<T>, ms: number) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<{ kind: "timeout" }>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: "timeout" }), ms);
+    });
+    try {
+      return await Promise.race([
+        Promise.resolve(promise).then(
+          (value) => ({ kind: "ok" as const, value }),
+          (error: unknown) => ({ kind: "error" as const, error }),
+        ),
+        timedOut,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  test("a running client recovers on its own after the database restarts", async () => {
+    if (!database) return;
+    const upstream = new URL(database.appUrl);
+    const port = await unusedPort();
+    const url = new URL(upstream);
+    url.hostname = "127.0.0.1";
+    url.port = String(port);
+    const forwarder = restartableForwarder(port, upstream);
+    await forwarder.start();
+    const max = 3;
+    const client = createDb(url.toString(), { max });
+    try {
+      await client.db.execute("select 1");
+
+      // The database goes away: open connections drop and new ones are refused.
+      await forwarder.stop();
+      // More failed queries than the pool has connections, so every pooled
+      // connection tries, and fails, to reconnect while the server is down.
+      for (let attempt = 0; attempt < max * 3; attempt += 1) {
+        const outcome = await settleWithin(client.db.execute("select 1"), 5_000);
+        expect(outcome.kind).toBe("error");
+      }
+
+      // The database is back. The same client must serve queries again
+      // without a process restart.
+      await forwarder.start();
+      const recovered = await settleWithin(client.db.execute("select 1 as ok"), 10_000);
+      expect(recovered.kind).toBe("ok");
+    } finally {
+      await forwarder.stop();
+      await settleWithin(client.close(), 5_000);
+    }
+  }, 60_000);
 
   test("a client created while the database is still refusing connects once it accepts", async () => {
     if (!database) return;

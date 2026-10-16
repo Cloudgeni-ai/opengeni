@@ -223,11 +223,12 @@ read-write) or create a managed vault with
 - Edits in a read-write linked vault are written to 1Password first, then the
   mirror refreshes. A changed item returns `provider_conflict`.
 - Items added or changed straight in 1Password show up without pressing Sync:
-  agent search refreshes a linked vault's mirror when it is more than 10
-  minutes old, and a reference that finds nothing refreshes mirrors more than
-  2 minutes old and looks again. A refresh costs one `vaults.list` call and
-  lists items only when the vault changed; a vault that failed to sync is
-  retried at most once per period, and a rate limit is waited out.
+  agent search and opening the vault in the app refresh a linked vault's mirror
+  when it is more than 10 minutes old, and a reference that finds nothing
+  refreshes mirrors more than 2 minutes old and looks again. A refresh costs one
+  `vaults.list` call and lists items only when the vault changed; a vault that
+  failed to sync is retried at most once per period, and a rate limit is waited
+  out.
 - A personal (Only me) connection's token is used for its owner in every
   workspace their Only-me vaults reach, and an organization connection serves
   its organization vaults in every workspace they are available in, whichever

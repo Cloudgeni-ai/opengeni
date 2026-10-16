@@ -1205,6 +1205,29 @@
   scrollbar-width: thin;
   scrollbar-color: var(--og-color-border-strong) transparent;
 }
+@supports selector(::-webkit-scrollbar) {
+  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*) {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
+  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    background: transparent;
+  }
+  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: var(--og-color-border-strong) padding-box;
+  }
+  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar-thumb:hover {
+    border-width: 2px;
+    background-color: var(--og-color-fg-subtle);
+  }
+  :where(:root[data-og-scrollbars="classic"]) :where(.og-root) :where(*)::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
 :where(.og-root)[data-radix-popper-content-wrapper]:has( > [data-machine-state-popover][data-state="closed"] ),:where(.og-root) [data-radix-popper-content-wrapper]:has( > [data-machine-state-popover][data-state="closed"] ) {
   visibility: hidden;
   pointer-events: none;

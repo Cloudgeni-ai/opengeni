@@ -89,8 +89,12 @@ An operator must establish that an orphan is no longer live before removing it.
 ## Filesystem semantics and limits
 
 Paths use the native resolver (working-root-relative, absolute, or exact `~/`
-expansion). Directory traversal uses retained directory handles and refuses
-symlink components and parent traversal. Parent directories must already exist;
+expansion). Symlinks in the parent directory spelling are resolved once at
+begin, as the shell does (macOS `/tmp` is `/private/tmp`); the destination name
+itself is never followed. The transaction then uses only that physical path:
+traversal uses retained directory handles and refuses symlink components, so a
+symlink swapped in later fails closed. Parent traversal (`..`) is refused.
+Parent directories must already exist;
 `create_parents=true` does not permit visible directory creation during staging.
 Observed parent-directory replacement is a conflict.
 

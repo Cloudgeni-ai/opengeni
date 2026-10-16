@@ -143,6 +143,7 @@ export type SwitchKind =
 
 export type WaitReason =
   | "pinned_account_unavailable"
+  | "pinned_account_disabled"
   /** The explicit choice can never serve this work until a person changes something (D-24). */
   | "pinned_account_ineligible"
   | "no_eligible_capacity"
@@ -566,6 +567,21 @@ export function pinnedNeverServes(
   return !isAuthorized(world, session, { ...pinned, healthy: true, allocatorEnabled: true });
 }
 
+function pinnedAllocationDisabled(world: World, session: Session, pinned: Connection): boolean {
+  if (!pinned.allocatorEnabled) return true;
+  if (pinned.assignmentPolicies === undefined) return false;
+  const source =
+    effectiveSettings(world.settings, session.workspaceId).values.inferenceSource?.[
+      pinned.provider
+    ] ?? "automatic";
+  return !pinned.assignmentPolicies.some(
+    (policy) =>
+      policy.workspaceId === session.workspaceId &&
+      (source === "automatic" || policy.inferencePool === source) &&
+      policy.allocatorEnabled,
+  );
+}
+
 /** Future times at which some quota or model cooldown in the world resets, ascending. */
 function futureResetTimes(world: World, now: number): number[] {
   const times = new Set<number>();
@@ -651,6 +667,9 @@ export function decide(world: World, sessionId: string, now: number): Decision {
     // It can never serve this work: explain that instead of waiting silently (D-24).
     if (pinnedNeverServes(world, session, pinned)) {
       return { kind: "wait", reason: "pinned_account_ineligible", earliestResetAt: null };
+    }
+    if (pinned && pinnedAllocationDisabled(world, session, pinned)) {
+      return { kind: "wait", reason: "pinned_account_disabled", earliestResetAt: null };
     }
     // Otherwise the earliest future time the chosen account can serve (D-22).
     return {
@@ -906,7 +925,9 @@ export function checkDecision(
         : session.pinnedConnectionId
           ? never
             ? "pinned_account_ineligible"
-            : "pinned_account_unavailable"
+            : pinned && pinnedAllocationDisabled(world, session, pinned)
+              ? "pinned_account_disabled"
+              : "pinned_account_unavailable"
           : "no_eligible_capacity";
     if (decision.reason !== expectedReason) {
       fail(

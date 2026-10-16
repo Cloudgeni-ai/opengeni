@@ -55,6 +55,20 @@ export function notificationPlan(item: InboxItem, accountLabel: string | null): 
   return plan;
 }
 
+/**
+ * The banner's text fields. Only macOS has a subtitle line, so elsewhere the
+ * context (who is asking, in which session and account) leads the body
+ * instead of being dropped.
+ */
+export function bannerText(
+  plan: NotificationPlan,
+  platform: NodeJS.Platform,
+): { subtitle?: string; body: string } {
+  if (platform === "darwin") return { subtitle: plan.subtitle, body: plan.body };
+  if (!plan.subtitle) return { body: plan.body };
+  return { body: plan.body ? `${plan.subtitle}\n${plan.body}` : plan.subtitle };
+}
+
 function snoozed(item: InboxItem, now: number): boolean {
   return item.snoozedUntil !== null && Date.parse(item.snoozedUntil) > now;
 }

@@ -5,11 +5,16 @@ export {
   acknowledgeScheduledTaskScheduleReconciliation,
   deferScheduledTaskScheduleReconciliation,
 } from "./scheduled-task-lifecycle";
+export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./human-input-secret-answers";
 export * from "./connected-machine-audience";
 import { sessionRetentionFromRow } from "./session-archive";
 import { sessionQueueIsEmptyInTransaction } from "./empty-session-queue";
+import {
+  subscriptionCapacityWaitReasonText,
+  subscriptionCapacityWaitNeedsAction,
+} from "@opengeni/subscriptions";
 import {
   applyPreparedSecretAnswersInTransaction,
   type PreparedSecretAnswer,
@@ -65,6 +70,8 @@ import {
 } from "./session-attempt-fence";
 export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
 export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
+export { effectiveSessionPolicyQuery } from "./session-execution-policy";
+
 import {
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   parseSecretReference,
@@ -508,8 +515,12 @@ import {
 export { SessionMessageSearchCursorError } from "./session-message-search";
 export * from "./artifact-catalog";
 export * from "./site-data";
+export * from "./site-publishing";
+export { withSiteRuntimeAdmission } from "./site-runtime-admission";
+export * from "./site-platform";
 export * from "./scheduled-slack-bot-messages";
 export * from "./organization-signup-use-cases";
+export * from "./site-sql";
 export * from "./usage-analytics";
 export * from "./slack-file-uploads";
 import { grantWorkspaceAccess } from "./workspace-membership-access";
@@ -816,6 +827,8 @@ import {
   type WorkspaceArchiveObjectRef,
   stableJson,
   MODEL_ATTACHMENT_REFS_FIELD,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
   TimelineAnnotations,
   renderUserMessageContentForModel,
@@ -8002,7 +8015,12 @@ export function durableUserHistoryItem(
       sentAt,
       sender,
     ),
-    ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
+    ...(attachmentRefs.length > 0
+      ? {
+          [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs,
+          [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION,
+        }
+      : {}),
     ...(annotations.length > 0
       ? {
           [MODEL_TIMELINE_ANNOTATIONS_FIELD]: TimelineAnnotations.parse(annotations),
@@ -24149,10 +24167,10 @@ const SUBSCRIPTION_CORE_WAIT_VOCABULARY: {
       },
     }),
     cancelledBy: "claude_capacity_reconcile",
-    // Claude's adapter reads no usage that can end an exhaustion before its
-    // stored reset (its quota comes from response headers), so its waiter
-    // sleeps until the reset.
-    recheckBeforeReset: false,
+    // Anthropic can reset a plan limit before the reset a refused request
+    // reported, and Claude's usage read ends the stored exhaustion and model
+    // cooldowns then, so its waiter rechecks on the bounded backoff.
+    recheckBeforeReset: true,
   },
 };
 
@@ -25145,10 +25163,61 @@ export async function reconcileSubscriptionCoreCapacityWait(
               returning ${SUBSCRIPTION_CORE_CODEX_WAITER_COLUMNS}`,
           );
           if (!row) return { action: "stale", events: [] } as const;
+          const changedReasonText =
+            waiter.waitReason !== waitEvaluation.waitReason
+              ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
+              : null;
+          let changedReasonEvents: SessionEvent[] = [];
+          if (changedReasonText) {
+            const insertedReasonEvents = await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: session.lastSequence + 1,
+                    type: vocabulary.waitingEventType,
+                    turnId: blockedTurn.id,
+                    turnGeneration: blockedTurn.executionGeneration,
+                    turnAssociation: "current",
+                    occurredAt: now,
+                    payload: {
+                      ...vocabulary.waitingPayload,
+                      code: "subscription_capacity_unavailable",
+                      error: changedReasonText,
+                      waitReason: waitEvaluation.waitReason,
+                      actionRequired: subscriptionCapacityWaitNeedsAction(
+                        waitEvaluation.waitReason,
+                      ),
+                      waiterId: waiter.waiterId,
+                      generation: waiter.generation,
+                      resetKind: scheduled.resetKind,
+                      earliestResetAt: waitEvaluation.earliestResetAt?.toISOString() ?? null,
+                      nextCheckAt: nextCheckAt.toISOString(),
+                    },
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning();
+            await tx
+              .update(schema.sessions)
+              .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+              .where(
+                and(
+                  eq(schema.sessions.workspaceId, input.workspaceId),
+                  eq(schema.sessions.id, input.sessionId),
+                ),
+              );
+            changedReasonEvents = insertedReasonEvents.map(mapEvent);
+          }
           return {
             action: "waiting",
             waiter: mapSubscriptionCoreCodexWaiter(row),
-            events: [],
+            events: changedReasonEvents,
           } as const;
         }
 
@@ -31646,6 +31715,38 @@ async function withCurrentSessionInputWait(
       row.status === "idle" && !row.activeTurnId && row.inputWaitTurnId && row.inputWaitUntil,
   );
   if (!candidates.length) return rows.map((row) => ({ ...row, currentInputWait: null }));
+  const matches = await currentSessionInputWaitTurnsQuery(
+    db,
+    workspaceId,
+    candidates.map((row) => row.id),
+  );
+  const byId = new Map(matches.map((row) => [row.id, row.turnId]));
+  return rows.map((row) => ({
+    ...row,
+    currentInputWait:
+      row.status === "idle" &&
+      !row.activeTurnId &&
+      row.inputWaitUntil &&
+      row.inputWaitReason &&
+      row.inputWaitTurnId &&
+      byId.get(row.id) === row.inputWaitTurnId
+        ? { deadlineAt: row.inputWaitUntil.toISOString(), reason: row.inputWaitReason }
+        : null,
+  }));
+}
+
+/**
+ * Each listed session's newest finished turn that decides its held wait. The
+ * lateral walks `session_turns_finished_order_idx` newest-first and stops at
+ * the first match, and probes consumed machine input through
+ * `session_system_updates_delivered_turn_idx`, so a long session costs about
+ * the same as a new one. Call inside the caller's RLS scope.
+ */
+export function currentSessionInputWaitTurnsQuery(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+) {
   const latest = db
     .select({ id: schema.sessionTurns.id })
     .from(schema.sessionTurns)
@@ -31664,32 +31765,16 @@ async function withCurrentSessionInputWait(
     )
     .limit(1)
     .as("latest_wait_turn");
-  const matches = await db
+  return db
     .select({ id: schema.sessions.id, turnId: latest.id })
     .from(schema.sessions)
     .leftJoinLateral(latest, sql`true`)
     .where(
       and(
         eq(schema.sessions.workspaceId, workspaceId),
-        inArray(
-          schema.sessions.id,
-          candidates.map((row) => row.id),
-        ),
+        inArray(schema.sessions.id, [...sessionIds]),
       ),
     );
-  const byId = new Map(matches.map((row) => [row.id, row.turnId]));
-  return rows.map((row) => ({
-    ...row,
-    currentInputWait:
-      row.status === "idle" &&
-      !row.activeTurnId &&
-      row.inputWaitUntil &&
-      row.inputWaitReason &&
-      row.inputWaitTurnId &&
-      byId.get(row.id) === row.inputWaitTurnId
-        ? { deadlineAt: row.inputWaitUntil.toISOString(), reason: row.inputWaitReason }
-        : null,
-  }));
 }
 
 /**
@@ -40099,6 +40184,9 @@ export async function applyContextCompaction(
                     payload: {
                       ...input.eventPayload,
                       summaryPosition,
+                      // Where this compaction's live segment begins: a message
+                      // fork reconstructs the history live at an earlier message.
+                      replacementFromPosition: supersededFrom,
                     },
                     occurredAt: new Date(),
                   },
@@ -81512,7 +81600,9 @@ export type AddSessionSystemUpdateInput = {
 
 export type AddSessionSystemUpdateResult<RequireIdleSession extends boolean = boolean> =
   | { added: false; reason: "session_cancelled" }
-  | (RequireIdleSession extends true ? { added: false; reason: "session_not_idle" } : never)
+  | (RequireIdleSession extends true
+      ? { added: false; reason: "session_not_idle" } | { added: false; reason: "session_paused" }
+      : never)
   | {
       added: boolean;
       reason: "added" | "duplicate";
@@ -81554,7 +81644,7 @@ export async function addSessionSystemUpdateWithSourceMutation<
     tx: Database,
     wakeEventId: string | null,
     updateId: string | null,
-    rejectionReason: "session_cancelled" | "session_not_idle" | null,
+    rejectionReason: "session_cancelled" | "session_not_idle" | "session_paused" | null,
   ) => Promise<void>,
   options: {
     /**
@@ -81667,8 +81757,10 @@ export async function addSessionSystemUpdateWithSourceMutation<
           if (replayed) {
             return replayed;
           }
-          await mutateSource(tx as unknown as Database, null, null, "session_not_idle");
-          return { added: false, reason: "session_not_idle" } as const;
+          const reason =
+            effectiveControl.state !== "active" ? "session_paused" : "session_not_idle";
+          await mutateSource(tx as unknown as Database, null, null, reason);
+          return { added: false, reason } as const;
         }
         const prepared = await options.prepareSource?.(tx as unknown as Database, input.sessionId);
         if ((prepared?.events?.length ?? 0) > 0) {
@@ -84337,6 +84429,9 @@ type LockedSessionUpdateResult = {
     resources?: ResourceRef[];
     tools?: ToolRef[];
     firstPartyMcpTools?: FirstPartyMcpToolName[];
+    /** Trusted host normalization; never accepted directly from a public update body. */
+    firstPartyMcpPermissions?: Permission[];
+    sandboxBackend?: "none";
     /** Agent configuration (migration 0559); written with the tool-policy CAS. */
     agentConfig?: ResolvedAgentConfig | null;
     /** Session instructions (the `agent.instructions` alias). */
@@ -84515,6 +84610,12 @@ export async function appendSessionEventsWithLockedSessionUpdate(
             ...(update.tools !== undefined ? { tools: update.tools } : {}),
             ...(update.firstPartyMcpTools !== undefined
               ? { firstPartyMcpTools: update.firstPartyMcpTools }
+              : {}),
+            ...(update.firstPartyMcpPermissions !== undefined
+              ? { firstPartyMcpPermissions: update.firstPartyMcpPermissions }
+              : {}),
+            ...(update.sandboxBackend !== undefined
+              ? { sandboxBackend: update.sandboxBackend }
               : {}),
             ...(update.agentConfig !== undefined ? { agentConfig: update.agentConfig } : {}),
             ...(update.instructions !== undefined ? { instructions: update.instructions } : {}),
@@ -85828,7 +85929,6 @@ export * from "./model-context-snapshots";
 export * from "./session-content-blobs";
 export * from "./session-content-compaction";
 export * from "./session-archive";
-export * from "./session-delta-folding";
 export * from "./codemode-operations";
 export * from "./codemode-approvals";
 export * from "./tool-action-reviews";

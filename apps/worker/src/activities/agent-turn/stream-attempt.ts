@@ -85,6 +85,8 @@ import {
 } from "../../observability-metrics";
 import {
   compactRetainedScreenshotHistory,
+  inlineImagesFromToolResultItem,
+  retainedToolImagesEventOutput,
   sdkEventContainsInlineImage,
   retainSessionScreenshot,
   typedScreenshotFromSdkEvent,
@@ -132,6 +134,7 @@ import {
   safeErrorDiagnostic,
   compactionFailureReasonFromError,
   compactionFailureTurnEventPayload,
+  compactionFirstPreparationEventPayload,
   modelPreparationFailureEventPayload,
   isCompactionSummaryFailure,
   PostCompactionContinuationEmptyError,
@@ -671,21 +674,32 @@ export async function runTurnStreamAttempt(
   let toolsExecuted = false;
   let finalReplyNudged = false;
   const revalidateModelCallAdmission = async () => {
-    await historySink.reconcileConversationTruth({ requireDurable: true });
-    await revalidatePlacedSubscriptionCore(db, providerTurn);
-    creditPolicyRevision = await ensureRunAllowedBetweenModelCalls({
-      modelId: resolvedModel?.configured.id ?? turn.model,
-      settings,
-      db,
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      isExternallyBilledTurn: billingState.isExternallyBilledTurn,
-      entitlements,
-      chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
-      countsTowardTokenCap: billingState.countsTowardTokenCap,
-      initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
-      sessionId: input.sessionId,
-    });
+    // The three checks are independent, so they run together; this sits on the
+    // critical path of every model call. All of them settle before any outcome
+    // is reported, and failures surface in the original order (durable
+    // history, subscription source, then usage), so a refusal is the same one
+    // the sequential checks would have produced.
+    const [history, source, usage] = await Promise.allSettled([
+      historySink.reconcileConversationTruth({ requireDurable: true }),
+      revalidatePlacedSubscriptionCore(db, providerTurn),
+      ensureRunAllowedBetweenModelCalls({
+        modelId: resolvedModel?.configured.id ?? turn.model,
+        settings,
+        db,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        isExternallyBilledTurn: billingState.isExternallyBilledTurn,
+        entitlements,
+        chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+        countsTowardTokenCap: billingState.countsTowardTokenCap,
+        initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+        sessionId: input.sessionId,
+      }),
+    ]);
+    if (history.status === "rejected") throw history.reason;
+    if (source.status === "rejected") throw source.reason;
+    if (usage.status === "rejected") throw usage.reason;
+    creditPolicyRevision = usage.value;
   };
   const runStreamAttempt = async (options: {
     requireTerminalModelResponse: boolean;
@@ -944,9 +958,9 @@ export async function runTurnStreamAttempt(
         }
         attempt.modelRequestStarted = true;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
-          beforeModelRequest: () => {
+          beforeModelRequest: (point) => {
             streamTiming.onModelRequestEntry();
-            return modelCallAdmission.beforeModelRequest();
+            return modelCallAdmission.beforeModelRequest(point);
           },
           onModelResponse: (event) => {
             responseCreditPolicyRevisions.add(creditPolicyRevision);
@@ -1334,8 +1348,16 @@ export async function runTurnStreamAttempt(
         const completedToolCall = completedToolCallFromSdkEvent(durableSdkEvent);
         if (completedToolCall) {
           toolsExecuted = true;
+          const priorReceipts = media.retainedScreenshotReceiptsByCallId.get(
+            completedToolCall.callId,
+          );
           retainedScreenshotMetadata =
-            media.retainedScreenshotReceiptsByCallId.get(completedToolCall.callId) ?? null;
+            priorReceipts && !Array.isArray(priorReceipts)
+              ? (priorReceipts as RetainedArtifactMetadata)
+              : null;
+          let toolImageReceipts = Array.isArray(priorReceipts)
+            ? (priorReceipts as ReadonlyArray<RetainedArtifactMetadata | null>)
+            : null;
           const typedScreenshot = retainedScreenshotMetadata
             ? null
             : typedScreenshotFromSdkEvent(durableSdkEvent);
@@ -1397,6 +1419,42 @@ export async function runTurnStreamAttempt(
               retainedScreenshotMetadata,
             );
           }
+          if (
+            !retainedScreenshotMetadata &&
+            !toolImageReceipts &&
+            !media.retainedSessionImageCallIds.has(completedToolCall.callId)
+          ) {
+            // Any other tool's images (for example an integration's capture)
+            // are stored once like screenshots, so history keeps a reference
+            // and the timeline can show them. An image that cannot be retained
+            // stays inline, exactly as before.
+            const images = inlineImagesFromToolResultItem(completedToolCall.resultItem);
+            if (images.some((image) => image !== null)) {
+              const receipts: Array<RetainedArtifactMetadata | null> = [];
+              for (const image of images) {
+                // Retention is an optimization here: any failure, expected or
+                // not, keeps that image inline as before.
+                const receipt = image
+                  ? await retainSessionScreenshot({
+                      db,
+                      objectStorage,
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: input.sessionId,
+                      turnId: activeTurnId,
+                      attemptId: input.attemptId,
+                      output: image,
+                    }).catch(() => null)
+                  : null;
+                receipts.push(receipt?.available ? receipt : null);
+              }
+              if (receipts.some((receipt) => receipt !== null)) {
+                toolImageReceipts = receipts;
+                media.retainedScreenshotReceiptsByCallId.set(completedToolCall.callId, receipts);
+              }
+            }
+          }
+          const retainedToolImages = toolImageReceipts;
           normalizedSdkEvents = normalizeSdkEvent(
             durableSdkEvent as typeof next.value,
             retainedScreenshotMetadata
@@ -1410,7 +1468,13 @@ export async function runTurnStreamAttempt(
                         reason: retainedScreenshotMetadata.reason,
                       },
                 }
-              : { messagePhases },
+              : retainedToolImages
+                ? {
+                    messagePhases,
+                    toolOutputTransform: (output) =>
+                      retainedToolImagesEventOutput(output, retainedToolImages),
+                  }
+                : { messagePhases },
           );
           const normalizedToolOutput = normalizedSdkEvents.find(
             (event) =>
@@ -1422,12 +1486,13 @@ export async function runTurnStreamAttempt(
               `Completed SDK tool call ${completedToolCall.callId} produced no durable output projection`,
             );
           }
-          const durableResultItem = retainedScreenshotMetadata
-            ? (compactRetainedScreenshotHistory(
-                [completedToolCall.resultItem],
-                media.retainedScreenshotReceiptsByCallId,
-              )[0] ?? completedToolCall.resultItem)
-            : completedToolCall.resultItem;
+          const durableResultItem =
+            retainedScreenshotMetadata || retainedToolImages
+              ? (compactRetainedScreenshotHistory(
+                  [completedToolCall.resultItem],
+                  media.retainedScreenshotReceiptsByCallId,
+                )[0] ?? completedToolCall.resultItem)
+              : completedToolCall.resultItem;
           // Keep every parallel result in the attempt ledger until the full
           // call batch has settled. The SDK's computed history is
           // non-monotonic while parallel calls complete (a later call may
@@ -1642,7 +1707,11 @@ export async function runTurnStreamAttempt(
       }
       if (
         !eventing.firstModelRequestPreparationRecorded &&
-        eventing.firstModelRequestPreparationStartedAt !== null
+        eventing.firstModelRequestPreparationStartedAt !== null &&
+        // Compaction needed before the first request is an expected step the
+        // in-activity recovery below settles and then reopens; it is not a
+        // preparation failure.
+        !(findCompactionNeededError(error) && eventing.turnStartedPublished)
       ) {
         eventing.firstModelRequestPreparationRecorded = true;
         const durationMs = Math.max(
@@ -1770,6 +1839,7 @@ export async function runTurnStreamAttempt(
               provider: aggregateProvider,
               providerApi: aggregateProviderApi,
               model: turnExecutionPolicy.productModelId,
+              purpose: "main",
               sourceKey: aggregateSourceKey,
               usage: { usage: aggregateUsage },
               normalizedUsage: normalizedAggregateUsage,
@@ -2293,6 +2363,24 @@ export async function runTurnStreamAttempt(
           thresholdTokens: compactionNeeded?.thresholdTokens,
           ...(requestSizeError ? { ...requestSizeError.requestSize } : {}),
         });
+        // When compaction is needed before the turn's first model request,
+        // preparation is still open. Settle it as an expected transition and
+        // reopen it for the retried request, whose real dispatch then records
+        // the preparation landmark and its startup sample.
+        if (
+          !eventing.firstModelRequestPreparationRecorded &&
+          eventing.firstModelRequestPreparationStartedAt !== null
+        ) {
+          const durationMs = performance.now() - eventing.firstModelRequestPreparationStartedAt;
+          eventing.firstModelRequestPreparationStartedAt = null;
+          eventing.firstModelRequestCheckpointAt = null;
+          await eventing.publish([
+            {
+              type: "turn.startup.phase.failed",
+              payload: compactionFirstPreparationEventPayload(durationMs),
+            },
+          ]);
+        }
         let compacted = false;
         let compactionHandled = false;
         let compactionFailureMessage: string | null = null;

@@ -1333,6 +1333,21 @@ never replays historical work or changes the accepted account selection of a
 capacity-waiting turn. A capacity waiter pinned to an allocator-disabled account
 requires an authorized account change; time or a deploy cannot override it.
 
+Skip-overlap admission distinguishes effective Pause (`session_paused`) from
+busy work (`session_not_idle`) under the same session lock. The scheduler records
+`scheduled_session_paused` on the skipped occurrence, and its detail page and
+run badge explain that the chat must be resumed for future runs. This describes
+the recorded skip, not a live assertion that the chat is still paused. Opening
+the chat does not resume it, and skipped occurrences are never replayed.
+
+An explicit account pin whose allocator is disabled is classified as
+`pinned_account_disabled`, not temporary quota exhaustion. It remains a durable
+wait with actionable guidance to enable the account or change the pin; another
+healthy account is never substituted. Reconciliation of an existing waiter
+appends one new status event when the reason changes, so old waits receive the
+same guidance without rewriting previous events or model context. Unchanged
+polls add no event. Effective Pause still fences reconciliation and dispatch.
+
 Build the private manifest with a read-only query (psql variables
 `workspace_id`, `interrupted_before`, and a fresh `operation_id`). Review its
 count and scope before supplying it to the migration runner. Selection is not
@@ -2967,6 +2982,20 @@ rule when heartbeat authority rejects a closed attempt. It does not refresh the
 closed holder, renew execution authority, or extend the capture deadline; the
 finalizer releases after physical settlement. Epoch replacement and expired
 captures still release promptly.
+A drain attempt stops waiting for its capture at its drain budget, but the
+capture is not abandoned: it keeps reading and can publish late through its
+claim's provider-request lineage, after which a retry tears down from that
+archive. Inside one worker, a retry of the same lease epoch and instance defers
+while an earlier drain capture is still reading, publishing or removing its
+spool: it neither replaces that claim nor starts a second capture, so a capture
+slower than the retry interval no longer gains another full read and host spool
+per retry. Other leases are unaffected, an already published archive still
+resumes teardown, a capture that failed releases its claim for a fresh one, and
+an entry older than the one-hour capture ceiling stops deferring. The deferral
+is per worker: another worker that receives the retry replaces the claim under
+the ordinary takeover rules, so each worker runs at most one such capture. Host
+spool reads also honour a capture's abort signal in the archive re-read and
+inventory verification passes.
 Migration 0497 repairs the global Modal orphan inventory for non-bypass migration
 owners. Its private backend-PID/transaction read capability opens only inside the
 inventory function, preserves cross-tenant warming/warm/draining attribution,

@@ -158,6 +158,10 @@ function swapFailureMessage(result: SwapActiveSandboxResponse): string {
       return "The selected machine is offline.";
     case "concurrent_swap":
       return "The session route changed concurrently. Refresh and try again.";
+    case "personal_machine_permission_required":
+      return "The machine's owner has not allowed this chat to use it.";
+    case "personal_machine_not_permitted":
+      return "Only the machine's owner can use it in this chat.";
     default:
       return "The session stayed on its current sandbox.";
   }

@@ -483,6 +483,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "changeMachineAudience",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/audience",
+    "request": [
+      "ChangeMachineAudienceRequest"
+    ],
+    "response": [
+      "ChangeMachineAudienceResponse"
+    ]
+  },
+  {
     "id": "changePreferenceRegistryScope",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/preferences/:preferenceId/scope",
@@ -491,6 +502,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PreferenceRegistryMutationResponse"
+    ]
+  },
+  {
+    "id": "checkSiteHostname",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/site-hostnames/:label",
+    "request": [],
+    "response": [
+      "SiteHostnameAvailability"
     ]
   },
   {
@@ -1239,6 +1259,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "defineSiteSqlQuery",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/queries/:name",
+    "request": [
+      "SiteSqlQueryDefinitionRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "DELETE /v1/organizations/:organizationId/codex/accounts/:accountId",
     "method": "DELETE",
     "path": "/v1/organizations/:organizationId/codex/accounts/:accountId",
@@ -1267,6 +1296,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "DELETE /v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "DELETE /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
     "request": [],
     "response": []
   },
@@ -1458,6 +1494,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "deleteSiteDataFile",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/files/:fileId",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "deleteSiteSqlQuery",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/queries/:name",
     "request": [],
     "response": []
   },
@@ -1792,6 +1835,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "browserOnly": "organization recovery is for when someone can't sign in, so each step is proven by that person's own browser sign-in"
   },
   {
+    "id": "executeSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/execute",
+    "request": [
+      "SiteSqlStatementRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "exportCompanyBrainOkf",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/company-brain/export",
@@ -1806,6 +1858,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/collections/:name/export",
     "request": [],
+    "response": []
+  },
+  {
+    "id": "exportSiteSql",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/export",
+    "request": [
+      "SiteSqlExportFormat"
+    ],
     "response": []
   },
   {
@@ -2160,6 +2221,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/downloads",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/downloads",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports",
     "request": [],
     "response": []
   },
@@ -3182,6 +3250,31 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "getSiteLimitProfile",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/site-limit-profile",
+    "request": [],
+    "response": [
+      "SiteLimitProfile"
+    ]
+  },
+  {
+    "id": "getSitePlatformUsage",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/site-platform-usage",
+    "request": [],
+    "response": [
+      "SitePlatformUsage"
+    ]
+  },
+  {
+    "id": "getSiteSql",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "getSlackUserLinkAccess",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId",
@@ -3617,9 +3710,25 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "importSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/import",
+    "request": [
+      "SiteSqlImportRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "inspectMcpAuthentication",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/capabilities/discovery/mcp-auth",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "inspectSiteSql",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/inspect",
     "request": [],
     "response": []
   },
@@ -4730,6 +4839,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "migrateSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/migrations",
+    "request": [
+      "SiteSqlMigrationRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "mintEnrollToken",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/enrollments/token",
@@ -4967,6 +5085,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "CodexSourceRequest"
     ],
+    "response": []
+  },
+  {
+    "id": "PATCH /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports/:reportId",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/reports/:reportId",
+    "request": [],
     "response": []
   },
   {
@@ -5245,6 +5370,31 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/fixes",
+    "request": [
+      "SitePublishWarningFix"
+    ],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/restore",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/restore",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/takedown",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication/takedown",
+    "request": [
+      "SiteTakedownRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/published-artifacts/uploads",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/uploads",
@@ -5498,6 +5648,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "previewMachineAudience",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/machines/:enrollmentId/audience/preview",
+    "request": [
+      "MachineAudiencePreviewRequest"
+    ],
+    "response": [
+      "MachineAudiencePreview"
+    ]
+  },
+  {
     "id": "previewPlugin",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/plugins/preview",
@@ -5654,6 +5815,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "request": [
+      "UpsertSitePublicationRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets",
@@ -5745,6 +5915,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/query",
     "request": [
       "SiteDataQueryRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "querySiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/query",
+    "request": [
+      "SiteSqlStatementRequest"
     ],
     "response": []
   },
@@ -6062,6 +6241,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "resetSiteSql",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/reset",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "resolveInteractionIntervention",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/interaction-interventions/:interventionId/resolve",
@@ -6325,6 +6511,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "DocumentDefaultCollectionBackfill"
     ]
+  },
+  {
+    "id": "runSiteSqlQuery",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/queries/:name",
+    "request": [
+      "SiteSqlRunRequest"
+    ],
+    "response": []
   },
   {
     "id": "saveAgentLearningSettings",
@@ -6656,6 +6851,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "WorkspacePauseTimerRequest"
     ],
+    "response": []
+  },
+  {
+    "id": "sitePublicationPath",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/publication",
+    "request": [],
     "response": []
   },
   {
@@ -7593,6 +7795,26 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SiteAuthConnectionMutationResponse"
     ]
+  },
+  {
+    "id": "updateSiteLimitProfile",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/site-limit-profile",
+    "request": [
+      "SiteLimitProfile"
+    ],
+    "response": [
+      "SiteLimitProfile"
+    ]
+  },
+  {
+    "id": "updateSiteSqlSettings",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/settings",
+    "request": [
+      "SiteSqlSettingsRequest"
+    ],
+    "response": []
   },
   {
     "id": "updateSource",

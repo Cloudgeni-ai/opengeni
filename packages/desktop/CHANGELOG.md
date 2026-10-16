@@ -1,5 +1,29 @@
 # @opengeni/desktop
 
+## 0.1.4
+
+### Patch Changes
+
+- 482d1ca: When the desktop app takes over the separate Mac agent app, screen control carries over. The app now lists the Screen Recording and Accessibility permissions to allow again, and says so once in a notification. Before, agents silently lost the use of the screen.
+- 90266f0: Connecting this computer from the desktop app now lets your agents use it in your chats in that workspace, private and shared, without asking again in every chat; only turns you start can use it. An app installed by a server's install script suggests that server at first sign-in. Linux gets overlay scrollbars, the keyring is opened only when a credential is first read or stored, and the server address field comes before Continue when you use another server.
+- a7197d8: The desktop app keeps checking for updates after one has downloaded, so an app that stays open for days moves on to the newest release instead of staying on the first update it found.
+- Updated dependencies [17d61c6]
+- Updated dependencies [74a259d]
+  - @opengeni/sdk@3.1.0
+
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies [9a15dda]
+- Updated dependencies [664368a]
+- Updated dependencies [2077293]
+- Updated dependencies [db3efc5]
+- Updated dependencies [957f6ee]
+- Updated dependencies [6339cec]
+- Updated dependencies [37169cd]
+  - @opengeni/sdk@3.0.0
+
 ## 0.1.2
 
 ### Patch Changes

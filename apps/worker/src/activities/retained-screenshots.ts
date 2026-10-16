@@ -98,6 +98,102 @@ export function typedScreenshotFromToolOutput(input: {
   };
 }
 
+/**
+ * Receipts for one tool result. A single receipt covers every inline image of
+ * the result (the intentional screenshot tools). A list holds one entry per
+ * inline image, in order; `null` keeps that image inline.
+ */
+export type RetainedImageReceipts =
+  | RetainedArtifactMetadata
+  | ReadonlyArray<RetainedArtifactMetadata | null>;
+
+/**
+ * Every inline image of a durable tool-result item, in the order compaction
+ * visits them. An image that cannot be decoded for retention is `null`, so
+ * receipts stay aligned with the images they replace.
+ */
+export function inlineImagesFromToolResultItem(
+  item: Record<string, unknown>,
+): Array<TypedScreenshotToolOutput | null> {
+  const callId = historyCallId(item);
+  if (!callId) return [];
+  const result =
+    item.output && typeof item.output === "object" && !Array.isArray(item.output)
+      ? (item.output as Record<string, unknown>)
+      : null;
+  const entries = Array.isArray(item.output)
+    ? item.output
+    : result && Array.isArray(result.content)
+      ? (result.content as unknown[])
+      : [];
+  const baseOutputId = typeof item.id === "string" && item.id.length > 0 ? item.id : callId;
+  const images: Array<TypedScreenshotToolOutput | null> = [];
+  for (const entry of entries) {
+    if (!isInlineImageContent(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const decoded =
+      record.type === "image"
+        ? decodeInlineMcpImage(record.data, record.mimeType)
+        : decodeInlineImageDataUrl(record.image);
+    const index = images.length;
+    images.push(
+      decoded
+        ? {
+            callId,
+            // The first image keeps the plain identity; later images of the
+            // same result get their own deterministic artifact.
+            toolOutputId: index === 0 ? baseOutputId : `${baseOutputId}:image:${index}`,
+            bytes: decoded.bytes,
+            mediaType: decoded.mediaType,
+          }
+        : null,
+    );
+  }
+  return images;
+}
+
+/**
+ * The timeline copy of a tool result whose images were retained: each retained
+ * image becomes its receipt, so the app can load and show it. Images kept
+ * inline are left for the ordinary media-preview normalization. Images are
+ * matched by content hash, because the audit copy can hold images (for
+ * example unsupported formats) that never reached the model history.
+ */
+export function retainedToolImagesEventOutput(
+  output: unknown,
+  receipts: ReadonlyArray<RetainedArtifactMetadata | null>,
+): unknown {
+  const bySha = new Map<string, RetainedArtifactMetadata>();
+  for (const receipt of receipts) {
+    if (receipt?.available) bySha.set(receipt.sha256, receipt);
+  }
+  if (bySha.size === 0) return output;
+  const replace = (entries: unknown[]) =>
+    entries.map((entry) => {
+      const bytes = toolOutputImageEntryBytes(entry);
+      if (!bytes) return entry;
+      return bySha.get(createHash("sha256").update(bytes).digest("hex")) ?? entry;
+    });
+  if (Array.isArray(output)) return replace(output);
+  if (output && typeof output === "object") {
+    const record = output as Record<string, unknown>;
+    if (Array.isArray(record.content)) return { ...record, content: replace(record.content) };
+  }
+  return output;
+}
+
+/** Bytes of an inline image block in either the MCP or the SDK content shape. */
+function toolOutputImageEntryBytes(entry: unknown): Uint8Array | null {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+  const record = entry as Record<string, unknown>;
+  if (record.type === "image")
+    return decodeInlineMcpImage(record.data, record.mimeType)?.bytes ?? null;
+  if (record.type !== "input_image") return null;
+  return (
+    imageBytesFromSdkImageSource(record.image ?? record.image_url ?? record.imageUrl)?.bytes ?? null
+  );
+}
+
 /** Read the SDK's trusted typed image before event/history serialization. */
 export function typedScreenshotFromSdkEvent(event: unknown): TypedScreenshotToolOutput | null {
   if (!event || typeof event !== "object") return null;
@@ -730,14 +826,18 @@ export const retainComputerScreenshot = retainSessionScreenshot;
 /** Replace only new screenshot bytes with a compact receipt before first persistence. */
 export function compactRetainedScreenshotHistory(
   history: Array<Record<string, unknown>>,
-  receiptsByCallId: ReadonlyMap<string, RetainedArtifactMetadata>,
+  receiptsByCallId: ReadonlyMap<string, RetainedImageReceipts>,
 ): Array<Record<string, unknown>> {
   if (receiptsByCallId.size === 0) return history;
   return history.map((item) => {
     const callId = historyCallId(item);
     const receipt = callId ? receiptsByCallId.get(callId) : undefined;
     if (!receipt) return item;
-    if (typeof item.output === "string" && item.output.startsWith("data:image/")) {
+    if (
+      !isReceiptList(receipt) &&
+      typeof item.output === "string" &&
+      item.output.startsWith("data:image/")
+    ) {
       return {
         ...item,
         output: { type: RETAINED_IMAGE_MARKER, artifact: receipt },
@@ -759,13 +859,23 @@ export function compactRetainedScreenshotHistory(
   });
 }
 
+function isReceiptList(
+  receipts: RetainedImageReceipts,
+): receipts is ReadonlyArray<RetainedArtifactMetadata | null> {
+  return Array.isArray(receipts);
+}
+
 function compactInlineImageContent(
   entries: unknown[],
-  receipt: RetainedArtifactMetadata,
+  receipts: RetainedImageReceipts,
 ): { entries: unknown[]; changed: boolean } {
   let changed = false;
+  let slot = 0;
   const compacted = entries.map((entry) => {
     if (!isInlineImageContent(entry)) return entry;
+    const receipt = isReceiptList(receipts) ? receipts[slot] : receipts;
+    slot += 1;
+    if (!receipt) return entry;
     changed = true;
     const record = entry as Record<string, unknown>;
     if (record.type === "image") {
@@ -785,8 +895,8 @@ function compactInlineImageContent(
 /** Collect durable screenshot receipts before their provider-only expansion. */
 export function collectRetainedScreenshotReceipts(
   history: ReadonlyArray<Record<string, unknown>>,
-  target: Map<string, RetainedArtifactMetadata> = new Map(),
-): Map<string, RetainedArtifactMetadata> {
+  target: Map<string, RetainedImageReceipts> = new Map(),
+): Map<string, RetainedImageReceipts> {
   for (const item of history) {
     const callId = historyCallId(item);
     if (!callId) continue;
@@ -804,13 +914,24 @@ export function collectRetainedScreenshotReceipts(
         ? ((item.output as Record<string, unknown>).content as unknown[])
         : null;
     if (!outputEntries) continue;
+    // One receipt per image slot: a retained marker or an image kept inline.
+    const slots: Array<RetainedArtifactMetadata | null> = [];
     for (const entry of outputEntries) {
       const receipt = retainedReceiptFromImageContent(entry);
-      if (receipt) {
-        target.set(callId, receipt);
-        break;
-      }
+      if (receipt) slots.push(receipt);
+      else if (isInlineImageContent(entry)) slots.push(null);
     }
+    const retained = slots.filter((slot): slot is RetainedArtifactMetadata => slot !== null);
+    if (retained.length === 0) continue;
+    // A result whose images all share one receipt (the screenshot tools) keeps
+    // the single-receipt form; anything else is matched image by image.
+    target.set(
+      callId,
+      retained.length === slots.length &&
+        retained.every((receipt) => receipt.artifactId === retained[0]!.artifactId)
+        ? retained[0]!
+        : slots,
+    );
   }
   return target;
 }
@@ -822,7 +943,7 @@ export function collectRetainedScreenshotReceipts(
  */
 export function compactRetainedScreenshotRunState(
   serialized: string,
-  receiptsByCallId: ReadonlyMap<string, RetainedArtifactMetadata>,
+  receiptsByCallId: ReadonlyMap<string, RetainedImageReceipts>,
 ): string {
   if (receiptsByCallId.size === 0) return serialized;
   const parsed = parseSerializedRunState(serialized);
@@ -840,8 +961,8 @@ export function compactRetainedScreenshotRunState(
 
 export function collectRetainedScreenshotRunStateReceipts(
   serialized: string,
-  target: Map<string, RetainedArtifactMetadata> = new Map(),
-): Map<string, RetainedArtifactMetadata> {
+  target: Map<string, RetainedImageReceipts> = new Map(),
+): Map<string, RetainedImageReceipts> {
   const parsed = parseSerializedRunState(serialized);
   if (!parsed) return target;
   visitSerializedRunStateItemArrays(parsed, (items) => {

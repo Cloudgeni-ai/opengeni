@@ -247,7 +247,8 @@ opacity-muted text.
   only while some are pending; New organization only for people who can create one; then
   Appearance (a submenu: Light, Dark, System, the chosen one checked) and Help & feedback (a
   submenu: Documentation when the deployment publishes a link, Send feedback when the person may
-  send it); then Sign out. It has no Settings row (the footer gear is that) and no Personal
+  send it) and Desktop app (a submenu: the download for this computer, Copy install command on
+  Mac and Linux, and All downloads; hidden inside the desktop app and on phones); then Sign out. It has no Settings row (the footer gear is that) and no Personal
   settings or Privacy preferences: both live in Settings > Your account (Privacy preferences only
   where analytics consent is configured). Deployments with browser accounts keep the same footer
   and put their account list and "Add another account" first in the same menu.
@@ -372,10 +373,11 @@ Learned on Settings > Models, 27 Sep 2026.
   confirms in a dialog. Show them directly; don't fold two or three rows under an "Advanced".
 - **No control for what the system decides.** When the product picks something automatically
   (which Codex accounts new work uses), say the outcome in one line above the list ("New work uses
-  this workspace's Codex accounts. The organization's account is set aside while these are
-  connected.") and mute what is set aside ("Not in use") instead of offering a switch people read
-  as a filter. A saved explicit choice shows truthfully in that line with one quiet way back
-  ("Use automatically").
+  this workspace's Codex accounts together with the organization's accounts.") and mute what a
+  saved explicit choice sets aside ("Not in use") instead of offering a switch people read as a
+  filter. The line must match what placement actually does: picked automatically, both pools
+  serve. A saved explicit choice shows truthfully in that line with one quiet way back ("Use
+  automatically").
 - **Unconnected options are not rows.** A provider you haven't connected is a choice on the
   Connect (or New) page, never a list row with its own Connect button. With nothing connected, the
   list becomes the empty state with the one Connect action.

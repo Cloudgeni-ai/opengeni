@@ -38,6 +38,7 @@ import {
   ReasoningEffort,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FirstPartyMcpToolName,
+  normalizeSitesDomain,
   OpenGeniSlackBotDisplayName,
   SandboxBackend,
   SessionMcpApprovalPolicy,
@@ -418,6 +419,12 @@ const SettingsSchema = z.object({
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .default("0.1.54"),
+  // Optional pin for the desktop app served by /desktop/latest/*. When unset,
+  // the newest desktop-v release on the agent release repository is served.
+  desktopStableVersion: z
+    .string()
+    .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
+    .optional(),
   // Optional independent beta-channel pointer. When unset, the beta update
   // manifest route is unavailable rather than silently serving stable.
   agentBetaVersion: z
@@ -929,6 +936,11 @@ const SettingsSchema = z.object({
   // emergency compatibility diagnosis.
   // OPENGENI_CODEX_TOOL_SEARCH_ENABLED
   codexToolSearchEnabled: EnvBoolean.default(true),
+  // Carry Codex subscription model requests over the backend's Responses
+  // WebSocket (one warm connection per conversation) instead of a new HTTP
+  // request per step. Requests the socket cannot carry fall back to HTTP.
+  // OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED
+  codexResponsesWebSocketEnabled: EnvBoolean.default(true),
   // Provider-neutral progressive disclosure for direct OpenAI/Azure native
   // client search and ordinary-function generic dispatch. Kept separate from
   // the Codex rollout so an emergency Codex opt-out cannot disable every model.
@@ -1544,6 +1556,43 @@ const SettingsSchema = z.object({
   documentEmbeddingApiKey: z.string().optional(),
   documentEmbeddingBaseUrl: z.string().url().optional(),
   documentEmbeddingBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
+  // Site SQL: optional per-Site Cloudflare storage (one SQLite Durable Object
+  // per Site, docs/site-data.md). Off unless enabled here, the gateway's
+  // internal origin is set and the published Sites gateway secret is
+  // configured; the API signs its calls to the gateway with that secret.
+  // Usage is recorded in the usage ledger only. Free-profile defaults are strict.
+  sitesCloudflareStorageEnabled: EnvBoolean.default(false),
+  sitesGatewayInternalOrigin: z
+    .string()
+    .url()
+    .refine((value) => {
+      const url = new URL(value);
+      if (url.pathname !== "/" || url.search || url.hash || url.username || url.password)
+        return false;
+      if (url.protocol === "https:") return true;
+      return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+    }, "must be an https origin (http only on loopback)")
+    .optional(),
+  // Site SQL storage per Site; defaults to the 5 GiB hard ceiling.
+  sitesSqlFreeStorageBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(5 * 1024 * 1024 * 1024),
+  // Optional per-Site monthly row quotas; unset means none (the platform
+  // meters rows per workspace instead; rate and per-call caps still apply).
+  sitesSqlFreeRowsReadPerMonth: z.coerce.number().int().positive().optional(),
+  sitesSqlFreeRowsWrittenPerMonth: z.coerce.number().int().positive().optional(),
+  sitesSqlFreeCallsPerMinutePerViewer: z.coerce.number().int().positive().default(60),
+  sitesSqlFreeCallsPerMinutePerSite: z.coerce.number().int().positive().default(600),
+  sitesSqlMaxRowsPerCall: z.coerce.number().int().min(1).max(5_000).default(1_000),
+  sitesSqlMaxResponseBytes: z.coerce
+    .number()
+    .int()
+    .min(1024)
+    .max(4 * 1024 * 1024)
+    .default(1024 * 1024),
+  sitesSqlTimeoutMs: z.coerce.number().int().min(1_000).max(60_000).default(15_000),
   // Site Data quotas and write rate limits. Usage is recorded in the
   // usage ledger only; shadow and paid modes are a later rollout step.
   siteDataRecordBytesPerSite: z.coerce
@@ -1581,6 +1630,108 @@ const SettingsSchema = z.object({
   // Schema-validation time all of a workspace's Sites may spend per minute.
   siteDataWorkspaceValidationMsPerMinute: z.coerce.number().int().positive().default(20_000),
   siteDataMaxRecordsPerCollection: z.coerce.number().int().positive().default(100_000),
+  // Published Sites (docs/design/published-sites-2026-10-14.md). Publishing is
+  // off unless sitesDomain names the Sites domain; the site-runtime API also
+  // needs the gateway secret. Defaults are strict.
+  sitesDomain: z.string().trim().min(3).max(200).optional(),
+  sitesGatewaySecret: z.string().min(32).optional(),
+  // Accepted during rotation only; remove once the gateway signs with the new secret.
+  sitesGatewaySecretPrevious: z.string().min(32).optional(),
+  sitesPublicEnabled: EnvBoolean.default(true),
+  sitesPublicAgentsEnabled: EnvBoolean.default(true),
+  // Login-only deployments (staging): public means any signed-in user; no guests.
+  sitesLoginOnly: EnvBoolean.default(false),
+  sitesForceNoindex: EnvBoolean.default(false),
+  // Defaults to abuse@<sites domain>.
+  sitesAbuseEmail: z.string().email().optional(),
+  // Guests start embedded agents only after the gateway verified a bot challenge.
+  sitesGuestAgentHumanCheck: EnvBoolean.default(false),
+  // Rate brakes of every Site limit profile (all access modes).
+  sitesFreeRequestsPerMinutePerVisitor: z.coerce.number().int().positive().default(120),
+  sitesFreeGuestWritesPerMinute: z.coerce.number().int().nonnegative().default(30),
+  // Deprecated (the former free profile): fallbacks for the public and guest
+  // settings below when those are unset.
+  sitesFreeConversationsPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeConversationsPerSitePerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeTurnsPerConversation: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeAgentMicrosPerConversation: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeAgentMicrosPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().optional(),
+  // Standard model-spend limits (micro-USD) for people outside the workspace
+  // (invited and public alike). Members are never limited by Site limits:
+  // they use the workspace's normal session limits. Unset: the deprecated
+  // free setting, else $10 per Site per month and no per-person limit.
+  sitesAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().optional(),
+  sitesAgentMicrosPerPersonPerDay: z.coerce.number().int().nonnegative().optional(),
+  // Internal guards for anonymous public visitors (not shown to Site owners). Unset:
+  // the deprecated free setting, else 20, 500, 50 and $1.
+  sitesGuestConversationsPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesGuestConversationsPerSitePerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesGuestTurnsPerConversation: z.coerce.number().int().nonnegative().optional(),
+  sitesGuestAgentMicrosPerConversation: z.coerce.number().int().nonnegative().optional(),
+  // What each agent turn of someone outside the workspace holds against the
+  // Site's spend limits while it runs (micro-USD; actual spend replaces it
+  // when settled), capped by the conversation's own cap and what is left.
+  sitesAgentReservationMicrosPerTurn: z.coerce.number().int().min(1_000).default(250_000),
+  // The credits profile multiplies the standard spend caps and guest guards.
+  sitesCreditsLimitMultiplier: z.coerce.number().int().min(1).max(1_000).default(10),
+  // Site platform usage (gateway requests, Site SQL rows and storage, Site
+  // Data storage), metered apart from model spend. usage_only records it;
+  // shadow computes the charge without charging; credits charges usage above
+  // the per-workspace monthly allowance.
+  sitesPlatformBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
+  // Credits mode: false refuses usage past the allowance instead of charging it.
+  sitesPlatformOverageEnabled: EnvBoolean.default(true),
+  sitesPlatformAllowanceRequests: z.coerce.number().int().nonnegative().default(1_000_000),
+  sitesPlatformAllowanceSqlRowsRead: z.coerce.number().int().nonnegative().default(10_000_000),
+  sitesPlatformAllowanceSqlRowsWritten: z.coerce.number().int().nonnegative().default(100_000),
+  sitesPlatformAllowanceStorageBytes: z.coerce.number().int().nonnegative().default(1_000_000_000),
+  // Unit prices in micro-USD: twice the Cloudflare list price (Workers
+  // requests, Durable Object SQLite rows and storage), covering host lookups,
+  // Durable Object requests and duration, and API work.
+  sitesPlatformPriceMicrosPerMillionRequests: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(600_000),
+  sitesPlatformPriceMicrosPerMillionSqlRowsRead: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(2_000),
+  sitesPlatformPriceMicrosPerMillionSqlRowsWritten: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(2_000_000),
+  sitesPlatformPriceMicrosPerGbMonth: z.coerce.number().int().nonnegative().default(400_000),
+  // The Opengeni-wide monthly brake: estimated USD cost of all workspaces'
+  // platform usage at the prices above. 0 turns the brake off.
+  sitesPlatformMonthlyLimitUsd: z.coerce.number().nonnegative().max(100_000_000).default(1_000),
+  sitesPlatformAlertPercent: z.coerce.number().int().min(1).max(100).default(80),
+  sitesReportsPerMinutePerVisitor: z.coerce.number().int().positive().default(5),
+  sitesViewerSessionIdleSeconds: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .default(12 * 60 * 60),
+  sitesViewerSessionAbsoluteSeconds: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(30 * 24 * 60 * 60)
+    .default(7 * 24 * 60 * 60),
+  // A released hostname stays held for its workspace at least this long.
+  sitesHostnameHoldDays: z.coerce.number().int().min(30).default(30),
+  // Optional Cloudflare edge sync: KV host map and cache purge. All unset: no-op.
+  sitesCloudflareApiToken: z.string().min(1).optional(),
+  sitesCloudflareAccountId: z.string().min(1).optional(),
+  sitesCloudflareKvNamespaceId: z.string().min(1).optional(),
+  sitesCloudflareZoneId: z.string().min(1).optional(),
+  // KV expiry of host-map entries; bounds staleness if a sync write is missed.
+  sitesHostMapTtlSeconds: z.coerce.number().int().min(60).max(86_400).default(300),
+  // Google Web Risk scanning of URLs in Site HTML on publish; off without a key.
+  sitesWebRiskApiKey: z.string().min(1).optional(),
   // Explicit commercial cutover. Existing queued revisions remain unpriced;
   // only jobs created at or after this instant may enter the paid rail.
   documentEmbeddingCreditsActivatedAt: z.iso.datetime().optional(),
@@ -4522,6 +4673,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),
+    desktopStableVersion: optional("OPENGENI_DESKTOP_STABLE_VERSION"),
     agentAutoUpdate: optional("OPENGENI_AGENT_AUTO_UPDATE"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
     billingMode: optional("OPENGENI_BILLING_MODE"),
@@ -4707,6 +4859,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     modelStreamProgressTimeoutMs: optional("OPENGENI_MODEL_STREAM_PROGRESS_TIMEOUT_MS"),
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
+    codexResponsesWebSocketEnabled: optional("OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
@@ -4911,6 +5064,20 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingApiKey: optional("OPENGENI_DOCUMENT_EMBEDDING_API_KEY"),
     documentEmbeddingBaseUrl: optional("OPENGENI_DOCUMENT_EMBEDDING_BASE_URL"),
     documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
+    sitesCloudflareStorageEnabled: optional("OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED"),
+    sitesGatewayInternalOrigin: optional("OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN"),
+    sitesSqlFreeStorageBytes: optional("OPENGENI_SITES_SQL_FREE_STORAGE_BYTES"),
+    sitesSqlFreeRowsReadPerMonth: optional("OPENGENI_SITES_SQL_FREE_ROWS_READ_PER_MONTH"),
+    sitesSqlFreeRowsWrittenPerMonth: optional("OPENGENI_SITES_SQL_FREE_ROWS_WRITTEN_PER_MONTH"),
+    sitesSqlFreeCallsPerMinutePerViewer: optional(
+      "OPENGENI_SITES_SQL_FREE_CALLS_PER_MINUTE_PER_VIEWER",
+    ),
+    sitesSqlFreeCallsPerMinutePerSite: optional(
+      "OPENGENI_SITES_SQL_FREE_CALLS_PER_MINUTE_PER_SITE",
+    ),
+    sitesSqlMaxRowsPerCall: optional("OPENGENI_SITES_SQL_MAX_ROWS_PER_CALL"),
+    sitesSqlMaxResponseBytes: optional("OPENGENI_SITES_SQL_MAX_RESPONSE_BYTES"),
+    sitesSqlTimeoutMs: optional("OPENGENI_SITES_SQL_TIMEOUT_MS"),
     siteDataRecordBytesPerSite: optional("OPENGENI_SITE_DATA_RECORD_BYTES_PER_SITE"),
     siteDataMaxRecordBytes: optional("OPENGENI_SITE_DATA_MAX_RECORD_BYTES"),
     siteDataMaxCollectionsPerSite: optional("OPENGENI_SITE_DATA_MAX_COLLECTIONS_PER_SITE"),
@@ -4926,6 +5093,83 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_SITE_DATA_WORKSPACE_VALIDATION_MS_PER_MINUTE",
     ),
     siteDataMaxRecordsPerCollection: optional("OPENGENI_SITE_DATA_MAX_RECORDS_PER_COLLECTION"),
+    sitesDomain: optional("OPENGENI_SITES_DOMAIN"),
+    sitesGatewaySecret: optional("OPENGENI_SITES_GATEWAY_SECRET"),
+    sitesGatewaySecretPrevious: optional("OPENGENI_SITES_GATEWAY_SECRET_PREVIOUS"),
+    sitesPublicEnabled: optional("OPENGENI_SITES_PUBLIC_ENABLED"),
+    sitesPublicAgentsEnabled: optional("OPENGENI_SITES_PUBLIC_AGENTS_ENABLED"),
+    sitesLoginOnly: optional("OPENGENI_SITES_LOGIN_ONLY"),
+    sitesForceNoindex: optional("OPENGENI_SITES_FORCE_NOINDEX"),
+    sitesAbuseEmail: optional("OPENGENI_SITES_ABUSE_EMAIL"),
+    sitesGuestAgentHumanCheck: optional("OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK"),
+    sitesFreeRequestsPerMinutePerVisitor: optional(
+      "OPENGENI_SITES_FREE_REQUESTS_PER_MINUTE_PER_VISITOR",
+    ),
+    sitesFreeGuestWritesPerMinute: optional("OPENGENI_SITES_FREE_GUEST_WRITES_PER_MINUTE"),
+    sitesFreeConversationsPerVisitorPerDay: optional(
+      "OPENGENI_SITES_FREE_CONVERSATIONS_PER_VISITOR_PER_DAY",
+    ),
+    sitesFreeConversationsPerSitePerDay: optional(
+      "OPENGENI_SITES_FREE_CONVERSATIONS_PER_SITE_PER_DAY",
+    ),
+    sitesFreeTurnsPerConversation: optional("OPENGENI_SITES_FREE_TURNS_PER_CONVERSATION"),
+    sitesFreeAgentMicrosPerConversation: optional(
+      "OPENGENI_SITES_FREE_AGENT_MICROS_PER_CONVERSATION",
+    ),
+    sitesFreeAgentMicrosPerVisitorPerDay: optional(
+      "OPENGENI_SITES_FREE_AGENT_MICROS_PER_VISITOR_PER_DAY",
+    ),
+    sitesFreeAgentMicrosPerSitePerMonth: optional(
+      "OPENGENI_SITES_FREE_AGENT_MICROS_PER_SITE_PER_MONTH",
+    ),
+    sitesCreditsLimitMultiplier: optional("OPENGENI_SITES_CREDITS_LIMIT_MULTIPLIER"),
+    sitesAgentReservationMicrosPerTurn: optional(
+      "OPENGENI_SITES_AGENT_RESERVATION_MICROS_PER_TURN",
+    ),
+    sitesAgentMicrosPerSitePerMonth: optional("OPENGENI_SITES_AGENT_MICROS_PER_SITE_PER_MONTH"),
+    sitesAgentMicrosPerPersonPerDay: optional("OPENGENI_SITES_AGENT_MICROS_PER_PERSON_PER_DAY"),
+    sitesGuestConversationsPerVisitorPerDay: optional(
+      "OPENGENI_SITES_GUEST_CONVERSATIONS_PER_VISITOR_PER_DAY",
+    ),
+    sitesGuestConversationsPerSitePerDay: optional(
+      "OPENGENI_SITES_GUEST_CONVERSATIONS_PER_SITE_PER_DAY",
+    ),
+    sitesGuestTurnsPerConversation: optional("OPENGENI_SITES_GUEST_TURNS_PER_CONVERSATION"),
+    sitesGuestAgentMicrosPerConversation: optional(
+      "OPENGENI_SITES_GUEST_AGENT_MICROS_PER_CONVERSATION",
+    ),
+    sitesPlatformBillingMode: optional("OPENGENI_SITES_PLATFORM_BILLING_MODE"),
+    sitesPlatformOverageEnabled: optional("OPENGENI_SITES_PLATFORM_OVERAGE_ENABLED"),
+    sitesPlatformAllowanceRequests: optional("OPENGENI_SITES_PLATFORM_ALLOWANCE_REQUESTS"),
+    sitesPlatformAllowanceSqlRowsRead: optional("OPENGENI_SITES_PLATFORM_ALLOWANCE_SQL_ROWS_READ"),
+    sitesPlatformAllowanceSqlRowsWritten: optional(
+      "OPENGENI_SITES_PLATFORM_ALLOWANCE_SQL_ROWS_WRITTEN",
+    ),
+    sitesPlatformAllowanceStorageBytes: optional("OPENGENI_SITES_PLATFORM_ALLOWANCE_STORAGE_BYTES"),
+    sitesPlatformPriceMicrosPerMillionRequests: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_MILLION_REQUESTS",
+    ),
+    sitesPlatformPriceMicrosPerMillionSqlRowsRead: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_MILLION_SQL_ROWS_READ",
+    ),
+    sitesPlatformPriceMicrosPerMillionSqlRowsWritten: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_MILLION_SQL_ROWS_WRITTEN",
+    ),
+    sitesPlatformPriceMicrosPerGbMonth: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_GB_MONTH",
+    ),
+    sitesPlatformMonthlyLimitUsd: optional("OPENGENI_SITES_PLATFORM_MONTHLY_LIMIT_USD"),
+    sitesPlatformAlertPercent: optional("OPENGENI_SITES_PLATFORM_ALERT_PERCENT"),
+    sitesReportsPerMinutePerVisitor: optional("OPENGENI_SITES_REPORTS_PER_MINUTE_PER_VISITOR"),
+    sitesViewerSessionIdleSeconds: optional("OPENGENI_SITES_VIEWER_SESSION_IDLE_SECONDS"),
+    sitesViewerSessionAbsoluteSeconds: optional("OPENGENI_SITES_VIEWER_SESSION_ABSOLUTE_SECONDS"),
+    sitesHostnameHoldDays: optional("OPENGENI_SITES_HOSTNAME_HOLD_DAYS"),
+    sitesCloudflareApiToken: optional("OPENGENI_SITES_CLOUDFLARE_API_TOKEN"),
+    sitesCloudflareAccountId: optional("OPENGENI_SITES_CLOUDFLARE_ACCOUNT_ID"),
+    sitesCloudflareKvNamespaceId: optional("OPENGENI_SITES_CLOUDFLARE_KV_NAMESPACE_ID"),
+    sitesCloudflareZoneId: optional("OPENGENI_SITES_CLOUDFLARE_ZONE_ID"),
+    sitesHostMapTtlSeconds: optional("OPENGENI_SITES_HOST_MAP_TTL_SECONDS"),
+    sitesWebRiskApiKey: optional("OPENGENI_SITES_WEB_RISK_API_KEY"),
     documentEmbeddingCreditsActivatedAt: optional(
       "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT",
     ),
@@ -9778,9 +10022,40 @@ export function localSandboxApiRouteAllowed(pathname: string): boolean {
   return LOCAL_SANDBOX_API_ROUTES.some((route) => route.test(pathname));
 }
 
+/**
+ * Published Sites serve untrusted HTML, so their domain must not hold or sit
+ * inside the console or API hosts: a Site could otherwise read or set their
+ * cookies. A separate registrable domain is required (see
+ * docs/published-sites.md); this catches the nesting a host check can see.
+ */
+export function validateSitesDomain(
+  settings: Pick<Settings, "sitesDomain" | "publicBaseUrl" | "webBaseUrl">,
+): void {
+  if (settings.sitesDomain === undefined) return;
+  let domain: string;
+  try {
+    domain = normalizeSitesDomain(settings.sitesDomain);
+  } catch {
+    throw new Error("OPENGENI_SITES_DOMAIN must be a domain name such as sites.example.com");
+  }
+  const hosts: Array<[string, string | undefined]> = [
+    ["OPENGENI_PUBLIC_BASE_URL", settings.publicBaseUrl],
+    ["OPENGENI_WEB_BASE_URL", settings.webBaseUrl],
+  ];
+  for (const [name, url] of hosts) {
+    if (!url) continue;
+    const host = new URL(url).hostname.toLowerCase().replace(/\.$/u, "");
+    if (host === domain || host.endsWith(`.${domain}`) || domain.endsWith(`.${host}`))
+      throw new Error(
+        `OPENGENI_SITES_DOMAIN (${domain}) must be a separate domain from the console and API: ${name} uses ${host}`,
+      );
+  }
+}
+
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
+  validateSitesDomain(settings);
   if (
     settings.organizationUserSetupEmailTokenTransport === "query" &&
     !settings.organizationUserSetupQueryEdgeSanitizationConfirmed

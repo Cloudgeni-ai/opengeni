@@ -92,6 +92,7 @@ import {
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
 const BROWSER_START_TIMEOUT_MS = 30_000;
 const TARGET_CREATION_SETTLE_TIMEOUT_MS = 5_000;
+const TARGET_CLOSE_SETTLE_TIMEOUT_MS = 2_000;
 // A screenshot stream is the compatibility floor for every Chromium build.
 // Keep it interactive even when Page.startScreencast is unavailable or a
 // background target never produces screencast events.
@@ -161,6 +162,8 @@ export type BrowserExternalAuthDispatchResult = {
 
 export type BrowserCdpConnection = {
   onDisconnect?: (listener: () => void) => () => void;
+  /** Throws a definite error for a page this transport can never control. */
+  assertNavigable?: (url: string) => void;
   send<T = Record<string, unknown>>(
     method: string,
     params?: Readonly<Record<string, unknown>>,
@@ -283,6 +286,9 @@ export type AgentBrowserDriverOptions = {
    * creates page targets. Remote and non-Chromium CDP engines commonly scope
    * targets to the connection that created them, so they require `cdp`. */
   targetLifecycle?: "runner" | "cdp";
+  /** The browser belongs to the person (attached Chrome): an explicit end
+   * closes the tabs this session opened that are still blank. */
+  closeUnusedOwnedTabsOnEnd?: boolean;
   tabControl?: boolean;
   /** Keep owned Chromium pages active without changing the foreground tab. */
   focusEmulation?: boolean;
@@ -328,6 +334,15 @@ type BrowserUserAgentMetadata = {
   formFactors?: string[];
 };
 
+/** How a tab's navigation treats a page that fails to load. */
+export type BrowserTabNavigationOptions = {
+  /** Reopening a saved tab: when its page can't load (the host is unreachable
+   * or no longer resolves), keep the tab open on the browser's error page with
+   * its URL, as the browser's own session restore does, instead of failing.
+   * Navigation policy refusals and invalid URLs still fail. */
+  keepTabOnLoadError?: boolean;
+};
+
 export type BrowserRuntimeSnapshot = {
   engine: "chromium" | "chrome" | "lightpanda";
   engineVersion: string | null;
@@ -363,6 +378,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private physicalGeneration: string;
   private readonly engine: "chromium" | "chrome" | "lightpanda";
   private readonly targetLifecycle: "runner" | "cdp";
+  private readonly closeUnusedOwnedTabsOnEnd: boolean;
+  /** Tabs this session created, in a browser it does not own. */
+  private readonly createdTargetIds = new Set<string>();
   private readonly tabControl: boolean;
   /** Cleared once the browser refuses focus emulation, so later targets keep
    * working without it instead of each paying the refusal. */
@@ -443,6 +461,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       ? validateHeadlessSessionCookies(options.headlessSessionCookies)
       : null;
     this.targetLifecycle = options.targetLifecycle ?? "runner";
+    this.closeUnusedOwnedTabsOnEnd = options.closeUnusedOwnedTabsOnEnd ?? false;
     this.tabControl = options.tabControl ?? true;
     this.focusEmulation = options.focusEmulation ?? false;
     this.frameStreaming = options.frameStreaming ?? true;
@@ -459,7 +478,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.connect = options.connect ?? (async (endpoint) => await CdpConnection.connect(endpoint));
   }
 
-  async start(url?: string): Promise<BrowserObservationValue> {
+  async start(
+    url?: string,
+    options: BrowserTabNavigationOptions = {},
+  ): Promise<BrowserObservationValue> {
     const deferNavigation = url !== undefined && url !== "about:blank";
     // Resolving the daemon's private CDP endpoint is itself the cold-start
     // primitive. Calling `agent-browser open` first makes the CLI perform one
@@ -473,6 +495,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     let target: TargetInfo;
     if (this.targetLifecycle === "cdp") {
       connection = await this.ensureConnection();
+      if (deferNavigation) connection.assertNavigable?.(url);
       const created = await connection.send<{ targetId?: unknown }>(
         "Target.createTarget",
         { url: "about:blank", background: true, ...this.contextScope() },
@@ -481,10 +504,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (typeof created.targetId !== "string" || !created.targetId) {
         throw new Error("browser did not return its initial page target");
       }
+      if (this.closeUnusedOwnedTabsOnEnd) this.createdTargetIds.add(created.targetId);
       // Attached Chrome's tab inventory may lag the creation receipt. Never
       // substitute another tab (even another blank tab) for the exact target
       // we created: the initial navigation would overwrite the user's page.
-      target = await this.waitForCreatedTargetInfo(connection, created.targetId);
+      try {
+        target = await this.waitForCreatedTargetInfo(connection, created.targetId);
+        this.selectedTargetId = target.targetId;
+        if (deferNavigation)
+          await this.navigate(await this.ensureTargetState(target), url, options);
+        return await this.observe(target.targetId);
+      } catch (error) {
+        // The session never started, so nothing can use or close this tab.
+        await this.discardCreatedTarget(connection, created.targetId);
+        throw error;
+      }
     } else {
       connection = await this.ensureConnection();
       if (this.headlessSessionCookies) {
@@ -495,7 +529,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // That tab stays in the inventory for the user to close; startup selects
       // the first live tab instead, and only creates one when none is live.
       let page: TargetInfo | undefined;
-      for (const candidate of visiblePageTargets(await this.targetInfos(connection))) {
+      const initialTargets = await this.targetInfos(connection);
+      for (const candidate of visiblePageTargets(initialTargets)) {
         try {
           await this.ensureTargetState(candidate);
         } catch (error) {
@@ -517,10 +552,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         page = await this.waitForCreatedTargetInfo(connection, created.targetId);
       }
       target = page;
+      this.closeStartupNewTabPages(connection, initialTargets, page.targetId);
     }
     this.selectedTargetId = target.targetId;
     if (deferNavigation) {
-      await this.navigate(await this.ensureTargetState(target), url);
+      await this.navigate(await this.ensureTargetState(target), url, options);
     }
     return await this.observe(target.targetId);
   }
@@ -558,8 +594,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
   }
 
-  async openTarget(url = "about:blank"): Promise<BrowserObservationValue> {
-    const state = await this.createTarget(url);
+  async openTarget(
+    url = "about:blank",
+    options: BrowserTabNavigationOptions = {},
+  ): Promise<BrowserObservationValue> {
+    const state = await this.createTarget(url, options);
     return await this.observe(state.targetId);
   }
 
@@ -572,7 +611,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return targets;
   }
 
-  private async createTarget(url: string): Promise<TargetState> {
+  private async createTarget(
+    url: string,
+    options: BrowserTabNavigationOptions = {},
+  ): Promise<TargetState> {
     if (!this.tabControl) {
       throw new InteractionDefiniteDriverError(
         "unsupported",
@@ -583,20 +625,83 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // Establish the blank document and target policies before remote navigation.
     // A slow response must use the navigation budget, not the target-creation deadline.
     const deferNavigation = url !== "about:blank";
+    if (deferNavigation) connection.assertNavigable?.(url);
     const result = await connection.send<{ targetId?: unknown }>("Target.createTarget", {
       ...this.contextScope(),
       url: deferNavigation ? "about:blank" : url,
       background: true,
     });
     if (typeof result.targetId !== "string") throw new Error("CDP did not return a target id");
+    if (this.closeUnusedOwnedTabsOnEnd) this.createdTargetIds.add(result.targetId);
+    const previousSelection = this.selectedTargetId;
     const createdTarget = await this.waitForCreatedTargetInfo(connection, result.targetId);
     const createdState = await this.ensureTargetState(createdTarget);
     await this.waitForCreatedTargetFrame(createdState);
     this.selectedTargetId = result.targetId;
     if (deferNavigation) {
-      await this.navigate(createdState, url);
+      try {
+        await this.navigate(createdState, url, options);
+      } catch (error) {
+        // A slow page may still finish loading in a tab the caller can list
+        // and select. Any other failure leaves a tab nobody asked for: the
+        // blank bootstrap document, or a page the browser will not let us
+        // control. The caller was told the open failed, so close it.
+        if (!isNavigationTimeout(error)) {
+          await this.discardCreatedTarget(connection, result.targetId);
+          if (this.selectedTargetId === result.targetId) this.selectedTargetId = previousSelection;
+        }
+        throw error;
+      }
     }
     return createdState;
+  }
+
+  private async discardCreatedTarget(
+    connection: BrowserCdpConnection,
+    targetId: string,
+  ): Promise<void> {
+    this.removeState(targetId);
+    this.createdTargetIds.delete(targetId);
+    if (this.selectedTargetId === targetId) this.selectedTargetId = null;
+    try {
+      await this.closeTargetAndSettle(connection, targetId);
+    } catch {
+      // Best effort: the tab may already be gone, and the original failure
+      // is what the caller needs to see.
+    }
+  }
+
+  /** A managed Chrome opens its own new-tab page at launch beside the page
+   * the driver uses. Tab lists hide it, yet it keeps a renderer for the page
+   * and another for its embedded Google bar alive for the browser's lifetime.
+   * Close it in the background; startup does not wait for the close. */
+  private closeStartupNewTabPages(
+    connection: BrowserCdpConnection,
+    targets: readonly TargetInfo[],
+    selectedTargetId: string,
+  ): void {
+    for (const info of targets) {
+      if (info.type !== "page" || info.targetId === selectedTargetId) continue;
+      if (info.url !== "chrome://newtab/" && info.url !== "chrome://new-tab-page/") continue;
+      this.removeState(info.targetId);
+      void connection.send("Target.closeTarget", { targetId: info.targetId }).catch(() => {});
+    }
+  }
+
+  /** Target.closeTarget is acknowledged before the browser drops the tab from
+   * Target.getTargets, and a cold or loaded browser can keep listing it for a
+   * moment. Wait until it is gone, so a tab list returned after a close never
+   * shows the closed tab. */
+  private async closeTargetAndSettle(
+    connection: BrowserCdpConnection,
+    targetId: string,
+  ): Promise<void> {
+    await connection.send("Target.closeTarget", { targetId });
+    const deadline = Date.now() + TARGET_CLOSE_SETTLE_TIMEOUT_MS;
+    while ((await this.targetInfos(connection)).some((info) => info.targetId === targetId)) {
+      if (Date.now() >= deadline) return;
+      await delay(25);
+    }
   }
 
   async selectTarget(targetId: string): Promise<BrowserObservationValue> {
@@ -615,10 +720,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
-    await connection.send("Target.closeTarget", { targetId });
+    await this.closeTargetAndSettle(connection, targetId);
     this.removeState(targetId);
+    this.createdTargetIds.delete(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
     return await this.listTargets();
+  }
+
+  /** Close the tabs this session opened in the person's browser that are
+   * still blank, so ending the session does not leave empty tabs behind.
+   * Tabs that show a page stay: the person may still want what the agent
+   * left there. */
+  async closeUnusedOwnedTabs(): Promise<void> {
+    if (!this.closeUnusedOwnedTabsOnEnd || this.createdTargetIds.size === 0 || !this.connection)
+      return;
+    const connection = this.connection;
+    const infos = await this.targetInfos(connection);
+    for (const info of infos) {
+      if (!this.createdTargetIds.has(info.targetId) || !isBlankTabUrl(info.url)) continue;
+      try {
+        await this.closeTargetAndSettle(connection, info.targetId);
+      } catch {
+        // Best effort per tab; the session end itself still proceeds.
+      }
+      this.createdTargetIds.delete(info.targetId);
+    }
   }
 
   async close(): Promise<void> {
@@ -694,14 +820,45 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
     }
     const targets = await this.listTargets();
-    const tabs = targets
-      .filter((target) => target.kind === "page" || target.kind === "popup")
-      .map((target) => ({ url: target.url, selected: target.selected }));
+    const tabs: BrowserRuntimeSnapshot["tabs"] = [];
+    for (const target of targets) {
+      if (target.kind !== "page" && target.kind !== "popup") continue;
+      // A tab showing the browser's error page still belongs to the page it
+      // failed to load; save that page so a later restore can retry it.
+      const url = target.url.toLowerCase().startsWith("chrome-error:")
+        ? ((await this.errorPageDestination(target.id)) ?? target.url)
+        : target.url;
+      tabs.push({ url, selected: target.selected });
+    }
     const separator = this.browserProduct.indexOf("/");
     const rawVersion = separator >= 0 ? this.browserProduct.slice(separator + 1) : "";
     const engineVersion =
       rawVersion.length > 0 && Buffer.byteLength(rawVersion) <= 256 ? rawVersion : null;
     return { engine: this.engine, engineVersion, tabs };
+  }
+
+  /** The http(s) URL an error page failed to load, read from its current
+   * history entry. Null when it can't be read; the caller keeps the error URL. */
+  private async errorPageDestination(targetId: string): Promise<string | null> {
+    try {
+      const connection = await this.ensureConnection();
+      const info = (await this.targetInfos(connection)).find(
+        (candidate) => candidate.targetId === targetId,
+      );
+      if (!info) return null;
+      const history = await this.sendActionTarget<{ currentIndex?: unknown; entries?: unknown }>(
+        await this.ensureTargetState(info),
+        "Page.getNavigationHistory",
+        {},
+      );
+      const entries = Array.isArray(history.entries) ? history.entries : [];
+      const entry =
+        typeof history.currentIndex === "number" ? entries[history.currentIndex] : undefined;
+      if (!isRecord(entry) || typeof entry.url !== "string") return null;
+      return /^https?:\/\//iu.test(entry.url) ? entry.url : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Supervisor-only read after both action controllers have quiesced. Never
@@ -1107,6 +1264,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await this.bringToFrontForAction(state);
       let completedActions = 0;
       const initialEffectCount = state.actionEffectCount;
+      const requestsBeforeActions = {
+        open: new Set(state.inflightRequests),
+        activity: state.networkActivitySequence,
+      };
       for (const [actionIndex, action] of actions.entries()) {
         state.actionTrace = trace ? { actionIndex, trace } : undefined;
         try {
@@ -1197,6 +1358,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return null;
       }
       try {
+        // Navigation already waits for the new document to load, and an
+        // explicit wait has its own condition; only page input settles here.
+        const last = actions.at(-1)?.type;
+        if (last !== "navigate" && last !== "history" && last !== "wait")
+          await this.settleActionRequests(state, requestsBeforeActions);
         await this.settleFiniteAnimations(state);
         const currentInfo = await this.requireTargetInfo(
           await this.ensureConnection(),
@@ -4302,11 +4468,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  private async navigate(state: TargetState, url: string): Promise<void> {
+  private async navigate(
+    state: TargetState,
+    url: string,
+    options: BrowserTabNavigationOptions = {},
+  ): Promise<void> {
+    this.connection?.assertNavigable?.(url);
     const result = await this.sendActionTarget<{ errorText?: unknown }>(state, "Page.navigate", {
       url,
     });
-    if (typeof result.errorText === "string" && result.errorText) {
+    if (
+      typeof result.errorText === "string" &&
+      result.errorText &&
+      !(options.keepTabOnLoadError === true && isPageLoadError(result.errorText))
+    ) {
       throw new InteractionDefiniteDriverError(
         "resource_unavailable",
         "browser could not navigate to the requested URL",
@@ -4411,6 +4586,39 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       throw error;
     }
     return (await this.callOnNode(state, entry.backendDOMNodeId, VISIBLE_FUNCTION, [])) === true;
+  }
+
+  /**
+   * A click often starts a request whose response then updates the page, as
+   * when a form posts and shows "Submitted". Observing immediately shows the
+   * page before that update, so the agent waits for, or guesses at, a result
+   * that is already on its way. Briefly wait for the requests the action
+   * itself started (not ones already open, such as long polls) to finish,
+   * then give the page a moment to apply the response. Actions that caused
+   * no network activity pay nothing, and the wait is bounded.
+   */
+  private async settleActionRequests(
+    state: TargetState,
+    before: { open: ReadonlySet<string>; activity: number },
+  ): Promise<void> {
+    if (state.dialog) return;
+    try {
+      // The renderer reports a request it starts before it answers a later
+      // command on the same session, so one cheap round trip makes sure the
+      // requests this action started have been seen.
+      await this.sendTarget(state, "Runtime.getIsolateId", {});
+    } catch {
+      // Settling only improves the snapshot; it never decides the outcome.
+    }
+    if (state.dialog || state.networkActivitySequence === before.activity) return;
+    const deadline = Date.now() + ACTION_REQUEST_SETTLE_LIMIT_MS;
+    const pending = () =>
+      state.networkTrackingOverflow ||
+      [...state.inflightRequests].some((requestId) => !before.open.has(requestId));
+    while (pending() && Date.now() < deadline && !state.dialog) {
+      await delay(ACTION_REQUEST_POLL_MS);
+    }
+    if (!state.dialog) await delay(ACTION_RESPONSE_APPLY_MS);
   }
 
   /**
@@ -4905,6 +5113,18 @@ function normalizeTargetInfo(value: unknown): TargetInfo {
   };
 }
 
+/** A tab with no page: the blank document a new tab starts on (attached
+ * Chrome creates it as an empty data URL) or the browser's new-tab page. */
+function isBlankTabUrl(url: string): boolean {
+  return (
+    url === "" ||
+    url === "about:blank" ||
+    url === "data:text/html," ||
+    url === "chrome://newtab/" ||
+    url === "chrome://new-tab-page/"
+  );
+}
+
 function absoluteTargetUrl(value: unknown): string | null {
   if (typeof value !== "string" || value.length === 0 || value.length > 16_384) return null;
   try {
@@ -5158,6 +5378,12 @@ const KEY_DEFINITIONS: Record<string, KeyDefinition> = {
 // Typical exit animations take 100-300 ms. Longer finite animations are
 // waited for only this long, so a slow transition cannot stall every action.
 const ANIMATION_SETTLE_LIMIT_MS = 750;
+// Requests an action starts usually answer in well under a second; a request
+// that stays open (a stream, a stalled server) must not hold the result back.
+const ACTION_REQUEST_SETTLE_LIMIT_MS = 1_500;
+const ACTION_REQUEST_POLL_MS = 20;
+// The response handler runs after the network layer reports the load finished.
+const ACTION_RESPONSE_APPLY_MS = 50;
 
 // Waits until no finite animation is running, then lets animationend
 // handlers commit their DOM removal (which can chain another animation).
@@ -5858,4 +6084,18 @@ async function ownedCdpProcessId(connection: BrowserCdpConnection): Promise<numb
     throw new Error("CDP endpoint does not identify the exact owned browser process");
   }
   return pid;
+}
+
+function isNavigationTimeout(error: unknown): boolean {
+  return (
+    error instanceof CdpCommandTimeoutError ||
+    (error instanceof InteractionDefiniteDriverError && error.code === "timeout")
+  );
+}
+
+/** Chromium reports a page that could not load (DNS, connection, TLS, ...)
+ * as a `net::ERR_*` navigation error after committing its error page. Other
+ * navigation errors, such as an invalid URL, leave no page for the URL. */
+function isPageLoadError(errorText: string): boolean {
+  return /^net::ERR_[A-Z0-9_]+$/u.test(errorText);
 }

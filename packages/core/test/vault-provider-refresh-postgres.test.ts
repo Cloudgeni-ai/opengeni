@@ -54,6 +54,7 @@ async function world() {
     name: "Refresher",
   });
   const grant = access.workspaceGrants[0]!;
+  const actor = { grant, accountAdmin: false };
   const subjectId = `user:${userId}`;
   const context: VaultDbContext = {
     kind: "subject",
@@ -101,7 +102,17 @@ async function world() {
       where id = ${vault.id}`;
   };
   const listCalls = () => host.calls.filter((call) => call.op === "listVaults").length;
-  return { db, principal, providers, addInProvider, ageMirror, listCalls };
+  return {
+    db,
+    principal,
+    actor,
+    workspaceId: grant.workspaceId,
+    vaultId: vault.id,
+    providers,
+    addInProvider,
+    ageMirror,
+    listCalls,
+  };
 }
 
 describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
@@ -122,6 +133,25 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       await ageMirror(LINKED_VAULT_SEARCH_MAX_AGE_MS + 1_000);
       const stale = await service.searchForAgent(principal, { query: "Company card", limit: 20 });
       expect(stale.items.map((result) => result.item.name)).toEqual(["Company card"]);
+      expect(listCalls()).toBe(before + 1);
+    });
+
+    test("opening a linked vault shows an item added in the provider once the mirror is stale", async () => {
+      if (!client) return;
+      const { db, actor, workspaceId, vaultId, providers, addInProvider, ageMirror, listCalls } =
+        await world();
+      const service = createVaultService({ db, encryptionKey: null, providers });
+      await addInProvider("Company card", "4111111111111111");
+      const names = async () =>
+        (await service.listItems(actor, workspaceId, vaultId, {})).items.map((item) => item.name);
+
+      const before = listCalls();
+      expect(await names()).toEqual(["Existing"]);
+      // A fresh mirror is trusted: no provider call.
+      expect(listCalls()).toBe(before);
+
+      await ageMirror(LINKED_VAULT_SEARCH_MAX_AGE_MS + 1_000);
+      expect((await names()).toSorted()).toEqual(["Company card", "Existing"]);
       expect(listCalls()).toBe(before + 1);
     });
 

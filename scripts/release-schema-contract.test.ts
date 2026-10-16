@@ -2325,6 +2325,16 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0792_scheduled_task_blocker_reviews.sql",
+      "0791_site_limit_profiles_new_defaults.sql",
+      "0790_site_limits_and_platform_usage.sql",
+      "0788_session_events_command_output_client_index.sql",
+      "0787_session_system_updates_delivered_turn_index.sql",
+      "0786_session_turns_finished_order_index.sql",
+      "0785_editable_spreadsheet_ordered_operation_ids.sql",
+      "0784_message_fork_as_of_history.sql",
+      "0783_site_sql.sql",
+      "0782_published_sites.sql",
       "0781_session_usage_limit_statement_seed.sql",
       "0780_only_me_vault_availability.sql",
       "0779_provider_connection_home_workspace.sql",

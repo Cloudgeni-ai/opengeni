@@ -67,6 +67,7 @@ import type {
 } from "./operation-connections";
 import {
   subscriptionCoreOperations,
+  subscriptionCoreUsageMergeOptions,
   type SubscriptionCoreConnectionCredential,
   type SubscriptionCoreConnectionCredentialRow,
   type SubscriptionCoreConnectionRefreshDeps,
@@ -671,9 +672,7 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
         ...(deps.modelIds ? { modelIds: deps.modelIds } : {}),
       });
       if (!quota) return { kind: "read", response, quota: null, applied: false, recovered: false };
-      const options = {
-        confirmsAvailability: provider.adapter.usageReadConfirmsAvailability?.(response),
-      };
+      const options = subscriptionCoreUsageMergeOptions(provider.adapter, response);
       const recorded = await scoped
         .scoped(db, (tx) => scoped.record(tx, quota, options))
         .catch(() => null);

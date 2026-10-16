@@ -115,7 +115,8 @@ import {
   useScheduleNavigation,
   type ScheduleAccess,
 } from "./schedule-parts";
-import { scheduledRunErrorText } from "@/lib/scheduled-run-error";
+import { scheduledRunErrorText, scheduledRunSkippedForPausedChat } from "@/lib/scheduled-run-error";
+import { ScheduleBlockerNotice, SchedulePausedChatNotice } from "./schedule-blocker-notice";
 import { ScheduledTaskAccessNotices } from "./schedule-access-notices";
 import { ScheduleAccounts, scheduleAccountsDescription } from "./schedule-accounts";
 import { useScheduleActions } from "./use-schedule-actions";
@@ -582,6 +583,9 @@ function StatusChip({ task, latest }: { task: ScheduledTask; latest?: ScheduledT
   if (latest?.status === "failed") {
     return <StatusBadge status="failed">Last run failed</StatusBadge>;
   }
+  if (scheduledRunSkippedForPausedChat(latest)) {
+    return <StatusBadge status="paused">Last run: chat paused</StatusBadge>;
+  }
   return null;
 }
 
@@ -622,7 +626,9 @@ function Overview({
   const sentence = `${scheduleWords(task.schedule, now).sentence}.`;
   const status =
     task.status === "paused"
-      ? "Paused, so it won't run until you turn it back on."
+      ? task.blocker?.state === "paused"
+        ? "Paused itself, so it won't run until you turn it back on."
+        : "Paused, so it won't run until you turn it back on."
       : !state.active
         ? `${state.label}, so it won't run.`
         : task.schedule.type === "manual"
@@ -637,7 +643,25 @@ function Overview({
     <>
       <DetailSection className="pt-6">
         {accessNotices}
-        {latest?.status === "failed" ? (
+        {task.blocker ? (
+          <ScheduleBlockerNotice
+            blocker={task.blocker}
+            onOpenChat={
+              latest?.sessionId && access.canReadSessionIds
+                ? () => onOpenSession(latest.sessionId!)
+                : undefined
+            }
+          />
+        ) : scheduledRunSkippedForPausedChat(latest) ? (
+          <SchedulePausedChatNotice
+            onOpenChat={
+              latest?.sessionId && access.canReadSessionIds
+                ? () => onOpenSession(latest.sessionId!)
+                : undefined
+            }
+          />
+        ) : null}
+        {latest?.status === "failed" && !task.blocker ? (
           <Notice tone="failed" title="The last run failed" className="mb-4">
             {latest.error?.trim() || "Open the run's chat to see what went wrong."}
           </Notice>

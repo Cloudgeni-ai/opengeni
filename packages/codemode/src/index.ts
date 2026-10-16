@@ -38,7 +38,7 @@ import {
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 
-import { siteSessionPath } from "@opengeni/contracts/site-session-http";
+import { siteHostWorkspacePath } from "@opengeni/contracts/site-session-http";
 import { materializeCodemodeImages } from "./images";
 
 export type { AttemptToolCatalog, AttemptToolCatalogEntry } from "@opengeni/contracts";
@@ -516,11 +516,14 @@ export class CodemodeClient {
     });
   }
 
-  /** Server-side Site preview forwarding. The attempt bearer never enters the
-   * page. Validate tenant routing here; ordinary API handlers authorize the
-   * operation under the existing agent proxy permission ceiling. */
+  /** The agent's own SDK requests through the Codemode SDK proxy (and the
+   * transport a local Site preview forwards through). The attempt bearer never
+   * enters a page. Validate tenant routing here; ordinary API handlers
+   * authorize the operation under the existing agent proxy permission ceiling.
+   * Requests marked as Site frames are held to the Site operation allowlist
+   * by the preview handler and again by the API. */
   async sessionRequest(path: string, init: RequestInit): Promise<Response> {
-    siteSessionPath(path, "site-host", init.method ?? "GET");
+    siteHostWorkspacePath(path, "site-host");
     return this.request(`/sdk${path}`, init, false);
   }
 

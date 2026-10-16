@@ -70,7 +70,8 @@ pub use desktop::{
 };
 #[cfg(target_os = "linux")]
 pub use desktop::{
-    validate_linux_named_key_chord, LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
+    linux_layout_text_keysyms, linux_named_key_chord_keysyms, validate_linux_named_key_chord,
+    LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
 };
 pub use error::{PlatformError, PlatformResult};
 #[cfg(unix)]
@@ -89,7 +90,11 @@ pub use pty::{spawn_pty, PtyProcess};
 /// startup/enroll seam uses these to request display capability on a real Mac; a
 /// denied grant degrades cleanly to `display_unavailable`.
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
-pub use macos::{desktop_grants, request_desktop_grants, DesktopGrants};
+pub use macos::{
+    desktop_grants, request_desktop_grants, request_desktop_permission, DesktopGrants,
+};
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+pub use opengeni_agent_macos_ffi::DesktopPermission;
 
 /// Reported OS/arch identity of the host the agent runs on, folded into the
 /// connect [`Hello`](opengeni_agent_proto::v1::Hello).

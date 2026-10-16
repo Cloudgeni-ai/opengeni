@@ -1,6 +1,8 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import {
   MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
   type FileAsset,
 } from "@opengeni/contracts";
@@ -8,10 +10,16 @@ import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { prepareRunInput, type AgentSegmentInput, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createHash } from "node:crypto";
-import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
+import sharp from "sharp";
+import {
+  MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+  agentRunFailurePayload,
+  providerRecoveryResult,
+} from "../src/activities/agent-turn/errors";
 import {
   MAX_INLINE_MODEL_ATTACHMENT_BYTES,
   RetainedAttachmentTransportLimitError,
+  RetainedAttachmentUnavailableError,
   createModelHistoryAttachmentProjector,
   modelAttachmentContentForFiles,
   turnInput,
@@ -59,6 +67,71 @@ describe("attachment refs after compaction", () => {
     expect(seeded[1]).toBe(history[1]!);
     expect(history[0]).toEqual(user("Inspect this file"));
     expect(withCurrentUserAttachmentRefs([catalog()], [current])).toEqual([catalog()]);
+  });
+
+  test("an existing catalog keeps its exact earlier projection", async () => {
+    const project = createModelHistoryAttachmentProjector({
+      supportsImageInput: true,
+    });
+    // Text already sent to a provider must replay byte for byte (prompt cache).
+    expect(await project([catalog()])).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: "[Opengeni retained attachment references]",
+          },
+          {
+            type: "input_text",
+            text:
+              `[Attachment: fileId=${archived.fileId}; mountDirectory=.opengeni/files/${archived.fileId}. ` +
+              "Use the existing file there, or call files__files_get_download_url with this fileId and " +
+              "download it with the shell.]",
+          },
+        ],
+        [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
+      },
+    ]);
+  });
+
+  test("a dated catalog replays its frozen text without per-file receipts or lookups", async () => {
+    let lookups = 0;
+    const project = createModelHistoryAttachmentProjector(
+      { supportsImageInput: true },
+      async () => {
+        lookups++;
+        return new Uint8Array();
+      },
+      async () => {
+        lookups++;
+        return [];
+      },
+    );
+    const dated = {
+      type: "message",
+      role: "system",
+      content: "[Opengeni earlier attachments]\n- fileId=example",
+      [MODEL_ATTACHMENT_REFS_FIELD]: [archived],
+      [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
+      [MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD]: true,
+    };
+    const projected = await project([dated, user("Continue")]);
+    expect(projected[0]).toEqual({
+      type: "message",
+      role: "system",
+      content: "[Opengeni earlier attachments]\n- fileId=example",
+      [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
+      [MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD]: true,
+    });
+    expect(projected[1]).toEqual(user("Continue"));
+    expect(lookups).toBe(0);
+    // The archived ref still counts as retained, so it is never re-stamped
+    // onto the latest message as if it had just been attached.
+    expect(withCurrentUserAttachmentRefs([dated, user("Continue")], [archived])[1]).toEqual(
+      user("Continue"),
+    );
   });
 });
 
@@ -806,6 +879,71 @@ describe("retained upload replay", () => {
     await expect(projector(history)).rejects.toThrow("Retained attachment bytes");
     await expect(projector(history)).rejects.toThrow("Retained attachment bytes");
   });
+  test("a storage miss for a retained image retries the same turn and later sends the same pixels", async () => {
+    const bytes = new TextEncoder().encode("image");
+    const asset = {
+      ...file("00000000-0000-4000-8000-000000000084", "image/png", bytes.length, "a.png"),
+      sha256: sha256(bytes),
+    };
+    const history = [
+      { ...user("inspect"), [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }] },
+    ];
+    let storageReady = false;
+    const projector = createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => {
+        if (!storageReady) throw new Error("attachment object is missing");
+        return bytes;
+      },
+      async () => [asset],
+    );
+    const missed = await projector(history).catch((error) => error);
+    expect(missed).toBeInstanceOf(RetainedAttachmentUnavailableError);
+    expect(missed.fileIds).toEqual([asset.id]);
+    expect(String(missed.message)).not.toContain(asset.id);
+    expect(agentRunFailurePayload(missed)).toMatchObject({
+      code: "retained_attachment_unavailable",
+      retryable: true,
+    });
+    expect(
+      agentRunFailurePayload(new Error("Failed to run the turn", { cause: missed })),
+    ).toMatchObject({ code: "retained_attachment_unavailable", retryable: true });
+    // Same finite connectivity backoff as other upstream outages.
+    expect(
+      providerRecoveryResult({
+        failureCode: "retained_attachment_unavailable",
+        attemptNumber: 1,
+      }),
+    ).toEqual({ status: "recovering", continueDelayMs: 2_000 });
+    expect(
+      providerRecoveryResult({
+        failureCode: "retained_attachment_unavailable",
+        attemptNumber: MAX_AUTOMATIC_PROVIDER_RECOVERIES + 1,
+      }),
+    ).toMatchObject({ status: "exhausted" });
+    storageReady = true;
+    expect(JSON.stringify(await projector(history))).toContain(
+      Buffer.from(bytes).toString("base64"),
+    );
+  });
+  test("different bytes for a retained image stay a terminal integrity failure", async () => {
+    const bytes = new TextEncoder().encode("image");
+    const asset = {
+      ...file("00000000-0000-4000-8000-000000000085", "image/png", bytes.length, "a.png"),
+      sha256: sha256(new TextEncoder().encode("other")),
+    };
+    const history = [
+      { ...user("inspect"), [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }] },
+    ];
+    const projector = createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => bytes,
+      async () => [asset],
+    );
+    const corrupt = await projector(history).catch((error) => error);
+    expect(corrupt).not.toBeInstanceOf(RetainedAttachmentUnavailableError);
+    expect(agentRunFailurePayload(corrupt).retryable).not.toBe(true);
+  });
 });
 
 test("retained uploads exceed the old aggregate cap without eviction or unbounded concurrent reads", async () => {
@@ -1057,5 +1195,66 @@ describe("attachments outside the current requester's file access", () => {
       expect(receipt).not.toContain("not available to the current requester");
     }
     expect(lookups).toBe(0);
+  });
+});
+
+// Regression: user photos were replayed at full camera resolution to every
+// provider except Anthropic, costing about 14k tokens each on current models.
+describe("photo resolution sent to the model", () => {
+  const photoId = "00000000-0000-4000-8000-0000000000a1";
+  const photo = async (width: number, height: number) =>
+    new Uint8Array(
+      await sharp({
+        create: { width, height, channels: 3, background: { r: 40, g: 120, b: 200 } },
+      })
+        .jpeg({ quality: 90 })
+        .toBuffer(),
+    );
+  const project = async (bytes: Uint8Array, item: Record<string, unknown>) => {
+    const asset = {
+      ...file(photoId, "image/jpeg", bytes.length, "photo.jpg"),
+      sha256: sha256(bytes),
+    };
+    const projected = await createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => bytes,
+      async () => [asset],
+    )([{ ...item, [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: photoId }] }]);
+    const parts = projected[0]!.content as Array<Record<string, unknown>>;
+    const image = String(parts.find((part) => part.type === "input_image")!.image);
+    const receipt = String(parts.find((part) => String(part.text).includes(photoId))!.text);
+    return { image, receipt };
+  };
+  const dataUrl = (bytes: Uint8Array) =>
+    `data:image/jpeg;base64,${Buffer.from(bytes).toString("base64")}`;
+
+  test("a newly sent photo is downscaled to the bound stamped on its message", async () => {
+    const bytes = await photo(4032, 3024);
+    const { image, receipt } = await project(bytes, {
+      ...user("what is this?"),
+      [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+    });
+    expect(image.startsWith("data:image/jpeg;base64,")).toBe(true);
+    const sent = await sharp(Buffer.from(image.slice(image.indexOf(",") + 1), "base64")).metadata();
+    expect([sent.width, sent.height]).toEqual([2000, 1500]);
+    expect(receipt).toContain("downscaled to 2000x1500 from 4032x3024");
+    expect(receipt).toContain("the file itself is full resolution");
+  });
+
+  test("a photo from before the bound existed keeps its original bytes", async () => {
+    const bytes = await photo(4032, 3024);
+    const { image, receipt } = await project(bytes, user("what is this?"));
+    expect(image).toBe(dataUrl(bytes));
+    expect(receipt).not.toContain("downscaled");
+  });
+
+  test("a photo within the bound is sent unchanged", async () => {
+    const bytes = await photo(1200, 900);
+    const { image, receipt } = await project(bytes, {
+      ...user("what is this?"),
+      [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+    });
+    expect(image).toBe(dataUrl(bytes));
+    expect(receipt).not.toContain("downscaled");
   });
 });

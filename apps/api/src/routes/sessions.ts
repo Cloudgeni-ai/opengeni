@@ -7,15 +7,35 @@ import {
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
-import { UnsupportedLatencyModeError } from "@opengeni/config";
+import {
+  agentConfigDeploymentPolicy,
+  resolveFirstPartyMcpToolPolicy,
+  UnsupportedLatencyModeError,
+} from "@opengeni/config";
+import { siteAgentDataToolNames, siteAgentSiteSqlOn } from "../site-publishing/agent-data-tools";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
-import { SessionMessageSearchRequest } from "@opengeni/contracts";
+import {
+  FIRST_PARTY_MCP_TOOL_CAPABILITIES,
+  FirstPartyMcpToolName,
+  resolveWorkspaceAgentDefaults,
+  SessionMessageSearchRequest,
+  type AgentCapabilities,
+  type ToolRef,
+} from "@opengeni/contracts";
+import {
+  SITE_FRAME_SESSION_CREATE_FIELDS,
+  siteFrameBodyRefusal,
+} from "@opengeni/contracts/site-session-http";
 import { requireWorkspace, scheduledSessionIds } from "@opengeni/db";
-import { isVerifiedDelegatedHumanAuthorization, withSiteSessionOrigin } from "@opengeni/core";
+import {
+  currentSiteSessionOrigin,
+  isVerifiedDelegatedHumanAuthorization,
+  withSiteSessionOrigin,
+} from "@opengeni/core";
 import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
 import {
   createRealtimeVoiceBilling,
@@ -158,6 +178,7 @@ import {
   getLiveEnrollmentConnection,
   getRetainedProcess,
   getSandbox,
+  getPublishedSiteVersion,
   getSession,
   readActiveSandbox,
   deleteSessionTreeIfQuiescent,
@@ -728,8 +749,36 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           grant,
           c.req.header("x-opengeni-site-id"),
           c.req.header("x-opengeni-site-version"),
+          // A frame without a published Site (inline HTML, a preview) is
+          // recorded as that frame, so its later requests reach this session.
+          {
+            marker: c.req.header("x-opengeni-site-frame"),
+            frameId: c.req.header("x-opengeni-site-frame-id"),
+          },
         ),
       );
+      // A Site page may start a conversation with a message and a model, and
+      // nothing else: the session gets the minimal Site profile. Only the Site
+      // itself, running its published agent as `site:<siteId>`, chooses tools.
+      const siteOrigin = origin ?? currentSiteSessionOrigin();
+      if (siteOrigin && grant.subjectId !== `site:${siteOrigin.siteId}`) {
+        const refused = siteFrameBodyRefusal("sessions.create", "/sessions", payload);
+        if (refused)
+          return c.json(
+            {
+              code: "SITE_SESSION_TOOLS_FORBIDDEN",
+              message:
+                "A Site page can start a session with a message and a model only, not choose its tools, servers, connections, permissions, vaults, sandbox, resources, Skills or learning",
+              details: { code: "site_frame_field_forbidden", field: refused },
+            },
+            403,
+          );
+        payload = await siteFrameSessionProfile(deps, workspaceId, payload, {
+          accountId: grant.accountId,
+          siteId: siteOrigin.siteId,
+          versionId: siteOrigin.versionId ?? null,
+        });
+      }
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
       session = await measureSessionCreatePhase(deps.observability, "core_create", () =>
@@ -6316,6 +6365,150 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
     return undefined;
   }
   return Math.floor(sequence);
+}
+
+/**
+ * The minimal Site profile of a session a Site page starts: only the allowed
+ * create fields, metadata without reserved `_opengeni` keys, no vault access,
+ * and the workspace's default agent capabilities without workspace
+ * administration or browser and computer control, so the page cannot reach
+ * the viewer's Connected Machines, sandboxes or browsers. Workers it spawns
+ * only narrow that. It runs without a sandbox; its first-party tools are the
+ * ones the Site declares plus the Site's own data tools, and its MCP
+ * connections only the ones the Site declares. Everything else (resources,
+ * Skills, learning, goals) is the workspace default for a plain chat. Agents
+ * started from a Site stay clamped
+ * (`assertNotSiteClampedAgent`).
+ */
+async function siteFrameSessionProfile(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  payload: unknown,
+  frame: { accountId: string; siteId: string | null; versionId: string | null },
+): Promise<Record<string, unknown>> {
+  const body = (payload ?? {}) as Record<string, unknown>;
+  const profile: Record<string, unknown> = {};
+  for (const field of SITE_FRAME_SESSION_CREATE_FIELDS)
+    if (body[field] !== undefined && body[field] !== null) profile[field] = body[field];
+  const metadata = body.metadata;
+  profile.metadata =
+    metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? Object.fromEntries(Object.entries(metadata).filter(([key]) => !key.startsWith("_opengeni")))
+      : {};
+  profile.vaultPolicy = { mode: "selected", vaultIds: [] };
+  // Tools are the overlap of what the Site declares and what the person may
+  // use: only the workspace MCP connections the Site version requests (the
+  // person's own access to each still applies), never the workspace
+  // default set. A frame with no published Site declares none.
+  profile.tools = await siteFrameDeclaredTools(deps, workspaceId, frame);
+  const unavailable = agentConfigDeploymentPolicy(deps.settings).unavailable;
+  const capabilities = siteFrameCapabilities(
+    resolveWorkspaceAgentDefaults((await requireWorkspace(deps.db, workspaceId)).settings)
+      ?.capabilities ?? "all",
+    unavailable,
+  );
+  profile.agent = { capabilities };
+  // First-party tools are the ones the Site declares plus the Site's own data
+  // tools, never the workspace default set; a Site page's agent runs without
+  // a sandbox.
+  profile.firstPartyMcpTools = (await siteFrameFirstPartyTools(deps, workspaceId, frame)).filter(
+    (tool) => {
+      const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
+      if (owner === "runtime") return true;
+      if (owner === "sandbox" || unavailable[owner] !== undefined) return false;
+      const value = (capabilities as Record<string, unknown>)[owner];
+      return value === undefined ? capabilities.from === "all" : value !== false;
+    },
+  );
+  profile.sandboxBackend = "none";
+  return profile;
+}
+
+/**
+ * The first-party tools of a Site page's session: the session runtime's own,
+ * the first-party tools the Site version declares, and, for a published Site,
+ * its own data tools (`site_data_query`, `site_data_write`, and the Site SQL
+ * tools when Site SQL is on), all within the deployment's tool allowlist.
+ */
+async function siteFrameFirstPartyTools(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  frame: { accountId: string; siteId: string | null; versionId: string | null },
+): Promise<FirstPartyMcpToolName[]> {
+  const allowed = new Set<string>(resolveFirstPartyMcpToolPolicy(deps.settings).allowed);
+  const tools = new Set<FirstPartyMcpToolName>(["set_session_title", "wait_for_input"]);
+  if (frame.siteId && frame.versionId) {
+    const scope = { accountId: frame.accountId, workspaceId };
+    const version = await getPublishedSiteVersion(
+      deps.db,
+      scope,
+      frame.siteId,
+      frame.versionId,
+    ).catch(() => null);
+    for (const tool of version?.requestedTools ?? []) {
+      const parsed = FirstPartyMcpToolName.safeParse(tool.toolName);
+      if (tool.serverId === "opengeni" && parsed.success) tools.add(parsed.data);
+    }
+    if (version)
+      for (const tool of siteAgentDataToolNames({
+        viewerKind: "member",
+        siteSql: await siteAgentSiteSqlOn(deps, scope, frame.siteId),
+        allowed: [...allowed],
+      }))
+        tools.add(tool);
+  }
+  return [...tools].filter((tool) => allowed.has(tool)).sort();
+}
+
+/** The workspace MCP connections (not the first-party server) a Site version declares. */
+async function siteFrameDeclaredTools(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  frame: { accountId: string; siteId: string | null; versionId: string | null },
+): Promise<ToolRef[]> {
+  if (!frame.siteId || !frame.versionId) return [];
+  const version = await getPublishedSiteVersion(
+    deps.db,
+    { accountId: frame.accountId, workspaceId },
+    frame.siteId,
+    frame.versionId,
+  ).catch(() => null);
+  const declared = new Map<string, Set<string>>();
+  for (const { serverId, toolName } of version?.requestedTools ?? []) {
+    if (serverId === "opengeni" || !/^[A-Za-z0-9_-]{1,200}$/u.test(serverId)) continue;
+    const names = declared.get(serverId) ?? new Set<string>();
+    names.add(toolName);
+    declared.set(serverId, names);
+  }
+  return [...declared].map(([id, names]) => ({
+    kind: "mcp",
+    id,
+    optional: true,
+    allowedTools: [...names].sort(),
+  }));
+}
+
+/**
+ * A Site page's session capabilities: the workspace default with workspace
+ * administration (sandboxes, Connected Machines, `run_on`) and browser and
+ * computer control off. Capabilities this server does not offer are left to
+ * the default, so the create never fails on them.
+ */
+export function siteFrameCapabilities(
+  workspaceDefault: AgentCapabilities,
+  unavailable: Readonly<Partial<Record<string, string>>>,
+): Exclude<AgentCapabilities, string> {
+  if (typeof workspaceDefault === "string")
+    return { from: workspaceDefault, workspaceAdmin: false, browser: false };
+  const capabilities: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(workspaceDefault))
+    if (name === "from" || value === false || unavailable[name] === undefined)
+      capabilities[name] = value;
+  return {
+    ...(capabilities as Exclude<AgentCapabilities, string>),
+    workspaceAdmin: false,
+    browser: false,
+  };
 }
 
 /** Stable, value-free JSON errors for only the create-session boundary. */

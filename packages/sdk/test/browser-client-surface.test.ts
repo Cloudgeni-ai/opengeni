@@ -110,6 +110,22 @@ const integrationMethods = [
   "importSiteData",
   "listSiteDataFiles",
   "resetSiteDataCollection",
+  // Site SQL management for hosts and scripts; the web Data tab only reads
+  // the database's status and turns it on or off, and agents use tools.
+  "defineSiteSqlQuery",
+  "deleteSiteSqlQuery",
+  "executeSiteSql",
+  "exportSiteSql",
+  "importSiteSql",
+  "inspectSiteSql",
+  "migrateSiteSql",
+  "querySiteSql",
+  "resetSiteSql",
+  "runSiteSqlQuery",
+  // The workspace default limit profile for published Sites, for hosts and
+  // admin scripts; the web console sets limits per Site.
+  "getSiteLimitProfile",
+  "updateSiteLimitProfile",
 ];
 
 // The native app exchanges its sign-in code, signs out and manages its push

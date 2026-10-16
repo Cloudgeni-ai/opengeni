@@ -1,0 +1,68 @@
+---
+title: "Published Sites"
+description: "Give a Site its own web address for your workspace, invited people or everyone, with sign-in, guests, an embedded agent and limits you control."
+---
+
+Publishing gives a workspace Site its own address under your deployment's Sites domain, such as `team-crm-4k9x.opengeni.site`. The Site's HTML, tools, [Site Data](/guides/site-data) and embedded agent work there the same way they do in the console. Your organization pays for what visitors do, within the limits you set.
+
+## Publish a Site
+
+Open the Site and choose **Publish**. Pick an address (Opengeni suggests one and checks it as you type), who can open the Site, whether visitors can chat with its agent, the limits, and whether search engines may list it. Only the Site's owner and workspace admins can publish, and the Site must be shared with its workspace first.
+
+**Unpublish** takes the Site offline at once and keeps its address reserved for your workspace. Changing the address moves the Site; a released address stays held for 30 days.
+
+Agents can publish too, with the `site_publication_get`, `site_publication_update` and `site_hostname_check` tools.
+
+## Who can open it
+
+| Option               | Who                                             | Sign-in  |
+| -------------------- | ----------------------------------------------- | -------- |
+| Workspace members    | Members of the Site's workspace                 | Required |
+| Invited people       | Members, plus the email addresses you add       | Required |
+| Anyone with the link | Everyone; visitors who don't sign in are guests | Optional |
+
+Invited people sign in to Opengeni with the invited email. They don't join your organization and see nothing else in it.
+
+## Viewers in Site code
+
+```ts
+import { createOpenGeniSiteClient } from "@opengeni/sdk/site";
+
+const site = createOpenGeniSiteClient();
+const viewer = await site.viewer;
+if (viewer && !viewer.signedIn) signIn.onclick = () => site.auth.signIn();
+hello.textContent = viewer?.name ?? "Welcome";
+```
+
+`site.viewer` is `{ kind, id, name, email, signedIn }` with `kind` one of `member`, `invited`, `user` or `guest`. `id` is stable per Site and is the owner of the viewer's Site Data records. Guests have no name or email. `site.auth.signIn()` sends the visitor through Opengeni sign-in and back; the Site never sees a password or token.
+
+## Guests and Site Data
+
+Guests reach a collection only when its guest rule allows it: `none` (the default), `read`, `append` (add records and read their own) or `own` (add, read, change and delete their own). Ask Opengeni to set it when it defines the collection.
+
+## Limits
+
+Limits follow who is viewing:
+
+- **Workspace members** are never limited by the Site. Their normal workspace limits apply, and they keep the agent even when it is off for everyone else.
+- **People outside the workspace** (invited people and public visitors) share one Site limit, $10 a month by default (or a daily amount instead). Workspace admins can add a limit per person, or turn the agent off for people outside the workspace.
+- **Guests** who don't sign in also meet built-in guards against bots: 20 conversations a day, 50 messages per conversation and $1 per conversation.
+
+People outside the workspace never get workspace tools and never use a member's ChatGPT, Claude or SuperGrok plan: when the Site's model runs on a plan, they use the workspace's default model paid with credits. The Publish page lists anything on the page that won't work for the Site's audience, with a **Fix** button where a safe fix exists, and **View as visitor** opens the Site as an invited person or a public visitor would see it.
+
+## Platform usage
+
+Apart from agent spend, Sites use requests, Site SQL rows and storage. Every workspace gets 1 million requests, 10 million rows read, 100,000 rows written and 1 GB of storage each month. Workspace settings > Usage shows how much of it is used. When your deployment bills platform usage, use above the allowance is paid with credits, and without credits new publications and Site SQL calls stop until the next month or until credits are added; published pages keep loading.
+
+## Reports and takedown
+
+Every published Site has a **Report** link. Reports appear in the **Reports** section of the Publish page and go to the abuse contact. The owner or a workspace admin can take a Site down at once with a reason; visitors then see a takedown notice until it is restored.
+
+## Keep Sites safe
+
+- A published Site is a public page: never put secrets or private data in its HTML.
+- Show viewer names, records and agent replies as text, never as HTML.
+
+## Self-hosting
+
+Publishing is off until `OPENGENI_SITES_DOMAIN` is set and the Sites gateway is deployed on that domain. See [Published Sites internals](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/published-sites.md) for settings, the management API and staging behavior.

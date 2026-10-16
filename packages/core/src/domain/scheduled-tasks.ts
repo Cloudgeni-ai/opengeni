@@ -90,6 +90,14 @@ import {
 import { HTTPException } from "hono/http-exception";
 import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
+import {
+  currentSiteSessionOrigin,
+  SITE_ORIGIN_METADATA_KEY,
+  siteOriginsMatch,
+  siteSessionOriginFromMetadata,
+  withSiteOriginMetadata,
+} from "../site-session-origin";
+import { assertNotSiteClampedAgent } from "../site-agent-clamp";
 import { personalGitHubRepositoryResources } from "./resources";
 import { knowledgeContextForAccess } from "./knowledge";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
@@ -211,14 +219,12 @@ function workspaceCustomModelCommitGuard(input: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       reference,
-      ...(input.claudeAuthoritySnapshot
+      claudeAuthority: input.claudeAuthoritySnapshot
         ? {
-            claudeAuthority: {
-              authoritySnapshot: input.claudeAuthoritySnapshot,
-              ...(input.scheduledTaskId ? { scheduledTaskId: input.scheduledTaskId } : {}),
-            },
+            authoritySnapshot: input.claudeAuthoritySnapshot,
+            ...(input.scheduledTaskId ? { scheduledTaskId: input.scheduledTaskId } : {}),
           }
-        : {}),
+        : null,
     });
     if (!active) {
       throw modelUnavailableHttpException(input.modelId);
@@ -365,6 +371,8 @@ export async function createValidatedScheduledTask(input: {
   /** Proves the bot may post in a newly chosen task Slack channel. */
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
 }): Promise<ScheduledTask> {
+  // An agent started from a Site page acts with the page's reach: no schedules.
+  await assertNotSiteClampedAgent(input.db, input.grant, "schedules");
   // Variable Sets were replaced by vaults (RM-1).
   if (input.payload.variableSetId) throw variableSetsRemovedError("variableSetId");
   if (input.payload.runMode === "existing_session") {
@@ -421,10 +429,20 @@ export async function createValidatedScheduledTask(input: {
       action: knowledgeAction,
     });
   }
-  const agentConfig: ScheduledTaskAgentConfig = await validateScheduledTaskAgentConfig({
+  const validatedAgentConfig: ScheduledTaskAgentConfig = await validateScheduledTaskAgentConfig({
     ...input,
     workspaceId: input.grant.workspaceId,
   });
+  // A schedule created from a Site page records which Site. Each run's
+  // session copies this metadata, so runs record it too and act with the
+  // page's reach (the Site agent clamp). Callers never supply it themselves.
+  const agentConfig: ScheduledTaskAgentConfig = {
+    ...validatedAgentConfig,
+    metadata: withSiteOriginMetadata(
+      validatedAgentConfig.metadata ?? {},
+      currentSiteSessionOrigin(),
+    ),
+  };
   // Connector accounts are never saved from what the schedule would resolve
   // now. Only accounts a person explicitly pins are stored, and only on a
   // schedule that starts its own session; everything else follows the owner's
@@ -950,6 +968,8 @@ export async function assertScheduledTaskMutationOwner(
   grant: AccessGrant,
   taskId: string,
 ): Promise<void> {
+  await assertNotSiteClampedAgent(db, grant, "schedules");
+  await assertSiteMayReachScheduledTask(db, grant, taskId);
   const writer = scheduledTaskInitiatorForGrant(grant);
   const matches = await scheduledTaskMutationOwnerMatches(db, {
     workspaceId: grant.workspaceId,
@@ -962,6 +982,22 @@ export async function assertScheduledTaskMutationOwner(
     throw new HTTPException(403, {
       message: "Only the schedule owner can change or run it. Copy it to create your own schedule.",
     });
+}
+
+/**
+ * A request from a Site page (a tool the page called) may change or run only
+ * a schedule that same Site created. Refused as a missing schedule.
+ */
+async function assertSiteMayReachScheduledTask(
+  db: Database,
+  grant: AccessGrant,
+  taskId: string,
+): Promise<void> {
+  const origin = currentSiteSessionOrigin();
+  if (!origin) return;
+  const task = await getScheduledTask(db, grant.workspaceId, taskId);
+  if (!siteOriginsMatch(origin, siteSessionOriginFromMetadata(task?.agentConfig.metadata)))
+    throw new HTTPException(404, { message: "scheduled task not found" });
 }
 
 /**
@@ -978,6 +1014,9 @@ export async function pauseScheduledTaskAsAdmin(
   );
 }
 
+export const SCHEDULED_TASK_PAUSED_TRIGGER_MESSAGE =
+  "This schedule is paused, so it cannot run now. Resume it first, then trigger it.";
+
 export async function triggerScheduledTaskForGrant(
   db: Database,
   grant: AccessGrant,
@@ -988,6 +1027,10 @@ export async function triggerScheduledTaskForGrant(
     await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
     if (isRetiredNativeAtlassianTask(input.task))
       throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
+    // The worker never runs a paused schedule. Refuse here so the caller is
+    // told, instead of accepting a trigger that would silently do nothing.
+    if (input.task.status === "paused")
+      throw new HTTPException(409, { message: SCHEDULED_TASK_PAUSED_TRIGGER_MESSAGE });
     const actor = creationInitiatorForGrant(grant).actor ?? null;
     const restriction = await scheduledTaskCredentialRestrictionForGrant(tx, grant, actor);
     // A caller cannot supply or clear the trusted ceiling. Ownerless and
@@ -1702,6 +1745,13 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     if (retainedPrompt !== undefined) {
       nextAgentConfig.resources = input.existing.agentConfig.resources;
     }
+    // The Site a schedule was created from stays recorded; an update never
+    // sets, changes or clears it.
+    const recordedOrigin = input.existing.agentConfig.metadata?.[SITE_ORIGIN_METADATA_KEY];
+    nextAgentConfig.metadata = {
+      ...withSiteOriginMetadata(nextAgentConfig.metadata ?? {}, null),
+      ...(recordedOrigin !== undefined ? { [SITE_ORIGIN_METADATA_KEY]: recordedOrigin } : {}),
+    };
     update.agentConfig = nextAgentConfig;
   }
   // Pins are the only saved account choice, a person's explicit one, and only

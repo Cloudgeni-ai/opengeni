@@ -793,7 +793,7 @@ bind NodePorts to loopback with
 loopback listeners through a private edge such as Tailscale Serve. Route `/` to
 web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`,
 `/install.sh`, `/install.ps1`, `/uninstall.sh`,
-`/opengeni-agent-minisign.pub`, and `/agent` to the API. Give the NATS
+`/opengeni-agent-minisign.pub`, `/agent`, and `/desktop` to the API. Give the NATS
 websocket, relay, and Garage S3 API their own private TLS ports. Set
 `selfhosted.natsUrl`, `selfhosted.relayUrl`, and `garage.publicEndpoint` to those
 private URLs. Also set `OPENGENI_PUBLIC_BASE_URL` to the browser/API origin. The
@@ -1934,10 +1934,14 @@ SDK/React/Codemode/ogtool manifest versions. Before a canary rollout, publish pa
 from the same source using `publish-canary.yml`, then set
 `OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
 `site-package-versions-<sha>` artifact. The publisher runs from protected `main`
-and admits only the exact commit the workflow run is on: npm provenance attests
-that commit, so the workflow, checkout and published source must all match, and
-an older ancestor is rejected. If `main` moves before the dispatch, publish the
-new `main` commit instead. The runtime includes these pins beside
+and accepts its own commit or a normally merged ancestor with successful exact-source
+main CI. For an ancestor, its controller and package source remain separate and
+the signed provenance names both; the run's head SHA is not the package source.
+Select the source-named artifact from the successful canonical publisher run.
+Environment approval and ordinary image/CI/deployment checks remain mandatory.
+Split-source failed receipts use V2 and cannot use the existing V1 receipt-only
+reconciliation lane; stop for reviewed recovery rather than relabel or replay them.
+See `CONTRIBUTING.md` for the admission and provenance contract. The runtime includes these pins beside
 the Sites skill. Never use a mutable dist-tag as the deployment pin. Production
 sandbox images do not include Site package archives; the local development
 image helper alone enables `OPENGENI_LOCAL_SITE_PACKAGES=true` for unreleased work.
@@ -2509,7 +2513,10 @@ helm upgrade --install opengeni "$OPENGENI_CHART_OCI" \
 Every migration declares `-- deployment-mode: rolling` or
 `-- deployment-mode: maintenance`. Rolling migrations apply while the previous
 release keeps serving; a maintenance migration needs every API, control and
-turn worker database login drained first. Before an upgrade, run the
+turn worker database login drained first. Rolling is the default: new
+maintenance migrations must state a `-- maintenance-justification:`, and
+incompatible changes are split into expand/contract steps across releases
+([migrations-expand-contract.md](migrations-expand-contract.md)). Before an upgrade, run the
 read-only plan from the new release's API image against the live database to
 decide whether the rollout needs a drain:
 
@@ -3406,6 +3413,19 @@ Macs that must first bootstrap through the whole-app installer are never updated
 this way. Set `OPENGENI_AGENT_AUTO_UPDATE=false` to update only on request. The
 agent fetches the release manifest from `OPENGENI_PUBLIC_BASE_URL`, so automatic
 updates also need it set.
+
+### Desktop app distribution
+
+The API also serves the desktop app's downloads at auth-exempt paths under
+`/desktop`: `/desktop/install.sh` (the macOS and Linux installer, defaulting to
+this deployment's `OPENGENI_PUBLIC_BASE_URL`), `/desktop/latest/<file>` (a 302 to
+that file on the current `desktop-v` release, for example
+`/desktop/latest/Opengeni-mac.dmg`), and `/desktop/latest` (the release page).
+The web app's account menu links to them. The current release is the newest
+stable `desktop-v` tag on the `OPENGENI_AGENT_RELEASES_BASE_URL` repository,
+cached for ten minutes; set `OPENGENI_DESKTOP_STABLE_VERSION` to pin a version,
+which a release host other than GitHub requires. Route `/desktop` to the `api`
+service in the ingress.
 
 ### Enrolling a machine
 

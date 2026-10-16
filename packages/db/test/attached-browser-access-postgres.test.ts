@@ -8,6 +8,7 @@ import {
   createOrganizationInvitation,
   ensureManagedAccessForUser,
   getAttachedBrowserDevice,
+  interactionControllerGone,
   listAttachedBrowserDevices,
   reconcileAttachedBrowserInventory,
   revokeEnrollment,
@@ -215,5 +216,85 @@ describe("attached browsers follow their machine's audience", () => {
         })
       ).state,
     ).toBe("disconnected");
+  });
+});
+
+describe("ending a browser whose controller can never be reached again", () => {
+  async function sandboxOf(enrollmentId: string): Promise<string> {
+    const [row] = await shared.admin<Array<{ id: string }>>`
+      select id from sandboxes where enrollment_id = ${enrollmentId}`;
+    if (!row) throw new Error("machine has no sandbox");
+    return row.id;
+  }
+
+  test("a removed machine's browsers are gone; a live or offline one's are not", async () => {
+    const org = await organization();
+    const team = await machine(org, "workspace");
+    const sandboxId = await sandboxOf(team.enrollmentId);
+    const managed = { kind: "connected_machine", sandboxId };
+    const attached = { kind: "attached_device", deviceId: team.deviceId };
+    const asOwner = viewer(org, org.owner);
+    expect(await interactionControllerGone(client.db, asOwner, managed)).toBe(false);
+    expect(await interactionControllerGone(client.db, asOwner, attached)).toBe(false);
+
+    // Offline is not gone: the machine still holds the browser's process and profile.
+    await shared.admin`
+      update enrollments set connection_lease_expires_at = now() - interval '1 minute'
+      where id = ${team.enrollmentId}`;
+    expect(await interactionControllerGone(client.db, asOwner, managed)).toBe(false);
+
+    await revokeEnrollment(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      enrollmentId: team.enrollmentId,
+    });
+    expect(await interactionControllerGone(client.db, asOwner, managed)).toBe(true);
+    expect(await interactionControllerGone(client.db, asOwner, attached)).toBe(true);
+    expect(await interactionControllerGone(client.db, viewer(org, org.member), managed)).toBe(true);
+    const sandboxGroup = { kind: "sandbox_group", sandboxGroupId: crypto.randomUUID() };
+    expect(await interactionControllerGone(client.db, asOwner, sandboxGroup)).toBe(false);
+  });
+
+  test("a disconnected Chrome device is gone while its machine stays enrolled", async () => {
+    const org = await organization();
+    const team = await machine(org, "workspace");
+    const attached = { kind: "attached_device", deviceId: team.deviceId };
+    await reconcileAttachedBrowserInventory(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      enrollmentId: team.enrollmentId,
+      snapshot: { bridgeGeneration: "bridge-1", revision: 2, devices: [] },
+    });
+    expect(await interactionControllerGone(client.db, viewer(org, org.owner), attached)).toBe(true);
+  });
+
+  test("someone else's personal machine is never judged gone for a person it is hidden from", async () => {
+    const org = await organization();
+    const personal = await machine(org, "user");
+    const sandboxId = await sandboxOf(personal.enrollmentId);
+    await revokeEnrollment(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      enrollmentId: personal.enrollmentId,
+    });
+    const asMember = viewer(org, org.member);
+    expect(
+      await interactionControllerGone(client.db, asMember, {
+        kind: "connected_machine",
+        sandboxId,
+      }),
+    ).toBe(false);
+    expect(
+      await interactionControllerGone(client.db, asMember, {
+        kind: "attached_device",
+        deviceId: personal.deviceId,
+      }),
+    ).toBe(false);
+    expect(
+      await interactionControllerGone(client.db, viewer(org, org.owner), {
+        kind: "connected_machine",
+        sandboxId,
+      }),
+    ).toBe(true);
   });
 });

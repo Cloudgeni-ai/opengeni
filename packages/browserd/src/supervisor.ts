@@ -45,7 +45,11 @@ import {
 } from "@opengeni/interaction";
 import { createAttachedChromeDriver, createAttachedChromeTransport } from "./attached-cdp";
 import { CdpConnection } from "./cdp";
-import { AgentBrowserDriver, type BrowserRuntimeSnapshot } from "./cdp-driver";
+import {
+  AgentBrowserDriver,
+  type BrowserRuntimeSnapshot,
+  type BrowserTabNavigationOptions,
+} from "./cdp-driver";
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
 import { uploadBrowserDownload } from "./download-upload";
 import type { ResolvedAgentBrowserBinary } from "./binary";
@@ -65,6 +69,8 @@ import {
   browserProfileCryptoPolicy,
   reapManagedBrowserProcesses,
   inspectOwnedManagedBrowserProcess,
+  stopEndedManagedBrowserProcess,
+  assertManagedBrowserProfileUnused,
   type OwnedManagedBrowserProcess,
 } from "./runner";
 import {
@@ -73,6 +79,7 @@ import {
   assertWorkingRuntimeReceipt,
   boundedFailureCode,
   isAbandonedLaunchReceipt,
+  isInterruptedLaunchReceipt,
   unavailable as workingRuntimeUnavailable,
   type BrowserWorkingRuntimeAuthority,
   type BrowserWorkingRuntimeReceipt,
@@ -201,9 +208,9 @@ export type BrowserStateCaptureInput = BrowserSessionReference & {
 export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   readonly fencedInputBatches?: boolean;
   readonly focusedInputObservations?: boolean;
-  start(url?: string): Promise<BrowserObservation>;
+  start(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
   listTargets(): Promise<BrowserTarget[]>;
-  openTarget(url?: string): Promise<BrowserObservation>;
+  openTarget(url?: string, options?: BrowserTabNavigationOptions): Promise<BrowserObservation>;
   openTargetWithInventory?(url?: string): Promise<BrowserTarget[]>;
   selectTarget(targetId: string): Promise<BrowserObservation>;
   closeTarget(targetId: string): Promise<BrowserTarget[]>;
@@ -239,6 +246,9 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   ownedProcessIdentity?(): Promise<OwnedManagedBrowserProcess | null>;
   /** Release a failed reattach transport without closing its owned browser. */
   detach?(): Promise<void>;
+  /** Explicit end only (never shutdown or reattach): close tabs this session
+   * opened in a browser it does not own and left blank. */
+  closeUnusedOwnedTabs?(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -291,6 +301,12 @@ export type BrowserSupervisorOptions = {
   uploadDownload?: typeof uploadBrowserDownload;
   /** Read-only identity seam; tests supply generated process receipts only. */
   inspectOwnedProcess?: typeof inspectOwnedManagedBrowserProcess;
+  /** Stops a browser an explicitly ended, non-resident session left running;
+   * tests observe the exact recorded process instead of signalling it. */
+  stopEndedProcess?: typeof stopEndedManagedBrowserProcess;
+  /** Proves no process runs a browser on an exact private profile before an
+   * interrupted launch is set aside; tests supply the outcome. */
+  assertProfileUnused?: typeof assertManagedBrowserProfileUnused;
 };
 
 type Runtime = {
@@ -356,6 +372,8 @@ export class BrowserSupervisor {
   ) => Promise<void>;
   private readonly uploadDownload: typeof uploadBrowserDownload;
   private readonly inspectOwnedProcess: typeof inspectOwnedManagedBrowserProcess;
+  private readonly stopEndedProcess: typeof stopEndedManagedBrowserProcess;
+  private readonly assertProfileUnused: typeof assertManagedBrowserProfileUnused;
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
   private readonly creationRequests = new Set<Promise<BrowserSupervisorSession>>();
@@ -397,6 +415,8 @@ export class BrowserSupervisor {
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
     this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
     this.inspectOwnedProcess = options.inspectOwnedProcess ?? inspectOwnedManagedBrowserProcess;
+    this.stopEndedProcess = options.stopEndedProcess ?? stopEndedManagedBrowserProcess;
+    this.assertProfileUnused = options.assertProfileUnused ?? assertManagedBrowserProfileUnused;
   }
 
   private async createEphemeralDriver(
@@ -903,14 +923,30 @@ export class BrowserSupervisor {
 
   async endSession(
     reference: BrowserSessionReference,
-    options: { removeState?: boolean } = {},
+    options: {
+      removeState?: boolean;
+      /** The person explicitly ends this browser after its controller lost
+       * it: discard a preserved working runtime instead of refusing. Cleanup
+       * paths (a failed or expired resume) never set this, so a possibly
+       * accepted launch stays preserved for recovery there. */
+      discardWorkingRuntime?: boolean;
+      /** The control plane is returning an expired resume to its checkpoint:
+       * when this generation's launch never recorded completion and no
+       * process runs its profile, move its whole session directory aside
+       * intact instead of refusing. Nothing is deleted. */
+      setAsideInterruptedLaunch?: boolean;
+    } = {},
   ): Promise<void> {
     return await this.finishSession(reference, options, false);
   }
 
   private async finishSession(
     reference: BrowserSessionReference,
-    options: { removeState?: boolean },
+    options: {
+      removeState?: boolean;
+      discardWorkingRuntime?: boolean;
+      setAsideInterruptedLaunch?: boolean;
+    },
     suspendForShutdown: boolean,
   ): Promise<void> {
     if (!isUuid(reference.browserSessionId)) throw new Error("browserSessionId must be a UUID");
@@ -929,8 +965,25 @@ export class BrowserSupervisor {
       }
       // Missing memory cannot acknowledge cleanup of a possibly accepted
       // launch. Its exact binding/holder must stay addressable for cleanup,
-      // unless this generation's latest launch provably never completed.
+      // unless this generation's latest launch provably never completed, or
+      // the person explicitly ends this exact generation and discards it.
       if (workingRuntimePresent) {
+        if (
+          options.removeState === true &&
+          options.discardWorkingRuntime === true &&
+          !suspendForShutdown
+        ) {
+          await this.retireNonResidentWorkingRuntime(reference, sessionDirectory);
+          return;
+        }
+        if (
+          options.removeState === true &&
+          options.setAsideInterruptedLaunch === true &&
+          !suspendForShutdown
+        ) {
+          await this.setAsideInterruptedLaunch(reference, sessionDirectory);
+          return;
+        }
         await this.cleanupAbandonedLaunch(
           reference,
           sessionDirectory,
@@ -965,6 +1018,16 @@ export class BrowserSupervisor {
         // Settle already-dispatched commands before their durable journals close.
         // lifecycle=ending fences queued/new dispatches without replaying input.
         await runtime.controller.waitForIdle();
+      }
+      if (
+        runtime.driver.closeUnusedOwnedTabs &&
+        !suspendForShutdown &&
+        !driverAlreadyClosed &&
+        !runtime.driver.isTerminal?.()
+      ) {
+        // Ending a session in the person's own Chrome must not leave behind the
+        // empty tab it opened. Best effort: the end itself must still succeed.
+        await runtime.driver.closeUnusedOwnedTabs?.().catch(() => undefined);
       }
       await this.disposeRuntime(
         runtime,
@@ -1881,6 +1944,106 @@ export class BrowserSupervisor {
     await rm(sessionDirectory, { recursive: true, force: true });
   }
 
+  /** An explicit end of a session this controller no longer holds in memory
+   * (it restarted, or the browser's runtime was lost), for the exact
+   * controller generation the control plane still binds. Ending discards the
+   * browser, so nothing here needs preserving for recovery: any browser still
+   * running the session's private profile is stopped by verified identity,
+   * the working runtime is retired and the session's state is removed. History
+   * that belongs to another generation stays preserved. */
+  private async retireNonResidentWorkingRuntime(
+    reference: BrowserSessionReference,
+    sessionDirectory: string,
+  ): Promise<void> {
+    let journal: SqliteBrowserWorkingRuntimeJournal;
+    let latest: BrowserWorkingRuntimeReceipt | null;
+    try {
+      journal = await SqliteBrowserWorkingRuntimeJournal.open({
+        sessionDirectory,
+        browserSessionId: reference.browserSessionId,
+        controllerGeneration: reference.controllerGeneration,
+      });
+    } catch {
+      throw workingRuntimeUnavailable();
+    }
+    try {
+      try {
+        latest = journal.latest();
+      } catch {
+        throw workingRuntimeUnavailable();
+      }
+      await this.stopEndedProcess(join(sessionDirectory, "profile"), latest?.process ?? null);
+      if (latest && latest.intent !== "retire") journal.retire(latest);
+    } finally {
+      journal.close();
+    }
+    await rm(join(this.socketRootDirectory, shortDigest(reference.browserSessionId)), {
+      recursive: true,
+      force: true,
+    });
+    await rm(sessionDirectory, { recursive: true, force: true });
+  }
+
+  /** Move an interrupted launch of this exact generation out of the session's
+   * path so the same browser can be restored from its checkpoint under a new
+   * generation. Only a launch that never recorded completion (no owned
+   * process) qualifies; a completed launch must be adopted instead. The move
+   * is a same-filesystem rename of the whole session directory, so its
+   * profile, journals and receipts are kept byte for byte under
+   * `set-aside/<browserSessionId>/<controllerGeneration>`. It happens only
+   * after a complete process inventory proves no browser runs that profile. */
+  private async setAsideInterruptedLaunch(
+    reference: BrowserSessionReference,
+    sessionDirectory: string,
+  ): Promise<void> {
+    // The generation names the set-aside directory: one plain path segment.
+    if (
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(reference.controllerGeneration) ||
+      reference.controllerGeneration.includes("..")
+    )
+      throw workingRuntimeUnavailable();
+    let latest: BrowserWorkingRuntimeReceipt | null;
+    try {
+      const reader = await SqliteBrowserWorkingRuntimeJournal.open(
+        {
+          sessionDirectory,
+          browserSessionId: reference.browserSessionId,
+          controllerGeneration: reference.controllerGeneration,
+        },
+        true,
+      );
+      try {
+        latest = reader.latest();
+      } finally {
+        reader.close();
+      }
+    } catch {
+      throw workingRuntimeUnavailable();
+    }
+    if (!isInterruptedLaunchReceipt(latest)) throw workingRuntimeUnavailable();
+    try {
+      await this.assertProfileUnused(join(sessionDirectory, "profile"));
+    } catch {
+      throw workingRuntimeUnavailable();
+    }
+    const setAsideParent = join(this.rootDirectory, "set-aside", reference.browserSessionId);
+    await mkdir(setAsideParent, { recursive: true, mode: 0o700 });
+    await chmod(setAsideParent, 0o700);
+    const target = join(setAsideParent, reference.controllerGeneration);
+    try {
+      await lstat(target);
+      // A generation is set aside at most once; never overwrite evidence.
+      throw workingRuntimeUnavailable();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await rename(sessionDirectory, target);
+    await rm(join(this.socketRootDirectory, shortDigest(reference.browserSessionId)), {
+      recursive: true,
+      force: true,
+    });
+  }
+
   private retireWorkingRuntime(runtime: Runtime) {
     if (
       runtime.workingJournal &&
@@ -2205,6 +2368,13 @@ async function createBrowserDriver(
     downloadDirectory: context.downloadDirectory,
     screenshotDirectory: context.screenshotDirectory,
     headed: context.headed,
+    // A managed browser on macOS runs on the person's own desktop. A window
+    // would appear in front of them, take focus and intercept their typing;
+    // the agent and the person's live view work through CDP, so it stays
+    // offscreen. A linked ComputerSession drives the native window itself.
+    ...(process.platform === "darwin" && context.headed && !context.linkedComputer
+      ? { offscreen: true }
+      : {}),
     ...(route?.kind === "proxy" && route.proxyUrl ? { proxyUrl: route.proxyUrl } : {}),
     ...(launchArguments.length > 0 ? { launchArguments } : {}),
     ...(route?.consistency.timezone ? { timezone: route.consistency.timezone } : {}),
@@ -3130,7 +3300,10 @@ function profileManifest(
   };
 }
 
-/** Rebuild a checkpoint's tab set on a freshly launched restored profile. */
+/** Rebuild a checkpoint's tab set on a freshly launched restored profile. A
+ * saved tab whose page can't load right now (its host is down or no longer
+ * resolves) is still reopened on the browser's error page, so one unreachable
+ * site never makes the whole browser unrecoverable. */
 export async function restoreTabs(
   driver: BrowserSupervisorDriver,
   capturedTabs: BrowserRuntimeSnapshot["tabs"],
@@ -3144,7 +3317,8 @@ export async function restoreTabs(
     tabs.findIndex((tab) => tab.selected),
   );
   const ordered = [tabs[primaryIndex]!, ...tabs.filter((_, index) => index !== primaryIndex)];
-  const first = await driver.start(ordered[0]!.url);
+  const reopen = { keepTabOnLoadError: true } satisfies BrowserTabNavigationOptions;
+  const first = await driver.start(ordered[0]!.url, reopen);
   const available = (await driver.listTargets()).filter(
     (target) => target.kind === "page" || target.kind === "popup",
   );
@@ -3158,7 +3332,7 @@ export async function restoreTabs(
       index === 0
         ? first.target
         : (available.find((candidate) => !used.has(candidate.id) && candidate.url === tab.url) ??
-          (await driver.openTarget(tab.url)).target);
+          (await driver.openTarget(tab.url, reopen)).target);
     used.add(target.id);
     if (index === 0) selectedTargetId = target.id;
   }

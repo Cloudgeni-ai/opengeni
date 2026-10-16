@@ -522,6 +522,7 @@ export async function startApi(
   const stopScheduledTaskLifecyclePump = startScheduledTaskLifecyclePump({
     db: dbClient.db,
     sync: (task) => workflowClient.client.syncScheduledTask({ task }),
+    bus,
     observability,
   });
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample

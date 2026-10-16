@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { InteractionControllerError } from "@opengeni/interaction";
+import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
 import {
   AttachedBrowserBridgeClient,
   AttachedBrowserBridgeError,
@@ -21,6 +21,43 @@ import {
 const POLL_INTERVAL_MS = 50;
 const POLL_LIMIT = 1_000;
 const MAX_EVENT_LISTENERS = 16_384;
+// Chrome reports the debugger detach that ends a refused navigation on its own
+// event stream, usually just before or after the failed command's reply.
+const REFUSED_NAVIGATION_DETACH_WAIT_MS = 1_000;
+
+const EXTENSION_RESTRICTED_SCHEMES = [
+  "about:",
+  "chrome:",
+  "chrome-extension:",
+  "devtools:",
+  "edge:",
+  "view-source:",
+] as const;
+
+/** Chrome's limit on which pages an extension may control, mirrored from the
+ * extension's tab policy (a parity test keeps the two identical). Checking it
+ * before a tab is created or navigated means a refused page never strands a
+ * tab or takes the user's tab out of control. */
+export function attachedChromePageRestriction(url: string): string | null {
+  const lower = url.toLowerCase();
+  if (EXTENSION_RESTRICTED_SCHEMES.some((scheme) => lower.startsWith(scheme))) {
+    return "Chrome does not permit extensions to control this browser page";
+  }
+  if (
+    lower.startsWith("https://chromewebstore.google.com/") ||
+    lower.startsWith("https://chrome.google.com/webstore/")
+  ) {
+    return "Chrome does not permit extensions to control the Chrome Web Store";
+  }
+  return null;
+}
+
+function restrictedPageError(reason: string): InteractionDefiniteDriverError {
+  return new InteractionDefiniteDriverError(
+    "unsupported",
+    `${reason}; the connected browser cannot open it`,
+  );
+}
 
 type AttachedTab = {
   id: string;
@@ -75,6 +112,9 @@ export function createAttachedChromeDriver(
     controllerGeneration: session.controllerGeneration,
     runner: transport.runner,
     targetLifecycle: "cdp",
+    // The browser is the person's own: ending the session closes the tabs it
+    // opened and left blank.
+    closeUnusedOwnedTabsOnEnd: true,
     connect: async () => transport.connection,
     engine: "chrome",
     permissionControl: false,
@@ -157,6 +197,13 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.browserPlatform = browser.platform ?? process.platform;
   }
 
+  /** Refuse, before anything is created or navigated, a page Chrome will not
+   * let the extension control. */
+  assertNavigable(url: string): void {
+    const reason = attachedChromePageRestriction(url);
+    if (reason) throw restrictedPageError(reason);
+  }
+
   async send<T = Record<string, unknown>>(
     method: string,
     params: Readonly<Record<string, unknown>> = {},
@@ -174,8 +221,11 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
             "Browser tab debugging disconnected; observe the tab again",
             true,
           );
+        const navigation = method === "Page.navigate";
+        if (navigation && typeof params.url === "string") this.assertNavigable(params.url);
         const mayChangePage = mayChangePageContent(method);
         if (mayChangePage) this.pendingInput.set(tabId, (this.pendingInput.get(tabId) ?? 0) + 1);
+        const detachEpoch = this.tabDetachEpochs.get(tabId) ?? 0;
         let response: { result: unknown };
         try {
           response = await this.bridge.request<{ result: unknown }>({
@@ -189,6 +239,12 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
           // A failed bridge reply does not prove that a queued command cannot
           // arrive later. Do not attach a replacement debugger underneath it.
           if (mayChangePage) this.uncertainTabs.add(tabId);
+          if (navigation && (await this.navigationEndedControl(tabId, detachEpoch)))
+            throw new InteractionDefiniteDriverError(
+              "unsupported",
+              "Chrome ended control of this tab when it navigated; Chrome does not permit " +
+                "extensions to control some pages, such as the Chrome Web Store or browser pages",
+            );
           if (this.sessionTabs.get(options.sessionId) !== tabId)
             throw new CdpSessionDetachedError(method);
           throw error;
@@ -328,6 +384,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       }
       case "Target.createTarget": {
         const url = boundedUrl(params.url ?? "about:blank");
+        if (url !== "about:blank") this.assertNavigable(url);
         const result = await this.bridge.request<{ tab: AttachedTab }>({
           type: "tabs.create",
           // Installed extensions exclude about: pages from target discovery
@@ -372,6 +429,24 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       }
       default:
         throw new CdpProtocolError(method, -32_601, "CDP method is unavailable on attached Chrome");
+    }
+  }
+
+  /** Chrome answers a navigation to a page the extension may not control by
+   * detaching the debugger while the tab lives on. Distinguish that from a
+   * closed tab or a user who canceled debugging. */
+  private async navigationEndedControl(tabId: string, detachEpoch: number): Promise<boolean> {
+    const deadline = Date.now() + REFUSED_NAVIGATION_DETACH_WAIT_MS;
+    while ((this.tabDetachEpochs.get(tabId) ?? 0) === detachEpoch) {
+      if (this.stopped || this.failure || Date.now() >= deadline) return false;
+      await delay(POLL_INTERVAL_MS);
+    }
+    if (this.canceledTabs.has(tabId)) return false;
+    try {
+      const listed = await this.bridge.request<{ tabs: unknown }>({ type: "tabs.list" });
+      return requireTabs(listed.tabs).some((tab) => tab.id === tabId);
+    } catch {
+      return false;
     }
   }
 
@@ -534,6 +609,7 @@ function requireTab(value: unknown): AttachedTab {
 
 function mapBridgeError(method: string, error: unknown, sessionId?: string): Error {
   if (error instanceof InteractionControllerError) return error;
+  if (error instanceof InteractionDefiniteDriverError) return error;
   if (
     error instanceof CdpProtocolError ||
     error instanceof CdpTransportError ||

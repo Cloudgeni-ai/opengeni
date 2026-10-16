@@ -249,6 +249,69 @@ describe("resolveInteractionSecretValues", () => {
   test("native desktop arguments are scanned deeply", () => {
     expect(collectStringsDeep({ text: "a", nested: [{ b: "c" }, 1, null] })).toEqual(["a", "c"]);
   });
+
+  test("a controller guard refuses before any reference is used", async () => {
+    const reference = "{".repeat(2) + "secret:Email code/password}}";
+    const base = port({ "Email code/password": "424242" });
+    const resolved: string[] = [];
+    const spied: InteractionSecretsPort = {
+      ...base,
+      async resolverFor(principal) {
+        const resolver = await base.resolverFor(principal);
+        if (!resolver) return resolver;
+        return {
+          ...resolver,
+          enabled: resolver.enabled,
+          resolve: async (references, context) => {
+            resolved.push(...references.map((entry) => entry.raw));
+            return await resolver.resolve(references, context);
+          },
+        };
+      },
+    };
+    const refusal = new ApiHttpError(422, {
+      code: "validation_failed",
+      message: "controller cannot accept secret values",
+    });
+    let guardCalls = 0;
+    const guard = async () => {
+      guardCalls += 1;
+      throw refusal;
+    };
+    const refused = await httpError(
+      resolveInteractionSecretValues({
+        port: spied,
+        grant: agentGrant,
+        texts: [reference],
+        use,
+        beforeResolve: guard,
+      }),
+    );
+    expect(refused).toBe(refusal);
+    expect(guardCalls).toBe(1);
+    expect(resolved).toEqual([]);
+
+    // Literal text and human callers never consult the controller.
+    for (const call of [
+      { grant: agentGrant, texts: ["no reference here"] },
+      { grant: humanGrant, texts: [reference] },
+    ]) {
+      expect(
+        await resolveInteractionSecretValues({ port: spied, use, beforeResolve: guard, ...call }),
+      ).toBeUndefined();
+    }
+    expect(guardCalls).toBe(1);
+
+    // A guard that accepts lets resolution proceed as before.
+    const values = await resolveInteractionSecretValues({
+      port: spied,
+      grant: agentGrant,
+      texts: [reference],
+      use,
+      beforeResolve: async () => undefined,
+    });
+    expect(Object.values(values ?? {})).toEqual(["424242"]);
+  });
 });
 
 describe("syncBrowserPasskeys", () => {
@@ -422,6 +485,52 @@ describe("syncBrowserPasskeys", () => {
     await sync(true);
     expect(client.requests.at(-1)!.credentials).toEqual([stored]);
     expect(calls.filter((call) => call.startsWith("lease:"))).toHaveLength(2);
+  });
+
+  test("syncs for one browser run in call order, so a write-back need not be awaited", async () => {
+    const { store, calls } = fakeStore();
+    const assertion: BrowserPasskeyEvent = {
+      type: "asserted",
+      eventId: "99999999-9999-4999-8999-999999999994",
+      occurredAt: "2026-10-12T20:00:03.000Z",
+      targetId: "target-1",
+      rpId: "localhost",
+      credentialId: stored.credentialId,
+      itemId: stored.itemId,
+      signCount: 7,
+    };
+    const pending = [assertion];
+    const client = fakeClient(pending);
+    const order: string[] = [];
+    const slow = {
+      async passkeySync(request: BrowserPasskeySyncRequest) {
+        order.push(`start:${request.credentials === null ? "keep" : "load"}`);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        const response = await client.passkeySync(request);
+        order.push("end");
+        return response;
+      },
+    };
+    const sync = (refresh: boolean) =>
+      syncBrowserPasskeys({
+        port: { ...port({}), passkeys: store },
+        grant: agentGrant,
+        browserSessionId: `${BROWSER}-ordered`,
+        controllerGeneration: "controller-1",
+        client: slow,
+        now: () => 3_000_000,
+        refresh,
+      });
+    // The write-back after one action is left running; the next action's
+    // takeover starts immediately but waits for it.
+    const writeBack = sync(false);
+    const takeover = sync(true);
+    expect(await takeover).toEqual({ saved: 0, asserted: 0 });
+    expect(await writeBack).toEqual({ saved: 0, asserted: 1 });
+    // The assertion was written back once, by the first sync only.
+    expect(calls.filter((call) => call.startsWith("count:"))).toEqual([`count:${stored.itemId}:7`]);
+    expect(order.slice(0, 4)).toEqual(["start:load", "end", "start:keep", "end"]);
+    expect(pending).toEqual([]);
   });
 
   test("humans never load passkeys and old controllers are skipped quietly", async () => {

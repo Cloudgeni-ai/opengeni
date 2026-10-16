@@ -43,10 +43,12 @@ import {
 import {
   automationRequestDigest,
   automationCredentialRestrictionForGrant,
+  assertNotSiteClampedAgent,
   assertWorkspaceModelPolicyAllows,
   buildAutomationAcceptedExecution,
   canonicalConfiguredModel,
   creationInitiatorForGrant,
+  currentSiteSessionOrigin,
   workspaceCustomModelReference,
   lockActiveCustomModelForAdmission,
   requireAccessGrant,
@@ -56,9 +58,26 @@ import {
   resolveWorkspaceCatalogSettings,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { parseRequestJson } from "../http/request-body";
+
+/**
+ * Create, change, delete or fire an automation: a workspace admin, but never
+ * a Site page (a tool it called) or an agent started from one. Site pages and
+ * their agents act with the page's reach, so no automation starts from a Site.
+ */
+async function requireAutomationWriter(
+  c: Context,
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<AccessGrant> {
+  const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+  if (currentSiteSessionOrigin())
+    throw new HTTPException(403, { message: "A Site page cannot create or change automations" });
+  await assertNotSiteClampedAgent(deps.db, grant, "automations");
+  return grant;
+}
 
 async function callerBundleSelection(
   deps: ApiRouteDeps,
@@ -91,7 +110,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/automations/sources", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAutomationWriter(c, deps, workspaceId);
     requirePermission(grant, "secrets:write");
     const request = await parseRequestJson(c, CreateAutomationSourceRequest);
     assertGenericTriggerMutable(request);
@@ -109,7 +128,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/workspaces/:workspaceId/automations/sources/:sourceId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAutomationWriter(c, deps, workspaceId);
     const request = await parseRequestJson(c, UpdateAutomationSourceRequest);
     const current = await requireSource(
       deps,
@@ -146,7 +165,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/automations/sources/:sourceId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAutomationWriter(c, deps, workspaceId);
     const current = await requireSource(
       deps,
       grant.accountId,
@@ -176,7 +195,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/automations/triggers", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAutomationWriter(c, deps, workspaceId);
     const request = await parseRequestJson(c, CreateAutomationTriggerRequest);
     const credentialRestriction = await automationCredentialRestrictionForGrant(deps.db, grant);
     requireAutomationCredentialRestrictionPermissions(
@@ -239,7 +258,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/workspaces/:workspaceId/automations/triggers/:triggerId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAutomationWriter(c, deps, workspaceId);
     const request = await parseRequestJson(c, UpdateAutomationTriggerRequest);
     const existing = (await listAutomationTriggers(deps.db, workspaceId)).find(
       (trigger) => trigger.id === c.req.param("triggerId"),
@@ -339,7 +358,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/automations/triggers/:triggerId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAutomationWriter(c, deps, workspaceId);
     const expectedRevision = Number(c.req.query("expectedRevision"));
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
       throw new HTTPException(400, {
@@ -382,7 +401,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/automations/sources/:sourceId/events", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAutomationWriter(c, deps, workspaceId);
     const request = await parseRequestJson(c, TriggerAutomationManuallyRequest);
     const credentialRestriction = await automationCredentialRestrictionForGrant(deps.db, grant);
     const source = await requireSource(deps, grant.accountId, workspaceId, c.req.param("sourceId"));
@@ -699,6 +718,9 @@ function workspaceCustomModelCommitGuard(input: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       reference,
+      // Automation configuration carries no accepted Claude authority, so an
+      // organization Claude model is refused here (unchanged behaviour).
+      claudeAuthority: null,
     });
     if (!active) {
       throw modelUnavailableHttpException(input.modelId);

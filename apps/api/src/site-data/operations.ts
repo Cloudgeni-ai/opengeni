@@ -1,6 +1,5 @@
 import type { ApiRouteDeps } from "@opengeni/core";
 import type {
-  AccessGrant,
   SiteDataCollectionDefinitionRequest,
   SiteDataDescribeResponse,
   SiteDataFileScope,
@@ -20,6 +19,7 @@ import {
   type SiteDataWriteOp,
 } from "@opengeni/db";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
+import { requireSitePlatformQuota } from "../site-publishing/platform-usage";
 import {
   assertSiteDataSchema,
   meterSiteData,
@@ -36,6 +36,7 @@ import {
   SITE_DATA_VALIDATION_BUDGET_MS,
   SITE_DATA_VALIDATION_RESERVE_MS_PER_BYTE,
   type SiteDataAccess,
+  type SiteDataAuthority,
   type SiteDataDeps,
   type SiteDataSurface,
   type SiteDataValidationMeter,
@@ -194,7 +195,7 @@ function logCleanupFailure(what: string, objectKey: string, error: unknown): voi
 
 export async function describeSiteData(
   deps: SiteDataDeps,
-  grant: AccessGrant,
+  grant: SiteDataAuthority,
   siteId: string,
 ): Promise<SiteDataDescribeResponse> {
   const access = await resolveSiteDataAccess(deps, grant, siteId, { management: true });
@@ -204,7 +205,7 @@ export async function describeSiteData(
 
 export async function defineSiteDataCollection(
   deps: SiteDataDeps,
-  grant: AccessGrant,
+  grant: SiteDataAuthority,
   siteId: string,
   name: string,
   definition: SiteDataCollectionDefinitionRequest,
@@ -234,6 +235,7 @@ export async function defineSiteDataCollection(
       ...(definition.privateRecords === undefined
         ? {}
         : { privateRecords: definition.privateRecords }),
+      ...(definition.guestAccess === undefined ? {} : { guestAccess: definition.guestAccess }),
       ...(definition.jsonSchema === undefined ? {} : { jsonSchema: definition.jsonSchema }),
       ...(definition.indexedFields ? { indexedFields: definition.indexedFields } : {}),
       ...(definition.uniqueFields ? { uniqueFields: definition.uniqueFields } : {}),
@@ -244,7 +246,7 @@ export async function defineSiteDataCollection(
 
 export async function deleteSiteDataCollection(
   deps: SiteDataDeps,
-  grant: AccessGrant,
+  grant: SiteDataAuthority,
   siteId: string,
   name: string,
 ) {
@@ -255,7 +257,7 @@ export async function deleteSiteDataCollection(
 
 export async function resetSiteDataCollection(
   deps: SiteDataDeps,
-  grant: AccessGrant,
+  grant: SiteDataAuthority,
   siteId: string,
   name: string,
 ) {
@@ -266,7 +268,7 @@ export async function resetSiteDataCollection(
 
 export async function querySiteData(
   deps: SiteDataDeps,
-  grant: AccessGrant,
+  grant: SiteDataAuthority,
   siteId: string,
   query: SiteDataQueryRequest,
   surface: SiteDataSurface = {},
@@ -286,7 +288,7 @@ export async function querySiteData(
 
 export async function getSiteDataRecord(
   deps: SiteDataDeps,
-  grant: AccessGrant,
+  grant: SiteDataAuthority,
   siteId: string,
   request: { collection: string; id?: string | undefined; key?: string | undefined },
   surface: SiteDataSurface = {},
@@ -302,12 +304,13 @@ export async function getSiteDataRecord(
 
 export async function writeSiteData(
   deps: SiteDataDeps,
-  grant: AccessGrant,
+  grant: SiteDataAuthority,
   siteId: string,
   operations: SiteDataWriteOperation[],
   surface: SiteDataSurface = {},
 ) {
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
+  await requireSitePlatformQuota(deps, access.caller, ["storage_bytes"]);
   const reserved = await consume(access, "write", operations.length, {
     collections: validatedCollections(operations),
     bytes: siteDataValidationBytes(validatedData(operations)),
@@ -444,7 +447,7 @@ export function siteDataCsvRecords(csv: string): Record<string, unknown>[] {
 
 export async function importSiteData(
   deps: SiteDataDeps,
-  grant: AccessGrant,
+  grant: SiteDataAuthority,
   siteId: string,
   collection: string,
   request: SiteDataImportRequest,
@@ -553,7 +556,7 @@ function csvLineBreaks(csv: string): number {
 
 export async function exportSiteData(
   deps: SiteDataDeps,
-  grant: AccessGrant,
+  grant: SiteDataAuthority,
   siteId: string,
   collection: string,
   format: "json" | "csv",
@@ -667,7 +670,7 @@ function storage(deps: Pick<ApiRouteDeps, "objectStorage">) {
 
 export async function uploadSiteDataFile(
   deps: SiteDataDeps & Pick<ApiRouteDeps, "objectStorage">,
-  grant: AccessGrant,
+  grant: SiteDataAuthority,
   siteId: string,
   input: {
     name: string | null | undefined;
@@ -685,6 +688,7 @@ export async function uploadSiteDataFile(
   const access = await resolveSiteDataAccess(deps, grant, siteId, surface);
   const objects = storage(deps);
   // Access, rate, then quota, before the body is read or reaches object storage.
+  await requireSitePlatformQuota(deps, access.caller, ["storage_bytes"]);
   await consume(access, "write", 1);
   const scope = input.scope ?? "shared";
   if (scope !== "shared" && scope !== "private")
@@ -723,7 +727,7 @@ export async function uploadSiteDataFile(
 
 export async function listSiteDataFiles(
   deps: SiteDataDeps,
-  grant: AccessGrant,
+  grant: SiteDataAuthority,
   siteId: string,
   options: { limit?: number; cursor?: string | null },
   surface: SiteDataSurface = {},
@@ -735,7 +739,7 @@ export async function listSiteDataFiles(
 
 export async function getSiteDataFileUrl(
   deps: SiteDataDeps & Pick<ApiRouteDeps, "objectStorage">,
-  grant: AccessGrant,
+  grant: SiteDataAuthority,
   siteId: string,
   fileId: string,
   surface: SiteDataSurface = {},
@@ -757,7 +761,7 @@ export async function getSiteDataFileUrl(
 
 export async function deleteSiteDataFile(
   deps: SiteDataDeps & Pick<ApiRouteDeps, "objectStorage">,
-  grant: AccessGrant,
+  grant: SiteDataAuthority,
   siteId: string,
   fileId: string,
   surface: SiteDataSurface = {},

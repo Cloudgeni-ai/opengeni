@@ -9,6 +9,7 @@ import {
   getSiteDataSite,
   parseSiteDataPath,
   readSiteDataPath,
+  recordSitePlatformUsageInTransaction,
   recordUsageEvent,
   SiteDataError,
   type Database,
@@ -776,16 +777,80 @@ export type SiteDataSurface = {
 };
 
 /**
+ * A viewer of a published Site, resolved and authorized by site-runtime (the
+ * gateway-signed API): a signed-in person (`user:<subject>`) or an anonymous
+ * guest (`guest:<visitor>`). Always a framed viewer of exactly this Site;
+ * guests reach only what each collection's guest rule allows.
+ */
+export type PublishedSiteDataViewer = {
+  kind: "published_viewer";
+  accountId: string;
+  workspaceId: string;
+  site: SiteDataSite;
+  principal: string;
+  guest: boolean;
+};
+
+/** Who is calling Site Data: an access grant, or a published Site viewer. */
+export type SiteDataAuthority = AccessGrant | PublishedSiteDataViewer;
+
+function isPublishedViewer(authority: SiteDataAuthority): authority is PublishedSiteDataViewer {
+  return (authority as { kind?: unknown }).kind === "published_viewer";
+}
+
+function publishedViewerAccess(
+  deps: SiteDataDeps,
+  viewer: PublishedSiteDataViewer,
+  siteId: string,
+  surface: SiteDataSurface,
+): SiteDataAccess {
+  if (viewer.site.id !== siteId)
+    throw new SiteDataError("forbidden", "A Site can only use its own data");
+  if (surface.management)
+    throw new SiteDataError("forbidden", "Only the Site's managers can manage its data");
+  if (viewer.site.status !== "active")
+    throw new SiteDataError("forbidden", "This Site is archived");
+  const caller: SiteDataCaller = {
+    accountId: viewer.accountId,
+    workspaceId: viewer.workspaceId,
+    siteId,
+    role: "viewer",
+    principal: viewer.principal,
+    actor: viewer.principal,
+    framed: true,
+    ...(viewer.guest ? { guest: true } : {}),
+  };
+  const subjectId = viewer.principal.startsWith("user:")
+    ? viewer.principal.slice("user:".length)
+    : null;
+  const limits = siteDataLimits(deps.settings);
+  return {
+    site: viewer.site,
+    caller,
+    subjectId,
+    store: siteDataStore(deps.db),
+    limits,
+    writeOptions: {
+      limits,
+      validate: validateSiteDataRecord,
+      afterWrite: (tx, summary) => meterSiteData(tx, viewer, caller, subjectId, "write", summary),
+    },
+  };
+}
+
+/**
  * Resolve the Site and caller. not_found when the caller cannot see the Site
  * (by audience); forbidden for an archived Site (viewers and Site frames) and
  * for management by anyone but a manager outside the Site frame.
  */
 export async function resolveSiteDataAccess(
   deps: SiteDataDeps,
-  grant: AccessGrant,
+  authority: SiteDataAuthority,
   siteId: string,
   surface: SiteDataSurface = {},
 ): Promise<SiteDataAccess> {
+  if (isPublishedViewer(authority)) return publishedViewerAccess(deps, authority, siteId, surface);
+  const grant = authority;
   const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId };
   // An agent whose session (or spawning lineage, root session, or current
   // turn) came from a Site page acts for that page: it gets the same frame
@@ -861,11 +926,15 @@ export async function resolveSiteDataAccess(
 /**
  * Usage metering in `usage_only` mode (docs/credit-boundaries-rollout.md): the
  * workspace pays for viewer-triggered usage; events are recorded in the write
- * transaction and never debit credits until a reviewed rate is enabled.
+ * transaction and never debit credits until a reviewed rate is enabled. The
+ * workspace's Site storage level (Site SQL plus Site Data) is refreshed in
+ * its platform usage in the same transaction; any charge for it settles with
+ * the next platform usage the API meters (a Site SQL call or a gateway
+ * request report).
  */
 export async function meterSiteData(
   tx: Database,
-  grant: AccessGrant,
+  grant: Pick<AccessGrant, "accountId" | "workspaceId">,
   caller: SiteDataCaller,
   subjectId: string | null,
   kind: "write" | "upload",
@@ -879,6 +948,11 @@ export async function meterSiteData(
     sourceResourceType: "site",
     sourceResourceId: caller.siteId,
   };
+  await recordSitePlatformUsageInTransaction(
+    tx,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    { refreshStorage: true },
+  );
   if (kind === "upload") {
     await recordUsageEvent(tx, {
       ...common,

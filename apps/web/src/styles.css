@@ -268,24 +268,40 @@ body {
   color: var(--color-fg);
 }
 
-/* Subtle scrollbars */
+/* Subtle scrollbars. On classic-scrollbar platforms (see markClassicScrollbars
+   in @opengeni/react) Chromium would draw arrow buttons on these, so engines
+   with ::-webkit-scrollbar get a slim rounded thumb that widens on hover. */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--color-border-strong) transparent;
 }
 
-*::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
+@supports selector(::-webkit-scrollbar) {
+  :where(:root[data-og-scrollbars="classic"]) * {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
 
-*::-webkit-scrollbar-thumb {
-  background: var(--color-border-strong);
-  border-radius: 999px;
-}
+  :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    background: transparent;
+  }
 
-*::-webkit-scrollbar-track {
-  background: transparent;
+  :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: var(--color-border-strong) padding-box;
+  }
+
+  :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-thumb:hover {
+    border-width: 2px;
+    background-color: var(--color-fg-subtle);
+  }
+
+  :where(:root[data-og-scrollbars="classic"]) *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
 }
 
 /* Focus ring. One calm, intentional treatment: a soft brand-tinted ring set off
@@ -559,14 +575,15 @@ html[data-desktop="windows"] [data-workspace-surface][role="dialog"] [data-dock-
   padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
 }
 
-/* A page without a title bar of its own starts below the caption row, which
-   moves the window like a native title bar, and its content fades out as it
-   scrolls beneath the buttons. */
-html[data-desktop="windows"] main [data-slot="content-page"]:not([data-slot="content-page"] *, [role="dialog"] *) {
+/* A page without a title bar of its own (a content page, or the new-session
+   page) keeps the caption row clear: the row moves the window like a native
+   title bar, and the page's content and scrollbar fade out beneath the
+   buttons. */
+html[data-desktop="windows"] main :is([data-slot="content-page"], [data-window-top-page]):not([data-slot="content-page"] *, [role="dialog"] *) {
   mask-image: linear-gradient(to bottom, transparent calc(var(--og-caption-row-height) / 2), #000 var(--og-caption-row-height));
 }
 
-html[data-desktop="windows"] main [data-slot="content-page"]:not([data-slot="content-page"] *, [role="dialog"] *)::before {
+html[data-desktop="windows"] main :is([data-slot="content-page"], [data-window-top-page]):not([data-slot="content-page"] *, [role="dialog"] *)::before {
   content: "";
   position: sticky;
   top: 0;

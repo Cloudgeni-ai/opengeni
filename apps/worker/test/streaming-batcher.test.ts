@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEventType } from "@opengeni/contracts";
 import type { AppendEventInput } from "@opengeni/db";
 import type { Context } from "@temporalio/activity";
-import { createRuntimeBatcher, nextStreamEvent } from "../src/activities/streaming";
+import {
+  createRuntimeBatcher,
+  mergeAdjacentTextDeltas,
+  nextStreamEvent,
+  TRAILING_FLUSH_MS,
+} from "../src/activities/streaming";
 
 // Lever A: token deltas coalesce through the batcher (one appendSessionEvents
 // txn + one publish per flush) instead of one DB round-trip per token. These
@@ -34,30 +39,168 @@ function delta(n: number, type: SessionEventType = DELTA) {
   return { type, payload: { n } };
 }
 
+/** The first fragment is sent at once; open the window so later ones batch. */
+async function openWindow(
+  batcher: ReturnType<typeof createRuntimeBatcher>,
+  flushes: number[][],
+): Promise<void> {
+  await batcher.push(delta(-1));
+  await batcher.flush();
+  expect(flushes).toEqual([[-1]]);
+  flushes.length = 0;
+}
+
+describe("mergeAdjacentTextDeltas", () => {
+  const text = (
+    t: string,
+    extra: Record<string, unknown> = {},
+    type: SessionEventType = DELTA,
+  ) => ({
+    type,
+    payload: { text: t, ...extra },
+  });
+
+  test("stores adjacent fragments of one stream as one delta with the exact text", () => {
+    // A surrogate pair split across provider fragments rejoins exactly.
+    const merged = mergeAdjacentTextDeltas([
+      text("Hel", { messageId: "m1", phase: "final_answer" }),
+      text("lo \ud83d", { messageId: "m1", phase: "final_answer" }),
+      text("\ude00!", { messageId: "m1", phase: "final_answer" }),
+    ]);
+    expect(merged).toEqual([
+      {
+        type: DELTA,
+        payload: { text: "Hello \u{1F600}!", messageId: "m1", phase: "final_answer" },
+      },
+    ]);
+  });
+
+  test("never merges across another event, type, message or phase, and keeps order", () => {
+    const toolCall = { type: TOOLCALL, payload: { id: "c1" } };
+    const merged = mergeAdjacentTextDeltas([
+      text("a", {}, REASONING),
+      text("b", {}, REASONING),
+      text("c"),
+      toolCall,
+      text("d"),
+      text("e", { messageId: "m2" }),
+      text("f", { messageId: "m2", phase: "commentary" }),
+    ]);
+    expect(merged).toEqual([
+      { type: REASONING, payload: { text: "ab" } },
+      text("c"),
+      toolCall,
+      text("d"),
+      text("e", { messageId: "m2" }),
+      text("f", { messageId: "m2", phase: "commentary" }),
+    ]);
+  });
+
+  test("leaves any other payload shape, and lone fragments, exactly as they were", () => {
+    const shaped = text("x", { coalescedUntil: 9 });
+    const notText = { type: DELTA, payload: { n: 1 } };
+    const identified = {
+      type: DELTA,
+      payload: { text: "y" },
+      clientEventId: "c",
+    } as AppendEventInput;
+    const lone = text("z");
+    const input = [shaped, text("1"), notText, identified, lone];
+    const merged = mergeAdjacentTextDeltas(input);
+    expect(merged).toHaveLength(5);
+    merged.forEach((event, index) => expect(event).toBe(input[index]!));
+  });
+
+  test("starts a new row at the live stream's 48 KiB text bound", () => {
+    const chunk = "x".repeat(20 * 1024);
+    const merged = mergeAdjacentTextDeltas([text(chunk), text(chunk), text(chunk)]);
+    expect(merged.map((event) => (event.payload as { text: string }).text.length)).toEqual([
+      40 * 1024,
+      20 * 1024,
+    ]);
+  });
+
+  test("joins reasoning summary parts with the readers' paragraph separator", () => {
+    const merged = mergeAdjacentTextDeltas([
+      text("**One**", {}, REASONING),
+      text("**Two**", {}, REASONING),
+      text(" detail", {}, REASONING),
+      text("**Three**", {}, REASONING),
+    ]);
+    expect(merged).toEqual([
+      { type: REASONING, payload: { text: "**One**\n\n**Two** detail**Three**" } },
+    ]);
+  });
+
+  test("after the leading fragment, a flushed burst reaches storage as one row", async () => {
+    const stored: AppendEventInput[][] = [];
+    const batcher = createRuntimeBatcher(async (events) => {
+      stored.push(events);
+    });
+    for (const part of ["The ", "quick ", "brown ", "fox"]) await batcher.push(text(part));
+    await batcher.flush();
+    expect(stored).toEqual([
+      [{ type: DELTA, payload: { text: "The " } }],
+      [{ type: DELTA, payload: { text: "quick brown fox" } }],
+    ]);
+  });
+});
+
 describe("createRuntimeBatcher", () => {
+  test("the first fragment, and the first after a structural event, are sent at once", async () => {
+    const { batcher, flushes } = recordingBatcher();
+    await batcher.push(delta(0));
+    expect(flushes).toEqual([[0]]); // time to first token is not delayed by the window
+    await batcher.push(delta(1));
+    await batcher.push(delta(2));
+    expect(flushes).toEqual([[0]]); // later fragments batch
+    await batcher.push(delta(3, TOOLCALL));
+    expect(flushes).toEqual([[0], [1, 2, 3]]);
+    await batcher.push(delta(4));
+    expect(flushes).toEqual([[0], [1, 2, 3], [4]]); // the next item starts at once too
+    await batcher.push(delta(5));
+    expect(flushes).toHaveLength(3);
+    await batcher.flush();
+    expect(flushes).toEqual([[0], [1, 2, 3], [4], [5]]);
+  });
+
+  test("a non-text event does not use up the first text fragment's leading edge", async () => {
+    const { batcher, flushes } = recordingBatcher();
+    await batcher.push(delta(0, "agent.updated" as SessionEventType)); // handoff marker
+    await batcher.push(delta(1)); // first text still goes at once
+    await sleep(10); // the serialized drain, far shorter than one window
+    expect(flushes.flat()).toEqual([0, 1]);
+    await batcher.push(delta(2));
+    expect(flushes.flat()).toEqual([0, 1]); // later fragments batch
+    await batcher.flush();
+  });
+
   test("coalesces a delta burst into ONE flush, order preserved (trailing timer)", async () => {
     const { batcher, flushes } = recordingBatcher();
-    // 10 deltas pushed fast (< 50 count, < 33ms) => no immediate flush.
+    await openWindow(batcher, flushes);
+    // 10 deltas pushed fast (< 50 count, < one window) => no immediate flush.
     for (let n = 0; n < 10; n++) {
       await batcher.push(delta(n));
     }
     expect(flushes.length).toBe(0); // still pending — nothing flushed yet
-    await sleep(60); // trailing timer (~33ms) fires
+    await sleep(TRAILING_FLUSH_MS * 2); // trailing timer fires
     expect(flushes.length).toBe(1);
     expect(flushes[0]).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
   });
 
   test("trailing timer flushes whatever accumulated on silence", async () => {
     const { batcher, flushes } = recordingBatcher();
+    await openWindow(batcher, flushes);
     await batcher.push(delta(1, REASONING));
     await batcher.push(delta(2, REASONING));
     expect(flushes.length).toBe(0);
-    await sleep(60);
+    await sleep(TRAILING_FLUSH_MS * 2);
     expect(flushes).toEqual([[1, 2]]);
   });
 
   test("a structural event flushes immediately and CARRIES pending deltas in order", async () => {
     const { batcher, flushes } = recordingBatcher();
+    await openWindow(batcher, flushes);
     await batcher.push(delta(0));
     await batcher.push(delta(1));
     await batcher.push(delta(2));
@@ -66,7 +209,7 @@ describe("createRuntimeBatcher", () => {
     expect(flushes.length).toBe(1);
     expect(flushes[0]).toEqual([0, 1, 2, 3]); // deltas ride the structural flush, in order
     // Timer must have been cleared: nothing more flushes on silence.
-    await sleep(60);
+    await sleep(TRAILING_FLUSH_MS * 2);
     expect(flushes.length).toBe(1);
   });
 
@@ -114,19 +257,23 @@ describe("createRuntimeBatcher", () => {
       await new Promise<void>((resolve) => gates.push(resolve));
     });
 
-    // The 50th delta starts a flush. The next 50 pushes must still resolve while
-    // that slow append is blocked; this is the production regression where each
-    // model delta previously waited ~0.75s for its own DB transaction.
+    // The leading delta starts a flush at once. The next 99 pushes must still
+    // resolve while that slow append is blocked; this is the production
+    // regression where each model delta previously waited ~0.75s for its own
+    // DB transaction.
     for (let n = 0; n < 100; n += 1) {
       await batcher.push(delta(n));
     }
-    expect(starts).toEqual([Array.from({ length: 50 }, (_, index) => index)]);
+    expect(starts).toEqual([[0]]);
 
     const drained = batcher.flush();
     gates[0]!();
     await sleep(10);
-    expect(starts[1]).toEqual(Array.from({ length: 50 }, (_, index) => index + 50));
+    expect(starts[1]).toEqual(Array.from({ length: 50 }, (_, index) => index + 1));
     gates[1]!();
+    await sleep(10);
+    expect(starts[2]).toEqual(Array.from({ length: 49 }, (_, index) => index + 51));
+    gates[2]!();
     await drained;
   });
 
@@ -136,7 +283,7 @@ describe("createRuntimeBatcher", () => {
     });
 
     await batcher.push(delta(1));
-    await sleep(60);
+    await sleep(TRAILING_FLUSH_MS * 2);
     await expect(batcher.push(delta(2))).rejects.toThrow("durable append failed");
     await expect(batcher.flush()).rejects.toThrow("durable append failed");
   });
@@ -174,7 +321,7 @@ describe("createRuntimeBatcher", () => {
 
   test("1000-delta turn: flush count collapses vs the per-delta (structural) path", async () => {
     // Freeze time so the count is purely coalescing-policy driven (removes the
-    // 33ms elapsed variable), making the before/after numbers deterministic.
+    // trailing-window elapsed variable), making the before/after numbers deterministic.
     const realNow = Date.now;
     Date.now = () => 1_000_000;
     try {
@@ -192,7 +339,8 @@ describe("createRuntimeBatcher", () => {
       }
       await after.batcher.flush(); // turn-end drain
       expect(after.flushes.length).toBeLessThanOrEqual(35);
-      expect(after.flushes.length).toBe(20); // 1000 / 50-event batches
+      // The leading delta goes at once, then 999 deltas in 50-event batches.
+      expect(after.flushes.length).toBe(21);
       // Order + completeness preserved across all batches.
       expect(after.flushes.flat()).toEqual(Array.from({ length: 1000 }, (_, i) => i));
     } finally {
@@ -225,19 +373,21 @@ describe("createRuntimeBatcher", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0]).toEqual({ events: 1, durationSeconds: 0.005 });
 
-    // Three coalesced deltas ride out on the next structural flush → size 4.
+    // The first delta after it goes at once; two more ride out on the next
+    // structural flush → size 3.
     await batcher.push(delta(1));
     await batcher.push(delta(2));
     await batcher.push(delta(3));
     await batcher.push(delta(4, TOOLCALL));
-    expect(seen).toHaveLength(2);
-    expect(seen[1]!.events).toBe(4);
+    expect(seen).toHaveLength(3);
+    expect(seen[1]!.events).toBe(1);
+    expect(seen[2]!.events).toBe(3);
 
     // A FAILED flush still reports its shape (onFlush runs in the finally).
     fail = true;
     await expect(batcher.push(delta(5, TOOLCALL))).rejects.toThrow("append failed");
-    expect(seen).toHaveLength(3);
-    expect(seen[2]!.events).toBe(1); // the single structural delta(5) that failed to flush
+    expect(seen).toHaveLength(4);
+    expect(seen[3]!.events).toBe(1); // the single structural delta(5) that failed to flush
   });
 });
 

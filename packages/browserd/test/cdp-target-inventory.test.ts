@@ -66,7 +66,55 @@ test("a post-creation inventory failure never creates a replacement tab or colle
   }
 });
 
-function inventoryFixture(failInventory = false) {
+test("closing a tab returns inventory without it even while the browser still lists it", async () => {
+  // Chrome acknowledges Target.closeTarget before Target.getTargets stops
+  // listing the tab; a cold or busy browser keeps listing it for a moment.
+  const fixture = inventoryFixture(false, 3);
+  try {
+    const targets = await fixture.driver.closeTarget("prior");
+    expect(targets.map((target) => target.id)).toEqual([]);
+    const closeIndex = fixture.calls.findIndex((call) => call.method === "Target.closeTarget");
+    expect(
+      fixture.calls.slice(closeIndex).filter((call) => call.method === "Target.getTargets").length,
+    ).toBeGreaterThan(3);
+  } finally {
+    await fixture.driver.detach();
+  }
+});
+
+test("ending a session in the person's browser closes only the blank tabs it opened", async () => {
+  const fixture = inventoryFixture(false, 0, { closeUnusedOwnedTabsOnEnd: true });
+  try {
+    // A blank tab the session opened, and a tab it opened and used.
+    await fixture.driver.openTargetWithInventory("about:blank");
+    await fixture.driver.openTarget("https://navigation.example.test/used");
+    await fixture.driver.closeUnusedOwnedTabs();
+    const closed = fixture.calls
+      .filter((call) => call.method === "Target.closeTarget")
+      .map((call) => call.params.targetId);
+    // The person's own tab (prior) and the used tab stay open.
+    expect(closed).toEqual(["opened-1"]);
+  } finally {
+    await fixture.driver.detach();
+  }
+});
+
+test("a managed browser's end never closes tabs one by one", async () => {
+  const fixture = inventoryFixture();
+  try {
+    await fixture.driver.openTargetWithInventory("about:blank");
+    await fixture.driver.closeUnusedOwnedTabs();
+    expect(fixture.calls.some((call) => call.method === "Target.closeTarget")).toBe(false);
+  } finally {
+    await fixture.driver.detach();
+  }
+});
+
+function inventoryFixture(
+  failInventory = false,
+  closedTabListings = 0,
+  driverOptions: { closeUnusedOwnedTabsOnEnd?: boolean } = {},
+) {
   const browserSessionId = randomUUID();
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const pages = new Map([
@@ -93,6 +141,7 @@ function inventoryFixture(failInventory = false) {
   ]);
   let created = 0,
     navigated = false;
+  const closing = new Map<string, number>();
   const connection: BrowserCdpConnection = {
     async send<T>(
       method: string,
@@ -113,7 +162,20 @@ function inventoryFixture(failInventory = false) {
       }
       if (method === "Target.getTargets") {
         if (failInventory && navigated) throw new Error("synthetic inventory outcome unavailable");
-        return { targetInfos: [...pages.values()] } as T;
+        const targetInfos = [...pages.values()];
+        for (const [targetId, remaining] of closing) {
+          if (remaining <= 0) {
+            pages.delete(targetId);
+            closing.delete(targetId);
+          } else closing.set(targetId, remaining - 1);
+        }
+        return { targetInfos } as T;
+      }
+      if (method === "Target.closeTarget") {
+        const targetId = String(params.targetId);
+        if (closedTabListings > 0) closing.set(targetId, closedTabListings - 1);
+        else pages.delete(targetId);
+        return { success: true } as T;
       }
       if (method === "Target.attachToTarget") return { sessionId: params.targetId } as T;
       const page = pages.get(options?.sessionId ?? "");
@@ -157,6 +219,7 @@ function inventoryFixture(failInventory = false) {
     browserSessionId,
     controllerGeneration: "synthetic-controller",
     runner: { run: async <T>() => ({}) as T },
+    ...driverOptions,
   });
   Object.assign(driver, { connection, browserContextId: "owned-context" });
   return { driver, calls, browserSessionId };

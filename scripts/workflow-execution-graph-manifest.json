@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "9e84537854c47a89e66f2975893463030aeb662415e768049871b78ca0647c30"
+      "sha256": "5d9bc01143fd10aa7826eeda0bca6bf7d853b579db98c3a0b0f87b344fb13eb3"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -22,7 +22,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "397b21065c0448aac95e8b9946d7168d7961d3291a2029826e162075f435d238"
+      "sha256": "235d8e4d131178429bf04d2ebf7316da7f3a2421123707d85d9edad6530a64d6"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/desktop-app-release.yml",
-      "sha256": "a5ab25e03f662f3c3149969f549e42ff1689f1a8f33928efc542d16da02d84d1"
+      "sha256": "52c9133f8a808d5a5a79d9f0cf19de2117c306ee039e452a26f9901950f9855d"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -62,7 +62,7 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "2fecee50c354d8567e750f0627de842e359298bb61c49396b6994341fbb9729e"
+      "sha256": "11024ac64c3fd45645d530e5844d4a144acd8365fbde585167e80fd4d0a46148"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
@@ -316,8 +316,14 @@
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
+      "step": "Check the Windows binaries run on stock Windows",
+      "sha256": "5f1e0c6b46aba5d9d35ae4800ac3bb3a1045c50f101cf37b6d017b2281aeb8f7"
+    },
+    {
+      "workflow": ".github/workflows/agent-release.yml",
+      "job": "build",
       "step": "Detect signing creds",
-      "sha256": "361786f3ad958c06709a22cd6fc6a1b3493ba614e94fad9fe4b09f4929378eff"
+      "sha256": "8a4a312b0319d719c79b02fd218665d6251987716c6903868e0d24908c6e89a0"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -336,6 +342,12 @@
       "job": "build",
       "step": "Intel cargo test (macOS coverage)",
       "sha256": "fd05d9ba821478e273f62c755c4a70dbf21f49e1b5e8b727a5cef441997bcfb2"
+    },
+    {
+      "workflow": ".github/workflows/agent-release.yml",
+      "job": "build",
+      "step": "List the Windows binaries to sign",
+      "sha256": "99d4d833e422dc4107dcb217861051c5c380173249d638a4ccaeade642493e33"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -370,14 +382,14 @@
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
-      "step": "Windows Authenticode (if cert present)",
-      "sha256": "db7fb389f907959e01aaaaa62498f2acefd3eb6556df714dd35eef889ec56779"
+      "step": "Verify Windows signatures",
+      "sha256": "7a5d4a936a93e8263af14abce2cd8c30453672122fbe56e0d52d1aa59c882797"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Windows unsigned note (no cert)",
-      "sha256": "704096f4d643358ca1200e07fabae60d6862764f321582099054cdf76b26f270"
+      "sha256": "6818438c0af31c1a501282efde21a9428735b639fd16a1201f2ba61ba278829e"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -767,7 +779,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
       "step": "Native report delivery contracts",
-      "sha256": "f2a29e986e8d98bc124d9fbd9ea179d89787212a7ff354ec08d7b53863028b80"
+      "sha256": "95b53fcc89005377619a3e313ba02b03d7f65cb055087566248d034c99a355a7"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -909,6 +921,12 @@
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "homebrew",
+      "step": "Update the cask",
+      "sha256": "0b233c70c48becd900e0b18680a4b8aaee8116194cf376275cfd5ccede05e986"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "linux",
       "step": "Build",
       "sha256": "b8abe2668e6b9ac43ae93007e748eadeba5d114143cc73491a6db2ea25a26ea6"
@@ -971,7 +989,7 @@
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "publish",
       "step": "Publish",
-      "sha256": "0501f67601a2b188d07165038cb1c606cad4f67ca0177391203043f7bd53c3a1"
+      "sha256": "c51511ac30340952b300fbaafc3f6b418dbaa9371b3243e4a9a070ce2e36586f"
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
@@ -983,7 +1001,7 @@
       "workflow": ".github/workflows/desktop-app-release.yml",
       "job": "windows",
       "step": "Build",
-      "sha256": "6900a898855f2935f91e189713a30a96032da5de7af4c00c4ab56959b48994d6"
+      "sha256": "e0070949250ad2b2f24caa96dfeeaac3724c438f1382aa0cbcc043165f1ea67f"
     },
     {
       "workflow": ".github/workflows/desktop-app-release.yml",
@@ -1002,6 +1020,12 @@
       "job": "windows",
       "step": "Verify",
       "sha256": "e558a14395a7534bb9328c859d9bf44b1847aff3d029f3db9131f90e904e4f6e"
+    },
+    {
+      "workflow": ".github/workflows/desktop-app-release.yml",
+      "job": "windows",
+      "step": "Verify signatures",
+      "sha256": "d73b2a3f71269a8e9e55e8bff0dce531b6f9b46a15b9d4db0b9390ebabcd5bbf"
     },
     {
       "workflow": ".github/workflows/desktop-e2e.yml",
@@ -1102,8 +1126,26 @@
     {
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
+      "step": "Admit exact source and CI",
+      "sha256": "dc894f956640654d7075246f3d4a8ad042575fbdd55f687a74dd0fad793b8adc"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "publish",
       "step": "Admit protected main source",
-      "sha256": "faec0df74f1ec9d6b83e2b21389f8cc52ec16d8f7873ecbec89edaec0cbc1bf8"
+      "sha256": "6590c803e20faf9692c6f63fe4e23f8c131e38f604f13d1288da3d709cdddc6e"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "publish",
+      "step": "Check out admitted source",
+      "sha256": "4a04e3e8059a0265df759ece12bc66ccca4028d5590d504b23b038a60292044a"
+    },
+    {
+      "workflow": ".github/workflows/publish-canary.yml",
+      "job": "publish",
+      "step": "Install admitted source dependencies",
+      "sha256": "ecb9e615659e3141ac8a5318b89529c2e3c319663adf0ae8fbef1112da0b08e7"
     },
     {
       "workflow": ".github/workflows/publish-canary.yml",
@@ -1115,13 +1157,7 @@
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
       "step": "Publish canary versions",
-      "sha256": "339463616de54eba4955bca6b0a3a69ad0be2e7e4f5bb3dd5e30ce6089b785d7"
-    },
-    {
-      "workflow": ".github/workflows/publish-canary.yml",
-      "job": "publish",
-      "step": "Verify exact source",
-      "sha256": "a75d25d34d692e5afcf6e883c33d3cd2ea19d2422effd6a041c38d0dc607dd49"
+      "sha256": "35ab9cbe37950552054bf677cb69e36a67b7eb9b8fdd878bbadffeb3d149f3ac"
     },
     {
       "workflow": ".github/workflows/publish-desktop-image.yml",

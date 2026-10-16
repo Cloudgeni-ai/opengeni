@@ -103,6 +103,10 @@ export function admitFailedPublisher(
 ): JsonObject {
   const value = object(run);
   requireThat(
+    value.head_sha === origin.source,
+    "Publisher provider identity differs: split-source V2 receipts require a separately reviewed recovery verifier",
+  );
+  requireThat(
     String(value.id) === origin.runId &&
       String(value.run_attempt) === origin.attempt &&
       value.head_sha === origin.source &&
@@ -531,6 +535,9 @@ export function historicalCohort(
     "scripts/publish-canary.ts",
     "scripts/canary-publication-receipts.ts",
     "scripts/publishable-workspaces.ts",
+    "scripts/release/lockstep-version.ts",
+    "scripts/canary-source-admission.ts",
+    "scripts/canary-source-provenance.ts",
   ]) {
     equal(
       git(root, ["show", `${source}:${path}`]),

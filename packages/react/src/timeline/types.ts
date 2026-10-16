@@ -259,6 +259,7 @@ export type StartupPhaseItem = {
     | "capture_in_progress"
     | "rotation_in_progress"
     | "provider_recovery_in_progress"
+    | "compaction_required"
     | undefined;
   occurredAt: string;
 };

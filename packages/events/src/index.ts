@@ -56,6 +56,7 @@ export {
   SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES,
   coalesceSessionEventDeltas,
   coalesceSessionEventDeltasWithCoverage,
+  reasoningDeltaSeparator,
   type CoalescedSessionEventPage,
 } from "./coalesce";
 

@@ -23,7 +23,7 @@ import {
   type NetworkRouteConfiguration as NetworkRouteConfigurationValue,
   type NetworkRouteConsistency as NetworkRouteConsistencyValue,
 } from "@opengeni/contracts";
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { attachedDeviceGenerationMatches } from "./attached-browser-devices";
 import { type Database, withRlsContext } from "./database";
 import {
@@ -472,9 +472,19 @@ async function replayedMutation(
   });
 }
 
+/** Lifecycles that never return to use; `includeTerminal: false` omits them in SQL. */
+const TERMINAL_INTERACTION_LIFECYCLES = ["ended", "failed"] as const;
+
 export async function listBrowserSessions(
   db: Database,
-  input: { accountId: string; workspaceId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    /** Only sessions with any association to this agent session. */
+    associatedSessionId?: string;
+    /** Defaults to true (complete history). */
+    includeTerminal?: boolean;
+  },
 ): Promise<BrowserSessionListResponseValue> {
   return await withRlsContext(
     db,
@@ -483,7 +493,22 @@ export async function listBrowserSessions(
       const rows = await scopedDb
         .select()
         .from(schema.browserSessions)
-        .where(eq(schema.browserSessions.workspaceId, input.workspaceId))
+        .where(
+          and(
+            eq(schema.browserSessions.workspaceId, input.workspaceId),
+            input.includeTerminal === false
+              ? notInArray(schema.browserSessions.lifecycle, [...TERMINAL_INTERACTION_LIFECYCLES])
+              : undefined,
+            input.associatedSessionId
+              ? sql`exists (
+                  select 1 from ${schema.browserSessionAssociations}
+                  where ${schema.browserSessionAssociations.workspaceId} = ${input.workspaceId}
+                    and ${schema.browserSessionAssociations.browserSessionId} = ${schema.browserSessions.id}
+                    and ${schema.browserSessionAssociations.sessionId} = ${input.associatedSessionId}
+                )`
+              : undefined,
+          ),
+        )
         .orderBy(desc(schema.browserSessions.lastUsedAt), desc(schema.browserSessions.id));
       const associations = await loadAssociations(
         scopedDb,
@@ -2114,6 +2139,30 @@ export async function getExpiredBrowserSessionResume(
   );
 }
 
+/** Controller authority of an in-flight continuation of an expired resume.
+ * That continuation has no dispatched operation of its own (its operation is
+ * recorded only once the controller adopts the working copy), so its authority
+ * is the expired resume itself: the browser is still lost from that resume and
+ * still bound to the same retained controller generation. */
+export async function touchExpiredBrowserSessionResume(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    browserSessionId: string;
+    controllerGeneration: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      const row = await loadBrowserSessionRow(tx, input.workspaceId, input.browserSessionId);
+      if (!row || row.controllerGeneration !== input.controllerGeneration) return false;
+      return await expiredResumeEligible(tx, row);
+    }, CONSISTENT_READ),
+  );
+}
+
 /** Return an expired resume to an ordinary suspended browser once its retained
  * controller generation was ended. The next resume restores the same durable
  * state under a fresh controller generation; nothing durable is deleted. */
@@ -2173,6 +2222,97 @@ export async function settleExpiredBrowserSessionResume(
 }
 
 const CONTROLLER_TRANSITION_EXPIRED = "controller_transition_expired";
+
+/** Continue an expired resume on its retained controller generation after that
+ * controller re-adopted the generation's own working copy. The browser keeps
+ * its record, history and working profile; nothing is restored or discarded.
+ * The new resume operation completes on that generation, and the expired one
+ * stays settled as `outcome_unknown`. */
+export async function continueExpiredBrowserSessionResume(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    browserSessionId: string;
+    operationId: string;
+    actorSubjectId: string;
+    controller: InteractionControllerBinding;
+  },
+): Promise<BrowserSessionMutationResponseValue> {
+  const digest = lifecycleRequestDigest(input.browserSessionId, "resume", input.actorSubjectId);
+  return await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
+      const existing = await loadOperation(tx, input.workspaceId, input.operationId);
+      if (existing) {
+        return await replayedMutation(tx, input.workspaceId, existing, {
+          kind: "resume",
+          digest,
+        });
+      }
+      const row = await loadBrowserSessionRow(tx, input.workspaceId, input.browserSessionId);
+      if (!row) throw new BrowserSessionNotFoundError("BrowserSession not found");
+      if (!(await expiredResumeEligible(tx, row))) {
+        throw new BrowserSessionStateError("Only a suspended BrowserSession can be resumed");
+      }
+      if (
+        row.controllerGeneration !== input.controller.controllerGeneration ||
+        row.controllerId !== input.controller.controllerId ||
+        row.placementInstanceId !== input.controller.placementInstanceId
+      ) {
+        throw new BrowserSessionOperationConflictError(
+          "BrowserSession controller authority changed",
+        );
+      }
+      const now = new Date();
+      const [operationRow] = await tx
+        .insert(schema.interactionOperations)
+        .values({
+          operationId: input.operationId,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          resourceKind: "browser_session",
+          resourceId: input.browserSessionId,
+          kind: "resume",
+          requestDigest: digest,
+          state: "completed",
+          actorSubjectId: input.actorSubjectId,
+          controllerGeneration: input.controller.controllerGeneration,
+          dispatchedAt: now,
+          settledAt: now,
+        })
+        .returning();
+      if (!operationRow) throw new Error("BrowserSession resume continuation insert was lost");
+      const [sessionRow] = await tx
+        .update(schema.browserSessions)
+        .set({
+          lifecycle: "active",
+          failureCode: null,
+          controllerHeartbeatAt: now,
+          lastUsedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.browserSessions.workspaceId, input.workspaceId),
+            eq(schema.browserSessions.id, input.browserSessionId),
+            eq(schema.browserSessions.lifecycle, "lost"),
+            eq(schema.browserSessions.failureCode, CONTROLLER_TRANSITION_EXPIRED),
+            eq(schema.browserSessions.controllerGeneration, input.controller.controllerGeneration),
+          ),
+        )
+        .returning();
+      if (!sessionRow) throw new Error("BrowserSession resume continuation was lost");
+      const associations = await loadAssociations(tx, input.workspaceId, [input.browserSessionId]);
+      await advanceWorkspaceInteractionRevision(tx, input.accountId, input.workspaceId);
+      return BrowserSessionMutationResponse.parse({
+        session: browserSessionFromRows(sessionRow, associations),
+        operation: operationReceipt(operationRow, false),
+      });
+    }),
+  );
+}
 
 async function loadBrowserSessionRow(
   tx: Database,

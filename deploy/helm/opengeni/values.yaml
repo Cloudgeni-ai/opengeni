@@ -940,6 +940,17 @@ postgres:
   podSecurityContext:
     fsGroup: 999
   securityContext: {}
+  # PostgreSQL server settings passed as `-c name=value`, in name order. Empty
+  # keeps the image defaults, which suit only small disposable stacks; a
+  # persistent single-node install should size memory and planner settings for
+  # its host, for example:
+  #   max_connections: 200
+  #   shared_buffers: 4GB
+  #   effective_cache_size: 12GB
+  #   random_page_cost: 1.1
+  #   shared_preload_libraries: pg_stat_statements
+  # Raise postgres.resources.limits.memory with shared_buffers.
+  parameters: {}
 
 # Embedded Temporal for disposable conformance stacks and the persistent non-HA
 # single-machine profile. Multi-node deployments should use Temporal Cloud, an
@@ -1105,6 +1116,10 @@ ingress:
         - path: /agent
           pathType: Prefix
           service: api
+        # Desktop app downloads: the installer and redirects to the release.
+        - path: /desktop
+          pathType: Prefix
+          service: api
   tls: []
   # Managed invitation emails use a query bearer because mail security
   # gateways may discard URL fragments. A separate exact route lets
@@ -1165,6 +1180,10 @@ ingress:
             pathType: Prefix
             service: api
           - path: /agent/v
+            pathType: Prefix
+            service: api
+          # Desktop app downloads (installer + release redirects, no secrets).
+          - path: /desktop
             pathType: Prefix
             service: api
           # Device-flow enrollment BOOTSTRAP endpoints a not-yet-credentialed

@@ -103,6 +103,7 @@ import {
   updateSessionTitleWithEvent,
   upsertScheduledSessionGoalForRun,
   withSessionActivityRlsContext,
+  withWorkspaceSubjectRls,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -1200,11 +1201,24 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         : null;
       const beforeFreshAgentRunCommit = acceptedCustomModel
         ? async (tx: Database): Promise<void> => {
-            const active = await lockActiveCustomModelForAdmission(tx, {
-              accountId: task.accountId,
-              workspaceId: task.workspaceId,
-              reference: acceptedCustomModel,
-            });
+            // Admission reads the task's accepted Claude authority (its
+            // carrier) as the person accountable for the task. The subject is
+            // scoped to this check and restored afterwards.
+            const active = await withWorkspaceSubjectRls(
+              tx,
+              task.workspaceId,
+              causalHumanSubjectId ?? task.ownerSubjectId ?? task.createdBy.subjectId,
+              async (scoped) =>
+                await lockActiveCustomModelForAdmission(scoped, {
+                  accountId: task.accountId,
+                  workspaceId: task.workspaceId,
+                  reference: acceptedCustomModel,
+                  claudeAuthority: {
+                    authoritySnapshot: taskClaudeProviderAccountAuthoritySnapshot,
+                    scheduledTaskId: task.id,
+                  },
+                }),
+            );
             if (!active) {
               throw new ScheduledRunTerminalAuthorityError(
                 "scheduled_model_unavailable",
@@ -1897,7 +1911,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             );
             if (
               scheduledUpdate.reason === "session_cancelled" ||
-              scheduledUpdate.reason === "session_not_idle"
+              scheduledUpdate.reason === "session_not_idle" ||
+              scheduledUpdate.reason === "session_paused"
             ) {
               const error = scheduledSessionRejectionError(scheduledUpdate.reason);
               return {
@@ -2047,7 +2062,11 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 },
               },
             );
-            if (bundled.reason === "session_cancelled" || bundled.reason === "session_not_idle") {
+            if (
+              bundled.reason === "session_cancelled" ||
+              bundled.reason === "session_not_idle" ||
+              bundled.reason === "session_paused"
+            ) {
               const error = scheduledSessionRejectionError(bundled.reason);
               return {
                 kind: "blocked" as const,
@@ -2137,7 +2156,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         }
         const terminalError = scheduledRunRecoveryTerminalError(error);
         if (terminalError?.code === "scheduled_model_unavailable") {
-          return scheduledRunTerminalResult(terminalError.code);
+          // The fresh-run admission rolled back the run insert. Record the
+          // refusal as a visible run so the schedule never fails silently.
+          return await refuseAdmission("scheduled_model_unavailable", false, terminalError.message);
         }
         throw error;
       }
@@ -2327,8 +2348,9 @@ function scheduledRunTerminalResult(
 }
 
 function scheduledSessionRejectionError(
-  rejectionReason: "session_cancelled" | "session_not_idle" | null,
-): "session_cancelled" | "scheduled_session_not_idle" {
+  rejectionReason: "session_cancelled" | "session_not_idle" | "session_paused" | null,
+): "session_cancelled" | "scheduled_session_not_idle" | "scheduled_session_paused" {
+  if (rejectionReason === "session_paused") return "scheduled_session_paused";
   return rejectionReason === "session_not_idle"
     ? "scheduled_session_not_idle"
     : "session_cancelled";
@@ -3050,7 +3072,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
   );
   if (
     scheduledUpdate.reason === "session_cancelled" ||
-    scheduledUpdate.reason === "session_not_idle"
+    scheduledUpdate.reason === "session_not_idle" ||
+    scheduledUpdate.reason === "session_paused"
   ) {
     return { action: "blocked", reason: "scheduled_run_terminal" };
   }

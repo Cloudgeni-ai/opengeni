@@ -882,6 +882,25 @@ for attachment delivery instead of inheriting launchd's `/`. Foreground `run`
 continues to use the directory it was launched from, and an explicit session
 `workingDir` still takes precedence.
 
+On Windows, the background agent is a per-user Task Scheduler task named
+**Opengeni Agent**, not a Windows Service. A service runs in session 0, where
+the screen, input and the user's browser are out of reach, and registering one
+needs an administrator. The task runs as the signed-in user in their own
+desktop session, so computer use works, and `start` needs no elevation. It
+starts at sign-in, runs the agent inside a hidden console host (no window, and
+the commands the agent runs share that hidden console), and a one-minute
+repetition starts the agent again if it ever exits. Its working directory is the
+user's profile folder. `stop` pauses: it disables the task so nothing restarts
+the agent, then asks the running agent to shut down cleanly through a named pipe
+private to the user, and ends the agent's process tree only if it does not stop
+within 45 seconds. The agent stays paused across sign-ins until `start`.
+`status` prints `opengeni-agent background task: running`, `paused`, `stopped`
+or `not installed`, read from the agent's own instance lock. The agent does not
+run while nobody is signed in to Windows. Earlier releases
+registered an `OpengeniAgent` Windows Service that could never start; `start`
+deletes it when allowed, and otherwise prints the one elevated command that
+removes it.
+
 The agent also never treats a filesystem root as its workspace, so an older
 service definition needs no manual step: when `run` starts with `/` (or a
 Windows drive root) as its working directory and the user's home directory
@@ -1173,6 +1192,12 @@ The API is the same flow:
   changed since the preview (preview again and retry), and
   `details.reason: "blocked"` with the preview while a duplicate connection
   remains.
+
+A person makes this change, in the app, through the API, or through an agent
+they gave their full access: a session with admin access or a connected agent
+with full access calls the same two routes as them (the `previewMachineAudience`
+and `changeMachineAudience` admin actions). An agent acting as itself, or one
+with less than the person's full access, is refused.
 
 ### Zero-click token (fleet / headless)
 

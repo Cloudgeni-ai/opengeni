@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import { encodeDocumentArtifactCommandBatch } from "@opengeni/contracts/document-artifact-commands";
 import { encodeEditableArtifactSerializedCommit } from "@opengeni/contracts/editable-artifact-serialized-commit";
 import {
@@ -2341,6 +2342,405 @@ describe("Postgres editable artifact authority", () => {
     expect(operationFacts[0]?.count).toBe(operationCount);
   }, 60_000);
 
+  test("keeps kernel-derived spreadsheet operation identities in command order", async () => {
+    if (!available || !shared) return;
+    const scope = { accountId, workspaceId };
+    const actorKey = JSON.stringify(["human", "user:alice"]);
+    const artifactId = nextId();
+    await store.createArtifact(
+      creationFixture({
+        scope,
+        artifactId,
+        receiptId: nextId(),
+        authorityKey: actorKey,
+        idempotencyKey: `create:${artifactId}`,
+        requestHash: hash("a"),
+        modality: "spreadsheet",
+        title: "Command-ordered operation identities",
+        stateHash: hash("b"),
+        authorizationRevision: 1,
+        createdBySubjectId: "user:alice",
+      }),
+    );
+    // The kernel hashes the intent with each command index, so the identities
+    // of one batch are lexically unordered. Identity i is still the operation
+    // at sequenceStart + i, and later commands may reference earlier ones.
+    const [low, middle, high] = [nextId(), nextId(), nextId()];
+    const first = [high, low, middle];
+    const [earlier, later] = [nextId(), nextId()];
+    const second = [later, earlier];
+    const firstReceipt = await applyTransaction({
+      artifactId,
+      clientTransactionId: "ordered-operation-ids-1",
+      requestHash: "ordered-operation-ids-1",
+      replicaId: "9999999999999999",
+      stateHash: hash("c"),
+      operationIds: first,
+    });
+    expect(firstReceipt).toMatchObject({ sequenceStart: 1, sequenceEnd: 3, operationCount: 3 });
+    const secondReceipt = await applyTransaction({
+      artifactId,
+      clientTransactionId: "ordered-operation-ids-2",
+      previousLocalTransactionId: "ordered-operation-ids-1",
+      requestHash: "ordered-operation-ids-2",
+      replicaId: "9999999999999999",
+      stateHash: hash("d"),
+      operationIds: second,
+    });
+    expect(secondReceipt).toMatchObject({ sequenceStart: 4, sequenceEnd: 5, operationCount: 2 });
+
+    const transactions = await shared.admin<{ operation_ids: string[] }[]>`
+      select operation_ids from editable_artifact_transactions
+      where account_id = ${accountId} and workspace_id = ${workspaceId}
+        and artifact_id = ${artifactId}
+      order by sequence_start`;
+    expect(transactions.map((row) => row.operation_ids)).toEqual([first, second]);
+    const operations = await shared.admin<
+      { sequence: number; operation_index: number; operation_id: string }[]
+    >`
+      select sequence::int as sequence, operation_index, operation_id
+      from editable_artifact_operations
+      where account_id = ${accountId} and workspace_id = ${workspaceId}
+        and artifact_id = ${artifactId}
+      order by sequence`;
+    expect(operations.map((row) => [row.sequence, row.operation_index, row.operation_id])).toEqual([
+      [1, 0, high],
+      [2, 1, low],
+      [3, 2, middle],
+      [4, 0, later],
+      [5, 1, earlier],
+    ]);
+
+    // Replay decodes the canonical bytes and requires them to agree with the
+    // durable projection position by position.
+    const kernelState = await readKernelState(scope, artifactId, "ordered-operation-ids-replay");
+    expect(kernelState.committedTransactionTail.map((entry) => entry.operationIds)).toEqual([
+      first,
+      second,
+    ]);
+    // The live history read decodes the same bytes for collaborating clients.
+    const liveRead = new PostgresEditableArtifactLiveReadStore(client!.db, {
+      snapshotBytes: {
+        async readSnapshotBytes() {
+          throw new Error("committed transaction reads need no snapshot");
+        },
+      },
+    });
+    const live = await liveRead.readCommittedTransaction({
+      scope,
+      artifactId,
+      transactionId: firstReceipt.serverTransactionId,
+    });
+    expect(live).toMatchObject({ startSequence: 1, endSequence: 3, modality: "spreadsheet" });
+    const replayed = await store.readTransactionBasis(scope, artifactId, {
+      actorKey,
+      clientTransactionId: "ordered-operation-ids-1",
+      previousLocalTransactionId: null,
+      selectiveUndoOperationIds: [],
+    });
+    expect(replayed.kind).toBe("existing");
+    if (replayed.kind === "existing") {
+      expect(replayed.receipt).toMatchObject({
+        serverTransactionId: firstReceipt.serverTransactionId,
+        sequenceStart: 1,
+        sequenceEnd: 3,
+      });
+    }
+  }, 60_000);
+
+  test("rejects duplicate or misplaced spreadsheet operation identities", async () => {
+    if (!available || !shared) return;
+    const ids = [nextId(), nextId(), nextId()];
+    const [a, b, c] = ids as [string, string, string];
+    const json = (value: unknown) => JSON.stringify(value);
+    const [validators] = await shared.admin<Record<string, boolean | null>[]>`
+      select
+        opengeni_private.editable_artifact_operation_id_list_valid(${json([c, a, b])}::text::jsonb)
+          as "unordered",
+        opengeni_private.editable_artifact_operation_id_list_valid(${json([a])}::text::jsonb)
+          as "single",
+        opengeni_private.editable_artifact_operation_id_list_valid('[]'::jsonb) as "empty",
+        opengeni_private.editable_artifact_operation_id_list_valid(${json([c, a, c])}::text::jsonb)
+          as "duplicate",
+        opengeni_private.editable_artifact_operation_id_list_valid(
+          ${json([a, b.toUpperCase()])}::text::jsonb
+        ) as "uppercase",
+        opengeni_private.editable_artifact_operation_id_list_valid(
+          ${json([a, "0".repeat(32)])}::text::jsonb
+        ) as "zero",
+        opengeni_private.editable_artifact_operation_id_list_valid(${json([a, 1])}::text::jsonb)
+          as "nonString",
+        opengeni_private.editable_artifact_operation_id_list_valid(${json({ a })}::text::jsonb)
+          as "object",
+        opengeni_private.editable_artifact_operation_id_list_valid(null::jsonb) as "null",
+        opengeni_private.editable_artifact_operation_id_list_valid(
+          (select jsonb_agg(lpad(to_hex(n), 32, 'a')) from generate_series(1, 4097) n)
+        ) as "oversized",
+        opengeni_private.editable_artifact_id_array_valid(${json([c, a, b])}::text::jsonb)
+          as "unorderedUndoSet",
+        opengeni_private.editable_artifact_id_array_valid(${json([a, b, c])}::text::jsonb)
+          as "sortedUndoSet"`;
+    expect(validators).toEqual({
+      unordered: true,
+      single: true,
+      // The count clauses, not the list validator, require at least one operation.
+      empty: true,
+      duplicate: false,
+      uppercase: false,
+      zero: false,
+      nonString: false,
+      object: false,
+      null: false,
+      oversized: false,
+      // Selective undo targets remain a canonically sorted set.
+      unorderedUndoSet: false,
+      sortedUndoSet: true,
+    });
+    const [constraint] = await shared.admin<{ definition: string }[]>`
+      select pg_get_constraintdef(oid) as definition from pg_constraint
+      where conname = 'editable_artifact_transactions_frontiers_chk'`;
+    expect(constraint?.definition).toContain(
+      "editable_artifact_operation_id_list_valid(operation_ids)",
+    );
+    expect(constraint?.definition).toContain(
+      "editable_artifact_id_array_valid(selective_undo_targets)",
+    );
+    expect(constraint?.definition).not.toContain("editable_artifact_id_array_valid(operation_ids)");
+
+    const scope = { accountId, workspaceId };
+    const actorKey = JSON.stringify(["human", "user:alice"]);
+    const artifactId = nextId();
+    await store.createArtifact(
+      creationFixture({
+        scope,
+        artifactId,
+        receiptId: nextId(),
+        authorityKey: actorKey,
+        idempotencyKey: `create:${artifactId}`,
+        requestHash: hash("e"),
+        modality: "spreadsheet",
+        title: "Rejected operation identities",
+        stateHash: hash("f"),
+        authorizationRevision: 1,
+        createdBySubjectId: "user:alice",
+      }),
+    );
+    const attempt = async (operationIds: readonly string[], swapOperationFacts: boolean) => {
+      const basis = await store.readTransactionBasis(scope, artifactId, {
+        actorKey,
+        clientTransactionId: `rejected-operation-ids-${nextId()}`,
+        previousLocalTransactionId: null,
+        selectiveUndoOperationIds: [],
+      });
+      if (basis.kind !== "basis" || basis.artifact.modality !== "spreadsheet") {
+        throw new Error("expected a spreadsheet transaction basis");
+      }
+      const clientTransactionId = `rejected-${nextId()}`;
+      const fixture = transactionFixture({
+        artifact: spreadsheetArtifact(basis.artifact),
+        transactionId: nextId(),
+        receiptId: nextId(),
+        operationIds,
+        outboxId: nextId(),
+        clientTransactionId,
+        requestHash: clientTransactionId,
+        replicaId: "aaaaaaaaaaaaaaaa",
+        stateHash: hash("1"),
+      });
+      const operations = swapOperationFacts
+        ? fixture.commit.operations.map((operation, index, all) => ({
+            ...operation,
+            operationId: all[all.length - 1 - index]!.operationId,
+          }))
+        : fixture.commit.operations;
+      return await store.tryCommitAppliedTransaction({
+        scope,
+        artifactId,
+        expectedLifecycle: "active",
+        expectedAuthorizationRevision: basis.artifact.authorizationRevision,
+        authorizationActor: humanAuthorizationActor(),
+        actorKey,
+        clientTransactionId,
+        requestHash: fixture.commit.receipt.requestHash,
+        expectedPredecessor: null,
+        expectedUnclaimedUndoTargets: [],
+        ...fixture.commit,
+        operations,
+      });
+    };
+    // A duplicated identity can never name two different operations.
+    await expect(attempt([b, a, b], false)).rejects.toThrow(/must be unique/);
+    // Operation facts must occupy the exact position their identity holds.
+    await expect(attempt([c, a], true)).rejects.toThrow(/disagrees/);
+    expect((await store.getArtifact(scope, artifactId))?.headSequence).toBe(0);
+    const [written] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from editable_artifact_transactions
+      where account_id = ${accountId} and workspace_id = ${workspaceId}
+        and artifact_id = ${artifactId}`;
+    expect(written?.count).toBe(0);
+  }, 60_000);
+
+  test("the commit trigger rejects operation identities moved after preflight", async () => {
+    // Every TypeScript preflight sees a consistent unsorted batch; a test-only
+    // BEFORE INSERT trigger then swaps the two identities as the operation rows
+    // are written, so only the database commit trigger can notice.
+    if (!available || !shared) return;
+    const admin = shared.admin;
+    const scope = { accountId, workspaceId };
+    const artifactId = nextId();
+    await store.createArtifact(
+      creationFixture({
+        scope,
+        artifactId,
+        receiptId: nextId(),
+        authorityKey: JSON.stringify(["human", "user:alice"]),
+        idempotencyKey: `create:${artifactId}`,
+        requestHash: hash("a"),
+        modality: "spreadsheet",
+        title: "Moved operation identities",
+        stateHash: hash("b"),
+        authorizationRevision: 1,
+        createdBySubjectId: "user:alice",
+      }),
+    );
+    const [low, high] = [nextId(), nextId()] as [string, string];
+    const unsorted = [high, low];
+    await admin.unsafe(
+      `CREATE FUNCTION public.editable_test_swap_operation_ids() RETURNS trigger
+       LANGUAGE plpgsql AS $fn$
+       BEGIN
+         IF NEW.operation_id = '${high}' THEN NEW.operation_id := '${low}';
+         ELSIF NEW.operation_id = '${low}' THEN NEW.operation_id := '${high}';
+         END IF;
+         RETURN NEW;
+       END
+       $fn$`,
+    );
+    let failure: unknown = null;
+    try {
+      await admin.unsafe(
+        `CREATE TRIGGER zz_editable_test_swap_operation_ids BEFORE INSERT
+         ON editable_artifact_operations
+         FOR EACH ROW EXECUTE FUNCTION public.editable_test_swap_operation_ids()`,
+      );
+      await applyTransaction({
+        artifactId,
+        clientTransactionId: "moved-operation-ids-1",
+        requestHash: "moved-operation-ids-1",
+        replicaId: "8888888888888888",
+        stateHash: hash("c"),
+        operationIds: unsorted,
+      });
+    } catch (error) {
+      failure = error;
+    } finally {
+      await admin.unsafe(
+        `DROP TRIGGER IF EXISTS zz_editable_test_swap_operation_ids ON editable_artifact_operations`,
+      );
+      await admin.unsafe(`DROP FUNCTION public.editable_test_swap_operation_ids()`);
+    }
+    type Chained = { code?: unknown; message?: string; cause?: unknown };
+    const chain: string[] = [];
+    for (
+      let cursor = failure as Chained | null | undefined;
+      cursor && chain.length < 6;
+      cursor = cursor.cause as Chained | undefined
+    ) {
+      chain.push(`[${String(cursor.code ?? "")}] ${cursor.message ?? ""}`);
+    }
+    expect(failure).not.toBeNull();
+    expect(chain).toContain(
+      "[23514] operation metadata differs from canonical transaction projection",
+    );
+    expect((await store.getArtifact(scope, artifactId))?.headSequence).toBe(0);
+    const [written] = await admin<{ transactions: number; operations: number }[]>`
+      select
+        (select count(*)::int from editable_artifact_transactions
+          where account_id = ${accountId} and workspace_id = ${workspaceId}
+            and artifact_id = ${artifactId}) as transactions,
+        (select count(*)::int from editable_artifact_operations
+          where account_id = ${accountId} and workspace_id = ${workspaceId}
+            and artifact_id = ${artifactId}) as operations`;
+    expect(written).toEqual({ transactions: 0, operations: 0 });
+
+    // Control: the identical unsorted batch commits when rows keep their positions.
+    const receipt = await applyTransaction({
+      artifactId,
+      clientTransactionId: "moved-operation-ids-2",
+      requestHash: "moved-operation-ids-2",
+      replicaId: "8888888888888888",
+      stateHash: hash("d"),
+      operationIds: unsorted,
+    });
+    expect(receipt).toMatchObject({ sequenceStart: 1, sequenceEnd: 2, operationCount: 2 });
+    const rows = await admin<{ operation_index: number; operation_id: string }[]>`
+      select operation_index, operation_id from editable_artifact_operations
+      where account_id = ${accountId} and workspace_id = ${workspaceId}
+        and artifact_id = ${artifactId}
+      order by sequence`;
+    expect(rows.map((row) => [row.operation_index, row.operation_id])).toEqual([
+      [0, high],
+      [1, low],
+    ]);
+  }, 60_000);
+
+  test("grants the operation identity validator to configured application roles only", async () => {
+    if (!available || !shared) return;
+    const migration = await readFile(
+      new URL("../drizzle/0785_editable_spreadsheet_ordered_operation_ids.sql", import.meta.url),
+      "utf8",
+    );
+    expect(migration).toContain("opengeni.migration_application_roles");
+    const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+    const runtimeRole = `editable_runtime_${suffix}`;
+    const bystanderRole = `editable_bystander_${suffix}`;
+    const rollback = new Error("roll back the re-applied migration");
+    let observed: Record<string, boolean | null> | undefined;
+    // Re-apply the migration as the migrator would, inside a transaction that
+    // is always rolled back, with one real and one unknown configured role.
+    await expect(
+      shared.admin.begin(async (tx) => {
+        await tx.unsafe(`CREATE ROLE ${runtimeRole} NOLOGIN`);
+        await tx.unsafe(`CREATE ROLE ${bystanderRole} NOLOGIN`);
+        await tx`select set_config(
+          'opengeni.migration_application_roles',
+          ${JSON.stringify([runtimeRole, `editable_missing_${suffix}`])},
+          true
+        )`;
+        await tx.unsafe(migration);
+        const [row] = await tx<Record<string, boolean | null>[]>`
+          select
+            has_function_privilege(${runtimeRole}, procedure.oid, 'EXECUTE') as "configured",
+            has_function_privilege(${bystanderRole}, procedure.oid, 'EXECUTE') as "bystander",
+            has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "app",
+            exists (
+              select 1 from aclexplode(procedure.proacl) acl where acl.grantee = 0
+            ) as "public",
+            procedure.prosecdef as "securityDefiner",
+            exists (
+              select 1 from pg_roles where rolname = ${`editable_missing_${suffix}`}
+            ) as "unknownCreated"
+          from pg_proc procedure
+          where procedure.oid =
+            'opengeni_private.editable_artifact_operation_id_list_valid(jsonb)'::regprocedure`;
+        observed = row;
+        throw rollback;
+      }),
+    ).rejects.toBe(rollback);
+    expect(observed).toEqual({
+      configured: true,
+      bystander: false,
+      app: true,
+      public: false,
+      securityDefiner: false,
+      unknownCreated: false,
+    });
+    const [after] = await shared.admin<{ roles: number }[]>`
+      select count(*)::int as roles from pg_roles
+      where rolname in (${runtimeRole}, ${bystanderRole})`;
+    expect(after?.roles).toBe(0);
+  }, 60_000);
+
   test("fences create and read authorization revisions without partial genesis writes", async () => {
     if (!available || !shared) return;
     const [fenceAccount] = await shared.admin<{ id: string }[]>`
@@ -2651,6 +3051,7 @@ async function applyTransaction(input: {
   requestHash: string;
   replicaId: string;
   stateHash: string;
+  operationIds?: readonly string[];
 }): Promise<Extract<PersistedEditableArtifactReceipt, { modality: "spreadsheet" }>> {
   const scope = { accountId, workspaceId };
   const actorKey = JSON.stringify(["human", "user:alice"]);
@@ -2682,7 +3083,9 @@ async function applyTransaction(input: {
       artifact: spreadsheetArtifact(basis.artifact),
       transactionId,
       receiptId: nextId(),
-      operationId: nextId(),
+      ...(input.operationIds === undefined
+        ? { operationId: nextId() }
+        : { operationIds: input.operationIds }),
       outboxId: nextId(),
       clientTransactionId: input.clientTransactionId,
       ...(input.previousLocalTransactionId === undefined
@@ -2726,22 +3129,24 @@ async function applyTransaction(input: {
   throw new Error("optimistic artifact transaction did not converge");
 }
 
-function transactionFixture(input: {
-  artifact: Extract<PersistedEditableArtifact, { modality: "spreadsheet" }>;
-  transactionId: string;
-  receiptId: string;
-  operationId: string;
-  outboxId: string;
-  clientTransactionId: string;
-  previousLocalTransactionId?: string;
-  causalBase?: PersistedEditableArtifactCausalFrontier;
-  predecessor?: Extract<PersistedEditableArtifactReceipt, { modality: "spreadsheet" }>;
-  selectiveUndoOperationIds?: readonly string[];
-  requestHash: string;
-  replicaId: string;
-  stateHash: string;
-  actorKey?: string;
-}) {
+function transactionFixture(
+  input: {
+    artifact: Extract<PersistedEditableArtifact, { modality: "spreadsheet" }>;
+    transactionId: string;
+    receiptId: string;
+    outboxId: string;
+    clientTransactionId: string;
+    previousLocalTransactionId?: string;
+    causalBase?: PersistedEditableArtifactCausalFrontier;
+    predecessor?: Extract<PersistedEditableArtifactReceipt, { modality: "spreadsheet" }>;
+    selectiveUndoOperationIds?: readonly string[];
+    requestHash: string;
+    replicaId: string;
+    stateHash: string;
+    actorKey?: string;
+  } & ({ operationId: string } | { operationIds: readonly string[] }),
+) {
+  const operationIds = "operationIds" in input ? [...input.operationIds] : [input.operationId];
   const committedAt = new Date().toISOString();
   const replicaCounter =
     input.artifact.causalFrontier.find((entry) => entry.replicaId === input.replicaId)?.counter ??
@@ -2777,13 +3182,13 @@ function transactionFixture(input: {
     requestHash: intent.requestHash,
     actorKey,
     sequenceStart: input.artifact.headSequence + 1,
-    sequenceEnd: input.artifact.headSequence + 1,
+    sequenceEnd: input.artifact.headSequence + operationIds.length,
     priorStateHash: input.artifact.stateHash,
     causalBase,
     resolvedCausalBase,
     resultingCausalFrontier,
     stateHash: input.stateHash,
-    operationCount: 1,
+    operationCount: operationIds.length,
     selectiveUndoOperationIds: input.selectiveUndoOperationIds ?? [],
     intentEnvelopeVersion: 1,
     intentProtocolVersion: 1,
@@ -2793,25 +3198,23 @@ function transactionFixture(input: {
     operationProtocolVersion: 2,
     committedAt,
   };
-  const operations = [
-    {
-      scope: input.artifact.scope,
-      artifactId: input.artifact.id,
-      serverTransactionId: input.transactionId,
-      sequence: receipt.sequenceStart,
-      actorKey,
-      createdAt: committedAt,
-      operationId: input.operationId,
-      dot: { replicaId: input.replicaId, counter },
-    },
-  ];
+  const operations = operationIds.map((operationId, index) => ({
+    scope: input.artifact.scope,
+    artifactId: input.artifact.id,
+    serverTransactionId: input.transactionId,
+    sequence: receipt.sequenceStart + index,
+    actorKey,
+    createdAt: committedAt,
+    operationId,
+    dot: { replicaId: input.replicaId, counter },
+  }));
   const committedTransactionBytes = encodeCommittedTransaction({
     transactionId: input.transactionId,
     replicaId: input.replicaId,
     replicaCounter: counter,
     resolvedCausalBase,
     priorStateHash: input.artifact.stateHash,
-    operationIds: [input.operationId],
+    operationIds,
     resultingCausalFrontier,
     stateHash: input.stateHash,
   });
@@ -2833,7 +3236,7 @@ function transactionFixture(input: {
         dot: { replicaId: input.replicaId, counter },
         resolvedCausalBase,
         resultingCausalFrontier,
-        operationIds: [input.operationId],
+        operationIds,
         operationProtocolVersion: 2,
         modelSchemaVersion: 2,
         kernelVersion: "test-kernel-1",

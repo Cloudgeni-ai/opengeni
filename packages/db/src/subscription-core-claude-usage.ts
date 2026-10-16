@@ -36,9 +36,11 @@ import {
   type QuotaWindow,
   type SubscriptionCoreConnectionRead,
   type SubscriptionQuota,
+  type SubscriptionQuotaBlock,
 } from "@opengeni/subscriptions";
 import {
   decodeSubscriptionCoreClaudeQuota,
+  SUBSCRIPTION_CORE_CLAUDE_CLAIMABLE_WINDOW_IDS,
   SUBSCRIPTION_CORE_CLAUDE_MODEL_PREFIXES,
   type SubscriptionCoreClaudeCredential,
 } from "./subscription-core-claude-adapter";
@@ -155,6 +157,59 @@ export function decodeSubscriptionCoreClaudeUsage(input: {
     }),
     revision: 0,
   };
+}
+
+/** The account windows that decide whether a Claude connection may serve. */
+const ACCOUNT_WINDOW_IDS = ["five_hour", "seven_day"] as const;
+
+function reportsBelowLimit(reading: SubscriptionCoreClaudeUsageReading, id: string): boolean {
+  const window = reading.observation?.windows.find((candidate) => candidate.id === id);
+  return window !== undefined && window.usedPercent !== null && window.usedPercent < 100;
+}
+
+/**
+ * The adapter's `usageReadConfirmsAvailability`: an available reading that
+ * reports both account windows (five hours, seven days) below the limit. A
+ * reading that omits one, or reports it without a percentage, says nothing
+ * about the limit that refused the connection, so it ends nothing.
+ */
+export function subscriptionCoreClaudeUsageConfirmsAvailability(response: unknown): boolean {
+  return (
+    isUsageReading(response) &&
+    response.status === "available" &&
+    ACCOUNT_WINDOW_IDS.every((id) => reportsBelowLimit(response, id))
+  );
+}
+
+/**
+ * The adapter's `usageReadEndsClaimedBlock`: with a reading that confirms
+ * availability, a stored block (a model cooldown, or the quota exhaustion
+ * deadline) has ended when its claim names only plan windows this build
+ * recognizes, was observed before the reading was requested (a refusal
+ * that arrived while it was in flight stands), and the reading reports
+ * every claimed window with a percentage below the limit. Everything else
+ * ends nothing (fail closed): a block without a claim (no or an
+ * unrecognized representative claim, or a refusal without usage headers),
+ * a claimed window the reading omits or answers as `null` (no such limit
+ * now never clears a limit that refused), and a reading that does not
+ * confirm availability. A plan without a family limit still recovers from
+ * an account-window claim: only the claimed windows are required.
+ */
+export function subscriptionCoreClaudeUsageEndsClaimedBlock(
+  response: unknown,
+): (block: SubscriptionQuotaBlock) => boolean {
+  if (!subscriptionCoreClaudeUsageConfirmsAvailability(response)) return () => false;
+  const reading = response as SubscriptionCoreClaudeUsageReading;
+  const requestedAt = Date.parse(reading.checkedAt);
+  if (!Number.isFinite(requestedAt)) return () => false;
+  return ({ claim }) =>
+    claim !== null &&
+    claim.windowIds.length > 0 &&
+    claim.observedAt < requestedAt &&
+    claim.windowIds.every(
+      (id) =>
+        SUBSCRIPTION_CORE_CLAUDE_CLAIMABLE_WINDOW_IDS.has(id) && reportsBelowLimit(reading, id),
+    );
 }
 
 /** The fields of a core connection row the usage projection reads. */

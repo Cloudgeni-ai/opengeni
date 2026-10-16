@@ -185,6 +185,11 @@ details {
   text-align: left;
 }
 
+/* Typing another server's address comes before continuing with it. */
+details[open] {
+  order: -1;
+}
+
 summary {
   width: fit-content;
   margin: 0 auto;

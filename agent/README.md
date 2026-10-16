@@ -103,7 +103,8 @@ pages or guarantee graceful completion for a permanently stuck controller.
   cancellation, or removal of the owning link releases the upload reservation.
 - **Background service** — `opengeni-agent start|stop|status` is the normal simple
   lifecycle; `service install|uninstall|...` is the advanced surface. It uses a
-  systemd user/system unit, macOS LaunchAgent, or Windows Service. Repeated `start`
+  systemd user/system unit, a macOS LaunchAgent, or a per-user Windows logon task
+  that runs in the user's desktop session (so computer use works). Repeated `start`
   repairs the definition without disrupting a running same-version process;
   `start --restart` activates a real binary upgrade once. The generated service
   preserves the installer's command `PATH`; agent commands retain that normal
@@ -112,8 +113,9 @@ pages or guarantee graceful completion for a permanently stuck controller.
   `opengeni-agent run` remains the explicit foreground mode.
 - **Pipelines** — `.github/workflows/agent-ci.yml` (fmt/clippy/test/build +
   install-smoke across ubuntu/macOS/Windows per PR) and `.github/workflows/agent-release.yml`
-  (matrix build → minisign-sign + sha256 → GitHub Release; macOS notarize + Windows
-  Authenticode are guarded creds-drop-ins that skip cleanly when absent).
+  (matrix build → minisign-sign + sha256 → GitHub Release; macOS notarize and Windows
+  Authenticode through Azure Artifact Signing, signed in with GitHub OIDC, are guarded
+  drop-ins that skip cleanly when their credentials or `AZURE_SIGNING_*` variables are absent).
 
 ## One agent, many Opengeni deployments
 

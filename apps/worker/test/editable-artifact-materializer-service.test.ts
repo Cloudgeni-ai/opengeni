@@ -230,6 +230,30 @@ describe("editable artifact materializer sidecar service", () => {
     ).toThrow("loopback HTTP listener");
   });
 
+  test("development storage validates the effective server-side endpoint", () => {
+    const complete = developmentEnvironment();
+    expect(
+      readEditableArtifactMaterializerSidecarEnvironment({
+        ...complete,
+        OPENGENI_OBJECT_STORAGE_ENDPOINT: "https://objects.example.test",
+        OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT: "http://127.0.0.1:13900",
+      }),
+    ).not.toBeNull();
+    expect(() =>
+      readEditableArtifactMaterializerSidecarEnvironment({
+        ...complete,
+        OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT: "https://objects.example.test",
+      }),
+    ).toThrow("loopback object storage");
+    expect(() =>
+      readEditableArtifactMaterializerSidecarEnvironment({
+        ...complete,
+        OPENGENI_OBJECT_STORAGE_ENDPOINT: "https://objects.example.test",
+        OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT: " ",
+      }),
+    ).toThrow("loopback object storage");
+  });
+
   test("ordinary Temporal worker entry never imports or starts the sidecar", async () => {
     const source = await Bun.file(new URL("../src/index.ts", import.meta.url)).text();
     expect(source).not.toContain("artifact-materializer-entry");

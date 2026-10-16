@@ -8,7 +8,9 @@ members = [
     "crates/opengeni-agent-platform",
     "crates/opengeni-agent-files-ffi",
     "crates/opengeni-agent-linux-ffi",
+    "crates/opengeni-agent-pipewire-ffi",
     "crates/opengeni-agent-macos-ffi",
+    "crates/opengeni-agent-windows-ffi",
     "crates/opengeni-agent-stream",
     "crates/opengeni-agent-update",
     "crates/opengeni-relay",
@@ -21,7 +23,7 @@ members = [
 # we lean on clippy::pedantic at the workspace level and silence only the few
 # lints that fight generated code or add no value here.
 [workspace.package]
-version = "0.1.60"
+version = "0.1.77"
 edition = "2021"
 rust-version = "1.82"
 license = "Apache-2.0"

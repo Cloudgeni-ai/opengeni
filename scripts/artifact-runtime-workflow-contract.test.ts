@@ -52,7 +52,8 @@ describe("artifact runtime workflow contract", () => {
 bun scripts/prepare-development-artifact-runtime.ts \\
   --repository-root "$GITHUB_WORKSPACE" \\
   --output "$GITHUB_WORKSPACE/.opengeni/artifact-runtime-report-ci"
-bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts
+bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
+  ./apps/api/test/native-spreadsheet-transaction-order.test.ts
 `);
     const unitSteps = parsed.jobs["unit-shards"]!.steps!;
     expect(unitSteps.some((candidate) => candidate.run?.includes("artifact-kernel-rust"))).toBe(

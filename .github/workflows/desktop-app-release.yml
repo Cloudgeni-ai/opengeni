@@ -5,12 +5,23 @@
 #   notarized with the App Store Connect key;
 # - Linux (x64 and arm64): AppImage, deb and rpm, with signed build provenance
 #   (verify a download with `gh attestation verify <file> --repo <this repo>`);
-# - Windows (x64 and arm64): an installer with signed build provenance. It is
-#   not yet Authenticode-signed, so SmartScreen warns on first run;
+# - Windows (x64 and arm64): an installer with signed build provenance,
+#   Authenticode-signed with Azure Artifact Signing when the repository
+#   variables below are set (otherwise unsigned, and SmartScreen warns);
 # and publishes them together as the release desktop-v<version>. Installed apps
 # update from the newest desktop-v release. Releases in this repository are
 # immutable once published, so the release is created as a draft, filled, and
 # only then published.
+#
+# Windows signing signs in to Azure with GitHub's OIDC token, so no Azure
+# secret is stored. Repository variables: AZURE_SIGNING_CLIENT_ID,
+# AZURE_SIGNING_TENANT_ID, AZURE_SIGNING_SUBSCRIPTION_ID, AZURE_SIGNING_ENDPOINT
+# (for example https://neu.codesigning.azure.net/), AZURE_SIGNING_ACCOUNT,
+# AZURE_SIGNING_CERTIFICATE_PROFILE and AZURE_SIGNING_PUBLISHER (the
+# certificate's common name, which installed apps require of their updates).
+# The client needs a federated credential for this repository's
+# desktop-release environment and the Artifact Signing Certificate Profile
+# Signer role on the account.
 name: desktop-app-release
 
 on:
@@ -234,8 +245,11 @@ jobs:
 
   windows:
     needs: version
+    environment: desktop-release
     runs-on: windows-2025
     timeout-minutes: 45
+    env:
+      SIGN: ${{ vars.AZURE_SIGNING_CERTIFICATE_PROFILE != '' }}
     defaults:
       run:
         shell: bash
@@ -255,13 +269,38 @@ jobs:
           (cd packages/desktop && bun run typecheck)
           (cd apps/desktop && bun run typecheck)
 
+      - name: Sign in to Azure for code signing
+        if: env.SIGN == 'true'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SIGNING_SUBSCRIPTION_ID }}
+
       - name: Build
         working-directory: apps/desktop
         env:
           OPENGENI_DESKTOP_VERSION: ${{ needs.version.outputs.version }}
+          SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_CERTIFICATE_PROFILE }}
+          SIGNING_PUBLISHER: ${{ vars.AZURE_SIGNING_PUBLISHER }}
         run: |
+          set -euo pipefail
           bun scripts/build.ts --production
-          bunx electron-builder --win --publish never
+          signing=()
+          if [ "$SIGN" = true ]; then
+            # electron-builder signs the app, its helpers, the installer and
+            # the uninstaller through the Artifact Signing PowerShell module,
+            # which uses the Azure CLI sign-in above.
+            signing=(
+              -c.win.azureSignOptions.endpoint="$SIGNING_ENDPOINT"
+              -c.win.azureSignOptions.codeSigningAccountName="$SIGNING_ACCOUNT"
+              -c.win.azureSignOptions.certificateProfileName="$SIGNING_PROFILE"
+              -c.win.azureSignOptions.publisherName="$SIGNING_PUBLISHER"
+            )
+          fi
+          bunx electron-builder --win --publish never "${signing[@]}"
 
       - name: Verify
         working-directory: apps/desktop/release
@@ -281,6 +320,29 @@ jobs:
           grep -q "version: $VERSION" latest.yml
           test -f win-unpacked/Opengeni.exe
           test -f win-arm64-unpacked/Opengeni.exe
+
+      - name: Verify signatures
+        if: env.SIGN == 'true'
+        working-directory: apps/desktop/release
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          SIGNING_PUBLISHER: ${{ vars.AZURE_SIGNING_PUBLISHER }}
+        run: |
+          $files = @(
+            "Opengeni-$env:VERSION-windows.exe",
+            "Opengeni-$env:VERSION-windows-x64.exe",
+            "Opengeni-$env:VERSION-windows-arm64.exe",
+            "win-unpacked/Opengeni.exe",
+            "win-arm64-unpacked/Opengeni.exe"
+          )
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -FilePath $file
+            if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "CN=`"?$([regex]::Escape($env:SIGNING_PUBLISHER))") {
+              throw "$file is not validly signed by $env:SIGNING_PUBLISHER ($($signature.Status): $($signature.StatusMessage))"
+            }
+            Write-Host "$file signed by $($signature.SignerCertificate.Subject)"
+          }
 
       - name: Provenance
         uses: actions/attest-build-provenance@v3
@@ -312,6 +374,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.version.outputs.version }}
+          WINDOWS_SIGNED: ${{ vars.AZURE_SIGNING_CERTIFICATE_PROFILE != '' }}
         run: |
           set -euo pipefail
           ls -la
@@ -321,12 +384,16 @@ jobs:
             echo "$tag is already published; releases are immutable, so build a new version." >&2
             exit 1
           fi
+          windows_note=""
+          if [ "$WINDOWS_SIGNED" != true ]; then
+            windows_note=" Until the installer is signed, Windows may say it protected your PC: choose **More info**, then **Run anyway**."
+          fi
           if ! gh release view "$tag" >/dev/null 2>&1; then
             cat > "$RUNNER_TEMP/notes.md" <<NOTES
           Opengeni desktop $VERSION.
 
-          - **macOS:** download \`Opengeni-$VERSION-mac.dmg\`, open it and drag Opengeni to Applications.
-          - **Windows:** download \`Opengeni-$VERSION-windows.exe\` and open it. It installs for you alone, without administrator rights, and updates itself. Until the installer is signed, Windows may say it protected your PC: choose **More info**, then **Run anyway**.
+          - **macOS:** download \`Opengeni-$VERSION-mac.dmg\`, open it and drag Opengeni to Applications, or run \`brew install --cask cloudgeni-ai/tap/opengeni\`.
+          - **Windows:** download \`Opengeni-$VERSION-windows.exe\` and open it. It installs for you alone, without administrator rights, and updates itself.$windows_note
           - **Ubuntu, Debian:** download the \`.deb\` for your machine (\`amd64\` or \`arm64\`) and run \`sudo apt install ./Opengeni-$VERSION-linux-amd64.deb\`.
           - **Fedora, RHEL, openSUSE:** download the \`.rpm\` (\`x86_64\` or \`aarch64\`) and run \`sudo dnf install ./Opengeni-$VERSION-linux-x86_64.rpm\`.
           - **Any Linux:** download the \`.AppImage\`, make it executable (\`chmod +x\`) and open it. It adds itself to your apps and updates itself.
@@ -338,3 +405,48 @@ jobs:
           fi
           gh release upload "$tag" ./* --clobber
           gh release edit "$tag" --draft=false --latest=false
+
+  # Point the Homebrew cask at this release. Stable versions only: the cask is
+  # what `brew install --cask cloudgeni-ai/tap/opengeni` installs.
+  homebrew:
+    needs: [version, publish]
+    if: ${{ !contains(needs.version.outputs.version, '-') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: apps/desktop/homebrew
+          sparse-checkout-cone-mode: false
+
+      - name: Update the cask
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+          TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          sha="$(gh release download "desktop-v$VERSION" --pattern SHA256SUMS --output - |
+            awk -v file="Opengeni-$VERSION-mac.dmg" '$2 == file { print $1 }')"
+          if ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "No checksum for Opengeni-$VERSION-mac.dmg in the release." >&2
+            exit 1
+          fi
+          key="$RUNNER_TEMP/tap-key"
+          (umask 077 && printf '%s\n' "$TAP_DEPLOY_KEY" > "$key")
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone --depth 1 git@github.com:Cloudgeni-ai/homebrew-tap.git "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Casks"
+          sed -e "s/@VERSION@/$VERSION/" -e "s/@SHA256@/$sha/" apps/desktop/homebrew/opengeni.rb \
+            > "$RUNNER_TEMP/tap/Casks/opengeni.rb"
+          cd "$RUNNER_TEMP/tap"
+          git add Casks/opengeni.rb
+          if git diff --cached --quiet; then
+            echo "The cask already points at $VERSION."
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -qm "opengeni $VERSION"
+          git push origin HEAD

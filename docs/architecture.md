@@ -38,6 +38,25 @@ retain catalog floors, granting no capabilities/credentials.
 owns turn refs: ordinary work uses session policy; scheduled work retains frozen
 selection. Credential-provider targeting/MCP preparation consume these refs,
 never omitted-tools queue arrays. Connection-backed MCPs use native authentication, including historical work.
+An optional `ToolRef.allowedTools` narrows a connection's catalog and direct calls;
+merged refs intersect that ceiling and children cannot widen it. Console Site
+agents use it for the overlap of Site-declared tools and the viewer's permissions.
+Their editable-artifact writes also require immutable create/import provenance
+within the same Site-clamped session tree; read-created session links grant no edits.
+Published-host continuation normalizes legacy tool-less chats through
+`apps/api/src/site-publishing/agent-session.ts` before admission: the locked
+session update installs only viewer-bound Site data tools, matching permissions
+and no sandbox, without restoring workspace defaults or rewriting accepted work.
+Published page connector tools use `site-publishing/page-tool-authority.ts`:
+the signed gateway's opaque Site session resolves its live workspace member,
+never a fabricated console authorization. Its request-local capability admits
+only current-version declared identities through the ordinary tool gateway,
+including account selection, approval and targeted live fences. This page
+authority is independent of the embedded agent's settings; outsiders receive none.
+Published-host Site funding retains a pending-admission token through dispatch.
+Its trusted async context locks the conversation before the session writer prefix;
+recovery revokes that token and checks the locked canonical queue before refunding,
+so delayed enqueue and idle settlement cannot allocate the same funds twice.
 Signed callbacks retain accepted initiators; children inherit bounded lineage.
 Continuations freeze causal-turn provenance at claim; renewals preserve snapshots
 and service principals. See
@@ -716,6 +735,9 @@ Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotatio
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the
 larger budget plus reaper period, even for historical Modal leases after backend
 changes. Drain budgets cover dispatch/capture/retry within the lifecycle ceiling.
+That budget bounds a drain attempt's wait, not its capture: a slower capture still
+publishes late, and a worker never runs two drain captures of one lease epoch at
+once (see `docs/run-lifecycle.md`).
 Warm-capture reclamation/heartbeat cleanup retain holders through the original
 deadline after turn closure: no takeover or authority extension.
 
@@ -1324,6 +1346,8 @@ Provider-normalized calls freeze nullable provider/equivalent-credit comparisons
 `priced_cost_micros` is requested price, not debit; external calls record zero.
 Telemetry/comparison prices cannot authorize capacity/debits. `agent.model.usage`
 preserves accepted billing/Gateway authority; repair prefers it over legacy inference.
+Its worker-set `purpose` names the call: `main` (the turn's own inference, including
+the aggregate fallback), `compaction` or `session-title`. Older events have none.
 
 Insights retains private/deleted/unmatched amounts. Details require actor
 visibility and canonical selected-key/explicit-permission ceilings. Mask before
@@ -1397,6 +1421,7 @@ Manifests and `.changeset/config.json` own publication; this map describes respo
 | `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK and React packages |
 | `apps/desktop` | `@opengeni/desktop-app` | Opengeni desktop app for macOS, Windows and Linux, built on `@opengeni/desktop` |
 | `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension; a leaf client, not session authority ([README](../apps/browser-extension/README.md), [privacy](../apps/browser-extension/PRIVACY.md)) |
+| `apps/site-gateway` | `@opengeni/site-gateway` | Cloudflare Worker serving published Sites on `<label>.<sites domain>`: host lookup, viewer sign-in cookies, signed forwarding to `/v1/site-runtime`, short generation-keyed HTML caching and edge headers; no authorization of its own ([README](../apps/site-gateway/README.md)) |
 | `apps/mobile` | Standalone Expo app `opengeni-mobile` (own `bun.lock`) | iOS and Android client: web sign-in for its own app credential, accounts, workspace switching, settings, and push; a leaf client ([README](../apps/mobile/README.md)) |
 
 The standalone `apps/api` entrypoint installs a one-shot fatal process
@@ -1671,6 +1696,9 @@ Local preview remains frozen-attempt Codemode, not current-human authority.
 Explicit catalog/declarations discovery and OAuth remain separate paths.
 
 HTML-only Sites and inline chat previews share the SDK bridge and renderer.
+The framework-free bridge host (`packages/sdk/src/site-bridge-host.ts`) is
+shared by the console frame and the published-Sites gateway shell
+(`apps/site-gateway`); hosts inject tool transport, viewer and sign-in.
 See [embedding authority internals](embedding-authority-internals.md#inline-html-and-chat-previews)
 for loading, versioning, visualization assets, and retained images.
 
@@ -1925,6 +1953,13 @@ bytes in object storage). Data belongs to the Site, not a version; collection
 access modes are enforced only in the API, Site frames reach it through the
 existing Site HTTP channel with host-pinned `current` routes only and always
 with viewer reach, and managers see it in the Site page's Data tab. See [`site-data.md`](site-data.md).
+
+Site SQL is the optional per-Site database next to it: one SQLite-backed
+Durable Object per Site in the Sites gateway Worker, reached only by the API
+through a signed internal gateway route. Postgres keeps the definitions
+(settings, migrations and named queries) so the database can be rebuilt; Site
+pages run only named queries with `:viewer` bound by the API. See
+[`site-data.md`](site-data.md#site-sql-optional-cloudflare-storage).
 
 Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
@@ -2238,6 +2273,12 @@ lanes declare services/credentials.
 
 Manifests/Changesets/CI/release scripts govern evidence-bound npm/image/Helm/Rust
 publication, retaining source identity. Web builds target both CPUs.
+`scripts/canary-source-admission.ts` admits an exact normally merged protected-main
+ancestor only with successful exact-source main CI. The current-main publication
+controller remains separate from its package-source checkout. Ancestor tarballs
+use supplied Sigstore provenance naming both source and controller, without changing
+GitHub's identity environment; ordinary current-head provenance stays unchanged.
+Split-source receipt V2 is explicitly outside canonical V1 receipt-only recovery.
 Canary packages prepack the complete cohort, retain write acknowledgements, then
 perform bounded strict read-only verification before producing Site pins.
 Post-write verification selects current tags and one immutable version manifest;

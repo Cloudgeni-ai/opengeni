@@ -15,6 +15,11 @@ export {
   compactionPrefixCuts,
 } from "./anthropic-compaction";
 export { AnthropicProviderRejection } from "./anthropic-messages";
+export {
+  createModelImageSizer,
+  type ModelImageSizerOptions,
+  type SizedImage,
+} from "./model-image-sizing";
 import { runSingleModelCall, type SingleModelCallTarget } from "./single-model-call";
 export {
   runSingleModelCall,
@@ -33,6 +38,7 @@ import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import {
+  mcpToolRecommendsApproval,
   normalizeCredentialProviderMcpUrl,
   toolPolicyActionName,
   toolReviewContextFromSchema,
@@ -223,6 +229,7 @@ import {
   ConnectorAttachmentTransferError,
   projectConnectorAttachmentTransfers,
   type ConnectorAttachmentMaterializer,
+  type ConnectorFileMaterializationRequest,
 } from "./connector-attachments";
 import {
   wrapAttemptToolDefinitions,
@@ -247,6 +254,7 @@ export {
   type ConnectorAttachmentMaterializationRequest,
   type ConnectorAttachmentMaterializer,
   type ConnectorAttachmentTransferProjectionOptions,
+  type ConnectorFileMaterializationRequest,
 } from "./connector-attachments";
 export {
   GMAIL_REST_API_BASE,
@@ -784,6 +792,8 @@ export {
   type CompactionProviderRejection,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
+  compactionAttachmentFileIds,
+  type AttachmentUploadTimes,
   compactionReplacementFingerprint,
   compactionThresholdTokens,
   clampCompactionThresholdRatio,
@@ -3580,6 +3590,7 @@ function installMcpApprovalPolicy(
         inputSchema: unknown;
         title?: string;
         accountLabel?: string | undefined;
+        recommendsApproval: boolean;
         readReview: ToolReviewReader;
       }
     >();
@@ -3598,6 +3609,7 @@ function installMcpApprovalPolicy(
           serverId: server.registryId,
           toolName: await server.unprefixedToolName(descriptor.name),
           inputSchema: descriptor.inputSchema,
+          recommendsApproval: mcpToolRecommendsApproval(descriptor),
           readReview: (name, args) => server.reviewContext(name, args),
           ...(descriptor.title ? { title: descriptor.title } : {}),
           ...(accountLabel ? { accountLabel } : {}),
@@ -3618,8 +3630,12 @@ function installMcpApprovalPolicy(
       const unprefixed = identity?.toolName ?? tool.name.slice(policy.prefix.length);
       const originalNeedsApproval = tool.needsApproval.bind(tool);
       const originalInvoke = tool.invoke.bind(tool);
-      const legacyApproval =
-        !policy.connectorBacked && mcpToolRequiresApproval(policy.requireApproval, unprefixed);
+      // The recommendation: the session's requireApproval or the tool's own
+      // tools/list `_meta`. Either one asking makes Ask the default.
+      const recommendsApproval =
+        mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
+        identity?.recommendsApproval === true;
+      const legacyApproval = !policy.connectorBacked && recommendsApproval;
       if (!policy.connectorBacked && !legacyApproval && !connectorActionPolicy) {
         return tool;
       }
@@ -3641,9 +3657,7 @@ function installMcpApprovalPolicy(
           }),
           actionName: toolPolicyActionName(unprefixed, identity?.inputSchema, args),
           ...(legacyApproval ? { approvalMode: "session_mcp" as const } : {}),
-          defaultDecision: mcpToolRequiresApproval(policy.requireApproval, unprefixed)
-            ? "ask"
-            : "allow",
+          defaultDecision: recommendsApproval ? "ask" : "allow",
         };
       };
       return {
@@ -3655,8 +3669,7 @@ function installMcpApprovalPolicy(
         ) => {
           if (!connectorActionPolicy) {
             return (
-              mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
-              (await originalNeedsApproval(runContext, parsedInput, callId))
+              recommendsApproval || (await originalNeedsApproval(runContext, parsedInput, callId))
             );
           }
           if (!callId) {
@@ -3675,7 +3688,7 @@ function installMcpApprovalPolicy(
           // An explicit Allow is a decision, not an exemption from one of several floors.
           const requiresApproval = preparation.managed
             ? preparation.decision === "ask"
-            : mcpToolRequiresApproval(policy.requireApproval, unprefixed);
+            : recommendsApproval;
           if (requiresApproval) approvalRequiredCallIds.add(callId);
           else approvalRequiredCallIds.delete(callId);
           return requiresApproval;
@@ -3932,7 +3945,9 @@ function installInteractionInterventionPolicy(
 
 /**
  * Translate the canonical decision into the model SDK interruption protocol.
- * Legacy requireApproval is a recommendation only when no explicit choice exists.
+ * Legacy requireApproval and a tool's `opengeni/recommendedPermission` `_meta`
+ * are recommendations only when no explicit choice exists. Every external MCP
+ * server is wrapped so a tool's own recommendation holds even without hooks.
  * Standalone runtimes without policy hooks retain their configured behavior;
  * they cannot execute an approval-gated call without the durable authority.
  * Prepared server/tool identities take precedence over longest-prefix legacy
@@ -3949,7 +3964,7 @@ function applyMcpApprovalPolicy(
     .filter(
       (server) =>
         Boolean(server.connectionRef) ||
-        Boolean(connectorActionPolicy && attemptToolSource(server.id) === "mcp") ||
+        attemptToolSource(server.id) === "mcp" ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
@@ -4638,6 +4653,8 @@ export type PrepareToolsOptions = {
   materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
   materializeGmailFile?: GmailRestMcpBridgeContext["materializeGmailFile"];
   readGmailFile?: GmailRestMcpBridgeContext["readGmailFile"];
+  /** Private host callback that materializes exact bytes a reviewed connector downloaded. */
+  materializeConnectorFile?: (request: ConnectorFileMaterializationRequest) => Promise<unknown>;
   /** Overlap every non-eager MCP connection/catalog with the first model request. */
   deferNonEagerUntilToolDemand?: boolean;
   /** @internal Shared live cells used by deferred preparation handles. */
@@ -4698,43 +4715,61 @@ export type ConnectedMcpServerBatches = {
 };
 
 /**
- * Connect SDK-managed MCP servers in stable, bounded batches. The SDK cleans a
- * failing strict batch; this wrapper additionally closes every earlier batch
- * before rethrowing, so a later-batch failure cannot leak live connections.
+ * Connect SDK-managed MCP servers concurrently, at most
+ * MCP_MAX_CONCURRENT_SERVER_OPERATIONS at a time. Each server runs the SDK's
+ * awaited single-server path, so the turn's wall time is the slowest server
+ * rather than the sum of every handshake. Results keep the input order. A
+ * strict failure stops scheduling more servers, closes every server that did
+ * connect, and rethrows the failure of the earliest failing server.
  */
 export async function connectMcpServersInBatches(
   servers: MCPServer[],
   options: { strict: boolean; connectTimeoutMs?: number },
 ): Promise<ConnectedMcpServerBatches> {
   assertMcpServerSelectionWithinBounds(servers);
-  const batches: ConnectedMcpServerBatch[] = [];
-  try {
-    for (let offset = 0; offset < servers.length; offset += MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
-      const batchServers = servers.slice(offset, offset + MCP_MAX_CONCURRENT_SERVER_OPERATIONS);
+  const connectedByIndex = new Array<ConnectedMcpServerBatch | undefined>(servers.length);
+  const failures: Array<{ index: number; error: Error }> = [];
+  let nextIndex = 0;
+  const connectNext = async (): Promise<void> => {
+    while (failures.length === 0) {
+      const index = nextIndex;
+      if (index >= servers.length) return;
+      nextIndex += 1;
+      const server = servers[index]!;
       try {
-        batches.push(
-          await connectMcpServers(batchServers, {
-            ...(options.connectTimeoutMs === undefined
-              ? {}
-              : { connectTimeoutMs: options.connectTimeoutMs }),
-            // Opengeni already bounds lifecycle work in batches. The Agents SDK
-            // parallel path additionally starts a detached `void drain()` task;
-            // a best-effort server rejection can escape that task as a process-
-            // level unhandled rejection even though the session records and
-            // degrades the failed server. Keep lifecycle ownership on the
-            // awaited serial path inside each bounded batch.
-            connectInParallel: false,
-            strict: options.strict,
-          }),
-        );
+        connectedByIndex[index] = await connectMcpServers([server], {
+          ...(options.connectTimeoutMs === undefined
+            ? {}
+            : { connectTimeoutMs: options.connectTimeoutMs }),
+          // Concurrency is owned here, one awaited server per slot. The Agents
+          // SDK parallel path additionally starts a detached `void drain()`
+          // task; a best-effort server rejection can escape that task as a
+          // process-level unhandled rejection even though the session records
+          // and degrades the failed server.
+          connectInParallel: false,
+          strict: options.strict,
+        });
       } catch (error) {
         const sdkError = error instanceof Error ? error : new Error(String(error));
-        throw unwrapMcpLifecycleErrorFromServers(batchServers, sdkError, "connect");
+        failures.push({
+          index,
+          error: unwrapMcpLifecycleErrorFromServers([server], sdkError, "connect"),
+        });
       }
     }
-  } catch (error) {
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(MCP_MAX_CONCURRENT_SERVER_OPERATIONS, servers.length) }, () =>
+      connectNext(),
+    ),
+  );
+  const batches = connectedByIndex.filter(
+    (batch): batch is ConnectedMcpServerBatch => batch !== undefined,
+  );
+  if (failures.length > 0) {
     await closeMcpServerBatches(batches).catch(() => undefined);
-    throw error;
+    failures.sort((left, right) => left.index - right.index);
+    throw failures[0]!.error;
   }
 
   const errors = new Map<MCPServer, Error>();
@@ -4999,10 +5034,21 @@ export async function prepareAgentTools(
     "server_construction",
     async () =>
       await boundedParallelMap(refs, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (tool, index) => {
-        const config = registry.get(tool.id);
-        if (!config) {
+        const registeredConfig = registry.get(tool.id);
+        if (!registeredConfig) {
           throw new Error(`Unknown MCP server id: ${tool.id}`);
         }
+        const config =
+          tool.allowedTools === undefined
+            ? registeredConfig
+            : {
+                ...registeredConfig,
+                allowedTools: tool.allowedTools.filter(
+                  (name) =>
+                    registeredConfig.allowedTools === undefined ||
+                    registeredConfig.allowedTools.includes(name),
+                ),
+              };
         if (config.id === CODEX_APPS_MCP_SERVER_ID && !isCodexAppsMcpServer(config)) {
           throw new Error("Codex Apps server id is reserved for the canonical endpoint");
         }
@@ -5191,6 +5237,9 @@ export async function prepareAgentTools(
               ? { materializeGmailFile: options.materializeGmailFile }
               : {}),
             ...(options.readGmailFile ? { readGmailFile: options.readGmailFile } : {}),
+            ...(options.materializeConnectorFile
+              ? { materializeConnectorFile: options.materializeConnectorFile }
+              : {}),
             ...(settings.gmailWatchTopicName
               ? { watchTopicName: settings.gmailWatchTopicName }
               : {}),
@@ -5813,10 +5862,7 @@ function installAttemptConnectorActionGatewayLifecycle(
                 definition.inputSchema,
                 arguments_,
               ),
-              defaultDecision:
-                attemptToolApproval(config!, definition.identity.toolName) === "human"
-                  ? "ask"
-                  : "allow",
+              defaultDecision: definition.approval === "human" ? "ask" : "allow",
             };
           }
         : (approvalId: string, arguments_: unknown): ConnectorActionToolCall => ({
@@ -6125,7 +6171,7 @@ async function prepareToolGatewayDefinitionsFromServers(
           ...(tool.annotations ? { annotations: tool.annotations } : {}),
           ...(tool.icons ? { icons: tool.icons } : {}),
           source: attemptToolSource(server.registryId),
-          approval: attemptToolApproval(config, toolName),
+          approval: attemptToolApproval(config, toolName, tool),
           effectAuthorityDigest: digestCanonicalJson({
             version: 1,
             serverId: server.registryId,
@@ -6293,10 +6339,12 @@ function attemptToolSource(serverId: string): ToolGatewayDefinition["source"] {
 function attemptToolApproval(
   config: Settings["mcpServers"][number],
   toolName: string,
+  tool: object,
 ): ToolGatewayDefinition["approval"] {
   if (
     config.requireApproval === true ||
-    (Array.isArray(config.requireApproval) && config.requireApproval.includes(toolName))
+    (Array.isArray(config.requireApproval) && config.requireApproval.includes(toolName)) ||
+    (attemptToolSource(config.id) === "mcp" && mcpToolRecommendsApproval(tool))
   ) {
     return "human";
   }

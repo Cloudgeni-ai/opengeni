@@ -7576,6 +7576,18 @@ export const sessionTurns = pgTable(
     unclaimedPromptTrigger: index("session_turns_unclaimed_prompt_trigger_idx")
       .on(table.workspaceId, table.sessionId, table.triggerEventId)
       .where(sql`${table.startedAt} is null`),
+    // Newest-finished-first walk for the session input-wait deciding turn, so
+    // the lateral LIMIT 1 stops at the first match instead of sorting the whole
+    // session history (migration 0786).
+    finishedOrder: index("session_turns_finished_order_idx")
+      .on(
+        table.workspaceId,
+        table.sessionId,
+        table.finishedAt.desc(),
+        table.position.desc(),
+        table.createdAt.desc(),
+      )
+      .where(sql`${table.finishedAt} is not null`),
     latencyModeValid: check(
       "session_turns_latency_mode_check",
       sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
@@ -9099,6 +9111,11 @@ export const sessionSystemUpdates = pgTable(
     pendingTerminalRepair: index("session_system_updates_pending_terminal_repair_idx")
       .on(table.workspaceId, table.sessionId, table.sourceId, table.dedupeKey)
       .where(sql`${table.state} = 'pending' and ${table.kind} = 'child_terminal_result'`),
+    // "Did this turn consume awaited machine input?" in the session input-wait
+    // deciding-turn predicate, probed once per candidate turn (migration 0787).
+    deliveredTurn: index("session_system_updates_delivered_turn_idx")
+      .on(table.workspaceId, table.deliveredTurnId)
+      .where(sql`${table.deliveredTurnId} is not null`),
     onePendingSteer: uniqueIndex("session_system_updates_one_pending_steer_idx")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.kind} = 'agent_steer_instruction' and ${table.state} = 'pending'`),
@@ -9663,6 +9680,19 @@ export const sessionEvents = pgTable(
         table.workspaceId,
         table.sessionId,
         sql`(${table.payload} ->> 'commandId')`,
+        table.sequence,
+      )
+      .where(sql`${table.type} = 'sandbox.command.output.delta'`),
+    // Command output paging under row-level security (migration 0788). Every
+    // output chunk's client event id starts with `command-output:<commandId>:`;
+    // byte-order text comparisons are leakproof, so a policy-bound reader can
+    // bound the scan to one command and the cursor. The JSON key above cannot:
+    // `->>` is not leakproof, so policies demote it to a per-row filter.
+    commandOutputClient: index("session_events_command_output_client_idx")
+      .on(
+        table.workspaceId,
+        table.sessionId,
+        sql`${table.clientEventId} collate "C"`,
         table.sequence,
       )
       .where(sql`${table.type} = 'sandbox.command.output.delta'`),
@@ -12166,6 +12196,44 @@ export const scheduledTaskScheduleOutbox = pgTable(
   },
   (table) => ({
     due: index("scheduled_task_schedule_outbox_due_idx").on(table.nextAttemptAt, table.id),
+  }),
+);
+
+/**
+ * Migration 0792: one review per schedule of its newest settled scheduled run.
+ * A blocked schedule tells its owner once (`notified`) or pauses itself when
+ * no later run can start until a person acts (`paused`). Owner-run lifecycle
+ * code writes it under the task lock; see `scheduled-task-blockers.ts`.
+ */
+export const scheduledTaskBlockerReviews = pgTable(
+  "scheduled_task_blocker_reviews",
+  {
+    taskId: uuid("task_id")
+      .primaryKey()
+      .references(() => scheduledTasks.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    reviewedRunId: uuid("reviewed_run_id"),
+    state: text("state").notNull().default("clear"),
+    reason: text("reason"),
+    message: text("message"),
+    blockedRunId: uuid("blocked_run_id"),
+    blockedSince: timestamp("blocked_since", { withTimezone: true }),
+    noticeSessionId: uuid("notice_session_id"),
+    noticeKey: text("notice_key"),
+    noticePending: text("notice_pending"),
+    noticePayload: jsonb("notice_payload"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspace: index("scheduled_task_blocker_reviews_workspace_idx").on(
+      table.workspaceId,
+      table.taskId,
+    ),
   }),
 );
 

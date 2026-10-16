@@ -1118,11 +1118,17 @@ describe("BrowserSession route discipline", () => {
     );
     expect(route).toContain("texts: browserActionSecretTexts(request.action)");
     expect(route).toContain('surface: "browser"');
-    // Passkeys sync before (taking over the principal's lease) and after the
-    // action, never instead of it.
-    expect(route.match(/await passkeySync\((?:true|false)\)/g)?.length).toBe(2);
-    expect(route.indexOf("await passkeySync(true)")).toBeLessThan(
+    // Passkeys sync before (taking over the principal's lease, settled before
+    // dispatch) and after the action, never instead of it.
+    expect(route.match(/passkeySync\((?:true|false)\)/g)?.length).toBe(2);
+    expect(route.indexOf("const passkeyTakeover = passkeySync(true)")).toBeLessThan(
+      route.indexOf("await passkeyTakeover"),
+    );
+    expect(route.indexOf("await passkeyTakeover")).toBeLessThan(
       route.indexOf("sessionClient.action("),
+    );
+    expect(route.indexOf("sessionClient.action(")).toBeLessThan(
+      route.indexOf("void passkeySync(false)"),
     );
     // The response is the controller receipt; the side map is never echoed.
     expect(route).not.toContain("secretValues: request");
@@ -1262,7 +1268,7 @@ describe("BrowserSession route discipline", () => {
     ).toBe(false);
 
     const source = await readFile(routeUrl, "utf8");
-    expect(source.match(/linkedComputer !== null,/gu)).toHaveLength(3);
+    expect(source.match(/linkedComputer !== null,/gu)).toHaveLength(4);
     expect(source).toContain(
       'nativeBrowserControl: typeof session.ensureBrowserControl === "function"',
     );
@@ -1292,6 +1298,43 @@ describe("BrowserSession route discipline", () => {
     );
     expect(route).toContain("dataKey.fill(0)");
     expect(route).toContain("rootKey.fill(0)");
+  });
+
+  test("ends a browser whose controller is gone in the control plane, fenced by its generation", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"',
+    );
+    const route = source.slice(start, source.indexOf("async function withBrowserPlacement", start));
+    const gone = route.indexOf(
+      "browserControllerGone(grant, workspaceId, record.session.placement)",
+    );
+    expect(gone).toBeGreaterThan(route.indexOf("const binding = record.session.controller"));
+    // The gone check runs before any controller dispatch, and the server-side
+    // completion keeps the bound generation so that controller stays fenced.
+    expect(gone).toBeLessThan(route.indexOf("dispatchBrowserSessionOperation"));
+    expect(gone).toBeLessThan(route.indexOf("withBrowserPlacement("));
+    const completion = route.slice(gone, route.indexOf("requireSourceSession", gone));
+    expect(completion).toContain(
+      "expectedControllerGeneration: binding?.controllerGeneration ?? null",
+    );
+    expect(completion).toContain("releaseInteractionHolder");
+    expect(completion).toContain("releaseBrowserPasskeys");
+    const helper = source.slice(source.indexOf("async function browserControllerGone"));
+    expect(helper.slice(0, helper.indexOf("\n  }\n"))).toContain("interactionControllerGone(");
+  });
+
+  test("only the person's explicit end may discard a lost browser's preserved runtime", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const start = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"',
+    );
+    const route = source.slice(start, source.indexOf("async function withBrowserPlacement", start));
+    expect(route).toContain("endBrowserDiscardingLostRuntime(client");
+    // Cleanup after a failed or expired resume keeps a possibly accepted
+    // launch preserved for recovery.
+    expect(source.split("endBrowserDiscardingLostRuntime(").length - 1).toBe(1);
+    expect(source).not.toContain("discardWorkingRuntime");
   });
 
   test("suspends only after encrypted capture and resumes only from durable authority", async () => {
@@ -1363,10 +1406,55 @@ describe("BrowserSession route discipline", () => {
       settle.indexOf("withBrowserPlacement("),
     );
     expect(settle).toContain("binding.placementInstanceId");
-    expect(settle.indexOf("endCapturedBrowserController(")).toBeLessThan(
+    // An interrupted launch is set aside intact, never discarded.
+    expect(settle.indexOf("endExpiredResumeSettingAsideInterruptedLaunch(")).toBeGreaterThan(-1);
+    expect(settle.indexOf("endExpiredResumeSettingAsideInterruptedLaunch(")).toBeLessThan(
       settle.indexOf("settleExpiredBrowserSessionResume(deps.db"),
     );
+    expect(settle).not.toContain("discardWorkingRuntime");
     expect(settle).toContain("expectedControllerGeneration: expired.controllerGeneration");
+  });
+
+  test("continues an expired resume on its retained working copy before restoring over it", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const resumeStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"',
+    );
+    const resume = source.slice(
+      resumeStart,
+      source.indexOf('"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"'),
+    );
+    // Continuation is tried first; only a refusal falls back to settle + restore.
+    expect(resume.indexOf("continueExpiredBrowserResume(")).toBeGreaterThan(-1);
+    expect(resume.indexOf("continueExpiredBrowserResume(")).toBeLessThan(
+      resume.indexOf("settleExpiredBrowserResume("),
+    );
+    expect(resume.indexOf("if (continued)")).toBeLessThan(
+      resume.indexOf("settleExpiredBrowserResume("),
+    );
+    const continuation = source.slice(
+      source.indexOf("async function continueExpiredBrowserResume"),
+      source.indexOf("async function settleExpiredBrowserResume"),
+    );
+    expect(continuation).toContain("if (!expired?.controllerGeneration) return null;");
+    expect(continuation).toContain(
+      'browserSessionStorageMode(record.session) !== "private_profile"',
+    );
+    // The same generation is re-adopted from its own working directory on the
+    // controller instance that holds it; nothing is restored or discarded.
+    expect(continuation).toContain("binding.placementInstanceId");
+    expect(continuation).toContain("controllerGeneration: binding.controllerGeneration");
+    expect(continuation).toContain("recoverExistingWorkingDirectory: true");
+    // Its operation is recorded only after adoption, so the heartbeat holds the
+    // expired resume itself rather than a not-yet-recorded operation.
+    expect(continuation).toContain("continuesExpiredBrowserResume: true");
+    expect(continuation).not.toContain("restore:");
+    expect(continuation).not.toContain("endSession");
+    expect(continuation).not.toContain("removeState");
+    expect(continuation).toContain('error.error.code === "resource_unavailable"');
+    expect(continuation.indexOf("client.createSession(")).toBeLessThan(
+      continuation.indexOf("continueExpiredBrowserSessionResume(deps.db"),
+    );
   });
 
   test("preserves exact human, service, and agent-attempt action provenance", () => {

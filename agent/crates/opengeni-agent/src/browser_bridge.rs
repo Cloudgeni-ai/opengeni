@@ -2456,7 +2456,7 @@ mod tests {
         );
         assert!(end.ended_at_unix_ms > 0);
         relay.join().expect("relay thread").expect("relay");
-        assert!(server.inventory().snapshot().devices.is_empty());
+        assert_eq!(server.inventory().snapshot().devices.len(), 0);
         server.shutdown().await.expect("shutdown");
     }
 
@@ -2513,7 +2513,7 @@ mod tests {
             v1::AttachedBrowserConnectionEndReason::AgentRejected as i32
         );
         assert!(end.detail.contains("unavailable reason"), "{}", end.detail);
-        assert!(server.inventory().snapshot().devices.is_empty());
+        assert_eq!(server.inventory().snapshot().devices.len(), 0);
         server.shutdown().await.expect("shutdown");
     }
 
@@ -2700,16 +2700,15 @@ mod tests {
         response["payload"]["tabs"].as_array().expect("tabs").len()
     }
 
-    /// Real Chromium + the unpacked extension + this agent binary as its native
-    /// host. The bridge is restarted, as an agent restart or update does, and
-    /// the profile must keep its placement so live sessions stay bound.
-    ///
-    /// OPENGENI_REAL_CHROME_AGENT_BINARY=<built opengeni-agent>
-    /// OPENGENI_REAL_CHROME_EXTENSION=<apps/browser-extension/dist> DISPLAY=:N
-    /// cargo test ... attached_chrome_keeps_its_placement_across_a_bridge_restart -- --ignored
-    #[tokio::test]
-    #[ignore = "needs Chromium, a display, a built agent binary and the unpacked extension"]
-    async fn attached_chrome_keeps_its_placement_across_a_bridge_restart() {
+    struct RealChromium {
+        root: tempfile::TempDir,
+        config_dir: PathBuf,
+        process: tokio::process::Child,
+    }
+
+    /// Real Chromium with the unpacked extension, and this agent binary
+    /// installed as its native messaging host.
+    fn launch_real_chromium() -> RealChromium {
         let binary = std::env::var("OPENGENI_REAL_CHROME_AGENT_BINARY").expect("agent binary");
         let extension = std::env::var("OPENGENI_REAL_CHROME_EXTENSION").expect("extension");
         let root = tempfile::tempdir().expect("tempdir");
@@ -2717,14 +2716,11 @@ mod tests {
         let xdg = root.path().join("config");
         std::fs::create_dir_all(&config_dir).expect("config dir");
         std::fs::create_dir_all(xdg.join("chromium")).expect("xdg");
-        // This ignored test runs alone; the variable only steers where the
+        // These ignored tests run alone; the variable only steers where the
         // manifest installer writes.
         std::env::set_var("XDG_CONFIG_HOME", &xdg);
         install_native_host_manifests(Path::new(&binary), root.path()).expect("manifest");
-        let server = BrowserBridgeServer::start(&config_dir)
-            .await
-            .expect("bridge");
-        let mut chromium = tokio::process::Command::new(
+        let process = tokio::process::Command::new(
             std::env::var("CHROMIUM").unwrap_or_else(|_| "chromium".to_string()),
         )
         // Chromium reads user-level native-host manifests from its user-data
@@ -2750,6 +2746,31 @@ mod tests {
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("chromium");
+        RealChromium {
+            root,
+            config_dir,
+            process,
+        }
+    }
+
+    /// Real Chromium + the unpacked extension + this agent binary as its native
+    /// host. The bridge is restarted, as an agent restart or update does, and
+    /// the profile must keep its placement so live sessions stay bound.
+    ///
+    /// OPENGENI_REAL_CHROME_AGENT_BINARY=<built opengeni-agent>
+    /// OPENGENI_REAL_CHROME_EXTENSION=<apps/browser-extension/dist> DISPLAY=:N
+    /// cargo test ... attached_chrome_keeps_its_placement_across_a_bridge_restart -- --ignored
+    #[tokio::test]
+    #[ignore = "needs Chromium, a display, a built agent binary and the unpacked extension"]
+    async fn attached_chrome_keeps_its_placement_across_a_bridge_restart() {
+        let RealChromium {
+            root: _root,
+            config_dir,
+            process: mut chromium,
+        } = launch_real_chromium();
+        let server = BrowserBridgeServer::start(&config_dir)
+            .await
+            .expect("bridge");
 
         let before = wait_for_device(&server).await;
         let tabs =
@@ -2775,6 +2796,48 @@ mod tests {
         );
         let _ = chromium.kill().await;
         server.shutdown().await.expect("shutdown");
+    }
+
+    /// Browserd refuses pages Chrome will not let the extension control,
+    /// without leaving tabs behind, against real Chromium, the real extension,
+    /// this agent binary as native host and this bridge.
+    ///
+    /// As above, plus OPENGENI_REAL_BROWSERD_PACKAGE=<packages/browserd>
+    /// cargo test ... attached_chrome_refuses_restricted_pages -- --ignored
+    #[tokio::test]
+    #[ignore = "needs Chromium, a display, bun, a built agent binary and the unpacked extension"]
+    async fn attached_chrome_refuses_restricted_pages() {
+        let package = std::env::var("OPENGENI_REAL_BROWSERD_PACKAGE").expect("browserd package");
+        let RealChromium {
+            root: _root,
+            config_dir,
+            process: mut chromium,
+        } = launch_real_chromium();
+        let server = BrowserBridgeServer::start(&config_dir)
+            .await
+            .expect("bridge");
+        let device = wait_for_device(&server).await;
+        let status = tokio::process::Command::new("bun")
+            .args([
+                "test",
+                "test/attached-chrome.e2e.test.ts",
+                "--test-name-pattern",
+                "refuses pages Chrome will not let the extension control",
+            ])
+            .current_dir(package)
+            .env("OPENGENI_ATTACHED_CHROME_E2E", "1")
+            .env("OPENGENI_ATTACHED_BROWSER_DEVICE_ID", &device.id)
+            .env(
+                "OPENGENI_ATTACHED_BROWSER_CONNECTION_GENERATION",
+                &device.connection_generation,
+            )
+            .env("OPENGENI_CONFIG_DIR", &config_dir)
+            .status()
+            .await
+            .expect("bun test");
+        let _ = chromium.kill().await;
+        server.shutdown().await.expect("shutdown");
+        assert!(status.success(), "browserd's restricted-page suite failed");
     }
 
     #[tokio::test]

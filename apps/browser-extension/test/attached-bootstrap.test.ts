@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
-import { AttachedChromeCdpConnection } from "../../../packages/browserd/src/attached-cdp";
-import { attachedTab } from "../src/protocol";
+import {
+  AttachedChromeCdpConnection,
+  attachedChromePageRestriction,
+} from "../../../packages/browserd/src/attached-cdp";
+import { attachedTab, tabUnavailableReason } from "../src/protocol";
 
 test("blank CDP bootstrap stays discoverable through the installed extension policy", async () => {
   const tab = (id: number, url: string) =>
@@ -50,5 +53,25 @@ test("blank CDP bootstrap stays discoverable through the installed extension pol
     expect(listed.targetInfos.map((target) => target.targetId)).toEqual(["1", "4"]);
   } finally {
     await connection.shutdown();
+  }
+});
+
+test("browserd refuses exactly the pages this extension cannot control", () => {
+  for (const url of [
+    "https://example.com/",
+    "data:text/html,",
+    "about:blank",
+    "About:Config",
+    "chrome://settings/",
+    "chrome-extension://abc/page.html",
+    "devtools://devtools/bundled/inspector.html",
+    "edge://settings/",
+    "view-source:https://example.com/",
+    "https://chromewebstore.google.com/detail/x",
+    "https://chrome.google.com/webstore/category/extensions",
+    "https://chrome.google.com/search",
+    "https://chromewebstore.google.com.example/",
+  ]) {
+    expect(attachedChromePageRestriction(url)).toBe(tabUnavailableReason(url));
   }
 });

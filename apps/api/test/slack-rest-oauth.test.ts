@@ -258,7 +258,7 @@ describe("Slack API-backed personal OAuth", () => {
           slackUserId: "U_EXTERNAL",
           slackTeamName: "Example Community",
           slackUserName: "member",
-          mcpToolsVerification: { status: "ok", toolCount: 9 },
+          mcpToolsVerification: { status: "ok", toolCount: SLACK_REST_MCP_TOOLS.length },
         });
         expect(
           (saved!.metadata.mcpTools as Array<{ name: string }>).map((tool) => tool.name),
@@ -360,7 +360,9 @@ describe("Slack API-backed personal OAuth", () => {
     const provider = await fixture({ omitScope: true });
     try {
       const begun = await provider.begin();
-      expect(begun.authorizationUrl.searchParams.get("scope")?.split(" ")).toHaveLength(11);
+      expect(begun.authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual([
+        ...OPENGENI_SLACK_REST_USER_SCOPES,
+      ]);
       await provider.callback(begun.state);
       const completed = await provider.read(begun.attempt.id);
       const saved = await getConnectionMetadata(
@@ -470,7 +472,7 @@ test("reviewed Slack scopes cannot be widened by caller or hosted metadata and n
     authorizationServerScopesSupported: ["offline_access", "search:read.public"],
   });
   expect(requested).toEqual([...OPENGENI_SLACK_REST_USER_SCOPES]);
-  expect(requested).toHaveLength(11);
+  expect(requested).toHaveLength(12);
   expect(requested.some((scope) => scope.startsWith("search:"))).toBe(false);
   expect(profile.normalizeGrantedScopes?.(["users:read,chat:write", " users:read "])).toEqual([
     "chat:write",

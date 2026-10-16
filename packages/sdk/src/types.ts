@@ -689,6 +689,8 @@ export type ResourceRef = RepositoryResourceRef | FileResourceRef;
 export type ToolRef = {
   kind: "mcp";
   id: string;
+  /** Narrow this connection's authorized tool names; an empty list allows none. */
+  allowedTools?: string[] | undefined;
   /** Skip this server when its connect/tools-list fails instead of failing the turn. */
   optional?: boolean | undefined;
   /**
@@ -3443,6 +3445,24 @@ export type ScheduledTask = {
   policyDrift?: ScheduledTaskPolicyDrift | null | undefined;
   /** Read-only: which accounts a run would use if it started now, for a viewer who can act on it. */
   accountPlan?: ScheduledTaskAccountPlan | undefined;
+  /** Read-only: why it paused itself, or why its owner was told its runs keep failing. */
+  blocker?: ScheduledTaskBlocker | undefined;
+};
+
+/**
+ * What blocks a schedule. `paused`: no later run could start until a person
+ * acts, so it paused itself; resume it once the cause is fixed. `notified`:
+ * its scheduled runs kept failing or being skipped and its owner was told
+ * once; it keeps running. `message` says what would unblock it.
+ */
+export type ScheduledTaskBlocker = {
+  state: "paused" | "notified";
+  /** Stable machine reason, such as `scheduled_session_paused`; tolerate new ones. */
+  reason: string;
+  message: string;
+  /** The run that showed the blocker (the first of a failing streak). */
+  runId: string;
+  since: string;
 };
 
 /**
@@ -3909,6 +3929,20 @@ export type FirstPartyMcpToolName =
   | "site_files_list"
   | "site_files_upload"
   | "site_files_delete"
+  | "site_publication_get"
+  | "site_publication_update"
+  | "site_publication_apply_fix"
+  | "site_hostname_check"
+  | "site_sql_inspect"
+  | "site_sql_enable"
+  | "site_sql_migrate"
+  | "site_sql_define_query"
+  | "site_sql_query"
+  | "site_sql_run"
+  | "site_sql_execute"
+  | "site_sql_export"
+  | "site_sql_import"
+  | "site_sql_reset"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"
@@ -9979,6 +10013,8 @@ export type SwapActiveSandboxResponse = {
     | "unsupported_backend_context"
     | "transient_establishment"
     | "concurrent_swap"
+    | "personal_machine_permission_required"
+    | "personal_machine_not_permitted"
     | "recovery_in_progress"
     | "recovery_degraded"
     | "recovery_unrecoverable";

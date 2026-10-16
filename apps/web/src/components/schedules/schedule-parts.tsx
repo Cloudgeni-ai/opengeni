@@ -27,6 +27,8 @@ import { useAppContext } from "@/context";
 import { creatorInitials } from "@/lib/creator-initials";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { scheduledTaskStateLabel } from "@/lib/scheduled-tasks";
+import { scheduledRunSkippedForPausedChat } from "@/lib/scheduled-run-error";
+import { PausedChatRunBadge } from "./schedule-blocker-notice";
 import { cn } from "@/lib/utils";
 import type { ScheduledTask, ScheduledTaskRun } from "@/types";
 
@@ -170,6 +172,7 @@ const RUN_BADGE: Record<
 };
 
 export function RunStatusBadge({ run }: { run: ScheduledTaskRun }) {
+  if (scheduledRunSkippedForPausedChat(run)) return <PausedChatRunBadge />;
   const badge = RUN_BADGE[run.status] ?? { status: "queued" as const, label: run.status };
   return (
     <StatusBadge

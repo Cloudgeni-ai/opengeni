@@ -534,9 +534,13 @@ describe("strict raw receipt acceptance", () => {
       () =>
         new CanaryReceiptStore(join(f.root, "bad-source"), {
           ...identity,
-          workflowSource: "b".repeat(40),
+          workflowSource: "invalid",
         }),
     ).toThrow("source identity");
+    const split = join(f.root, "split-source");
+    const splitIdentity = { ...identity, workflowSource: "b".repeat(40) };
+    new CanaryReceiptStore(split, splitIdentity).record("COHORT_PLAN", {});
+    expect(f.events(split)[0]).toMatchObject({ protocol: 2, identity: splitIdentity });
   });
 
   test("the file bound covers the largest read budget, and reconciliation admits it", () => {

@@ -30,6 +30,7 @@ import {
   personalFallbackActive,
   decidePlacement,
   quotaCapacity,
+  storedQuotaDocument,
   subscriptionCoreCredentialRefresher,
   type Ineligibility,
   type PlacementDecision,
@@ -266,6 +267,12 @@ class SubscriptionBindingConflict extends Error {
 }
 
 const BINDING_CONFLICT_RETRIES = 3;
+
+/**
+ * How long before its settlement a refusal's response headers may have
+ * claimed the cooldown the settlement records (`recordSubscriptionCoreModelCooldown`).
+ */
+export const SUBSCRIPTION_CORE_REFUSAL_CLAIM_MS = 2 * 60_000;
 
 /**
  * The session's explicit choice for this provider names a connection that was
@@ -995,14 +1002,24 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
    * state, so placement excludes the model there, a waiter learns when it
    * returns, and a plan change seen on refresh clears it early. Fenced on the
    * refresh generation the refused bearer carried; never shortens a cooldown.
+   *
+   * The cooldown's claim (`QuotaBlockClaim`: which limits it came from, so a
+   * usage reading may end it early) stays only when it is the same refusal's:
+   * the response headers of a refused request are joined before its
+   * settlement, so a claim observed within `SUBSCRIPTION_CORE_REFUSAL_CLAIM_MS`
+   * before `refusedAt` that still explains the stored deadline is moved to
+   * the merged deadline. Any other claim of the model is dropped: a refusal
+   * without that evidence keeps the model cooled until its own end.
    */
   async function recordSubscriptionCoreModelCooldown(
     db: Database,
     identity: SubscriptionCoreTurnIdentity,
     lease: SubscriptionCoreLeaseRef,
-    input: { modelId: string; until: Date; refreshGeneration: number },
+    input: { modelId: string; until: Date; refreshGeneration: number; refusedAt?: number },
   ): Promise<boolean> {
     if (!input.modelId.trim() || input.modelId.length > 256) return false;
+    const claimSince =
+      input.refusedAt === undefined ? null : input.refusedAt - SUBSCRIPTION_CORE_REFUSAL_CLAIM_MS;
     const access = await withLeasedConnection(db, identity, lease, async (tx) => {
       const [connection] = await rawRows<{ refresh_generation: number | string }>(
         tx,
@@ -1019,6 +1036,29 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         exhaustedKind: null,
         source: "refusal",
       };
+      const stored = sql`subscription_connection_quota.quota`;
+      const until = sql`greatest(
+        coalesce((${stored}->'modelCooldowns'->>${input.modelId}::text)::bigint, 0),
+        ${input.until.getTime()}::bigint
+      )`;
+      const claim = sql`(${stored}->'modelCooldownClaims'->${input.modelId}::text)`;
+      const cooled = sql`jsonb_set(
+        case when jsonb_typeof(${stored}->'modelCooldowns') = 'object'
+          then ${stored}
+          else jsonb_set(${stored}, '{modelCooldowns}', '{}'::jsonb)
+        end,
+        array['modelCooldowns', ${input.modelId}],
+        to_jsonb(${until})
+      )`;
+      // The same refusal's claim, still tied to the stored deadline.
+      const keepClaim = sql`(
+        ${claimSince}::bigint is not null
+        and jsonb_typeof(${claim}) = 'object'
+        and ${claim}->'until' = ${stored}->'modelCooldowns'->${input.modelId}::text
+        and case when jsonb_typeof(${claim}->'observedAt') = 'number'
+          then (${claim}->>'observedAt')::numeric >= ${claimSince}::bigint
+          else false end
+      )`;
       const rows = await rawRows<{ connection_id: string }>(
         tx,
         sql`insert into subscription_connection_quota (
@@ -1038,16 +1078,20 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
                 when subscription_connection_quota.observed_refresh_generation
                   is distinct from excluded.observed_refresh_generation
                 then excluded.quota
+                when ${stored}->'modelCooldownClaims' is null then ${cooled}
+                when jsonb_typeof(${stored}->'modelCooldownClaims') <> 'object'
+                  then ${cooled} - 'modelCooldownClaims'
                 else jsonb_set(
-                  case when jsonb_typeof(subscription_connection_quota.quota->'modelCooldowns') = 'object'
-                    then subscription_connection_quota.quota
-                    else jsonb_set(subscription_connection_quota.quota, '{modelCooldowns}', '{}'::jsonb)
-                  end,
-                  array['modelCooldowns', ${input.modelId}],
-                  to_jsonb(greatest(
-                    coalesce((subscription_connection_quota.quota->'modelCooldowns'->>${input.modelId})::bigint, 0),
-                    ${input.until.getTime()}::bigint
-                  ))
+                  ${cooled},
+                  '{modelCooldownClaims}',
+                  ((${stored}->'modelCooldownClaims') - ${input.modelId}::text) ||
+                    case when ${keepClaim}
+                      then jsonb_build_object(
+                        ${input.modelId}::text,
+                        ${claim} || jsonb_build_object('until', ${until})
+                      )
+                      else '{}'::jsonb
+                    end
                 )
               end,
               updated_at = case
@@ -1519,13 +1563,7 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         current !== null &&
         quotaCapacity(current, observedNow).kind === "exhausted" &&
         quotaCapacity(next, observedNow).kind !== "exhausted";
-      const stored = {
-        windows: next.windows,
-        modelCooldowns: next.modelCooldowns,
-        exhaustedUntil: next.exhaustedUntil,
-        exhaustedKind: next.exhaustedKind,
-        source: next.source,
-      };
+      const stored = storedQuotaDocument(next);
       const observedAt = new Date(next.observedAt ?? Date.now()).toISOString();
       await tx.execute(
         sql`insert into subscription_connection_quota (

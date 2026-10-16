@@ -159,7 +159,30 @@ export * from "./editable-artifact-live";
 
 // Transport-neutral editable-artifact domain service, ports, and contracts.
 export * from "./editable-artifacts";
-export { withSiteSessionOrigin } from "./site-session-origin";
+export {
+  currentSiteSessionOrigin,
+  siteOriginsMatch,
+  siteSessionOriginFromMetadata,
+  withSiteOriginMetadata,
+  withSiteSessionOrigin,
+  type SiteSessionOrigin,
+} from "./site-session-origin";
+export {
+  assertNotSiteClampedAgent,
+  assertSiteAgentMayChooseCompute,
+  SITE_AGENT_COMPUTE_MESSAGE,
+  siteAgentClamp,
+  siteAgentMayReachSession,
+  siteClampedAgentMessage,
+  siteSessionClamp,
+  type SiteAgentClamp,
+  type SiteClampedResource,
+} from "./site-agent-clamp";
+export {
+  currentHostSessionUsageLimit,
+  withHostSessionUsageLimit,
+  type HostSessionUsageLimit,
+} from "./host-session-usage-limit";
 export { resolveTurnSurface } from "./turn-surface";
 
 export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";

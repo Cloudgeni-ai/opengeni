@@ -139,7 +139,7 @@ test("Pause skips a reusable occurrence without reserving an unserviceable queue
       }),
     );
   await control("pause");
-  expect((await nextOccurrence(target)).reason).toBe("session_not_idle");
+  expect((await nextOccurrence(target)).reason).toBe("session_paused");
   const [row] = await shared.admin`select status from sessions where id = ${target.sessionId}`;
   expect(row!.status).toBe("idle");
   await control("resume");

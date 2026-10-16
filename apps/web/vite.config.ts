@@ -258,9 +258,11 @@ export default defineConfig({
               // Entry-aware splitting otherwise cuts this one unit in two as
               // soon as a lazy route imports only part of it (an extra startup
               // request for a few kilobytes). Vite's preload helper joins them
-              // for the same reason.
+              // for the same reason. The classic-scrollbar probe runs before the
+              // first paint, so it joins them rather than the lazy host-theme
+              // group that also imports it.
               name: "startup-sdk-runtime",
-              test: /(?:packages[\\/]sdk[\\/]src[\\/](?:errors|types|retained-artifacts|interaction)\.ts|packages[\\/]contracts[\\/]src[\\/]browser-storage\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:signup-attribution|analytics-observer)\.ts|vite[\\/]preload-helper\.js)$/,
+              test: /(?:packages[\\/]sdk[\\/]src[\\/](?:errors|types|retained-artifacts|interaction)\.ts|packages[\\/]contracts[\\/]src[\\/]browser-storage\.ts|packages[\\/]react[\\/]src[\\/](?:scrollbars|lib[\\/]scrollbars)\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:signup-attribution|analytics-observer)\.ts|vite[\\/]preload-helper\.js)$/,
               includeDependenciesRecursively: false,
               priority: 5,
             },

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { FileAsset, ResourceRef } from "@opengeni/sdk";
+import type { FileAsset, ResourceRef, SendMessageInput } from "@opengeni/sdk";
 import type { FileAttachmentClientLike } from "@opengeni/react/session";
 import type { NativeCryptoAdapter, NativeFileAdapter, NativePickedFile } from "./adapters";
 
@@ -32,6 +32,11 @@ export interface NativeFileAttachmentsResult {
   addFiles(files: NativePickedFile[]): Promise<void>;
   retry(id: string): Promise<void>;
   remove(id: string): void;
+  /**
+   * Remove only ready files whose durable ids a send captured. Files added
+   * while that send was in flight stay queued for the next message.
+   */
+  removeReadyFiles(fileIds: Iterable<string>): void;
   clear(): void;
   clearError(): void;
   /** Show already-uploaded files (a restored draft) as ready attachments. */
@@ -61,6 +66,44 @@ export function projectNativeAttachmentScopeState(
   error: Error | null,
 ): { attachments: NativeAttachment[]; error: Error | null } {
   return scopeMatches ? { attachments, error } : { attachments: [], error: null };
+}
+
+/** Drop the ready attachments whose durable file ids are in `fileIds`. */
+export function removeReadyNativeAttachments(
+  current: NativeAttachment[],
+  fileIds: Iterable<string>,
+): NativeAttachment[] {
+  const sent = new Set(fileIds);
+  if (sent.size === 0) return current;
+  const kept = current.filter(
+    (entry) => !(entry.status === "ready" && entry.file && sent.has(entry.file.id)),
+  );
+  return kept.length === current.length ? current : kept;
+}
+
+function sentFileIds(input: SendMessageInput): string[] {
+  return (input.resources ?? []).flatMap((resource) =>
+    resource.kind === "file" ? [resource.fileId] : [],
+  );
+}
+
+/**
+ * Composer callbacks that keep the attachment tray in step with sends. An
+ * ordinary Send is acknowledged locally (`onSubmitted`), so its files leave
+ * the tray at once; waiting for server acceptance left them visible and a
+ * second tap re-sent the same files as a file-only message. Steer and
+ * recovered sends only report acceptance (`onSent`). Both remove exactly the
+ * files that send captured.
+ */
+export function nativeComposerAttachmentCallbacks(
+  attachments: Pick<NativeFileAttachmentsResult, "removeReadyFiles">,
+): {
+  onSubmitted: (text: string, input: SendMessageInput) => void;
+  onSent: (text: string, input: SendMessageInput) => void;
+} {
+  const removeSent = (_text: string, input: SendMessageInput) =>
+    attachments.removeReadyFiles(sentFileIds(input));
+  return { onSubmitted: removeSent, onSent: removeSent };
 }
 
 export async function runNativeAttachmentPicker(input: {
@@ -348,6 +391,11 @@ export function useNativeFileAttachments(input: {
     setAttachments([]);
     setError(null);
   }, []);
+  const removeReadyFiles = useCallback((fileIds: Iterable<string>) => {
+    const sent = [...fileIds];
+    if (sent.length === 0) return;
+    setAttachments((current) => removeReadyNativeAttachments(current, sent));
+  }, []);
   const clearError = useCallback(() => setError(null), []);
   const restoreReady = useCallback((files: Iterable<FileAsset>) => {
     const restored = [...files];
@@ -397,6 +445,7 @@ export function useNativeFileAttachments(input: {
     addFiles,
     retry,
     remove,
+    removeReadyFiles,
     clear,
     clearError,
     restoreReady,

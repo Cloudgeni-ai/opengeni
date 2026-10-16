@@ -35,6 +35,12 @@ function track<T extends { mockRestore(): void }>(spy: T): T {
   restores.push(() => spy.mockRestore());
   return spy;
 }
+const noSiteLineage = {
+  originSiteIds: [],
+  siteTurn: false,
+  scheduledTaskId: null,
+  complete: true,
+};
 
 function fixture(restrictedExisting = false) {
   const existing: AutomationTrigger = {
@@ -369,6 +375,8 @@ describe("automation setup credential ceiling", () => {
           metadata: source === "session" ? restricted : {},
         } as never),
       );
+      // The caller's session lineage names no Site, so no Site clamp applies.
+      track(spyOn(db, "getSiteDataAgentSession").mockResolvedValue(noSiteLineage));
       const response = await request(app, await bearer(false, true), template);
       expect(response.status).toBe(201);
       expect(create.mock.calls[0]?.[1].credentialRestriction).toBe("developer_setup");
@@ -454,6 +462,7 @@ describe("automation setup credential ceiling", () => {
         metadata: {},
       } as never),
     );
+    track(spyOn(db, "getSiteDataAgentSession").mockResolvedValue(noSiteLineage));
     expect((await request(app, await bearer(false, true), template)).status).toBe(403);
     expect(create).not.toHaveBeenCalled();
   });

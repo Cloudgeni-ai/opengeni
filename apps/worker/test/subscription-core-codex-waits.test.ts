@@ -791,7 +791,7 @@ describe("core waiter recheck schedule", () => {
     ).toEqual({ nextCheckAt: at(90_000), resetKind: "bounded_refresh" });
   });
 
-  test("a provider that does not recheck sleeps until its reset", () => {
+  test("the bare schedule sleeps until its reset; every live provider rechecks before it", () => {
     expect(
       db.subscriptionCoreCodexNextCheckAt({
         earliestResetAt: at(6 * 3_600_000),
@@ -802,6 +802,6 @@ describe("core waiter recheck schedule", () => {
     ).toEqual({ nextCheckAt: at(6 * 3_600_000), resetKind: "authoritative" });
     expect(db.subscriptionCoreWaiterRechecksBeforeReset("codex")).toBe(true);
     expect(db.subscriptionCoreWaiterRechecksBeforeReset("xai")).toBe(true);
-    expect(db.subscriptionCoreWaiterRechecksBeforeReset("claude")).toBe(false);
+    expect(db.subscriptionCoreWaiterRechecksBeforeReset("claude")).toBe(true);
   });
 });

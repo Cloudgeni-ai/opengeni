@@ -137,6 +137,15 @@ export type CompactionModelUsageEventState = {
   claimedSourceKeys: Set<string>;
 };
 
+/**
+ * Why the worker made a model call. The durable `agent.model.usage` payload
+ * records it so a reader can tell the turn's own inference (`main`, including
+ * the aggregate billing fallback) from the auxiliary context summarizer and
+ * session-title calls. Only the worker sets it, at the call site; it changes no
+ * source key, billing, credit, idempotency or metric label.
+ */
+export type ModelCallPurpose = "main" | "compaction" | "session-title";
+
 export function createModelResponseEventState(
   claimedSourceKeys: Set<string> = new Set<string>(),
 ): ModelResponseEventState {
@@ -331,6 +340,7 @@ export async function processModelResponseTerminalEvent(input: {
         provider: input.provider,
         providerApi: input.providerApi,
         model: input.model,
+        purpose: "main",
         sourceKey,
         usage: responseUsage,
         normalizedUsage,
@@ -409,7 +419,7 @@ export async function processModelResponseTerminalEvent(input: {
 export async function processCompactionModelUsageEvent(input: {
   usage: ModelResponseUsage;
   state: CompactionModelUsageEventState;
-  sourceKind?: "compaction" | "session-title";
+  sourceKind?: Exclude<ModelCallPurpose, "main">;
   dispatchId: string | null;
   settings: Settings;
   db: ActivityServices["db"];
@@ -440,11 +450,12 @@ export async function processCompactionModelUsageEvent(input: {
   | { status: "duplicate"; sourceKey: string }
   | { status: "processed"; sourceKey: string; authoritative: boolean }
 > {
+  const purpose = input.sourceKind ?? "compaction";
   const usageOrdinal = input.state.usageCount + 1;
   const sourceKey = modelUsageSourceKey({
     responseId: input.usage.responseId,
     dispatchId: input.dispatchId,
-    positionalKey: `${input.sourceKind ?? "compaction"}-${usageOrdinal}`,
+    positionalKey: `${purpose}-${usageOrdinal}`,
   });
   if (input.state.claimedSourceKeys.has(sourceKey)) {
     return { status: "duplicate", sourceKey };
@@ -496,6 +507,7 @@ export async function processCompactionModelUsageEvent(input: {
         provider: input.provider,
         providerApi: input.providerApi,
         model: input.model,
+        purpose,
         sourceKey,
         usage: input.usage,
         normalizedUsage,
@@ -558,6 +570,8 @@ export async function emitModelCallUsage(input: {
   provider: string;
   providerApi: ModelProviderApi;
   model: string;
+  /** Why the worker made this call; durable event and log line only, never a metric label. */
+  purpose: ModelCallPurpose;
   sourceKey: string;
   usage: ModelResponseUsage | { usage?: unknown | null } | null;
   normalizedUsage?: ModelCallUsageNormalization;
@@ -605,6 +619,7 @@ export async function emitModelCallUsage(input: {
           provider: input.provider,
           providerApi: input.providerApi,
           model: input.model,
+          purpose: input.purpose,
           sourceKey: input.sourceKey,
           ...(input.billingPath ? { billingPath: input.billingPath } : {}),
           ...(input.upstreamProvider ? { upstreamProvider: input.upstreamProvider } : {}),
@@ -640,6 +655,7 @@ export async function emitModelCallUsage(input: {
       provider: input.provider,
       providerApi: input.providerApi,
       model: input.model,
+      purpose: input.purpose,
       inputTokens: telemetry.inputTokens,
       outputTokens: telemetry.outputTokens,
       cachedTokens: telemetry.cachedTokens,

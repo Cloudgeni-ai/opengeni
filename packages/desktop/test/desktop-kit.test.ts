@@ -7,13 +7,23 @@ import type { InboxItem, ListInboxResponse } from "@opengeni/sdk";
 
 import { AccountStore } from "../src/main/accounts";
 import {
-  agentBinaryCandidates,
   connectionFor,
+  hostedAgentPath,
   lastErrorLine,
+  parseAgentVersion,
   parseConnections,
-  parseServiceRunning,
+  parsePermissions,
+  standaloneMacAgentApp,
 } from "../src/main/agent-cli";
-import { diffInbox, inboxItemPath, notificationPlan, plainText } from "../src/main/inbox-model";
+import { HostedAgent, RESTART_EXIT_CODE, type AgentChild } from "../src/main/hosted-agent";
+import { autostartDesktopEntry } from "../src/main/linux-integration";
+import {
+  bannerText,
+  diffInbox,
+  inboxItemPath,
+  notificationPlan,
+  plainText,
+} from "../src/main/inbox-model";
 import { localFile, localPageUrl } from "../src/main/local-pages";
 import { nativeSignInUrl, parseSignInCallback, pkcePair } from "../src/main/pkce";
 import { newestReleaseTag, resolveUpdateFeedUrl } from "../src/main/update-feed";
@@ -145,26 +155,39 @@ describe("native sign-in", () => {
 });
 
 describe("agent command line", () => {
-  test("finds the installer's agent paths", () => {
-    expect(agentBinaryCandidates("darwin", "/Users/user", {})).toEqual([
-      "/Users/user/Applications/OpenGeni Agent.app/Contents/MacOS/opengeni-agent",
+  test("keeps the agent where the command line expects it", () => {
+    expect(hostedAgentPath("darwin", "/Users/user", {})).toBe(
       "/Users/user/.local/bin/opengeni-agent",
-    ]);
-    expect(agentBinaryCandidates("linux", "/home/user", {})).toEqual([
-      "/home/user/.local/bin/opengeni-agent",
-    ]);
-    expect(agentBinaryCandidates("win32", "C:\\Users\\user", {})).toEqual([
-      "C:\\Users\\user\\AppData\\Local\\Opengeni\\bin\\opengeni-agent.exe",
-    ]);
-    expect(
-      agentBinaryCandidates("win32", "C:\\Users\\user", { LOCALAPPDATA: "D:\\Local" }),
-    ).toEqual(["D:\\Local\\Opengeni\\bin\\opengeni-agent.exe"]);
-    expect(agentBinaryCandidates("linux", "/home/user", {})).toEqual([
-      "/home/user/.local/bin/opengeni-agent",
-    ]);
-    expect(agentBinaryCandidates("win32", "C:/Users/user", { LOCALAPPDATA: "C:/L" })[0]).toContain(
-      "opengeni-agent.exe",
     );
+    expect(hostedAgentPath("linux", "/home/user", {})).toBe("/home/user/.local/bin/opengeni-agent");
+    expect(hostedAgentPath("win32", "C:\\Users\\user", {})).toBe(
+      "C:\\Users\\user\\AppData\\Local\\Opengeni\\bin\\opengeni-agent.exe",
+    );
+    expect(hostedAgentPath("win32", "C:\\Users\\user", { LOCALAPPDATA: "D:\\Local" })).toBe(
+      "D:\\Local\\Opengeni\\bin\\opengeni-agent.exe",
+    );
+    expect(standaloneMacAgentApp("/Users/user")).toBe(
+      "/Users/user/Applications/OpenGeni Agent.app",
+    );
+  });
+
+  test("reads the agent's version", () => {
+    expect(parseAgentVersion("opengeni-agent 0.1.65\n")).toBe("0.1.65");
+    expect(parseAgentVersion("something else")).toBeNull();
+  });
+
+  test("reads the screen-control permissions", () => {
+    expect(
+      parsePermissions(
+        'note\n{"required":true,"screenRecording":true,"accessibility":false,"inputMonitoring":true}\n',
+      ),
+    ).toEqual({
+      required: true,
+      granted: { screenRecording: true, accessibility: false, inputMonitoring: true },
+    });
+    expect(parsePermissions('{"required":false}')).toEqual({ required: false });
+    expect(parsePermissions("error: unrecognized subcommand 'permissions'")).toBeNull();
+    expect(parsePermissions('{"required":true,"screenRecording":true}')).toBeNull();
   });
 
   test("parses connections and matches the server and workspace", () => {
@@ -185,20 +208,124 @@ describe("agent command line", () => {
     ).toEqual([]);
   });
 
-  test("reads the service status on each platform", () => {
-    expect(parseServiceRunning("opengeni-agent LaunchAgent: loaded")).toBe(true);
-    expect(parseServiceRunning("opengeni-agent LaunchAgent: not loaded")).toBe(false);
-    expect(parseServiceRunning("opengeni-agent service: active")).toBe(true);
-    expect(parseServiceRunning("opengeni-agent service: inactive")).toBe(false);
-    expect(parseServiceRunning("        STATE              : 4  RUNNING")).toBe(true);
-    expect(parseServiceRunning("        STATE              : 1  STOPPED")).toBe(false);
-  });
-
   test("keeps the last meaningful error line", () => {
     expect(lastErrorLine("\u001b[31merror: enroll token expired\u001b[0m\n\n")).toBe(
       "enroll token expired",
     );
     expect(lastErrorLine("   \n")).toBeNull();
+    expect(
+      lastErrorLine(
+        "opengeni-install: installing x (version: latest)\nopengeni-install: ERROR: failed to download https://h/a : timed out\nopengeni-install: cleaning up\n",
+      ),
+    ).toBe("failed to download https://h/a : timed out");
+    expect(lastErrorLine("opengeni-install: downloading binary + checksum + signature\n")).toBe(
+      "downloading binary + checksum + signature",
+    );
+  });
+});
+
+describe("the app's agent", () => {
+  class FakeChild implements AgentChild {
+    private listeners: ((code: number | null) => void)[] = [];
+    constructor(readonly pid: number) {}
+    onExit(listener: (code: number | null) => void): void {
+      this.listeners.push(listener);
+    }
+    exit(code: number | null): void {
+      for (const listener of this.listeners.splice(0)) listener(code);
+    }
+  }
+
+  function harness() {
+    let clock = 0;
+    let nextPid = 1;
+    const children: FakeChild[] = [];
+    const timers: { at: number; run: () => void }[] = [];
+    const agent = new HostedAgent({
+      spawn: () => {
+        const child = new FakeChild(nextPid++);
+        children.push(child);
+        return child;
+      },
+      terminate: async (child) => (child as FakeChild).exit(null),
+      now: () => clock,
+      setTimer: (run, ms) => {
+        const timer = { at: clock + ms, run };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimer: (handle) => {
+        const index = timers.indexOf(handle as (typeof timers)[number]);
+        if (index >= 0) timers.splice(index, 1);
+      },
+      onChange: () => undefined,
+    });
+    const advance = (ms: number) => {
+      clock += ms;
+      for (const timer of timers.filter((candidate) => candidate.at <= clock)) {
+        timers.splice(timers.indexOf(timer), 1);
+        timer.run();
+      }
+    };
+    return { agent, children, timers, advance };
+  }
+
+  test("starts again at once after an update asks for it", () => {
+    const { agent, children, advance } = harness();
+    agent.start("https://app.example.com");
+    advance(10_000);
+    children[0]!.exit(RESTART_EXIT_CODE);
+    expect(children).toHaveLength(2);
+    expect(agent.state).toBe("running");
+  });
+
+  test("backs off after crashes and resets after a healthy run", () => {
+    const { agent, children, timers, advance } = harness();
+    agent.start("https://app.example.com");
+    advance(6_000);
+    children[0]!.exit(1);
+    expect(agent.state).toBe("restarting");
+    expect(timers[0]!.at).toBe(7_000);
+    advance(1_000);
+    advance(6_000);
+    children[1]!.exit(1);
+    expect(timers[0]!.at).toBe(15_000);
+    advance(2_000);
+    advance(120_000);
+    children[2]!.exit(1);
+    expect(timers[0]!.at - 135_000).toBe(1_000);
+  });
+
+  test("waits politely when another agent already serves this computer", () => {
+    const { agent, children, timers, advance } = harness();
+    agent.start("https://app.example.com");
+    advance(100);
+    children[0]!.exit(0);
+    expect(agent.state).toBe("elsewhere");
+    expect(timers[0]!.at).toBe(30_100);
+  });
+
+  test("stays stopped once stopped, and restarts on request", async () => {
+    const { agent, children, timers } = harness();
+    agent.start("https://app.example.com");
+    await agent.restart();
+    expect(children).toHaveLength(2);
+    await agent.stop();
+    expect(agent.state).toBe("stopped");
+    expect(timers).toHaveLength(0);
+    await agent.restart();
+    expect(children).toHaveLength(2);
+  });
+});
+
+describe("Linux autostart", () => {
+  test("opens the app without a window at login", () => {
+    expect(autostartDesktopEntry("Opengeni", "/opt/Opengeni/opengeni")).toContain(
+      "Exec=/opt/Opengeni/opengeni --hidden",
+    );
+    expect(autostartDesktopEntry("Opengeni", "/home/user/My Apps/Opengeni.AppImage")).toContain(
+      'Exec="/home/user/My Apps/Opengeni.AppImage" --hidden',
+    );
   });
 });
 
@@ -283,6 +410,14 @@ describe("inbox notifications", () => {
     expect(choice.subtitle).toBe("Fix the build · a@x.io · app");
     expect(notificationPlan(item({}), null).reply).toBe(true);
     expect(notificationPlan(item({ kind: "notification" }), null).buttons).toEqual([]);
+  });
+
+  test("keeps the banner's context where the platform has no subtitle", () => {
+    const plan = notificationPlan(item({}), "a@x.io · app");
+    expect(bannerText(plan, "darwin")).toEqual({ subtitle: plan.subtitle, body: plan.body });
+    expect(bannerText(plan, "win32")).toEqual({ body: `${plan.subtitle}\n${plan.body}` });
+    expect(bannerText({ ...plan, subtitle: "" }, "linux")).toEqual({ body: plan.body });
+    expect(bannerText({ ...plan, body: "" }, "win32")).toEqual({ body: plan.subtitle });
   });
 
   test("opens the session at the item's moment", () => {

@@ -31,7 +31,6 @@ import type { AccessGrant, Session } from "@opengeni/contracts";
 import {
   acquireLease,
   getSandboxSessionEnvelope,
-  getLiveEnrollmentConnection,
   getSandbox,
   touchLeaseHolder,
   markWarmLeaseInstanceLost,
@@ -48,6 +47,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import {
+  errorCauseAttributes,
   recordTenancyCompatibilityLaneUse,
   sandboxLeaseTelemetryKey,
   sandboxOperationMetricObserver,
@@ -92,12 +92,16 @@ import {
   type RoutingSandboxSession,
 } from "@opengeni/runtime/sandbox";
 import {
+  grantHasAgentAttemptAuthority,
   managedSessionGroupBackend,
   managedSessionGroupOs,
   providerSettingsForSessionSandboxRuntime,
   relayConfigFromSettings,
+  requireLiveAgentAttemptAuthorization,
+  resolveChannelAMachineConnection,
   resolveSessionSandboxRuntime,
   wrapChannelABoxWithRouting,
+  type ChannelAMachineAuthority,
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 
@@ -199,6 +203,10 @@ export type ChannelAHandle = {
    * active-sandbox pointer and is safe for placement-bound controllers. */
   homeSession: ChannelASession;
   routingSession: RoutingSandboxSession;
+  /** Whose access this request uses to reach a Connected Machine: the person
+   * who started an agent's turn, or the calling person. Routes that look up
+   * the routed machine again must use it rather than the raw caller grant. */
+  machineAuthority: () => Promise<ChannelAMachineAuthority>;
   requestId: string;
 };
 
@@ -537,6 +545,36 @@ export async function withChannelARead<T>(
   return await withChannelAOperation(services, ctx, true, fn);
 }
 
+/**
+ * Whose access this request uses to reach a Connected Machine. A person uses
+ * their own. An agent acts for the person who started its turn (as swap and
+ * run_on do), so the machines that person can use stay usable from browser,
+ * computer, file and terminal requests; a personal machine also needs the
+ * attempt's own per-chat permission, checked by the connection resolver.
+ */
+async function channelAMachineAuthority(
+  db: Database,
+  ctx: ChannelAContext,
+): Promise<ChannelAMachineAuthority> {
+  const grant = ctx.grant;
+  const callerSessionId = grant?.metadata?.["sessionId"];
+  if (!grant || !grantHasAgentAttemptAuthority(grant) || typeof callerSessionId !== "string") {
+    return { subjectId: ctx.subjectId, personalMachineAttempt: null };
+  }
+  const actor = await requireLiveAgentAttemptAuthorization(db, grant, callerSessionId);
+  if (!actor.initiatingHumanSubjectId) {
+    return { subjectId: ctx.subjectId, personalMachineAttempt: null };
+  }
+  return {
+    subjectId: actor.initiatingHumanSubjectId,
+    personalMachineAttempt: {
+      turnId: actor.turnId,
+      attemptId: actor.attemptId,
+      executionGeneration: actor.executionGeneration,
+    },
+  };
+}
+
 async function withChannelAOperation<T>(
   services: ChannelAServices,
   ctx: ChannelAContext,
@@ -552,23 +590,32 @@ async function withChannelAOperation<T>(
     : undefined;
   const { accountId, workspaceId, session } = ctx;
 
-  if (session.sandboxBackend === "none") {
-    throw new HTTPException(409, { message: "sandbox not available" });
-  }
-
   const sandboxGroupId = session.sandboxGroupId;
   const requestId = crypto.randomUUID();
   const holderId = `direct:${requestId}`;
   const operationStartedAt = performance.now();
   const operation = ctx.operation ?? (readOnly ? "read" : "mutation");
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
+  let machineAuthorityResult: Promise<ChannelAMachineAuthority> | undefined;
+  const machineAuthority = (): Promise<ChannelAMachineAuthority> =>
+    (machineAuthorityResult ??= channelAMachineAuthority(db, ctx));
 
   // The STABLE run-environment used by both a cloud home and a machine home.
   // It also carries the per-session Codemode pointer selected below. Constants
   // only: user secrets are resolved per command (W1), never seeded here.
+  // `none` describes only the durable home. A session without a home sandbox
+  // that attached a Connected Machine runs its turns there (the worker gives
+  // such a turn the effective selfhosted backend), so its direct operations,
+  // such as opening a computer or browser on that machine, follow the same
+  // active pointer.
+  const machineOnlyHome = session.sandboxBackend === "none";
+  if (machineOnlyHome && !(await readActiveSandbox(db, workspaceId, session.id))?.activeSandboxId) {
+    throw new HTTPException(409, { message: "sandbox not available" });
+  }
+  const effectiveBackend = machineOnlyHome ? "selfhosted" : session.sandboxBackend;
   const settingsForSession =
-    session.sandboxBackend !== settings.sandboxBackend
-      ? { ...settings, sandboxBackend: session.sandboxBackend }
+    effectiveBackend !== settings.sandboxBackend
+      ? { ...settings, sandboxBackend: effectiveBackend }
       : settings;
   const environment = stableSandboxEnvironmentForRun(settingsForSession, { workspaceId });
   if (hasGitCredentialRepositorySelection(session.resources)) {
@@ -619,6 +666,7 @@ async function withChannelAOperation<T>(
       lease,
       homeSession,
       routingSession,
+      machineAuthority,
       requestId,
     });
     // The direct request has accepted the result in memory. Finalize every
@@ -631,12 +679,15 @@ async function withChannelAOperation<T>(
   // A machine-targeted top-level session has an honest selfhosted HOME label.
   // It has no cloud provider box and therefore must not acquire or establish a
   // phantom home lease before following its active machine pointer.
-  if (session.sandboxBackend === "selfhosted") {
+  if (effectiveBackend === "selfhosted") {
     let established: EstablishedSandboxSession | undefined;
     try {
       ctx.waitSignal?.throwIfAborted();
       const pointer = await readActiveSandbox(db, workspaceId, session.id);
       if (!pointer?.activeSandboxId) {
+        if (machineOnlyHome) {
+          throw new HTTPException(409, { message: "sandbox not available" });
+        }
         // A machine-home session with no selected machine uses the deployment's
         // managed group box, exactly like the worker turn path. Keep the durable
         // home label honest; only this request's effective backend changes.
@@ -663,9 +714,10 @@ async function withChannelAOperation<T>(
           message: "machine-home session has no active Connected Machine or managed sandbox",
         });
       }
+      const requestMachineAuthority = await machineAuthority();
       const sandbox = await getSandbox(
         db,
-        { accountId: ctx.accountId, workspaceId, subjectId: ctx.subjectId },
+        { accountId: ctx.accountId, workspaceId, subjectId: requestMachineAuthority.subjectId },
         pointer.activeSandboxId,
       );
       if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {
@@ -674,10 +726,16 @@ async function withChannelAOperation<T>(
         });
       }
       const originWorkspaceId = sandbox.workspaceId;
-      const enrollment = await getLiveEnrollmentConnection(
+      const enrollment = await resolveChannelAMachineConnection(
         db,
-        { accountId, workspaceId, subjectId: ctx.subjectId },
-        sandbox.enrollmentId,
+        {
+          accountId,
+          workspaceId,
+          sessionId: session.id,
+          machineWorkspaceId: originWorkspaceId,
+          enrollmentId: sandbox.enrollmentId,
+        },
+        requestMachineAuthority,
       );
       if (!enrollment?.connectionInstanceId) {
         // Preserve causal machine liveness through Channel-A. Generic callers
@@ -745,6 +803,7 @@ async function withChannelAOperation<T>(
           workspaceId,
           sessionId: session.id,
           resourceSubjectId: ctx.subjectId,
+          machineAuthority,
           pinnedSelfhosted: {
             sandboxId: sandbox.id,
             epoch: pointer.activeEpoch,
@@ -1064,6 +1123,7 @@ async function withChannelAOperation<T>(
           workspaceId,
           sessionId: session.id,
           resourceSubjectId: ctx.subjectId,
+          machineAuthority,
           homeLease: {
             sandboxGroupId,
             leaseEpoch: leaseSnapshot.leaseEpoch,
@@ -1445,6 +1505,9 @@ export function observeChannelAOperationFailure(
     errorClass: "SandboxChannelAOperationError",
     errorCode: diagnostic.errorCode,
     origin: "api",
+    // Which component refused it (controller, machine, database), as reviewed
+    // closed values only; "unexpected" alone cannot be diagnosed after the fact.
+    ...errorCauseAttributes(input.error),
   } as const;
   try {
     services.observability.incrementCounter({

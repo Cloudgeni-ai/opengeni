@@ -48,6 +48,9 @@ opengeni-agent-linux-ffi = { path = "../opengeni-agent-linux-ffi" }
 
 [target.'cfg(windows)'.dependencies]
 command-group = { workspace = true }
+# Windows desktop backend: the leaf FFI crate that owns all Win32 `unsafe`
+# (GDI capture + SendInput) behind a safe API.
+opengeni-agent-windows-ffi = { path = "../opengeni-agent-windows-ffi" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { workspace = true }
