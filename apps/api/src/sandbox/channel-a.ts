@@ -43,6 +43,7 @@ import {
   SandboxPaidComputeAdmissionError,
   withSandboxProviderReadLock,
   type Database,
+  type EnrollmentRecord,
   type LeaseSnapshot,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
@@ -207,6 +208,15 @@ export type ChannelAHandle = {
    * who started an agent's turn, or the calling person. Routes that look up
    * the routed machine again must use it rather than the raw caller grant. */
   machineAuthority: () => Promise<ChannelAMachineAuthority>;
+  /** For a machine-home request, the Connected Machine and live runner this
+   * request was pinned to under `machineAuthority`. The routing session fails
+   * rather than follow a changed pointer, so a route that resolved this same
+   * sandbox can use it instead of looking the machine up again. */
+  pinnedMachine: {
+    sandboxId: string;
+    sandboxWorkspaceId: string;
+    enrollment: EnrollmentRecord;
+  } | null;
   requestId: string;
 };
 
@@ -629,6 +639,7 @@ async function withChannelAOperation<T>(
     routed: EstablishedSandboxSession,
     lease: LeaseSnapshot | null,
     homeSession: ChannelASession,
+    pinnedMachine: ChannelAHandle["pinnedMachine"] = null,
   ): Promise<T> => {
     const emit = async (events: { type: string; payload: unknown }[]): Promise<void> => {
       await appendAndPublishEvents(
@@ -667,6 +678,7 @@ async function withChannelAOperation<T>(
       homeSession,
       routingSession,
       machineAuthority,
+      pinnedMachine,
       requestId,
     });
     // The direct request has accepted the result in memory. Finalize every
@@ -813,7 +825,11 @@ async function withChannelAOperation<T>(
         },
         established,
       );
-      return await runEstablished(routed, null, established.session as ChannelASession);
+      return await runEstablished(routed, null, established.session as ChannelASession, {
+        sandboxId: sandbox.id,
+        sandboxWorkspaceId: originWorkspaceId,
+        enrollment,
+      });
     } catch (error) {
       observeChannelAOperationFailure(services, {
         workspaceId,
