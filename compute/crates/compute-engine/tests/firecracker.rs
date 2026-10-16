@@ -194,6 +194,11 @@ async fn boot_pause_compress_snapshot_restore() {
     };
     let name = format!("engine-test-{}", std::process::id());
     let engine = engine(&lab);
+    assert!(
+        engine.runtime().starts_with("Firecracker v"),
+        "{}",
+        engine.runtime()
+    );
     let spec = jailed_spec(&lab, &name, 3_900_001);
     let dir = spec.logs.clone();
     let uds = spec.vsock_path();

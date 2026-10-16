@@ -107,6 +107,11 @@ pub(crate) struct Meta {
     /// remote image's memory ahead of hydration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filled_hash: Option<String>,
+    /// The runtime that made the image ([`compute_engine::Engine::runtime`]),
+    /// if known. A VMM that refuses an image made under another runtime
+    /// will go on refusing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
 
 /// Per-chunk hashes of a memory image.
@@ -370,7 +375,19 @@ impl Images {
 
     /// Builds, checks and publishes a new generation from `parts`, then
     /// points `current` at it. Blocking: run off the async executor.
+    #[cfg(test)]
     pub fn publish(&self, parts: Parts<'_>) -> Result<Verified, Suspect> {
+        self.publish_made_by(parts, None)
+    }
+
+    /// Builds, checks and publishes a new generation from `parts`, made
+    /// under `runtime` (see [`Meta::runtime`]), then points `current` at
+    /// it. Blocking: run off the async executor.
+    pub fn publish_made_by(
+        &self,
+        parts: Parts<'_>,
+        runtime: Option<&str>,
+    ) -> Result<Verified, Suspect> {
         // The record vouches for what is published here, so the directory
         // itself must survive a crash too.
         crate::layout::create_dir_durably(&self.dir)?;
@@ -444,6 +461,9 @@ impl Images {
             chunks_hash: blake3::hash(&chunk_bytes).to_hex().to_string(),
             remote: remote.is_some(),
             filled_hash: filled.map(|filled| blake3::hash(&filled).to_hex().to_string()),
+            runtime: runtime
+                .filter(|runtime| !runtime.is_empty())
+                .map(str::to_owned),
         };
         write_synced(
             &staging.join(META),

@@ -68,6 +68,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 state: images.state(image.generation()),
                 memory: images.memory(image.generation()),
                 chunks: Some(Arc::new(chunks.0.clone())),
+                runtime: image.meta().runtime.clone(),
             }),
             profile: profile.exists().then_some(profile),
         };
@@ -178,23 +179,31 @@ impl<E: Engine, S: Store> Job<E, S> {
         let published = blocking(move || {
             let published = match &fetched {
                 FetchedMemory::None => images.clear().map_err(Suspect::from).map(|()| None),
-                FetchedMemory::Local { state, memory } => {
-                    images.publish(Parts::Whole { state, memory }).map(Some)
-                }
+                FetchedMemory::Local {
+                    state,
+                    memory,
+                    runtime,
+                } => images
+                    .publish_made_by(Parts::Whole { state, memory }, runtime.as_deref())
+                    .map(Some),
                 FetchedMemory::Remote {
                     state,
                     memory_len,
                     chunks,
                     manifest,
                     prefilled,
+                    runtime,
                 } => images
-                    .publish(Parts::Remote {
-                        state,
-                        memory_len: *memory_len,
-                        chunks: crate::image::ChunkMap(chunks.clone()),
-                        manifest,
-                        prefilled: prefilled.as_ref(),
-                    })
+                    .publish_made_by(
+                        Parts::Remote {
+                            state,
+                            memory_len: *memory_len,
+                            chunks: crate::image::ChunkMap(chunks.clone()),
+                            manifest,
+                            prefilled: prefilled.as_ref(),
+                        },
+                        runtime.as_deref(),
+                    )
                     .map(Some),
             };
             let _ = fs::remove_dir_all(&scratch);

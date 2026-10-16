@@ -371,6 +371,10 @@ impl Engine for Fake {
         MemoryProfile::bare_metal()
     }
 
+    fn runtime(&self) -> &str {
+        "fake"
+    }
+
     async fn restore(&self, spec: &VmSpec, files: &RestoreFiles) -> Result<FakeVm, EngineError> {
         let now = self.world.restoring.fetch_add(1, Ordering::SeqCst) + 1;
         self.world.max_restoring.fetch_max(now, Ordering::SeqCst);

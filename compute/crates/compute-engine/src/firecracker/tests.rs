@@ -17,6 +17,14 @@ fn a_launch_that_could_not_clean_up_is_fatal() {
     assert_eq!(stuck.kind, ErrorKind::Fatal);
 }
 
+#[test]
+fn the_runtime_names_the_processor_model() {
+    let cpuinfo = "processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD EPYC 9B14\n";
+    assert_eq!(cpu_model(cpuinfo), "AMD EPYC 9B14");
+    assert_eq!(cpu_model("processor : 0\n"), "an unknown processor");
+    assert!(runtime_of(Path::new("/nonexistent/firecracker")).is_err());
+}
+
 /// A VMM API that answers `PATCH /vm` with `patch` and `GET /` with
 /// `get`.
 fn vmm(patch: Answer, get: Answer) -> (Socket, Api) {

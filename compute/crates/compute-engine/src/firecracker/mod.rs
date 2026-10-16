@@ -179,6 +179,8 @@ pub struct Firecracker {
     cgroup_relative: PathBuf,
     startup_timeout: Duration,
     memory: MemoryProfile,
+    /// See [`Engine::runtime`]: the VMM's version and the processor.
+    runtime: String,
 }
 
 impl Firecracker {
@@ -220,6 +222,7 @@ impl Firecracker {
                 "VMs need a parent cgroup below the cgroup v2 root",
             ));
         }
+        let runtime = runtime_of(&binary)?;
         Ok(Self {
             binary,
             jailer: config.jailer,
@@ -227,6 +230,7 @@ impl Firecracker {
             cgroup_relative,
             startup_timeout: Duration::from_secs(5),
             memory: MemoryProfile::bare_metal(),
+            runtime,
         })
     }
 
@@ -466,6 +470,40 @@ fn cgroup2_mount() -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no cgroup v2 hierarchy mounted"))
 }
 
+/// What a memory image made here depends on: the version `binary` reports
+/// and the processor model. Firecracker refuses snapshots of versions it no
+/// longer reads, and a guest's saved processor state belongs to its model.
+fn runtime_of(binary: &Path) -> io::Result<String> {
+    let output = std::process::Command::new(binary)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()?;
+    let reported = String::from_utf8_lossy(&output.stdout);
+    let version = reported
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty());
+    let Some(version) = version.filter(|_| output.status.success()) else {
+        return Err(io::Error::other(format!(
+            "{} --version reported no version",
+            binary.display()
+        )));
+    };
+    let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    Ok(format!("{version} on {}", cpu_model(&cpuinfo)))
+}
+
+/// The processor's model name as `/proc/cpuinfo` gives it.
+fn cpu_model(cpuinfo: &str) -> &str {
+    cpuinfo
+        .lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == "model name").then(|| value.trim())
+        })
+        .unwrap_or("an unknown processor")
+}
+
 /// Readies the jail for a launch and opens the VMM's console and log.
 fn prepare(
     jail: &Jail,
@@ -697,6 +735,10 @@ impl Engine for Firecracker {
 
     fn memory_profile(&self) -> MemoryProfile {
         self.memory
+    }
+
+    fn runtime(&self) -> &str {
+        &self.runtime
     }
 
     async fn boot(&self, spec: &VmSpec) -> Result<FirecrackerVm, EngineError> {

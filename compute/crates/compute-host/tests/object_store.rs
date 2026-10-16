@@ -76,6 +76,7 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
             state: local.path().join("state"),
             memory: local.path().join("memory"),
             chunks: None,
+            runtime: None,
         }),
         profile: None,
     };

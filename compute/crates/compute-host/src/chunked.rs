@@ -90,6 +90,9 @@ struct Head {
 struct MemoryHead {
     state: String,
     memory: String,
+    /// The runtime that made the image, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime: Option<String>,
 }
 
 fn parse_head(operation: &'static str, bytes: &[u8]) -> Result<Head, EngineError> {
@@ -428,7 +431,11 @@ impl Store for Chunked {
                 ),
             );
             Ok(match (state?, memory?) {
-                (Some(state), Some(memory)) => Some(Some(MemoryHead { state, memory })),
+                (Some(state), Some(memory)) => Some(Some(MemoryHead {
+                    state,
+                    memory,
+                    runtime: image.runtime.clone(),
+                })),
                 _ => None,
             })
         };
@@ -619,13 +626,18 @@ impl Store for Chunked {
                     chunks,
                     manifest: manifest_bytes,
                     prefilled,
+                    runtime: stored.runtime.clone(),
                 });
             }
             // A manifest not laid out in whole chunks cannot be paged in;
             // bring the memory back whole instead.
             let memory = into.scratch.join("memory");
             self.get_file(&stored.memory, &memory, None).await?;
-            Ok(FetchedMemory::Local { state, memory })
+            Ok(FetchedMemory::Local {
+                state,
+                memory,
+                runtime: stored.runtime.clone(),
+            })
         };
         // Each runs to the end: a failure returns only once nothing of this
         // fetch writes into the sandbox's files any more.

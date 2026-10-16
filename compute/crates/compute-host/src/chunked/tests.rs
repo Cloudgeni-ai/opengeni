@@ -24,6 +24,9 @@ fn sparse(path: &Path, length: u64, writes: &[(u64, &[u8])]) {
     }
 }
 
+/// The runtime the test images say made them.
+const RUNTIME: &str = "Firecracker v1.0.0 on a test processor";
+
 fn files(dir: &Path, memory: bool) -> SavedFiles {
     SavedFiles {
         disk: crate::store::JailedFile::new(dir.join("disk")),
@@ -31,6 +34,7 @@ fn files(dir: &Path, memory: bool) -> SavedFiles {
             state: dir.join("state"),
             memory: dir.join("memory"),
             chunks: None,
+            runtime: Some(RUNTIME.to_owned()),
         }),
         profile: None,
     }
@@ -284,10 +288,12 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
         chunks: map,
         manifest,
         prefilled,
+        runtime,
     } = store.fetch(sandbox, &into).await.unwrap()
     else {
         panic!("memory should stay in the store");
     };
+    assert_eq!(runtime.as_deref(), Some(RUNTIME), "the runtime comes back");
     assert_eq!(memory_len, big);
     assert!(prefilled.is_none(), "an unusable profile packs nothing");
     assert_eq!(
@@ -371,6 +377,7 @@ async fn a_wake_brings_its_working_set_back_with_the_state() {
         chunks: map,
         manifest,
         prefilled: Some(prefilled),
+        ..
     } = store.fetch(sandbox, &into).await.unwrap()
     else {
         panic!("the working set should come back with the state");

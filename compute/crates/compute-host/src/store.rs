@@ -35,6 +35,9 @@ pub struct SavedImage {
     /// zeros), when known: chunks whose hash matches the stored copy are
     /// then neither read nor uploaded again.
     pub chunks: Option<Arc<Vec<[u8; 32]>>>,
+    /// The runtime that made it, if known ([`compute_engine::Engine::runtime`]),
+    /// kept with the copy so a fetched image still says.
+    pub runtime: Option<String>,
 }
 
 /// A file in a VM's jail. Its VMM can put a link to a host file or a pipe
@@ -126,7 +129,12 @@ pub enum FetchedMemory {
     /// No memory image was asked for.
     None,
     /// Complete files in the scratch directory.
-    Local { state: PathBuf, memory: PathBuf },
+    Local {
+        state: PathBuf,
+        memory: PathBuf,
+        /// The runtime that made the image, as archived.
+        runtime: Option<String>,
+    },
     /// The state, in the scratch directory; memory stays in the store, to be
     /// paged in as the guest touches it.
     Remote {
@@ -139,6 +147,8 @@ pub enum FetchedMemory {
         /// What the fetch brought back of memory already: the working set
         /// the guest touched first after its last wake.
         prefilled: Option<Prefilled>,
+        /// The runtime that made the image, as archived.
+        runtime: Option<String>,
     },
 }
 
@@ -281,6 +291,8 @@ impl Directory {
 /// copy's receipt, so a receipt vouches for the files' contents, not only
 /// their names.
 const CONTENTS: &str = "contents";
+/// The stored file naming the runtime that made the memory image.
+const RUNTIME: &str = "runtime";
 
 /// The contents list for `files` (name and path) as stored in `dir`, with
 /// `made` telling apart copies of the same bytes.
@@ -385,6 +397,10 @@ impl Store for Directory {
         let cancel = cancel.clone();
         let disk = files.disk.clone();
         let mut pairs = Vec::new();
+        let runtime = files
+            .memory
+            .as_ref()
+            .and_then(|memory| memory.runtime.clone());
         if let Some(memory) = &files.memory {
             pairs.push((memory.state.clone(), "state"));
             pairs.push((memory.memory.clone(), "memory"));
@@ -417,6 +433,10 @@ impl Store for Directory {
                 }
                 copy_sparse(local, &staging.join(name))?;
                 names.push(*name);
+            }
+            if let Some(runtime) = &runtime {
+                fs::write(staging.join(RUNTIME), runtime)?;
+                names.push(RUNTIME);
             }
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -476,7 +496,18 @@ impl Store for Directory {
             let memory = into.scratch.join("memory");
             copy_checked(&stored, "state", &state, &listed)?;
             copy_checked(&stored, "memory", &memory, &listed)?;
-            Ok(FetchedMemory::Local { state, memory })
+            let runtime = if listed.contains_key(RUNTIME) {
+                let copy = into.scratch.join(RUNTIME);
+                copy_checked(&stored, RUNTIME, &copy, &listed)?;
+                Some(fs::read_to_string(&copy)?)
+            } else {
+                None
+            };
+            Ok(FetchedMemory::Local {
+                state,
+                memory,
+                runtime,
+            })
         })
         .await
     }
@@ -495,7 +526,7 @@ impl Store for Directory {
         blocking("forget", move || {
             // The device state goes first: without it, what remains of the
             // memory image can never be mistaken for a usable one.
-            for name in ["state", "memory"] {
+            for name in ["state", "memory", RUNTIME] {
                 match fs::remove_file(stored.join(name)) {
                     Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
                         return Err(error);
@@ -516,7 +547,8 @@ impl Store for Directory {
             };
             let mut kept = String::with_capacity(listed.len());
             for line in listed.lines() {
-                if !line.starts_with("state ") && !line.starts_with("memory ") {
+                let name = line.split_once(' ').map_or(line, |(name, _)| name);
+                if !["state", "memory", RUNTIME].contains(&name) {
                     kept.push_str(line);
                     kept.push('\n');
                 }
@@ -571,6 +603,7 @@ mod tests {
                 state: dir.path().join("state"),
                 memory: dir.path().join("memory"),
                 chunks: None,
+                runtime: None,
             }),
             profile: None,
         };
@@ -615,6 +648,7 @@ mod tests {
                 state: dir.path().join("state"),
                 memory: dir.path().join("memory"),
                 chunks: None,
+                runtime: Some("Firecracker v1.0.0 on a test processor".into()),
             }),
             profile: None,
         };
@@ -638,7 +672,8 @@ mod tests {
         fs::create_dir_all(dir.path().join("good")).unwrap();
         assert!(matches!(
             store.fetch(id, &good).await.unwrap(),
-            FetchedMemory::Local { .. }
+            FetchedMemory::Local { runtime: Some(runtime), .. }
+                if runtime == "Firecracker v1.0.0 on a test processor"
         ));
         assert_eq!(fs::read(&good.disk).unwrap(), b"GOOD");
 

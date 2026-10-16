@@ -62,6 +62,11 @@ pub trait Engine: Send + Sync + 'static {
     /// How this engine backs, saves and compresses guest memory.
     fn memory_profile(&self) -> MemoryProfile;
 
+    /// What restoring a memory image depends on besides the image, such as
+    /// the VMM's version and the processor: an image made under another
+    /// runtime may be refused. Empty when unknown.
+    fn runtime(&self) -> &str;
+
     /// Boots a fresh VM from its disks.
     fn boot(&self, spec: &VmSpec) -> impl Future<Output = Result<Self::Vm, EngineError>> + Send;
 

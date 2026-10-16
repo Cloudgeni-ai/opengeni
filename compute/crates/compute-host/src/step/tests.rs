@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use compute_core::SandboxId;
 use compute_engine::Found;
@@ -17,6 +17,11 @@ struct Counting {
     restores: AtomicUsize,
     resumes: AtomicUsize,
     stops: AtomicUsize,
+    /// What [`Engine::runtime`] says.
+    runtime: String,
+    /// Whether it refuses every memory image, as a VMM refuses a snapshot
+    /// format it no longer reads.
+    refuses: AtomicBool,
 }
 
 impl Counting {
@@ -34,12 +39,23 @@ impl Engine for Counting {
         MemoryProfile::bare_metal()
     }
 
+    fn runtime(&self) -> &str {
+        &self.runtime
+    }
+
     async fn boot(&self, _: &VmSpec) -> Result<(), EngineError> {
         unreachable!("no step here boots")
     }
 
     async fn restore(&self, _: &VmSpec, _: &RestoreFiles) -> Result<(), EngineError> {
         self.restores.fetch_add(1, Ordering::SeqCst);
+        if self.refuses.load(Ordering::SeqCst) {
+            return Err(EngineError::new(
+                ErrorKind::MemoryLost,
+                "restore",
+                "unsupported snapshot version",
+            ));
+        }
         Ok(())
     }
 
@@ -416,6 +432,55 @@ async fn an_uncertain_eviction_keeps_the_local_copy() {
     let sandbox = sandbox.restart().await;
     let durable = sandbox.records.settle(sandbox.id).await.unwrap();
     assert_eq!(durable.disk, Disk::Remote);
+}
+
+/// A VMM that refuses a sound image made under its own runtime may have
+/// failed for a reason of the host's, so the image is kept for a retry.
+/// One made under another runtime (an older VMM, another processor) will
+/// be refused every time: the sandbox gives its memory up and wakes from
+/// its disk instead of retrying forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_refused_by_another_runtime_is_given_up() {
+    const NOW: &str = "Firecracker v2.0.0 on a new processor";
+    for (made_under, kept) in [
+        (NOW, true),
+        ("Firecracker v1.0.0 on an old processor", false),
+    ] {
+        let mut sandbox = Sandbox::new().await;
+        sandbox.engine = Arc::new(Counting {
+            runtime: NOW.to_owned(),
+            refuses: AtomicBool::new(true),
+            ..Counting::default()
+        });
+        let saved = sandbox.record(Change::new().image(true)).await;
+        let (state, memory) = (
+            sandbox.paths.dir.join("state"),
+            sandbox.paths.dir.join("memory"),
+        );
+        fs::write(&state, "state").unwrap();
+        fs::write(&memory, vec![7; 8192]).unwrap();
+        let images = images_of(&sandbox.paths);
+        images
+            .publish_made_by(
+                Parts::Whole {
+                    state: &state,
+                    memory: &memory,
+                },
+                Some(made_under),
+            )
+            .unwrap();
+
+        let ran = sandbox.job(NoStore, saved, false).run(Step::Restore).await;
+        assert_eq!(Counting::count(&sandbox.engine.restores), 1);
+        let durable = sandbox.records.settle(sandbox.id).await.unwrap();
+        if kept {
+            assert_eq!(ran.outcome, Outcome::Failed(Failure::Transient));
+            assert!(durable.image, "a sound image of this runtime was given up");
+        } else {
+            assert_eq!(ran.outcome, Outcome::Failed(Failure::MemoryLost));
+            assert!(!durable.image, "the sandbox would retry the image forever");
+        }
+    }
 }
 
 /// A failed disk check, or one an agent never finished, keeps every later

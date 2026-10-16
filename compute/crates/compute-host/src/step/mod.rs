@@ -564,6 +564,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         let snapshot = started.elapsed();
         let scratch = self.paths.dir.join("saving");
         let watching = Arc::clone(&live.memory.disk);
+        let runtime = self.engine.runtime().to_owned();
         let published = blocking(move || {
             // The VMM wrote these inside its jail, where it could have put
             // links instead: they move somewhere only the host reaches and
@@ -585,7 +586,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                     memory: &files.memory,
                 },
             };
-            let published = images.publish(parts);
+            let published = images.publish_made_by(parts, Some(&runtime));
             if published.is_err() {
                 let _ = remove_if_present(&files.state);
                 let _ = remove_if_present(&files.memory);
@@ -731,9 +732,12 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// Decides what the VMM refusing to load `image` means. The image is
     /// given up only when it is proven bad: a local image that fails the
     /// deep check goes to quarantine, and a remote image whose store copy
-    /// is bad or gone is dropped. Otherwise the refusal was the host's (a
-    /// pager that could not start or could not reach the store, say) and
-    /// the image is kept for a retry.
+    /// is bad or gone is dropped. An image recorded as made under another
+    /// runtime (a different VMM version or processor model) is given up
+    /// too: that VMM will go on refusing it, so the sandbox wakes from its
+    /// disk instead of retrying forever. Otherwise the refusal was the
+    /// host's (a pager that could not start or could not reach the store,
+    /// say) and the image is kept for a retry.
     async fn rejected(
         &mut self,
         images: &Images,
@@ -743,6 +747,23 @@ impl<E: Engine, S: Store> Job<E, S> {
     ) -> Outcome {
         const OP: &str = "restore";
         tracing::warn!(id = %self.id, %error, "the VMM refused the memory image");
+        let made_under = image.meta().runtime.as_deref().unwrap_or("");
+        if !made_under.is_empty() && made_under != self.engine.runtime() {
+            tracing::warn!(
+                id = %self.id,
+                made_under,
+                runtime = self.engine.runtime(),
+                "the refused image was made under another runtime; waking from the disk"
+            );
+            if let Err(error) = self.commit(Change::new().image(false)).await {
+                return state_failure(&error);
+            }
+            return failure(&EngineError::new(
+                ErrorKind::MemoryLost,
+                OP,
+                format!("made under another runtime ({made_under:?}): {error}"),
+            ));
+        }
         if image.meta().remote {
             #[cfg(target_os = "linux")]
             let lost = memory
