@@ -125,7 +125,7 @@ async function listCalls(): Promise<SessionSidebarEvidence["listCalls"]> {
   return page.evaluate(() => window.sessionSidebarQa.listCalls);
 }
 
-test("session titles fade into icons without ellipsis across themes and widths", async () => {
+test("session titles fade before icons without ellipsis across themes and widths", async () => {
   for (const theme of ["dark", "light"]) {
     for (const width of [1160, 390]) {
       await page.setViewportSize({ width, height: 850 });
@@ -150,7 +150,7 @@ test("session titles fade into icons without ellipsis across themes and widths",
       expect(computed.clipped).toBe(true);
       const titleBox = (await title.boundingBox())!;
       const metadataBox = (await metadata.boundingBox())!;
-      expect(titleBox.x + titleBox.width).toBeCloseTo(metadataBox.x + 8, 0);
+      expect(titleBox.x + titleBox.width).toBeCloseTo(metadataBox.x - 4, 0);
       const sidebar = page.getByRole("complementary", { name: "Workspace sidebar" });
       expect(await sidebar.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
         true,

@@ -211,7 +211,6 @@ describe("SessionRowContent", () => {
     expect(text.textContent).toBe(title);
     expect(text.className).toContain("overflow-hidden whitespace-nowrap");
     expect(text.className).not.toContain("truncate");
-    expect(text.parentElement?.hasAttribute("data-session-row-text")).toBe(true);
     expect(text.parentElement?.nextElementSibling?.hasAttribute("data-session-row-metadata")).toBe(
       true,
     );
@@ -219,15 +218,12 @@ describe("SessionRowContent", () => {
       expect(host.querySelector("[data-session-row-state]")?.className).toContain("truncate");
   });
 
-  test("fades title text into existing metadata without changing its footprint", async () => {
+  test("keeps the title fade inside its column without extending into metadata", async () => {
     const styles = await Bun.file(new URL("../../styles.css", import.meta.url)).text();
     expect(styles).toContain(
       "mask-image: linear-gradient(to right, #000 calc(100% - 1rem), transparent)",
     );
-    expect(styles).toContain(
-      "[data-session-row-text]:has(+ [data-session-row-metadata]) > [data-session-row-title]",
-    );
-    expect(styles).toContain("width: calc(100% + 0.75rem)");
+    expect(styles).not.toContain("[data-session-row-text]");
   });
 
   test.each([

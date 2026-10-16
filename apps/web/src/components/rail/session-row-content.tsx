@@ -223,7 +223,7 @@ export function SessionRowContent({
       {/* Inert for the row's accessible name, which its `aria-label` owns -
           including the creator. Kept as-is so this change regresses nothing. */}
       <span className="sr-only">{stateLabel}. </span>
-      <span data-session-row-text className="flex min-w-0 flex-1 flex-col leading-tight">
+      <span className="flex min-w-0 flex-1 flex-col leading-tight">
         <span data-session-row-title className="block min-w-0 overflow-hidden whitespace-nowrap">
           {title}
         </span>
