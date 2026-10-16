@@ -28,7 +28,10 @@ export type OpenGeniSiteAiOptions = {
 
 export type OpenGeniSiteAi = {
   /** Starts an ordinary viewer-owned Site session and returns its first turn's output. */
-  run(request: OpenGeniSiteAiRequest, options?: OpenGeniSiteAiOptions): Promise<OpenGeniSiteAiResult>;
+  run(
+    request: OpenGeniSiteAiRequest,
+    options?: OpenGeniSiteAiOptions,
+  ): Promise<OpenGeniSiteAiResult>;
   /** Observe without sending work. Omit `after` to replay the complete answer;
    * with `after`, text/onText contain only subsequent output. Pass the retained
    * turnId when resuming a pending turn, so another turn cannot settle it. */
@@ -53,8 +56,7 @@ export function createOpenGeniSiteAi(
     })) {
       after = event.coveredThrough ?? event.sequence;
       const step = fold.push(event);
-      for (const chunk of step.chunks)
-        if (chunk.type === "text") options.onText?.(chunk.text);
+      for (const chunk of step.chunks) if (chunk.type === "text") options.onText?.(chunk.text);
       if (step.terminal === "failed") throw fold.failureError();
       // Published-host event views deliberately omit approval/input payloads.
       // The lifecycle event still says the work is waiting, not completed.
@@ -79,7 +81,9 @@ export function createOpenGeniSiteAi(
         initialMessage: request.initialMessage,
         idempotencyKey: request.idempotencyKey ?? crypto.randomUUID(),
         ...(request.model === undefined ? {} : { model: request.model }),
-        ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
+        ...(request.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: request.reasoningEffort }),
         ...(request.latencyMode === undefined ? {} : { latencyMode: request.latencyMode }),
       });
       options.onSession?.(session.id);

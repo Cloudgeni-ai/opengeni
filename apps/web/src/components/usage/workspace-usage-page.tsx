@@ -154,7 +154,6 @@ export function WorkspaceUsagePage({
           onChangeRule={budget.setMemberRule}
         />
       ) : null}
-
     </SectionStack>
   );
 }

@@ -6,11 +6,23 @@ import type {
   InsightsUsageResponse,
   InsightsSiteUsageQuery,
 } from "@opengeni/contracts/insights-usage";
-import { readInsightsCalls, readInsightsUsage, readInsightsSiteUsage, type Database } from "@opengeni/db";
+import {
+  readInsightsCalls,
+  readInsightsUsage,
+  readInsightsSiteUsage,
+  type Database,
+} from "@opengeni/db";
 
-export async function getInsightsSiteUsage(db: Database, input: {
-  accountId: string; workspaceId: string; query: InsightsSiteUsageQuery; now?: Date;
-}) {
+export async function getInsightsSiteUsage(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    query: InsightsSiteUsageQuery;
+    viewerSubjectId: string | null;
+    now?: Date;
+  },
+) {
   return readInsightsSiteUsage(db, { ...input, now: input.now ?? new Date() });
 }
 

@@ -17,30 +17,40 @@ export type InsightsUsageRange = z.infer<typeof InsightsUsageRange>;
 
 /** Aggregate Site accounting only: no viewer, session, turn or prompt identities. */
 export const InsightsSiteUsageQuery = /* @__PURE__ */ defineSchema(() =>
-  z.object({ range: z.enum(["today", "week", "month", "30d", "90d", "ytd"]).default("month") }).strict(),
+  z
+    .object({ range: z.enum(["today", "week", "month", "30d", "90d", "ytd"]).default("month") })
+    .strict(),
 );
 export type InsightsSiteUsageQuery = z.infer<typeof InsightsSiteUsageQuery>;
-export const InsightsSiteUsageRow = /* @__PURE__ */ defineSchema(() => z.object({
-  siteId: Identifier.nullable(),
-  title: z.string(),
-  kind: z.enum(["site", "restricted", "other"]),
-  calls: SafeCount,
-  pricedCalls: SafeCount,
-  /** Settled negative model-usage ledger entries, not a provider price. */
-  chargedMicros: SafeCount,
-  /** Recorded API-equivalent estimates across all payment paths. */
-  apiEquivalentMicros: SafeCount,
-  subscriptionApiEquivalentMicros: SafeCount,
-  ownKeyApiEquivalentMicros: SafeCount,
-}).strict());
+export const InsightsSiteUsageRow = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      siteId: Identifier.nullable(),
+      title: z.string(),
+      kind: z.enum(["site", "restricted", "other"]),
+      calls: SafeCount,
+      pricedCalls: SafeCount,
+      /** Settled negative model-usage ledger entries, not a provider price. */
+      chargedMicros: SafeCount,
+      /** Recorded API-equivalent estimates across all payment paths. */
+      apiEquivalentMicros: SafeCount,
+      subscriptionApiEquivalentMicros: SafeCount,
+      ownKeyApiEquivalentMicros: SafeCount,
+    })
+    .strict(),
+);
 export type InsightsSiteUsageRow = z.infer<typeof InsightsSiteUsageRow>;
-export const InsightsSiteUsageResponse = /* @__PURE__ */ defineSchema(() => z.object({
-  workspaceId: Identifier,
-  range: InsightsSiteUsageQuery.shape.range,
-  windowStart: UtcDateTime,
-  windowEnd: UtcDateTime,
-  rows: z.array(InsightsSiteUsageRow).max(201),
-}).strict());
+export const InsightsSiteUsageResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      workspaceId: Identifier,
+      range: InsightsSiteUsageQuery.shape.range,
+      windowStart: UtcDateTime,
+      windowEnd: UtcDateTime,
+      rows: z.array(InsightsSiteUsageRow).max(201),
+    })
+    .strict(),
+);
 export type InsightsSiteUsageResponse = z.infer<typeof InsightsSiteUsageResponse>;
 
 export const InsightsUsageGroupBy = /* @__PURE__ */ defineSchema(() =>

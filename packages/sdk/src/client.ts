@@ -1,5 +1,8 @@
 import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
-import type { InsightsSiteUsageQuery, InsightsSiteUsageResponse } from "@opengeni/contracts/insights-usage";
+import type {
+  InsightsSiteUsageQuery,
+  InsightsSiteUsageResponse,
+} from "@opengeni/contracts/insights-usage";
 import type {
   ClaudeSubscriptionAccountsResponse,
   ClaudeSubscriptionAccount,
@@ -10339,8 +10342,13 @@ export class OpenGeniClient {
     options: Partial<InsightsSiteUsageQuery> = {},
     requestOptions: OpenGeniRequestOptions = {},
   ): Promise<InsightsSiteUsageResponse> {
-    return this.requestJson("GET", `/v1/workspaces/${encodeURIComponent(workspaceId)}/insights/sites`,
-      undefined, { range: options.range ?? "month" }, requestOptions);
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/insights/sites`,
+      undefined,
+      { range: options.range ?? "month" },
+      requestOptions,
+    );
   }
 
   /** Shared usage under the existing workspace access gate. */

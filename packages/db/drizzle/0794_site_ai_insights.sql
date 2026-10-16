@@ -5,6 +5,8 @@ SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='5min';
 ALTER TABLE credit_ledger_entries ADD COLUMN site_id uuid;
 
+ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE credit_ledger_entries NO FORCE ROW LEVEL SECURITY;
 DO $backfill$
 DECLARE scope record;
 BEGIN
@@ -19,6 +21,8 @@ BEGIN
   END LOOP;
 END
 $backfill$;
+ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+ALTER TABLE credit_ledger_entries FORCE ROW LEVEL SECURITY;
 
 CREATE FUNCTION stamp_model_debit_site() RETURNS trigger
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $body$
@@ -45,7 +49,7 @@ CREATE INDEX credit_ledger_site_occurred_idx ON credit_ledger_entries(workspace_
 DO $reader$
 BEGIN
   EXECUTE format($ddl$
-    CREATE FUNCTION opengeni_private.insights_site_usage(a uuid,w uuid,lo timestamptz,hi timestamptz)
+    CREATE FUNCTION opengeni_private.insights_site_usage(a uuid,w uuid,lo timestamptz,hi timestamptz,viewer text)
     RETURNS TABLE(payload jsonb) LANGUAGE plpgsql VOLATILE SECURITY DEFINER
     SET search_path=pg_catalog,%1$I,opengeni_private,pg_temp SET jit=off AS $fn$
     DECLARE actor text:=nullif(current_setting('opengeni.subject_id',true),'');
@@ -56,6 +60,8 @@ BEGIN
         RAISE EXCEPTION 'Site Insights requires exact tenant scope' USING ERRCODE='42501'; END IF;
       IF lo IS NULL OR hi IS NULL OR hi<lo OR hi-lo>interval '370 days' THEN
         RAISE EXCEPTION 'Invalid Site Insights window' USING ERRCODE='22023'; END IF;
+      IF viewer IS NOT NULL AND viewer IS DISTINCT FROM actor AND viewer IS DISTINCT FROM human THEN
+        RAISE EXCEPTION 'Site Insights viewer differs from the verified actor' USING ERRCODE='42501'; END IF;
       -- The existing owner+witness fact capability admits costs, not transcripts.
       INSERT INTO opengeni_private.insights_fact_read_runtime_capabilities
         (backend_pid,transaction_id,capability_kind,account_id,workspace_id,subject_id,initiating_human_subject_id)
@@ -76,10 +82,11 @@ BEGIN
               AND c.type='model_usage_debit' AND c.source_type='model_response' AND c.amount_micros<0
               AND c.occurred_at>=lo AND c.occurred_at<hi
         ), visible AS MATERIALIZED (
-          -- Site RLS decides whether even the Site identity/title is visible.
+          -- Match workspace-artifacts.visibleTo: its RLS is tenant-only.
           -- Private/unavailable Sites share one bucket; never leak their ids.
           SELECT site.id,site.title FROM %1$I.workspace_artifacts site
             WHERE site.account_id=a AND site.workspace_id=w
+              AND (site.visibility='workspace_shared' OR site.owner_subject_id=viewer)
         ), grouped AS (
           SELECT v.id,coalesce(v.title,'Private or unavailable Sites') title,
             CASE WHEN v.id IS NULL THEN 'restricted' ELSE 'site' END kind,
@@ -109,14 +116,59 @@ BEGIN
 END
 $reader$;
 
-REVOKE ALL ON FUNCTION opengeni_private.insights_site_usage(uuid,uuid,timestamptz,timestamptz) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.insights_site_usage(uuid,uuid,timestamptz,timestamptz,text) FROM PUBLIC;
 DO $acl$
 DECLARE role_name text;
 BEGIN
   FOR role_name IN SELECT r.rolname FROM jsonb_array_elements_text(current_setting('opengeni.migration_application_roles')::jsonb) configured(value)
     JOIN pg_roles r ON r.rolname=configured.value
     WHERE has_table_privilege(r.rolname,format('%I.model_call_facts',current_schema()),'SELECT') LOOP
-    EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.insights_site_usage(uuid,uuid,timestamptz,timestamptz) TO %I',role_name);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.insights_site_usage(uuid,uuid,timestamptz,timestamptz,text) TO %I',role_name);
   END LOOP;
 END
 $acl$;
+
+-- Analytical definers also run in installations whose migration owner bypasses
+-- RLS. Keep the independent Site audience explicit, without changing native
+-- private-session predicates or granting inventory access to Site transcripts.
+-- This invoker view adds only a filter; it never confers underlying table access.
+CREATE VIEW insights_audience_sessions WITH (security_invoker=true,security_barrier=true) AS
+  SELECT * FROM sessions WHERE session_site_actor_visible(
+    site_id,site_access_root_id,root_session_id,site_viewer_principal,site_owner_subject_id);
+REVOKE ALL ON insights_audience_sessions FROM PUBLIC;
+
+-- Existing migrations use source-anchored function replacement to preserve
+-- signatures, ACLs and accounting protocols. Change only the sessions relation
+-- in the complete, enumerated family of analytical readers; refuse source drift.
+DO $analytical_audience$
+DECLARE routine record; original text; updated text; changed int:=0;
+BEGIN
+  FOR routine IN SELECT p.oid,p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='opengeni_private' AND p.proname IN (
+      'visible_workspace_insights_model_call_facts','visible_workspace_insights_usage_events',
+      'visible_workspace_insights_usage_projection','complete_workspace_insights_usage_projection',
+      'visible_workspace_insights_model_fact_rows','workspace_insights_amount_fact_rows',
+      'insights_scoped_usage_rows','insights_scoped_calls_rows') LOOP
+    original:=pg_get_functiondef(routine.oid);
+    updated:=regexp_replace(original,'\.sessions([[:space:]])','.insights_audience_sessions\1','g');
+    IF updated=original THEN
+      -- The short overloads delegate to their scoped sibling without a join.
+      IF routine.proname NOT IN('visible_workspace_insights_model_call_facts','visible_workspace_insights_usage_events') THEN
+        RAISE EXCEPTION 'Insights audience source contract changed: %',routine.proname; END IF;
+      CONTINUE;
+    END IF;
+    IF routine.proname='insights_scoped_usage_rows' THEN
+      -- A hidden Site is restricted, not a deleted conversation. This metadata
+      -- existence check cannot project identifiers and keeps totals complete.
+      updated:=replace(updated,'WHEN s.id IS NULL OR r.id IS NULL THEN ''deleted''',format(
+        'WHEN (s.id IS NULL OR r.id IS NULL) AND EXISTS(SELECT 1 FROM %I.model_call_facts sf
+          WHERE sf.account_id=a AND sf.workspace_id=w.id AND sf.session_id=f.session_id AND sf.site_id IS NOT NULL)
+          THEN ''restricted'' WHEN s.id IS NULL OR r.id IS NULL THEN ''deleted''',current_schema()));
+      IF position('sf.site_id IS NOT NULL' IN updated)=0 THEN RAISE EXCEPTION 'Insights classification source contract changed'; END IF;
+    END IF;
+    EXECUTE updated;
+    changed:=changed+1;
+  END LOOP;
+  IF changed<>9 THEN RAISE EXCEPTION 'Expected nine scoped analytical readers, updated %',changed; END IF;
+END
+$analytical_audience$;

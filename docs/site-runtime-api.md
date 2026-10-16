@@ -276,9 +276,14 @@ Operations:
   - Guest writes have their own per-minute limit.
   - Guests never reach files.
 - `sessions.*` are Site agent conversations:
-  - **Create.** A new conversation runs as the service principal
-    `site:<siteId>`, through in-process dispatch with a short-lived delegated
-    token.
+  - **Create.** A workspace member runs as their verified native human identity
+    in a native private session. The in-process request carries a non-serializable
+    verified viewer proof, revalidated against live membership and permission
+    ceilings. Guests and signed-in outsiders retain `site:<siteId>` execution
+    through a short-lived delegated token, with an independent immutable
+    Site/viewer audience enforced by native authorization and RLS. No fabricated
+    workspace membership or shared fallback is used. Disabled private-session
+    policy explicitly refuses a new conversation.
     - It uses `agentAccess: "session"`, the publication's model,
       instructions and MCP servers, memory off and no sandbox
       (`sandboxBackend: "none"`; a publication has no sandbox setting).
@@ -299,7 +304,8 @@ Operations:
       members who may use connections (`mcp_servers:attach` or admins).
       Invited, `user` and guest viewers never get workspace tools. They are
       optional references, so an unknown connection is skipped.
-    - Its model is the publication's model for members. For everyone else a
+    - Its default model is the publication's model; members may select an allowed
+      model with their normal personal access/subscriptions. For everyone else a
       subscription-billed model is replaced by the workspace's default
       credit-billed model, or the start is refused with
       `not_available_for_viewer` (`feature: "agent_model"`) when there is
@@ -320,6 +326,11 @@ Operations:
     queue, queue items, composer draft, human input) work only on the
     viewer's own conversations on this Site. Any other conversation returns
     404 `site_conversation_not_found`.
+    Direct workspace session, event, file and control routes enforce the same
+    viewer audience; hiding sidebar entries alone is not authorization. Ordinary
+    discovery excludes app-internal sessions; explicit Site history includes
+    only the viewer's own work. Stream reauthorization checks the live published
+    host and viewer session before further delivery.
   - **Site-safe views.** `get`, `list` and `create` return a projection
     without account or workspace ids, instructions, tools or policies,
     metadata, creator, sandbox ids or diagnostics.

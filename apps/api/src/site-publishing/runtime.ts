@@ -9,7 +9,11 @@ import {
   type SiteLimits,
   type SiteViewerCapabilities,
 } from "@opengeni/contracts";
-import { sessionUsageLimitsProducerEnabled, stampSiteViewerSessionAuthorization, type ApiRouteDeps } from "@opengeni/core";
+import {
+  sessionUsageLimitsProducerEnabled,
+  stampSiteViewerSessionAuthorization,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   consumeSiteRuntimeRate,
   findSiteHostname,
@@ -798,9 +802,9 @@ export async function meterSiteRuntime(
 // --- in-process dispatch ------------------------------------------------------------
 
 /**
- * Run an ordinary session route in this process as the Site's service
- * principal (`site:<siteId>`), with a 60-second delegated token carrying only
- * session permissions and the viewer as its display label. The Site and the
+ * Run an ordinary session route in this process as the verified member, or
+ * the Site service principal for an outsider. The latter uses a 60-second
+ * delegated token plus the separate trusted viewer audience. The Site and the
  * served version ride along as the request's Site origin, so new sessions and
  * turns record where they came from. The route authorizes as usual.
  */
@@ -831,7 +835,9 @@ export async function siteRuntimeSessionRequest(
     stampSiteViewerSessionAuthorization(request, {
       organizationId: host.scope.accountId,
       subjectId: viewer.subjectId,
-      permissions: [...new Set([...SITE_RUNTIME_AGENT_PERMISSIONS, ...(input.extraPermissions ?? [])])],
+      permissions: [
+        ...new Set([...SITE_RUNTIME_AGENT_PERMISSIONS, ...(input.extraPermissions ?? [])]),
+      ],
       workspaceId: host.scope.workspaceId,
     });
   }

@@ -1255,9 +1255,16 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     const reauthorizeViewer = async () => {
       const liveHost = await requireServedSiteRuntimeHost(deps, host.domain, request.fields.host);
       const liveViewer = await resolveSiteRuntimeViewer(deps, liveHost, request.fields);
-      if (liveHost.site.id !== host.site.id || liveViewer.principal !== viewer.principal ||
-        liveViewer.kind !== viewer.kind || liveViewer.sessionId !== viewer.sessionId)
-        throw siteNotAvailableForViewer("agent", "This conversation is no longer available to this viewer");
+      if (
+        liveHost.site.id !== host.site.id ||
+        liveViewer.principal !== viewer.principal ||
+        liveViewer.kind !== viewer.kind ||
+        liveViewer.sessionId !== viewer.sessionId
+      )
+        throw siteNotAvailableForViewer(
+          "agent",
+          "This conversation is no longer available to this viewer",
+        );
     };
     let pendingAdmission: { sessionId: string; admissionId: string } | undefined;
     const send = async (
@@ -1269,18 +1276,19 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       await reauthorizeViewer();
       const execute = () =>
         withSiteViewerRlsContext({ siteId: host.site.id, principal: viewer.principal }, () =>
-        withSiteSessionOrigin(siteOrigin, async () =>
-          dispatch(
-            await siteRuntimeSessionRequest(deps, host, viewer, {
-              origin: url.origin,
-              method,
-              path,
-              reauthorize: reauthorizeViewer,
-              ...(body === undefined ? {} : { body }),
-              ...(extraPermissions ? { extraPermissions } : {}),
-            }),
+          withSiteSessionOrigin(siteOrigin, async () =>
+            dispatch(
+              await siteRuntimeSessionRequest(deps, host, viewer, {
+                origin: url.origin,
+                method,
+                path,
+                reauthorize: reauthorizeViewer,
+                ...(body === undefined ? {} : { body }),
+                ...(extraPermissions ? { extraPermissions } : {}),
+              }),
+            ),
           ),
-        ));
+        );
       const pending = pendingAdmission;
       if (!pending) return await execute();
       // The trusted context fences every session write through enqueue commit.
@@ -1361,7 +1369,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         await requireSitePlatformOpen(deps, "guest_agent");
       const models = await siteViewerModels(host, viewer, limits);
       if (input.model && !models.allowed.includes(input.model))
-        throw siteNotAvailableForViewer("agent_model", "This model is not available to you on this Site");
+        throw siteNotAvailableForViewer(
+          "agent_model",
+          "This model is not available to you on this Site",
+        );
       if (models.unavailable)
         throw siteNotAvailableForViewer(
           "agent_model",
@@ -1421,7 +1432,10 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       // Settle the viewer's recent spend so the day budget sees it.
       if (!repair && viewer.kind !== "member" && deps.settings.privacyOnlyMeAllowed === false)
-        throw siteNotAvailableForViewer("private_conversations", "Private Site conversations are disabled by this deployment");
+        throw siteNotAvailableForViewer(
+          "private_conversations",
+          "Private Site conversations are disabled by this deployment",
+        );
       for (const conversation of await listOwnedSiteRuntimeConversations(deps.db, host.scope, {
         siteId: host.site.id,
         viewerPrincipal: viewer.principal,
@@ -1532,7 +1546,11 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         // No sandbox: a Site's agent answers from the page and the Site's
         // data, with no shell or workspace files.
         sandboxBackend: "none",
-        ...(repair ? { model: repair.model } : input.model || models.default ? { model: input.model ?? models.default } : {}),
+        ...(repair
+          ? { model: repair.model }
+          : input.model || models.default
+            ? { model: input.model ?? models.default }
+            : {}),
         ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
         ...(input.latencyMode === undefined ? {} : { latencyMode: input.latencyMode }),
         instructions: siteAgentInstructions(host, viewer, dataTools, agent.instructions),

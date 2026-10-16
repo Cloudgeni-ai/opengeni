@@ -32571,9 +32571,11 @@ function sessionFilters(
     // App-internal execution is not ordinary workspace conversation discovery.
     // This is presentation scope only: native ownership and Site RLS still apply.
     const ownRoot = options.authorizationScope?.agentAccessViewer?.callerRootSessionId;
-    filters.push(ownRoot
-      ? sql`(${schema.sessions.siteAccessRootId} is null OR ${schema.sessions.rootSessionId} = ${ownRoot}::uuid)`
-      : sql`${schema.sessions.siteAccessRootId} is null`);
+    filters.push(
+      ownRoot
+        ? sql`(${schema.sessions.siteAccessRootId} is null OR ${schema.sessions.rootSessionId} = ${ownRoot}::uuid)`
+        : sql`${schema.sessions.siteAccessRootId} is null`,
+    );
   }
   const archivedRoot = sql`exists (
     select 1
@@ -33326,7 +33328,9 @@ async function readSessionListForSubject(
                     eq(schema.sessions.workspaceId, workspaceId),
                     inArray(schema.sessions.id, candidates),
                     sql`${schema.sessions.siteAccessRootId} is null`,
-                    ...(options.authorizationScope ? [sessionAuthorizationScopeFilter(options.authorizationScope)] : []),
+                    ...(options.authorizationScope
+                      ? [sessionAuthorizationScopeFilter(options.authorizationScope)]
+                      : []),
                   ),
                 );
               const allowed = new Set(allowedRows.map((row) => row.id));
@@ -34779,9 +34783,11 @@ async function selectSessionDiscoveryPageRows(
     );
   } else {
     const ownRoot = options.authorizationScope?.agentAccessViewer?.callerRootSessionId;
-    authorizationFilters.push(ownRoot
-      ? sql`(${schema.sessions.siteAccessRootId} is null OR ${schema.sessions.rootSessionId} = ${ownRoot}::uuid)`
-      : sql`${schema.sessions.siteAccessRootId} is null`);
+    authorizationFilters.push(
+      ownRoot
+        ? sql`(${schema.sessions.siteAccessRootId} is null OR ${schema.sessions.rootSessionId} = ${ownRoot}::uuid)`
+        : sql`${schema.sessions.siteAccessRootId} is null`,
+    );
   }
   if (options.filters.activeOnly) {
     authorizationFilters.push(notInArray(schema.sessions.status, ["failed", "cancelled"]));

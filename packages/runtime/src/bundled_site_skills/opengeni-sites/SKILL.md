@@ -18,8 +18,9 @@ Site on the web is built in (see "Publish to the web").
 
 A Site never needs its own server, API key, or hosting provider to reach
 Opengeni. Model access, agent conversations, and workspace tools all come from
-the host bridge: `createOpenGeniSiteClient` from `@opengeni/sdk/site` plus the
-`@opengeni/react/session-ui` conversation surface. The parent page owns the
+the host bridge: `createOpenGeniSiteClient` from `@opengeni/sdk/site`. Use its
+`ai.run` helper for inline results, or `@opengeni/react/session-ui` when the app
+needs a conversation surface. The parent page owns the
 credentials and workspace identity; Site code receives neither, so "keep
 credentials server-side" is already satisfied by that bridge.
 
@@ -239,6 +240,33 @@ const client = createOpenGeniSiteClient();
 const issues = await client.tools.linear.issues_list({ state: "Todo" });
 ```
 
+### Inline AI: the app chooses the interaction
+
+Use `site.ai.run({ initialMessage: appDefinedPrompt, idempotencyKey: actionId })`
+to return AI output inside the app without mounting chat or displaying history.
+Prompts, context, controls and results are app-designed; Draft, Summarize or
+Classify are merely possible examples, never required buttons or templates.
+Use `onText` for incremental text and `onSession` to retain a native handle before
+waiting. A result has `text`, `sessionId`, `turnId`, `after` and `status`:
+`completed`, `pending` (approval/input needed), or `cancelled`; failures reject.
+Validate any app-defined structured output before using it.
+
+This is ordinary native execution with the same model access, subscriptions,
+permissions, tool selection, approvals, metering and outsider caps. Aborting the
+observation does not cancel the task. `site.ai.result(id, { turnId })` replays
+without creating more work. Supplying `after` returns subsequent text only;
+retain earlier text or omit it for a full replay. Keep retry keys stable per
+action and handles in viewer-private state/storage, not shared Site Data.
+
+Site AI is private per viewer by default and does not clutter the workspace
+sidebar or ordinary search. Signed-in members use their real human identity;
+guests use existing cookie/visitor continuity, not a shared anonymous chat.
+If organization policy disallows private execution, surface its explicit
+refusal; never fall back to shared sessions. Privacy does not automatically
+extend to separately published artifacts or shared Site Data.
+
+### Optional conversation UI
+
 For embedded conversations, `site.client` is the ordinary Opengeni SDK client;
 `site.workspaceId` is a host-resolved routing alias. Use the normal React
 complete conversation surface—do not implement session REST or SSE yourself:
@@ -259,7 +287,7 @@ const site = createOpenGeniSiteClient();
 ```
 
 `sessionId` is the existing session or the id returned by `site.client.createSession`.
-For a normal chat app, offer a conversation selector and “New conversation”.
+For a normal chat app, a conversation selector and “New conversation” are optional.
 Create on first Send rather than mounting the page; keep the selected id in React
 state and reopen existing conversations through the SDK.
 Keep first-send creation single-flight; reuse its `idempotencyKey` when retrying,
@@ -272,14 +300,17 @@ write origin metadata yourself. The local preview has no published identity, so
 this filter returns no Site history there; test newly created/current conversations
 locally and the selector after publication.
 
-This is a default, not a restriction. For a project-focused app, use `channelId`
-on SDK creation/listing instead; its list may include conversations created
-elsewhere. Project management tools use `projectId` (see `opengeni-projects`
-when available). Do not automatically create a project just to group Site chats.
-Unfiled Site conversations group under their Site in the main sidebar; explicit
-projects and pins take precedence. Origin remains visible regardless of placement.
-The host Site page always provides its own Conversations panel independently of
-the navigation you build. Opening existing sessions never changes their origin.
+Do not automatically create a project just to group Site chats. Site execution
+does not appear in ordinary workspace discovery, even for its owner. The host
+Site page provides a viewer-scoped Conversations panel independently of app
+navigation. Opening existing sessions never changes their origin or audience.
+Page code cannot widen the Site boundary by supplying project, visibility,
+tools or credential fields; use ordinary authoring tools for project management.
+
+Per-Site AI costs are in Insights: actual credit charges are distinct from
+API-equivalent subscription/own-key estimates and unbilled platform counters.
+Usage is for limits. Do not build private transcript or viewer analytics into
+shared dashboards just because aggregate costs are visible there.
 
 `SessionConversation` connects timeline/history, durable composer drafts,
 queue display/edit/delete/steer, pause/resume, and human-input forms. Prefer it

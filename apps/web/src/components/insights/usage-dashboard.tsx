@@ -314,8 +314,14 @@ export function UsageDashboard(props: UsageDashboardProps) {
       </div>
       {props.scope.kind === "workspace" ? (
         <>
-        {query.range !== "custom" ? <SiteAiUsageSection client={client} workspaceId={props.scope.workspaceId} range={query.range} /> : null}
-        <SitePlatformUsageSection client={client} workspaceId={props.scope.workspaceId} />
+          {query.range !== "custom" ? (
+            <SiteAiUsageSection
+              client={client}
+              workspaceId={props.scope.workspaceId}
+              range={query.range}
+            />
+          ) : null}
+          <SitePlatformUsageSection client={client} workspaceId={props.scope.workspaceId} />
         </>
       ) : null}
     </div>

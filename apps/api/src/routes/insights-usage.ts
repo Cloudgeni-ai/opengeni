@@ -17,6 +17,7 @@ import {
   listInsightsCalls,
   requireAccessContext,
   requireAccessGrant,
+  siteViewerForGrant,
   type ApiRouteDeps,
   type InsightsQueryScope,
 } from "@opengeni/core";
@@ -229,9 +230,15 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const query = InsightsSiteUsageQuery.safeParse(insightsQueryParameters(c.req.queries()));
     if (!query.success) throw new HTTPException(400, { message: "invalid Site Insights query" });
-    const response = await insightsWithFriendlyTimeout(() => getInsightsSiteUsage(deps.db, {
-      accountId: grant.accountId, workspaceId, query: query.data,
-    }));
+    const viewer = await siteViewerForGrant(deps.db, grant);
+    const response = await insightsWithFriendlyTimeout(() =>
+      getInsightsSiteUsage(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        query: query.data,
+        viewerSubjectId: viewer.subjectId,
+      }),
+    );
     c.header("cache-control", "private, no-store");
     return c.json(InsightsSiteUsageResponse.parse(response));
   });

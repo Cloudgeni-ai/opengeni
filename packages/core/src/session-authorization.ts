@@ -320,13 +320,16 @@ export async function requireSessionAuthorization(
     const viewer = currentSiteViewerRlsContext();
     const resolved = await resolveSessionAuthorizationActor(deps.db, grant, reads);
     const actor = resolved.actor;
-    const allowed = actor.kind === "agent_attempt"
-      ? actor.callerRootSessionId === authority.rootSessionId &&
-        (authority.siteAccessRootId === authority.rootSessionId || authority.siteOwnerSubjectId === actor.initiatingHumanSubjectId)
-      : authority.siteOwnerSubjectId === actor.subjectId ||
-        (actor.subjectId === `site:${authority.siteId}` &&
-          viewer?.siteId === authority.siteId &&
-          viewer.principal === authority.siteViewerPrincipal);
+    const allowed =
+      actor.kind === "agent_attempt"
+        ? (authority.siteOwnerSubjectId !== null &&
+            authority.siteOwnerSubjectId === actor.initiatingHumanSubjectId) ||
+          (actor.callerRootSessionId === authority.rootSessionId &&
+            authority.siteAccessRootId === authority.rootSessionId)
+        : authority.siteOwnerSubjectId === actor.subjectId ||
+          (actor.subjectId === `site:${authority.siteId}` &&
+            viewer?.siteId === authority.siteId &&
+            viewer.principal === authority.siteViewerPrincipal);
     if (!allowed) throw new SessionAuthorizationDeniedError("not_found");
   }
 

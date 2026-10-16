@@ -1,7 +1,10 @@
 /** Exact in-process request proof, installed only by the verified Site gateway. */
 const authorities = new WeakMap<Request, () => Promise<void>>();
 
-export function bindSiteSessionRequestAuthority(request: Request, reauthorize: () => Promise<void>): void {
+export function bindSiteSessionRequestAuthority(
+  request: Request,
+  reauthorize: () => Promise<void>,
+): void {
   authorities.set(request, reauthorize);
 }
 

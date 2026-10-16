@@ -12,6 +12,12 @@ ALTER TABLE sessions ADD COLUMN site_id uuid,
 ALTER TABLE model_call_facts ADD COLUMN site_id uuid;
 
 -- Run the bounded source backfill under the same tenant scope as each row.
+-- Maintenance cutover: the migration owner must enumerate all tenants even
+-- when NOSUPERUSER/NOBYPASSRLS. These transaction-local DDL changes are restored
+-- before commit; runtime roles never receive a cross-tenant read lane.
+ALTER TABLE site_runtime_conversations NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE model_call_facts NO FORCE ROW LEVEL SECURITY;
 DO $backfill$
 DECLARE scope record;
 BEGIN
@@ -37,6 +43,9 @@ BEGIN
   END LOOP;
 END
 $backfill$;
+ALTER TABLE site_runtime_conversations FORCE ROW LEVEL SECURITY;
+ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+ALTER TABLE model_call_facts FORCE ROW LEVEL SECURITY;
 
 CREATE FUNCTION bind_session_site_audience() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $body$

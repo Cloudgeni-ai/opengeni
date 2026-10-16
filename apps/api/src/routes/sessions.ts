@@ -30,7 +30,12 @@ import {
   SITE_FRAME_SESSION_CREATE_FIELDS,
   siteFrameBodyRefusal,
 } from "@opengeni/contracts/site-session-http";
-import { requireWorkspace, scheduledSessionIds, currentSiteViewerRlsContext, nestedPostgresSqlState } from "@opengeni/db";
+import {
+  requireWorkspace,
+  scheduledSessionIds,
+  currentSiteViewerRlsContext,
+  nestedPostgresSqlState,
+} from "@opengeni/db";
 import {
   currentSiteSessionOrigin,
   isVerifiedDelegatedHumanAuthorization,
@@ -5678,7 +5683,10 @@ export function sessionTenancyHttpError(error: unknown): Error {
       retryable: false,
     });
   }
-  if (error instanceof SessionTenancyNotActivatedError || nestedPostgresSqlState(error) === "P0793") {
+  if (
+    error instanceof SessionTenancyNotActivatedError ||
+    nestedPostgresSqlState(error) === "P0793"
+  ) {
     return new ApiHttpError(409, {
       code: "conflict",
       message: "Only-me chats are not enabled for this organization.",
@@ -6559,7 +6567,10 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
       403,
     );
   }
-  if (error instanceof SessionTenancyNotActivatedError || nestedPostgresSqlState(error) === "P0793") {
+  if (
+    error instanceof SessionTenancyNotActivatedError ||
+    nestedPostgresSqlState(error) === "P0793"
+  ) {
     return c.json(
       {
         code: "SESSION_TENANCY_NOT_ACTIVATED",

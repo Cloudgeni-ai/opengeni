@@ -1115,6 +1115,27 @@ never enter the iframe; `@opengeni/sdk/site` uses a single parent-owned
 `MessagePort` that exposes only the retained tool allowlist intersected with the
 current viewer's live workspace catalog.
 
+Site AI can return directly into an app without any conversation UI:
+
+```ts
+import { createOpenGeniSiteClient } from "@opengeni/sdk/site";
+const site = createOpenGeniSiteClient();
+const result = await site.ai.run({ initialMessage: appPrompt, idempotencyKey: actionId });
+if (result.status === "completed") renderResult(result.text);
+```
+
+The app defines the prompt, context and output presentation. This helper uses
+native sessions and events with the same permissions, approvals, model access
+and billing; it is not a second executor. New Site work is private per viewer
+and excluded from ordinary workspace discovery. `pending` and `cancelled` are
+not successful results; model failure rejects. Retain the `onSession` handle
+to observe again using `site.ai.result(id, { turnId })`, without creating work.
+An `after` cursor returns only subsequent output; omit it for full replay.
+Aborting observation does not cancel native execution. See
+[`site-conversations.md`](../../docs/site-conversations.md) and
+[`site-session-embed`](../../examples/site-session-embed) for optional chat and
+headless inline examples. Do not store private handles in shared Site Data.
+
 ```ts
 let cursor: string | undefined;
 do {

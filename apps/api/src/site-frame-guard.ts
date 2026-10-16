@@ -78,11 +78,19 @@ export function siteFrameGuard(deps: ApiRouteDeps) {
         throw new HTTPException(404, { message: "Unsupported Site session API path" });
     }
     if (match.sessionId !== null) {
-      const authority = await getSessionAuthorityProjection(deps.db, grant.workspaceId, match.sessionId);
+      const authority = await getSessionAuthorityProjection(
+        deps.db,
+        grant.workspaceId,
+        match.sessionId,
+      );
       const session = await getSession(deps.db, grant.workspaceId, match.sessionId).catch(
         () => null,
       );
-      if (!authority?.siteAccessRootId || !session || !siteOriginsMatch(origin, siteSessionOriginFromMetadata(session.metadata)))
+      if (
+        !authority?.siteAccessRootId ||
+        !session ||
+        !siteOriginsMatch(origin, siteSessionOriginFromMetadata(session.metadata))
+      )
         throw new HTTPException(404, { message: "session not found" });
     }
     if (c.req.method !== "GET" && match.operation.id !== "sessions.create") {
