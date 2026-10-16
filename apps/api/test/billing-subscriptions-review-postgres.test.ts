@@ -48,7 +48,7 @@ async function* listed<T>(values: T[]) {
   yield* values;
 }
 
-async function fixture() {
+async function fixture(fixtureOptions: { upgradePeriodShiftSeconds?: number } = {}) {
   const userId = crypto.randomUUID();
   const accountId = (
     await ensureManagedAccessForUser(client.db, {
@@ -145,8 +145,8 @@ async function fixture() {
         if (params.metadata) Object.assign(sub.metadata, params.metadata);
         if (params.items) {
           sub.items.data[0].price = price(params.items[0].price.slice(6));
-          sub.items.data[0].current_period_start += 1;
-          sub.items.data[0].current_period_end += 1;
+          sub.items.data[0].current_period_start += fixtureOptions.upgradePeriodShiftSeconds ?? 1;
+          sub.items.data[0].current_period_end += fixtureOptions.upgradePeriodShiftSeconds ?? 1;
           const invoice = invoiceFor(sub, `in_upgrade_${accountId}`);
           invoice.billing_reason = "subscription_update";
         }
@@ -274,6 +274,24 @@ test("real org-fenced DB adapter accepts paid invoices, upgrade and duplicate de
     idempotencyKey: crypto.randomUUID(),
   });
   await f.paid(f.original);
+  expect((await getBillingBalance(client.db, f.accountId)).balanceMicros).toBe(2_000_000_000);
+}, 180_000);
+
+test("a paid same-second upgrade replaces plan credit exactly once through the real DB adapter", async () => {
+  const f = await fixture({ upgradePeriodShiftSeconds: 0 });
+  await f.paid(f.original);
+  expect((await getBillingBalance(client.db, f.accountId)).balanceMicros).toBe(200_000_000);
+  const originalStart = f.original.items.data[0].current_period_start;
+  const input = {
+    accountId: f.accountId,
+    planKey: "max",
+    idempotencyKey: crypto.randomUUID(),
+  };
+  const result = await f.service.upgrade(input);
+  expect(f.original.items.data[0].current_period_start).toBe(originalStart);
+  await f.paid(f.original);
+  expect(await f.service.upgrade(input)).toEqual(result);
+  expect(f.updates()).toBe(1);
   expect((await getBillingBalance(client.db, f.accountId)).balanceMicros).toBe(2_000_000_000);
 }, 180_000);
 
