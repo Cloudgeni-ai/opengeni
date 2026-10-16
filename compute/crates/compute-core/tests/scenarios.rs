@@ -319,6 +319,19 @@ fn releasing_the_last_hold_starts_the_idle_clock() {
 }
 
 #[test]
+fn releasing_a_hold_taken_before_a_restart_still_counts_as_activity() {
+    let mut rig = Rig::new(HostPolicy::default());
+    // A new host agent knows nothing of the holds the old one took.
+    rig.add(1, State::RUNNING, recommended());
+    rig.at(secs(5));
+    rig.send(Input::Release {
+        sandbox: SandboxId(1),
+        hold: HoldId(1),
+    });
+    assert_eq!(rig.host.next_deadline(), Some(At::from_duration(secs(15))));
+}
+
+#[test]
 fn transient_failures_back_off_exponentially() {
     let mut rig = Rig::new(HostPolicy::default());
     rig.add(1, saved(), recommended());

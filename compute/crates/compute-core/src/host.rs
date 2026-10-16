@@ -68,7 +68,9 @@ pub enum Input {
         /// How urgently to wake for it.
         priority: Priority,
     },
-    /// A hold ended. Counts as activity. Unknown holds are ignored.
+    /// A hold ended. Counts as activity even when the hold is not known
+    /// here, such as one taken before the host agent restarted: whoever
+    /// held it used the sandbox until now.
     Release {
         /// The sandbox.
         sandbox: SandboxId,
@@ -496,9 +498,8 @@ impl Host {
                 }
             }
             Input::Release { sandbox, hold } => {
-                if let Some(slot) = self.sandboxes.get_mut(&sandbox)
-                    && slot.holds.remove(&hold).is_some()
-                {
+                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
+                    slot.holds.remove(&hold);
                     slot.touch(now);
                     self.mark(sandbox);
                 }
