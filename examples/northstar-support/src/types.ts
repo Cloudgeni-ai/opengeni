@@ -90,4 +90,6 @@ export type DemoHealth = {
   openGeniConfigured: boolean;
   mcpTokenConfigured: boolean;
   mcpPublicUrl: string | null;
+  /** Whether the Opengeni server accepts per-run usage limits; null when it could not be read. */
+  sessionUsageLimitsEnabled: boolean | null;
 };

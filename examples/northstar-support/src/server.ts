@@ -11,11 +11,19 @@ import { uuidV5 } from "@opengeni/sdk/chat";
 import { realpath, stat } from "node:fs/promises";
 import { extname, join, resolve, sep } from "node:path";
 import * as z from "zod/v4";
-import { RateLimiter, consumeRateLimits, type RateLimitRefusal } from "./rate-limit";
+import {
+  TieredConcurrencyLimit,
+  TieredRateLimit,
+  type RateLimitRefusal,
+  type TieredConcurrencyBounds,
+  type TieredRateBounds,
+} from "./rate-limit";
 import type {
   SupportCase,
   DemoHealth,
   SupportDomainEvent,
+  SupportNote,
+  SupportReply,
   SupportTicket,
   SupportWorkspaceState,
   TicketPriority,
@@ -45,18 +53,55 @@ const env = {
   mcpToken: process.env.OPENGENI_DEMO_MCP_TOKEN?.trim() ?? "",
 };
 
-// Abuse bounds for an anonymous public demo: every agent run spends model
-// usage. Visitors can drop their cookie, so the global limits are the real cap.
-const AGENT_RUNS_PER_VISITOR = { limit: 6, windowMs: 10 * 60_000 };
-const AGENT_RUNS_GLOBAL = { limit: 30, windowMs: 60 * 60_000 };
-const RESETS_PER_VISITOR = { limit: 5, windowMs: 60_000 };
-const RESETS_GLOBAL = { limit: 30, windowMs: 60_000 };
+// Abuse bounds for an anonymous public demo. Each action is limited per
+// visitor (cookie), per client address (see `clientAddress`), and across the
+// demo. Visitors can replace their cookie, so the client and demo tiers are
+// the real caps. Requests that fail validation never count.
+const MINUTE = 60_000;
+// Every agent run spends model usage.
+const AGENT_RUNS: TieredRateBounds = {
+  visitor: { limit: 6, windowMs: 10 * MINUTE },
+  client: { limit: 10, windowMs: 60 * MINUTE },
+  demo: { limit: 30, windowMs: 60 * MINUTE },
+};
+const RESETS: TieredRateBounds = {
+  visitor: { limit: 5, windowMs: MINUTE },
+  client: { limit: 10, windowMs: MINUTE },
+  demo: { limit: 30, windowMs: MINUTE },
+};
+// Ticket edits, notes, and replies on the shared board. Each one makes every
+// open browser refetch the board.
+const PRODUCT_WRITES: TieredRateBounds = {
+  visitor: { limit: 20, windowMs: MINUTE },
+  client: { limit: 40, windowMs: MINUTE },
+  demo: { limit: 120, windowMs: MINUTE },
+};
+// Every write the proxy forwards to Opengeni: messages, draft saves, controls.
+const SESSION_WRITES: TieredRateBounds = {
+  visitor: { limit: 60, windowMs: MINUTE },
+  client: { limit: 120, windowMs: MINUTE },
+  demo: { limit: 600, windowMs: MINUTE },
+};
+// Messages that start or redirect agent work (send, steer, draft submit, and
+// approval or human-input answers). Each one is a durable turn in production.
+const SESSION_MESSAGES: TieredRateBounds = {
+  visitor: { limit: 20, windowMs: 10 * MINUTE },
+  client: { limit: 40, windowMs: 10 * MINUTE },
+  demo: { limit: 200, windowMs: 10 * MINUTE },
+};
+// Open Opengeni event streams; each one holds a connection to the API.
+const EVENT_STREAMS: TieredConcurrencyBounds = { visitor: 8, client: 24, demo: 200 };
 // Each run stops before its next model request once it has used $1.00 of
 // API-equivalent model usage (USD micros). Visitors cannot raise it.
 const AGENT_RUN_USAGE_LIMIT_MICROS = 1_000_000;
-// Typed messages only: no uploads or recordings travel through the proxy.
-const PROXY_MAX_BODY_BYTES = 32 * 1024;
+// How often to recheck an Opengeni server that did not confirm usage limits.
+const CAPABILITY_RECHECK_MS = MINUTE;
+// Typed text only, on both the demo API and the proxy: no uploads or recordings.
+const MAX_BODY_BYTES = 32 * 1024;
 const MAX_INITIAL_MESSAGE_CHARACTERS = 4_000;
+// Each ticket keeps only its newest notes, replies, and activity entries.
+const TICKET_HISTORY_LIMIT = 50;
+const PROXY_BASE_PATH = "/api/opengeni";
 
 // The demo has one fixed Opengeni operator instead of a login. A real product
 // resolves this from its own authenticated session on every request. Anonymous
@@ -440,6 +485,8 @@ function emit(
   return event;
 }
 
+// History is bounded: the board is shared, and every change makes each open
+// browser refetch all of it.
 function addActivity(ticket: SupportTicket, actor: string, summary: string): void {
   ticket.activity.unshift({
     id: crypto.randomUUID(),
@@ -447,6 +494,49 @@ function addActivity(ticket: SupportTicket, actor: string, summary: string): voi
     summary,
     createdAt: new Date().toISOString(),
   });
+  ticket.activity.splice(TICKET_HISTORY_LIMIT);
+}
+
+function addNote(ticket: SupportTicket, note: SupportNote): void {
+  ticket.notes.unshift(note);
+  ticket.notes.splice(TICKET_HISTORY_LIMIT);
+}
+
+function addReply(ticket: SupportTicket, reply: SupportReply): void {
+  ticket.replies.push(reply);
+  ticket.replies.splice(0, ticket.replies.length - TICKET_HISTORY_LIMIT);
+}
+
+type JsonObject = Record<string, unknown>;
+
+/**
+ * The request's JSON object body, read up to MAX_BODY_BYTES: `{}` when it is
+ * missing or not a JSON object, and null when it is too large.
+ */
+async function readJsonBody(request: Request): Promise<JsonObject | null> {
+  if (Number(request.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) return null;
+  const reader = request.body?.getReader();
+  if (!reader) return {};
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_BODY_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  try {
+    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as JsonObject)
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 function domainEventStream(request: Request): Response {
@@ -539,11 +629,51 @@ export type ProductHandlerConfig = {
   serveStatic: boolean;
   /** Public product origin; an https origin gets Secure visitor cookies. */
   appOrigin?: string | undefined;
+  /**
+   * The client network address that keys the per-client limits, or null to
+   * skip them. Behind a reverse proxy, this must be the address the proxy
+   * forwards, not the proxy's own.
+   */
+  clientAddress?: ((request: Request) => string | null) | undefined;
   /** Test seam: the fetch the server-side Opengeni client uses. */
   fetch?: OpenGeniClientOptions["fetch"];
   /** Test seam: the clock the rate limits use. */
   now?: () => number;
 };
+
+/** Who is calling: the browser's visitor id, whether it already had a valid cookie, and its address. */
+type Caller = { visitorId: string; established: boolean; clientAddress: string | null };
+
+/**
+ * What a proxied path addresses, decoded the way the session proxy decodes it,
+ * or null for a path the proxy refuses outright.
+ */
+type ProxiedRoute = { sessionId: string | null; stream: "workspace" | "session" | null };
+
+function proxiedRoute(pathname: string): ProxiedRoute | null {
+  const raw = pathname.slice(PROXY_BASE_PATH.length).replace(/\/+$/, "").split("/").slice(1);
+  if (raw[0] !== "v1") return null;
+  const segments: string[] = [];
+  for (const part of raw.slice(1)) {
+    try {
+      segments.push(decodeURIComponent(part));
+    } catch {
+      return null;
+    }
+  }
+  // workspaces/:workspaceId/(sessions/:sessionId/...|live-events/stream)
+  const [root, , area, sessionId, ...op] = segments;
+  if (root !== "workspaces") return { sessionId: null, stream: null };
+  if (area === "live-events") {
+    return {
+      sessionId: null,
+      stream: sessionId === "stream" && op.length === 0 ? "workspace" : null,
+    };
+  }
+  if (area !== "sessions" || !sessionId) return { sessionId: null, stream: null };
+  const stream = op.length === 2 && op[0] === "events" && op[1] === "stream" ? "session" : null;
+  return { sessionId, stream };
+}
 
 /**
  * The product backend: the demo's own API plus the packaged Opengeni session
@@ -555,6 +685,7 @@ export function createProductHandler(
 ): (request: Request) => Promise<Response> {
   const { workspaceId, mcpToken } = config;
   const configured = Boolean(config.apiKey && workspaceId);
+  const now = config.now ?? Date.now;
   const openGeni = new OpenGeniClient({
     baseUrl: config.apiBaseUrl,
     apiKey: config.apiKey,
@@ -562,12 +693,15 @@ export function createProductHandler(
   });
   const visitors = new VisitorCookies(config.appOrigin ?? PRODUCT_APP_ORIGIN);
   const owners = new SessionOwners();
-  const limit = (bounds: { limit: number; windowMs: number }, message: string) =>
-    new RateLimiter({ ...bounds, message, ...(config.now ? { now: config.now } : {}) });
-  const runsPerVisitor = limit(AGENT_RUNS_PER_VISITOR, "Too many agent runs from this browser");
-  const runsGlobal = limit(AGENT_RUNS_GLOBAL, "The demo has started too many agent runs recently");
-  const resetsPerVisitor = limit(RESETS_PER_VISITOR, "Too many resets from this browser");
-  const resetsGlobal = limit(RESETS_GLOBAL, "The demo has been reset too often recently");
+  const clientAddressOf = (request: Request) => config.clientAddress?.(request) ?? null;
+  const limit = (bounds: TieredRateBounds, action: string) =>
+    new TieredRateLimit(bounds, action, config.now);
+  const agentRuns = limit(AGENT_RUNS, "agent runs");
+  const resets = limit(RESETS, "resets");
+  const productWrites = limit(PRODUCT_WRITES, "ticket changes");
+  const sessionWrites = limit(SESSION_WRITES, "agent session changes");
+  const sessionMessages = limit(SESSION_MESSAGES, "agent messages");
+  const eventStreams = new TieredConcurrencyLimit(EVENT_STREAMS, "agent event streams");
 
   // Explicit onboarding: the proxy and asUser never grant membership. A stable
   // operation id makes the grant an exact replay on every server start.
@@ -603,10 +737,41 @@ export function createProductHandler(
     return demoMembership;
   }
 
+  // Every run carries a usage limit, which an Opengeni server accepts only when
+  // its operator enabled per-task usage limits. Without them every start would
+  // fail, so health reports not ready. A confirmed capability is kept; a
+  // missing or unreadable one is rechecked at most once per CAPABILITY_RECHECK_MS.
+  let usageLimits: { enabled: boolean | null; checkedAt: number } | null = null;
+  let usageLimitsCheck: Promise<boolean | null> | null = null;
+  function sessionUsageLimitsEnabled(): Promise<boolean | null> {
+    if (!configured) return Promise.resolve(null);
+    if (
+      usageLimits &&
+      (usageLimits.enabled === true || now() - usageLimits.checkedAt < CAPABILITY_RECHECK_MS)
+    ) {
+      return Promise.resolve(usageLimits.enabled);
+    }
+    usageLimitsCheck ??= openGeni
+      .getClientConfig()
+      .then(
+        (clientConfig) => clientConfig.sessionUsageLimits?.enabled === true,
+        () => null,
+      )
+      .then((enabled) => {
+        usageLimits = { enabled, checkedAt: now() };
+        return enabled;
+      })
+      .finally(() => {
+        usageLimitsCheck = null;
+      });
+    return usageLimitsCheck;
+  }
+
   // The browser's only Opengeni route: the packaged session proxy. It acts as
   // the demo operator through asUser, pins the configured workspace, and serves
   // only the conversation routes this panel uses.
   const openGeniProxy = createSessionProxyHandler(openGeni, {
+    basePath: PROXY_BASE_PATH,
     resolve: async () => {
       if (!configured) {
         return json({ error: "Opengeni credentials are not configured." }, 503);
@@ -628,6 +793,14 @@ export function createProductHandler(
     // control, goal, human input, artifacts, realtime). A browser reaches only
     // the sessions it started through /api/demo/sessions; unknown ids are denied.
     authorizeSession: (sessionId, { request }) => owners.owns(sessionId, visitors.read(request)),
+    // Runs after `authorizeSession`, before every forwarded message, approval
+    // decision, and human-input answer: these start or redirect agent work.
+    beforeForwardMessage: (_input, { request }) => {
+      const visitorId = visitors.read(request);
+      if (visitorId === null) return proxyError(403, "mutation_denied", "Request denied.");
+      const refusal = sessionMessages.consume(visitorId, clientAddressOf(request));
+      return refusal ? tooManyProxyRequests(refusal) : undefined;
+    },
     // Browser-initiated creation stays off (no `createSession` hook), and so
     // does every surface this panel does not use.
     sessionList: false,
@@ -639,29 +812,41 @@ export function createProductHandler(
     sandboxFiles: false,
     artifacts: false,
     sites: false,
-    maxBodyBytes: PROXY_MAX_BODY_BYTES,
+    maxBodyBytes: MAX_BODY_BYTES,
   });
 
   async function health(): Promise<DemoHealth> {
-    const mcpPublicUrl = await config.resolveMcpUrl();
+    const [mcpPublicUrl, usageLimitsEnabled] = await Promise.all([
+      config.resolveMcpUrl(),
+      sessionUsageLimitsEnabled(),
+    ]);
     return {
-      ok: Boolean(configured && mcpToken && mcpPublicUrl),
+      ok: Boolean(configured && mcpToken && mcpPublicUrl && usageLimitsEnabled === true),
       workspaceId: workspaceId || null,
       openGeniConfigured: configured,
       mcpTokenConfigured: Boolean(mcpToken),
       mcpPublicUrl,
+      sessionUsageLimitsEnabled: usageLimitsEnabled,
     };
   }
 
-  async function createAgentSession(request: Request, visitorId: string): Promise<Response> {
+  async function createAgentSession(request: Request, caller: Caller): Promise<Response> {
     if (!configured || !mcpToken) {
       return json({ error: "Demo server credentials are not configured." }, 503);
     }
-    const refusal = consumeRateLimits([
-      [runsPerVisitor, visitorId],
-      [runsGlobal, "all"],
-    ]);
-    if (refusal) return tooManyRequests(refusal);
+    // Validate everything first: only a start that will reach Opengeni counts
+    // against the run limits.
+    const body = await readJsonBody(request);
+    if (body === null) return json({ error: "Request body is too large." }, 413);
+    const parsedInput = createDemoSessionInput.safeParse(body);
+    if (!parsedInput.success) {
+      return json({ error: "Invalid agent start request." }, 400);
+    }
+    const { ticketId, initialMessage: requestedMessage, runId } = parsedInput.data;
+    const supportCase = getCase(ticketId);
+    if (!supportCase) {
+      return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
+    }
     const mcpUrl = await config.resolveMcpUrl();
     if (!mcpUrl) {
       return json(
@@ -671,15 +856,11 @@ export function createProductHandler(
         503,
       );
     }
-    const parsedInput = createDemoSessionInput.safeParse(await request.json().catch(() => ({})));
-    if (!parsedInput.success) {
-      return json({ error: "Invalid agent start request." }, 400);
+    if ((await sessionUsageLimitsEnabled()) !== true) {
+      return json({ error: "The Opengeni server does not accept per-run usage limits." }, 503);
     }
-    const { ticketId, initialMessage: requestedMessage, runId } = parsedInput.data;
-    const supportCase = getCase(ticketId);
-    if (!supportCase) {
-      return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
-    }
+    const refusal = agentRuns.consume(caller.visitorId, caller.clientAddress);
+    if (refusal) return tooManyRequests(refusal);
     const { ticket, customer } = supportCase;
     const initialMessage = requestedMessage
       ? requestedMessage
@@ -703,6 +884,12 @@ export function createProductHandler(
       // Explicit selections: only the Northstar MCP server, no first-party tools.
       // A per-session MCP server must also be selected in `tools` to be usable.
       firstPartyMcpTools: [],
+      // Only the session's own tools plus asking the user for input: no web
+      // search or fetch, media generation, secrets, subagents, Knowledge,
+      // schedules, or workspace tools, and no Skills to read, save, install,
+      // or remove (anonymous visitors must not change what others' agents see).
+      agent: { capabilities: { from: "none", skills: false } },
+      bundledSkillIds: [],
       // A pure tool agent: no sandbox to start, and no shell around the product tools.
       sandboxBackend: "none",
       // The narrowest session: private to the demo operator, agent reach limited
@@ -715,53 +902,112 @@ export function createProductHandler(
       // Stable per visitor and start: a retried request returns the same
       // session, and no other visitor can replay into it.
       idempotencyKey: `northstar:${ticket.id}:${await uuidV5(
-        `${visitorId}:${runId}`,
+        `${caller.visitorId}:${runId}`,
         IDEMPOTENCY_NAMESPACE,
       )}`,
     };
     // The workspace's default model applies; the browser cannot choose one.
     await ensureDemoMembership();
-    const session = await openGeni
-      .asUser(DEMO_USER.externalId, { source: DEMO_USER.source })
-      .createSession(workspaceId, sessionRequest);
-    if (!owners.claim(session.id, visitorId)) {
+    let session: Awaited<ReturnType<OpenGeniClient["createSession"]>>;
+    try {
+      session = await openGeni
+        .asUser(DEMO_USER.externalId, { source: DEMO_USER.source })
+        .createSession(workspaceId, sessionRequest);
+    } catch (error) {
+      // The operator turned usage limits off after this server confirmed them.
+      if (
+        error instanceof OpenGeniApiError &&
+        error.details?.code === "session_usage_limit_disabled"
+      ) {
+        usageLimits = { enabled: false, checkedAt: now() };
+      }
+      throw error;
+    }
+    if (!owners.claim(session.id, caller.visitorId)) {
       return json({ error: "This agent run belongs to another visitor." }, 409);
     }
     return json(session, 201);
   }
 
-  async function apiRequest(request: Request, url: URL, visitorId: string): Promise<Response> {
-    if (url.pathname.startsWith("/api/opengeni/")) {
-      try {
-        return await openGeniProxy(request);
-      } catch (error) {
-        return json({ error: error instanceof Error ? error.message : String(error) }, 502);
-      }
+  async function forwardToOpenGeni(request: Request): Promise<Response> {
+    try {
+      return await openGeniProxy(request);
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : String(error) }, 502);
     }
-    if (request.method !== "GET" && !sameOriginRequest(request)) {
+  }
+
+  async function proxyRequest(request: Request, url: URL, caller: Caller): Promise<Response> {
+    const route = proxiedRoute(url.pathname);
+    const sessionId = route?.sessionId ?? null;
+    const owned =
+      caller.established && sessionId !== null && owners.owns(sessionId, caller.visitorId);
+    if (request.method !== "GET") {
+      // A browser changes only the sessions it started: workspace-level writes
+      // stop here, the proxy refuses other sessions without calling Opengeni,
+      // and every write it forwards counts.
+      if (sessionId === null) return proxyError(404, "route_not_allowed", "Not found.");
+      if (owned && sameOriginRequest(request)) {
+        const refusal = sessionWrites.consume(caller.visitorId, caller.clientAddress);
+        if (refusal) return tooManyProxyRequests(refusal);
+      }
+      return await forwardToOpenGeni(request);
+    }
+    if (route?.stream === "workspace" && !caller.established) {
+      // The refusal sets the visitor cookie, so the stream's own retry succeeds.
+      return proxyError(403, "visitor_required", "Load the demo page first.", true);
+    }
+    if (route?.stream === "workspace" || (route?.stream === "session" && owned)) {
+      // Each open stream holds one connection to Opengeni.
+      const slot = eventStreams.acquire(caller.visitorId, caller.clientAddress);
+      if ("refused" in slot) {
+        const response = proxyError(429, "rate_limited", `${slot.refused}.`, true);
+        response.headers.set("retry-after", "5");
+        return response;
+      }
+      return releaseWhenClosed(await forwardToOpenGeni(request), slot.release, request.signal);
+    }
+    return await forwardToOpenGeni(request);
+  }
+
+  async function apiRequest(request: Request, url: URL, caller: Caller): Promise<Response> {
+    if (url.pathname.startsWith(`${PROXY_BASE_PATH}/`)) {
+      return await proxyRequest(request, url, caller);
+    }
+    if (request.method === "GET") {
+      if (url.pathname === "/api/demo/health") {
+        // Not ready (503) until a run can start, so probes and deploy checks fail closed.
+        const report = await health();
+        return json(report, report.ok ? 200 : 503);
+      }
+      return productRead(request, url);
+    }
+    if (!sameOriginRequest(request)) {
       return json({ error: "Cross-site requests are not allowed." }, 403);
     }
-    if (url.pathname === "/api/demo/health" && request.method === "GET") {
-      return json(await health());
+    // Every write comes from a browser that already holds a visitor cookie, so
+    // dropping the cookie never buys a fresh per-visitor allowance.
+    if (!caller.established) {
+      return json({ error: "Reload the page and try again." }, 403);
     }
     if (url.pathname === "/api/demo/sessions" && request.method === "POST") {
       try {
-        return await createAgentSession(request, visitorId);
+        return await createAgentSession(request, caller);
       } catch (error) {
         return json({ error: error instanceof Error ? error.message : String(error) }, 502);
       }
     }
     if (url.pathname === "/api/demo/reset" && request.method === "POST") {
-      const refusal = consumeRateLimits([
-        [resetsPerVisitor, visitorId],
-        [resetsGlobal, "all"],
-      ]);
+      const refusal = resets.consume(caller.visitorId, caller.clientAddress);
       if (refusal) return tooManyRequests(refusal);
       state = freshState();
       emit("demo.reset", "Demo data reset", "all");
       return json(state);
     }
-    return await productDataRequest(request, url);
+    return await productWrite(request, url, () => {
+      const refusal = productWrites.consume(caller.visitorId, caller.clientAddress);
+      return refusal ? tooManyRequests(refusal) : null;
+    });
   }
 
   return async function productRequest(request: Request): Promise<Response> {
@@ -787,19 +1033,84 @@ export function createProductHandler(
     // request without a valid cookie is a new visitor that owns no sessions.
     const known = visitors.read(request);
     const issued = known === null ? visitors.issue(request) : null;
-    const response = await apiRequest(request, url, known ?? issued!.id);
+    const response = await apiRequest(request, url, {
+      visitorId: known ?? issued!.id,
+      established: known !== null,
+      clientAddress: clientAddressOf(request),
+    });
     return issued ? withSetCookie(response, issued.setCookie) : response;
   };
 }
 
 function tooManyRequests({ limiter, retryAfterSeconds }: RateLimitRefusal): Response {
-  const wait =
-    retryAfterSeconds < 90
-      ? `${retryAfterSeconds} seconds`
-      : `${Math.ceil(retryAfterSeconds / 60)} minutes`;
-  const response = json({ error: `${limiter.message}. Try again in ${wait}.` }, 429);
+  const response = json(
+    { error: `${limiter.message}. Try again in ${wait(retryAfterSeconds)}.` },
+    429,
+  );
   response.headers.set("retry-after", String(retryAfterSeconds));
   return response;
+}
+
+function wait(seconds: number): string {
+  return seconds < 90 ? `${seconds} seconds` : `${Math.ceil(seconds / 60)} minutes`;
+}
+
+/** A refusal on a proxy route, in the error envelope the Opengeni SDK reads. */
+function proxyError(status: number, code: string, message: string, retryable = false): Response {
+  return json({ error: { code, message, retryable } }, status);
+}
+
+function tooManyProxyRequests({ limiter, retryAfterSeconds }: RateLimitRefusal): Response {
+  const response = proxyError(
+    429,
+    "rate_limited",
+    `${limiter.message}. Try again in ${wait(retryAfterSeconds)}.`,
+    true,
+  );
+  response.headers.set("retry-after", String(retryAfterSeconds));
+  return response;
+}
+
+/** Call `release` once the event stream ends, fails, or the browser goes away. */
+function releaseWhenClosed(response: Response, release: () => void, signal: AbortSignal): Response {
+  const source = response.body;
+  if (!source || !response.headers.get("content-type")?.startsWith("text/event-stream")) {
+    release();
+    return response;
+  }
+  // `release` is idempotent, so every way the stream can end may call it.
+  const finish = () => {
+    signal.removeEventListener("abort", finish);
+    release();
+  };
+  if (signal.aborted) finish();
+  else signal.addEventListener("abort", finish, { once: true });
+  const reader = source.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          finish();
+          controller.close();
+        } else {
+          controller.enqueue(chunk.value);
+        }
+      } catch (error) {
+        finish();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      finish();
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }
 
 function withSetCookie(response: Response, cookie: string): Response {
@@ -812,39 +1123,44 @@ function withSetCookie(response: Response, cookie: string): Response {
   });
 }
 
+const PRIORITIES: TicketPriority[] = ["low", "normal", "high", "urgent"];
+const STATUSES: TicketStatus[] = ["open", "investigating", "waiting_on_customer", "resolved"];
+
 /** The fictional product's own data, shared by every visitor. */
-async function productDataRequest(request: Request, url: URL): Promise<Response> {
-  if (url.pathname === "/api/demo/state" && request.method === "GET") return json(state);
-  if (url.pathname === "/api/demo/events" && request.method === "GET")
-    return domainEventStream(request);
+function productRead(request: Request, url: URL): Response {
+  if (url.pathname === "/api/demo/state") return json(state);
+  if (url.pathname === "/api/demo/events") return domainEventStream(request);
+  return new Response("Not found", { status: 404 });
+}
+
+/**
+ * Changes to the shared product data. `admitWrite` runs after a write is
+ * validated and before it changes anything; a Response refuses the write.
+ */
+async function productWrite(
+  request: Request,
+  url: URL,
+  admitWrite: () => Response | null,
+): Promise<Response> {
   if (url.pathname === "/api/demo/ticket" && request.method === "PATCH") {
-    const input = (await request.json().catch(() => ({}))) as {
-      ticketId?: unknown;
-      priority?: unknown;
-      status?: unknown;
-    };
+    const input = await readJsonBody(request);
+    if (input === null) return json({ error: "Request body is too large." }, 413);
     const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
     const supportCase = getCase(ticketId);
     if (!supportCase) return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
     const { ticket } = supportCase;
-    const priorities: TicketPriority[] = ["low", "normal", "high", "urgent"];
-    const statuses: TicketStatus[] = ["open", "investigating", "waiting_on_customer", "resolved"];
+    const priority = PRIORITIES.find((value) => value === input.priority);
+    const status = STATUSES.find((value) => value === input.status);
+    const refused = admitWrite();
+    if (refused) return refused;
     const changes: string[] = [];
-    if (
-      typeof input.priority === "string" &&
-      priorities.includes(input.priority as TicketPriority) &&
-      input.priority !== ticket.priority
-    ) {
-      changes.push(`priority to ${input.priority}`);
-      ticket.priority = input.priority as TicketPriority;
+    if (priority && priority !== ticket.priority) {
+      changes.push(`priority to ${priority}`);
+      ticket.priority = priority;
     }
-    if (
-      typeof input.status === "string" &&
-      statuses.includes(input.status as TicketStatus) &&
-      input.status !== ticket.status
-    ) {
-      changes.push(`status to ${input.status.replaceAll("_", " ")}`);
-      ticket.status = input.status as TicketStatus;
+    if (status && status !== ticket.status) {
+      changes.push(`status to ${status.replaceAll("_", " ")}`);
+      ticket.status = status;
     }
     if (changes.length > 0) {
       const summary = `Maya changed ${changes.join(" and ")}`;
@@ -854,10 +1170,8 @@ async function productDataRequest(request: Request, url: URL): Promise<Response>
     return json(state);
   }
   if (url.pathname === "/api/demo/notes" && request.method === "POST") {
-    const input = (await request.json().catch(() => ({}))) as {
-      ticketId?: unknown;
-      body?: unknown;
-    };
+    const input = await readJsonBody(request);
+    if (input === null) return json({ error: "Request body is too large." }, 413);
     const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
     const supportCase = getCase(ticketId);
     if (!supportCase) return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
@@ -866,7 +1180,9 @@ async function productDataRequest(request: Request, url: URL): Promise<Response>
     if (body.length < 2 || body.length > 1_000) {
       return json({ error: "Internal note must be between 2 and 1,000 characters." }, 422);
     }
-    ticket.notes.unshift({
+    const refused = admitWrite();
+    if (refused) return refused;
+    addNote(ticket, {
       id: crypto.randomUUID(),
       author: "Maya Chen",
       authorKind: "human",
@@ -878,10 +1194,8 @@ async function productDataRequest(request: Request, url: URL): Promise<Response>
     return json(state);
   }
   if (url.pathname === "/api/demo/replies" && request.method === "POST") {
-    const input = (await request.json().catch(() => ({}))) as {
-      ticketId?: unknown;
-      body?: unknown;
-    };
+    const input = await readJsonBody(request);
+    if (input === null) return json({ error: "Request body is too large." }, 413);
     const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
     const supportCase = getCase(ticketId);
     if (!supportCase) return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
@@ -890,7 +1204,9 @@ async function productDataRequest(request: Request, url: URL): Promise<Response>
     if (body.length < 2 || body.length > 2_000) {
       return json({ error: "Reply must be between 2 and 2,000 characters." }, 422);
     }
-    ticket.replies.push({
+    const refused = admitWrite();
+    if (refused) return refused;
+    addReply(ticket, {
       id: crypto.randomUUID(),
       author: "Maya Chen",
       body,
@@ -1031,7 +1347,7 @@ function buildMcpServer(): McpServer {
         body,
         createdAt: new Date().toISOString(),
       };
-      ticket.notes.unshift(note);
+      addNote(ticket, note);
       addActivity(ticket, "Opengeni agent", "Added an internal investigation note");
       emit("ticket.note_added", "Agent added an internal note", ticket.id);
       return toolResult({ ok: true, note });
@@ -1054,14 +1370,34 @@ async function mcpRequest(request: Request): Promise<Response> {
   return await transport.handleRequest(request);
 }
 
+/**
+ * The client address in a header a trusted reverse proxy sets: the last entry
+ * of a comma-separated list such as `X-Forwarded-For` (the hop the proxy
+ * itself appended), or the whole value of a single-address header such as
+ * `X-Real-IP`. Null when the header is missing or malformed.
+ */
+export function forwardedClientAddress(value: string | null): string | null {
+  const address = value?.split(",").at(-1)?.trim() ?? "";
+  return /^[0-9A-Fa-f:.]{2,45}$/.test(address) ? address : null;
+}
+
 if (import.meta.main) {
+  // Behind a reverse proxy, every request comes from the proxy's own address.
+  // Name the header it sets to the client address (for example X-Real-IP or
+  // X-Forwarded-For), or every visitor shares one per-client limit.
+  const clientIpHeader = process.env.OPENGENI_DEMO_CLIENT_IP_HEADER?.trim() || null;
+  let productServer: ReturnType<typeof Bun.serve> | undefined;
   // One handler per process: its visitor cookie key and session ownership live in memory.
   const productRequest = createProductHandler({
     ...env,
     resolveMcpUrl: resolvePublicMcpUrl,
     serveStatic: UNIFIED_SERVER,
+    clientAddress: (request) =>
+      clientIpHeader
+        ? forwardedClientAddress(request.headers.get(clientIpHeader))
+        : (productServer?.requestIP(request)?.address ?? null),
   });
-  const productServer = Bun.serve({
+  productServer = Bun.serve({
     hostname: UNIFIED_SERVER ? "0.0.0.0" : "127.0.0.1",
     port: PRODUCT_PORT,
     idleTimeout: 255,
@@ -1086,4 +1422,5 @@ if (import.meta.main) {
   console.log("MCP auth               ", env.mcpToken ? "configured" : "MISSING");
   console.log("Opengeni auth          ", env.apiKey ? "configured" : "MISSING");
   console.log("Opengeni workspace     ", env.workspaceId || "MISSING");
+  console.log("Client address         ", clientIpHeader ?? "socket peer address");
 }

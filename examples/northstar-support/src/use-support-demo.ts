@@ -38,6 +38,15 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+// Health answers 503 until an agent run can start; its body still says why.
+async function fetchHealth(): Promise<DemoHealth> {
+  const response = await fetch(`${PRODUCT_API_ORIGIN}/api/demo/health`);
+  if (!response.ok && response.status !== 503) {
+    throw new Error(`Request failed (${response.status})`);
+  }
+  return (await response.json()) as DemoHealth;
+}
+
 export function useSupportDemo(): SupportDemoResult {
   const [state, setState] = useState<SupportWorkspaceState | null>(null);
   const [health, setHealth] = useState<DemoHealth | null>(null);
@@ -49,7 +58,7 @@ export function useSupportDemo(): SupportDemoResult {
     try {
       const [nextState, nextHealth] = await Promise.all([
         fetchJson<SupportWorkspaceState>("/api/demo/state"),
-        fetchJson<DemoHealth>("/api/demo/health"),
+        fetchHealth(),
       ]);
       setState(nextState);
       setHealth(nextHealth);

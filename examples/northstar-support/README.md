@@ -36,7 +36,16 @@ component source rather than a stale published copy.
 ## Run against managed Opengeni
 
 Requirements: Bun, an organization API key for the configured shared
-organization workspace, and a public HTTPS tunnel for the MCP endpoint.
+organization workspace, a public HTTPS tunnel for the MCP endpoint, and an
+Opengeni server that accepts per-task usage limits.
+
+Every run carries a usage limit, so the Opengeni server must have per-task
+usage limits enabled (`OPENGENI_SESSION_USAGE_LIMITS_ENABLED=true` on its API
+and workers; `GET /v1/config/client` then reports
+`sessionUsageLimits.enabled: true`). Until it does, `GET /api/demo/health`
+answers 503 with `ok: false` and `sessionUsageLimitsEnabled: false`, and the
+panel's Start button stays off. The demo never drops the limit to make runs
+work.
 
 The server acts through `asUser` and onboards the demo operator with
 `addExternalWorkspaceMember`, so a workspace API key does not work. The
@@ -94,24 +103,51 @@ decides which of that operator's sessions each browser may use:
 - **Narrow sessions.** Sessions are created `visibility: "private"`,
   `agentAccess: "session"`, and `memoryScope: "off"`, with only the Northstar
   MCP server, no first-party tools, no sandbox, and a $1.00 usage limit
-  (`usageLimitMicros`) that the browser cannot raise.
+  (`usageLimitMicros`) that the browser cannot raise. The agent starts from
+  `capabilities: { from: "none", skills: false }` with no bundled Skills: it
+  can use its Northstar tools and ask the visitor for input, but cannot read,
+  save, install, or remove Skills (which would change every other visitor's
+  agent), search or fetch the web, generate media, resolve secrets, start
+  subagents, or use Knowledge, schedules, or workspace tools. As a further
+  safeguard, set the demo workspace's Agent learning (Knowledge, Instructions,
+  Skills) to Off.
 - **Closed proxy surfaces.** Browser session creation, the session list,
   archive, model selection, files and uploads, voice input, realtime voice,
-  sandbox files, artifacts, and Sites are all off. Mutations must be
-  same-origin and come from an established visitor (`authorizeMutation`), and
-  request bodies are limited to 32 KiB.
-- **Rate limits.** Agent runs are limited to 6 per visitor per 10 minutes and
-  30 per hour across the demo; resets to 5 per visitor and 30 in total per
-  minute. A refusal is a 429 with `Retry-After`. Tune the constants at the top
-  of `src/server.ts`.
+  sandbox files, artifacts, and Sites are all off. A browser can change only
+  the sessions it started: workspace-level writes (such as resuming a paused
+  workspace) are refused. Mutations must be same-origin and come from an
+  established visitor (`authorizeMutation`), and request bodies are limited to
+  32 KiB, on the demo API too.
+- **Rate limits.** Each action is limited per visitor, per client address, and
+  across the demo, and only valid requests count, so a burst of malformed
+  starts cannot use up anyone's allowance:
+
+  | Action                                                         | Per visitor | Per client address | Whole demo   |
+  | -------------------------------------------------------------- | ----------- | ------------------ | ------------ |
+  | Agent runs (`POST /api/demo/sessions`)                         | 6 / 10 min  | 10 / hour          | 30 / hour    |
+  | Messages (send, steer, draft submit, approval or input answer) | 20 / 10 min | 40 / 10 min        | 200 / 10 min |
+  | Every forwarded session write (also draft saves and controls)  | 60 / min    | 120 / min          | 600 / min    |
+  | Ticket edits, notes, and replies                               | 20 / min    | 40 / min           | 120 / min    |
+  | Resets                                                         | 5 / min     | 10 / min           | 30 / min     |
+  | Open agent event streams (concurrent)                          | 8           | 24                 | 200          |
+
+  A refusal is a 429 with `Retry-After`. Every write, and the workspace live
+  stream, needs an established visitor cookie, so dropping the cookie never
+  buys a fresh per-visitor allowance. Behind a reverse proxy, set
+  `OPENGENI_DEMO_CLIENT_IP_HEADER` to the header it sets to the client address
+  (`X-Real-IP`, or `X-Forwarded-For`, whose last entry is used), and make the
+  proxy see real client addresses; otherwise every visitor shares the proxy's
+  address and the per-client limits act as a smaller demo-wide cap. Tune the
+  constants at the top of `src/server.ts`.
 
 Visitor state lives in memory, so run one replica. Product data (tickets,
 notes, replies, Reset) is the fictional product's shared database: every
-visitor sees the same tickets. The workspace live-control stream the provider
-subscribes to stays open to every visitor because the panel refreshes session
-state from it; its events carry only pause and resume facts (a session id,
-action, actor, and bounded reason) that `authorizeSession` makes useless to
-anyone but the session's owner.
+visitor sees the same tickets, and each ticket keeps only its newest 50 notes,
+replies, and activity entries. The workspace live-control stream the provider
+subscribes to is open to every established visitor because the panel
+refreshes session state from it; its events carry only pause and resume facts
+(a session id, action, actor, and bounded reason) that `authorizeSession`
+makes useless to anyone but the session's owner.
 
 ## What to inspect
 

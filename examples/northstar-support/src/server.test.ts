@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createProductHandler, staticResponse } from "./server";
+import { createProductHandler, forwardedClientAddress, staticResponse } from "./server";
 
 const roots: string[] = [];
 
@@ -138,10 +138,36 @@ const WORKSPACE = `${PROXY}/workspaces/${WORKSPACE_ID}`;
 
 type UpstreamCall = { method: string; path: string; headers: Headers; body: unknown };
 
+type FakeOptions = {
+  membership?: Response;
+  sessionId?: string;
+  /** Whether the server reports per-task usage limits as enabled. Defaults to true. */
+  usageLimits?: boolean;
+};
+
+/** An SSE response that stays open until the caller aborts it. */
+function openEventStream(signal: AbortSignal): Response {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const close = () => {
+        try {
+          controller.close();
+        } catch {
+          // Already closed.
+        }
+      };
+      if (signal.aborted) close();
+      else signal.addEventListener("abort", close, { once: true });
+    },
+  });
+  return new Response(body, { headers: { "content-type": "text/event-stream" } });
+}
+
 /** A fake Opengeni API: no network, records every call the demo server makes. */
-function fakeOpenGeni(options: { membership?: Response; sessionId?: string } = {}) {
+function fakeOpenGeni(options: FakeOptions = {}) {
   const calls: UpstreamCall[] = [];
   const sessionsByKey = new Map<string, string>();
+  const server = { usageLimits: options.usageLimits ?? true, rejectUsageLimits: false };
   const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const request = new Request(input, init);
     const url = new URL(request.url);
@@ -153,6 +179,19 @@ function fakeOpenGeni(options: { membership?: Response; sessionId?: string } = {
       return options.membership?.clone() ?? Response.json({ subjectId: "subject-maya" });
     }
     if (url.pathname === `${base}/sessions` && request.method === "POST") {
+      if (server.rejectUsageLimits && body?.usageLimitMicros != null) {
+        return Response.json(
+          {
+            error: {
+              code: "validation_failed",
+              message: "Usage limits are not enabled on this server.",
+              retryable: false,
+              details: { code: "session_usage_limit_disabled" },
+            },
+          },
+          { status: 422 },
+        );
+      }
       const key = String(body?.idempotencyKey);
       const id = options.sessionId ?? sessionsByKey.get(key) ?? crypto.randomUUID();
       sessionsByKey.set(key, id);
@@ -168,7 +207,11 @@ function fakeOpenGeni(options: { membership?: Response; sessionId?: string } = {
         apiContractRevision: "upstream",
         fileUploads: { enabled: true },
         voiceInput: { available: true, maxDurationSeconds: 60 },
+        sessionUsageLimits: { enabled: server.usageLimits },
       });
+    }
+    if (url.pathname.endsWith("/stream") && request.method === "GET") {
+      return openEventStream(request.signal);
     }
     if (url.pathname.endsWith("/events") && request.method === "GET") return Response.json([]);
     return Response.json({ id: url.pathname.split("/")[5], workspaceId: WORKSPACE_ID });
@@ -176,12 +219,18 @@ function fakeOpenGeni(options: { membership?: Response; sessionId?: string } = {
   return {
     calls,
     fetch,
+    server,
     /** Upstream calls that address one session. */
     sessionCalls: (sessionId: string) => calls.filter((call) => call.path.includes(sessionId)),
+    /** Upstream calls to one path suffix with one method. */
+    count: (method: string, suffix: string) =>
+      calls.filter((call) => call.method === method && call.path.endsWith(suffix)).length,
   };
 }
 
-function demoServer(options: Parameters<typeof fakeOpenGeni>[0] & { now?: () => number } = {}) {
+const CLIENT_HEADER = "x-test-client";
+
+function demoServer(options: FakeOptions & { now?: () => number; clientAddresses?: boolean } = {}) {
   const upstream = fakeOpenGeni(options);
   const handler = createProductHandler({
     apiBaseUrl: API,
@@ -193,6 +242,9 @@ function demoServer(options: Parameters<typeof fakeOpenGeni>[0] & { now?: () => 
     appOrigin: ORIGIN,
     fetch: upstream.fetch,
     ...(options.now ? { now: options.now } : {}),
+    ...(options.clientAddresses
+      ? { clientAddress: (request: Request) => request.headers.get(CLIENT_HEADER) }
+      : {}),
   });
   return { upstream, handler };
 }
@@ -201,8 +253,10 @@ type Handler = ReturnType<typeof createProductHandler>;
 type BrowserInit = { method?: string; body?: unknown; headers?: Record<string, string> };
 
 /** One browser: the visitor cookie the server issued it. */
-async function newVisitor(handler: Handler): Promise<string> {
-  const response = await handler(new Request(`${ORIGIN}/api/demo/state`));
+async function newVisitor(handler: Handler, client?: string): Promise<string> {
+  const response = await handler(
+    new Request(`${ORIGIN}/api/demo/state`, client ? { headers: { [CLIENT_HEADER]: client } } : {}),
+  );
   expect(response.status).toBe(200);
   const setCookie = response.headers.get("set-cookie");
   expect(setCookie).not.toBeNull();
@@ -224,10 +278,12 @@ async function startRun(
   handler: Handler,
   cookie: string | null,
   runId: string = crypto.randomUUID(),
+  headers: Record<string, string> = {},
 ): Promise<Response> {
   return await handler(
     browserRequest(`${ORIGIN}/api/demo/sessions`, cookie, {
       method: "POST",
+      headers,
       body: { ticketId: "TKT-2847", initialMessage: "Investigate TKT-2847.", runId },
     }),
   );
@@ -241,6 +297,11 @@ async function startedSessionId(handler: Handler, cookie: string): Promise<strin
 
 async function errorCode(response: Response): Promise<string | undefined> {
   return ((await response.json()) as { error?: { code?: string } }).error?.code;
+}
+
+async function errorMessage(response: Response): Promise<string> {
+  const { error } = (await response.json()) as { error: string | { message: string } };
+  return typeof error === "string" ? error : error.message;
 }
 
 async function expectStatus(
@@ -347,6 +408,9 @@ describe("Northstar anonymous visitor isolation", () => {
       sandboxBackend: "none",
       tools: [{ kind: "mcp", id: "northstar_support" }],
     });
+    // Only the session's own tools: no Skills, web search, media, or secrets.
+    expect(body.agent).toEqual({ capabilities: { from: "none", skills: false } });
+    expect(body.bundledSkillIds).toEqual([]);
     expect(body.model).toBeUndefined();
     // Per visitor, and never the raw cookie id or run id.
     const visitorId = cookie.split("=")[1]!.split(".")[0]!;
@@ -556,16 +620,6 @@ describe("Northstar anonymous visitor isolation", () => {
 });
 
 describe("Northstar demo rate limits", () => {
-  function testClock() {
-    let now = Date.UTC(2026, 9, 16, 12);
-    return {
-      now: () => now,
-      advance: (ms: number) => {
-        now += ms;
-      },
-    };
-  }
-
   function sessionCreates(upstream: ReturnType<typeof fakeOpenGeni>): number {
     return upstream.calls.filter(
       (call) => call.method === "POST" && call.path === `/v1/workspaces/${WORKSPACE_ID}/sessions`,
@@ -593,11 +647,11 @@ describe("Northstar demo rate limits", () => {
         expect((await startRun(handler, cookie)).status).toBe(201);
       }
     }
-    // Dropping the cookie does not escape the demo-wide cap.
-    const global = await startRun(handler, null);
+    // A new cookie does not escape the demo-wide cap.
+    const global = await startRun(handler, await newVisitor(handler));
     expect(global.status).toBe(429);
     expect(((await global.json()) as { error: string }).error).toBe(
-      "The demo has started too many agent runs recently. Try again in 60 minutes.",
+      "The demo has had too many agent runs recently. Try again in 60 minutes.",
     );
     expect(sessionCreates(upstream)).toBe(30);
 
@@ -623,5 +677,424 @@ describe("Northstar demo rate limits", () => {
     );
     clock.advance(60_000);
     expect((await reset()).status).toBe(200);
+  });
+});
+
+function testClock() {
+  let now = Date.UTC(2026, 9, 16, 12);
+  return {
+    now: () => now,
+    advance: (ms: number) => {
+      now += ms;
+    },
+  };
+}
+
+describe("Northstar demo readiness", () => {
+  test("is not ready until Opengeni accepts per-run usage limits", async () => {
+    const clock = testClock();
+    const { handler, upstream } = demoServer({ usageLimits: false, now: clock.now });
+    const cookie = await newVisitor(handler);
+    const health = async () => await handler(browserRequest(`${ORIGIN}/api/demo/health`, cookie));
+
+    const notReady = await health();
+    expect(notReady.status).toBe(503);
+    expect(await notReady.json()).toMatchObject({ ok: false, sessionUsageLimitsEnabled: false });
+    // No start reaches Opengeni or uses up the run budget.
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const start = await startRun(handler, cookie);
+      expect(start.status).toBe(503);
+      expect(await errorMessage(start)).toBe(
+        "The Opengeni server does not accept per-run usage limits.",
+      );
+    }
+    expect(upstream.count("POST", `/workspaces/${WORKSPACE_ID}/sessions`)).toBe(0);
+    // An unconfirmed capability is rechecked at most once a minute.
+    expect(upstream.count("GET", "/v1/config/client")).toBe(1);
+
+    upstream.server.usageLimits = true;
+    clock.advance(60_000);
+    const ready = await health();
+    expect(ready.status).toBe(200);
+    expect(await ready.json()).toMatchObject({ ok: true, sessionUsageLimitsEnabled: true });
+    expect((await startRun(handler, cookie)).status).toBe(201);
+    // A confirmed capability is kept.
+    clock.advance(24 * 60 * 60_000);
+    expect((await health()).status).toBe(200);
+    expect(upstream.count("GET", "/v1/config/client")).toBe(2);
+  });
+
+  test("becomes not ready when Opengeni later refuses usage limits", async () => {
+    const { handler, upstream } = demoServer();
+    const cookie = await newVisitor(handler);
+    expect((await startRun(handler, cookie)).status).toBe(201);
+    upstream.server.usageLimits = false;
+    upstream.server.rejectUsageLimits = true;
+    const refused = await startRun(handler, cookie);
+    expect(refused.status).toBe(502);
+    const health = await handler(browserRequest(`${ORIGIN}/api/demo/health`, cookie));
+    expect(health.status).toBe(503);
+    expect(await health.json()).toMatchObject({ ok: false, sessionUsageLimitsEnabled: false });
+  });
+
+  test("reports an unreadable Opengeni server as not ready", async () => {
+    const handler = createProductHandler({
+      apiBaseUrl: API,
+      apiKey: "og_org_rejected_key",
+      workspaceId: WORKSPACE_ID,
+      mcpToken: "mcp-test-token",
+      resolveMcpUrl: async () => `${ORIGIN}/mcp`,
+      serveStatic: false,
+      appOrigin: ORIGIN,
+      fetch: async () =>
+        Response.json({ error: { code: "unauthorized", message: "bad key" } }, { status: 401 }),
+    });
+    const response = await handler(new Request(`${ORIGIN}/api/demo/health`));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ ok: false, sessionUsageLimitsEnabled: null });
+  });
+});
+
+describe("Northstar shared product data", () => {
+  const ticket = (state: unknown) =>
+    (state as { cases: Array<{ ticket: Record<string, unknown> }> }).cases.find(
+      (supportCase) => supportCase.ticket.id === "TKT-2847",
+    )!.ticket as {
+      notes: Array<{ body: string }>;
+      replies: Array<{ body: string }>;
+      activity: unknown[];
+    };
+
+  async function resetDemo(handler: Handler): Promise<void> {
+    const cookie = await newVisitor(handler);
+    const response = await handler(
+      browserRequest(`${ORIGIN}/api/demo/reset`, cookie, { method: "POST" }),
+    );
+    expect(response.status).toBe(200);
+  }
+
+  test("accepts changes only from an established visitor", async () => {
+    const { handler } = demoServer();
+    await resetDemo(handler);
+    const writes: Array<BrowserInit & { url: string }> = [
+      {
+        url: `${ORIGIN}/api/demo/ticket`,
+        method: "PATCH",
+        body: { ticketId: "TKT-2847", priority: "urgent" },
+      },
+      {
+        url: `${ORIGIN}/api/demo/notes`,
+        method: "POST",
+        body: { ticketId: "TKT-2847", body: "Planted" },
+      },
+      {
+        url: `${ORIGIN}/api/demo/replies`,
+        method: "POST",
+        body: { ticketId: "TKT-2847", body: "Hi" },
+      },
+      { url: `${ORIGIN}/api/demo/reset`, method: "POST" },
+      {
+        url: `${ORIGIN}/api/demo/sessions`,
+        method: "POST",
+        body: { ticketId: "TKT-2847", runId: crypto.randomUUID() },
+      },
+    ];
+    for (const write of writes) {
+      const response = await handler(browserRequest(write.url, null, write));
+      expect({ url: write.url, status: response.status }).toEqual({ url: write.url, status: 403 });
+      // The refusal establishes the visitor for its next attempt.
+      expect(response.headers.get("set-cookie")).toMatch(/^__Host-northstar_visitor=/);
+    }
+    const state = await (await handler(new Request(`${ORIGIN}/api/demo/state`))).json();
+    expect(ticket(state).notes.map((note) => note.body)).not.toContain("Planted");
+  });
+
+  test("limits ticket changes and counts only valid ones", async () => {
+    const clock = testClock();
+    const { handler } = demoServer({ now: clock.now });
+    await resetDemo(handler);
+    const cookie = await newVisitor(handler);
+    const note = (body: string) =>
+      handler(
+        browserRequest(`${ORIGIN}/api/demo/notes`, cookie, {
+          method: "POST",
+          body: { ticketId: "TKT-2847", body },
+        }),
+      );
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      expect((await note("x")).status).toBe(422);
+    }
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      expect((await note(`Note ${attempt}`)).status).toBe(200);
+    }
+    const limited = await note("One too many");
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("60");
+    expect(await errorMessage(limited)).toBe(
+      "Too many ticket changes from this browser. Try again in 60 seconds.",
+    );
+    // Edits and replies share the allowance.
+    const edit = await handler(
+      browserRequest(`${ORIGIN}/api/demo/ticket`, cookie, {
+        method: "PATCH",
+        body: { ticketId: "TKT-2847", priority: "urgent" },
+      }),
+    );
+    expect(edit.status).toBe(429);
+    clock.advance(60_000);
+    expect((await note("Back again")).status).toBe(200);
+  });
+
+  test("keeps only the newest history on each ticket", async () => {
+    const clock = testClock();
+    const { handler } = demoServer({ now: clock.now });
+    await resetDemo(handler);
+    const cookie = await newVisitor(handler);
+    for (let index = 0; index < 60; index += 1) {
+      if (index % 10 === 0) clock.advance(60_000);
+      for (const [path, body] of [
+        ["notes", `Note ${index}`],
+        ["replies", `Reply ${index}`],
+      ] as const) {
+        const response = await handler(
+          browserRequest(`${ORIGIN}/api/demo/${path}`, cookie, {
+            method: "POST",
+            body: { ticketId: "TKT-2847", body },
+          }),
+        );
+        expect(response.status).toBe(200);
+      }
+    }
+    const current = ticket(await (await handler(new Request(`${ORIGIN}/api/demo/state`))).json());
+    expect(current.notes).toHaveLength(50);
+    expect(current.notes[0]!.body).toBe("Note 59");
+    expect(current.replies).toHaveLength(50);
+    expect(current.replies.at(-1)!.body).toBe("Reply 59");
+    expect(current.replies[0]!.body).toBe("Reply 10");
+    expect(current.activity).toHaveLength(50);
+
+    const oversized = await handler(
+      browserRequest(`${ORIGIN}/api/demo/notes`, cookie, {
+        method: "POST",
+        body: { ticketId: "TKT-2847", body: "x".repeat(40 * 1024) },
+      }),
+    );
+    expect(oversized.status).toBe(413);
+    await resetDemo(handler);
+  });
+});
+
+describe("Northstar proxied Opengeni traffic", () => {
+  const sessionUrl = (sessionId: string) => `${WORKSPACE}/sessions/${sessionId}`;
+  const send = (handler: Handler, cookie: string, sessionId: string, text = "Check again") =>
+    handler(
+      browserRequest(`${sessionUrl(sessionId)}/events`, cookie, {
+        method: "POST",
+        body: { type: "user.message", payload: { text } },
+      }),
+    );
+
+  test("limits messages to the agent", async () => {
+    const clock = testClock();
+    const { handler, upstream } = demoServer({ now: clock.now });
+    const cookie = await newVisitor(handler);
+    const sessionId = await startedSessionId(handler, cookie);
+    for (let message = 0; message < 20; message += 1) {
+      expect((await send(handler, cookie, sessionId)).status).toBe(200);
+    }
+    const limited = await send(handler, cookie, sessionId);
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("600");
+    expect(await limited.json()).toEqual({
+      error: {
+        code: "rate_limited",
+        message: "Too many agent messages from this browser. Try again in 10 minutes.",
+        retryable: true,
+      },
+    });
+    // Steer and composer submit share the allowance.
+    const steer = await handler(
+      browserRequest(`${sessionUrl(sessionId)}/steer`, cookie, {
+        method: "POST",
+        body: { text: "stop" },
+      }),
+    );
+    expect(steer.status).toBe(429);
+    expect(upstream.count("POST", `${sessionId}/events`)).toBe(20);
+    expect(upstream.count("POST", `${sessionId}/steer`)).toBe(0);
+    clock.advance(10 * 60_000);
+    expect((await send(handler, cookie, sessionId)).status).toBe(200);
+  });
+
+  test("limits every session write it forwards, and only those", async () => {
+    const clock = testClock();
+    const { handler, upstream } = demoServer({ now: clock.now });
+    const owner = await newVisitor(handler);
+    const other = await newVisitor(handler);
+    const sessionId = await startedSessionId(handler, owner);
+    const pause = (cookie: string) =>
+      handler(
+        browserRequest(`${sessionUrl(sessionId)}/control`, cookie, {
+          method: "POST",
+          body: { action: "pause" },
+        }),
+      );
+    // Another visitor's writes are refused without reaching Opengeni, so they
+    // cannot use up the demo-wide allowance.
+    for (let attempt = 0; attempt < 700; attempt += 1) {
+      expect((await pause(other)).status).toBe(404);
+    }
+    // Workspace-level writes are never forwarded.
+    await expectStatus(
+      handler,
+      owner,
+      {
+        label: "workspace resume",
+        url: `${WORKSPACE}/inference-control`,
+        method: "POST",
+        body: { action: "resume" },
+      },
+      404,
+      "route_not_allowed",
+    );
+    expect(upstream.count("POST", "/inference-control")).toBe(0);
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      expect((await pause(owner)).status).toBe(200);
+    }
+    const limited = await pause(owner);
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("60");
+    expect(await errorMessage(limited)).toBe(
+      "Too many agent session changes from this browser. Try again in 60 seconds.",
+    );
+    expect(upstream.count("POST", `${sessionId}/control`)).toBe(60);
+  });
+
+  test("an encoded session id cannot skip the write limits", async () => {
+    const { handler, upstream } = demoServer();
+    const cookie = await newVisitor(handler);
+    const sessionId = await startedSessionId(handler, cookie);
+    const encoded = [...sessionId].map((char) => `%${char.charCodeAt(0).toString(16)}`).join("");
+    for (let attempt = 0; attempt < 70; attempt += 1) {
+      await handler(
+        browserRequest(`${WORKSPACE}/sessions/${encoded}/control`, cookie, {
+          method: "POST",
+          body: { action: "pause" },
+        }),
+      );
+    }
+    expect(upstream.count("POST", `${sessionId}/control`)).toBe(60);
+  });
+
+  test("requires a visitor cookie for the workspace live stream", async () => {
+    const { handler, upstream } = demoServer();
+    const response = await handler(browserRequest(`${WORKSPACE}/live-events/stream`, null));
+    expect(response.status).toBe(403);
+    expect(response.headers.get("set-cookie")).toMatch(/^__Host-northstar_visitor=/);
+    expect(await response.json()).toEqual({
+      error: { code: "visitor_required", message: "Load the demo page first.", retryable: true },
+    });
+    expect(upstream.calls).toEqual([]);
+  });
+
+  test("caps open event streams and frees a slot when one closes", async () => {
+    const { handler } = demoServer();
+    const cookie = await newVisitor(handler);
+    const sessionId = await startedSessionId(handler, cookie);
+    const open: Response[] = [];
+    const openStream = async (url: string) => {
+      const response = await handler(browserRequest(url, cookie));
+      if (response.status === 200) open.push(response);
+      return response;
+    };
+    try {
+      const sessionStream = await openStream(`${sessionUrl(sessionId)}/events/stream`);
+      expect(sessionStream.status).toBe(200);
+      expect(sessionStream.headers.get("content-type")).toStartWith("text/event-stream");
+      for (let stream = 1; stream < 8; stream += 1) {
+        expect((await openStream(`${WORKSPACE}/live-events/stream`)).status).toBe(200);
+      }
+      const limited = await openStream(`${WORKSPACE}/live-events/stream`);
+      expect(limited.status).toBe(429);
+      expect(limited.headers.get("retry-after")).toBe("5");
+      expect(await errorMessage(limited)).toBe(
+        "Too many open agent event streams from this browser.",
+      );
+      // A stream the visitor may not open never takes a slot.
+      const foreign = await openStream(`${sessionUrl(crypto.randomUUID())}/events/stream`);
+      expect(foreign.status).toBe(404);
+
+      await open.shift()!.body!.cancel();
+      expect((await openStream(`${WORKSPACE}/live-events/stream`)).status).toBe(200);
+      // Other visitors have their own allowance.
+      const otherCookie = await newVisitor(handler);
+      const other = await handler(browserRequest(`${WORKSPACE}/live-events/stream`, otherCookie));
+      expect(other.status).toBe(200);
+      open.push(other);
+    } finally {
+      await Promise.all(open.map((response) => response.body?.cancel()));
+    }
+  });
+});
+
+describe("Northstar run start limits", () => {
+  test("counts only valid starts from established visitors", async () => {
+    const { handler, upstream } = demoServer();
+    const cookie = await newVisitor(handler);
+    // Malformed, unknown-ticket, and cookie-less starts never touch the budget.
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const empty = await handler(
+        browserRequest(`${ORIGIN}/api/demo/sessions`, cookie, { method: "POST", body: {} }),
+      );
+      expect(empty.status).toBe(400);
+      const unknown = await handler(
+        browserRequest(`${ORIGIN}/api/demo/sessions`, cookie, {
+          method: "POST",
+          body: { ticketId: "TKT-0000", runId: crypto.randomUUID() },
+        }),
+      );
+      expect(unknown.status).toBe(404);
+      expect((await startRun(handler, null)).status).toBe(403);
+    }
+    const oversized = await handler(
+      browserRequest(`${ORIGIN}/api/demo/sessions`, cookie, {
+        method: "POST",
+        body: { ticketId: "TKT-2847", runId: crypto.randomUUID(), pad: "x".repeat(40 * 1024) },
+      }),
+    );
+    expect(oversized.status).toBe(413);
+    for (let run = 0; run < 6; run += 1) {
+      expect((await startRun(handler, cookie)).status).toBe(201);
+    }
+    expect((await startRun(handler, cookie)).status).toBe(429);
+    expect(upstream.count("POST", `/workspaces/${WORKSPACE_ID}/sessions`)).toBe(6);
+  });
+
+  test("limits runs from one client address across fresh cookies", async () => {
+    const { handler } = demoServer({ clientAddresses: true });
+    const from = (client: string) => ({ [CLIENT_HEADER]: client });
+    for (let visitor = 0; visitor < 10; visitor += 1) {
+      const cookie = await newVisitor(handler, "198.51.100.7");
+      expect((await startRun(handler, cookie, undefined, from("198.51.100.7"))).status).toBe(201);
+    }
+    const cookie = await newVisitor(handler, "198.51.100.7");
+    const limited = await startRun(handler, cookie, undefined, from("198.51.100.7"));
+    expect(limited.status).toBe(429);
+    expect(await errorMessage(limited)).toBe(
+      "Too many agent runs from this network. Try again in 60 minutes.",
+    );
+    const elsewhere = await newVisitor(handler, "203.0.113.9");
+    expect((await startRun(handler, elsewhere, undefined, from("203.0.113.9"))).status).toBe(201);
+  });
+});
+
+describe("forwardedClientAddress", () => {
+  test("uses the hop the trusted proxy appended", () => {
+    expect(forwardedClientAddress("203.0.113.9")).toBe("203.0.113.9");
+    expect(forwardedClientAddress("10.0.0.1, 198.51.100.7")).toBe("198.51.100.7");
+    expect(forwardedClientAddress(" 2001:db8::1 ")).toBe("2001:db8::1");
+    expect(forwardedClientAddress(null)).toBeNull();
+    expect(forwardedClientAddress("not an address")).toBeNull();
+    expect(forwardedClientAddress("198.51.100.7, ")).toBeNull();
   });
 });
