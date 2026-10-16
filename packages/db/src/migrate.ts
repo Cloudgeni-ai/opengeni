@@ -9,6 +9,7 @@ import * as databaseSchema from "./schema";
 import { KNOWLEDGE_MIGRATION_MARKER, migrateRetainedKnowledge } from "./knowledge-migration";
 import { migrateLegacySkillConfigurations } from "./skill-config-migration";
 import { batchedBackfillTransactionLocalSetting } from "./migration-runner-settings";
+import { migrationSqlForServer } from "./migration-postgres-compatibility";
 import {
   CLAUDE_POOL_MIGRATION_MARKER,
   migrateClaudeSubscriptionPoolCredentials,
@@ -259,6 +260,7 @@ export async function executeMigrationFile(
     "preinstalledVector" | "environmentsEncryptionKey" | "interruptedTurnRetirement"
   >,
 ): Promise<void> {
+  sqlText = await migrationSqlForServer(sql, file, sqlText);
   if (sqlText.includes(INTERRUPTED_TURN_RETIREMENT_MARKER)) {
     if (file !== INTERRUPTED_TURN_RETIREMENT_MIGRATION)
       throw new Error("Interrupted-turn retirement is restricted to migration 0764");

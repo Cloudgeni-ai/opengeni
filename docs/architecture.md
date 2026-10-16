@@ -2251,6 +2251,12 @@ fail. See [migration delivery rules](../AGENTS.md#deployment-work-notes).
 Managed PostgreSQL may preinstall pgvector for restricted migrators. The
 explicit initial-migration opt-in verifies its public extension-owned type;
 see [deployment](deployment.md#database-identities-and-runtime-posture).
+PostgreSQL 18's additional NOT NULL catalog rows are handled by the closed,
+source-hash-checked `packages/db/src/migration-postgres-compatibility.ts` adapter
+at execution of historical 0345/0598. It changes only their constraint-catalog
+reads, not published SQL bytes, ledger names, release hashes, or schema guards;
+older servers execute the original source. Already-applied migrations stay
+skipped. See [migration compatibility](migrations-expand-contract.md#historical-server-compatibility).
 
 Postgres owns file access/liveness; fork screenshots require ancestry and copied receipts, preserving RLS.
 Storage endpoints and signed URLs are transport details; keep URLs, object keys,
