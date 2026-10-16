@@ -874,6 +874,115 @@ fn a_sleep_request_made_while_a_wake_passes_a_deeper_level_survives_it() {
 }
 
 #[test]
+fn a_sleep_request_made_while_a_sleep_step_gives_way_to_a_wake_applies_after_it() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, paused(Durability::Local), SleepPolicy::NEVER);
+    let request = Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Saved,
+    };
+    let (step, drop) = only_start(&rig.send(request));
+    assert_eq!(step, Step::Drop);
+    let hold = Input::Hold {
+        sandbox: SandboxId(1),
+        hold: HoldId(1),
+        until: None,
+        priority: Priority::Interactive,
+    };
+    rig.send(hold);
+    assert_eq!(
+        rig.host.sandbox(SandboxId(1)).unwrap().requested,
+        Level::Running,
+        "a hold withdraws the earlier request"
+    );
+    assert_nothing_started(&rig.send(request));
+
+    // The drop was asked to stop but finished anyway. It reached the level
+    // asked for, yet the request was made for after the wake.
+    let (step, restore) = only_start(&rig.finish(1, drop, Outcome::Done));
+    assert_eq!(step, Step::Restore);
+    assert_eq!(
+        rig.host.sandbox(SandboxId(1)).unwrap().requested,
+        Level::Saved
+    );
+    assert_nothing_started(&rig.finish(1, restore, Outcome::Done));
+    let (step, op) = only_start(&rig.send(Input::Release {
+        sandbox: SandboxId(1),
+        hold: HoldId(1),
+    }));
+    assert_eq!(
+        step,
+        Step::Pause,
+        "the request applies once the wake is done"
+    );
+    let (step, op) = only_start(&rig.finish(1, op, Outcome::Done));
+    assert_eq!(step, Step::Save);
+    let (step, op) = only_start(&rig.finish(1, op, Outcome::Done));
+    assert_eq!(step, Step::Drop);
+    rig.finish(1, op, Outcome::Done);
+    assert_eq!(rig.state(1), saved());
+    assert_eq!(
+        rig.host.sandbox(SandboxId(1)).unwrap().requested,
+        Level::Running
+    );
+}
+
+#[test]
+fn a_refused_resume_that_loses_its_records_keeps_the_vm_but_trusts_no_copy() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, paused(Durability::Remote), recommended());
+    let (step, op) = only_start(&rig.touch(1));
+    assert_eq!(step, Step::Resume);
+    let actions = rig.finish(1, op, Outcome::Failed(Failure::Untrusted));
+    assert_eq!(rig.state(1), paused(Durability::Volatile));
+    let notices = notices(&actions, 1);
+    assert!(!notices.contains(&Notice::MemoryLost), "the VM is intact");
+    assert!(notices.contains(&Notice::Retrying {
+        step: Step::Resume,
+        failures: 1,
+    }));
+    assert_nothing_started(&actions);
+    let (step, op) = only_start(&rig.tick_at_deadline());
+    assert_eq!(step, Step::Resume, "the retry resumes the same VM");
+    rig.finish(1, op, Outcome::Done);
+    assert_eq!(rig.state(1), State::RUNNING);
+}
+
+#[test]
+fn a_refused_restore_that_loses_its_records_boots_fresh_from_disk() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(
+        1,
+        state(Level::Archived, Durability::Remote, true),
+        recommended(),
+    );
+    let (step, op) = only_start(&rig.touch(1));
+    assert_eq!(step, Step::Restore);
+    let actions = rig.finish(1, op, Outcome::Failed(Failure::Untrusted));
+    assert_eq!(rig.state(1), state(Level::Saved, Durability::Local, false));
+    assert!(notices(&actions, 1).contains(&Notice::MemoryLost));
+    assert_eq!(
+        only_start(&actions).0,
+        Step::Boot,
+        "programs are lost, so nothing is gained by waiting"
+    );
+
+    rig.add(
+        2,
+        state(Level::Remote, Durability::Remote, true),
+        recommended(),
+    );
+    let (step, op) = only_start(&rig.touch(2));
+    assert_eq!(step, Step::Fetch);
+    rig.finish(2, op, Outcome::Failed(Failure::Untrusted));
+    assert_eq!(
+        rig.state(2),
+        state(Level::Remote, Durability::Remote, true),
+        "the store vouches for a remote copy, not local records"
+    );
+}
+
+#[test]
 fn memory_pressure_cancels_an_archive_that_would_hold_it_up() {
     let mut rig = pressured_rig();
     let rules = SleepRules {

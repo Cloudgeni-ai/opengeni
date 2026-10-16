@@ -32,13 +32,14 @@ struct Marks {
 }
 
 impl Marks {
-    /// Removes both markers durably, remembering them. On failure every
-    /// marker is back in place.
-    fn take(paths: &Paths) -> io::Result<Self> {
+    /// Removes both markers durably, remembering them. On failure the
+    /// outcome to report: a transient failure when every marker is back in
+    /// place, and otherwise [`Failure::Untrusted`].
+    fn take(paths: &Paths, id: Id, operation: &'static str) -> Result<Self, Outcome> {
         let archived = match fs::read(&paths.archived) {
             Ok(contents) => Some(contents),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
+            Err(error) => return Err(io_failure(operation, error)),
         };
         let marks = Self {
             saved: paths.saved.exists(),
@@ -49,23 +50,47 @@ impl Marks {
         }
         let removed = remove_durably(&paths.saved).and_then(|()| remove_durably(&paths.archived));
         if let Err(error) = removed {
-            if let Err(restoring) = marks.put_back(paths) {
-                tracing::error!(error = %restoring, "saved-copy markers not put back");
-            }
-            return Err(error);
+            return Err(match marks.put_back(paths) {
+                Ok(()) => io_failure(operation, error),
+                Err(lost) => {
+                    tracing::error!(%id, error = %lost, "saved-copy markers not put back");
+                    Outcome::Failed(Failure::Untrusted)
+                }
+            });
         }
         Ok(marks)
     }
 
-    /// Writes the markers back as they were.
+    /// Writes back whichever markers are missing, once it is certain the
+    /// guest never ran. A marker still present was never removed and is
+    /// unchanged.
     fn put_back(&self, paths: &Paths) -> io::Result<()> {
-        if self.saved {
+        if self.saved && !paths.saved.exists() {
             write_atomic(&paths.saved, b"")?;
         }
-        if let Some(contents) = &self.archived {
+        if let Some(contents) = &self.archived
+            && !paths.archived.exists()
+        {
             write_atomic(&paths.archived, contents)?;
         }
         Ok(())
+    }
+
+    /// The outcome of a wake refused before its guest ran: nothing changed
+    /// once the markers are back, and otherwise the copies they vouched for
+    /// are no longer trusted. Any other failure leaves them taken away, as
+    /// the guest may have run.
+    fn after_failed_wake(&self, paths: &Paths, id: Id, error: &EngineError) -> Outcome {
+        if error.kind != ErrorKind::Transient {
+            return failure(error);
+        }
+        match self.put_back(paths) {
+            Ok(()) => failure(error),
+            Err(lost) => {
+                tracing::error!(%id, error = %lost, "saved-copy markers not put back after a refused wake");
+                Outcome::Failed(Failure::Untrusted)
+            }
+        }
     }
 }
 
@@ -119,8 +144,27 @@ fn io_failure(operation: &'static str, error: std::io::Error) -> Outcome {
 }
 
 impl<E: Engine, S: Store> Job<E, S> {
-    /// Runs `step` and reports how it went and what VM remains.
+    /// Runs `step` and reports how it went and what VM remains. A step that
+    /// lost the VM's memory leaves no VM process: it is ended before the
+    /// step reports, since the core may start a replacement on the same disk
+    /// right after.
     pub async fn run(mut self, step: Step) -> (Outcome, After<E::Vm>) {
+        let (outcome, after) = self.step(step).await;
+        if outcome != Outcome::Failed(Failure::MemoryLost) {
+            return (outcome, after);
+        }
+        let vm = match after {
+            After::NoVm => return (outcome, After::NoVm),
+            After::Kept(live) => {
+                live.stopping.store(true, Ordering::Release);
+                live.vm
+            }
+            After::New(vm) => vm,
+        };
+        (self.end(vm, outcome).await, After::NoVm)
+    }
+
+    async fn step(&mut self, step: Step) -> (Outcome, After<E::Vm>) {
         if self.cancel.is_cancelled() {
             return (
                 Outcome::Cancelled,
@@ -167,23 +211,17 @@ impl<E: Engine, S: Store> Job<E, S> {
 
     /// Resumes a paused VM. A saved copy of it goes stale the moment the
     /// guest runs and its disk moves on, so it is unmarked first, and marked
-    /// again if the resume was refused: the guest never ran, and the core
-    /// counts on a transient failure having changed nothing.
+    /// again only if the resume was refused, as then the guest never ran.
     async fn resume(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
-        let marks = match Marks::take(&self.paths) {
+        let marks = match Marks::take(&self.paths, self.id, "resume") {
             Ok(marks) => marks,
-            Err(error) => return (io_failure("resume", error), After::Kept(live)),
+            Err(outcome) => return (outcome, After::Kept(live)),
         };
-        let result = self.engine.resume(&live.vm).await;
-        if let Err(error) = &result
-            && error.kind == ErrorKind::Transient
-            && let Err(error) = marks.put_back(&self.paths)
-        {
-            // The copy is still good but no longer marked, so the host just
-            // stops relying on it; nothing stale can be restored this way.
-            tracing::error!(id = %self.id, %error, "saved copy not marked again after a refused resume");
-        }
-        self.simple(result, live)
+        let outcome = match self.engine.resume(&live.vm).await {
+            Ok(()) => Outcome::Done,
+            Err(error) => marks.after_failed_wake(&self.paths, self.id, &error),
+        };
+        (outcome, After::Kept(live))
     }
 
     async fn compress(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
@@ -240,20 +278,12 @@ impl<E: Engine, S: Store> Job<E, S> {
             return (Outcome::Failed(Failure::Fatal), After::Kept(live));
         }
         live.stopping.store(true, Ordering::Release);
-        match self.engine.stop(live.vm).await {
-            Ok(()) => (Outcome::Done, After::NoVm),
-            Err(error) => {
-                // The copy is safe on disk either way, so the sandbox moves
-                // on without the process; a VMM that would not die is a host
-                // problem worth surfacing.
-                tracing::error!(id = %self.id, %error, "VM process did not end cleanly");
-                (Outcome::Failed(Failure::MemoryLost), After::NoVm)
-            }
-        }
+        (self.end(live.vm, Outcome::Done).await, After::NoVm)
     }
 
-    /// Start from the saved image, mark the image stale before the guest
-    /// runs, then resume.
+    /// Start from the saved image, unmark it before the guest runs, then
+    /// resume. A VM that fails to resume is ended before its markers are
+    /// reconsidered, so no second process ever runs from the same files.
     async fn restore(&self) -> (Outcome, After<E::Vm>) {
         let paths = &self.paths;
         if !paths.saved.exists() {
@@ -268,19 +298,32 @@ impl<E: Engine, S: Store> Job<E, S> {
                 return (failure(&error), After::NoVm);
             }
         };
-        let unmarked = remove_durably(&paths.saved).and_then(|()| remove_durably(&paths.archived));
-        if let Err(error) = unmarked {
-            let _ = self.engine.stop(vm).await;
-            return (io_failure("restore", error), After::NoVm);
-        }
+        let marks = match Marks::take(paths, self.id, "restore") {
+            Ok(marks) => marks,
+            Err(outcome) => return (self.end(vm, outcome).await, After::NoVm),
+        };
         if let Err(error) = self.engine.resume(&vm).await {
-            // The guest never ran, so the image is still good: keep it.
-            let _ = self.engine.stop(vm).await;
-            let _ = write_atomic(&paths.saved, b"");
-            return (failure(&error), After::NoVm);
+            let ended = self.end(vm, Outcome::Done).await;
+            if ended != Outcome::Done {
+                return (ended, After::NoVm);
+            }
+            return (marks.after_failed_wake(paths, self.id, &error), After::NoVm);
         }
         self.tell_guest_restored().await;
         (Outcome::Done, After::New(vm))
+    }
+
+    /// Ends a VM process this step started and reports `outcome`, or a fatal
+    /// failure if the process would not end: without proof that it did,
+    /// nothing may replace it.
+    async fn end(&self, vm: E::Vm, outcome: Outcome) -> Outcome {
+        match self.engine.stop(vm).await {
+            Ok(()) => outcome,
+            Err(error) => {
+                tracing::error!(id = %self.id, %error, "a VM process would not end");
+                Outcome::Failed(Failure::Fatal)
+            }
+        }
     }
 
     /// Lets the guest fix its clock and drop dead connections before the
@@ -401,4 +444,96 @@ impl<E: Engine, S: Store> Job<E, S> {
 fn drop_snapshot(paths: &Paths) {
     let _ = remove_if_present(&paths.snapshot.state);
     let _ = remove_if_present(&paths.snapshot.memory);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use compute_core::SandboxId;
+
+    use super::*;
+
+    const ID: Id = Id(SandboxId(7));
+
+    /// A sandbox directory with both markers in place.
+    fn marked() -> (tempfile::TempDir, Paths) {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::new(root.path(), ID);
+        fs::create_dir_all(&paths.dir).unwrap();
+        write_atomic(&paths.saved, b"").unwrap();
+        write_atomic(&paths.archived, b"memory").unwrap();
+        (root, paths)
+    }
+
+    fn error(kind: ErrorKind) -> EngineError {
+        EngineError::new(kind, "resume", "test")
+    }
+
+    /// Makes the directory read-only, or returns false where that does not
+    /// stop writes, as for root.
+    fn freeze(dir: &std::path::Path) -> bool {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let probe = dir.join("probe");
+        if fs::write(&probe, b"").is_ok() {
+            let _ = fs::remove_file(probe);
+            return false;
+        }
+        true
+    }
+
+    fn thaw(dir: &std::path::Path) {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn a_refused_wake_puts_the_markers_back_as_they_were() {
+        let (_root, paths) = marked();
+        let marks = Marks::take(&paths, ID, "resume").unwrap();
+        assert!(!paths.saved.exists() && !paths.archived.exists());
+        let outcome = marks.after_failed_wake(&paths, ID, &error(ErrorKind::Transient));
+        assert_eq!(outcome, Outcome::Failed(Failure::Transient));
+        assert!(paths.saved.exists());
+        assert_eq!(fs::read(&paths.archived).unwrap(), b"memory");
+    }
+
+    #[test]
+    fn a_wake_that_breaks_down_leaves_the_markers_taken() {
+        for kind in [ErrorKind::MemoryLost, ErrorKind::Fatal] {
+            let (_root, paths) = marked();
+            let marks = Marks::take(&paths, ID, "resume").unwrap();
+            marks.after_failed_wake(&paths, ID, &error(kind));
+            assert!(
+                !paths.saved.exists() && !paths.archived.exists(),
+                "{kind:?}: the guest may have run"
+            );
+        }
+    }
+
+    #[test]
+    fn markers_that_cannot_be_put_back_are_reported_untrusted() {
+        let (_root, paths) = marked();
+        let marks = Marks::take(&paths, ID, "resume").unwrap();
+        if !freeze(&paths.dir) {
+            thaw(&paths.dir);
+            return;
+        }
+        let outcome = marks.after_failed_wake(&paths, ID, &error(ErrorKind::Transient));
+        thaw(&paths.dir);
+        assert_eq!(outcome, Outcome::Failed(Failure::Untrusted));
+        assert!(!paths.saved.exists());
+    }
+
+    #[test]
+    fn taking_markers_from_a_frozen_directory_changes_nothing() {
+        let (_root, paths) = marked();
+        if !freeze(&paths.dir) {
+            thaw(&paths.dir);
+            return;
+        }
+        let taken = Marks::take(&paths, ID, "resume");
+        thaw(&paths.dir);
+        assert_eq!(taken.unwrap_err(), Outcome::Failed(Failure::Transient));
+        assert!(paths.saved.exists() && paths.archived.exists());
+    }
 }

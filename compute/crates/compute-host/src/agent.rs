@@ -974,15 +974,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             match fresh {
-                Some(live)
-                    if slot.dead == Some(live.incarnation)
-                        || outcome == Outcome::Failed(Failure::MemoryLost) =>
-                {
+                // A process that already ended on its own only needs its
+                // resources released. One that lost its memory was ended by
+                // the step before it reported.
+                Some(live) if slot.dead == Some(live.incarnation) => {
                     slot.incarnation = None;
                     slot.dead = None;
                     reap = Some(live);
                 }
                 Some(live) => {
+                    debug_assert_ne!(outcome, Outcome::Failed(Failure::MemoryLost));
                     slot.incarnation = Some(live.incarnation);
                     slot.vm = Some(live);
                 }

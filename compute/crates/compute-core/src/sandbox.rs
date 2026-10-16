@@ -2,9 +2,10 @@
 
 use std::collections::BTreeMap;
 
+use crate::host::{Failure, Notice, Outcome};
 use crate::ids::{HoldId, OpId, SandboxId};
 use crate::level::{Durability, Level, Priority, State, Step};
-use crate::policy::SleepPolicy;
+use crate::policy::{Backoff, SleepPolicy};
 use crate::time::At;
 
 /// A step the host has started and not yet heard back about.
@@ -27,6 +28,15 @@ pub(crate) struct Retry {
 pub(crate) struct Wake {
     pub priority: Priority,
     pub since: At,
+}
+
+/// What a finished step did to its sandbox beyond changing its state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Settled {
+    /// Running programs were lost.
+    pub lost: bool,
+    /// What to tell the host agent about a failure, if anything.
+    pub notice: Option<Notice>,
 }
 
 /// Position in a step queue. Lower sorts first.
@@ -89,6 +99,78 @@ impl Sandbox {
     /// Records activity at `at`; activity never moves backwards.
     pub fn touch(&mut self, at: At) {
         self.last_activity = self.last_activity.max(at);
+    }
+
+    /// Applies how `step` ended to the state and the retry bookkeeping.
+    /// `backoff` spaces out retries after transient failures.
+    pub fn settle_step(
+        &mut self,
+        step: Step,
+        outcome: Outcome,
+        now: At,
+        backoff: &Backoff,
+    ) -> Settled {
+        let mut settled = Settled {
+            lost: false,
+            notice: None,
+        };
+        if matches!(step, Step::Resume | Step::Restore)
+            && matches!(
+                outcome,
+                Outcome::Failed(Failure::MemoryLost | Failure::Fatal)
+            )
+        {
+            // The guest may have run before the step broke down, so no saved
+            // copy, here or in object storage, may match the disk any more.
+            // The host agent stops trusting them before letting the guest
+            // run and trusts them again only when it was refused, which is a
+            // transient failure.
+            settled.lost = self.lose(State::without_saved_copies);
+        }
+        match outcome {
+            Outcome::Done => {
+                debug_assert!(step.can_start(self.state), "{step:?} from {:?}", self.state);
+                self.state = step.apply(self.state);
+                if step.wakes() && self.state.level == Level::Running {
+                    self.touch(now);
+                }
+                self.retry = None;
+            }
+            Outcome::Cancelled => {}
+            Outcome::Failed(failure @ (Failure::Transient | Failure::Untrusted)) => {
+                if failure == Failure::Untrusted {
+                    settled.lost |= self.lose(State::without_saved_copies);
+                }
+                // With the programs lost there is nothing to retry: the next
+                // wake boots fresh from the files.
+                if !settled.lost {
+                    let failures = self
+                        .retry
+                        .map_or(1, |retry| retry.failures.saturating_add(1));
+                    self.retry = Some(Retry {
+                        failures,
+                        not_before: now + backoff.delay(failures),
+                    });
+                    settled.notice = Some(Notice::Retrying { step, failures });
+                }
+            }
+            Outcome::Failed(Failure::MemoryLost) => {
+                settled.lost |= self.lose(State::without_memory_image);
+            }
+            Outcome::Failed(Failure::Fatal) => {
+                self.broken = true;
+                settled.notice = Some(Notice::Broken);
+            }
+        }
+        settled
+    }
+
+    /// Moves to the state `change` gives and returns whether running programs
+    /// were lost on the way.
+    fn lose(&mut self, change: impl FnOnce(State) -> (State, bool)) -> bool {
+        let (state, lost) = change(self.state);
+        self.state = state;
+        lost
     }
 
     /// Asks for the sandbox to be awake, keeping the most urgent priority and

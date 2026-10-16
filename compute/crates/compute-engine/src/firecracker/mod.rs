@@ -291,9 +291,11 @@ impl FirecrackerVm {
 
 /// Pauses or resumes the processors so that a failure always means nothing
 /// changed. A request refused or never sent is a transient failure. A
-/// request whose answer was lost may still have taken effect, so the VMM is
-/// asked which state the VM is in; if it cannot say, the VM is beyond
-/// control and counts as lost, since its guest may or may not be running.
+/// request whose answer was lost or late may still have taken effect, so the
+/// VMM is asked which state the VM is in. It answers requests one at a time,
+/// so once it answers, the earlier request has either taken effect or never
+/// will. If it cannot say in time, the VM is beyond control and counts as
+/// lost, since its guest may or may not be running.
 async fn set_run_state(
     api: &Api,
     alive: impl Fn() -> bool,
@@ -570,8 +572,8 @@ mod tests {
     use tokio::net::UnixListener;
 
     /// A VMM API that answers `PATCH /vm` with `patch` and `GET /` with
-    /// `get`; `None` drops the connection without answering.
-    fn vmm(patch: Option<&'static str>, get: Option<&'static str>) -> (Socket, Api) {
+    /// `get`.
+    fn vmm(patch: Answer, get: Answer) -> (Socket, Api) {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let socket = std::env::temp_dir().join(format!(
             "compute-engine-vmm-{}-{}.sock",
@@ -584,18 +586,38 @@ mod tests {
             while let Ok((mut stream, _)) = listener.accept().await {
                 let mut request = vec![0_u8; 4096];
                 let read = stream.read(&mut request).await.unwrap_or(0);
-                let reply = if request[..read].starts_with(b"PATCH") {
+                let answer = if request[..read].starts_with(b"PATCH") {
                     patch
                 } else {
                     get
                 };
-                if let Some(reply) = reply {
-                    let _ = stream.write_all(reply.as_bytes()).await;
+                match answer {
+                    Answer::Reply(reply) => {
+                        let _ = stream.write_all(reply.as_bytes()).await;
+                    }
+                    Answer::Close => {}
+                    Answer::Hang => {
+                        tokio::spawn(async move {
+                            let _open = stream;
+                            std::future::pending::<()>().await;
+                        });
+                    }
                 }
             }
         });
-        let api = Api::new(&socket);
+        let limit = Duration::from_millis(200);
+        let api = Api::new(&socket).with_limits(limit, limit);
         (Socket(socket), api)
+    }
+
+    /// How the fake VMM answers a request.
+    #[derive(Clone, Copy)]
+    enum Answer {
+        Reply(&'static str),
+        /// Drops the connection without answering.
+        Close,
+        /// Keeps the connection open and never answers.
+        Hang,
     }
 
     /// Removes the socket file when the test ends.
@@ -620,23 +642,33 @@ mod tests {
 
     #[tokio::test]
     async fn a_run_state_change_fails_only_when_nothing_changed() {
-        let (_s1, api) = vmm(Some(NO_CONTENT), None);
+        use Answer::{Close, Hang, Reply};
+        let (_s1, api) = vmm(Reply(NO_CONTENT), Close);
         assert_eq!(resume(&api, true).await, Ok(()));
-        let (_s2, api) = vmm(Some(REFUSED), Some(PAUSED));
+        let (_s2, api) = vmm(Reply(REFUSED), Reply(PAUSED));
         assert_eq!(
             resume(&api, true).await,
             Err(ErrorKind::Transient),
             "refused"
         );
         // The answer is lost: the VMM says what actually happened.
-        let (_s3, api) = vmm(None, Some(RUNNING));
+        let (_s3, api) = vmm(Close, Reply(RUNNING));
         assert_eq!(resume(&api, true).await, Ok(()), "it did resume");
-        let (_s4, api) = vmm(None, Some(PAUSED));
+        let (_s4, api) = vmm(Close, Reply(PAUSED));
         assert_eq!(resume(&api, true).await, Err(ErrorKind::Transient));
+        // The answer is late: likewise.
+        let (_s5, api) = vmm(Hang, Reply(RUNNING));
+        assert_eq!(resume(&api, true).await, Ok(()), "it did resume");
         // Nobody can say whether the guest ran.
-        let (_s5, api) = vmm(None, None);
+        let (_s6, api) = vmm(Close, Close);
         assert_eq!(resume(&api, true).await, Err(ErrorKind::MemoryLost));
         assert_eq!(resume(&api, false).await, Err(ErrorKind::MemoryLost));
+        // A VMM that stops answering is beyond control, and noticing that
+        // takes no longer than the deadlines.
+        let (_s7, api) = vmm(Hang, Hang);
+        let started = std::time::Instant::now();
+        assert_eq!(resume(&api, true).await, Err(ErrorKind::MemoryLost));
+        assert!(started.elapsed() < Duration::from_secs(2));
         // Never sent: nothing changed.
         let gone = Api::new(std::env::temp_dir().join("compute-engine-no-such-vmm.sock"));
         assert_eq!(resume(&gone, true).await, Err(ErrorKind::Transient));
