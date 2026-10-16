@@ -7,7 +7,9 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
  * authenticated with an HMAC key generated when the process starts, so a
  * restart simply starts every visitor over. The id is not an Opengeni
  * identity: the server records which visitor created each agent session and
- * the proxy's `authorizeSession` hook lets a browser reach only those.
+ * the proxy's `authorizeSession` hook lets a browser reach only those. Each
+ * session's MCP server carries a separately signed binding to the same
+ * visitor, which selects whose product data the agent's tools use.
  */
 
 const COOKIE_NAME = "northstar_visitor";
@@ -55,6 +57,23 @@ export class VisitorCookies {
     };
   }
 
+  /**
+   * A server-only value that ties the MCP calls of one visitor's agent sessions
+   * to that visitor. It travels only in the session's MCP server headers, which
+   * Opengeni stores encrypted and never returns to the browser or the model.
+   */
+  mcpBinding(visitorId: string): string {
+    return `${visitorId}.${this.#sign(`mcp:${visitorId}`)}`;
+  }
+
+  /** The visitor an MCP binding names, or null when it is missing, malformed, or not signed by this process. */
+  readMcpBinding(value: string | null): string | null {
+    const parts = value?.split(".") ?? [];
+    if (parts.length !== 2) return null;
+    const [id, mac] = parts as [string, string];
+    return VISITOR_ID.test(id) && sameText(mac, this.#sign(`mcp:${id}`)) ? id : null;
+  }
+
   #secure(request: Request): boolean {
     return this.#httpsOrigin || isHttps(request.url);
   }
@@ -86,6 +105,45 @@ export class SessionOwners {
   owns(sessionId: string, visitorId: string | null): boolean {
     return visitorId !== null && this.#owners.get(sessionId) === visitorId;
   }
+}
+
+/**
+ * The client address in a header a trusted reverse proxy sets: the last entry
+ * of a comma-separated list such as `X-Forwarded-For` (the hop the proxy
+ * itself appended), or the whole value of a single-address header such as
+ * `X-Real-IP`. Null when the header is missing or malformed.
+ */
+export function forwardedClientAddress(value: string | null): string | null {
+  const address = value?.split(",").at(-1)?.trim() ?? "";
+  return /^[0-9A-Fa-f:.]{2,45}$/.test(address) ? address : null;
+}
+
+/**
+ * The network a client address belongs to, for the per-network limits: an IPv4
+ * address as is (also when written as an IPv4-mapped IPv6 address), and an
+ * IPv6 address as its /64, the block one subscriber usually holds.
+ */
+export function networkKey(address: string): string {
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(address);
+  if (mapped) return mapped[1]!;
+  if (!address.includes(":")) return address;
+  const halves = address.toLowerCase().split("%")[0]!.split("::");
+  if (halves.length > 2) return address;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves[1] ? halves[1].split(":") : [];
+  const groups =
+    halves.length === 2
+      ? [...head, ...Array<string>(Math.max(0, 8 - head.length - tail.length)).fill("0"), ...tail]
+      : head;
+  return `${groups
+    .slice(0, 4)
+    .map((group) => group.replace(/^0+(?=.)/, ""))
+    .join(":")}::/64`;
+}
+
+/** True when two secrets match, compared in constant time. */
+export function sameSecret(actual: string | null, expected: string): boolean {
+  return actual !== null && expected.length > 0 && sameText(actual, expected);
 }
 
 /** True for same-origin browser requests and non-browser clients (which send no `Sec-Fetch-Site`). */

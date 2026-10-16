@@ -18,18 +18,16 @@ import {
   type TieredConcurrencyBounds,
   type TieredRateBounds,
 } from "./rate-limit";
-import type {
-  SupportCase,
-  DemoHealth,
-  SupportDomainEvent,
-  SupportNote,
-  SupportReply,
-  SupportTicket,
-  SupportWorkspaceState,
-  TicketPriority,
-  TicketStatus,
-} from "./types";
-import { SessionOwners, VisitorCookies, sameOriginRequest } from "./visitors";
+import type { SupportCase, DemoHealth, TicketPriority, TicketStatus } from "./types";
+import { VisitorProductStates, addActivity, addNote, addReply, findCase } from "./visitor-state";
+import {
+  SessionOwners,
+  VisitorCookies,
+  forwardedClientAddress,
+  networkKey,
+  sameOriginRequest,
+  sameSecret,
+} from "./visitors";
 
 const PRODUCT_PORT = Number(process.env.PORT ?? 4100);
 const MCP_PORT = Number(process.env.OPENGENI_DEMO_MCP_PORT ?? 4101);
@@ -39,6 +37,8 @@ const PRODUCT_APP_ORIGIN = (
 ).replace(/\/+$/, "");
 const STATIC_ROOT = join(import.meta.dir, "../dist");
 const MCP_SERVER_ID = "northstar_support";
+// Set by this server on every session's MCP server; selects the visitor whose data the tools use.
+const MCP_VISITOR_HEADER = "X-Northstar-Visitor";
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATE_CACHE_CONTROL = "no-cache";
 const NOT_FOUND_CACHE_CONTROL = "no-store";
@@ -54,9 +54,9 @@ const env = {
 };
 
 // Abuse bounds for an anonymous public demo. Each action is limited per
-// visitor (cookie), per client address (see `clientAddress`), and across the
-// demo. Visitors can replace their cookie, so the client and demo tiers are
-// the real caps. Requests that fail validation never count.
+// visitor (cookie), per client network (see `DemoServerConfig.clientIpHeader`),
+// and across the demo. Visitors can replace their cookie, so the network and
+// demo tiers are the real caps. Requests that fail validation never count.
 const MINUTE = 60_000;
 // Every agent run spends model usage.
 const AGENT_RUNS: TieredRateBounds = {
@@ -69,8 +69,8 @@ const RESETS: TieredRateBounds = {
   client: { limit: 10, windowMs: MINUTE },
   demo: { limit: 30, windowMs: MINUTE },
 };
-// Ticket edits, notes, and replies on the shared board. Each one makes every
-// open browser refetch the board.
+// Ticket edits, notes, and replies on the visitor's own copy of the board. Each
+// one makes that visitor's open pages refetch it.
 const PRODUCT_WRITES: TieredRateBounds = {
   visitor: { limit: 20, windowMs: MINUTE },
   client: { limit: 40, windowMs: MINUTE },
@@ -91,16 +91,24 @@ const SESSION_MESSAGES: TieredRateBounds = {
 };
 // Open Opengeni event streams; each one holds a connection to the API.
 const EVENT_STREAMS: TieredConcurrencyBounds = { visitor: 8, client: 24, demo: 200 };
-// Each run stops before its next model request once it has used $1.00 of
-// API-equivalent model usage (USD micros). Visitors cannot raise it.
+// Open product update streams (/api/demo/events): one per open demo tab.
+const PRODUCT_STREAMS: TieredConcurrencyBounds = { visitor: 4, client: 24, demo: 200 };
+// When the Opengeni server accepts per-run usage limits, each run stops before
+// its next model request once it has used $1.00 of API-equivalent model usage
+// (USD micros). Visitors cannot raise it. The workspace budget is the hard cap
+// either way.
 const AGENT_RUN_USAGE_LIMIT_MICROS = 1_000_000;
-// How often to recheck an Opengeni server that did not confirm usage limits.
+// How long a read of that capability is reused, and how soon a failed read is retried.
 const CAPABILITY_RECHECK_MS = MINUTE;
+const CAPABILITY_RETRY_MS = 15_000;
+// Health waits at most this long for a first capability read (informational
+// only), staying well under probe timeouts.
+const HEALTH_CAPABILITY_WAIT_MS = 1_500;
 // Typed text only, on both the demo API and the proxy: no uploads or recordings.
 const MAX_BODY_BYTES = 32 * 1024;
+// Every request body this server accepts, MCP calls included, is small JSON.
+const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const MAX_INITIAL_MESSAGE_CHARACTERS = 4_000;
-// Each ticket keeps only its newest notes, replies, and activity entries.
-const TICKET_HISTORY_LIMIT = 50;
 const PROXY_BASE_PATH = "/api/opengeni";
 
 // The demo has one fixed Opengeni operator instead of a login. A real product
@@ -331,20 +339,6 @@ const initialCases: SupportCase[] = [
   },
 ];
 
-let state: SupportWorkspaceState = freshState();
-const subscribers = new Set<ReadableStreamDefaultController<Uint8Array>>();
-
-function freshState(): SupportWorkspaceState {
-  return {
-    revision: 1,
-    cases: structuredClone(initialCases),
-  };
-}
-
-function getCase(ticketId: string): SupportCase | null {
-  return state.cases.find((supportCase) => supportCase.ticket.id === ticketId) ?? null;
-}
-
 function json(value: unknown, status = 200): Response {
   return Response.json(value, {
     status,
@@ -458,79 +452,43 @@ export async function staticResponse(
   return (await serveStaticFile(request, root, indexPath, REVALIDATE_CACHE_CONTROL)) ?? notFound();
 }
 
-function emit(
-  type: SupportDomainEvent["type"],
-  summary: string,
-  ticketId: string,
-): SupportDomainEvent {
-  state.revision += 1;
-  const event: SupportDomainEvent = {
-    id: crypto.randomUUID(),
-    type,
-    ticketId,
-    revision: state.revision,
-    summary,
-    occurredAt: new Date().toISOString(),
-  };
-  const frame = encoder.encode(
-    `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
-  );
-  for (const subscriber of subscribers) {
-    try {
-      subscriber.enqueue(frame);
-    } catch {
-      subscribers.delete(subscriber);
-    }
-  }
-  return event;
-}
-
-// History is bounded: the board is shared, and every change makes each open
-// browser refetch all of it.
-function addActivity(ticket: SupportTicket, actor: string, summary: string): void {
-  ticket.activity.unshift({
-    id: crypto.randomUUID(),
-    actor,
-    summary,
-    createdAt: new Date().toISOString(),
-  });
-  ticket.activity.splice(TICKET_HISTORY_LIMIT);
-}
-
-function addNote(ticket: SupportTicket, note: SupportNote): void {
-  ticket.notes.unshift(note);
-  ticket.notes.splice(TICKET_HISTORY_LIMIT);
-}
-
-function addReply(ticket: SupportTicket, reply: SupportReply): void {
-  ticket.replies.push(reply);
-  ticket.replies.splice(0, ticket.replies.length - TICKET_HISTORY_LIMIT);
-}
-
 type JsonObject = Record<string, unknown>;
 
 /**
- * The request's JSON object body, read up to MAX_BODY_BYTES: `{}` when it is
- * missing or not a JSON object, and null when it is too large.
+ * The request body, read up to `maxBytes`: empty when there is none, and null
+ * when it is larger (by its declared length or as it streams in).
  */
-async function readJsonBody(request: Request): Promise<JsonObject | null> {
-  if (Number(request.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) return null;
+async function readBodyBytes(
+  request: Request,
+  maxBytes: number,
+): Promise<Uint8Array<ArrayBuffer> | null> {
+  if (Number(request.headers.get("content-length") ?? 0) > maxBytes) return null;
   const reader = request.body?.getReader();
-  if (!reader) return {};
+  if (!reader) return new Uint8Array();
   const chunks: Uint8Array[] = [];
   let size = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     size += value.byteLength;
-    if (size > MAX_BODY_BYTES) {
+    if (size > maxBytes) {
       await reader.cancel().catch(() => undefined);
       return null;
     }
     chunks.push(value);
   }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * The request's JSON object body, read up to MAX_BODY_BYTES: `{}` when it is
+ * missing or not a JSON object, and null when it is too large.
+ */
+async function readJsonBody(request: Request): Promise<JsonObject | null> {
+  const bytes = await readBodyBytes(request, MAX_BODY_BYTES);
+  if (bytes === null) return null;
   try {
-    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    const parsed: unknown = JSON.parse(Buffer.from(bytes).toString("utf8"));
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
       ? (parsed as JsonObject)
       : {};
@@ -539,61 +497,21 @@ async function readJsonBody(request: Request): Promise<JsonObject | null> {
   }
 }
 
-function domainEventStream(request: Request): Response {
-  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
-  let keepalive: ReturnType<typeof setInterval> | null = null;
-  const stream = new ReadableStream<Uint8Array>({
-    start(next) {
-      controller = next;
-      subscribers.add(next);
-      next.enqueue(
-        encoder.encode(
-          `event: connected\ndata: ${JSON.stringify({ revision: state.revision })}\n\n`,
-        ),
-      );
-      keepalive = setInterval(() => {
-        try {
-          next.enqueue(encoder.encode(": keepalive\n\n"));
-        } catch {
-          subscribers.delete(next);
-        }
-      }, 15_000);
-    },
-    cancel() {
-      if (controller) subscribers.delete(controller);
-      if (keepalive) clearInterval(keepalive);
-    },
-  });
-  request.signal.addEventListener(
-    "abort",
-    () => {
-      if (controller) subscribers.delete(controller);
-      if (keepalive) clearInterval(keepalive);
-    },
-    { once: true },
-  );
-  return new Response(stream, {
-    headers: {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache, no-transform",
-      connection: "keep-alive",
-      "access-control-allow-origin": PRODUCT_APP_ORIGIN,
-    },
-  });
+/** The `/mcp` endpoint for a configured public origin or full `/mcp` URL, or null when it is not a URL. */
+export function publicMcpEndpoint(configured: string): string | null {
+  try {
+    const endpoint = new URL(configured);
+    const path = endpoint.pathname.replace(/\/+$/, "");
+    endpoint.pathname = path.endsWith("/mcp") ? path : `${path}/mcp`;
+    return endpoint.toString();
+  } catch {
+    return null;
+  }
 }
 
 async function resolvePublicMcpUrl(): Promise<string | null> {
   const configured = process.env.OPENGENI_DEMO_MCP_URL?.trim();
-  if (configured) {
-    try {
-      const endpoint = new URL(configured);
-      endpoint.pathname = endpoint.pathname.replace(/\/+$/, "");
-      if (!endpoint.pathname.endsWith("/mcp")) endpoint.pathname += "/mcp";
-      return endpoint.toString();
-    } catch {
-      return null;
-    }
-  }
+  if (configured) return publicMcpEndpoint(configured);
   try {
     const response = await fetch("http://127.0.0.1:4040/api/tunnels", {
       signal: AbortSignal.timeout(1_500),
@@ -616,7 +534,7 @@ async function resolvePublicMcpUrl(): Promise<string | null> {
   }
 }
 
-export type ProductHandlerConfig = {
+export type DemoServerConfig = {
   apiBaseUrl: string;
   /** Organization API key; it never leaves this server. */
   apiKey: string;
@@ -630,18 +548,27 @@ export type ProductHandlerConfig = {
   /** Public product origin; an https origin gets Secure visitor cookies. */
   appOrigin?: string | undefined;
   /**
-   * The client network address that keys the per-client limits, or null to
-   * skip them. Behind a reverse proxy, this must be the address the proxy
-   * forwards, not the proxy's own.
+   * The request header a trusted reverse proxy sets to the client address
+   * (for example `x-real-ip`), which keys the per-network limits. Unset, or
+   * missing on a request, they key on the socket peer. Name only a header the
+   * proxy itself overwrites: one a client can send would let it pick a fresh
+   * network on every request.
    */
-  clientAddress?: ((request: Request) => string | null) | undefined;
+  clientIpHeader?: string | null | undefined;
   /** Test seam: the fetch the server-side Opengeni client uses. */
   fetch?: OpenGeniClientOptions["fetch"];
-  /** Test seam: the clock the rate limits use. */
+  /** Test seam: the clock the rate limits and capability checks use. */
   now?: () => number;
 };
 
-/** Who is calling: the browser's visitor id, whether it already had a valid cookie, and its address. */
+export type DemoServer = {
+  /** The product backend. `peer` is the socket address, used when no proxy header names the client. */
+  product: (request: Request, peer?: string | null) => Promise<Response>;
+  /** The `/mcp` endpoint Opengeni calls for the product tools: bearer token plus visitor binding. */
+  mcp: (request: Request) => Promise<Response>;
+};
+
+/** Who is calling: the browser's visitor id, whether it already had a valid cookie, and its network. */
 type Caller = { visitorId: string; established: boolean; clientAddress: string | null };
 
 /**
@@ -676,16 +603,15 @@ function proxiedRoute(pathname: string): ProxiedRoute | null {
 }
 
 /**
- * The product backend: the demo's own API plus the packaged Opengeni session
- * proxy. Each browser is an anonymous visitor that can reach only the agent
- * sessions it started.
+ * The product backend (the demo's own API plus the packaged Opengeni session
+ * proxy) and its MCP tools. Each browser is an anonymous visitor that can reach
+ * only the agent sessions it started and only its own copy of the product data.
  */
-export function createProductHandler(
-  config: ProductHandlerConfig,
-): (request: Request) => Promise<Response> {
+export function createDemoServer(config: DemoServerConfig): DemoServer {
   const { workspaceId, mcpToken } = config;
   const configured = Boolean(config.apiKey && workspaceId);
   const now = config.now ?? Date.now;
+  const clientIpHeader = config.clientIpHeader?.trim() || null;
   const openGeni = new OpenGeniClient({
     baseUrl: config.apiBaseUrl,
     apiKey: config.apiKey,
@@ -693,7 +619,9 @@ export function createProductHandler(
   });
   const visitors = new VisitorCookies(config.appOrigin ?? PRODUCT_APP_ORIGIN);
   const owners = new SessionOwners();
-  const clientAddressOf = (request: Request) => config.clientAddress?.(request) ?? null;
+  const states = new VisitorProductStates(initialCases);
+  // The caller of each request, for the proxy hooks (which receive the same Request).
+  const callers = new WeakMap<Request, Caller>();
   const limit = (bounds: TieredRateBounds, action: string) =>
     new TieredRateLimit(bounds, action, config.now);
   const agentRuns = limit(AGENT_RUNS, "agent runs");
@@ -702,6 +630,16 @@ export function createProductHandler(
   const sessionWrites = limit(SESSION_WRITES, "agent session changes");
   const sessionMessages = limit(SESSION_MESSAGES, "agent messages");
   const eventStreams = new TieredConcurrencyLimit(EVENT_STREAMS, "agent event streams");
+  const productStreams = new TieredConcurrencyLimit(PRODUCT_STREAMS, "product update streams");
+
+  /** The network a request comes from: the trusted proxy's header when set, else the socket peer. */
+  function clientNetwork(request: Request, peer: string | null | undefined): string | null {
+    const forwarded = clientIpHeader
+      ? forwardedClientAddress(request.headers.get(clientIpHeader))
+      : null;
+    const address = forwarded ?? peer?.trim() ?? "";
+    return address ? networkKey(address) : null;
+  }
 
   // Explicit onboarding: the proxy and asUser never grant membership. A stable
   // operation id makes the grant an exact replay on every server start.
@@ -737,20 +675,22 @@ export function createProductHandler(
     return demoMembership;
   }
 
-  // Every run carries a usage limit, which an Opengeni server accepts only when
-  // its operator enabled per-task usage limits. Without them every start would
-  // fail, so health reports not ready. A confirmed capability is kept; a
-  // missing or unreadable one is rechecked at most once per CAPABILITY_RECHECK_MS.
+  // Whether the Opengeni server accepts per-run usage limits
+  // (OPENGENI_SESSION_USAGE_LIMITS_ENABLED, reported by GET /v1/config/client).
+  // Runs carry the limit only when it does; otherwise they start without one,
+  // and the workspace budget remains the hard spend cap. A read is reused for
+  // CAPABILITY_RECHECK_MS and a failed one (null) retried after
+  // CAPABILITY_RETRY_MS, so neither the demo's readiness nor its runs depend on it.
   let usageLimits: { enabled: boolean | null; checkedAt: number } | null = null;
   let usageLimitsCheck: Promise<boolean | null> | null = null;
+  function usageLimitsFresh(): boolean {
+    if (!usageLimits) return false;
+    const reuseMs = usageLimits.enabled === null ? CAPABILITY_RETRY_MS : CAPABILITY_RECHECK_MS;
+    return now() - usageLimits.checkedAt < reuseMs;
+  }
   function sessionUsageLimitsEnabled(): Promise<boolean | null> {
     if (!configured) return Promise.resolve(null);
-    if (
-      usageLimits &&
-      (usageLimits.enabled === true || now() - usageLimits.checkedAt < CAPABILITY_RECHECK_MS)
-    ) {
-      return Promise.resolve(usageLimits.enabled);
-    }
+    if (usageLimits && usageLimitsFresh()) return Promise.resolve(usageLimits.enabled);
     usageLimitsCheck ??= openGeni
       .getClientConfig()
       .then(
@@ -765,6 +705,15 @@ export function createProductHandler(
         usageLimitsCheck = null;
       });
     return usageLimitsCheck;
+  }
+  /** Informational for health: the last read while rechecking, and a short wait for the first. */
+  async function usageLimitsForHealth(): Promise<boolean | null> {
+    if (usageLimits && !usageLimitsFresh()) {
+      const last = usageLimits.enabled;
+      void sessionUsageLimitsEnabled();
+      return last;
+    }
+    return await within(sessionUsageLimitsEnabled(), HEALTH_CAPABILITY_WAIT_MS, null);
   }
 
   // The browser's only Opengeni route: the packaged session proxy. It acts as
@@ -796,9 +745,9 @@ export function createProductHandler(
     // Runs after `authorizeSession`, before every forwarded message, approval
     // decision, and human-input answer: these start or redirect agent work.
     beforeForwardMessage: (_input, { request }) => {
-      const visitorId = visitors.read(request);
-      if (visitorId === null) return proxyError(403, "mutation_denied", "Request denied.");
-      const refusal = sessionMessages.consume(visitorId, clientAddressOf(request));
+      const caller = callers.get(request);
+      if (!caller?.established) return proxyError(403, "mutation_denied", "Request denied.");
+      const refusal = sessionMessages.consume(caller.visitorId, caller.clientAddress);
       return refusal ? tooManyProxyRequests(refusal) : undefined;
     },
     // Browser-initiated creation stays off (no `createSession` hook), and so
@@ -818,10 +767,12 @@ export function createProductHandler(
   async function health(): Promise<DemoHealth> {
     const [mcpPublicUrl, usageLimitsEnabled] = await Promise.all([
       config.resolveMcpUrl(),
-      sessionUsageLimitsEnabled(),
+      usageLimitsForHealth(),
     ]);
     return {
-      ok: Boolean(configured && mcpToken && mcpPublicUrl && usageLimitsEnabled === true),
+      // Ready to start runs. Per-run usage limits are optional, so they never
+      // make the demo unready; `sessionUsageLimitsEnabled` only reports them.
+      ok: Boolean(configured && mcpToken && mcpPublicUrl),
       workspaceId: workspaceId || null,
       openGeniConfigured: configured,
       mcpTokenConfigured: Boolean(mcpToken),
@@ -843,7 +794,7 @@ export function createProductHandler(
       return json({ error: "Invalid agent start request." }, 400);
     }
     const { ticketId, initialMessage: requestedMessage, runId } = parsedInput.data;
-    const supportCase = getCase(ticketId);
+    const supportCase = findCase(states.read(caller.visitorId), ticketId);
     if (!supportCase) {
       return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
     }
@@ -855,9 +806,6 @@ export function createProductHandler(
         },
         503,
       );
-    }
-    if ((await sessionUsageLimitsEnabled()) !== true) {
-      return json({ error: "The Opengeni server does not accept per-run usage limits." }, 503);
     }
     const refusal = agentRuns.consume(caller.visitorId, caller.clientAddress);
     if (refusal) return tooManyRequests(refusal);
@@ -874,7 +822,14 @@ export function createProductHandler(
       cacheToolsList: false,
       timeoutMs: 60_000,
       requireApproval: [],
-      headers: { Authorization: `Bearer ${mcpToken}` },
+      // The visitor binding makes the tools read and change only this
+      // visitor's product data. Opengeni stores these headers encrypted and
+      // never returns their values, and the proxy refuses browser credential
+      // rotations, so neither the browser nor the model can change it.
+      headers: {
+        Authorization: `Bearer ${mcpToken}`,
+        [MCP_VISITOR_HEADER]: visitors.mcpBinding(caller.visitorId),
+      },
     };
     const sessionRequest: CreateSessionRequest = {
       initialMessage,
@@ -897,7 +852,6 @@ export function createProductHandler(
       visibility: "private",
       agentAccess: "session",
       memoryScope: "off",
-      usageLimitMicros: AGENT_RUN_USAGE_LIMIT_MICROS,
       metadata: { demo: "northstar-support", ticketId: ticket.id },
       // Stable per visitor and start: a retried request returns the same
       // session, and no other visitor can replay into it.
@@ -908,21 +862,24 @@ export function createProductHandler(
     };
     // The workspace's default model applies; the browser cannot choose one.
     await ensureDemoMembership();
-    let session: Awaited<ReturnType<OpenGeniClient["createSession"]>>;
-    try {
-      session = await openGeni
-        .asUser(DEMO_USER.externalId, { source: DEMO_USER.source })
-        .createSession(workspaceId, sessionRequest);
-    } catch (error) {
-      // The operator turned usage limits off after this server confirmed them.
-      if (
-        error instanceof OpenGeniApiError &&
-        error.details?.code === "session_usage_limit_disabled"
-      ) {
+    const operator = openGeni.asUser(DEMO_USER.externalId, { source: DEMO_USER.source });
+    let session: Awaited<ReturnType<OpenGeniClient["createSession"]>> | undefined;
+    // A per-run usage limit only where the server accepts one: Opengeni refuses
+    // a limit with 422 while OPENGENI_SESSION_USAGE_LIMITS_ENABLED is off.
+    if ((await sessionUsageLimitsEnabled()) === true) {
+      try {
+        session = await operator.createSession(workspaceId, {
+          ...sessionRequest,
+          usageLimitMicros: AGENT_RUN_USAGE_LIMIT_MICROS,
+        });
+      } catch (error) {
+        if (!usageLimitsDisabled(error)) throw error;
+        // Turned off since the last read. Opengeni refuses before it creates
+        // or replays anything, so the same start continues without a limit.
         usageLimits = { enabled: false, checkedAt: now() };
       }
-      throw error;
     }
+    session ??= await operator.createSession(workspaceId, sessionRequest);
     if (!owners.claim(session.id, caller.visitorId)) {
       return json({ error: "This agent run belongs to another visitor." }, 409);
     }
@@ -970,17 +927,176 @@ export function createProductHandler(
     return await forwardToOpenGeni(request);
   }
 
+  /** Product update events for this visitor only, while the page is open. */
+  function productEventStream(request: Request, caller: Caller): Response {
+    // Updates reach only the visitor they belong to, so the stream needs the
+    // cookie the page's first state read set; the page opens it after that read.
+    if (!caller.established) {
+      return json({ error: "Reload the page to receive product updates." }, 403);
+    }
+    const slot = productStreams.acquire(caller.visitorId, caller.clientAddress);
+    if ("refused" in slot) {
+      const response = json({ error: `${slot.refused}. Close a tab and try again.` }, 429);
+      response.headers.set("retry-after", "5");
+      return response;
+    }
+    const { visitorId } = caller;
+    let unsubscribe = () => {};
+    let keepalive: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      unsubscribe();
+      if (keepalive) clearInterval(keepalive);
+      keepalive = null;
+    };
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        unsubscribe = states.subscribe(visitorId, controller);
+        controller.enqueue(
+          encoder.encode(
+            `event: connected\ndata: ${JSON.stringify({ revision: states.read(visitorId).revision })}\n\n`,
+          ),
+        );
+        keepalive = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(": keepalive\n\n"));
+          } catch {
+            stop();
+          }
+        }, 15_000);
+      },
+      cancel: stop,
+    });
+    request.signal.addEventListener("abort", stop, { once: true });
+    const response = new Response(stream, {
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive",
+        "access-control-allow-origin": PRODUCT_APP_ORIGIN,
+      },
+    });
+    return releaseWhenClosed(response, slot.release, request.signal);
+  }
+
+  /**
+   * Changes to the visitor's own copy of the product data. `admitWrite` runs
+   * after a write is validated and before it changes anything; a Response
+   * refuses the write.
+   */
+  async function productWrite(
+    request: Request,
+    url: URL,
+    visitorId: string,
+    admitWrite: () => Response | null,
+  ): Promise<Response> {
+    if (url.pathname === "/api/demo/ticket" && request.method === "PATCH") {
+      const input = await readJsonBody(request);
+      if (input === null) return json({ error: "Request body is too large." }, 413);
+      const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
+      const current = findCase(states.read(visitorId), ticketId);
+      if (!current) return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
+      const priority = PRIORITIES.find(
+        (value) => value === input.priority && value !== current.ticket.priority,
+      );
+      const status = STATUSES.find(
+        (value) => value === input.status && value !== current.ticket.status,
+      );
+      const refused = admitWrite();
+      if (refused) return refused;
+      if (!priority && !status) return json(states.read(visitorId));
+      const state = states.writable(visitorId);
+      const { ticket } = findCase(state, ticketId)!;
+      const changes: string[] = [];
+      if (priority) {
+        changes.push(`priority to ${priority}`);
+        ticket.priority = priority;
+      }
+      if (status) {
+        changes.push(`status to ${status.replaceAll("_", " ")}`);
+        ticket.status = status;
+      }
+      const summary = `Maya changed ${changes.join(" and ")}`;
+      addActivity(ticket, "Maya Chen", summary);
+      states.emit(visitorId, state, "ticket.updated", summary, ticket.id);
+      return json(state);
+    }
+    if (url.pathname === "/api/demo/notes" && request.method === "POST") {
+      const input = await readJsonBody(request);
+      if (input === null) return json({ error: "Request body is too large." }, 413);
+      const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
+      if (!findCase(states.read(visitorId), ticketId)) {
+        return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
+      }
+      const body = typeof input.body === "string" ? input.body.trim() : "";
+      if (body.length < 2 || body.length > 1_000) {
+        return json({ error: "Internal note must be between 2 and 1,000 characters." }, 422);
+      }
+      const refused = admitWrite();
+      if (refused) return refused;
+      const state = states.writable(visitorId);
+      const { ticket } = findCase(state, ticketId)!;
+      addNote(ticket, {
+        id: crypto.randomUUID(),
+        author: "Maya Chen",
+        authorKind: "human",
+        body,
+        createdAt: new Date().toISOString(),
+      });
+      addActivity(ticket, "Maya Chen", "Added an internal note");
+      states.emit(visitorId, state, "ticket.note_added", "Maya added an internal note", ticket.id);
+      return json(state);
+    }
+    if (url.pathname === "/api/demo/replies" && request.method === "POST") {
+      const input = await readJsonBody(request);
+      if (input === null) return json({ error: "Request body is too large." }, 413);
+      const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
+      if (!findCase(states.read(visitorId), ticketId)) {
+        return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
+      }
+      const body = typeof input.body === "string" ? input.body.trim() : "";
+      if (body.length < 2 || body.length > 2_000) {
+        return json({ error: "Reply must be between 2 and 2,000 characters." }, 422);
+      }
+      const refused = admitWrite();
+      if (refused) return refused;
+      const state = states.writable(visitorId);
+      const { ticket, customer } = findCase(state, ticketId)!;
+      addReply(ticket, {
+        id: crypto.randomUUID(),
+        author: "Maya Chen",
+        body,
+        createdAt: new Date().toISOString(),
+      });
+      ticket.status = "waiting_on_customer";
+      ticket.unread = false;
+      addActivity(
+        ticket,
+        "Maya Chen",
+        `Replied to ${customer.primaryContact.name} and set the ticket to waiting on customer`,
+      );
+      states.emit(
+        visitorId,
+        state,
+        "ticket.replied",
+        `Reply sent to ${customer.primaryContact.name}`,
+        ticket.id,
+      );
+      return json(state);
+    }
+    return new Response("Not found", { status: 404 });
+  }
+
   async function apiRequest(request: Request, url: URL, caller: Caller): Promise<Response> {
     if (url.pathname.startsWith(`${PROXY_BASE_PATH}/`)) {
       return await proxyRequest(request, url, caller);
     }
     if (request.method === "GET") {
-      if (url.pathname === "/api/demo/health") {
-        // Not ready (503) until a run can start, so probes and deploy checks fail closed.
-        const report = await health();
-        return json(report, report.ok ? 200 : 503);
-      }
-      return productRead(request, url);
+      // Always 200 once the server answers; `ok` says whether runs can start.
+      if (url.pathname === "/api/demo/health") return json(await health());
+      // The visitor's own copy of the fictional product's data.
+      if (url.pathname === "/api/demo/state") return json(states.read(caller.visitorId));
+      if (url.pathname === "/api/demo/events") return productEventStream(request, caller);
+      return new Response("Not found", { status: 404 });
     }
     if (!sameOriginRequest(request)) {
       return json({ error: "Cross-site requests are not allowed." }, 403);
@@ -1000,17 +1116,18 @@ export function createProductHandler(
     if (url.pathname === "/api/demo/reset" && request.method === "POST") {
       const refusal = resets.consume(caller.visitorId, caller.clientAddress);
       if (refusal) return tooManyRequests(refusal);
-      state = freshState();
-      emit("demo.reset", "Demo data reset", "all");
+      // Only this visitor starts over.
+      const state = states.reset(caller.visitorId);
+      states.emit(caller.visitorId, state, "demo.reset", "Demo data reset", "all");
       return json(state);
     }
-    return await productWrite(request, url, () => {
+    return await productWrite(request, url, caller.visitorId, () => {
       const refusal = productWrites.consume(caller.visitorId, caller.clientAddress);
       return refusal ? tooManyRequests(refusal) : null;
     });
   }
 
-  return async function productRequest(request: Request): Promise<Response> {
+  async function product(request: Request, peer?: string | null): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") {
       return new Response(null, {
@@ -1033,13 +1150,72 @@ export function createProductHandler(
     // request without a valid cookie is a new visitor that owns no sessions.
     const known = visitors.read(request);
     const issued = known === null ? visitors.issue(request) : null;
-    const response = await apiRequest(request, url, {
+    const caller: Caller = {
       visitorId: known ?? issued!.id,
       established: known !== null,
-      clientAddress: clientAddressOf(request),
-    });
+      clientAddress: clientNetwork(request, peer),
+    };
+    callers.set(request, caller);
+    const response = await apiRequest(request, url, caller);
     return issued ? withSetCookie(response, issued.setCookie) : response;
-  };
+  }
+
+  async function mcp(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname !== "/mcp") return new Response("Not found", { status: 404 });
+    if (!sameSecret(request.headers.get("authorization"), mcpToken ? `Bearer ${mcpToken}` : "")) {
+      return json({ error: "unauthorized" }, 401);
+    }
+    // The binding this server set on the session when it was created selects
+    // whose product data the tools use. Sessions from before a restart carry
+    // a binding the new process cannot verify, like their visitor cookies.
+    const visitorId = visitors.readMcpBinding(request.headers.get(MCP_VISITOR_HEADER));
+    if (visitorId === null) return json({ error: "unknown visitor" }, 403);
+    // Tool calls are small JSON. The body is read here, under the cap, before
+    // the MCP transport parses it.
+    let call = request;
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      const body = await readBodyBytes(request, MAX_REQUEST_BODY_BYTES);
+      if (body === null) return json({ error: "Request body is too large." }, 413);
+      call = new Request(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body,
+        signal: request.signal,
+      });
+    }
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      enableJsonResponse: true,
+    });
+    const server = buildMcpServer(states, visitorId);
+    await server.connect(transport);
+    return await transport.handleRequest(call);
+  }
+
+  return { product, mcp };
+}
+
+function usageLimitsDisabled(error: unknown): boolean {
+  return (
+    error instanceof OpenGeniApiError &&
+    error.status === 422 &&
+    error.details?.code === "session_usage_limit_disabled"
+  );
+}
+
+/** `promise`'s value, or `fallback` when it takes longer than `ms`. */
+async function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((settle) => {
+        timer = setTimeout(() => settle(fallback), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function tooManyRequests({ limiter, retryAfterSeconds }: RateLimitRefusal): Response {
@@ -1126,110 +1302,16 @@ function withSetCookie(response: Response, cookie: string): Response {
 const PRIORITIES: TicketPriority[] = ["low", "normal", "high", "urgent"];
 const STATUSES: TicketStatus[] = ["open", "investigating", "waiting_on_customer", "resolved"];
 
-/** The fictional product's own data, shared by every visitor. */
-function productRead(request: Request, url: URL): Response {
-  if (url.pathname === "/api/demo/state") return json(state);
-  if (url.pathname === "/api/demo/events") return domainEventStream(request);
-  return new Response("Not found", { status: 404 });
-}
-
-/**
- * Changes to the shared product data. `admitWrite` runs after a write is
- * validated and before it changes anything; a Response refuses the write.
- */
-async function productWrite(
-  request: Request,
-  url: URL,
-  admitWrite: () => Response | null,
-): Promise<Response> {
-  if (url.pathname === "/api/demo/ticket" && request.method === "PATCH") {
-    const input = await readJsonBody(request);
-    if (input === null) return json({ error: "Request body is too large." }, 413);
-    const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
-    const supportCase = getCase(ticketId);
-    if (!supportCase) return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
-    const { ticket } = supportCase;
-    const priority = PRIORITIES.find((value) => value === input.priority);
-    const status = STATUSES.find((value) => value === input.status);
-    const refused = admitWrite();
-    if (refused) return refused;
-    const changes: string[] = [];
-    if (priority && priority !== ticket.priority) {
-      changes.push(`priority to ${priority}`);
-      ticket.priority = priority;
-    }
-    if (status && status !== ticket.status) {
-      changes.push(`status to ${status.replaceAll("_", " ")}`);
-      ticket.status = status;
-    }
-    if (changes.length > 0) {
-      const summary = `Maya changed ${changes.join(" and ")}`;
-      addActivity(ticket, "Maya Chen", summary);
-      emit("ticket.updated", summary, ticket.id);
-    }
-    return json(state);
-  }
-  if (url.pathname === "/api/demo/notes" && request.method === "POST") {
-    const input = await readJsonBody(request);
-    if (input === null) return json({ error: "Request body is too large." }, 413);
-    const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
-    const supportCase = getCase(ticketId);
-    if (!supportCase) return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
-    const { ticket } = supportCase;
-    const body = typeof input.body === "string" ? input.body.trim() : "";
-    if (body.length < 2 || body.length > 1_000) {
-      return json({ error: "Internal note must be between 2 and 1,000 characters." }, 422);
-    }
-    const refused = admitWrite();
-    if (refused) return refused;
-    addNote(ticket, {
-      id: crypto.randomUUID(),
-      author: "Maya Chen",
-      authorKind: "human",
-      body,
-      createdAt: new Date().toISOString(),
-    });
-    addActivity(ticket, "Maya Chen", "Added an internal note");
-    emit("ticket.note_added", "Maya added an internal note", ticket.id);
-    return json(state);
-  }
-  if (url.pathname === "/api/demo/replies" && request.method === "POST") {
-    const input = await readJsonBody(request);
-    if (input === null) return json({ error: "Request body is too large." }, 413);
-    const ticketId = typeof input.ticketId === "string" ? input.ticketId : "";
-    const supportCase = getCase(ticketId);
-    if (!supportCase) return json({ error: `Ticket ${ticketId || "unknown"} not found.` }, 404);
-    const { ticket, customer } = supportCase;
-    const body = typeof input.body === "string" ? input.body.trim() : "";
-    if (body.length < 2 || body.length > 2_000) {
-      return json({ error: "Reply must be between 2 and 2,000 characters." }, 422);
-    }
-    const refused = admitWrite();
-    if (refused) return refused;
-    addReply(ticket, {
-      id: crypto.randomUUID(),
-      author: "Maya Chen",
-      body,
-      createdAt: new Date().toISOString(),
-    });
-    ticket.status = "waiting_on_customer";
-    ticket.unread = false;
-    addActivity(
-      ticket,
-      "Maya Chen",
-      `Replied to ${customer.primaryContact.name} and set the ticket to waiting on customer`,
-    );
-    emit("ticket.replied", `Reply sent to ${customer.primaryContact.name}`, ticket.id);
-    return json(state);
-  }
-  return new Response("Not found", { status: 404 });
-}
-
 function toolResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
 }
 
-function buildMcpServer(): McpServer {
+function toolError(message: string) {
+  return { ...toolResult({ error: message }), isError: true };
+}
+
+/** The product tools, reading and changing only `visitorId`'s copy of the data. */
+function buildMcpServer(states: VisitorProductStates, visitorId: string): McpServer {
   const server = new McpServer({ name: "northstar-support", version: "1.0.0" });
   server.registerTool(
     "get_ticket",
@@ -1237,17 +1319,14 @@ function buildMcpServer(): McpServer {
       description:
         "Get the complete support ticket, including priority, status, SLA, customer message, internal notes, and activity.",
       inputSchema: {
-        ticketId: z.string().describe("Ticket id from the active Northstar session"),
+        ticketId: z.string().max(64).describe("Ticket id from the active Northstar session"),
       },
     },
     async ({ ticketId }) => {
-      const supportCase = getCase(ticketId);
+      const supportCase = findCase(states.read(visitorId), ticketId);
       return supportCase
         ? toolResult(supportCase.ticket)
-        : {
-            ...toolResult({ error: `Ticket ${ticketId} not found` }),
-            isError: true,
-          };
+        : toolError(`Ticket ${ticketId} not found`);
     },
   );
   server.registerTool(
@@ -1256,18 +1335,14 @@ function buildMcpServer(): McpServer {
       description:
         "Get the customer account behind the ticket, including plan, ARR, health, contact, seats, and recent export reliability.",
       inputSchema: {
-        customerId: z.string().describe("Customer id from the ticket"),
+        customerId: z.string().max(64).describe("Customer id from the ticket"),
       },
     },
     async ({ customerId }) => {
       const customer =
-        state.cases.find((supportCase) => supportCase.customer.id === customerId)?.customer ?? null;
-      return customer
-        ? toolResult(customer)
-        : {
-            ...toolResult({ error: `Customer ${customerId} not found` }),
-            isError: true,
-          };
+        states.read(visitorId).cases.find((supportCase) => supportCase.customer.id === customerId)
+          ?.customer ?? null;
+      return customer ? toolResult(customer) : toolError(`Customer ${customerId} not found`);
     },
   );
   server.registerTool(
@@ -1276,22 +1351,29 @@ function buildMcpServer(): McpServer {
       description:
         "Update support ticket priority, status, or assignee. Include a short evidence-based reason. This changes product data immediately.",
       inputSchema: {
-        ticketId: z.string(),
+        ticketId: z.string().max(64),
         priority: z.enum(["low", "normal", "high", "urgent"]).optional(),
         status: z.enum(["open", "investigating", "waiting_on_customer", "resolved"]).optional(),
-        assignee: z.string().min(1).optional(),
-        reason: z.string().min(5),
+        assignee: z.string().min(1).max(80).optional(),
+        reason: z.string().min(5).max(500),
       },
     },
     async ({ ticketId, priority, status, assignee, reason }) => {
-      const supportCase = getCase(ticketId);
-      if (!supportCase) {
-        return {
-          ...toolResult({ error: `Ticket ${ticketId} not found` }),
-          isError: true,
-        };
+      const current = findCase(states.read(visitorId), ticketId);
+      if (!current) return toolError(`Ticket ${ticketId} not found`);
+      const changed =
+        (priority !== undefined && priority !== current.ticket.priority) ||
+        (status !== undefined && status !== current.ticket.status) ||
+        (assignee !== undefined && assignee !== current.ticket.assignee);
+      if (!changed) {
+        return toolResult({
+          ok: true,
+          summary: "Reviewed ticket; no field changes",
+          ticket: current.ticket,
+        });
       }
-      const { ticket } = supportCase;
+      const state = states.writable(visitorId);
+      const { ticket } = findCase(state, ticketId)!;
       const changes: string[] = [];
       if (priority && priority !== ticket.priority) {
         changes.push(`priority ${ticket.priority} → ${priority}`);
@@ -1305,13 +1387,9 @@ function buildMcpServer(): McpServer {
         changes.push(`assignee ${ticket.assignee} → ${assignee}`);
         ticket.assignee = assignee;
       }
-      const summary = changes.length
-        ? `Updated ${changes.join(", ")}`
-        : "Reviewed ticket; no field changes";
-      if (changes.length > 0) {
-        addActivity(ticket, "Opengeni agent", `${summary}. Reason: ${reason}`);
-        emit("ticket.updated", summary, ticket.id);
-      }
+      const summary = `Updated ${changes.join(", ")}`;
+      addActivity(ticket, "Opengeni agent", `${summary}. Reason: ${reason}`);
+      states.emit(visitorId, state, "ticket.updated", summary, ticket.id);
       return toolResult({ ok: true, summary, ticket });
     },
   );
@@ -1321,25 +1399,21 @@ function buildMcpServer(): McpServer {
       description:
         "Add a concise internal note to the ticket. Use this to preserve investigation evidence and the recommended next step.",
       inputSchema: {
-        ticketId: z.string(),
+        ticketId: z.string().max(64),
         body: z.string().min(10).max(1_000),
       },
     },
     async ({ ticketId, body }) => {
-      const supportCase = getCase(ticketId);
-      if (!supportCase) {
-        return {
-          ...toolResult({ error: `Ticket ${ticketId} not found` }),
-          isError: true,
-        };
-      }
-      const { ticket } = supportCase;
-      const existing = ticket.notes.find(
+      const current = findCase(states.read(visitorId), ticketId);
+      if (!current) return toolError(`Ticket ${ticketId} not found`);
+      const existing = current.ticket.notes.find(
         (note) => note.authorKind === "agent" && note.body === body,
       );
       if (existing) {
         return toolResult({ ok: true, duplicate: true, note: existing });
       }
+      const state = states.writable(visitorId);
+      const { ticket } = findCase(state, ticketId)!;
       const note = {
         id: crypto.randomUUID(),
         author: "Opengeni agent",
@@ -1349,63 +1423,36 @@ function buildMcpServer(): McpServer {
       };
       addNote(ticket, note);
       addActivity(ticket, "Opengeni agent", "Added an internal investigation note");
-      emit("ticket.note_added", "Agent added an internal note", ticket.id);
+      states.emit(visitorId, state, "ticket.note_added", "Agent added an internal note", ticket.id);
       return toolResult({ ok: true, note });
     },
   );
   return server;
 }
 
-async function mcpRequest(request: Request): Promise<Response> {
-  const url = new URL(request.url);
-  if (url.pathname !== "/mcp") return new Response("Not found", { status: 404 });
-  if (!env.mcpToken || request.headers.get("authorization") !== `Bearer ${env.mcpToken}`) {
-    return json({ error: "unauthorized" }, 401);
-  }
-  const transport = new WebStandardStreamableHTTPServerTransport({
-    enableJsonResponse: true,
-  });
-  const server = buildMcpServer();
-  await server.connect(transport);
-  return await transport.handleRequest(request);
-}
-
-/**
- * The client address in a header a trusted reverse proxy sets: the last entry
- * of a comma-separated list such as `X-Forwarded-For` (the hop the proxy
- * itself appended), or the whole value of a single-address header such as
- * `X-Real-IP`. Null when the header is missing or malformed.
- */
-export function forwardedClientAddress(value: string | null): string | null {
-  const address = value?.split(",").at(-1)?.trim() ?? "";
-  return /^[0-9A-Fa-f:.]{2,45}$/.test(address) ? address : null;
-}
-
 if (import.meta.main) {
   // Behind a reverse proxy, every request comes from the proxy's own address.
-  // Name the header it sets to the client address (for example X-Real-IP or
-  // X-Forwarded-For), or every visitor shares one per-client limit.
+  // Name the header it overwrites with the client address (X-Real-IP for
+  // ingress-nginx), or every visitor shares one per-network limit.
   const clientIpHeader = process.env.OPENGENI_DEMO_CLIENT_IP_HEADER?.trim() || null;
-  let productServer: ReturnType<typeof Bun.serve> | undefined;
-  // One handler per process: its visitor cookie key and session ownership live in memory.
-  const productRequest = createProductHandler({
+  // One server per process: its visitor cookie key, session ownership, and
+  // product data live in memory.
+  const demo = createDemoServer({
     ...env,
     resolveMcpUrl: resolvePublicMcpUrl,
     serveStatic: UNIFIED_SERVER,
-    clientAddress: (request) =>
-      clientIpHeader
-        ? forwardedClientAddress(request.headers.get(clientIpHeader))
-        : (productServer?.requestIP(request)?.address ?? null),
+    clientIpHeader,
   });
-  productServer = Bun.serve({
+  const productServer = Bun.serve({
     hostname: UNIFIED_SERVER ? "0.0.0.0" : "127.0.0.1",
     port: PRODUCT_PORT,
     idleTimeout: 255,
-    fetch: async (request) => {
+    maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
+    fetch: async (request, server) => {
       if (UNIFIED_SERVER && new URL(request.url).pathname === "/mcp") {
-        return await mcpRequest(request);
+        return await demo.mcp(request);
       }
-      return await productRequest(request);
+      return await demo.product(request, server.requestIP(request)?.address);
     },
   });
   const mcpServer = UNIFIED_SERVER
@@ -1414,7 +1461,8 @@ if (import.meta.main) {
         hostname: "127.0.0.1",
         port: MCP_PORT,
         idleTimeout: 255,
-        fetch: mcpRequest,
+        maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
+        fetch: demo.mcp,
       });
 
   console.log(`Northstar product API  http://127.0.0.1:${productServer.port}/api/demo/health`);

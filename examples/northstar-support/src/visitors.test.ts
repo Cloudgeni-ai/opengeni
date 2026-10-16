@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
-import { SessionOwners, VisitorCookies, sameOriginRequest } from "./visitors";
+import {
+  SessionOwners,
+  VisitorCookies,
+  forwardedClientAddress,
+  networkKey,
+  sameOriginRequest,
+  sameSecret,
+} from "./visitors";
 
 const HTTPS_ORIGIN = "https://demo.example.test";
 const HTTP_ORIGIN = "http://127.0.0.1:3101";
@@ -76,6 +83,39 @@ describe("VisitorCookies", () => {
   });
 });
 
+describe("VisitorCookies MCP bindings", () => {
+  test("names the visitor only when this process signed the binding", () => {
+    const cookies = new VisitorCookies(HTTPS_ORIGIN);
+    const issued = cookies.issue(new Request(`${HTTPS_ORIGIN}/api/demo/state`));
+    const binding = cookies.mcpBinding(issued.id);
+    expect(binding).toMatch(/^[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/);
+    expect(binding.split(".")[0]).toBe(issued.id);
+    expect(cookies.readMcpBinding(binding)).toBe(issued.id);
+
+    const [id, mac] = binding.split(".") as [string, string];
+    const other = cookies.issue(new Request(`${HTTPS_ORIGIN}/api/demo/state`)).id;
+    const cookieValue = pair(issued.setCookie).split("=")[1]!;
+    for (const invalid of [
+      null,
+      "",
+      id,
+      `${id}.`,
+      `${id}.${mac}.${mac}`,
+      `${id}.${mac.slice(0, -1)}${mac.endsWith("A") ? "B" : "A"}`,
+      `${other}.${mac}`,
+      // A cookie is signed for another purpose and is not an MCP binding.
+      cookieValue,
+      new VisitorCookies(HTTPS_ORIGIN).mcpBinding(issued.id),
+    ]) {
+      expect(cookies.readMcpBinding(invalid)).toBeNull();
+    }
+    // Nor is an MCP binding a cookie.
+    expect(
+      cookies.read(withCookie(`${HTTPS_ORIGIN}/`, `__Host-northstar_visitor=${binding}`)),
+    ).toBeNull();
+  });
+});
+
 describe("SessionOwners", () => {
   test("grants a session only to the visitor that created it", () => {
     const owners = new SessionOwners();
@@ -113,5 +153,35 @@ describe("sameOriginRequest", () => {
     expect(sameOriginRequest(request("none"))).toBe(true);
     expect(sameOriginRequest(request("same-site"))).toBe(false);
     expect(sameOriginRequest(request("cross-site"))).toBe(false);
+  });
+});
+
+describe("client networks", () => {
+  test("uses the hop the trusted proxy appended", () => {
+    expect(forwardedClientAddress("203.0.113.9")).toBe("203.0.113.9");
+    expect(forwardedClientAddress("10.0.0.1, 198.51.100.7")).toBe("198.51.100.7");
+    expect(forwardedClientAddress(" 2001:db8::1 ")).toBe("2001:db8::1");
+    expect(forwardedClientAddress(null)).toBeNull();
+    expect(forwardedClientAddress("not an address")).toBeNull();
+    expect(forwardedClientAddress("198.51.100.7, ")).toBeNull();
+  });
+
+  test("keys IPv4 by address and IPv6 by its /64", () => {
+    expect(networkKey("198.51.100.7")).toBe("198.51.100.7");
+    expect(networkKey("::ffff:198.51.100.7")).toBe("198.51.100.7");
+    expect(networkKey("2001:db8:0001:0002:aaaa:bbbb:cccc:dddd")).toBe("2001:db8:1:2::/64");
+    expect(networkKey("2001:db8:1:2::1")).toBe("2001:db8:1:2::/64");
+    expect(networkKey("2001:DB8:1:2::FFFF")).toBe("2001:db8:1:2::/64");
+    expect(networkKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(networkKey("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
+    expect(networkKey("::1")).toBe("0:0:0:0::/64");
+  });
+
+  test("compares secrets exactly", () => {
+    expect(sameSecret("Bearer token", "Bearer token")).toBe(true);
+    expect(sameSecret("Bearer token2", "Bearer token")).toBe(false);
+    expect(sameSecret(null, "Bearer token")).toBe(false);
+    // An unconfigured secret never matches, not even an empty value.
+    expect(sameSecret("", "")).toBe(false);
   });
 });
