@@ -21,6 +21,10 @@ use compute_storage::store::ChunkStore;
 use object_store::StaticCredentialProvider;
 use object_store::gcp::{GcpCredential, GoogleCloudStorageBuilder};
 
+#[path = "support/required.rs"]
+mod required;
+use required::skip;
+
 fn open(url: &str) -> (Chunked, ChunkStore) {
     if let (Ok(token), Some(rest)) = (
         std::env::var("COMPUTE_TEST_GCS_TOKEN"),
@@ -65,7 +69,10 @@ fn sparse(path: &Path, length: u64, at: &[u64], seed: u64) {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_sandbox_survives_a_round_trip_through_object_storage() {
     let Ok(url) = std::env::var("COMPUTE_TEST_STORE") else {
-        eprintln!("skipped: set COMPUTE_TEST_STORE to run against object storage");
+        skip(
+            "store",
+            "set COMPUTE_TEST_STORE to run against object storage",
+        );
         return;
     };
     let (store, chunks) = open(&url);
@@ -76,6 +83,7 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
             state: local.path().join("state"),
             memory: local.path().join("memory"),
             chunks: None,
+            runtime: None,
         }),
         profile: None,
     };

@@ -19,9 +19,10 @@
 //!    waits only for its own chunk.
 //! 3. **Hydration.** Alongside, the remaining chunks are fetched in the
 //!    background into the memory file, a few at a time per VM and a
-//!    bounded number on the whole host, so the image becomes a complete
-//!    local copy that the next save can merge over, and the pager can
-//!    hand the guest's memory to the kernel and exit.
+//!    bounded number on the whole host, fewer while any wake or fault waits
+//!    on the store (see [`crate::lanes`]), so the image becomes a complete
+//!    local copy that the next save can merge over, and the pager can hand
+//!    the guest's memory to the kernel and exit.
 //!
 //! Every chunk read from the store is checked against its content hash
 //! (see [`compute_storage::store::ChunkStore::get_chunk`]) and against the
@@ -49,6 +50,7 @@ use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::{Semaphore, mpsc, watch};
 
 use crate::image::{CHUNK_BYTES, Hash, ZERO, chunk_count, chunk_range};
+use crate::lanes::Lanes;
 use crate::working_set::PageSet;
 
 /// Chunk fetches in flight per VM for demand and prefetch.
@@ -57,9 +59,6 @@ const FOREGROUND_PER_VM: usize = 64;
 /// alongside demand: with 4 KiB pages a waking guest faults one chunk at a
 /// time, so waiting for a pause in demand would leave it fetching serially.
 const BACKGROUND_PER_VM: usize = 16;
-/// Background hydration fetches in flight on the whole host, so many VMs
-/// hydrating at once never starve a guest that is waiting on a page.
-const BACKGROUND_PER_HOST: usize = 128;
 /// Chunks after a demand-fetched one that are fetched along with it: a
 /// guest that touches one chunk usually touches its neighbours next.
 const READAHEAD_CHUNKS: usize = 4;
@@ -68,13 +67,27 @@ const FETCHES_PER_HOST: usize = 512;
 /// Recently fetched chunks kept in memory, shared by every VM: sandboxes
 /// started from the same template share most of their memory.
 const CACHE_BYTES: usize = 1 << 30;
-/// How long a chunk keeps being retried while the store or host fails in
-/// ways that may pass (timeouts, dropped connections, local resource
-/// limits) before the VM's memory counts as lost. The guest waits on a
-/// demand fetch meanwhile, which beats losing its programs.
-const RETRY_FOR: Duration = Duration::from_secs(60);
-/// The longest pause between two tries of a chunk.
+/// How long a fetched chunk stays in that cache. The cache serves wakes
+/// close together; between them its memory belongs to sandboxes, so a
+/// chunk leaves this long after it arrived, used or not.
+const CACHE_FOR: Duration = Duration::from_secs(60);
+/// A chunk is retried for as long as its VM lives while the store or host
+/// fails in ways that may pass (timeouts, dropped connections, refused
+/// credentials, local resource limits): the guest stalls on a demand fetch
+/// meanwhile and loses nothing. Only a chunk the store proves bad or gone
+/// loses the VM's memory.
+///
+/// A chunk failing this long marks the store as stalled, which the host's
+/// status shows until a fetch succeeds again.
+const STALL_AFTER: Duration = Duration::from_secs(5);
+/// How long failing tries follow each other quickly; after that the store
+/// is probably down, and the host's fetches slow to
+/// [`STALLED_RETRY_DELAY`] apart so they do not flood it as it comes back.
+const RETRY_QUICKLY_FOR: Duration = Duration::from_secs(60);
+/// The longest pause between two quick tries of a chunk.
 const RETRY_DELAY_MAX: Duration = Duration::from_secs(2);
+/// The pause between two tries of a chunk once the store seems down.
+const STALLED_RETRY_DELAY: Duration = Duration::from_secs(10);
 /// How long one try at a chunk may take once it has its transfer slot.
 /// Every slot is held for at most this long, so a try waiting for one
 /// waits a bounded time too.
@@ -127,7 +140,32 @@ pub(crate) struct Fetcher {
     /// Tells requests for the same chunk apart over time.
     requests: AtomicU64,
     all: Arc<Semaphore>,
-    background: Arc<Semaphore>,
+    /// Background fetches give way to the ones somebody waits on.
+    lanes: Arc<Lanes>,
+    /// Chunks failing for longer than [`STALL_AFTER`], and since when.
+    stall: Mutex<Stall>,
+}
+
+#[derive(Debug, Default)]
+struct Stall {
+    failing: usize,
+    since: Option<std::time::Instant>,
+}
+
+/// One chunk failing for longer than [`STALL_AFTER`]; dropping it, however
+/// the fetch ends, stops counting it.
+struct Stalled<'a>(&'a Mutex<Stall>);
+
+impl Drop for Stalled<'_> {
+    fn drop(&mut self) {
+        let mut stall = lock(self.0);
+        stall.failing -= 1;
+        if stall.failing == 0
+            && let Some(since) = stall.since.take()
+        {
+            tracing::info!(stalled_for = ?since.elapsed(), "the store answers again");
+        }
+    }
 }
 
 /// A chunk request under way and how many wait for it.
@@ -168,24 +206,31 @@ impl Drop for Waiting<'_> {
 struct Cache {
     bytes: usize,
     chunks: HashMap<String, Arc<Vec<u8>>>,
-    order: VecDeque<String>,
+    /// Keys oldest first, with when each arrived.
+    order: VecDeque<(String, tokio::time::Instant)>,
 }
 
 impl Cache {
-    /// Adds `chunk` and returns the chunks it pushed out, for the caller to
-    /// free once the lock is released: freeing 256 KiB buffers can wait on
-    /// the allocator, and every fetch on the host waits for this lock.
+    /// Adds `chunk`, arrived `now`, and returns the chunks it pushed out
+    /// (those older than [`CACHE_FOR`] first), for the caller to free once
+    /// the lock is released: freeing 256 KiB buffers can wait on the
+    /// allocator, and every fetch on the host waits for this lock.
     #[must_use]
-    fn insert(&mut self, key: String, chunk: Arc<Vec<u8>>) -> Vec<Arc<Vec<u8>>> {
-        let mut evicted = Vec::new();
+    fn insert(
+        &mut self,
+        key: String,
+        chunk: Arc<Vec<u8>>,
+        now: tokio::time::Instant,
+    ) -> Vec<Arc<Vec<u8>>> {
+        let mut evicted = self.expire(now);
         if chunk.len() > CACHE_BYTES || self.chunks.contains_key(&key) {
             return evicted;
         }
         self.bytes += chunk.len();
-        self.order.push_back(key.clone());
+        self.order.push_back((key.clone(), now));
         self.chunks.insert(key, chunk);
         while self.bytes > CACHE_BYTES {
-            let Some(oldest) = self.order.pop_front() else {
+            let Some((oldest, _)) = self.order.pop_front() else {
                 break;
             };
             if let Some(chunk) = self.chunks.remove(&oldest) {
@@ -195,18 +240,65 @@ impl Cache {
         }
         evicted
     }
+
+    /// Takes out the chunks that arrived [`CACHE_FOR`] or more before
+    /// `now`, and returns them for the caller to free as
+    /// [`Self::insert`]'s are.
+    #[must_use]
+    fn expire(&mut self, now: tokio::time::Instant) -> Vec<Arc<Vec<u8>>> {
+        let mut expired = Vec::new();
+        while let Some((key, _)) = self
+            .order
+            .front()
+            .filter(|(_, arrived)| now.saturating_duration_since(*arrived) >= CACHE_FOR)
+        {
+            if let Some(chunk) = self.chunks.remove(key) {
+                self.bytes -= chunk.len();
+                expired.push(chunk);
+            }
+            self.order.pop_front();
+        }
+        expired
+    }
 }
 
 impl Fetcher {
-    pub fn new(chunks: ChunkStore) -> Self {
+    pub fn new(chunks: ChunkStore, lanes: Arc<Lanes>) -> Self {
         Self {
             chunks,
             inflight: Arc::default(),
             cache: Arc::default(),
             requests: AtomicU64::new(0),
             all: Arc::new(Semaphore::new(FETCHES_PER_HOST)),
-            background: Arc::new(Semaphore::new(BACKGROUND_PER_HOST)),
+            lanes,
+            stall: Mutex::default(),
         }
+    }
+
+    /// How long chunks have been failing to arrive from a store that does
+    /// not answer, if they are. Sandboxes waiting on remote memory stall
+    /// meanwhile and lose nothing.
+    pub fn stalled_for(&self) -> Option<Duration> {
+        lock(&self.stall).since.map(|since| since.elapsed())
+    }
+
+    /// Frees the cached chunks older than [`CACHE_FOR`]; the agent calls
+    /// this as it samples, so the cache empties once wakes stop.
+    pub fn forget_old(&self) {
+        let expired = lock(&self.cache).expire(tokio::time::Instant::now());
+        drop(expired);
+    }
+
+    /// Counts a chunk as failing for longer than [`STALL_AFTER`] until the
+    /// returned guard drops.
+    fn stalled(&self, error: &str) -> Stalled<'_> {
+        let mut stall = lock(&self.stall);
+        stall.failing += 1;
+        if stall.since.is_none() {
+            tracing::warn!(%error, "remote memory cannot be filled; sandboxes waiting on it stall until it can");
+            stall.since = Some(std::time::Instant::now());
+        }
+        Stalled(&self.stall)
     }
 
     /// The plain bytes of `reference`, checked against its hashes.
@@ -216,10 +308,10 @@ impl Fetcher {
         if let Some(chunk) = cached() {
             return Ok(chunk);
         }
-        let _slot = if background {
-            Some(self.background.acquire().await)
+        let (_waited_on, _background) = if background {
+            (None, Some(self.lanes.background().await))
         } else {
-            None
+            (Some(self.lanes.foreground()), None)
         };
         // Another VM may have brought it in meanwhile.
         if let Some(chunk) = cached() {
@@ -269,7 +361,11 @@ impl Fetcher {
                 ))),
             };
             if let Ok(chunk) = &fetched {
-                let evicted = lock(&cache).insert(key.clone(), Arc::clone(chunk));
+                let evicted = lock(&cache).insert(
+                    key.clone(),
+                    Arc::clone(chunk),
+                    tokio::time::Instant::now(),
+                );
                 drop(evicted);
             }
             let mut inflight = lock(&inflight);
@@ -515,6 +611,18 @@ impl Hydration {
         if !self.claim(index) {
             return Ok(());
         }
+        let written = self.write_chunk(index, &range, plain);
+        self.settle(index, written)
+    }
+
+    /// Writes the pages of chunk `index` the pack did not fill, and checks
+    /// those it did.
+    fn write_chunk(
+        &self,
+        index: usize,
+        range: &std::ops::Range<u64>,
+        plain: &[u8],
+    ) -> Result<(), Unavailable> {
         let failed = |error: io::Error| Unavailable::passing(format!("chunk {index}: {error}"));
         let within = |at: u64| usize::try_from(at - range.start).unwrap_or(usize::MAX);
         for (run, filled) in self.filled.runs(range.clone()) {
@@ -534,10 +642,11 @@ impl Hydration {
                     )));
                 }
             } else {
+                #[cfg(test)]
+                tests::failing_write(&self.file).map_err(failed)?;
                 self.file.write_all_at(bytes, run.start).map_err(failed)?;
             }
         }
-        self.arrived(index);
         Ok(())
     }
 
@@ -547,6 +656,11 @@ impl Hydration {
         if !self.claim(index) {
             return Ok(());
         }
+        let checked = self.check_in_place(index);
+        self.settle(index, checked)
+    }
+
+    fn check_in_place(&self, index: usize) -> Result<(), Unavailable> {
         let range = chunk_range(index, self.len);
         let mut held = vec![0; usize::try_from(range.end - range.start).unwrap_or(0)];
         self.file
@@ -557,8 +671,18 @@ impl Hydration {
                 "pages the working-set pack filled differ from chunk {index}"
             )));
         }
-        self.arrived(index);
         Ok(())
+    }
+
+    /// Counts chunk `index`, claimed by this caller, as in place once
+    /// `outcome` succeeded; otherwise lets go of it, so the next try writes
+    /// it again.
+    fn settle(&self, index: usize, outcome: Result<(), Unavailable>) -> Result<(), Unavailable> {
+        match outcome {
+            Ok(()) => self.arrived(index),
+            Err(_) => self.claimed[index].store(false, Ordering::Release),
+        }
+        outcome
     }
 
     fn arrived(&self, index: usize) {
@@ -670,8 +794,10 @@ async fn fill(
 }
 
 /// Fetches chunk `index` and stores it, retrying failures that may pass
-/// for up to [`RETRY_FOR`]. A chunk the store proves bad or gone fails at
-/// once: [`ChunkStore::get_chunk`] has already read it twice.
+/// until hydration stops (see [`STALL_AFTER`]): the store's, and the
+/// host's own, such as a full disk, so the sandbox waits for room rather
+/// than dying. A chunk the store proves bad or gone fails at once:
+/// [`ChunkStore::get_chunk`] has already read it twice.
 fn fetch_one(
     fetcher: &Arc<Fetcher>,
     hydration: &Arc<Hydration>,
@@ -684,36 +810,44 @@ fn fetch_one(
         let Some(reference) = hydration.refs[index].clone() else {
             return (index, Ok(()));
         };
-        if hydration.filled.covers(chunk_range(index, hydration.len)) {
-            let checked = write(&hydration, move |hydration| hydration.check_filled(index));
-            return (index, checked.await);
-        }
+        let in_place = hydration.filled.covers(chunk_range(index, hydration.len));
         let started = tokio::time::Instant::now();
         let mut delay = Duration::from_millis(50);
+        let mut stalled = None;
         loop {
-            match fetcher.get(&reference, background).await {
-                Ok(plain) => {
-                    let stored = write(&hydration, move |hydration| hydration.store(index, &plain));
-                    return (index, stored.await);
+            let attempt = if in_place {
+                write(&hydration, move |hydration| hydration.check_filled(index)).await
+            } else {
+                match fetcher.get(&reference, background).await {
+                    Ok(plain) => {
+                        write(&hydration, move |hydration| hydration.store(index, &plain)).await
+                    }
+                    Err(error) if error.is_permanent() => {
+                        Err(Unavailable::permanent(format!("chunk {index}: {error}")))
+                    }
+                    Err(error) => Err(Unavailable::passing(format!("chunk {index}: {error}"))),
                 }
-                Err(error) if error.is_permanent() => {
-                    return (
-                        index,
-                        Err(Unavailable::permanent(format!("chunk {index}: {error}"))),
-                    );
+            };
+            match attempt {
+                Err(failed) if !failed.permanent && !hydration.cancelled.is_cancelled() => {
+                    tracing::debug!(index, reason = %failed.reason, "filling a chunk failed; trying again");
+                    if stalled.is_none() && started.elapsed() >= STALL_AFTER {
+                        stalled = Some(fetcher.stalled(&failed.reason));
+                    }
                 }
-                Err(error) if started.elapsed() >= RETRY_FOR => {
-                    return (
-                        index,
-                        Err(Unavailable::passing(format!("chunk {index}: {error}"))),
-                    );
-                }
-                Err(error) => {
-                    tracing::debug!(index, %error, "chunk fetch failed; trying again");
-                }
+                done => return (index, done),
             }
-            tokio::time::sleep(delay).await;
-            delay = (delay * 2).min(RETRY_DELAY_MAX);
+            tokio::select! {
+                () = hydration.cancelled.cancelled() => {
+                    return (index, Err(Unavailable::passing("filling stopped".to_owned())));
+                }
+                () = tokio::time::sleep(delay) => {}
+            }
+            delay = if started.elapsed() < RETRY_QUICKLY_FOR {
+                (delay * 2).min(RETRY_DELAY_MAX)
+            } else {
+                STALLED_RETRY_DELAY
+            };
         }
     }
 }
@@ -760,11 +894,79 @@ pub(crate) fn chunk_hash(plain: &[u8]) -> Hash {
 mod tests {
     use super::*;
 
+    /// Local writes still to fail, by the memory file's inode.
+    static FAILING: Mutex<Vec<(u64, u32)>> = Mutex::new(Vec::new());
+
+    /// Fails a write into `file` while failures are left for it, as a
+    /// full disk would.
+    pub(super) fn failing_write(file: &File) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        let inode = file.metadata()?.ino();
+        let mut failing = lock(&FAILING);
+        match failing
+            .iter_mut()
+            .find(|(at, left)| *at == inode && *left > 0)
+        {
+            Some((_, left)) => {
+                *left -= 1;
+                Err(io::Error::new(
+                    io::ErrorKind::StorageFull,
+                    "simulated full disk",
+                ))
+            }
+            None => Ok(()),
+        }
+    }
+
     const PAGE: u64 = 4096;
+
+    /// Cached chunks leave [`CACHE_FOR`] after they arrived, with the
+    /// bytes they held, whether the agent samples or the next fetch lands.
+    #[test]
+    fn cached_chunks_leave_a_minute_after_they_arrived() {
+        let start = tokio::time::Instant::now();
+        let chunk = |byte| Arc::new(vec![byte; 4096]);
+        let mut cache = Cache::default();
+        assert_eq!(cache.insert("a".into(), chunk(1), start).len(), 0);
+        let later = start + Duration::from_secs(30);
+        assert_eq!(cache.insert("b".into(), chunk(2), later).len(), 0);
+        assert_eq!(cache.bytes, 2 * 4096);
+
+        let just_before = start + CACHE_FOR - Duration::from_millis(1);
+        assert_eq!(cache.expire(just_before).len(), 0);
+        let expired = cache.expire(start + CACHE_FOR);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0][0], 1, "the oldest goes first");
+        assert!(!cache.chunks.contains_key("a"));
+        assert_eq!((cache.bytes, cache.order.len()), (4096, 1));
+
+        // A fetch landing takes out what has expired by then, and a chunk
+        // fetched again after it left comes back.
+        let evicted = cache.insert("a".into(), chunk(3), later + CACHE_FOR);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0][0], 2);
+        assert_eq!((cache.bytes, cache.order.len()), (4096, 1));
+        assert_eq!(cache.chunks["a"][0], 3);
+        assert_eq!(cache.expire(later + 3 * CACHE_FOR).len(), 1);
+        assert_eq!(
+            (cache.bytes, cache.chunks.len(), cache.order.len()),
+            (0, 0, 0)
+        );
+    }
 
     /// Hydrates a three-chunk image whose chunk 1 is never stored, with
     /// `filled` written into the memory file first by `prefill`.
     async fn hydrate(
+        filled: &[std::ops::Range<u64>],
+        prefill: impl Fn(&File, &[Vec<u8>]),
+    ) -> (Result<(), Unavailable>, Vec<u8>, Vec<u8>) {
+        hydrate_failing(0, filled, prefill).await
+    }
+
+    /// [`hydrate`], with the first `failing` writes into the memory file
+    /// failing as on a full disk.
+    async fn hydrate_failing(
+        failing: u32,
         filled: &[std::ops::Range<u64>],
         prefill: impl Fn(&File, &[Vec<u8>]),
     ) -> (Result<(), Unavailable>, Vec<u8>, Vec<u8>) {
@@ -791,8 +993,12 @@ mod tests {
             .unwrap();
         file.set_len(3 * CHUNK_BYTES).unwrap();
         prefill(&file, &plain);
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            lock(&FAILING).push((file.metadata().unwrap().ino(), failing));
+        }
         let (hydration, _arrivals) = Hydration::start(
-            Arc::new(Fetcher::new(chunks)),
+            Arc::new(Fetcher::new(chunks, Arc::default())),
             &path,
             encoded
                 .iter()
@@ -824,6 +1030,21 @@ mod tests {
         assert_eq!(held, image);
     }
 
+    /// A write that fails on the host's own disk, such as a full one, is
+    /// tried again with the chunk already fetched: the sandbox waits for
+    /// room instead of losing its memory.
+    #[tokio::test]
+    async fn a_failing_local_write_is_tried_again() {
+        let filled = CHUNK_BYTES..2 * CHUNK_BYTES;
+        let (finished, held, image) =
+            hydrate_failing(3, std::slice::from_ref(&filled), |file, plain| {
+                file.write_all_at(&plain[1], CHUNK_BYTES).unwrap();
+            })
+            .await;
+        finished.unwrap();
+        assert_eq!(held, image);
+    }
+
     #[tokio::test]
     async fn filled_pages_that_differ_from_their_chunk_fail_for_good() {
         // A wrong page in a chunk that is fetched.
@@ -844,5 +1065,165 @@ mod tests {
         )
         .await;
         assert!(finished.unwrap_err().permanent);
+    }
+
+    /// An in-memory store whose reads fail, as if it did not answer, while
+    /// `down` is set.
+    #[derive(Debug, Default)]
+    struct Flaky {
+        inner: object_store::memory::InMemory,
+        down: AtomicBool,
+    }
+
+    impl std::fmt::Display for Flaky {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("flaky")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for Flaky {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            if self.down.load(Ordering::Relaxed) {
+                return Err(object_store::Error::Generic {
+                    store: "flaky",
+                    source: "connection refused".into(),
+                });
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        async fn delete(&self, location: &object_store::path::Path) -> object_store::Result<()> {
+            self.inner.delete(location).await
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+        ) -> object_store::Result<()> {
+            self.inner.copy(from, to).await
+        }
+
+        async fn copy_if_not_exists(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+        ) -> object_store::Result<()> {
+            self.inner.copy_if_not_exists(from, to).await
+        }
+    }
+
+    /// A store that stops answering stalls hydration, which carries on
+    /// once it answers again: nothing is lost however long it takes.
+    #[tokio::test]
+    async fn a_store_that_does_not_answer_stalls_hydration_without_losing_it() {
+        let chunk = usize::try_from(CHUNK_BYTES).unwrap();
+        let plain: Vec<Vec<u8>> = (1..=3_u8).map(|fill| vec![fill; chunk]).collect();
+        let backend = Arc::new(Flaky::default());
+        let chunks = ChunkStore::new(
+            Arc::clone(&backend) as Arc<dyn object_store::ObjectStore>,
+            object_store::path::Path::from("p"),
+        );
+        let encoded: Vec<_> = plain
+            .iter()
+            .map(|bytes| compute_storage::chunk::EncodedChunk::encode(bytes, 1).unwrap())
+            .collect();
+        for chunk in &encoded {
+            chunks.put_chunk(chunk).await.unwrap();
+        }
+        backend.down.store(true, Ordering::Relaxed);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory");
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(3 * CHUNK_BYTES).unwrap();
+        let fetcher = Arc::new(Fetcher::new(chunks, Arc::default()));
+        let (hydration, _arrivals) = Hydration::start(
+            Arc::clone(&fetcher),
+            &path,
+            encoded
+                .iter()
+                .map(|chunk| Some(chunk.reference.clone()))
+                .collect(),
+            plain.iter().map(|bytes| chunk_hash(bytes)).collect(),
+            PageSet::new(&[]),
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let waited = tokio::time::Instant::now();
+        while fetcher.stalled_for().is_none() {
+            assert!(
+                waited.elapsed() < STALL_AFTER + Duration::from_secs(10),
+                "never reported as stalled"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), hydration.finished())
+                .await
+                .is_err(),
+            "a store that does not answer neither fails nor finishes hydration"
+        );
+
+        backend.down.store(false, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(30), hydration.finished())
+            .await
+            .expect("hydration carries on once the store answers")
+            .unwrap();
+        // The stall ends with the fetch that wrote the last chunk, just
+        // after that write completed hydration.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while fetcher.stalled_for().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("no longer stalled once every chunk is in place");
+        let mut held = vec![0; 3 * chunk];
+        file.read_exact_at(&mut held, 0).unwrap();
+        assert_eq!(held, plain.concat());
     }
 }

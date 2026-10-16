@@ -7,8 +7,26 @@
 //! the host can go away at any moment and a new one reconnects: the pager
 //! greets every connection with what it still misses, and faults on missing
 //! bytes simply wait meanwhile.
+//!
+//! Pagers outlive the agent that launched them, so after an upgrade a newer
+//! agent talks to pagers an older one started. The greeting therefore says
+//! which [`PROTOCOL`] the pager speaks, and the host sends only messages that
+//! version understands. A host refuses a pager whose protocol is newer than
+//! its own or older than [`OLDEST_PROTOCOL`].
 
 use serde::{Deserialize, Serialize};
+
+/// The protocol this build speaks.
+pub const PROTOCOL: u32 = 1;
+
+/// The oldest protocol this build still serves as the host. Raising it
+/// drops support for pagers started by agents older than the one before.
+pub const OLDEST_PROTOCOL: u32 = 1;
+
+/// Greetings from before the protocol was named are protocol 1.
+const fn unnamed_protocol() -> u32 {
+    1
+}
 
 /// From the pager to the host.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +34,9 @@ use serde::{Deserialize, Serialize};
 pub enum ToHost {
     /// Sent first on every connection.
     Hello {
+        /// The protocol the pager speaks.
+        #[serde(default = "unnamed_protocol")]
+        protocol: u32,
         /// The image the pager serves, as the host named it at launch.
         tag: String,
         /// Device and inode of the memory file the pager reads, so a host
@@ -76,6 +97,7 @@ mod tests {
     #[test]
     fn messages_are_single_lines_that_round_trip() {
         let hello = ToHost::Hello {
+            protocol: PROTOCOL,
             tag: "7".into(),
             device: 1,
             inode: 2,
@@ -93,5 +115,15 @@ mod tests {
         };
         assert_eq!(parse::<ToPager>(&line(&filled).unwrap()).unwrap(), filled);
         assert!(parse::<ToPager>(b"{\"filled\":3}").is_err());
+    }
+
+    #[test]
+    fn a_greeting_that_names_no_protocol_is_the_first() {
+        let greeting =
+            br#"{"hello":{"tag":"7","device":1,"inode":2,"missing":[],"prefetched":true}}"#;
+        let Ok(ToHost::Hello { protocol, .. }) = parse::<ToHost>(greeting) else {
+            panic!("an old greeting no longer parses");
+        };
+        assert_eq!(protocol, 1);
     }
 }

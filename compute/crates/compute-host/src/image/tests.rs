@@ -89,6 +89,7 @@ fn merged_images_equal_their_base_with_the_diff_laid_over_it() {
             None => images.publish(Parts::Whole {
                 state: &state,
                 memory: &diff,
+                len: LEN,
             }),
             Some(base) => images.publish(Parts::Diff {
                 base,
@@ -121,6 +122,7 @@ fn a_diff_of_the_wrong_length_is_refused() {
         .publish(Parts::Whole {
             state: &state,
             memory: &diff,
+            len: LEN,
         })
         .unwrap();
     File::create(&diff).unwrap().set_len(LEN - PAGE).unwrap();
@@ -135,6 +137,93 @@ fn a_diff_of_the_wrong_length_is_refused() {
             .is_err()
     );
     assert_eq!(images.current().unwrap(), Some(base.generation()));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A VMM decides what it writes into its jail. Memory of another length
+/// than the sandbox's, or state far larger than any snapshot's, is refused
+/// before anything is read or allocated for it: a sparse file a terabyte
+/// long costs nothing to make.
+#[test]
+fn oversized_snapshot_files_are_refused_before_they_are_read() {
+    let dir = scratch("oversized");
+    let images = Images::new(dir.join("images"));
+    let (memory, state) = (dir.join("memory"), dir.join("state"));
+    write_diff(&memory, &[(1, 7)]);
+    write_state(&state, b"s");
+    let good = images
+        .publish(Parts::Whole {
+            state: &state,
+            memory: &memory,
+            len: LEN,
+        })
+        .unwrap()
+        .generation();
+
+    File::create(&memory).unwrap().set_len(1 << 40).unwrap();
+    write_state(&state, b"t");
+    let started = std::time::Instant::now();
+    assert!(
+        images
+            .publish(Parts::Whole {
+                state: &state,
+                memory: &memory,
+                len: LEN,
+            })
+            .is_err(),
+        "memory longer than the sandbox's was published"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+    write_diff(&memory, &[(1, 7)]);
+    File::create(&state)
+        .unwrap()
+        .set_len(MAX_STATE_BYTES + 1)
+        .unwrap();
+    assert!(
+        images
+            .publish(Parts::Whole {
+                state: &state,
+                memory: &memory,
+                len: LEN,
+            })
+            .is_err(),
+        "state larger than any snapshot's was published"
+    );
+    assert_eq!(images.current().unwrap(), Some(good));
+    images.verify(good, Depth::Deep).unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A stored state file that grew past what the image's description
+/// records is damage, found without reading all of it.
+#[test]
+fn a_state_file_longer_than_recorded_is_damage() {
+    let dir = scratch("long-state");
+    let images = Images::new(dir.join("images"));
+    let (memory, state) = (dir.join("memory"), dir.join("state"));
+    write_diff(&memory, &[(1, 7)]);
+    write_state(&state, b"s");
+    let generation = images
+        .publish(Parts::Whole {
+            state: &state,
+            memory: &memory,
+            len: LEN,
+        })
+        .unwrap()
+        .generation();
+    let stored = images.state(generation);
+    fs::set_permissions(&stored, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&stored)
+        .unwrap()
+        .set_len(1 << 40)
+        .unwrap();
+    assert!(matches!(
+        images.verify(generation, Depth::Light),
+        Err(Suspect::Damaged { .. })
+    ));
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -153,6 +242,7 @@ fn recovery_keeps_an_image_it_cannot_read_for_now() {
         .publish(Parts::Whole {
             state: &state,
             memory: &memory,
+            len: LEN,
         })
         .unwrap();
     let generation = image.generation();
@@ -205,6 +295,7 @@ fn crashes_and_corruption_never_lose_or_misuse_the_committed_image() {
                 None => images.publish(Parts::Whole {
                     state: &state,
                     memory: &diff,
+                    len: LEN,
                 }),
                 Some(base) => images.publish(Parts::Diff {
                     base,
@@ -352,6 +443,7 @@ fn a_shared_image_is_the_same_file_and_survives_its_source() {
         .publish(Parts::Whole {
             state: &state,
             memory: &memory,
+            len: std::fs::metadata(&memory).unwrap().len(),
         })
         .unwrap();
     let before = content(&template, source.generation());

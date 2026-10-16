@@ -74,6 +74,13 @@ impl VmSpec {
     pub fn api_socket(&self) -> PathBuf {
         self.dir.join("api.sock")
     }
+
+    /// Guest memory in bytes: the length of every memory snapshot of the
+    /// VM.
+    #[must_use]
+    pub fn memory_bytes(&self) -> u64 {
+        u64::from(self.memory_mib) << 20
+    }
 }
 
 /// Where a snapshot is written on local disk.
@@ -130,4 +137,8 @@ pub struct RestoreFiles {
     pub state: PathBuf,
     /// Guest memory.
     pub memory: MemorySource,
+    /// The runtime the image was made under, if known; see
+    /// [`crate::Engine::runtime`]. An engine that keeps that runtime
+    /// restores the image under it.
+    pub made_under: Option<String>,
 }

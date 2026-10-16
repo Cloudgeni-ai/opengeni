@@ -65,6 +65,8 @@ pub(crate) struct Paths {
     /// The sandbox directory, host only.
     pub dir: PathBuf,
     pub record: PathBuf,
+    /// The sandbox's named holds; see `agent::holds`.
+    pub holds: PathBuf,
     /// The VM's jail: the only directory its VMM can see.
     pub jail: PathBuf,
     pub kernel: PathBuf,
@@ -90,6 +92,7 @@ impl Paths {
         let jail = dir.join(JAIL);
         Self {
             record: dir.join("sandbox.json"),
+            holds: dir.join("holds.json"),
             kernel: jail.join("vmlinux"),
             disk: jail.join("disk.ext4"),
             snapshot: SnapshotFiles {

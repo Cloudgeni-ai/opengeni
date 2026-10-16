@@ -81,9 +81,9 @@ mode = "advisory"
 
 # Unsafe code lives in the modules written to hold it, next to the invariant
 # its safety argument rests on, where each block is reviewed: the pager's
-# userfaultfd and mmap handling, the storage crate's FIEMAP ioctl, the
-# engine's pidfd registration, and the host's mappings of sealed memory images
-# (image.rs) and of memory files filling from object storage (lazy.rs).
+# userfaultfd and mmap handling, the engine's pidfd registration, and the
+# host's mappings of sealed memory images (image.rs) and of memory files
+# filling from object storage (lazy.rs).
 # Anything else is listed in the baseline until it moves behind one of them.
 [rules.pattern_ratchet.unsafe_code]
 patterns = ['\bunsafe\b']
@@ -93,7 +93,6 @@ allow = [
   "crates/compute-host/src/lazy.rs",
   "crates/compute-pager/src/linux.rs",
   "crates/compute-pager/src/source.rs",
-  "crates/compute-storage/src/fiemap.rs",
 ]
 
 [rules.pattern_ratchet.unsafe_code.no_crossing]

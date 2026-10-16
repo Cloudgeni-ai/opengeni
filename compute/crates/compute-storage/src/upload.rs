@@ -14,9 +14,14 @@
 //! When an object already exists under a content name, GCS reports the
 //! checksums it computed when the object was stored, so [`Gcs::stored`]
 //! compares them with ours without downloading the object.
+//!
+//! The same answer says when the object was stored and which write of its
+//! name it is (its generation), which a sweep needs to delete an object
+//! only if nothing stored it again since the sweep looked (see
+//! [`crate::fresh`]).
 
 use std::fmt::{self, Write as _};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -39,6 +44,28 @@ pub(crate) enum Created {
     New,
     /// An object was already stored under the name; nothing was written.
     Exists,
+}
+
+/// What GCS keeps about a stored object.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Stored {
+    /// The checksums GCS computed when it stored the object, in
+    /// `x-goog-hash` form; empty for composite objects, which have no MD5.
+    pub(crate) checksums: String,
+    /// When the object was stored, to the second.
+    pub(crate) at: Option<SystemTime>,
+    /// Which write of the name this object is.
+    pub(crate) generation: Option<String>,
+}
+
+/// What a delete of one generation of an object did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Deleted {
+    Yes,
+    /// The name holds another generation now: it was stored again.
+    Changed,
+    /// Nothing is stored under the name.
+    Gone,
 }
 
 /// Checksummed uploads to one Google Cloud Storage bucket: create-only, or
@@ -87,11 +114,10 @@ impl Gcs {
 
     async fn send(&self, path: &Path, bytes: &Bytes, create_only: bool) -> Result<Created> {
         let hashes = checksums(bytes);
-        let url = self.url(path);
         let mut delay = Duration::from_millis(100);
         let mut attempt = 1;
         loop {
-            match self.put(&url, bytes, &hashes, create_only).await? {
+            match self.put(path, bytes, &hashes, create_only).await? {
                 Put::Done(created) => return Ok(created),
                 Put::Retry(reason) | Put::Fail(reason) if attempt >= ATTEMPTS => {
                     return Err(Error::Transfer(format!("PUT {path}: {reason}")));
@@ -106,17 +132,12 @@ impl Gcs {
         }
     }
 
-    /// The checksums GCS computed for the object at `path` when it was
-    /// stored, in `x-goog-hash` form, or `None` when there is no object.
-    pub(crate) async fn stored(&self, path: &Path) -> Result<Option<String>> {
-        let token = self.credentials.get_credential().await?;
-        let request = http::Request::builder()
-            .method(http::Method::HEAD)
-            .uri(self.url(path))
-            .header(
-                http::header::AUTHORIZATION,
-                format!("Bearer {}", token.bearer),
-            )
+    /// What GCS keeps about the object at `path`, or `None` when there is
+    /// no object.
+    pub(crate) async fn stored(&self, path: &Path) -> Result<Option<Stored>> {
+        let request = self
+            .request(http::Method::HEAD, path)
+            .await?
             .body(HttpRequestBody::empty())
             .map_err(|error| Error::Transfer(error.to_string()))?;
         let response = self
@@ -131,10 +152,11 @@ impl Gcs {
         if !status.is_success() {
             return Err(Error::Transfer(format!("HEAD {path}: status {status}")));
         }
+        let headers = response.headers();
         // GCS sends one `x-goog-hash` header per algorithm.
         let mut crc = None;
         let mut md5 = None;
-        for value in response.headers().get_all("x-goog-hash") {
+        for value in headers.get_all("x-goog-hash") {
             let value = value.to_str().unwrap_or_default();
             for part in value.split(',').map(str::trim) {
                 if part.starts_with("crc32c=") {
@@ -144,26 +166,89 @@ impl Gcs {
                 }
             }
         }
-        Ok(Some(match (crc, md5) {
+        let checksums = match (crc, md5) {
             (Some(crc), Some(md5)) => format!("{crc},{md5}"),
             // Composite objects have no MD5; never match them.
             _ => String::new(),
+        };
+        let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+        Ok(Some(Stored {
+            checksums,
+            at: header(http::header::LAST_MODIFIED.as_str()).and_then(|value| {
+                chrono::DateTime::parse_from_rfc2822(value)
+                    .ok()
+                    .map(SystemTime::from)
+            }),
+            generation: header("x-goog-generation").map(str::to_owned),
         }))
+    }
+
+    /// Deletes the object at `path` if it is still `generation`, the write
+    /// of the name its caller looked at.
+    pub(crate) async fn delete_generation(&self, path: &Path, generation: &str) -> Result<Deleted> {
+        let mut delay = Duration::from_millis(100);
+        let mut attempt = 1;
+        loop {
+            let request = self
+                .request(http::Method::DELETE, path)
+                .await?
+                .header("x-goog-if-generation-match", generation)
+                .body(HttpRequestBody::empty())
+                .map_err(|error| Error::Transfer(error.to_string()))?;
+            let reason = match self.client.execute(request).await {
+                Ok(response) => match response.status() {
+                    status if status.is_success() => return Ok(Deleted::Yes),
+                    http::StatusCode::PRECONDITION_FAILED => return Ok(Deleted::Changed),
+                    http::StatusCode::NOT_FOUND => return Ok(Deleted::Gone),
+                    status
+                        if status == http::StatusCode::TOO_MANY_REQUESTS
+                            || status.is_server_error() =>
+                    {
+                        format!("status {status}")
+                    }
+                    status => {
+                        return Err(Error::Transfer(format!("DELETE {path}: status {status}")));
+                    }
+                },
+                // A delete whose answer was lost may have happened: the
+                // retry then finds the name changed or gone, never wrongly
+                // deletes, since it names the same generation.
+                Err(error) => error.to_string(),
+            };
+            if attempt >= ATTEMPTS {
+                return Err(Error::Transfer(format!("DELETE {path}: {reason}")));
+            }
+            tokio::time::sleep(delay).await;
+            delay *= 4;
+            attempt += 1;
+        }
+    }
+
+    async fn request(&self, method: http::Method, path: &Path) -> Result<http::request::Builder> {
+        let token = self.credentials.get_credential().await?;
+        Ok(http::Request::builder()
+            .method(method)
+            .uri(self.url(path))
+            .header(
+                http::header::AUTHORIZATION,
+                format!("Bearer {}", token.bearer),
+            ))
     }
 
     fn url(&self, path: &Path) -> String {
         format!("{}/{}", self.bucket_url, encode(path.as_ref()))
     }
 
-    async fn put(&self, url: &str, bytes: &Bytes, hashes: &str, create_only: bool) -> Result<Put> {
-        let token = self.credentials.get_credential().await?;
-        let mut request = http::Request::builder()
-            .method(http::Method::PUT)
-            .uri(url)
-            .header(
-                http::header::AUTHORIZATION,
-                format!("Bearer {}", token.bearer),
-            )
+    async fn put(
+        &self,
+        path: &Path,
+        bytes: &Bytes,
+        hashes: &str,
+        create_only: bool,
+    ) -> Result<Put> {
+        let mut request = self
+            .request(http::Method::PUT, path)
+            .await?
             .header(http::header::CONTENT_LENGTH, bytes.len())
             .header("x-goog-hash", hashes);
         if create_only {
@@ -230,91 +315,11 @@ fn encode(name: &str) -> String {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
-    use object_store::StaticCredentialProvider;
-    use object_store::client::{HttpError, HttpRequest, HttpResponse, HttpService};
-    use object_store::gcp::GcpCredential;
-
-    /// A GCS stand-in that verifies `x-goog-hash` as the real service does,
-    /// optionally after corrupting the first `corrupt` uploads in transit.
-    #[derive(Debug, Default)]
-    pub(crate) struct Fake {
-        pub(crate) objects: Mutex<HashMap<String, Bytes>>,
-        corrupt: Mutex<u32>,
-        puts: Mutex<u32>,
-    }
-
-    #[derive(Debug)]
-    struct Service(Arc<Fake>);
-
-    #[async_trait::async_trait]
-    impl HttpService for Service {
-        async fn call(&self, request: HttpRequest) -> std::result::Result<HttpResponse, HttpError> {
-            let (parts, body) = request.into_parts();
-            let key = parts.uri.path().to_owned();
-            let reply = |status: u16, body: &str| {
-                http::Response::builder()
-                    .status(status)
-                    .body(Bytes::from(body.to_owned()).into())
-                    .unwrap()
-            };
-            if parts.method == http::Method::HEAD {
-                let objects = self.0.objects.lock().unwrap();
-                return Ok(match objects.get(&key) {
-                    None => reply(404, ""),
-                    Some(bytes) => {
-                        let hashes = checksums(bytes);
-                        let (crc, md5) = hashes.split_once(',').unwrap();
-                        http::Response::builder()
-                            .status(200)
-                            .header("x-goog-hash", crc)
-                            .header("x-goog-hash", md5)
-                            .body(Bytes::new().into())
-                            .unwrap()
-                    }
-                });
-            }
-            *self.0.puts.lock().unwrap() += 1;
-            let mut bytes = Bytes::from(body.as_bytes().unwrap().to_vec());
-            {
-                let mut corrupt = self.0.corrupt.lock().unwrap();
-                if *corrupt > 0 {
-                    *corrupt -= 1;
-                    let mut damaged = bytes.to_vec();
-                    damaged[0] ^= 1;
-                    bytes = Bytes::from(damaged);
-                }
-            }
-            let sent = parts.headers["x-goog-hash"].to_str().unwrap();
-            if sent != checksums(&bytes) {
-                return Ok(reply(400, "<Code>BadDigest</Code>"));
-            }
-            let mut objects = self.0.objects.lock().unwrap();
-            if parts.headers.contains_key("x-goog-if-generation-match")
-                && objects.contains_key(&key)
-            {
-                return Ok(reply(412, ""));
-            }
-            objects.insert(key, bytes);
-            Ok(reply(200, ""))
-        }
-    }
-
-    pub(crate) fn gcs(fake: &Arc<Fake>) -> Gcs {
-        let credentials = Arc::new(StaticCredentialProvider::new(GcpCredential {
-            bearer: "token".to_owned(),
-        }));
-        Gcs::new(
-            HttpClient::new(Service(fake.clone())),
-            credentials,
-            "http://fake",
-            "bucket",
-        )
-    }
+    use crate::fake::{Fake, gcs};
 
     #[tokio::test(start_paused = true)]
     async fn corrupted_uploads_are_refused_and_sent_again() {
@@ -325,13 +330,14 @@ pub(crate) mod tests {
         let bytes = Bytes::from_static(b"chunk bytes");
         assert_eq!(store.create(&path, &bytes).await.unwrap(), Created::New);
         assert_eq!(*fake.puts.lock().unwrap(), 3);
-        assert_eq!(fake.objects.lock().unwrap()["/bucket/p/chunks/v1/a"], bytes);
+        assert_eq!(fake.bytes("p/chunks/v1/a").unwrap(), bytes);
         assert_eq!(store.create(&path, &bytes).await.unwrap(), Created::Exists);
-        assert_eq!(store.stored(&path).await.unwrap(), Some(checksums(&bytes)));
+        let stored = store.stored(&path).await.unwrap().unwrap();
+        assert_eq!(stored.checksums, checksums(&bytes));
         assert_eq!(store.stored(&Path::from("p/none")).await.unwrap(), None);
         let other = Bytes::from_static(b"other bytes");
         store.replace(&path, &other).await.unwrap();
-        assert_eq!(fake.objects.lock().unwrap()["/bucket/p/chunks/v1/a"], other);
+        assert_eq!(fake.bytes("p/chunks/v1/a").unwrap(), other);
     }
 
     #[tokio::test(start_paused = true)]
@@ -345,7 +351,51 @@ pub(crate) mod tests {
             .unwrap_err();
         assert!(matches!(error, Error::Transfer(_)), "{error}");
         assert_eq!(*fake.puts.lock().unwrap(), ATTEMPTS);
-        assert!(fake.objects.lock().unwrap().is_empty());
+        assert_eq!(fake.names().len(), 0);
+    }
+
+    /// The stored time and generation come from the same answer as the
+    /// checksums, and a delete names the generation it means.
+    #[tokio::test]
+    async fn only_the_generation_looked_at_is_deleted() {
+        let fake = Arc::new(Fake::default());
+        let store = gcs(&fake);
+        let path = Path::from("p/chunks/v1/b");
+        let first = Bytes::from_static(b"first");
+        store.create(&path, &first).await.unwrap();
+        let seen = store.stored(&path).await.unwrap().unwrap();
+        let object = fake.object("p/chunks/v1/b").unwrap();
+        assert_eq!(seen.generation, Some(object.generation.to_string()));
+        let at = seen.at.unwrap();
+        let truncated = object.at.duration_since(at).unwrap();
+        assert!(
+            truncated < Duration::from_secs(1),
+            "to the second: {truncated:?}"
+        );
+        // Stored again since it was looked at: the delete changes nothing.
+        store.replace(&path, &first).await.unwrap();
+        let looked_at = seen.generation.unwrap();
+        assert_eq!(
+            store.delete_generation(&path, &looked_at).await.unwrap(),
+            Deleted::Changed
+        );
+        assert!(fake.bytes("p/chunks/v1/b").is_some());
+        let now = store
+            .stored(&path)
+            .await
+            .unwrap()
+            .unwrap()
+            .generation
+            .unwrap();
+        assert_eq!(
+            store.delete_generation(&path, &now).await.unwrap(),
+            Deleted::Yes
+        );
+        assert!(fake.bytes("p/chunks/v1/b").is_none());
+        assert_eq!(
+            store.delete_generation(&path, &now).await.unwrap(),
+            Deleted::Gone
+        );
     }
 
     #[test]

@@ -17,6 +17,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .ok()
             .and_then(|meminfo| available_memory(&meminfo, huge));
         self.ready.sampled();
+        #[cfg(target_os = "linux")]
+        if let Some(fetcher) = &self.fetcher {
+            fetcher.forget_old();
+        }
         let mut batch: Vec<Input> = match self.busy {
             Some(rule) => self
                 .sample_busy(rule)
@@ -58,9 +62,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// pausing or saving never counts, even when a whole pause and resume
     /// falls between two readings. Each signal counts only when it was read
     /// at both ends of the window, so one that cannot be read leaves the
-    /// other to decide alone.
+    /// other to decide alone. A sandbox none of whose watched signals could
+    /// be read counts as busy at once, whatever its window: putting a
+    /// working guest to sleep costs far more than keeping an idle one awake
+    /// a little longer. How many such sandboxes there are goes into the
+    /// host's status.
     pub(super) fn sample_busy(&mut self, rule: BusyRule) -> Vec<SandboxId> {
         let now = Instant::now();
+        let watching = rule.watches_cpu() || rule.watches_io();
         let mut busy = Vec::new();
         for (id, slot) in &mut self.slots {
             let running = self
@@ -79,27 +88,47 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .watches_io()
                 .then(|| self.engine.io_bytes(&live.vm).ok())
                 .flatten();
-            let fresh = ActivityWindow {
+            let mut fresh = ActivityWindow {
                 incarnation: live.incarnation,
                 started: now,
                 cpu,
                 io,
+                unseen: false,
             };
+            if watching && cpu.is_none() && io.is_none() {
+                // Nothing to judge by, now or at the end of any window: a
+                // pause delay shorter than the window would otherwise let
+                // a working guest fall asleep first.
+                fresh.unseen = true;
+                busy.push(*id);
+                slot.activity = Some(fresh);
+                continue;
+            }
             match slot.activity {
-                Some(window) if window.incarnation == live.incarnation => {
+                // A window that began unreadable has nothing to compare
+                // against; one starts now.
+                Some(window)
+                    if window.incarnation == live.incarnation
+                        && (window.cpu.is_some() || window.io.is_some()) =>
+                {
                     let elapsed = now.duration_since(window.started);
                     if elapsed >= rule.window {
                         let used = window
                             .cpu
                             .zip(cpu)
-                            .map_or(Duration::ZERO, |(before, after)| {
-                                after.saturating_sub(before)
-                            });
+                            .map(|(before, after)| after.saturating_sub(before));
                         let moved = window
                             .io
                             .zip(io)
-                            .map_or(0, |(before, after)| after.saturating_sub(before));
-                        if rule.is_busy(used, moved, elapsed) {
+                            .map(|(before, after)| after.saturating_sub(before));
+                        fresh.unseen = used.is_none() && moved.is_none() && watching;
+                        if fresh.unseen
+                            || rule.is_busy(
+                                used.unwrap_or(Duration::ZERO),
+                                moved.unwrap_or(0),
+                                elapsed,
+                            )
+                        {
                             busy.push(*id);
                         }
                         slot.activity = Some(fresh);
@@ -108,6 +137,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 _ => slot.activity = Some(fresh),
             }
         }
+        let unseen = self
+            .slots
+            .values()
+            .filter(|slot| slot.activity.is_some_and(|window| window.unseen))
+            .count();
+        if unseen > self.unseen_activity {
+            tracing::warn!(
+                sandboxes = unseen,
+                "activity of running sandboxes cannot be read; they count as busy"
+            );
+        }
+        self.unseen_activity = unseen;
         busy
     }
 }

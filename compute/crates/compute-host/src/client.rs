@@ -46,18 +46,21 @@ impl Client {
     }
 
     /// Opens a byte stream to `port` inside sandbox `id`, waking it first.
-    /// On success the reply is [`Reply::Connected`] and the stream carries
-    /// the guest connection; read from the returned reader, which may
-    /// already hold the guest's first bytes.
+    /// With a `generation`, only to that execution: a sandbox that booted
+    /// afresh since is refused as stale. On success the reply is
+    /// [`Reply::Connected`], naming the execution reached, and the stream
+    /// carries the guest connection; read from the returned reader, which
+    /// may already hold the guest's first bytes.
     pub async fn connect(
         &self,
         id: Id,
+        generation: Option<u64>,
         port: u32,
         priority: PriorityName,
     ) -> io::Result<(Reply, BufReader<UnixStream>)> {
         self.send(&Request::Connect {
             id,
-            generation: None,
+            generation,
             port,
             priority,
         })

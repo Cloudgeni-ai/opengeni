@@ -13,6 +13,8 @@
 //! (default 12), `COMPUTE_TEST_RESULTS` a directory for JSON results and
 //! `COMPUTE_TEST_PROFILE` the agent's memory profile (the agent's default,
 //! `bare-metal`, when unset; `nested` needs a reserved 2 MiB page pool).
+//! `COMPUTE_TEST_REQUIRE` (`lab` on a gate) makes a test that cannot run
+//! fail.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, TcpListener};
@@ -32,12 +34,20 @@ use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep, timeout};
 
 mod ready;
+#[path = "../support/required.rs"]
+mod required;
 mod spoofing;
+
+use required::skip;
 
 const PORT: u32 = 52;
 
 fn lab() -> Option<PathBuf> {
-    std::env::var_os("COMPUTE_TEST_LAB").map(PathBuf::from)
+    let lab = std::env::var_os("COMPUTE_TEST_LAB").map(PathBuf::from);
+    if lab.is_none() {
+        skip("lab", "set COMPUTE_TEST_LAB to run against Firecracker");
+    }
+    lab
 }
 
 fn count() -> usize {
@@ -231,7 +241,7 @@ async fn create(client: &Client, sandbox: Id, sleep: SleepConfig) {
 async fn exec(client: &Client, sandbox: Id, script: &str) -> (String, Duration) {
     let started = Instant::now();
     let (reply, mut stream) = client
-        .connect(sandbox, PORT, PriorityName::Interactive)
+        .connect(sandbox, None, PORT, PriorityName::Interactive)
         .await
         .unwrap();
     let Reply::Connected { waited_us, .. } = reply else {
@@ -385,10 +395,7 @@ impl Kind {
 /// files its guest had.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn sandboxes_survive_the_agent_being_killed() {
-    let Some(lab) = lab() else {
-        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
-        return;
-    };
+    let Some(lab) = lab() else { return };
     let count = count();
     let host = Host::new(&lab, "kill", &["--network"]);
     let agent = host.start().await;
@@ -705,10 +712,7 @@ fn check_probes(
 /// another sandbox.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn restored_guests_reach_the_internet_at_once_and_nothing_else() {
-    let Some(lab) = lab() else {
-        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
-        return;
-    };
+    let Some(lab) = lab() else { return };
     let count = count().max(2);
     // Something to reach on every host address and on the sandboxes' link
     // addresses, which are the host's too.
@@ -825,8 +829,12 @@ fn listen_everywhere() -> (TcpListener, u16) {
 /// host's local network (not the host).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn only_trusted_hosts_let_guests_reach_the_local_network() {
-    let (Some(lab), Some(target)) = (lab(), std::env::var_os("COMPUTE_TEST_LAN_TARGET")) else {
-        eprintln!("skipped: set COMPUTE_TEST_LAB and COMPUTE_TEST_LAN_TARGET");
+    let Some(lab) = lab() else { return };
+    let Some(target) = std::env::var_os("COMPUTE_TEST_LAN_TARGET") else {
+        skip(
+            "lan",
+            "set COMPUTE_TEST_LAN_TARGET to a listener on the host's local network",
+        );
         return;
     };
     let lan = target.to_string_lossy().into_owned();

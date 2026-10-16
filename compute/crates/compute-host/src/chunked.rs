@@ -22,8 +22,10 @@
 //! offset are downloaded: a sandbox that changed little of its disk wakes
 //! from local bytes.
 //!
-//! Chunks no pointer refers to any more are left for garbage collection,
-//! which is not part of this module.
+//! Chunks no pointer refers to any more are deleted by a sweep
+//! ([`Chunked::sweep`]); an archive publishes its pointer within the
+//! window that keeps a sweep from deleting what it reused (see
+//! [`compute_storage::fresh`]).
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -38,12 +40,14 @@ use compute_storage::Error as StorageError;
 use compute_storage::chunk::{ChunkRef, EncodedChunk};
 use compute_storage::manifest::{DiskManifest, ExtentSource};
 use compute_storage::store::ChunkStore;
+pub use compute_storage::sweep::Report;
 use futures::{StreamExt as _, stream};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Semaphore};
 
 pub use crate::image::CHUNK_BYTES;
 use crate::image::{Hash, ZERO, chunk_count, chunk_range, hash_chunks};
+use crate::lanes::Lanes;
 use crate::protocol::Id;
 use crate::store::{Archive, FetchInto, FetchedMemory, Prefilled, Receipt, SavedFiles, Store};
 use crate::working_set::{self, WakeProfile};
@@ -89,6 +93,9 @@ struct Head {
 struct MemoryHead {
     state: String,
     memory: String,
+    /// The runtime that made the image, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime: Option<String>,
 }
 
 fn parse_head(operation: &'static str, bytes: &[u8]) -> Result<Head, EngineError> {
@@ -114,6 +121,8 @@ pub struct Chunked {
     seed: Arc<Mutex<Option<Arc<Seed>>>>,
     /// Permits for chunk transfers, shared by every sandbox.
     transfers: Arc<Semaphore>,
+    /// A wake's transfers are foreground: background ones give way.
+    lanes: Arc<Lanes>,
 }
 
 /// What identifies one version of a local file: if any of it changes, the
@@ -182,6 +191,7 @@ impl Chunked {
             chunks,
             seed: Arc::default(),
             transfers: Arc::new(Semaphore::new(TRANSFERS_PER_HOST)),
+            lanes: Arc::default(),
         }
     }
 
@@ -191,6 +201,68 @@ impl Chunked {
     /// is not an object storage URL.
     pub fn from_url(url: &str) -> Result<Option<Self>, compute_storage::Error> {
         Ok(ChunkStore::from_url(url)?.map(Self::new))
+    }
+
+    /// Refuses a store this release cannot read every copy in; see
+    /// [`ChunkStore::refuse_unstamped_pointers`].
+    pub async fn refuse_unreadable(&self) -> Result<(), StorageError> {
+        self.chunks.refuse_unstamped_pointers().await
+    }
+
+    /// Deletes the chunks and manifests no sandbox's stored copy names any
+    /// more, or with `delete` false only reports them (see
+    /// [`compute_storage::sweep`]).
+    pub async fn sweep(&self, delete: bool) -> Result<Report, StorageError> {
+        compute_storage::sweep::sweep(
+            &self.chunks,
+            |pointer| async move { self.names(&pointer).await },
+            delete,
+        )
+        .await
+    }
+
+    /// The chunk and manifest keys the stored copy whose pointer holds
+    /// `pointer` keeps. Anything unreadable fails, so a sweep stops before
+    /// deleting what it could not account for; only a damaged or missing
+    /// working-set pack does not, since a wake without it is just slower.
+    async fn names(&self, pointer: &[u8]) -> Result<Vec<String>, StorageError> {
+        let head: Head = serde_json::from_slice(pointer)?;
+        if !(1..=HEAD_VERSION).contains(&head.version) {
+            return Err(StorageError::Invalid("a stored copy of an unknown version"));
+        }
+        let mut manifests = vec![head.disk];
+        // A working-set pack holds memory pages, so it is kept only with
+        // the memory image it serves.
+        let pack = head.memory.as_ref().and(head.pack.as_ref());
+        if let Some(memory) = &head.memory {
+            manifests.extend([memory.state.clone(), memory.memory.clone()]);
+        }
+        let mut names = Vec::new();
+        for digest in manifests {
+            let manifest = self.chunks.get_manifest(&digest).await?;
+            names.push(ChunkStore::manifest_key(&digest));
+            names.extend(
+                manifest
+                    .extents
+                    .iter()
+                    .filter_map(|extent| match &extent.source {
+                        ExtentSource::Chunk { reference, .. } => Some(reference.key()),
+                        ExtentSource::Zero | ExtentSource::Base { .. } => None,
+                    }),
+            );
+        }
+        names.extend(head.profile.as_ref().map(ChunkRef::key));
+        if let Some(index) = pack {
+            names.push(index.key());
+            match working_set::parts(&self.chunks, index).await {
+                Ok(parts) => names.extend(parts.iter().map(ChunkRef::key)),
+                Err(error) if error.is_permanent() => {
+                    tracing::warn!(%error, "working-set pack unreadable; its parts may be swept");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(names)
     }
 
     async fn head(&self, operation: &'static str, id: Id) -> Result<Option<Head>, EngineError> {
@@ -314,6 +386,88 @@ impl Chunked {
         })
     }
 
+    /// Brings the memory image `head` names into `into.scratch`: the state
+    /// whole, and the memory as the chunk list a pager fetches from, with
+    /// the working-set pack already filled in, or whole when the manifest
+    /// is not laid out in chunks.
+    async fn fetch_memory(
+        &self,
+        head: &Head,
+        into: &FetchInto,
+    ) -> Result<FetchedMemory, EngineError> {
+        const OP: &str = "fetch";
+        if !into.memory {
+            return Ok(FetchedMemory::None);
+        }
+        let Some(stored) = &head.memory else {
+            return Err(EngineError::new(
+                ErrorKind::MemoryLost,
+                OP,
+                "the stored copy has no memory image",
+            ));
+        };
+        tokio::fs::create_dir_all(&into.scratch)
+            .await
+            .map_err(|error| EngineError::io(OP, error))?;
+        let state = into.scratch.join("state");
+        // The working set follows the manifest, which gives the image's
+        // length, while the state comes in beside both.
+        let memory = async {
+            let manifest = self
+                .chunks
+                .get_manifest(&stored.memory)
+                .await
+                .map_err(|error| storage_error(OP, error))?;
+            let refs = chunk_refs(&manifest);
+            let prefilled = match (&head.pack, &refs) {
+                (Some(index), Some(refs)) => {
+                    let zero_chunks = refs.iter().map(Option::is_none).collect();
+                    self.fetch_pack(index, &into.scratch, manifest.disk_len, &zero_chunks)
+                        .await
+                }
+                _ => None,
+            };
+            Ok::<_, EngineError>((manifest, refs, prefilled))
+        };
+        // Both run to the end, so neither is still writing when the other
+        // fails.
+        let (state_fetched, memory) =
+            tokio::join!(self.get_file(&stored.state, &state, None), memory);
+        state_fetched?;
+        let (manifest, refs, prefilled) = memory?;
+        let Some(refs) = refs else {
+            // A manifest not laid out in whole chunks cannot be paged in;
+            // bring the memory back whole instead.
+            let memory = into.scratch.join("memory");
+            self.get_file(&stored.memory, &memory, None).await?;
+            return Ok(FetchedMemory::Local {
+                state,
+                memory,
+                runtime: stored.runtime.clone(),
+            });
+        };
+        let chunks = refs
+            .iter()
+            .map(|reference| {
+                reference
+                    .as_ref()
+                    .map_or(Ok(ZERO), |reference| hash_from_hex(&reference.hash))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|()| EngineError::new(ErrorKind::Fatal, OP, "bad chunk hash in manifest"))?;
+        let manifest_bytes = manifest
+            .encode()
+            .map_err(|error| storage_error(OP, error))?;
+        Ok(FetchedMemory::Remote {
+            state,
+            memory_len: manifest.disk_len,
+            chunks,
+            manifest: manifest_bytes,
+            prefilled,
+            runtime: stored.runtime.clone(),
+        })
+    }
+
     /// Stores the learned wake profile `learned`, if there is one, and
     /// returns its reference.
     async fn put_profile(
@@ -381,6 +535,17 @@ impl Store for Chunked {
         cancel: &CancellationToken,
     ) -> Result<Archive, EngineError> {
         const OP: &str = "archive";
+        if cancel.is_cancelled() {
+            return Ok(Archive::Cancelled);
+        }
+        // Begun before the store is looked at: a sweep that takes stock
+        // before this archive publishes stops it from publishing, so it
+        // never names what that sweep deletes.
+        let publication = self
+            .chunks
+            .begin(&id.to_string())
+            .await
+            .map_err(|error| storage_error(OP, error))?;
         let earlier = match self.head(OP, id).await {
             Ok(head) => head,
             Err(error) => {
@@ -424,7 +589,11 @@ impl Store for Chunked {
                 ),
             );
             Ok(match (state?, memory?) {
-                (Some(state), Some(memory)) => Some(Some(MemoryHead { state, memory })),
+                (Some(state), Some(memory)) => Some(Some(MemoryHead {
+                    state,
+                    memory,
+                    runtime: image.runtime.clone(),
+                })),
                 _ => None,
             })
         };
@@ -455,7 +624,7 @@ impl Store for Chunked {
             .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
         let receipt = Receipt(blake3::hash(&bytes).to_hex().to_string());
         self.chunks
-            .put_pointer(&id.to_string(), bytes)
+            .publish(publication, bytes)
             .await
             .map_err(|error| storage_error(OP, error))?;
         Ok(Archive::Stored(receipt))
@@ -526,6 +695,8 @@ impl Store for Chunked {
 
     async fn fetch(&self, id: Id, into: &FetchInto) -> Result<FetchedMemory, EngineError> {
         const OP: &str = "fetch";
+        // A sandbox waits on all of it: its disk, state and pack.
+        let _waited_on = self.lanes.foreground();
         let Some(head) = self.head(OP, id).await? else {
             return Err(EngineError::new(
                 ErrorKind::Fatal,
@@ -552,78 +723,9 @@ impl Store for Chunked {
             }
             Ok::<_, EngineError>(())
         };
-        let memory = async {
-            if !into.memory {
-                return Ok(FetchedMemory::None);
-            }
-            let Some(stored) = &head.memory else {
-                return Err(EngineError::new(
-                    ErrorKind::MemoryLost,
-                    OP,
-                    "the stored copy has no memory image",
-                ));
-            };
-            tokio::fs::create_dir_all(&into.scratch)
-                .await
-                .map_err(|error| EngineError::io(OP, error))?;
-            let state = into.scratch.join("state");
-            // The working set follows the manifest, which gives the image's
-            // length, while the state comes in beside both.
-            let memory = async {
-                let manifest = self
-                    .chunks
-                    .get_manifest(&stored.memory)
-                    .await
-                    .map_err(|error| storage_error(OP, error))?;
-                let refs = chunk_refs(&manifest);
-                let prefilled = match (&head.pack, &refs) {
-                    (Some(index), Some(refs)) => {
-                        let zero_chunks = refs.iter().map(Option::is_none).collect();
-                        self.fetch_pack(index, &into.scratch, manifest.disk_len, &zero_chunks)
-                            .await
-                    }
-                    _ => None,
-                };
-                Ok::<_, EngineError>((manifest, refs, prefilled))
-            };
-            // Both run to the end, so neither is still writing when the
-            // other fails.
-            let (state_fetched, memory) =
-                tokio::join!(self.get_file(&stored.state, &state, None), memory);
-            state_fetched?;
-            let (manifest, refs, prefilled) = memory?;
-            if let Some(refs) = refs {
-                let chunks = refs
-                    .iter()
-                    .map(|reference| {
-                        reference
-                            .as_ref()
-                            .map_or(Ok(ZERO), |reference| hash_from_hex(&reference.hash))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|()| {
-                        EngineError::new(ErrorKind::Fatal, OP, "bad chunk hash in manifest")
-                    })?;
-                let manifest_bytes = manifest
-                    .encode()
-                    .map_err(|error| storage_error(OP, error))?;
-                return Ok(FetchedMemory::Remote {
-                    state,
-                    memory_len: manifest.disk_len,
-                    chunks,
-                    manifest: manifest_bytes,
-                    prefilled,
-                });
-            }
-            // A manifest not laid out in whole chunks cannot be paged in;
-            // bring the memory back whole instead.
-            let memory = into.scratch.join("memory");
-            self.get_file(&stored.memory, &memory, None).await?;
-            Ok(FetchedMemory::Local { state, memory })
-        };
         // Each runs to the end: a failure returns only once nothing of this
         // fetch writes into the sandbox's files any more.
-        let (disk, profile, memory) = tokio::join!(disk, profile, memory);
+        let (disk, profile, memory) = tokio::join!(disk, profile, self.fetch_memory(&head, into));
         disk?;
         profile?;
         memory
@@ -636,38 +738,49 @@ impl Store for Chunked {
             .map_err(|error| storage_error("delete", error))
     }
 
-    /// Points the sandbox at its disk alone. The memory chunks stay until
-    /// garbage collection finds nothing refers to them.
+    /// Points the sandbox at its disk alone, without the memory image or
+    /// the working-set pack of its pages. Their chunks stay until a sweep
+    /// finds nothing names them. The new pointer lands only on the version
+    /// read, so a write held up past a newer copy never replaces it; a
+    /// sweep's fence meanwhile means reading it again.
     async fn forget_memory(&self, id: Id) -> Result<Option<Receipt>, EngineError> {
         const OP: &str = "forget";
-        let Some(stored) = self
-            .chunks
-            .get_pointer(&id.to_string())
-            .await
-            .map_err(|error| storage_error(OP, error))?
-        else {
-            return Ok(None);
-        };
-        let head = parse_head(OP, &stored)?;
-        if head.memory.is_none() {
-            return Ok(Some(Receipt(blake3::hash(&stored).to_hex().to_string())));
+        /// Reads before giving up for now: each fence a sweep stored since
+        /// the read costs one.
+        const TRIES: usize = 3;
+        let name = id.to_string();
+        for _ in 0..TRIES {
+            let Some((stored, change)) = self
+                .chunks
+                .read_for_change(&name)
+                .await
+                .map_err(|error| storage_error(OP, error))?
+            else {
+                return Ok(None);
+            };
+            let head = parse_head(OP, &stored)?;
+            if head.memory.is_none() && head.pack.is_none() {
+                return Ok(Some(Receipt(blake3::hash(&stored).to_hex().to_string())));
+            }
+            let head = Head {
+                memory: None,
+                pack: None,
+                ..head
+            };
+            let bytes = serde_json::to_vec(&head)
+                .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
+            let receipt = Receipt(blake3::hash(&bytes).to_hex().to_string());
+            match self.chunks.publish(change, bytes).await {
+                Ok(()) => return Ok(Some(receipt)),
+                Err(StorageError::Superseded) => {}
+                Err(error) => return Err(storage_error(OP, error)),
+            }
         }
-        let head = Head {
-            memory: None,
-            ..head
-        };
-        let bytes = serde_json::to_vec(&head)
-            .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
-        let receipt = Receipt(blake3::hash(&bytes).to_hex().to_string());
-        self.chunks
-            .put_pointer(&id.to_string(), bytes)
-            .await
-            .map_err(|error| storage_error(OP, error))?;
-        Ok(Some(receipt))
+        Err(storage_error(OP, StorageError::Superseded))
     }
 
-    fn chunks(&self) -> Option<&ChunkStore> {
-        Some(&self.chunks)
+    fn chunks(&self) -> Option<(&ChunkStore, &Arc<Lanes>)> {
+        Some((&self.chunks, &self.lanes))
     }
 }
 
@@ -715,14 +828,16 @@ pub(crate) fn hash_from_hex(hex: &str) -> Result<Hash, ()> {
 fn storage_error(operation: &'static str, error: StorageError) -> EngineError {
     let kind = match &error {
         // Networks and disks recover; trying again later may work.
-        StorageError::Io(_) | StorageError::Object(_) | StorageError::Transfer(_) => {
-            ErrorKind::Transient
-        }
+        StorageError::Io(_)
+        | StorageError::Object(_)
+        | StorageError::Transfer(_)
+        | StorageError::Superseded => ErrorKind::Transient,
         // A stored copy that fails its checks will fail them again: the store
         // already retried the read and quarantined the object.
         StorageError::Integrity
         | StorageError::Truncated { .. }
         | StorageError::Invalid(_)
+        | StorageError::Unsupported(_)
         | StorageError::Json(_) => ErrorKind::Fatal,
     };
     EngineError::caused_by(kind, operation, error)

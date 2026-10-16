@@ -15,7 +15,26 @@ use crate::state::{Identity, Record, check_generation};
 use crate::step::images_of;
 use crate::store::Store;
 
-use super::{Command, Event, HostAgent, HostError, Reply, Waiter, Woke};
+use super::holds::{Write, hold_id};
+use super::{Command, Event, HostAgent, HostError, Reply, Waiter, Woke, unix_ms_now};
+
+/// Replies to `reply` once the write in `outcome` has made a change
+/// durable, or with why the change was refused or could not be kept.
+fn answer_once_written(outcome: Result<Write, HostError>, reply: Reply<()>) {
+    match outcome {
+        Ok(write) => {
+            tokio::spawn(async move {
+                let result = write
+                    .await
+                    .map_err(|error| HostError::Io(format!("keeping the holds failed: {error}")));
+                let _ = reply.send(result);
+            });
+        }
+        Err(error) => {
+            let _ = reply.send(Err(error));
+        }
+    }
+}
 
 /// Makes a new sandbox's directory and first files, from `template` where
 /// one fits. Blocks.
@@ -53,19 +72,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 priority,
                 reply,
             } => {
-                let result = self.check(id, generation).and_then(|()| {
-                    if self.slots.contains_key(&id.0) {
-                        Ok(())
-                    } else {
-                        Err(HostError::NotFound(id))
-                    }
-                });
-                if result.is_ok() {
-                    self.input(Input::Touch {
-                        sandbox: id.0,
-                        priority,
-                    });
-                }
+                let result = self.touch(id, generation, priority);
                 if let Some(reply) = reply {
                     let _ = reply.send(result);
                 }
@@ -95,26 +102,26 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Command::Hold {
                 id,
                 generation,
-                hold,
+                name,
                 ttl,
                 priority,
                 reply,
             } => {
-                let result = self
+                let outcome = self
                     .check(id, generation)
-                    .and_then(|()| self.hold(id, hold, ttl, priority));
-                let _ = reply.send(result);
+                    .and_then(|()| self.hold(id, name, ttl, priority));
+                answer_once_written(outcome, reply);
             }
             Command::Unhold {
                 id,
                 generation,
-                hold,
+                name,
                 reply,
             } => {
-                let result = self
+                let outcome = self
                     .check(id, generation)
-                    .and_then(|()| self.unhold(id, hold));
-                let _ = reply.send(result);
+                    .and_then(|()| self.unhold(id, &name));
+                answer_once_written(outcome, reply);
             }
             Command::Acquire {
                 id,
@@ -146,7 +153,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 match self.leftovers.get(&id.0) {
                     Some(&left) => self.remove_leftovers(id, left, reply),
                     None => {
-                        let _ = reply.send(Err(HostError::Broken(id)));
+                        let _ = reply.send(Err(self.blocked_error(id)));
                     }
                 }
                 return;
@@ -156,7 +163,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
             self.blocked.remove(&id.0);
-            self.remove_recorded(&record, None, vec![reply]);
+            self.remove_recorded(&record, None, vec![reply], None);
             return;
         }
         if let Err(error) = self.check(id, generation) {
@@ -175,15 +182,42 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    pub(super) fn unhold(&mut self, id: Id, hold: HoldId) -> Result<(), HostError> {
+    /// Marks sandbox `id` used now, if it exists at `generation`.
+    fn touch(
+        &mut self,
+        id: Id,
+        generation: Option<u64>,
+        priority: Priority,
+    ) -> Result<(), HostError> {
+        self.check(id, generation)?;
         if !self.slots.contains_key(&id.0) {
             return Err(HostError::NotFound(id));
         }
-        self.input(Input::Release {
+        self.input(Input::Touch {
             sandbox: id.0,
-            hold,
+            priority,
         });
         Ok(())
+    }
+
+    /// Ends named hold `name`, returning the write that makes its end
+    /// durable. If it was already gone, an earlier release may still be
+    /// on its way to disk, or have failed to get there: the write then
+    /// resolves once that release is kept.
+    pub(super) fn unhold(&mut self, id: Id, name: &str) -> Result<Write, HostError> {
+        let Some(slot) = self.slots.get_mut(&id.0) else {
+            return Err(HostError::NotFound(id));
+        };
+        let write = if slot.holds.remove(name) {
+            slot.holds.write(unix_ms_now())
+        } else {
+            slot.holds.flush()
+        };
+        self.input(Input::Release {
+            sandbox: id.0,
+            hold: hold_id(name),
+        });
+        Ok(write)
     }
 
     pub(super) fn acquire(
@@ -221,7 +255,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// runs.
     pub(super) fn check(&self, id: Id, generation: Option<u64>) -> Result<(), HostError> {
         if self.blocked.contains_key(&id.0) {
-            return Err(HostError::Broken(id));
+            return Err(self.blocked_error(id));
         }
         match self.records.get(id) {
             Some(record) => Ok(check_generation(&record, generation)?),
@@ -261,57 +295,92 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         Ok(())
     }
 
+    /// Holds sandbox `id` awake for `name`, returning the write that makes
+    /// the hold durable.
     pub(super) fn hold(
         &mut self,
         id: Id,
-        hold: HoldId,
+        name: String,
         ttl: Option<Duration>,
         priority: Priority,
-    ) -> Result<(), HostError> {
+    ) -> Result<Write, HostError> {
         if self.slots.get(&id.0).is_none_or(|slot| slot.destroy) {
             return Err(HostError::NotFound(id));
         }
         let until = ttl.map(|ttl| self.now() + ttl);
         self.input(Input::Hold {
             sandbox: id.0,
-            hold,
+            hold: hold_id(&name),
             until,
             priority,
         });
-        Ok(())
+        let now_ms = unix_ms_now();
+        let lapses_ms = ttl
+            .map(|ttl| now_ms.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)));
+        let slot = self.slots.get_mut(&id.0).ok_or(HostError::NotFound(id))?;
+        slot.holds.set(name, lapses_ms);
+        Ok(slot.holds.write(now_ms))
     }
 
-    /// Why `id` cannot be created with `config` now, if it cannot.
-    fn admit(&self, id: Id, config: &SandboxConfig) -> Result<(), HostError> {
-        if self.blocked.contains_key(&id.0) {
-            return Err(HostError::Broken(id));
+    /// The refusal of a request for blocked sandbox `id`.
+    fn blocked_error(&self, id: Id) -> HostError {
+        HostError::Blocked {
+            id,
+            reason: self.blocked.get(&id.0).cloned().unwrap_or_default(),
         }
-        self.ordinals_known().map_err(HostError::Io)?;
+    }
+
+    /// The answer to creating `id` with `config` when no work is needed: a
+    /// refusal, or success for a repeat of a create that already happened.
+    fn create_answer(&self, id: Id, config: &SandboxConfig) -> Option<Result<(), HostError>> {
+        if self.blocked.contains_key(&id.0) {
+            return Some(Err(self.blocked_error(id)));
+        }
+        if let Err(problem) = self.ordinals_known() {
+            return Some(Err(HostError::Io(problem)));
+        }
+        if self.preparing.contains(&id.0) {
+            // Perhaps this very create's earlier attempt: retrying once it
+            // is done tells.
+            return Some(Err(HostError::Busy(id)));
+        }
+        let record = self.records.get(id);
         if self.slots.contains_key(&id.0)
-            || self.preparing.contains(&id.0)
             || self.destroying.contains_key(&id.0)
             || self.hosts.contains_key(&id.0)
-            || self.records.get(id).is_some()
+            || record.is_some()
         {
-            return Err(HostError::Exists(id));
+            // Creating is idempotent: a client retrying a create whose reply
+            // it lost finds the sandbox it asked for. One with other
+            // settings, or on its way out, is someone else's.
+            let same = self.slots.get(&id.0).is_some_and(|slot| !slot.destroy)
+                && !self.destroying.contains_key(&id.0)
+                && record.is_some_and(|record| !record.removing && record.config == *config);
+            return Some(if same {
+                Ok(())
+            } else {
+                Err(HostError::Exists(id))
+            });
         }
         if self.tearing_down.contains_key(&id.0) {
             // An old VM of this id is still being torn down; its teardown
             // must not touch the new sandbox's files.
-            return Err(HostError::Busy(id));
+            return Some(Err(HostError::Busy(id)));
         }
-        let policy = self.sleep_policy(config).map_err(HostError::Invalid)?;
-        if policy.rules().archive_after.is_some() && !self.store.is_configured() {
-            return Err(HostError::Invalid(
-                "this host has no store, so sandboxes cannot be archived".into(),
-            ));
+        match self.sleep_policy(config) {
+            Err(error) => Some(Err(HostError::Invalid(error))),
+            Ok(policy) if policy.rules().archive_after.is_some() && !self.store.is_configured() => {
+                Some(Err(HostError::Invalid(
+                    "this host has no store, so sandboxes cannot be archived".into(),
+                )))
+            }
+            Ok(_) => None,
         }
-        Ok(())
     }
 
     pub(super) fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
-        if let Err(error) = self.admit(id, &config) {
-            let _ = reply.send(Err(error));
+        if let Some(answer) = self.create_answer(id, &config) {
+            let _ = reply.send(answer);
             return;
         }
         self.template_used(Shape::of(&config));
@@ -421,6 +490,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     revision: record.as_ref().map_or(0, |record| record.revision),
                     level: view.state.level.into(),
                     durability: view.state.durability.into(),
+                    backed_up_ms: record.as_ref().and_then(|record| record.backed_up_ms),
                     memory_saved: view.state.keeps_programs(),
                     step: view.step.map(|step| step_name(step).to_owned()),
                     holds: view.holds,
@@ -443,6 +513,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 (step_name(*step).to_owned(), stats)
             })
             .collect();
+        #[cfg(target_os = "linux")]
+        let store_stalled_ms = self
+            .fetcher
+            .as_ref()
+            .and_then(|fetcher| fetcher.stalled_for())
+            .map(|stalled| u64::try_from(stalled.as_millis()).unwrap_or(u64::MAX));
+        #[cfg(not(target_os = "linux"))]
+        let store_stalled_ms = None;
         HostStatus {
             sandboxes,
             steps,
@@ -465,6 +543,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.ready.status(&mut templates, &self.ready_usage());
                 templates
             },
+            store_stalled_ms,
+            unseen_activity: self.unseen_activity,
+            about: self.about.clone(),
         }
     }
 }

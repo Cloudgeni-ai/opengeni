@@ -23,6 +23,10 @@ pub enum Input {
         state: State,
         /// When it sleeps deeper.
         policy: SleepPolicy,
+        /// Its last activity: now for a new sandbox, or as recorded for one
+        /// found on disk, so a restart does not reset how long it has been
+        /// idle. A time after now counts as now.
+        last_activity: At,
     },
     /// Stop managing a sandbox and delete it.
     Remove {
@@ -426,9 +430,10 @@ impl Host {
                 sandbox,
                 state,
                 policy,
+                last_activity,
             } => {
                 if let Entry::Vacant(entry) = self.sandboxes.entry(sandbox) {
-                    entry.insert(Sandbox::new(now, state, policy));
+                    entry.insert(Sandbox::new(last_activity.min(now), state, policy));
                     self.mark(sandbox);
                 }
             }

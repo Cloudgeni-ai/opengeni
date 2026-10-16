@@ -433,6 +433,7 @@ impl World {
             sandbox: id,
             state,
             policy,
+            last_activity: self.now,
         });
     }
 

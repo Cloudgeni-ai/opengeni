@@ -46,6 +46,18 @@ pub enum Found {
     Paused,
 }
 
+/// Whether an engine can load memory images made under some runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Readable {
+    /// One of its VMMs reads them; a refusal was for another reason.
+    Yes,
+    /// None of its VMMs ever will, and this says why. Only proof counts:
+    /// a refusal alone proves nothing.
+    No(String),
+    /// It cannot tell, for instance because a runtime is unnamed.
+    Unknown,
+}
+
 /// What the host needs from a VM program.
 ///
 /// Every method that can fail reports an [`ErrorKind`] saying what the
@@ -61,6 +73,32 @@ pub trait Engine: Send + Sync + 'static {
 
     /// How this engine backs, saves and compresses guest memory.
     fn memory_profile(&self) -> MemoryProfile;
+
+    /// What restoring a memory image depends on besides the image, such as
+    /// the VMM's version and the processor: an image made under another
+    /// runtime may be refused. New VMs run under this one. Empty when
+    /// unknown.
+    fn runtime(&self) -> &str;
+
+    /// The runtime `vm` runs under, which its snapshots belong to. A VM an
+    /// earlier agent started before an upgrade may run under an older one
+    /// than [`Engine::runtime`]. Empty when unknown.
+    fn vm_runtime<'a>(&'a self, vm: &'a Self::Vm) -> &'a str {
+        let _ = vm;
+        self.runtime()
+    }
+
+    /// Whether any VMM this engine keeps can load an image made under
+    /// runtime `made_under`, on any processor. A runtime on another
+    /// processor is not a [`Readable::No`]: whether its saved processor
+    /// state fits this one is only known by trying.
+    fn reads(&self, made_under: &str) -> Readable {
+        if made_under == self.runtime() && !made_under.is_empty() {
+            Readable::Yes
+        } else {
+            Readable::Unknown
+        }
+    }
 
     /// Boots a fresh VM from its disks.
     fn boot(&self, spec: &VmSpec) -> impl Future<Output = Result<Self::Vm, EngineError>> + Send;

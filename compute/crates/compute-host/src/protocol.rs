@@ -201,6 +201,9 @@ impl SleepConfig {
     }
 }
 
+/// The most guest memory a sandbox may have, in MiB.
+pub const MAX_MEMORY_MIB: u32 = 65_536;
+
 /// What a sandbox looks like and how it sleeps.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxConfig {
@@ -225,8 +228,10 @@ impl SandboxConfig {
         if self.vcpus == 0 || self.vcpus > 32 {
             return Err("vcpus must be between 1 and 32".into());
         }
-        if !(128..=65_536).contains(&self.memory_mib) {
-            return Err("memory_mib must be between 128 and 65536".into());
+        if !(128..=MAX_MEMORY_MIB).contains(&self.memory_mib) {
+            return Err(format!(
+                "memory_mib must be between 128 and {MAX_MEMORY_MIB}"
+            ));
         }
         self.sleep_policy()
     }
@@ -241,11 +246,19 @@ impl SandboxConfig {
 /// it started inside the sandbox learns they are gone instead of acting on a
 /// different execution. Pausing, saving and restoring continue the same
 /// execution and keep the generation.
+///
+/// Every request may be retried after a lost reply. Create is idempotent:
+/// repeating it with the same settings succeeds, with other settings it is
+/// refused with [`ErrorCode::Exists`], and while the first attempt is still
+/// under way with [`ErrorCode::Busy`]. Remove reports
+/// [`ErrorCode::NotFound`] once the sandbox is gone, which a retrying
+/// caller takes as done. Waking, holding and connecting change nothing a
+/// repeat would undo.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    /// Create a sandbox. It costs nothing until first needed: the first
-    /// wake boots it.
+    /// Create a sandbox, or confirm one made with the same settings. It
+    /// costs nothing until first needed: the first wake boots it.
     Create {
         /// Its id.
         id: Id,
@@ -314,10 +327,11 @@ pub enum Request {
         level: LevelName,
     },
     /// Keep a sandbox awake for a named reason, such as an agent turn in
-    /// progress, waking it if it sleeps. Replies at once. Holding again
-    /// under the same name refreshes the hold, and with `ttl_ms` it lapses
-    /// on its own unless refreshed in time, so a caller that disappears
-    /// cannot keep a sandbox awake forever.
+    /// progress, waking it if it sleeps. Replies once the hold is on disk,
+    /// without waiting for the wake: it outlasts a restart of the host
+    /// agent. Holding again under the same name refreshes the hold, and
+    /// with `ttl_ms` it lapses on its own unless refreshed in time, so a
+    /// caller that disappears cannot keep a sandbox awake forever.
     Hold {
         /// Its id.
         id: Id,
@@ -363,6 +377,11 @@ pub enum Reply {
         /// it to finish.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         during: Option<String>,
+        /// The execution that is running. It changes only when the sandbox
+        /// boots afresh, which ends every program in it; pass it to later
+        /// requests that rely on programs started now.
+        #[serde(default)]
+        generation: u64,
     },
     /// The stream to the guest port follows this line.
     Connected {
@@ -370,6 +389,9 @@ pub enum Reply {
         waited_us: u64,
         /// Microseconds spent reaching the guest port after waking.
         connect_us: u64,
+        /// The execution the stream reached, as in [`Reply::Woken`].
+        #[serde(default)]
+        generation: u64,
     },
     /// The host's state.
     Status(Box<HostStatus>),
@@ -391,12 +413,20 @@ pub enum ErrorCode {
     Invalid,
     /// No such sandbox.
     NotFound,
-    /// The sandbox already exists.
+    /// A sandbox of that id exists with other settings, or is being
+    /// removed.
     Exists,
     /// The sandbox is still being created; try again.
     Busy,
-    /// The sandbox cannot run on this host.
+    /// The sandbox failed in a way this host cannot retry: it can be
+    /// removed, or restored elsewhere from a stored copy. Retrying here
+    /// does not help.
     Broken,
+    /// The host does not manage the sandbox until someone resolves why
+    /// (status lists it under `blocked`, with the reason). Its files and
+    /// any VM are kept as they are, and it can still be removed. Retrying
+    /// does not help until then.
+    Blocked,
     /// The sandbox was removed while the request waited.
     Removed,
     /// The request names a generation the sandbox has moved past.
@@ -422,6 +452,11 @@ pub struct SandboxStatus {
     pub level: LevelName,
     /// Where a copy of its current state is kept besides the VM.
     pub durability: DurabilityName,
+    /// When the store's latest copy of it was made, in milliseconds since
+    /// the Unix epoch: what losing this host would go back to. A sandbox
+    /// that stays busy is not archived, so this can be long ago.
+    #[serde(default)]
+    pub backed_up_ms: Option<u64>,
     /// Whether its running programs survive (a memory image or live VM).
     pub memory_saved: bool,
     /// The step in progress.
@@ -485,6 +520,40 @@ pub struct HostStatus {
     /// The warm templates new sandboxes start from, one per shape.
     #[serde(default)]
     pub templates: Vec<TemplateStatus>,
+    /// How long, in milliseconds, memory waking from object storage has
+    /// been failing to arrive, because the store does not answer or its
+    /// pages cannot be written to local disk, if it is. Sandboxes waking
+    /// from the store stall meanwhile; they lose nothing and carry on once
+    /// the store answers and there is room.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_stalled_ms: Option<u64>,
+    /// Running sandboxes whose processor use and traffic could not be read
+    /// lately. They count as busy, so none falls asleep unseen; a number
+    /// above zero means the host's sensing is failing.
+    #[serde(default)]
+    pub unseen_activity: usize,
+    /// What the host runs.
+    #[serde(default)]
+    pub about: About,
+}
+
+/// What a host agent runs, so a measurement can say what it measured.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct About {
+    /// The agent's build: the start of a hash of its executable.
+    #[serde(default)]
+    pub build: String,
+    /// What memory images made here depend on, such as the VMM's version
+    /// and the processor.
+    #[serde(default)]
+    pub runtime: String,
+    /// How guest memory is backed.
+    #[serde(default)]
+    pub memory_profile: String,
+    /// The disk image new sandboxes start from: its path, size and last
+    /// change.
+    #[serde(default)]
+    pub base_image: String,
 }
 
 /// One shape's warm template.

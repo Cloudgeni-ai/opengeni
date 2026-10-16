@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use compute_core::{Failure, Outcome, Step};
 use compute_engine::{
     CancellationToken, Completion, Engine, EngineError, ErrorKind, MemoryProfile, MemorySource,
-    RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
+    Readable, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -147,6 +147,9 @@ pub(crate) struct Job<E: Engine, S> {
     /// concurrency limit protects (a wake, once its VMM has resumed), so
     /// another may start while this one waits for its guest.
     pub unthrottle: Option<Box<dyn FnOnce() + Send + Sync>>,
+    /// The sandbox's last activity when the step was issued, in
+    /// milliseconds since the Unix epoch; every write of the record keeps it.
+    pub last_used_ms: u64,
 }
 
 fn failure(error: &EngineError) -> Outcome {
@@ -276,11 +279,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 After::New(vm, memory) => Some((vm, memory)),
             };
             if let Some((vm, memory)) = ended {
-                outcome = self.end(vm, outcome).await;
-                // A VM that would not end may still need its pager.
-                if outcome != Outcome::Failed(Failure::Fatal) {
-                    memory.close().await;
-                }
+                outcome = self.end_with_memory(vm, memory, outcome).await;
             }
             after = After::NoVm;
         }
@@ -326,7 +325,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                     return (Outcome::Failed(Failure::MemoryLost), After::NoVm);
                 };
                 match step {
-                    Step::Pause => self.simple(self.engine.pause(&live.vm).await, live),
+                    Step::Pause => self.pause(live).await,
                     Step::Resume => self.resume(live).await,
                     Step::Compress => self.compress(live).await,
                     Step::Save => self.save(live).await,
@@ -357,6 +356,7 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// nothing: an unknown fate says nothing about the sandbox's copies,
     /// so it is never taken as their loss.
     async fn commit(&mut self, change: Change) -> Result<(), StateError> {
+        let change = change.last_used(self.last_used_ms);
         let before = self.record.clone();
         let failed = match self.records.commit(self.id, before.fence(), change).await {
             Ok(record) => {
@@ -401,6 +401,22 @@ impl<E: Engine, S: Store> Job<E, S> {
     ) -> (Outcome, After<E::Vm>) {
         let outcome = result.map_or_else(|error| failure(&error), |()| Outcome::Done);
         (outcome, After::Kept(live))
+    }
+
+    /// Pauses a running VM, first recording when it was last used: from
+    /// here on the sandbox sleeps, and a restarted agent counts its idle
+    /// time from the record. Recorded first, so a pause that fails to be
+    /// recorded leaves the VM as it was.
+    async fn pause(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        if self
+            .record
+            .last_used_ms
+            .is_none_or(|was| was < self.last_used_ms)
+            && let Err(error) = self.commit(Change::new()).await
+        {
+            return (state_failure(&error), After::Kept(live));
+        }
+        self.simple(self.engine.pause(&live.vm).await, live)
     }
 
     /// Resumes a paused VM. A saved copy of it goes stale the moment the
@@ -481,6 +497,16 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// and survives the process crashing. A wake that arrives during the
     /// save cancels it.
     async fn save(&mut self, mut live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        // A lazily woken VM's image must be whole, and its pager hold all
+        // of it, before a diff can be merged over it or the image replaced.
+        match self.settled(&live, "save").await {
+            None => return (Outcome::Cancelled, After::Kept(live)),
+            Some(Err(error)) => {
+                live.memory.base = Base::Unknown;
+                return (failure(&error), After::Kept(live));
+            }
+            Some(Ok(())) => {}
+        }
         // A live VM's record never vouches for an image; this is a guard.
         if self.record.image
             && let Err(error) = self.commit(Change::new().image(false)).await
@@ -523,6 +549,23 @@ impl<E: Engine, S: Store> Job<E, S> {
         (Outcome::Done, After::Kept(live))
     }
 
+    /// Waits until `live`'s memory has settled (see
+    /// [`LiveMemory::settled`]), unless the step is cancelled first, which
+    /// gives `None`: memory still arriving from a store that is away can
+    /// take as long as the store stays away, and a wake or a removal
+    /// meanwhile must not wait for it.
+    async fn settled(
+        &self,
+        live: &Live<E::Vm>,
+        operation: &'static str,
+    ) -> Option<Result<(), EngineError>> {
+        tokio::select! {
+            biased;
+            settled = live.memory.settled(operation) => Some(settled),
+            () = self.cancel.cancelled() => None,
+        }
+    }
+
     /// Ends the VM process of a paused VM whose current state is saved, which
     /// frees all of its memory at once and loses nothing.
     async fn end_process(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
@@ -533,10 +576,9 @@ impl<E: Engine, S: Store> Job<E, S> {
             return (Outcome::Failed(Failure::Fatal), After::Kept(live));
         }
         live.stopping.store(true, Ordering::Release);
-        let outcome = self.end(live.vm, Outcome::Done).await;
-        if outcome == Outcome::Done {
-            live.memory.close().await;
-        }
+        let outcome = self
+            .end_with_memory(live.vm, live.memory, Outcome::Done)
+            .await;
         (outcome, After::NoVm)
     }
 
@@ -545,9 +587,6 @@ impl<E: Engine, S: Store> Job<E, S> {
     async fn write_image(&self, live: &mut Live<E::Vm>) -> Result<Verified, EngineError> {
         const OP: &str = "save";
         let images = images_of(&self.paths);
-        // A lazily woken VM's image must be whole, and its pager hold all
-        // of it, before a diff can be merged over it or the image replaced.
-        live.memory.settled(OP).await?;
         #[cfg(target_os = "linux")]
         if let (Some(_), Base::Image(generation)) = (&live.memory.paging, live.memory.base) {
             let images = images.clone();
@@ -585,6 +624,10 @@ impl<E: Engine, S: Store> Job<E, S> {
         let snapshot = started.elapsed();
         let scratch = self.paths.dir.join("saving");
         let watching = Arc::clone(&live.memory.disk);
+        // The runtime of the VMM that wrote the snapshot, which after an
+        // upgrade can be older than the engine's own.
+        let runtime = self.engine.vm_runtime(&live.vm).to_owned();
+        let memory_len = self.spec.memory_bytes();
         let published = blocking(move || {
             // The VMM wrote these inside its jail, where it could have put
             // links instead: they move somewhere only the host reaches and
@@ -604,9 +647,11 @@ impl<E: Engine, S: Store> Job<E, S> {
                 _ => Parts::Whole {
                     state: &files.state,
                     memory: &files.memory,
+                    len: memory_len,
                 },
             };
-            let published = images.publish(parts);
+            let made_by = (!runtime.is_empty()).then_some(runtime.as_str());
+            let published = images.publish_made_by(parts, made_by);
             if published.is_err() {
                 let _ = remove_if_present(&files.state);
                 let _ = remove_if_present(&files.memory);
@@ -684,6 +729,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         let files = RestoreFiles {
             state: self.paths.snapshot.state.clone(),
             memory,
+            made_under: image.meta().runtime.clone(),
         };
         // On any failure below the VM process is gone before its memory's
         // pager and hydration are stopped and joined, so a retry never
@@ -696,13 +742,19 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
             Err(error) => {
                 self.launches += u32::from(error.launched);
-                if error.kind == ErrorKind::MemoryLost {
-                    let outcome = self.rejected(&images, &image, &live_memory, &error).await;
+                let outcome = if error.kind == ErrorKind::MemoryLost {
+                    self.rejected(&images, &image, &live_memory, &error).await
+                } else {
+                    failure(&error)
+                };
+                if error.kind == ErrorKind::Fatal {
+                    // A VMM the engine could not end may still run on this
+                    // memory: its guest must never wait forever on a page.
+                    live_memory.serve_detached();
+                } else {
                     live_memory.close().await;
-                    return (outcome, After::NoVm);
                 }
-                live_memory.close().await;
-                return (failure(&error), After::NoVm);
+                return (outcome, After::NoVm);
             }
         };
         let loaded = started.elapsed();
@@ -710,10 +762,9 @@ impl<E: Engine, S: Store> Job<E, S> {
         // A restore continues the saved execution: the generation stays.
         let running = Change::new().image(false).archived(false);
         if let Err(error) = self.commit(running).await {
-            let outcome = self.end(vm, state_failure(&error)).await;
-            if outcome != Outcome::Failed(Failure::Fatal) {
-                live_memory.close().await;
-            }
+            let outcome = self
+                .end_with_memory(vm, live_memory, state_failure(&error))
+                .await;
             return (outcome, After::NoVm);
         }
         let committed = started.elapsed();
@@ -725,11 +776,10 @@ impl<E: Engine, S: Store> Job<E, S> {
         if let Err(error) = self.engine.resume(&vm).await {
             // The VM ends before the image is reconsidered, so no second
             // process ever runs from the same files.
-            let ended = self.end(vm, Outcome::Done).await;
+            let ended = self.end_with_memory(vm, live_memory, Outcome::Done).await;
             if ended != Outcome::Done {
                 return (ended, After::NoVm);
             }
-            live_memory.close().await;
             return (
                 self.after_failed_wake(&error, true, archived).await,
                 After::NoVm,
@@ -759,10 +809,15 @@ impl<E: Engine, S: Store> Job<E, S> {
 
     /// Decides what the VMM refusing to load `image` means. The image is
     /// given up only when it is proven bad: a local image that fails the
-    /// deep check goes to quarantine, and a remote image whose store copy
-    /// is bad or gone is dropped. Otherwise the refusal was the host's (a
-    /// pager that could not start or could not reach the store, say) and
-    /// the image is kept for a retry.
+    /// deep check goes to quarantine, a remote image whose store copy is
+    /// bad or gone is dropped, and an image in a snapshot format no VMM the
+    /// engine keeps can read is given up, since none ever will. Otherwise
+    /// the refusal may have been the host's (memory short, a pager that
+    /// could not start or reach the store, a VMM killed while loading) and
+    /// the image is kept for a retry. That includes an image made on
+    /// another processor model: whether its saved processor state fits
+    /// this one is unproven, and the image still wakes on a host like the
+    /// one that made it.
     async fn rejected(
         &mut self,
         images: &Images,
@@ -772,6 +827,34 @@ impl<E: Engine, S: Store> Job<E, S> {
     ) -> Outcome {
         const OP: &str = "restore";
         tracing::warn!(id = %self.id, %error, "the VMM refused the memory image");
+        let made_under = image.meta().runtime.as_deref().unwrap_or("");
+        match self.engine.reads(made_under) {
+            Readable::No(why) => {
+                tracing::warn!(
+                    id = %self.id,
+                    made_under,
+                    why,
+                    "no VMM here reads the refused image; waking from the disk"
+                );
+                if let Err(error) = self.commit(Change::new().image(false)).await {
+                    return state_failure(&error);
+                }
+                return failure(&EngineError::new(
+                    ErrorKind::MemoryLost,
+                    OP,
+                    format!("the memory image cannot be read here: {why}; {error}"),
+                ));
+            }
+            Readable::Yes | Readable::Unknown if made_under != self.engine.runtime() => {
+                tracing::warn!(
+                    id = %self.id,
+                    made_under,
+                    runtime = self.engine.runtime(),
+                    "the refused image was made under another runtime"
+                );
+            }
+            Readable::Yes | Readable::Unknown => {}
+        }
         if image.meta().remote {
             #[cfg(target_os = "linux")]
             let lost = memory
@@ -965,6 +1048,20 @@ impl<E: Engine, S: Store> Job<E, S> {
                 Outcome::Failed(Failure::Fatal)
             }
         }
+    }
+
+    /// Like [`Self::end`] for a VM with its memory: the pager going away is
+    /// expected, and once the process has ended its memory is closed. A VM
+    /// that would not end keeps its memory served, since it may still run.
+    async fn end_with_memory(&self, vm: E::Vm, memory: LiveMemory, outcome: Outcome) -> Outcome {
+        memory.ending();
+        let outcome = self.end(vm, outcome).await;
+        if outcome == Outcome::Failed(Failure::Fatal) {
+            memory.serve_detached();
+        } else {
+            memory.close().await;
+        }
+        outcome
     }
 
     /// Lets the guest fix its clock, drop dead connections and learn which

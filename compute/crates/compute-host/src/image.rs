@@ -33,7 +33,7 @@
 
 use std::fmt;
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read};
 use std::ops::Range;
 use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -62,6 +62,12 @@ const REMOTE: &str = "remote.json";
 const FILLED: &str = "filled";
 const CURRENT: &str = "current";
 const QUARANTINE: &str = "quarantine";
+/// The most saved processor and device state an image may hold. A VMM's is
+/// tens of kilobytes; one anywhere near this is not a snapshot, and is
+/// refused before it is read into memory.
+const MAX_STATE_BYTES: u64 = 64 << 20;
+/// The most an image's description may hold, for the same reason.
+const MAX_META_BYTES: u64 = 1 << 20;
 /// Quarantined generations kept per sandbox; older ones are removed so a
 /// repeatedly failing sandbox cannot fill the disk.
 const QUARANTINE_KEEP: usize = 2;
@@ -107,6 +113,11 @@ pub(crate) struct Meta {
     /// remote image's memory ahead of hydration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filled_hash: Option<String>,
+    /// The runtime that made the image ([`compute_engine::Engine::runtime`]),
+    /// if known. It picks the VMM that restores the image, and proves an
+    /// image unreadable when no VMM the host keeps reads its format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
 }
 
 /// Per-chunk hashes of a memory image.
@@ -195,8 +206,14 @@ pub(crate) enum Depth {
 /// What a new generation is built from.
 #[derive(Debug)]
 pub(crate) enum Parts<'a> {
-    /// A complete memory file and its state, both moved in.
-    Whole { state: &'a Path, memory: &'a Path },
+    /// A complete memory file and its state, both moved in. `len` is the
+    /// sandbox's memory size: a memory file of any other length is refused
+    /// before anything is read from it.
+    Whole {
+        state: &'a Path,
+        memory: &'a Path,
+        len: u64,
+    },
     /// The pages that changed since `base`, merged over a copy of it; holes
     /// in `diff` are pages equal to `base`. `state` and `diff` are moved in
     /// or consumed.
@@ -229,6 +246,19 @@ pub(crate) enum Parts<'a> {
 #[derive(Clone, Debug)]
 pub(crate) struct Images {
     dir: PathBuf,
+}
+
+/// A new generation's memory, in staging, and what describes it.
+struct Staged<'a> {
+    parent: Option<Generation>,
+    /// None when the state is shared in already.
+    state: Option<&'a Path>,
+    memory_len: u64,
+    chunks: ChunkMap,
+    /// The manifest of memory still in object storage.
+    remote: Option<&'a [u8]>,
+    /// Which chunks of remote memory are already filled in.
+    filled: Option<Vec<u8>>,
 }
 
 impl Images {
@@ -293,9 +323,10 @@ impl Images {
     pub fn verify(&self, generation: Generation, depth: Depth) -> Result<Verified, Suspect> {
         let dir = self.path(generation);
         let damaged = |reason: String| Suspect::Damaged { generation, reason };
-        let meta = match fs::read(dir.join(META)) {
-            Ok(bytes) => serde_json::from_slice::<Meta>(&bytes)
+        let meta = match read_at_most(&dir.join(META), MAX_META_BYTES) {
+            Ok(Some(bytes)) => serde_json::from_slice::<Meta>(&bytes)
                 .map_err(|error| damaged(format!("{META}: {error}")))?,
+            Ok(None) => return Err(damaged(format!("{META} is too large"))),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Err(Suspect::Missing(generation));
             }
@@ -307,13 +338,15 @@ impl Images {
                 meta.version, meta.generation
             )));
         }
-        let state = fs::read(dir.join(STATE))?;
-        if state.len() as u64 != meta.state_len
-            || blake3::hash(&state).to_hex().as_str() != meta.state_hash
-        {
+        let state = read_at_most(&dir.join(STATE), meta.state_len.min(MAX_STATE_BYTES))?;
+        if state.is_none_or(|state| {
+            state.len() as u64 != meta.state_len
+                || blake3::hash(&state).to_hex().as_str() != meta.state_hash
+        }) {
             return Err(damaged("state does not match its hash".into()));
         }
-        let chunk_bytes = fs::read(dir.join(CHUNKS))?;
+        let chunk_bytes =
+            read_at_most(&dir.join(CHUNKS), chunk_map_len(meta.memory_len))?.unwrap_or_default();
         if blake3::hash(&chunk_bytes).to_hex().as_str() != meta.chunks_hash {
             return Err(damaged("chunk map does not match its hash".into()));
         }
@@ -348,7 +381,8 @@ impl Images {
 
     /// The chunk map of a verified generation.
     pub fn chunk_map(&self, image: &Verified) -> io::Result<ChunkMap> {
-        let bytes = fs::read(self.path(image.generation()).join(CHUNKS))?;
+        let path = self.path(image.generation()).join(CHUNKS);
+        let bytes = read_at_most(&path, chunk_map_len(image.meta.memory_len))?.unwrap_or_default();
         if blake3::hash(&bytes).to_hex().as_str() != image.meta.chunks_hash {
             return Err(invalid("chunk map changed after it was verified"));
         }
@@ -389,71 +423,39 @@ impl Images {
 
     /// Builds, checks and publishes a new generation from `parts`, then
     /// points `current` at it. Blocking: run off the async executor.
+    #[cfg(test)]
     pub fn publish(&self, parts: Parts<'_>) -> Result<Verified, Suspect> {
+        self.publish_made_by(parts, None)
+    }
+
+    /// Builds, checks and publishes a new generation from `parts`, made
+    /// under `runtime` (see [`Meta::runtime`]), then points `current` at
+    /// it. Blocking: run off the async executor.
+    pub fn publish_made_by(
+        &self,
+        parts: Parts<'_>,
+        runtime: Option<&str>,
+    ) -> Result<Verified, Suspect> {
         // The record vouches for what is published here, so the directory
         // itself must survive a crash too.
         crate::layout::create_dir_durably(&self.dir)?;
         let generation = self.next_generation()?;
         let staging = self.fresh_staging(generation)?;
-        let memory = staging.join(MEMORY);
-        let (parent, state, memory_len, chunks, remote, filled) = match parts {
-            Parts::Whole {
-                state,
-                memory: whole,
-            } => {
-                move_in(whole, &memory)?;
-                let file = File::open(&memory)?;
-                let len = file.metadata()?.len();
-                let all: Vec<usize> = (0..chunk_count(len)).collect();
-                let chunks = ChunkMap(hash_chunks(&file, len, &all)?);
-                (None, Some(state), len, chunks, None, None)
-            }
-            Parts::Shared { from, image } => {
-                let chunks = share_image(from, image, &staging)?;
-                (None, None, image.meta.memory_len, chunks, None, None)
-            }
-            Parts::Diff { base, state, diff } => {
-                let parent = self.verify(base, Depth::Light)?;
-                if parent.meta.remote {
-                    return Err(Suspect::Damaged {
-                        generation: base,
-                        reason: "merge base is not fully in local memory".into(),
-                    });
-                }
-                let mut chunks = self.chunk_map(&parent)?;
-                let len = parent.meta.memory_len;
-                let touched = merge(&self.memory(base), diff, &memory, len)?;
-                let file = File::open(&memory)?;
-                for (index, hash) in touched.iter().zip(hash_chunks(&file, len, &touched)?) {
-                    chunks.0[*index] = hash;
-                }
-                fs::remove_file(diff)?;
-                (Some(base), Some(state), len, chunks, None, None)
-            }
-            Parts::Remote {
-                state,
-                memory_len,
-                chunks,
-                manifest,
-                prefilled,
-            } => {
-                let filled = remote_memory(&memory, memory_len, prefilled)?;
-                (
-                    None,
-                    Some(state),
-                    memory_len,
-                    chunks,
-                    Some(manifest),
-                    filled,
-                )
-            }
-        };
+        let Staged {
+            parent,
+            state,
+            memory_len,
+            chunks,
+            remote,
+            filled,
+        } = self.stage_memory(parts, &staging)?;
         if let Some(state) = state {
             move_in(state, &staging.join(STATE))?;
         }
-        let state_bytes = fs::read(staging.join(STATE))?;
+        let state_bytes = read_at_most(&staging.join(STATE), MAX_STATE_BYTES)?
+            .ok_or_else(|| invalid("saved state is too large to be a snapshot's"))?;
         let chunk_bytes = chunks.encode();
-        if chunk_bytes.len() != chunk_count(memory_len) * 32 {
+        if chunk_bytes.len() as u64 != chunk_map_len(memory_len) {
             return Err(invalid("chunk map does not cover memory").into());
         }
         write_synced(&staging.join(CHUNKS), &chunk_bytes)?;
@@ -472,6 +474,9 @@ impl Images {
             chunks_hash: blake3::hash(&chunk_bytes).to_hex().to_string(),
             remote: remote.is_some(),
             filled_hash: filled.map(|filled| blake3::hash(&filled).to_hex().to_string()),
+            runtime: runtime
+                .filter(|runtime| !runtime.is_empty())
+                .map(str::to_owned),
         };
         write_synced(
             &staging.join(META),
@@ -490,6 +495,87 @@ impl Images {
         )?;
         failpoint("pointed")?;
         Ok(verified)
+    }
+
+    /// Puts the memory of `parts` at `memory` and hashes what is new.
+    fn stage_memory<'a>(&self, parts: Parts<'a>, staging: &Path) -> Result<Staged<'a>, Suspect> {
+        let memory = &staging.join(MEMORY);
+        Ok(match parts {
+            Parts::Whole {
+                state,
+                memory: whole,
+                len: memory_len,
+            } => {
+                move_in(whole, memory)?;
+                let file = File::open(memory)?;
+                let found = file.metadata()?.len();
+                if found != memory_len {
+                    return Err(invalid(&format!(
+                        "memory has {found} bytes, the sandbox {memory_len}"
+                    ))
+                    .into());
+                }
+                let all: Vec<usize> = (0..chunk_count(memory_len)).collect();
+                Staged {
+                    parent: None,
+                    state: Some(state),
+                    memory_len,
+                    chunks: ChunkMap(hash_chunks(&file, memory_len, &all)?),
+                    remote: None,
+                    filled: None,
+                }
+            }
+            Parts::Shared { from, image } => Staged {
+                parent: None,
+                state: None,
+                memory_len: image.meta.memory_len,
+                chunks: share_image(from, image, staging)?,
+                remote: None,
+                filled: None,
+            },
+            Parts::Diff { base, state, diff } => {
+                let parent = self.verify(base, Depth::Light)?;
+                if parent.meta.remote {
+                    return Err(Suspect::Damaged {
+                        generation: base,
+                        reason: "merge base is not fully in local memory".into(),
+                    });
+                }
+                let mut chunks = self.chunk_map(&parent)?;
+                let memory_len = parent.meta.memory_len;
+                let touched = merge(&self.memory(base), diff, memory, memory_len)?;
+                let file = File::open(memory)?;
+                for (index, hash) in touched
+                    .iter()
+                    .zip(hash_chunks(&file, memory_len, &touched)?)
+                {
+                    chunks.0[*index] = hash;
+                }
+                fs::remove_file(diff)?;
+                Staged {
+                    parent: Some(base),
+                    state: Some(state),
+                    memory_len,
+                    chunks,
+                    remote: None,
+                    filled: None,
+                }
+            }
+            Parts::Remote {
+                state,
+                memory_len,
+                chunks,
+                manifest,
+                prefilled,
+            } => Staged {
+                parent: None,
+                state: Some(state),
+                memory_len,
+                chunks,
+                remote: Some(manifest),
+                filled: remote_memory(memory, memory_len, prefilled)?,
+            },
+        })
     }
 
     /// Records that `image`'s memory file is now complete, after hydration
@@ -659,6 +745,12 @@ pub(crate) fn retirable(
 /// Number of chunks covering `len` bytes.
 pub(crate) fn chunk_count(len: u64) -> usize {
     usize::try_from(len.div_ceil(CHUNK_BYTES)).unwrap_or(usize::MAX)
+}
+
+/// The length of the chunk map of an image of `len` bytes: a hash per
+/// chunk.
+fn chunk_map_len(len: u64) -> u64 {
+    len.div_ceil(CHUNK_BYTES).saturating_mul(32)
 }
 
 /// The byte range of chunk `index` in an image of `len` bytes.
@@ -918,6 +1010,17 @@ fn sync_dir(path: &Path) -> io::Result<()> {
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_owned())
+}
+
+/// The contents of the file at `path`, or `None` if it holds more than
+/// `max` bytes. Never reads more than one byte past `max`, however large
+/// the file or however it grows meanwhile.
+fn read_at_most(path: &Path, max: u64) -> io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= max).then_some(bytes))
 }
 
 /// Whether a failed read shows an image is damaged (a file is missing, or

@@ -89,11 +89,11 @@ pub(crate) enum Health {
 }
 
 impl Sandbox {
-    pub fn new(now: At, state: State, policy: SleepPolicy) -> Self {
+    pub fn new(last_activity: At, state: State, policy: SleepPolicy) -> Self {
         Self {
             state: State::new(state.level, state.durability, state.memory_saved),
             policy,
-            last_activity: now,
+            last_activity,
             wake: None,
             holds: BTreeMap::new(),
             floor: Level::Running,

@@ -21,7 +21,8 @@
 //! let policy = SleepPolicy::new(SleepRules::RECOMMENDED).unwrap();
 //! let sandbox = SandboxId(1);
 //! let mut actions = Vec::new();
-//! host.handle(At::ZERO, Input::Add { sandbox, state: State::RUNNING, policy }, &mut actions);
+//! let last_activity = At::ZERO;
+//! host.handle(At::ZERO, Input::Add { sandbox, state: State::RUNNING, policy, last_activity }, &mut actions);
 //! // Ten idle seconds later, it pauses.
 //! assert_eq!(host.next_deadline(), Some(At::from_millis(10_000)));
 //! host.handle(At::from_millis(10_000), Input::Tick, &mut actions);

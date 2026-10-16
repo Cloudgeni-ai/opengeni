@@ -508,7 +508,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Filled::Failed { vm } => {
                 self.ready.retry.insert(shape, Instant::now() + FILL_RETRY);
                 if let Some(record) = self.records.get(host) {
-                    self.remove_recorded(&record, vm, Vec::new());
+                    self.remove_recorded(&record, vm, Vec::new(), None);
                 } else {
                     tracing::error!(%host, "a failed ready sandbox has no record");
                 }
@@ -521,7 +521,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Idle { record, live, .. } = idle;
         live.stopping.store(true, Ordering::Release);
         let record = self.records.get(record.id).unwrap_or(record);
-        self.remove_recorded(&record, Some((live.vm, live.memory)), Vec::new());
+        self.remove_recorded(&record, Some((live.vm, live.memory)), Vec::new(), None);
     }
 
     /// Removes the ready sandboxes of `shape` filled from any template but
@@ -715,7 +715,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 if current.id == id {
                     self.hosts.insert(host.0, id.0);
                 }
-                self.remove_recorded(&current, Some((live.vm, live.memory)), Vec::new());
+                self.remove_recorded(&current, Some((live.vm, live.memory)), Vec::new(), None);
                 let _ = reply.send(Err(error));
                 return;
             }
@@ -745,6 +745,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sandbox: id.0,
             state: State::new(Level::Paused, Durability::Volatile, false),
             policy,
+            last_activity: self.now(),
         });
         if died {
             self.exited(id, incarnation);

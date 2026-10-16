@@ -407,11 +407,15 @@ impl Template {
             .map_err(CopyFailure::from)?
             .ok_or_else(|| CopyFailure::Unusable("the template has no image".into()))?;
         copy_sparse(&self.dir.join(DISK), &paths.disk).map_err(CopyFailure::from)?;
+        // A clone is made by whatever made its template.
         images
-            .publish(Parts::Shared {
-                from: &source,
-                image: &image,
-            })
+            .publish_made_by(
+                Parts::Shared {
+                    from: &source,
+                    image: &image,
+                },
+                image.meta().runtime.as_deref(),
+            )
             .map_err(CopyFailure::from)?;
         Ok(())
     }
@@ -899,11 +903,12 @@ async fn attempt<E: Engine>(
         blocking(move || watch.sync()).await
     }
     .await;
+    let runtime = engine.vm_runtime(&vm).to_owned();
     let stopped = engine.stop(vm).await.map_err(|error| error.to_string());
     saved?;
     stopped?;
     let (root, paths) = (build.root.clone(), paths.clone());
-    blocking(move || publish(&root, inputs, &paths, &files)).await
+    blocking(move || publish(&root, inputs, &paths, &files, &runtime)).await
 }
 
 /// Waits until the guest of `vm` accepts a connection on `port`.
@@ -934,13 +939,15 @@ pub(crate) async fn ready<E: Engine>(
     }
 }
 
-/// Puts the template together from what its stopped VM left in `paths`,
-/// publishes it, and removes older templates of its shape. Blocks.
+/// Puts the template together from what its stopped VM, made under
+/// `runtime`, left in `paths`, publishes it, and removes older templates
+/// of its shape. Blocks.
 fn publish(
     root: &Path,
     inputs: Inputs,
     paths: &Paths,
     files: &SnapshotFiles,
+    runtime: &str,
 ) -> io::Result<Template> {
     let templates = templates_dir(root);
     let name = inputs.dir_name();
@@ -955,10 +962,14 @@ fn publish(
     compute_engine::confined::check_written(&disk)?;
     seal(&disk)?;
     Images::new(staging.join("images"))
-        .publish(Parts::Whole {
-            state: &written.state,
-            memory: &written.memory,
-        })
+        .publish_made_by(
+            Parts::Whole {
+                state: &written.state,
+                memory: &written.memory,
+                len: inputs.shape.bytes(),
+            },
+            Some(runtime),
+        )
         .map_err(io::Error::other)?;
     let encoded = serde_json::to_vec_pretty(&inputs).map_err(io::Error::other)?;
     write_atomic(&staging.join(INPUTS), &encoded)?;

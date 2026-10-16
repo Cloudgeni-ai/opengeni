@@ -432,7 +432,7 @@ async fn only_a_stream_that_carries_traffic_keeps_its_sandbox_awake() {
     lab.create(sandbox, PAUSE_SOON).await;
     let (reply, mut stream) = lab
         .client
-        .connect(sandbox, 52, PriorityName::Interactive)
+        .connect(sandbox, None, 52, PriorityName::Interactive)
         .await
         .unwrap();
     assert!(matches!(reply, Reply::Connected { .. }), "{reply:?}");
@@ -484,7 +484,7 @@ async fn a_stream_carries_both_directions_at_once() {
     lab.create(sandbox, NEVER).await;
     let (reply, mut stream) = lab
         .client
-        .connect(sandbox, 52, PriorityName::Interactive)
+        .connect(sandbox, None, 52, PriorityName::Interactive)
         .await
         .unwrap();
     assert!(matches!(reply, Reply::Connected { .. }), "{reply:?}");
@@ -555,6 +555,56 @@ async fn traffic_counts_when_processor_use_cannot_be_read() {
     check_traffic_keeps_awake(&lab, id(19)).await;
 }
 
+/// A sandbox none of whose activity can be read counts as busy, since it
+/// may be working, and the host's status counts it; once its activity can
+/// be read again, it falls asleep when idle as usual. It counts as busy at
+/// once, so even a pause delay shorter than the reading window never lets
+/// it fall asleep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_whose_activity_cannot_be_read_stays_awake() {
+    const PAUSE_AFTER: SleepConfig = SleepConfig {
+        pause_after_ms: Some(300),
+        ..NEVER
+    };
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        |config| {
+            config.busy = Some(BusyRule {
+                cpu_percent: 50,
+                io_bytes_per_second: 100_000,
+                window: Duration::from_secs(2),
+            });
+        },
+    )
+    .await;
+    let sandbox = id(100);
+    lab.world.unreadable_cpu.store(true, Ordering::SeqCst);
+    lab.world.unreadable_io.store(true, Ordering::SeqCst);
+    lab.create(sandbox, PAUSE_AFTER).await;
+    assert_eq!(lab.run(sandbox, &["still"]).await, ["ok"]);
+    lab.wait_until("its activity counted as unseen", |status| {
+        status.unseen_activity == 1
+    })
+    .await;
+    sleep(Duration::from_millis(2_000)).await;
+    let status = lab.status().await;
+    assert_eq!(
+        Lab::sandbox(&status, sandbox).level,
+        LevelName::Running,
+        "an unseen guest fell asleep"
+    );
+    assert_eq!(status.unseen_activity, 1);
+    lab.world.unreadable_cpu.store(false, Ordering::SeqCst);
+    lab.world.unreadable_io.store(false, Ordering::SeqCst);
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    lab.wait_until("nothing unseen", |status| status.unseen_activity == 0)
+        .await;
+    lab.assert_clean();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rule_that_ignores_the_processor_still_counts_traffic() {
     let lab = Lab::start_configured(
@@ -578,7 +628,9 @@ async fn a_rule_that_ignores_the_processor_still_counts_traffic() {
 /// pause moved is the host's work, and must not keep the guest awake.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pause_and_wake_between_two_readings_is_not_guest_activity() {
-    const EVERY: Duration = Duration::from_millis(400);
+    // Wide enough for a pause, its record write and a wake to fit between
+    // two readings while the other tests load the host.
+    const EVERY: Duration = Duration::from_millis(800);
     const PAUSE_AFTER: Duration = Duration::from_millis(1_000);
     let lab = Lab::start_configured(
         Lab::root(),
