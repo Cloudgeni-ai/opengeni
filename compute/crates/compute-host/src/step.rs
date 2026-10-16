@@ -748,10 +748,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 let source = ChunkSource::new(Arc::clone(&hydration)).map_err(io)?;
                 (Memory::Remote(source), Some(hydration))
             } else {
-                let file = fs::File::open(images.memory(generation)).map_err(io)?;
-                // SAFETY: published images are sealed read-only and never
-                // modified; a new save always writes a new generation.
-                let mapped = unsafe { compute_pager::MappedFile::new(&file) }.map_err(io)?;
+                let mapped = images.map_memory(generation).map_err(io)?;
                 (Memory::Local(mapped), None)
             };
             live.paging =
