@@ -1971,10 +1971,15 @@ describe("interaction attempt tools", () => {
       context,
     );
     expect(captures).toBe(1);
-    expect(visualResult.content).toEqual([
-      { type: "text", text: JSON.stringify(visualResult.structuredContent) },
-      { type: "image", data: Buffer.from(image).toString("base64"), mimeType: "image/jpeg" },
-    ]);
+    expect(visualResult.content).toHaveLength(2);
+    const [visualText, visualImage] = visualResult.content;
+    expect(visualText).toMatchObject({ type: "text" });
+    expect((visualText as { text: string }).text.startsWith(`Tab ${target.id}`)).toBe(true);
+    expect(visualImage).toEqual({
+      type: "image",
+      data: Buffer.from(image).toString("base64"),
+      mimeType: "image/jpeg",
+    });
     expect(visualResult.structuredContent).toMatchObject({
       agentView: { sourceKind: "snapshot", nodes: [] },
     });
