@@ -20,11 +20,41 @@ import {
   assertManagedBrowserProfileUnused,
   browserLaunchArguments,
   browserProfileCryptoPolicy,
+  macosOffscreenChromeArguments,
+  parseMacosDisplayGeometry,
   reapManagedBrowserProcesses,
   inspectOwnedManagedBrowserProcess,
 } from "../src/runner";
 
 describe("managed browser profile cryptography", () => {
+  test("offscreen macOS browsers present the host display and an ordinary User-Agent", async () => {
+    const geometry = parseMacosDisplayGeometry(
+      JSON.stringify({ w: 1920, h: 1080, x: 0, y: 88, vw: 1920, vh: 962, scale: 1 }),
+    );
+    expect(geometry).toEqual({
+      width: 1920,
+      height: 1080,
+      scale: 1,
+      insets: { left: 0, right: 0, top: 30, bottom: 88 },
+    });
+    expect(parseMacosDisplayGeometry("")).toBeNull();
+    expect(parseMacosDisplayGeometry(JSON.stringify({ w: 1920, h: 1080 }))).toBeNull();
+    expect(
+      parseMacosDisplayGeometry(
+        JSON.stringify({ w: 1920, h: 1080, x: 0, y: -5, vw: 1920, vh: 962, scale: 1 }),
+      ),
+    ).toBeNull();
+    expect(
+      await macosOffscreenChromeArguments("/Applications/Fixture", {
+        chromeMajorVersion: async () => 155,
+        mainDisplay: async () => geometry!,
+      }),
+    ).toEqual([
+      "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+      "--screen-info={1920x1080 devicePixelRatio=1 workAreaLeft=0 workAreaRight=0 workAreaTop=30 workAreaBottom=88}",
+    ]);
+  });
+
   test("declares only explicitly pinned portable policies", () => {
     expect(browserProfileCryptoPolicy("linux")).toBe("chromium_basic");
     expect(browserProfileCryptoPolicy("darwin")).toBe("chromium_mock_keychain");
@@ -47,6 +77,64 @@ describe("managed browser profile cryptography", () => {
     expect(browserLaunchArguments("darwin", [], true)).not.toContain(feature);
     expect(browserLaunchArguments("win32", [], true)).not.toContain(feature);
   });
+
+  test.skipIf(process.platform !== "darwin")(
+    "launches an offscreen managed browser as the real browser without a window",
+    async () => {
+      const root = await mkdtemp("/tmp/og-runner-offscreen-");
+      const contents = join(root, "Fixture Browser.app", "Contents");
+      const browserPath = join(contents, "MacOS", "Fixture Browser");
+      const helperPath = join(root, "opengeni-computer-native");
+      const binaryPath = join(root, "fixture-agent-browser");
+      await mkdir(join(contents, "MacOS"), { recursive: true });
+      await writeFile(browserPath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      await writeFile(
+        join(contents, "Info.plist"),
+        "<plist><dict><key>CFBundleShortVersionString</key>\n\t<string>155.0.8059.82</string></dict></plist>",
+      );
+      await writeFile(helperPath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+      await writeFile(
+        binaryPath,
+        `#!/usr/bin/env bun\nconsole.log(JSON.stringify({ success: true, data: { executable: process.env.AGENT_BROWSER_EXECUTABLE_PATH, headed: process.env.AGENT_BROWSER_HEADED, backgroundExecutable: process.env.OPENGENI_BACKGROUND_BROWSER_EXECUTABLE ?? null }, error: null }));\n`,
+        { mode: 0o700 },
+      );
+      const runner = await AgentBrowserJsonRunner.create({
+        namespace: "og",
+        sessionName: "offscreen",
+        socketDirectory: join(root, "socket"),
+        profileDirectory: join(root, "profile"),
+        downloadDirectory: join(root, "downloads"),
+        screenshotDirectory: join(root, "screenshots"),
+        headed: true,
+        offscreen: true,
+        browserExecutablePath: browserPath,
+        browserLaunchHelperPath: helperPath,
+        binary: {
+          path: binaryPath,
+          name: "agent-browser-darwin-arm64",
+          version: "0.33.2",
+          sha256: "fixture",
+        },
+      });
+      try {
+        const result = await runner.run<{
+          executable: string;
+          headed: string;
+          backgroundExecutable: string | null;
+        }>(["open", "about:blank"]);
+        expect(result.headed).toBe("0");
+        expect(result.backgroundExecutable).toBeNull();
+        expect(result.executable).toStartWith(join(root, "chrome-launch"));
+        const wrapper = await readFile(result.executable, "utf8");
+        expect(wrapper).toContain(`exec '${browserPath}' '--user-agent=Mozilla/5.0 (Macintosh;`);
+        expect(wrapper).toContain("Chrome/155.0.0.0 Safari/537.36'");
+        expect(wrapper).toMatch(/'--screen-info=\{\d+x\d+ devicePixelRatio=\d+ /u);
+        expect(wrapper).not.toContain("HeadlessChrome");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test.skipIf(process.platform !== "darwin")(
     "launches a managed browser through the lifecycle-preserving background helper",

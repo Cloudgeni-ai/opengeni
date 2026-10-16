@@ -2368,6 +2368,13 @@ async function createBrowserDriver(
     downloadDirectory: context.downloadDirectory,
     screenshotDirectory: context.screenshotDirectory,
     headed: context.headed,
+    // A managed browser on macOS runs on the person's own desktop. A window
+    // would appear in front of them, take focus and intercept their typing;
+    // the agent and the person's live view work through CDP, so it stays
+    // offscreen. A linked ComputerSession drives the native window itself.
+    ...(process.platform === "darwin" && context.headed && !context.linkedComputer
+      ? { offscreen: true }
+      : {}),
     ...(route?.kind === "proxy" && route.proxyUrl ? { proxyUrl: route.proxyUrl } : {}),
     ...(launchArguments.length > 0 ? { launchArguments } : {}),
     ...(route?.consistency.timezone ? { timezone: route.consistency.timezone } : {}),
