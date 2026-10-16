@@ -151,11 +151,10 @@ describe("core usage allowance admission", () => {
         opengeniDb,
         "withWorkspaceSubjectSessionActivityRls",
       ).mockImplementation(async (db, _workspaceId, _subjectId, fn) => await fn(db as never));
-      const slack = spyOn(
-        opengeniDb,
-        "getSlackInteractionSessionAccessForSession",
-      ).mockResolvedValue(null);
-      const authority = spyOn(opengeniDb, "getSessionAuthorityProjection").mockResolvedValue(null);
+      const authorization = spyOn(opengeniDb, "getSessionAuthorizationFacts").mockResolvedValue({
+        target: null,
+        caller: null,
+      });
       const replay = spyOn(opengeniDb, "getSessionRetryReceiptInTransaction").mockResolvedValue(
         null,
       );
@@ -211,8 +210,7 @@ describe("core usage allowance admission", () => {
         });
       } finally {
         workspaceRls.mockRestore();
-        slack.mockRestore();
-        authority.mockRestore();
+        authorization.mockRestore();
         replay.mockRestore();
         session.mockRestore();
         failure.mockRestore();
