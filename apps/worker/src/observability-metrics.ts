@@ -2902,6 +2902,50 @@ export function recordBatchFlush(
   });
 }
 
+const MODEL_STEP_PHASE_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30];
+
+/**
+ * Opengeni work between two model requests of one stream, measured with local
+ * clocks on the side that does it:
+ *
+ *   - `response_settlement` — consumer: a terminal model response arrived to
+ *     the moment the next model request is allowed to proceed (`settle`).
+ *   - `response_usage` — the part of settlement that meters the response
+ *     (lease renewal, usage and credit recording, the usage event).
+ *   - `response_history` — the part that retains media and reconciles history.
+ *   - `settlement_wait` — producer: a model request entered and waited this
+ *     long for the previous response's settlement.
+ *   - `admission` — producer: the per-request admission revalidation (durable
+ *     history checkpoint, subscription source, usage limits).
+ *
+ * Tool execution runs between a response and the next model entry, in parallel
+ * with settlement; only `settlement_wait` and `admission` delay the next
+ * request beyond the tools themselves.
+ */
+export type ModelStepPhase =
+  | "response_settlement"
+  | "response_usage"
+  | "response_history"
+  | "settlement_wait"
+  | "admission";
+
+export function recordModelStepPhase(
+  observability: Observability,
+  input: { provider: string; phase: ModelStepPhase; durationSeconds: number },
+): void {
+  try {
+    observability.observeHistogram({
+      name: "opengeni_model_step_phase_duration_seconds",
+      help: "Seconds of Opengeni work between model requests of one stream, by phase.",
+      buckets: MODEL_STEP_PHASE_BUCKETS,
+      labels: { provider: input.provider, phase: input.phase },
+      value: Math.max(0, input.durationSeconds),
+    });
+  } catch {
+    // Metrics emission must never affect a model call.
+  }
+}
+
 /** Latency of the durable `appendSessionEvents` DB write — the write path. A p99
  *  climb here is our Postgres, not the model or NATS. */
 export function recordSessionEventAppendLatency(

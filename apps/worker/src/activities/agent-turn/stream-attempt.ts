@@ -77,6 +77,7 @@ import {
   recordBatchFlush,
   recordContextCompaction,
   recordModelInputTokens,
+  recordModelStepPhase,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
   recordSandboxSharedPreparation,
@@ -718,6 +719,12 @@ export async function runTurnStreamAttempt(
     const modelCallAdmission = createModelCallAdmission({
       signal: runtimeCancellationSignal,
       admit: revalidateModelCallAdmission,
+      observe: (phase, durationSeconds) =>
+        recordModelStepPhase(observability, {
+          provider: resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai",
+          phase,
+          durationSeconds,
+        }),
     });
     const responseCreditPolicyRevisions = new Set<number | undefined>();
     const responseCountBeforeStream = modelResponseState.responseCount;
@@ -1208,6 +1215,7 @@ export async function runTurnStreamAttempt(
         const generatedImageReceipt = generatedImage
           ? await media.retainNativeGeneratedImage(generatedImage)
           : null;
+        const responseSettlementStartedAt = performance.now();
         const responseResult = await processModelResponseTerminalEvent({
           creditPolicyRevision,
           event: next.value,
@@ -1247,6 +1255,12 @@ export async function runTurnStreamAttempt(
           ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
         });
         if (responseResult.status === "processed") {
+          const responseUsageSettledAt = performance.now();
+          recordModelStepPhase(observability, {
+            provider: streamProvider,
+            phase: "response_usage",
+            durationSeconds: (responseUsageSettledAt - responseSettlementStartedAt) / 1_000,
+          });
           if (
             !providerPublishesNativeRequestEvents &&
             fallbackProviderRequestLifecycleStartedAt !== null
@@ -1305,6 +1319,17 @@ export async function runTurnStreamAttempt(
           currentToolBatchCallIds = new Set<string>();
           currentToolBatchCompletedCallIds = new Set<string>();
           await historySink.reconcileConversationTruth();
+          const responseSettledAt = performance.now();
+          recordModelStepPhase(observability, {
+            provider: streamProvider,
+            phase: "response_history",
+            durationSeconds: (responseSettledAt - responseUsageSettledAt) / 1_000,
+          });
+          recordModelStepPhase(observability, {
+            provider: streamProvider,
+            phase: "response_settlement",
+            durationSeconds: (responseSettledAt - responseSettlementStartedAt) / 1_000,
+          });
           turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
           modelCheckpointMemoryCollector.schedule(observability);
         }
