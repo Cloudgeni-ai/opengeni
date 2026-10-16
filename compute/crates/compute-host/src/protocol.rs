@@ -464,6 +464,30 @@ pub struct HostStatus {
     /// when its record is readable.
     #[serde(default)]
     pub blocked: Vec<BlockedSandbox>,
+    /// The warm templates new sandboxes start from, one per shape.
+    #[serde(default)]
+    pub templates: Vec<TemplateStatus>,
+}
+
+/// One shape's warm template.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateStatus {
+    pub vcpus: u8,
+    pub memory_mib: u32,
+    pub state: TemplateState,
+}
+
+/// Whether new sandboxes of a shape can start from its template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateState {
+    /// New sandboxes of the shape start from it.
+    Ready,
+    /// Being built; new sandboxes boot cold meanwhile.
+    Building,
+    /// The last build failed; new sandboxes boot cold, and a later one
+    /// tries again.
+    Failed,
 }
 
 /// A sandbox the host cannot manage.

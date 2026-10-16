@@ -30,6 +30,8 @@ use tokio::time::{Instant, sleep_until};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
+use crate::pool::{Pool, PoolConfig, Shape, Sources, Template};
+
 use crate::protocol::{HostStatus, Id, SandboxConfig, StepStats};
 use crate::state::{Record, Records, StateError, lock_exclusive};
 use crate::step::{After, Live};
@@ -40,6 +42,7 @@ mod recover;
 mod requests;
 mod sample;
 mod steps;
+mod warm;
 
 /// How long a starting agent waits for the previous one to let go of the
 /// state root.
@@ -89,6 +92,9 @@ pub struct HostConfig {
     /// agent at a time may hand them out. `None` only where no two agents
     /// can meet, as in tests with fake VMs.
     pub host_lock: Option<PathBuf>,
+    /// Warm templates new sandboxes start from (see [`crate::pool`]).
+    /// `None` boots every new sandbox cold.
+    pub pool: Option<PoolConfig>,
 }
 
 /// When a running sandbox counts as busy: its VM used at least
@@ -261,6 +267,15 @@ enum Event<V> {
         ordinal: u32,
         result: Result<Record, HostError>,
         reply: Reply<()>,
+        /// The template the sandbox could not start from because it no
+        /// longer fits today's inputs.
+        stale: Option<Arc<Template>>,
+    },
+    /// A template build ended; its VM is gone and `ordinal` free again.
+    TemplateBuilt {
+        shape: Shape,
+        ordinal: u32,
+        result: Result<Template, String>,
     },
     StepDone {
         id: Id,
@@ -360,6 +375,7 @@ pub struct HostAgent<E: Engine, S: Store> {
     root: PathBuf,
     base_image: PathBuf,
     images: Images,
+    warm: Option<Warm>,
     core: Host,
     origin: Instant,
     slots: HashMap<SandboxId, Slot<E::Vm>>,
@@ -398,6 +414,48 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
     commands_tx: mpsc::WeakUnboundedSender<Command>,
+}
+
+/// Checks that this host's settings fit every recorded sandbox: a sandbox
+/// keeps the user and addresses it was given, and new ones are handed out
+/// by today's settings, which therefore must agree.
+fn check_fit(images: &Images, records: &Records) -> Result<(), HostError> {
+    let misfits: Vec<String> = records
+        .all()
+        .iter()
+        .filter_map(|record| images.check(record).err())
+        .collect();
+    if misfits.is_empty() {
+        Ok(())
+    } else {
+        Err(HostError::Invalid(format!(
+            "this host's settings do not fit its sandboxes: {}",
+            misfits.join("; ")
+        )))
+    }
+}
+
+/// Sets up the host's sandbox networking, if sandboxes are networked.
+async fn prepare_network(
+    network: Option<NetworkConfig>,
+) -> Result<Option<Arc<Networks>>, HostError> {
+    let Some(network) = network else {
+        return Ok(None);
+    };
+    let prepared = tokio::task::spawn_blocking(move || Networks::prepare(&network))
+        .await
+        .map_err(|error| HostError::Io(error.to_string()))?
+        .map_err(|error| HostError::Io(error.to_string()))?;
+    Ok(Some(Arc::new(prepared)))
+}
+
+/// The host's warm templates and how to build them.
+#[derive(Debug)]
+struct Warm {
+    pool: Pool,
+    sources: Arc<Sources>,
+    ready_port: u32,
+    ready_timeout: Duration,
 }
 
 /// Wakes a sandbox when data arrives for it on a guest port.
@@ -462,28 +520,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             first_uid: config.first_uid,
             network: config.network.clone(),
         };
-        // A sandbox keeps the user and addresses it was given; new ones
-        // are handed out by today's settings, which therefore must agree.
-        let misfits: Vec<String> = records
-            .all()
-            .iter()
-            .filter_map(|record| images.check(record).err())
-            .collect();
-        if !misfits.is_empty() {
-            return Err(HostError::Invalid(format!(
-                "this host's settings do not fit its sandboxes: {}",
-                misfits.join("; ")
-            )));
-        }
-        let net = match config.network.clone() {
-            Some(network) => Some(Arc::new(
-                tokio::task::spawn_blocking(move || Networks::prepare(&network))
-                    .await
-                    .map_err(|error| HostError::Io(error.to_string()))?
-                    .map_err(|error| HostError::Io(error.to_string()))?,
-            )),
-            None => None,
-        };
+        check_fit(&images, &records)?;
+        let net = prepare_network(config.network.clone()).await?;
         let (commands_tx, commands) = mpsc::unbounded_channel();
         let (events_tx, events) = mpsc::unbounded_channel();
         #[cfg(target_os = "linux")]
@@ -492,6 +530,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .map(|chunks| Arc::new(crate::lazy::Fetcher::new(chunks.clone())));
         // Huge-page profiles cannot compress, whatever the host says.
         let can_compress = config.can_compress && engine.memory_profile().compress;
+        // Template VMs an earlier agent left are ended before any sandbox
+        // can be given the user one of them ran as.
+        let networked = config.network.is_some();
+        let (warm, warm_shapes) = Warm::start(
+            config.pool,
+            &engine,
+            &config.root,
+            &config.base_image,
+            networked,
+            &images,
+        )
+        .await;
         let mut agent = Self {
             engine: Arc::new(engine),
             store: Arc::new(store),
@@ -502,6 +552,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             images,
             root: config.root,
             base_image: config.base_image,
+            warm,
             pressure: config.policy.memory.is_some(),
             core,
             origin: Instant::now(),
@@ -529,6 +580,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             commands_tx: commands_tx.downgrade(),
         };
         agent.recover(strays).await;
+        for shape in warm_shapes {
+            agent.want_template(shape);
+        }
         let handle = Handle {
             commands: commands_tx,
             holds: Arc::new(AtomicU64::new(1)),

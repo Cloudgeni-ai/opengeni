@@ -26,6 +26,7 @@ use tokio::sync::watch;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep};
 
+mod pool;
 mod requests;
 mod restart;
 mod sleep;
@@ -195,7 +196,7 @@ impl Fake {
             listener,
             Arc::clone(&memory),
             spec.drives[0].path.clone(),
-            Arc::new(AtomicBool::new(false)),
+            Arc::default(),
             Arc::clone(&cpu),
         ));
         let world = Arc::clone(&self.world);
@@ -256,19 +257,19 @@ impl Fake {
     }
 }
 
-/// A guest: answers shell-like lines on any port, and remembers whether this
-/// VM process was told it was restored.
+/// A guest: answers shell-like lines on any port, and remembers the restore
+/// notice this VM process was given, if any.
 async fn guest(
     listener: UnixListener,
     memory: Arc<Mutex<String>>,
     disk: PathBuf,
-    told_restored: Arc<AtomicBool>,
+    notice: Arc<Mutex<Option<String>>>,
     cpu: Arc<Mutex<CpuMeter>>,
 ) {
     while let Ok((stream, _)) = listener.accept().await {
         let memory = Arc::clone(&memory);
         let disk = disk.clone();
-        let told_restored = Arc::clone(&told_restored);
+        let notice = Arc::clone(&notice);
         let cpu = Arc::clone(&cpu);
         tokio::spawn(async move {
             let (read, mut write) = stream.into_split();
@@ -293,11 +294,23 @@ async fn guest(
                         "ok".into()
                     }
                     ("disk", _) => std::fs::read_to_string(&disk).unwrap_or_default(),
-                    ("restored", _) => {
-                        told_restored.store(true, Ordering::SeqCst);
+                    ("restored", fields) => {
+                        *notice.lock().unwrap() = Some(fields.to_owned());
                         "ok".into()
                     }
-                    ("told-restored?", _) => told_restored.load(Ordering::SeqCst).to_string(),
+                    ("told-restored?", _) => notice.lock().unwrap().is_some().to_string(),
+                    // The sandbox id the last restore notice named.
+                    ("sandbox?", _) => notice
+                        .lock()
+                        .unwrap()
+                        .as_deref()
+                        .and_then(|fields| {
+                            fields
+                                .split_whitespace()
+                                .find_map(|field| field.strip_prefix("sandbox="))
+                        })
+                        .unwrap_or_default()
+                        .to_owned(),
                     ("busy", _) => {
                         cpu.lock().unwrap().set_busy(true);
                         "ok".into()
@@ -567,6 +580,7 @@ impl Lab {
             }),
             can_compress: true,
             host_lock: None,
+            pool: None,
         };
         configure(&mut config);
         let engine = Fake {

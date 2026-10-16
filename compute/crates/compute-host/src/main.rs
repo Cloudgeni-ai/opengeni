@@ -16,12 +16,16 @@ use compute_host::protocol::{
     HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
 };
 use compute_host::{
-    BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, NoStore, Store, serve,
+    BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, NoStore, PoolConfig, Shape,
+    Store, serve,
 };
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
+
+/// How long a template's freshly booted guest may take to become ready.
+const TEMPLATE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Parser)]
 #[command(about = "Run an Opengeni compute host agent, or talk to one")]
@@ -141,9 +145,19 @@ struct ServeArgs {
     #[arg(long = "guest-port")]
     guest_ports: Vec<GuestPort>,
     /// Guest vsock port to tell about each restore from a memory image, so
-    /// the guest can set its clock and reconnect.
+    /// the guest can set its clock, reconnect and learn its sandbox id.
     #[arg(long)]
     restore_notice_port: Option<u32>,
+    /// Keep warm templates: a guest vsock port that accepts connections
+    /// once a freshly booted guest is ready for work. New sandboxes then
+    /// start from a saved, booted guest of their shape instead of booting.
+    #[arg(long)]
+    template_ready_port: Option<u32>,
+    /// A shape, as `VCPUSxMEMORY_MIB` such as `2x1024`, whose template is
+    /// built as soon as the agent starts; other shapes get one on first
+    /// use. Repeatable. Needs `--template-ready-port`.
+    #[arg(long = "template", requires = "template_ready_port")]
+    templates: Vec<Shape>,
     /// How guest memory is backed and saved: `bare-metal` (4 KiB pages,
     /// dirty-page tracking, compression allowed) or `nested` (2 MiB pages
     /// from the host's reserved huge-page pool, resident-page saves, no
@@ -428,6 +442,7 @@ fn expect_done(reply: Reply) -> anyhow::Result<()> {
 }
 
 async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
+    let (firecracker, jailer) = (args.firecracker.clone(), args.jailer.clone());
     let engine = Firecracker::new(FirecrackerConfig {
         firecracker: args.firecracker,
         jailer: args.jailer,
@@ -460,6 +475,12 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         restore_notice_port: args.restore_notice_port,
         first_uid: args.first_uid,
         host_lock: Some(args.host_lock),
+        pool: args.template_ready_port.map(|ready_port| PoolConfig {
+            ready_port,
+            shapes: args.templates.clone(),
+            depends_on: vec![firecracker.clone(), jailer.clone()],
+            ready_timeout: TEMPLATE_READY_TIMEOUT,
+        }),
         network: args.network.then_some(NetworkConfig {
             pool: args.network_pool,
             trusted: args.trusted,

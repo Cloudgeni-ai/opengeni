@@ -19,6 +19,7 @@ mod layout;
 #[cfg(target_os = "linux")]
 mod lazy;
 pub mod net;
+mod pool;
 pub mod protocol;
 pub mod restore_notice;
 mod server;
@@ -29,6 +30,7 @@ mod store;
 pub use agent::{BusyRule, Handle, HostAgent, HostConfig, HostError, Lease};
 pub use chunked::{CHUNK_BYTES, Chunked};
 pub use guest_ports::{GuestPort, Route};
+pub use pool::{PoolConfig, Shape};
 pub use server::serve;
 pub use store::{
     Directory, FetchInto, FetchedMemory, NoStore, Receipt, SavedFiles, SavedImage, Store,

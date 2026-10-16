@@ -28,8 +28,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 ordinal,
                 result,
                 reply,
+                stale,
             } => {
                 self.preparing.remove(&id.0);
+                if let Some(template) = &stale {
+                    self.template_stale(template);
+                }
                 let record = match result {
                     Ok(record) => record,
                     Err(error) => {
@@ -44,11 +48,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let paths = Paths::new(&self.root, id);
                 let spec = vm_spec(&record, &paths, &self.images);
                 self.insert(id, paths, spec);
-                // A new sandbox is a disk without a memory image: its first
-                // wake boots it, under the same admission limits as any wake.
+                // A new sandbox is a saved one: a disk, with a memory image
+                // when it started from a template. Its first wake boots or
+                // restores it, under the same admission limits as any wake.
                 self.input(Input::Add {
                     sandbox: id.0,
-                    state: State::new(Level::Saved, Durability::Local, false),
+                    state: State::new(Level::Saved, Durability::Local, record.image),
                     policy,
                 });
                 let _ = reply.send(Ok(()));
@@ -60,6 +65,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 after,
             } => self.step_done(id, op, outcome, after),
             Event::Exited { id, incarnation } => self.exited(id, incarnation),
+            Event::TemplateBuilt {
+                shape,
+                ordinal,
+                result,
+            } => self.template_built(shape, ordinal, result),
             Event::Destroyed {
                 id,
                 ordinal,

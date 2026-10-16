@@ -1,19 +1,40 @@
 //! Requests from handles, checked against each sandbox's generation.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use compute_core::{HoldId, Input, Level, Priority, Step};
 use compute_engine::Engine;
 
-use crate::layout::{Images, Paths, copy_sparse, sync_parent};
+use crate::layout::{Images, Paths, sync_parent};
+use crate::pool::{Shape, Sources, Start, Template, first_files};
 use crate::protocol::{BlockedSandbox, HostStatus, Id, SandboxConfig, SandboxStatus, step_name};
 use crate::state::{Record, check_generation};
+use crate::step::images_of;
 use crate::store::Store;
 
 use super::{Command, Event, HostAgent, HostError, Reply};
+
+/// Makes a new sandbox's directory and first files, from `template` where
+/// one fits. Blocks.
+fn new_files(
+    paths: &Paths,
+    base: &Path,
+    template: Option<(&Template, &Sources)>,
+) -> io::Result<Start> {
+    // The directory must be new: one already there belongs to a sandbox
+    // this agent does not know, and is left alone.
+    std::fs::create_dir(&paths.dir)?;
+    std::fs::create_dir_all(&paths.jail)?;
+    let start = first_files(paths, &images_of(paths), base, template)?;
+    // The record, written next, vouches for these: their directory entries
+    // must outlast a crash first.
+    sync_parent(&paths.disk)?;
+    sync_parent(&paths.jail)?;
+    Ok(start)
+}
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn on_command(&mut self, command: Command) {
@@ -280,7 +301,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
         };
-        let record = Record::new(id, ordinal, allocation, config);
+        let template = self.template_for(Shape::of(&config));
+        let sources = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources));
+        let mut record = Record::new(id, ordinal, allocation, config);
         let link = Images::link(&record);
         let paths = Paths::new(&self.root, id);
         let dir = paths.dir.clone();
@@ -290,27 +313,31 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         tokio::spawn(async move {
             let networks = net.clone();
+            let from = template.clone();
             let prepared = tokio::task::spawn_blocking(move || {
-                // The directory must be new: one already there belongs to a
-                // sandbox this agent does not know, and is left alone.
-                std::fs::create_dir(&paths.dir)?;
-                std::fs::create_dir_all(&paths.jail)?;
-                copy_sparse(&base, &paths.disk)?;
-                // The record, written next, vouches for these: their
-                // directory entries must outlast a crash first.
-                sync_parent(&paths.disk)?;
-                sync_parent(&paths.jail)?;
+                let warm = from.as_deref().zip(sources.as_deref());
+                let start = new_files(&paths, &base, warm)?;
                 if let (Some(net), Some(link)) = (&networks, &link) {
                     net.ensure(link)?;
                 }
-                Ok(())
+                Ok(start)
             })
             .await
             .unwrap_or_else(|error| Err(io::Error::other(error)));
+            let stale = match prepared {
+                Ok(Start::Stale) => template,
+                _ => None,
+            };
             // The record goes last: a directory without one is an
             // unfinished creation and is cleaned up on recovery.
             let result = match prepared {
-                Ok(()) => records.insert(record).await.map_err(HostError::from),
+                Ok(start) => {
+                    // A sandbox started from a template holds a memory image
+                    // of a guest that never ran as it: its first wake
+                    // restores it.
+                    record.image = start == Start::Template;
+                    records.insert(record).await.map_err(HostError::from)
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     tracing::error!(%id, "a directory for a new sandbox already exists; refusing it");
                     let _ = events.send(Event::Prepared {
@@ -318,6 +345,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         ordinal,
                         result: Err(HostError::Exists(id)),
                         reply,
+                        stale,
                     });
                     return;
                 }
@@ -336,6 +364,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 ordinal,
                 result,
                 reply,
+                stale,
             });
         });
     }
@@ -386,6 +415,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     problem: problem.clone(),
                 })
                 .collect(),
+            templates: self
+                .warm
+                .as_ref()
+                .map(|warm| warm.pool.status())
+                .unwrap_or_default(),
         }
     }
 }

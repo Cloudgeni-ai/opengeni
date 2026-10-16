@@ -418,24 +418,81 @@ link set dev {UPLINK} up
 route replace default via {host_ip} dev {UPLINK}
 "
         );
-        if tap == Tap::Foreign {
-            let _ = writeln!(commands, "tuntap del dev {TAP} mode tap");
-        }
-        if tap != Tap::Fits {
-            let _ = writeln!(
-                commands,
-                "tuntap add dev {TAP} mode tap user {uid} group {gid}"
-            );
-        }
-        let _ = write!(
+        commands.push_str(&tap_commands(tap, *uid, *gid));
+        commands
+    }
+}
+
+/// `ip -batch` lines that give a namespace the guest's side of every
+/// sandbox network: the tap, owned by the VMM's `uid` and `gid`, with the
+/// gateway's fixed address and the guest's fixed neighbour entry.
+fn tap_commands(tap: Tap, uid: u32, gid: u32) -> String {
+    let mut commands = String::new();
+    if tap == Tap::Foreign {
+        let _ = writeln!(commands, "tuntap del dev {TAP} mode tap");
+    }
+    if tap != Tap::Fits {
+        let _ = writeln!(
             commands,
-            "link set dev {TAP} address {TAP_MAC}
+            "tuntap add dev {TAP} mode tap user {uid} group {gid}"
+        );
+    }
+    let _ = write!(
+        commands,
+        "link set dev {TAP} address {TAP_MAC}
 addr replace {GATEWAY_IP}/{LINK_PREFIX} dev {TAP}
 link set dev {TAP} up
 neigh replace {GUEST_IP} lladdr {GUEST_MAC} dev {TAP} nud permanent
 "
-        );
-        commands
+    );
+    commands
+}
+
+/// A network namespace holding only a tap that looks to its guest exactly
+/// like a sandbox's, and leads nowhere: for a VM whose saved state must fit
+/// every sandbox, such as a template's (see [`crate::pool`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Isolated {
+    namespace: String,
+}
+
+impl Isolated {
+    /// The isolated namespace of the VM named `vm`.
+    pub fn new(vm: &str) -> Self {
+        Self {
+            namespace: format!("{PREFIX}-{vm}"),
+        }
+    }
+
+    /// The guest interface for the VM description.
+    pub fn vm_network(&self) -> Network {
+        Network {
+            tap: TAP.to_owned(),
+            mac: GUEST_MAC.to_owned(),
+            namespace: Some(Path::new(NETNS_DIR).join(&self.namespace)),
+        }
+    }
+
+    /// Creates the namespace, or sets right what an earlier attempt left,
+    /// with a tap the VMM running as `uid` and `gid` may open. Blocks.
+    pub fn ensure(&self, uid: u32, gid: u32) -> Result<(), NetError> {
+        let path = Path::new(NETNS_DIR).join(&self.namespace);
+        if !path.exists() {
+            run("ip", &["netns", "add", &self.namespace], None)?;
+        }
+        in_namespace(&path, || {
+            let mut commands = "link set dev lo up\n".to_owned();
+            commands.push_str(&tap_commands(Tap::find(uid, gid)?, uid, gid));
+            run("ip", &["-batch", "-"], Some(&commands))
+        })
+    }
+
+    /// Deletes the namespace; succeeds when there is none. Blocks.
+    pub fn remove(&self) -> Result<(), NetError> {
+        if !Path::new(NETNS_DIR).join(&self.namespace).exists() {
+            return Ok(());
+        }
+        run("ip", &["netns", "del", &self.namespace], None)
     }
 }
 
