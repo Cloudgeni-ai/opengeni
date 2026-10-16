@@ -204,7 +204,9 @@ async fn boot_pause_compress_snapshot_restore() {
     let name = format!("engine-test-{}", std::process::id());
     let engine = engine(&lab);
     assert!(
-        engine.runtime().starts_with("Firecracker v"),
+        engine
+            .runtime()
+            .starts_with("Firecracker snapshot format v"),
         "{}",
         engine.runtime()
     );
