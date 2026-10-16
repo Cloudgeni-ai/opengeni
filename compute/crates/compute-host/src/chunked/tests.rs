@@ -1,5 +1,6 @@
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
+use std::time::Duration;
 
 use object_store::memory::InMemory;
 use object_store::{ObjectStore, path::Path as ObjectPath};
@@ -326,11 +327,12 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
     assert_eq!(gone.kind, ErrorKind::Fatal);
 }
 
-#[tokio::test]
-async fn a_wake_brings_its_working_set_back_with_the_state() {
-    const PAGE: u64 = 4096;
-    let dir = tempfile::tempdir().unwrap();
-    let mut saved = files(dir.path(), true);
+const PAGE: u64 = 4096;
+
+/// A saved sandbox whose guest touched three pages (one of them zeros)
+/// first after its last wake, so its archive stores a working-set pack.
+fn with_working_set(dir: &Path) -> SavedFiles {
+    let mut saved = files(dir, true);
     let big = 4 * CHUNK_BYTES;
     sparse(saved.disk.path(), CHUNK_BYTES, &[(0, b"disk")]);
     let snapshot = saved.memory.clone().unwrap();
@@ -351,12 +353,17 @@ async fn a_wake_brings_its_working_set_back_with_the_state() {
         offsets: vec![2 * CHUNK_BYTES, 0, 3 * CHUNK_BYTES, 2 * CHUNK_BYTES + PAGE],
         page_size: PAGE,
     };
-    fs::write(
-        dir.path().join("profile"),
-        serde_json::to_vec(&learned).unwrap(),
-    )
-    .unwrap();
-    saved.profile = Some(dir.path().join("profile"));
+    fs::write(dir.join("profile"), serde_json::to_vec(&learned).unwrap()).unwrap();
+    saved.profile = Some(dir.join("profile"));
+    saved
+}
+
+#[tokio::test]
+async fn a_wake_brings_its_working_set_back_with_the_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let saved = with_working_set(dir.path());
+    let snapshot = saved.memory.clone().unwrap();
+    let big = 4 * CHUNK_BYTES;
     let store = Chunked::new(ChunkStore::new(
         Arc::new(InMemory::new()),
         ObjectPath::from("t"),
@@ -607,4 +614,70 @@ async fn a_copy_missing_a_chunk_fails_verification_until_archived_again() {
     assert!(store.verify(sandbox, &third).await.unwrap());
     let stored = backend.get(&key).await.unwrap().bytes().await.unwrap();
     assert_eq!(stored.as_ref(), memory_chunk.bytes.as_slice());
+}
+
+/// A sweep keeps everything a stored copy needs, its working-set pack
+/// included; what a forgotten memory image or a deleted copy alone named
+/// becomes sweepable, and what another copy shares stays.
+#[tokio::test]
+async fn a_sweep_keeps_what_stored_copies_name() {
+    use compute_storage::fresh::Clock;
+
+    let dir = tempfile::tempdir().unwrap();
+    let saved = with_working_set(dir.path());
+    let other_dir = tempfile::tempdir().unwrap();
+    let other = files(other_dir.path(), false);
+    // The same disk: the two copies share its chunk and manifest.
+    sparse(other.disk.path(), CHUNK_BYTES, &[(0, b"disk")]);
+    let chunks = ChunkStore::new(Arc::new(InMemory::new()), ObjectPath::from("t"));
+    let store = Chunked::new(chunks.clone());
+    let (with_memory, disk_only) = (
+        id("0123456789abcdef0123456789abcdef"),
+        id("fedcba9876543210fedcba9876543210"),
+    );
+    for (sandbox, files) in [(with_memory, &saved), (disk_only, &other)] {
+        store
+            .archive(sandbox, files, &CancellationToken::new())
+            .await
+            .unwrap()
+            .stored()
+            .unwrap();
+    }
+    let pointer = chunks
+        .get_pointer(&with_memory.to_string())
+        .await
+        .unwrap()
+        .unwrap();
+    let pack = parse_head("test", &pointer).unwrap().pack.unwrap();
+    let parts = working_set::parts(&chunks, &pack).await.unwrap();
+    let named = store.names(&pointer).await.unwrap();
+    assert_ne!(parts.len(), 0);
+    for kept in parts.iter().chain([&pack]) {
+        assert!(named.contains(&kept.key()), "the pack is kept");
+    }
+
+    // Seen from a month ahead, everything stored is old enough to go.
+    let later = SystemTime::now() + Duration::from_secs(30 * 86_400);
+    let ahead = Chunked::new(chunks.with_clock(Clock::from_fn(move || later)));
+    let report = ahead.sweep(false).await.unwrap();
+    assert_eq!((report.pointers, report.unnamed), (2, 0), "{report:?}");
+    assert_eq!(report.named, report.stored);
+
+    store.forget_memory(with_memory).await.unwrap();
+    let forgotten = ahead.sweep(false).await.unwrap();
+    assert!(
+        forgotten.unnamed >= 2,
+        "the image's manifests: {forgotten:?}"
+    );
+    assert_eq!(forgotten.named + forgotten.unnamed, forgotten.stored);
+
+    store.delete(with_memory).await.unwrap();
+    let shared = ahead.sweep(false).await.unwrap();
+    assert_eq!(shared.pointers, 1);
+    assert!(shared.named >= 2, "the shared disk stays: {shared:?}");
+    assert_eq!(shared.named + shared.unnamed, shared.stored);
+
+    store.delete(disk_only).await.unwrap();
+    let none = ahead.sweep(false).await.unwrap();
+    assert_eq!((none.named, none.unnamed), (0, none.stored));
 }

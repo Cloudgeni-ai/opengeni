@@ -6,11 +6,15 @@
 
 pub mod chunk;
 pub mod dirty;
+#[cfg(test)]
+mod fake;
 #[cfg(target_os = "linux")]
 pub mod fiemap;
+pub mod fresh;
 pub mod lazy;
 pub mod manifest;
 pub mod store;
+pub mod sweep;
 mod upload;
 
 /// Fail closed on invalid metadata, unavailable objects and corrupt content.
@@ -27,6 +31,13 @@ pub enum Error {
     /// An upload or download did not complete; trying again may work.
     #[error("transfer failed: {0}")]
     Transfer(String),
+    /// An archive ran past the window in which it may publish what it
+    /// stored; it starts again.
+    #[error("the archive took too long to publish; it starts again")]
+    Expired,
+    /// This store cannot do what was asked.
+    #[error("unsupported by this store: {0}")]
+    Unsupported(&'static str),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -47,8 +58,9 @@ impl Error {
             | Self::Integrity
             | Self::Truncated { .. }
             | Self::Json(_)
+            | Self::Unsupported(_)
             | Self::Object(object_store::Error::NotFound { .. }) => true,
-            Self::Transfer(_) | Self::Io(_) | Self::Object(_) => false,
+            Self::Transfer(_) | Self::Expired | Self::Io(_) | Self::Object(_) => false,
         }
     }
 }

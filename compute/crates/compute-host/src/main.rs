@@ -87,6 +87,16 @@ enum Command {
     },
     /// Create many sandboxes, let them sleep, then wake them all at once.
     Bench(BenchArgs),
+    /// Delete the chunks and manifests in object storage that no sandbox's
+    /// stored copy names any more, on any host. Run on a schedule, such as
+    /// daily; safe while agents archive. Without `--delete`, only reports.
+    Sweep {
+        /// The store, as `serve --store` takes it: `gs://bucket/prefix`.
+        #[arg(long)]
+        store: String,
+        #[arg(long)]
+        delete: bool,
+    },
 }
 
 #[derive(Args)]
@@ -398,6 +408,13 @@ async fn agent_main() -> anyhow::Result<()> {
         }
         Command::Exec { id, script, port } => exec(&client, id, port, &script).await,
         Command::Bench(args) => bench(&client, &args).await,
+        Command::Sweep { store, delete } => {
+            let chunked = Chunked::from_url(&store)?
+                .with_context(|| format!("{store} is not an object storage URL"))?;
+            let report = chunked.sweep(delete).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
     }
 }
 

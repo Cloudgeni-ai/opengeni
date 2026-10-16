@@ -14,18 +14,24 @@
 //! it. Names include the hash of the stored bytes, so every writer of a name
 //! writes exactly the same bytes: two repairs racing write the same object,
 //! and no operation can undo another's repair.
+//!
+//! Only a sweep (see [`crate::sweep`]) deletes chunks and manifests, once
+//! no pointer names them; the rules in [`crate::fresh`] keep it from
+//! deleting what an archive in flight is about to name.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
+use futures::TryStreamExt as _;
 use object_store::{ClientOptions, ObjectStore, PutMode, PutOptions, path::Path};
 
 use crate::{
     Error, Result,
     chunk::{ChunkRef, EncodedChunk, decode},
+    fresh::{Clock, Freshness, Publication},
     manifest::{DiskManifest, MAX_MANIFEST_BYTES},
-    upload::{Created, Gcs},
+    upload::{Created, Deleted, Gcs},
 };
 
 /// Largest pointer object accepted; pointers only name manifests.
@@ -63,6 +69,55 @@ pub struct ChunkStore {
     backend: Arc<dyn ObjectStore>,
     prefix: Path,
     uploader: Uploader,
+    freshness: Freshness,
+    clock: Clock,
+}
+
+/// The kinds of stored object, each under its own prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Area {
+    /// The only objects ever replaced: each names a copy's manifests.
+    Pointers,
+    Manifests,
+    Chunks,
+}
+
+impl Area {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Pointers => "pointers/v1",
+            Self::Manifests => "manifests/v1",
+            Self::Chunks => "chunks/v1",
+        }
+    }
+}
+
+/// One stored object, as a listing shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    /// Its key under the store's prefix, as [`ChunkRef::key`] gives it.
+    pub key: String,
+    pub stored_at: SystemTime,
+    pub size: u64,
+}
+
+/// What a delete on condition did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removal {
+    Deleted,
+    /// It was stored again recently, so it stays.
+    Kept,
+    /// Nothing was stored under the key any more.
+    Gone,
+}
+
+/// What is stored under a content name.
+enum Found {
+    /// Exactly the bytes the name allows, stored at the time given if the
+    /// store says.
+    Ours(Option<SystemTime>),
+    /// Nothing, or other bytes.
+    Other,
 }
 
 impl ChunkStore {
@@ -74,6 +129,43 @@ impl ChunkStore {
             backend,
             prefix,
             uploader: Uploader::ReadBack,
+            freshness: Freshness::DEFAULT,
+            clock: Clock::system(),
+        }
+    }
+
+    /// The same store under other time rules; host agents and sweeps of
+    /// one store must agree on them.
+    #[must_use]
+    pub fn with_freshness(self, freshness: Freshness) -> Self {
+        Self { freshness, ..self }
+    }
+
+    /// The same store reading the time from `clock`.
+    #[must_use]
+    pub fn with_clock(self, clock: Clock) -> Self {
+        Self { clock, ..self }
+    }
+
+    #[must_use]
+    pub fn freshness(&self) -> Freshness {
+        self.freshness
+    }
+
+    #[must_use]
+    pub fn now(&self) -> SystemTime {
+        self.clock.now()
+    }
+
+    /// A store over `fake`'s bucket, under `prefix`, on `fake`'s clock.
+    #[cfg(test)]
+    pub(crate) fn over_fake(fake: &Arc<crate::fake::Fake>, prefix: &str) -> Self {
+        Self {
+            backend: Arc::new(crate::fake::Bucket(fake.clone())),
+            prefix: Path::from(prefix),
+            uploader: Uploader::Gcs(crate::fake::gcs(fake)),
+            freshness: Freshness::DEFAULT,
+            clock: fake.clock.clone(),
         }
     }
 
@@ -128,6 +220,8 @@ impl ChunkStore {
             backend,
             prefix,
             uploader,
+            freshness: Freshness::DEFAULT,
+            clock: Clock::system(),
         }))
     }
 
@@ -154,7 +248,9 @@ impl ChunkStore {
     /// Replaces the small mutable object `name`, such as the record of which
     /// manifests make up a sandbox's current copy. Chunks and manifests are
     /// immutable; pointers are the only objects ever overwritten, so write one
-    /// only after everything it names is stored.
+    /// only after everything it names is stored. A pointer naming objects
+    /// an archive stored or reused goes through [`Self::publish`] instead;
+    /// this is for pointers naming only what an earlier one did.
     pub async fn put_pointer(&self, name: &str, bytes: Vec<u8>) -> Result<()> {
         if bytes.len() > MAX_POINTER_BYTES {
             return Err(Error::Invalid("pointer too large"));
@@ -163,6 +259,28 @@ impl ChunkStore {
             .put(&self.pointer_path(name)?, Bytes::from(bytes).into())
             .await?;
         Ok(())
+    }
+
+    /// Starts an archive: begin before looking at the store at all.
+    pub fn begin(&self) -> Publication {
+        Publication {
+            started: self.clock.now(),
+        }
+    }
+
+    /// Ends `publication` by replacing pointer `name`. Refused with
+    /// [`Error::Expired`] once the publication's window has passed: a sweep
+    /// may since have deleted what it reused, so the archive starts again.
+    pub async fn publish(
+        &self,
+        publication: Publication,
+        name: &str,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        if !publication.open(&self.freshness, self.clock.now()) {
+            return Err(Error::Expired);
+        }
+        self.put_pointer(name, bytes).await
     }
 
     /// Reads pointer `name`, or `None` when there is none.
@@ -209,8 +327,20 @@ impl ChunkStore {
         if self.create(&path, &bytes).await? == Created::New {
             return Ok(true);
         }
-        if self.holds(&path, &bytes).await? {
-            return Ok(false);
+        if let Found::Ours(stored_at) = self.found(&path, &bytes).await? {
+            // Reused as it is, unless it was stored too long ago for a
+            // sweep to see the pointer this archive will publish: then it
+            // is stored again (see `crate::fresh`).
+            let now = self.clock.now();
+            if stored_at.is_some_and(|at| !self.freshness.is_stale(at, now)) {
+                return Ok(false);
+            }
+            self.replace(&path, &bytes).await?;
+            return if self.holds(&path, &bytes).await? {
+                Ok(false)
+            } else {
+                Err(Error::Integrity)
+            };
         }
         // Something else is stored under our name: the remains of a bad
         // write or a damaged copy. Keep it for inspection and write ours
@@ -271,19 +401,33 @@ impl ChunkStore {
 
     /// Whether the object at `path` holds exactly `bytes`.
     async fn holds(&self, path: &Path, bytes: &Bytes) -> Result<bool> {
+        Ok(matches!(self.found(path, bytes).await?, Found::Ours(_)))
+    }
+
+    async fn found(&self, path: &Path, bytes: &Bytes) -> Result<Found> {
         if let Uploader::Gcs(gcs) = &self.uploader {
             // GCS kept the checksums it verified at upload: no download.
-            return Ok(gcs.stored(path).await? == Some(crate::upload::checksums(bytes)));
+            return Ok(match gcs.stored(path).await? {
+                Some(stored) if stored.checksums == crate::upload::checksums(bytes) => {
+                    Found::Ours(stored.at)
+                }
+                _ => Found::Other,
+            });
         }
         let result = match self.backend.get(path).await {
             Ok(result) => result,
-            Err(object_store::Error::NotFound { .. }) => return Ok(false),
+            Err(object_store::Error::NotFound { .. }) => return Ok(Found::Other),
             Err(error) => return Err(error.into()),
         };
         if result.meta.size != bytes.len() as u64 {
-            return Ok(false);
+            return Ok(Found::Other);
         }
-        Ok(result.bytes().await? == *bytes)
+        let stored_at = SystemTime::from(result.meta.last_modified);
+        Ok(if result.bytes().await? == *bytes {
+            Found::Ours(Some(stored_at))
+        } else {
+            Found::Other
+        })
     }
 
     /// Copies the object at `path` under `quarantine/v1/` for inspection.
@@ -325,7 +469,10 @@ impl ChunkStore {
         reference.validate()?;
         let path = self.path(&reference.key());
         if let (Uploader::Gcs(gcs), Some(expected)) = (&self.uploader, &reference.checksums) {
-            return Ok(gcs.stored(&path).await?.as_deref() == Some(expected.as_str()));
+            return Ok(gcs
+                .stored(&path)
+                .await?
+                .is_some_and(|stored| stored.checksums == *expected));
         }
         match self.read_chunk(&path, reference).await {
             Ok(_) => Ok(true),
@@ -383,9 +530,15 @@ impl ChunkStore {
     pub async fn put_manifest(&self, manifest: &DiskManifest) -> Result<String> {
         let bytes = manifest.encode()?;
         let digest = blake3::hash(&bytes).to_hex().to_string();
-        self.put_immutable(&format!("manifests/v1/{digest}.json"), Bytes::from(bytes))
+        self.put_immutable(&Self::manifest_key(&digest), Bytes::from(bytes))
             .await?;
         Ok(digest)
+    }
+
+    /// The key of the manifest whose digest is `digest`.
+    #[must_use]
+    pub fn manifest_key(digest: &str) -> String {
+        format!("manifests/v1/{digest}.json")
     }
 
     pub async fn get_manifest(&self, digest: &str) -> Result<DiskManifest> {
@@ -398,7 +551,7 @@ impl ChunkStore {
         }
         let result = self
             .backend
-            .get(&self.path(&format!("manifests/v1/{digest}.json")))
+            .get(&self.path(&Self::manifest_key(digest)))
             .await?;
         if result.meta.size > MAX_MANIFEST_BYTES as u64 {
             return Err(Error::Invalid("manifest too large"));
@@ -408,6 +561,67 @@ impl ChunkStore {
             return Err(Error::Integrity);
         }
         DiskManifest::decode(&bytes)
+    }
+
+    /// Every object stored in `area`.
+    pub async fn list(&self, area: Area) -> Result<Vec<Listed>> {
+        let prefix = self.path(area.prefix());
+        self.backend
+            .list(Some(&prefix))
+            .map_err(Error::from)
+            .and_then(|meta| async move {
+                let key = meta
+                    .location
+                    .prefix_match(&self.prefix)
+                    .map(|parts| parts.map(|part| part.as_ref().to_owned()))
+                    .ok_or(Error::Invalid("listed object outside the store"))?
+                    .collect::<Vec<_>>()
+                    .join("/");
+                Ok(Listed {
+                    key,
+                    stored_at: meta.last_modified.into(),
+                    size: meta.size,
+                })
+            })
+            .try_collect()
+            .await
+    }
+
+    /// The name of the pointer a listing of [`Area::Pointers`] shows as
+    /// `key`.
+    #[must_use]
+    pub fn pointer_name(key: &str) -> Option<&str> {
+        key.strip_prefix("pointers/v1/")
+    }
+
+    /// Deletes the chunk or manifest at `key` if it was stored before
+    /// `before` and has not been stored again since this call looked. Only
+    /// GCS deletes on that condition; elsewhere this refuses with
+    /// [`Error::Unsupported`].
+    pub async fn delete_if_stored_before(&self, key: &str, before: SystemTime) -> Result<Removal> {
+        let Uploader::Gcs(gcs) = &self.uploader else {
+            return Err(Error::Unsupported(
+                "deleting stored objects needs a delete on condition (GCS)",
+            ));
+        };
+        if !(key.starts_with(Area::Chunks.prefix()) || key.starts_with(Area::Manifests.prefix())) {
+            return Err(Error::Invalid("only chunks and manifests are deleted"));
+        }
+        let path = self.path(key);
+        let Some(stored) = gcs.stored(&path).await? else {
+            return Ok(Removal::Gone);
+        };
+        let (Some(at), Some(generation)) = (stored.at, stored.generation) else {
+            return Ok(Removal::Kept);
+        };
+        if at >= before {
+            return Ok(Removal::Kept);
+        }
+        Ok(match gcs.delete_generation(&path, &generation).await? {
+            Deleted::Yes => Removal::Deleted,
+            Deleted::Changed => Removal::Kept,
+            Deleted::Gone => Removal::Gone,
+        })
     }
 }
 
@@ -549,30 +763,29 @@ mod tests {
 
     #[tokio::test]
     async fn gcs_checksums_prove_a_chunk_without_reading_it() {
-        use crate::upload::tests::{Fake, gcs};
+        use crate::fake::{Fake, gcs};
         let fake = Arc::new(Fake::default());
         let store = ChunkStore {
             // Never read: GCS answers from the checksums it keeps.
             backend: Arc::new(InMemory::new()),
             prefix: Path::from("p"),
             uploader: Uploader::Gcs(gcs(&fake)),
+            freshness: Freshness::DEFAULT,
+            clock: Clock::system(),
         };
         let chunk = EncodedChunk::encode(&[9; 16384], 1).unwrap();
         assert!(!store.has_chunk(&chunk.reference).await.unwrap());
         assert!(store.put_chunk(&chunk).await.unwrap());
         assert!(store.has_chunk(&chunk.reference).await.unwrap());
         // Same-length damage under the chunk's name is not held...
-        let key = format!("/bucket/p/{}", chunk.object_key());
+        let key = format!("p/{}", chunk.object_key());
         let mut damaged = chunk.bytes.clone();
         damaged[1] ^= 0x10;
-        fake.objects
-            .lock()
-            .unwrap()
-            .insert(key.clone(), Bytes::from(damaged));
+        fake.put_raw(&key, Bytes::from(damaged));
         assert!(!store.has_chunk(&chunk.reference).await.unwrap());
         // ...and the next upload of the same content replaces it.
         assert!(store.put_chunk(&chunk).await.unwrap());
-        assert_eq!(fake.objects.lock().unwrap()[&key], chunk.bytes);
+        assert_eq!(fake.bytes(&key).unwrap(), chunk.bytes);
         assert!(store.has_chunk(&chunk.reference).await.unwrap());
         // A reference whose checksums disagree with its bytes is refused.
         let mut forged = chunk.clone();

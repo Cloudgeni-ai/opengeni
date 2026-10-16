@@ -13,6 +13,7 @@ workspace = true
 base64 = "0.22"
 blake3 = "1.8"
 bytes = "1"
+chrono = { version = "0.4.34", default-features = false, features = ["clock"] }
 crc32c = "0.6"
 http = "1"
 md-5 = "0.10"

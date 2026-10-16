@@ -357,6 +357,16 @@ fn make_parts(
     Ok(zeros)
 }
 
+/// The chunks holding the parts of the pack `index` names, for a sweep to
+/// keep.
+pub(crate) async fn parts(
+    chunks: &ChunkStore,
+    index: &ChunkRef,
+) -> Result<Vec<ChunkRef>, compute_storage::Error> {
+    let index: PackIndex = serde_json::from_slice(&chunks.get_chunk(index).await?)?;
+    Ok(index.parts.into_iter().map(|part| part.chunk).collect())
+}
+
 /// Fetches the pack `index` names into `memory`, a file of the image's
 /// `memory_len` bytes, and returns the byte ranges it filled, sorted and
 /// merged. Never fails: a part that cannot be fetched or checked is left
