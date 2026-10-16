@@ -202,6 +202,19 @@ async function readErrorDetail(
   return detail;
 }
 
+/**
+ * Claude accepts only `[a-zA-Z0-9_-]` in tool call IDs. Calls recorded by
+ * other providers or synthesized by Opengeni (for example a disclosure
+ * search such as `opengeni:family:<id>`) may carry other characters. Such an
+ * ID gets a stable, collision-safe Claude form; the call and its result map
+ * to the same form, and an ID that is already valid passes through unchanged.
+ */
+export function anthropicToolUseId(id: string): string {
+  if (/^[a-zA-Z0-9_-]+$/.test(id)) return id;
+  const readable = id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+  return `${readable}_${createHash("sha256").update(id).digest("hex").slice(0, 16)}`;
+}
+
 export function anthropicToolName(name: string, namespace?: string): string {
   if (!namespace && /^[a-zA-Z0-9_-]{1,64}$/.test(name)) return name;
   const identity = JSON.stringify([namespace ?? null, name]);
@@ -326,7 +339,7 @@ export function anthropicMessages(
         append("assistant", [
           {
             type: "tool_use",
-            id: text(item.callId ?? item.call_id, "tool ID"),
+            id: anthropicToolUseId(text(item.callId ?? item.call_id, "tool ID")),
             name: anthropicToolName(text(item.name, "tool name"), item.namespace),
             input: object(args),
           },
@@ -337,7 +350,7 @@ export function anthropicMessages(
         append("user", [
           {
             type: "tool_result",
-            tool_use_id: text(item.callId ?? item.call_id, "tool result ID"),
+            tool_use_id: anthropicToolUseId(text(item.callId ?? item.call_id, "tool result ID")),
             content: contentBlocks(item.output),
             ...(item.providerData?.anthropic?.is_error ? { is_error: true } : {}),
           },
