@@ -106,10 +106,12 @@ fn ready_dirs(lab: &Lab) -> Vec<String> {
         .into_iter()
         .filter(|(dir, answers)| answers.as_deref() == Some(dir.as_str()))
         .filter(|(dir, _)| {
+            // One being removed meanwhile is not ready.
             let path = lab.root.join("state/vm/firecracker").join(dir);
-            let record: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(path.join("sandbox.json")).unwrap()).unwrap();
-            record["ready"] == true
+            std::fs::read(path.join("sandbox.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|record| record["ready"] == true)
         })
         .map(|(dir, _)| dir)
         .collect()
