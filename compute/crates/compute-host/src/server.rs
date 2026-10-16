@@ -9,7 +9,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::time::Instant;
 
 use crate::agent::{Handle, HostError};
-use crate::protocol::{ErrorCode, Reply, Request};
+use crate::protocol::{ErrorCode, Reply, Request, step_name};
 
 /// Requests are small; anything longer is refused.
 const MAX_REQUEST: u64 = 64 << 10;
@@ -121,6 +121,7 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
         } => match handle.acquire(id, generation, priority.into()).await {
             Ok(lease) => Reply::Woken {
                 waited_us: micros(lease.waited()),
+                during: lease.during().map(|step| step_name(step).to_owned()),
             },
             Err(error) => error_reply(&error),
         },

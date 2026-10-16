@@ -243,7 +243,7 @@ enum Command {
         generation: Option<u64>,
         hold: HoldId,
         priority: Priority,
-        reply: Reply<PathBuf>,
+        reply: Reply<Woke>,
     },
     /// Whether the sandbox is still at `generation`.
     Check {
@@ -322,6 +322,9 @@ struct Slot<V> {
     vm: Option<Live<V>>,
     /// Incarnation of the VM that exists, wherever it is.
     incarnation: Option<u64>,
+    /// VM processes started for it (boots and restores) since the agent
+    /// started.
+    launches: u64,
     /// A VM that died while a step held it.
     dead: Option<u64>,
     /// Listeners for connections the guest opens to the host.
@@ -329,13 +332,29 @@ struct Slot<V> {
     op: Option<Running>,
     destroy: bool,
     removers: Vec<Reply<()>>,
-    /// Requests waiting for the sandbox to run, with the generation each
-    /// names, if any.
-    waiters: Vec<(Option<u64>, Reply<PathBuf>)>,
+    /// Requests waiting for the sandbox to run.
+    waiters: Vec<Waiter>,
     /// A step the core started that waits for a dead VM's teardown.
     deferred: Option<Step>,
     /// Processor use measured so far, while the VM runs.
     cpu: Option<CpuWindow>,
+}
+
+/// Someone waiting for a sandbox to run.
+#[derive(Debug)]
+struct Waiter {
+    /// The generation the request names, if any.
+    generation: Option<u64>,
+    /// The step under way when the wake arrived.
+    during: Option<Step>,
+    reply: Reply<Woke>,
+}
+
+/// A sandbox that runs, as a waiter learns of it.
+#[derive(Debug)]
+struct Woke {
+    vsock: PathBuf,
+    during: Option<Step>,
 }
 
 /// Talks to a running host agent. Cheap to clone.
@@ -353,6 +372,7 @@ pub struct Lease {
     hold: HoldId,
     vsock: PathBuf,
     waited: Duration,
+    during: Option<Step>,
     /// The generation the lease was asked for, if any.
     generation: Option<u64>,
     commands: mpsc::UnboundedSender<Command>,
@@ -624,6 +644,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 spec: Arc::new(spec),
                 vm: None,
                 incarnation: None,
+                launches: 0,
                 dead: None,
                 _ports: ports,
                 op: None,

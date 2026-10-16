@@ -1,13 +1,29 @@
 Opengeni compute
+Copyright 2026 Opengeni
 
-Parts of the design of compute-host follow ideas from SPACE (Sandboxed
-Platform for Agentic Code Execution), https://github.com/perplexityai/SPACE,
-Copyright 2026 Perplexity AI, licensed under the Apache License, Version 2.0:
+This directory contains work derived from SPACE
+(https://github.com/perplexityai/SPACE), Copyright 2026 Perplexity AI,
+licensed under the Apache License, Version 2.0. SPACE has no NOTICE file of
+its own. The derived files were taken at SPACE commit c788098f and changed as
+listed here; each says so at its top.
 
-- VMs outlive the host agent and are taken back from durable per-VM records
-  when it starts again.
-- Every guest gets the same fixed address behind NAT in its own network
-  namespace, so a guest restored from a snapshot needs no reconfiguration.
-
-No SPACE source code is included. Where a file's design follows SPACE, its
-header says so.
+- crates/archcheck: SPACE's crates/tools/archcheck. Renamed to
+  compute-archcheck, given standalone dependency versions, taught to expand
+  `<dir>/*` workspace members, and its README and repository test pointed at
+  this workspace.
+- smoke/compute_smoke: SPACE's space_smoke framework (__init__, __main__,
+  model, registry, runtime, suite, sharding, fixtures and
+  invariants/lifecycle) and its E2B-compatible scenarios
+  (scenarios/ecw_*). Renamed to compute_smoke; telemetry, Kubernetes
+  discovery and control-plane identity checks removed; fixtures, the
+  lifecycle invariant and the shard timings rewritten for this host agent's
+  API; scenarios kept as they were except where a scenario's header says
+  how it was adapted. The adapter (client, services, config), the compute_*
+  scenarios and the guest service are new.
+- crates/compute-host: no SPACE source code, but parts of its design follow
+  SPACE's ideas, and the files concerned say so at their top:
+  - VMs outlive the host agent and are taken back from durable per-VM
+    records when it starts again.
+  - Every guest gets the same fixed address behind NAT in its own network
+    namespace, so a guest restored from a snapshot needs no
+    reconfiguration.

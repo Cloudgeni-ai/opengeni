@@ -18,7 +18,7 @@ use crate::state::{Change, Fence, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::Store;
 
-use super::{Event, HostAgent, HostError, Reply, Running, TEARDOWN_RETRY};
+use super::{Event, HostAgent, HostError, Reply, Running, TEARDOWN_RETRY, Woke};
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn on_event(&mut self, event: Event<E::Vm>) {
@@ -203,6 +203,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     pub(super) fn step_done(&mut self, id: Id, op: OpId, outcome: Outcome, after: After<E::Vm>) {
+        let launched = matches!(after, After::New(..));
         let fresh = match after {
             After::New(vm, memory) => Some(self.own(id, vm, memory)),
             After::Kept(live) => Some(live),
@@ -211,6 +212,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut reap = None;
         let mut destroy = false;
         if let Some(slot) = self.slots.get_mut(&id.0) {
+            if launched {
+                slot.launches += 1;
+            }
             if let Some(running) = slot.op.take().filter(|running| running.op == op) {
                 let stats = &mut self.stats[running.step.index()];
                 let micros =
@@ -378,8 +382,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Some(mut slot) = self.slots.remove(&id.0) else {
             return;
         };
-        for (_, waiter) in slot.waiters.drain(..) {
-            let _ = waiter.send(Err(HostError::Removed(id)));
+        for waiter in slot.waiters.drain(..) {
+            let _ = waiter.reply.send(Err(HostError::Removed(id)));
         }
         let live = slot.vm.take();
         if let Some(live) = &live {
@@ -473,8 +477,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         };
         let generation = self.records.get(id).map(|record| record.generation);
-        for (expected, waiter) in slot.waiters.drain(..) {
-            let answer = match (expected, generation) {
+        for waiter in slot.waiters.drain(..) {
+            let answer = match (waiter.generation, generation) {
                 // It booted afresh since the request: the programs the
                 // caller relies on are gone.
                 (Some(expected), Some(found)) if expected != found => Err(HostError::Stale {
@@ -482,9 +486,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     expected,
                     found,
                 }),
-                _ => result.clone(),
+                _ => result.clone().map(|vsock| Woke {
+                    vsock,
+                    during: waiter.during,
+                }),
             };
-            let _ = waiter.send(answer);
+            let _ = waiter.reply.send(answer);
         }
     }
 }

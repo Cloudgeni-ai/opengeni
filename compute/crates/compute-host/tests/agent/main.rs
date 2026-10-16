@@ -648,6 +648,17 @@ impl Lab {
             .unwrap()
     }
 
+    async fn wake(&self, id: Id) -> Reply {
+        self.client
+            .call(&Request::Wake {
+                id,
+                generation: None,
+                priority: PriorityName::Interactive,
+            })
+            .await
+            .unwrap()
+    }
+
     fn sandbox(status: &HostStatus, id: Id) -> &compute_host::protocol::SandboxStatus {
         status
             .sandboxes

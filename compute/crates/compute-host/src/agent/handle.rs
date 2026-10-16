@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use compute_core::{HoldId, Level, Priority};
+use compute_core::{HoldId, Level, Priority, Step};
 use compute_engine::vsock;
 use tokio::net::UnixStream;
 use tokio::sync::oneshot;
@@ -91,7 +91,7 @@ impl Handle {
             commands: self.commands.clone(),
             armed: true,
         };
-        let vsock = self
+        let woke = self
             .ask(|reply| Command::Acquire {
                 id,
                 generation,
@@ -104,8 +104,9 @@ impl Handle {
         Ok(Lease {
             id,
             hold,
-            vsock,
+            vsock: woke.vsock,
             waited: started.elapsed(),
+            during: woke.during,
             generation,
             commands: self.commands.clone(),
         })
@@ -193,6 +194,13 @@ impl Lease {
     #[must_use]
     pub fn waited(&self) -> Duration {
         self.waited
+    }
+
+    /// The step under way when the wake arrived, if any: a wake during a
+    /// sleep step cancels it or waits for it to finish.
+    #[must_use]
+    pub fn during(&self) -> Option<Step> {
+        self.during
     }
 
     /// Host side of the sandbox's vsock device.

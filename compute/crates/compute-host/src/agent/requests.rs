@@ -15,7 +15,7 @@ use crate::state::{Record, check_generation};
 use crate::step::images_of;
 use crate::store::Store;
 
-use super::{Command, Event, HostAgent, HostError, Reply};
+use super::{Command, Event, HostAgent, HostError, Reply, Waiter, Woke};
 
 /// Makes a new sandbox's directory and first files, from `template` where
 /// one fits. Blocks.
@@ -185,17 +185,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         generation: Option<u64>,
         hold: HoldId,
         priority: Priority,
-        reply: Reply<PathBuf>,
+        reply: Reply<Woke>,
     ) {
         if let Err(error) = self.check(id, generation) {
             let _ = reply.send(Err(error));
             return;
         }
+        let during = self.core.sandbox(id.0).and_then(|view| view.step);
         let Some(slot) = self.slots.get_mut(&id.0).filter(|slot| !slot.destroy) else {
             let _ = reply.send(Err(HostError::NotFound(id)));
             return;
         };
-        slot.waiters.push((generation, reply));
+        slot.waiters.push(Waiter {
+            generation,
+            during,
+            reply,
+        });
         self.input(Input::Hold {
             sandbox: id.0,
             hold,
@@ -385,6 +390,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     memory_saved: view.state.keeps_programs(),
                     step: view.step.map(|step| step_name(step).to_owned()),
                     holds: view.holds,
+                    launches: slot.launches,
                     resident_bytes: slot
                         .vm
                         .as_ref()

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use compute_core::{HostPolicy, Step};
 use compute_host::protocol::{
-    DurabilityName, Id, LevelName, PriorityName, Reply, Request, SleepConfig,
+    DurabilityName, HostStatus, Id, LevelName, PriorityName, Reply, Request, SleepConfig,
 };
 use tokio::time::{Instant, sleep};
 
@@ -578,6 +578,53 @@ async fn a_wake_during_save_resumes_the_paused_vm() {
         !lab.image(sandbox),
         "a cancelled save must not leave a valid-looking image"
     );
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wake_names_the_step_it_met_and_concurrent_wakes_share_one_restore() {
+    let delays = Delays {
+        snapshot: Duration::from_millis(300),
+        restore: Duration::from_millis(100),
+        ..Delays::default()
+    };
+    let lab = Arc::new(Lab::new(delays, HostPolicy::default()).await);
+    let sandbox = id(13);
+    let launches = |status: &HostStatus| Lab::sandbox(status, sandbox).launches;
+    lab.create(sandbox, NEVER).await;
+    assert_eq!(launches(&lab.status().await), 0, "creating costs no VM");
+    assert_eq!(lab.run(sandbox, &["set warm"]).await, ["ok"]);
+    assert_eq!(launches(&lab.status().await), 1, "the first use boots it");
+
+    // A wake that arrives while the memory is being saved says so, and
+    // resumes the paused VM instead of starting another.
+    assert_eq!(lab.sleep_to(sandbox, LevelName::Saved).await, Reply::Done);
+    lab.wait_until("the save to start", |status| {
+        Lab::sandbox(status, sandbox).step.as_deref() == Some("save")
+    })
+    .await;
+    let reply = lab.wake(sandbox).await;
+    assert!(
+        matches!(&reply, Reply::Woken { during: Some(step), .. } if step == "save"),
+        "{reply:?}"
+    );
+    assert_eq!(launches(&lab.status().await), 1);
+
+    // Sixteen wakes of a sandbox saved to disk share one restored VM.
+    assert_eq!(lab.sleep_to(sandbox, LevelName::Saved).await, Reply::Done);
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    let mut wakes = tokio::task::JoinSet::new();
+    for _ in 0..16 {
+        let lab = Arc::clone(&lab);
+        wakes.spawn(async move { lab.wake(sandbox).await });
+    }
+    while let Some(reply) = wakes.join_next().await {
+        let reply = reply.unwrap();
+        assert!(matches!(reply, Reply::Woken { .. }), "{reply:?}");
+    }
+    assert_eq!(launches(&lab.status().await), 2, "one restore served all");
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
+    assert_eq!(lab.run(sandbox, &["get"]).await, ["warm"]);
     lab.assert_clean();
 }
 
