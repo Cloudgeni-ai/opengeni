@@ -43,6 +43,7 @@ import {
   recordModelTransportStarted,
 } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
+import { beginModelRequestEvidence } from "./model-request-evidence";
 import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import {
@@ -534,7 +535,9 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     // The attempt-local observer durably checkpoints provider dispatch before
     // this process can place request bytes on the network.
     await recordModelTransportStarted();
-    const capture = captureProviderRequestBody(provider, input, init);
+    const evidence = beginModelRequestEvidence(provider, init);
+    const capture = captureProviderRequestBody(provider, input, init, evidence?.requestBody);
+    evidence?.track(capture.captured, capture.cancel);
     const started = performance.now();
     recordModelTransportDispatched(started);
     // A request whose bearer a subscription core leased is admitted by its
@@ -580,9 +583,10 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
         }
       }
       recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
-      return response;
+      return evidence?.observeResponse(response) ?? response;
     } catch (error) {
       capture.cancel();
+      await evidence?.failed();
       recordModelCallMetric(provider, "failed", started);
       throw error;
     }

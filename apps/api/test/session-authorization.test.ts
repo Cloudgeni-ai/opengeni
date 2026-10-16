@@ -36,6 +36,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["GET", "/lineage", "session.lineage.read"],
   ["GET", "/background-commands", "session.read"],
   ["GET", "/model-context", "session.read"],
+  ["GET", "/model-evidence", "session.read"],
   ["GET", "/tool-reviews/synthetic-approval", "session.read"],
   ["GET", "/tool-reviews/synthetic-approval/details", "session.read"],
   ["GET", "/codex-accounts", "session.read"],

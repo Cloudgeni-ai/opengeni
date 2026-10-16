@@ -12,6 +12,7 @@
 // WebSockets) goes over HTTP unchanged.
 
 import type { FetchLike } from "./fetch";
+import { CODEX_PHYSICAL_REQUEST, type CodexPhysicalRequestInit } from "./request-context";
 
 export const CODEX_RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 
@@ -419,7 +420,17 @@ export function codexResponsesTransport(
       };
 
       try {
-        active.socket.send(JSON.stringify({ ...payload, type: "response.create" }));
+        const packet = JSON.stringify({ ...payload, type: "response.create" });
+        // Observe the actual packet, not the HTTP-shaped input before type is added.
+        // Diagnostic failures never change dispatch, retry or cancellation.
+        try {
+          (init as CodexPhysicalRequestInit | undefined)?.[
+            CODEX_PHYSICAL_REQUEST
+          ]?.onWebSocketPacket?.(packet);
+        } catch {
+          /* observational */
+        }
+        active.socket.send(packet);
       } catch (error) {
         finish(error);
       }

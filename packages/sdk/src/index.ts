@@ -1,3 +1,5 @@
+export { assessModelRequestEvidence, assessSessionModelEvidencePages } from "@opengeni/contracts";
+export type { ModelRequestEvidence, SessionModelEvidencePage } from "@opengeni/contracts";
 export { parseCustomMcpSetupRequest } from "./prepared-mcp-setup";
 export type {
   AvailableOpenGeniSlackBots,

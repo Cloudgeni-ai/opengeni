@@ -15991,6 +15991,7 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     // liveness policy, first-event/terminal phase, provider request id). Never
     // request body, credentials, or model output.
     "agent.model.request",
+    "agent.model.evidence",
     "agent.model.usage",
     "tool.auth_needed",
     "credential.auth_needed",
@@ -21825,6 +21826,7 @@ export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./company-brain";
 export * from "./model-context-inspector";
+export * from "./model-request-evidence";
 export * from "./workspace-learning-policy";
 export * from "./agent-learning";
 export * from "./knowledge-entries";

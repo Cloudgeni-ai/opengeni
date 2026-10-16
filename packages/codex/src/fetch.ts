@@ -18,6 +18,8 @@ import { opaqueProviderArtifactFingerprints } from "./opaque-artifact";
 import { CODEX_FIVE_HOUR_WINDOW_SECONDS, CODEX_WEEKLY_WINDOW_SECONDS } from "./usage-normalize";
 import {
   codexRequestStorage,
+  CODEX_PHYSICAL_REQUEST,
+  type CodexPhysicalRequestInit,
   type CodexModelRequestEvent,
   type CodexProviderRequestSettlement,
   type CodexRequestPreparationPhase,
@@ -854,6 +856,10 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       }
       let res: Response;
       transportAttempt += 1;
+      (nextInit as CodexPhysicalRequestInit)[CODEX_PHYSICAL_REQUEST] = {
+        requestId,
+        transportAttempt,
+      };
       const audit: RequestAudit = {
         ctx,
         requestId,

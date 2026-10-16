@@ -5,6 +5,7 @@ import {
   type CodexWebSocketLike,
 } from "../src/responses-websocket";
 import { parseCodexUsageHeaders } from "../src/fetch";
+import { CODEX_PHYSICAL_REQUEST } from "../src/request-context";
 
 const URL = "https://chatgpt.example/backend-api/codex/responses";
 
@@ -109,6 +110,31 @@ const rateLimits = {
     },
   },
 };
+
+test("optional custody observer receives the actual socket packet and cannot change sending", async () => {
+  const { transport, sockets } = harness();
+  let packet = "";
+  const pending = transport(
+    URL,
+    request(undefined, {
+      [CODEX_PHYSICAL_REQUEST]: {
+        requestId: "fixture-physical",
+        transportAttempt: 2,
+        onWebSocketPacket: (value: string) => {
+          packet = value;
+          throw new Error("fixture observer failed");
+        },
+      },
+    }),
+  );
+  const socket = await nextSend(() => sockets[0]);
+  expect(JSON.parse(packet)).toEqual(socket.sent[0]);
+  expect(packet).toContain('"type":"response.create"');
+  expect(packet).not.toContain("fixture-physical");
+  socket.emit({ type: "response.completed", response: { id: "fixture-response" } });
+  expect(await (await pending).text()).toContain("fixture-response");
+  socket.close();
+});
 
 test("streams a response over one reused connection as SSE with usage headers", async () => {
   const { transport, sockets, httpCalls } = harness();

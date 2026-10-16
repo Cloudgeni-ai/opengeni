@@ -186,6 +186,7 @@ import {
   getSessionForSubject,
   getSessionGoal,
   getLatestSessionModelContext,
+  getSessionModelEvidence,
   getSessionHumanInputRequest,
   getSessionGoalWithContinuation,
   getSessionGoalRevision,
@@ -1337,6 +1338,49 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         policy,
       ),
     );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/model-evidence", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    if (!z.string().uuid().safeParse(sessionId).success)
+      throw new HTTPException(404, { message: "session not found" });
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccessFor(c),
+    );
+    if (!session) throw new HTTPException(404, { message: "session not found" });
+    const query = z
+      .object({
+        afterSequence: z.coerce.number().int().nonnegative().optional(),
+        throughSequence: z.coerce.number().int().nonnegative().optional(),
+        limit: z.coerce.number().int().min(1).max(20).optional(),
+      })
+      .safeParse(c.req.query());
+    if (
+      !query.success ||
+      (query.data.throughSequence !== undefined &&
+        query.data.throughSequence < (query.data.afterSequence ?? 0))
+    )
+      throw new HTTPException(400, { message: "invalid model evidence page cursor" });
+    try {
+      return c.json(
+        await getSessionModelEvidence(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          ...query.data,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof RangeError)
+        throw new HTTPException(400, { message: "invalid model evidence page cursor" });
+      throw error;
+    }
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/model-context", async (c) => {
@@ -5519,6 +5563,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
   if (suffix === "/background-commands" && verb === "GET") return "session.read";
   if (suffix === "/model-context" && verb === "GET") return "session.read";
+  if (suffix === "/model-evidence" && verb === "GET") return "session.read";
   if (/^\/tool-reviews\/[^/]+(?:\/details)?$/.test(suffix) && verb === "GET") return "session.read";
   if (suffix === "/codex-accounts" && verb === "GET") return "session.read";
   if (/^\/background-commands\/[^/]+$/.test(suffix) && verb === "DELETE") {

@@ -1,3 +1,4 @@
+import { captureModelUsageEvidence } from "@opengeni/runtime";
 import { canonicalizeConfiguredModelId } from "@opengeni/config";
 import {
   isStoredVerbatimAsLosslessJsonString,
@@ -649,6 +650,19 @@ export async function emitModelCallUsage(input: {
       (event.payload as Record<string, unknown>).sourceKey === input.sourceKey,
   );
   if (!authoritative) return false;
+  const committed = appended!.events.find(
+    (event) =>
+      event.type === "agent.model.usage" &&
+      event.turnAssociation === "current" &&
+      (event.payload as Record<string, unknown>)?.sourceKey === input.sourceKey,
+  )!;
+  await captureModelUsageEvidence({
+    sourceKey: input.sourceKey,
+    purpose: input.purpose,
+    eventId: committed.id,
+    sequence: committed.sequence,
+    payload: committed.payload,
+  });
   releaseReceiptMeteredByCommittedEvent(input, telemetry);
   try {
     input.observability.info("model call usage", {

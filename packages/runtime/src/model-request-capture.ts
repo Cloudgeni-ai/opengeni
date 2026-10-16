@@ -67,14 +67,16 @@ export function captureProviderRequestBody(
   provider: string,
   input: Parameters<typeof fetch>[0],
   init?: RequestInit,
+  onBody?: (body: string | null, reason?: string) => void | Promise<void>,
 ): { init: RequestInit | undefined; captured: Promise<void>; cancel: () => void } {
   const context = modelRequestCapture.getStore();
   const callback = context?.onProviderRequest;
-  if (!callback) return { init, captured: Promise.resolve(), cancel: () => {} };
+  if (!callback && !onBody) return { init, captured: Promise.resolve(), cancel: () => {} };
   // Reserve identity at dispatch, not when asynchronous reading finishes.
-  const index = context.nextProviderRequestIndex?.();
-  const observer = (providerId: string, body: string | null, reason?: string) =>
-    callback(providerId, body, reason, index);
+  const index = context?.nextProviderRequestIndex?.();
+  const observer = async (providerId: string, body: string | null, reason?: string) => {
+    await Promise.all([callback?.(providerId, body, reason, index), onBody?.(body, reason)]);
+  };
   let cancel = () => {};
   let body = init?.body;
   let nextInit = init;
@@ -119,13 +121,16 @@ export function captureProviderRequestBody(
           }
           chunks.push(decoder.decode(chunk.value, { stream: true }));
         }
-        if (cancelled) return;
+        if (cancelled) {
+          await onBody?.(null, "Request capture cancelled before completion.");
+          return;
+        }
         chunks.push(decoder.decode());
         text = chunks.join("");
       } catch {
         void reader.cancel().catch(() => undefined);
-        if (!cancelled)
-          await observer(provider, null, "The provider body could not be read as UTF-8.");
+        if (cancelled) await onBody?.(null, "Request capture cancelled before completion.");
+        else await observer(provider, null, "The provider body could not be read as UTF-8.");
         return;
       } finally {
         signal?.removeEventListener("abort", cancel);

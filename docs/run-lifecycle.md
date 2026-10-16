@@ -4825,6 +4825,12 @@ settlement and writer quiescence. Replaying the same key adds no wake revision.
 
 ## Debug context capture
 
+Deployment-opt-in [per-physical-request evidence](model-request-evidence.md) is
+separate from this latest-snapshot inspector. It retains attempt-scoped request,
+public response and committed usage joins, including title/compaction purposes,
+and closes before ordinary settlement. Missing/stale/oversized captures remain
+explicitly incomplete; archive export is not an empty completeness certificate.
+
 The session Context inspector reads the latest attempt-fenced capture. The runtime
 observes the final HTTP body inside `instrumentedModelFetch`, after Responses/chat
 conversion and Codex, SuperGrok or gateway normalization. It stores the original
