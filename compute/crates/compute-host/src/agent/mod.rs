@@ -94,9 +94,16 @@ pub struct HostConfig {
 /// When a running sandbox counts as busy: over `window`, its VM used at
 /// least `cpu_percent` of one processor on average, or moved at least
 /// `io_bytes_per_second` on average through its network and disk (see
-/// [`Engine::io_bytes`]). Vsock traffic needs no rule: it always runs over a
-/// stream the agent proxies, and an open stream keeps a sandbox awake on its
-/// own.
+/// [`Engine::io_bytes`]).
+///
+/// Vsock traffic is not measured here: the traffic counters see only part
+/// of it, and no rule depends on them for it. Streams the host opens into
+/// the guest hold the sandbox awake while they are open. Connections the
+/// guest opens to its host (see [`crate::guest_ports`]) deliberately do
+/// not: a control link carries keepalives for as long as the guest lives,
+/// so its traffic alone must not keep a sandbox awake. Data arriving on one
+/// can wake the sandbox, and the guest's own work for it shows as
+/// processor use.
 ///
 /// This is how the host sees work nobody told it about, such as a build or
 /// test run an agent left in the background, or a download that mostly

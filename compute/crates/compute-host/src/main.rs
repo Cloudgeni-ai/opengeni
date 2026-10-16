@@ -175,8 +175,8 @@ struct ServeArgs {
     #[arg(long, default_value_t = BusyRule::DEFAULT.cpu_percent)]
     busy_cpu_percent: u32,
     /// A running sandbox whose VM moves at least this many KiB a second
-    /// through its disk, network and vsock counts as busy and stays awake;
-    /// 0 ignores traffic.
+    /// through its disk and network counts as busy and stays awake; 0
+    /// ignores traffic.
     #[arg(long, default_value_t = BusyRule::DEFAULT.io_bytes_per_second >> 10)]
     busy_io_kib: u64,
     /// ...averaged over this long.

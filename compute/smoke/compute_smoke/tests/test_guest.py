@@ -516,6 +516,51 @@ class GuestInternals(unittest.TestCase):
         names = [event["name"] for event in watcher.read_events()]
         self.assertIn("new/inner/file", names)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_child_that_left_stays_gone_when_its_parent_is_renamed_meanwhile(self) -> None:
+        # The parent's rename must not take over the child's pending
+        # departure, or the child would stay watched outside the tree.
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        os.rename(root / "old" / "inner", self.scratch / "elsewhere")
+        os.rename(root / "old", root / "new")
+        watcher.read_events()
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        watcher.read_events()
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertIn(root / "new", watcher.watched().values())
+        self.assertEqual(
+            [path for path in watcher.watched().values() if path.name == "inner"],
+            [],
+            "the departed child is still watched",
+        )
+        (self.scratch / "elsewhere" / "file").touch()
+        (root / "new" / "fence").touch()
+        names = [event["name"] for event in watcher.read_events()]
+        self.assertTrue(names)
+        self.assertTrue(all(name == "new/fence" for name in names), names)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_rename_inside_a_departed_directory_follows_it_back(self) -> None:
+        # The parent leaves (its arrival in a later read), its child is
+        # renamed inside it meanwhile, then the parent arrives: the child's
+        # watch ends up under the parent's new name and the child's new one.
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        isdir = self.guest.IN_ISDIR
+        away = self.event(watcher, root, self.guest.IN_MOVED_FROM | isdir, 7, "old")
+        old = root / "old"
+        renamed = self.event(watcher, old, self.guest.IN_MOVED_FROM | isdir, 8, "inner")
+        renamed += self.event(watcher, old, self.guest.IN_MOVED_TO | isdir, 8, "inner2")
+        back = self.event(watcher, root, self.guest.IN_MOVED_TO | isdir, 7, "back")
+        watcher.parse(away)
+        watcher.parse(renamed)
+        watcher.parse(back)
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertIn(root / "back", watcher.watched().values())
+        self.assertIn(root / "back" / "inner2", watcher.watched().values())
+        self.assertNotIn(root / "back" / "inner", watcher.watched().values())
+
 
 if __name__ == "__main__":
     unittest.main()

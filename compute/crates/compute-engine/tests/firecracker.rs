@@ -347,3 +347,39 @@ async fn a_new_engine_adopts_a_running_vm_without_disturbing_it() {
     }
     std::fs::remove_dir_all(&spec.logs).unwrap();
 }
+
+/// A launch counts once the engine saw the VMM running: a jailer that fails
+/// before starting one is no launch, a VMM that then refuses its snapshot is
+/// one.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_vmm_seen_running_counts_as_a_launch() {
+    let Some(lab) = lab() else {
+        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
+        return;
+    };
+    let name = format!("launch-test-{}", std::process::id());
+    let spec = jailed_spec(&lab, &name, 3_900_003);
+    let failing = Firecracker::new(FirecrackerConfig {
+        firecracker: lab.join("bin/firecracker"),
+        jailer: "/bin/false".into(),
+        cgroup_parent: "/sys/fs/cgroup/compute-test".into(),
+    })
+    .unwrap();
+    let error = failing.boot(&spec).await.unwrap_err();
+    assert!(!error.launched, "a jailer that failed counted: {error}");
+
+    let state = spec.dir.join("vm.state");
+    let memory = spec.dir.join("vm.mem");
+    std::fs::write(&state, b"not a snapshot").unwrap();
+    std::fs::write(&memory, vec![0_u8; 4096]).unwrap();
+    let files = RestoreFiles {
+        state,
+        memory: MemorySource::File(memory),
+    };
+    let error = engine(&lab).restore(&spec, &files).await.unwrap_err();
+    assert!(
+        error.launched,
+        "a VMM that refused its snapshot did not count: {error}"
+    );
+    std::fs::remove_dir_all(&spec.logs).unwrap();
+}

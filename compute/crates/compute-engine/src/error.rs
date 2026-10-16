@@ -24,8 +24,10 @@ pub struct EngineError {
     pub operation: &'static str,
     /// What went wrong, for logs.
     pub message: String,
-    /// Whether a VMM process was started before the failure, so the host
-    /// can count every launch, failed ones included.
+    /// Whether the engine saw a VMM process it started before the failure,
+    /// so the host can count every launch, failed ones included. An engine
+    /// sets this only for a process it confirmed, never for an attempt
+    /// that may have failed before one existed.
     pub launched: bool,
     #[source]
     source: Option<Box<dyn StdError + Send + Sync>>,

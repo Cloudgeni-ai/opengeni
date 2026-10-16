@@ -243,8 +243,11 @@ impl Firecracker {
 
     /// Starts a jailed VMM for `spec` and waits for its API. `owned` are
     /// files the VMM must be able to write, such as its drives; they are
-    /// handed to the VM's user first. A failure once the jailer process
-    /// exists counts as a launch ([`EngineError::launched`]).
+    /// handed to the VM's user first. A failure counts as a launch
+    /// ([`EngineError::launched`]) once the VMM the jailer started was found
+    /// in the VM's cgroup. Before that, a jailer that failed or hung may
+    /// have got as far as starting one, but anything it left in the cgroup
+    /// is ended unseen and not counted.
     async fn launch(
         &self,
         spec: &VmSpec,
@@ -301,10 +304,9 @@ impl Firecracker {
                 ErrorKind::Transient,
                 operation,
                 format!("the jailer did not finish within {JAILER_TIMEOUT:?}"),
-            )
-            .after_launch());
+            ));
         };
-        let status = status.map_err(|error| EngineError::io(operation, error).after_launch())?;
+        let status = status.map_err(|error| EngineError::io(operation, error))?;
         if !status.success() {
             let _ = self.discard(spec).await;
             return Err(EngineError::new(
@@ -314,14 +316,13 @@ impl Firecracker {
                     "the jailer failed ({status}); see {}",
                     spec.logs.join("vmm.log").display()
                 ),
-            )
-            .after_launch());
+            ));
         }
         let vm = match self.attach(spec, &jail) {
             Ok(vm) => vm,
             Err(error) => {
                 let _ = self.discard(spec).await;
-                return Err(EngineError::new(ErrorKind::Transient, operation, error).after_launch());
+                return Err(EngineError::new(ErrorKind::Transient, operation, error));
             }
         };
         if let Err(error) = vm.wait_for_api(self.startup_timeout).await {
