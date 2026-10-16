@@ -66,7 +66,23 @@ test("a post-creation inventory failure never creates a replacement tab or colle
   }
 });
 
-function inventoryFixture(failInventory = false) {
+test("closing a tab returns inventory without it even while the browser still lists it", async () => {
+  // Chrome acknowledges Target.closeTarget before Target.getTargets stops
+  // listing the tab; a cold or busy browser keeps listing it for a moment.
+  const fixture = inventoryFixture(false, 3);
+  try {
+    const targets = await fixture.driver.closeTarget("prior");
+    expect(targets.map((target) => target.id)).toEqual([]);
+    const closeIndex = fixture.calls.findIndex((call) => call.method === "Target.closeTarget");
+    expect(
+      fixture.calls.slice(closeIndex).filter((call) => call.method === "Target.getTargets").length,
+    ).toBeGreaterThan(3);
+  } finally {
+    await fixture.driver.detach();
+  }
+});
+
+function inventoryFixture(failInventory = false, closedTabListings = 0) {
   const browserSessionId = randomUUID();
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const pages = new Map([
@@ -93,6 +109,7 @@ function inventoryFixture(failInventory = false) {
   ]);
   let created = 0,
     navigated = false;
+  const closing = new Map<string, number>();
   const connection: BrowserCdpConnection = {
     async send<T>(
       method: string,
@@ -113,7 +130,20 @@ function inventoryFixture(failInventory = false) {
       }
       if (method === "Target.getTargets") {
         if (failInventory && navigated) throw new Error("synthetic inventory outcome unavailable");
-        return { targetInfos: [...pages.values()] } as T;
+        const targetInfos = [...pages.values()];
+        for (const [targetId, remaining] of closing) {
+          if (remaining <= 0) {
+            pages.delete(targetId);
+            closing.delete(targetId);
+          } else closing.set(targetId, remaining - 1);
+        }
+        return { targetInfos } as T;
+      }
+      if (method === "Target.closeTarget") {
+        const targetId = String(params.targetId);
+        if (closedTabListings > 0) closing.set(targetId, closedTabListings - 1);
+        else pages.delete(targetId);
+        return { success: true } as T;
       }
       if (method === "Target.attachToTarget") return { sessionId: params.targetId } as T;
       const page = pages.get(options?.sessionId ?? "");

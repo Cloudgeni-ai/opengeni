@@ -2096,6 +2096,13 @@ chromiumE2e(
       await expect(
         driver.openTarget(`http://127.0.0.1:${refusedPort}/opened`),
       ).rejects.toMatchObject({ code: "resource_unavailable" });
+      // A failed open never leaves a tab behind, including the first one
+      // after a restore.
+      expect(await driver.listTargets()).toHaveLength(3);
+      await expect(
+        driver.openTarget(`http://127.0.0.1:${refusedPort}/opened-again`),
+      ).rejects.toMatchObject({ code: "resource_unavailable" });
+      expect(await driver.listTargets()).toHaveLength(3);
       // A malformed URL is never kept, even when restoring: the browser has no
       // page for it.
       await expect(driver.openTarget("http://[::1/", { keepTabOnLoadError: true })).rejects.toThrow(
