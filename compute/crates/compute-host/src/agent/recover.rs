@@ -112,7 +112,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // A VM found running is left as it is: its guest's programs
                 // matter more than its network, and its memory keeps coming.
                 Some(error) => {
-                    keep_serving(vm);
+                    keep_serving::<E>(vm);
                     Err(HostError::Io(format!("network not repaired: {error}")))
                 }
                 None => self.recover_one(record, vm).await,
@@ -326,7 +326,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let policy = match self.sleep_policy(&record.config) {
             Ok(policy) => policy,
             Err(error) => {
-                keep_serving(found);
+                keep_serving::<E>(found);
                 return Err(HostError::Invalid(error));
             }
         };
@@ -336,7 +336,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             match self.adopted_state(&record, found).await {
                 Ok(state) => (state, Some((vm, memory))),
                 Err(error) => {
-                    keep_serving(Ok(Some((vm, found, memory))));
+                    keep_serving::<E>(Ok(Some((vm, found, memory))));
                     return Err(error);
                 }
             }
