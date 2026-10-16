@@ -1,3 +1,4 @@
+import { registerModelEvidenceSecrets } from "@opengeni/runtime";
 import { getSessionRootId, resolvePrReviewGitCredential } from "@opengeni/db";
 import { prReviewRegistrationIdFromCredentialBinding } from "@opengeni/core";
 import {
@@ -375,6 +376,12 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     cancellationSignal,
     undefined,
   );
+  registerModelEvidenceSecrets([
+    sandboxGitToken,
+    sandboxCodemodeToken,
+    ...Object.values(sandboxGitTokens ?? {}),
+    ...(sandboxGitCredentialBindings ?? []).map((binding) => binding.token),
+  ]);
   // Reserved, image-owned paths win over workspace/session variables. The
   // exact same merged object feeds both box manifest and agent declaration,
   // preserving the no-environment-delta invariant.
@@ -464,6 +471,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
           );
           if (binding) {
             assertGitCredentialRenewalTransportUnchanged(initialBinding, binding);
+            registerModelEvidenceSecrets([binding.token]);
           }
           pendingBinding = binding;
           return binding
@@ -583,6 +591,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
         );
       }
       codemodeTokenState.token = material.token;
+      registerModelEvidenceSecrets([material.token]);
     };
     let renewalExpiresAt = initialExpiresAt;
     if (renewalExpiresAt.getTime() <= Date.now() + CODEMODE_TOKEN_EXPIRY_LEAD_MS) {

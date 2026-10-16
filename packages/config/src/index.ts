@@ -672,6 +672,8 @@ const SettingsSchema = z.object({
   // The current stable Codex catalog policy is 10k tokens; the truncator adds
   // Codex's 1.2x JSON serialization allowance when applying it.
   modelToolOutputTruncationTokens: z.coerce.number().int().positive().default(10_000),
+  // Opt-in benchmark diagnostics. No extra model content is retained by default.
+  modelRequestEvidenceEnabled: EnvBoolean.default(false),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -4786,6 +4788,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     contextReservedOutputTokens: optional("OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS"),
     contextAutoCompactThresholdTokens: optional("OPENGENI_CONTEXT_AUTO_COMPACT_THRESHOLD_TOKENS"),
     modelToolOutputTruncationTokens: optional("OPENGENI_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS"),
+    modelRequestEvidenceEnabled: optional("OPENGENI_MODEL_REQUEST_EVIDENCE_ENABLED"),
     authRequired: optional("OPENGENI_AUTH_REQUIRED"),
     accessKey: optional("OPENGENI_ACCESS_KEY"),
     authAllowHealth: optional("OPENGENI_AUTH_ALLOW_HEALTH"),

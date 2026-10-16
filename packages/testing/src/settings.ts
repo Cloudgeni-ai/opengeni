@@ -10,6 +10,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     slackAccessMode: "limited",
     serviceName: "opengeni",
+    modelRequestEvidenceEnabled: false,
     environment: "test",
     deploymentRevision: "dev",
     databaseUrl: "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni",

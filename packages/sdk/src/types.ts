@@ -2372,6 +2372,7 @@ export const SESSION_EVENT_TYPES = [
   "agent.toolCall.created",
   "agent.toolCall.output",
   "agent.model.request",
+  "agent.model.evidence",
   "agent.model.usage",
   "tool.auth_needed",
   "credential.auth_needed",

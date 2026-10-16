@@ -140,6 +140,7 @@ import {
   type StreamSessionEventsOptions,
 } from "./stream";
 import type { SessionModelContextResponse } from "./model-context";
+import type { SessionModelEvidencePage } from "@opengeni/contracts";
 import { withDeprecationNotices, type OpenGeniDeprecationHandler } from "./deprecation";
 import type {
   SkillRecord,
@@ -1660,6 +1661,21 @@ export class OpenGeniClient {
     return await this.requestJson<SessionModelContextResponse>(
       "GET",
       `${sessionPath(workspaceId, sessionId)}/model-context`,
+    );
+  }
+
+  /** Page all records at a fixed watermark; recurse into each child separately. */
+  async getSessionModelEvidence(
+    workspaceId: string,
+    sessionId: string,
+    options: { afterSequence?: number; throughSequence?: number; limit?: number } = {},
+  ): Promise<SessionModelEvidencePage> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options))
+      if (value !== undefined) query.set(key, String(value));
+    return this.requestJson<SessionModelEvidencePage>(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/model-evidence?${query}`,
     );
   }
 

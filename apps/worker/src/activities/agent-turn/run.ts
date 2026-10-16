@@ -1,4 +1,11 @@
 import { withClaudeConnectionCredential } from "@opengeni/config";
+import { storeModelEvidenceContent } from "@opengeni/db";
+import {
+  finishModelRequestEvidence,
+  startModelRequestEvidence,
+  withModelEvidencePurpose,
+  withModelRequestEvidence,
+} from "@opengeni/runtime";
 import {
   getSessionAuthorityProjection,
   canSpendSubscriptionCoreCodexExtraCredits,
@@ -9,7 +16,7 @@ import {
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
 import { createAttemptVaultAccess } from "./secret-resolver";
-import { resolveAgentToolFamilies } from "@opengeni/contracts";
+import { resolveAgentToolFamilies, type ModelRequestEvidence } from "@opengeni/contracts";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
   freezeAgentLearningPolicy,
@@ -254,6 +261,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     input: RunAgentTurnInput,
     resolvedServices: ActivityServices,
     activitySpan: ReturnType<ActivityServices["observability"]["startSpan"]>,
+    bindEvidenceSink?: (sink: (record: ModelRequestEvidence) => Promise<void>) => void,
   ): Promise<RunAgentTurnResult> => {
     const {
       settings,
@@ -302,6 +310,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     } = createTurnContext({
       settings,
       cancellationRequestedAt: cancellationSignal?.aborted ? performance.now() : null,
+    });
+    bindEvidenceSink?.(async (record) => {
+      if (!eventing.publish || !attempt.turnId)
+        throw new Error("Model evidence attempt not claimed");
+      const stored = await storeModelEvidenceContent(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: input.attemptId,
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        record,
+      });
+      const appended = await eventing.publish(
+        [{ type: "agent.model.evidence", payload: stored }],
+        true,
+      );
+      if (
+        !appended.events.some(
+          (event) => event.type === "agent.model.evidence" && event.turnAssociation === "current",
+        )
+      )
+        throw new Error("Model evidence exact attempt publication rejected");
     });
     const noteCancellationRequested = (): void => {
       control.cancellationRequestedAt ??= performance.now();
@@ -523,6 +554,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!eventing.publish || !eventing.settle) {
         throw new Error("turn eventing was not wired during claim");
       }
+      const settle = eventing.settle;
+      eventing.settle = async (...args) => {
+        await finishModelRequestEvidence();
+        return settle(...args);
+      };
+      await startModelRequestEvidence();
       assertRecoveryWindow();
       // Same object, narrowed type: every post-claim phase mutates this exact
       // context, so this must stay an assertion and never become a copy.
@@ -1232,28 +1269,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               )
             : null;
           const withSessionTitleProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
-            withClaudeTitleUsage(() =>
-              xaiSessionTitleContext
-                ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
-                : codexSessionTitleContext
-                  ? codexRequestStorage.run(codexSessionTitleContext, fn)
-                  : fn(),
+            withModelEvidencePurpose("session-title", () =>
+              withClaudeTitleUsage(() =>
+                xaiSessionTitleContext
+                  ? xaiSubscriptionRequestStorage.run(xaiSessionTitleContext, fn)
+                  : codexSessionTitleContext
+                    ? codexRequestStorage.run(codexSessionTitleContext, fn)
+                    : fn(),
+              ),
             );
           const withCodexRemoteCompaction = <T>(fn: () => Promise<T>): Promise<T> =>
-            withClaudeUsage(() =>
-              withCodex(() =>
-                withCodexRequestOverrides(
-                  {
-                    betaFeatures: [REMOTE_COMPACTION_V2_BETA_FEATURE],
-                    turnMetadata: {
-                      request_kind: "compaction",
-                      compaction: {
-                        implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
-                        strategy: "memento",
+            withModelEvidencePurpose("compaction", () =>
+              withClaudeUsage(() =>
+                withCodex(() =>
+                  withCodexRequestOverrides(
+                    {
+                      betaFeatures: [REMOTE_COMPACTION_V2_BETA_FEATURE],
+                      turnMetadata: {
+                        request_kind: "compaction",
+                        compaction: {
+                          implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION,
+                          strategy: "memento",
+                        },
                       },
                     },
-                  },
-                  fn,
+                    fn,
+                  ),
                 ),
               ),
             );
@@ -2173,7 +2214,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } catch {
             // Correlation diagnostics never affect execution or admission.
           }
-          return runAgentTurn(input, resolvedServices, span);
+          if (!resolvedServices.settings.modelRequestEvidenceEnabled)
+            return runAgentTurn(input, resolvedServices, span);
+          let persistEvidence = async (_record: ModelRequestEvidence): Promise<void> => {
+            throw new Error("Model evidence scope is not bound to an attempt");
+          };
+          return withModelRequestEvidence(
+            (record) => persistEvidence(record),
+            () =>
+              runAgentTurn(input, resolvedServices, span, (sink) => {
+                persistEvidence = sink;
+              }),
+          );
         }),
       );
     } catch (error) {

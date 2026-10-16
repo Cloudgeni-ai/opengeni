@@ -160,6 +160,14 @@ Idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different
 
+Optional per-physical-request audit capture is owned by
+`packages/runtime/src/model-request-evidence.ts`, the worker attempt publisher,
+and `packages/db/src/model-request-evidence.ts`. It reuses append-only session
+events/content blobs and exact committed usage identities without replacing the
+latest Debug snapshot. The authorized API/SDK expose bounded, fixed-watermark
+pages with explicit completeness and archive limitations; see
+[model request evidence](model-request-evidence.md).
+
 Subscription serving revisions are attempt-scoped; the accepted model and
 frozen connection authority remain the logical turn's contract. Shared-core
 placement, candidate-aware capacity waits and lease-backed switch events use

@@ -7,6 +7,16 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 
+/** In-process transport metadata only. Never serialized as headers or request JSON. */
+export const CODEX_PHYSICAL_REQUEST = Symbol.for("opengeni.codex.physical-request.v1");
+export type CodexPhysicalRequestInit = RequestInit & {
+  [CODEX_PHYSICAL_REQUEST]?: {
+    requestId: string;
+    transportAttempt: number;
+    onWebSocketPacket?: (packet: string) => void;
+  };
+};
+
 export type CodexTokenSnapshot = {
   accessToken: string;
   chatgptAccountId: string | null;

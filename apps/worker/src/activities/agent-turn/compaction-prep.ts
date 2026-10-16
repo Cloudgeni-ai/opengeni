@@ -1,3 +1,4 @@
+import { withModelEvidencePurpose } from "@opengeni/runtime";
 import {
   ensureRunAllowedBetweenModelCalls,
   ensureSessionUsageLimitAllowsBetweenModelCalls,
@@ -333,7 +334,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         entitlements: deps.entitlements,
         sessionId: input.sessionId,
       });
-      return await summarizeModel(s, m);
+      return await withModelEvidencePurpose("compaction", () => summarizeModel(s, m));
     };
     summarize.estimatePrefixTokens = () => {
       if (resolvedModel?.provider.api === "chat") {

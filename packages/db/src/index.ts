@@ -1,3 +1,4 @@
+export * from "./model-request-evidence";
 export {
   listExhaustedScheduledTasks,
   retireExhaustedScheduledTask,
