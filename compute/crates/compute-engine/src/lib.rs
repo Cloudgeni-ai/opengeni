@@ -141,15 +141,26 @@ pub trait Engine: Send + Sync + 'static {
     /// watch for a VM dying on its own while a step uses it.
     fn exited(&self, vm: &Self::Vm) -> impl Future<Output = ()> + Send + 'static;
 
-    /// What a new page-fault handler needs to take over a VM restored with
-    /// [`MemorySource::Pager`] whose handler has gone, for example with the
-    /// host agent that ran it. Engines that cannot hand it over refuse.
-    fn paged_memory(&self, vm: &Self::Vm) -> Result<PagedMemory, EngineError> {
-        let _ = vm;
-        Err(EngineError::new(
-            ErrorKind::Fatal,
-            "paged_memory",
-            "this engine cannot hand over a VM's page-fault handling",
-        ))
+    /// Like [`Engine::adopt`], for a VM restored with
+    /// [`MemorySource::Pager`] whose page-fault handler has gone, for
+    /// example with the host agent that ran it. Its page faults go to
+    /// `serve`, which starts a new handler, before the VMM is asked
+    /// anything: the VMM itself may be waiting on a page.
+    ///
+    /// If the handling cannot be handed over or `serve` fails, the VM is
+    /// ended and the error is [`ErrorKind::MemoryLost`]. Engines that cannot
+    /// hand it over at all end the VM and find none.
+    fn adopt_paged<T, F, Fut>(
+        &self,
+        spec: &VmSpec,
+        serve: F,
+    ) -> impl Future<Output = Result<Option<(Self::Vm, Found, T)>, EngineError>> + Send
+    where
+        T: Send,
+        F: FnOnce(PagedMemory) -> Fut + Send,
+        Fut: Future<Output = Result<T, EngineError>> + Send,
+    {
+        let _ = serve;
+        async move { self.clean_up(spec).await.map(|()| None) }
     }
 }

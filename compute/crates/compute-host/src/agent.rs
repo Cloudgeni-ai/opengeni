@@ -172,6 +172,10 @@ impl From<StateError> for HostError {
 
 type Reply<T> = oneshot::Sender<Result<T, HostError>>;
 
+/// A VM found still running after an agent restart, with what it is doing
+/// and, if its memory is paged, the pager now serving it.
+type FoundVm<E> = (<E as Engine>::Vm, Found, Option<LiveMemory>);
+
 #[derive(Debug)]
 enum Command {
     Create {
@@ -737,7 +741,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     async fn find_vms(
         &self,
         records: &[Record],
-    ) -> HashMap<SandboxId, Result<Option<(E::Vm, Found)>, HostError>> {
+    ) -> HashMap<SandboxId, Result<Option<FoundVm<E>>, HostError>> {
         /// Enough to hide each lookup's round trip to its VMM without
         /// opening thousands of descriptors at once.
         const CONCURRENT: usize = 64;
@@ -752,7 +756,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     &self.images,
                 );
                 let found = match record.disk {
-                    Disk::Local => self.engine.adopt(&spec).await,
+                    Disk::Local if crate::step::paged(&paths) => {
+                        self.adopt_paged(record.id, &spec, &paths).await
+                    }
+                    Disk::Local => self
+                        .engine
+                        .adopt(&spec)
+                        .await
+                        .map(|found| found.map(|(vm, how)| (vm, how, None))),
                     Disk::Remote => self.engine.clean_up(&spec).await.map(|()| None),
                 };
                 (
@@ -763,6 +774,34 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .buffer_unordered(CONCURRENT)
             .collect()
             .await
+    }
+
+    /// Takes back a VM whose memory the previous agent's pager served,
+    /// starting a new pager before anything asks the VMM, which may itself
+    /// be waiting on a page. One whose pager cannot be taken over is ended;
+    /// its record still says whether a saved image stands in for it.
+    async fn adopt_paged(
+        &self,
+        id: Id,
+        spec: &VmSpec,
+        paths: &Paths,
+    ) -> Result<Option<FoundVm<E>>, compute_engine::EngineError> {
+        let found = self
+            .engine
+            .adopt_paged(spec, |handed| self.take_over_paging(handed, paths))
+            .await;
+        match found {
+            Ok(Some((vm, how, memory))) => {
+                tracing::info!(%id, "took over the VM's memory pager");
+                Ok(Some((vm, how, Some(memory))))
+            }
+            Ok(None) => Ok(None),
+            Err(error) if error.kind == compute_engine::ErrorKind::MemoryLost => {
+                tracing::warn!(%id, %error, "the VM's memory pager cannot be taken over; the VM was ended");
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Makes sure every recorded sandbox's network exists with the current
@@ -805,20 +844,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .map_err(|error| HostError::Io(error.to_string()))
     }
 
-    /// Serves the memory of a VM found running whose pager went with the
-    /// previous agent; see [`crate::step::take_over_paging`].
+    /// Serves the memory `handed` over by a VM found running whose pager
+    /// went with the previous agent; see [`crate::step::take_over_paging`].
     async fn take_over_paging(
         &self,
-        vm: &E::Vm,
+        handed: compute_engine::PagedMemory,
         paths: &Paths,
     ) -> Result<LiveMemory, compute_engine::EngineError> {
         #[cfg(target_os = "linux")]
         {
-            crate::step::take_over_paging(&*self.engine, vm, paths, self.fetcher.as_ref()).await
+            crate::step::take_over_paging(handed, paths, self.fetcher.as_ref()).await
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (vm, paths);
+            let _ = (handed, paths);
             Err(compute_engine::EngineError::new(
                 compute_engine::ErrorKind::Fatal,
                 "take over paging",
@@ -832,7 +871,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     async fn recover_one(
         &mut self,
         record: Record,
-        found: Result<Option<(E::Vm, Found)>, HostError>,
+        found: Result<Option<FoundVm<E>>, HostError>,
     ) -> Result<bool, HostError> {
         let id = record.id;
         let policy = self
@@ -840,34 +879,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .map_err(HostError::Invalid)?;
         let paths = Paths::new(&self.root, id);
         let spec = vm_spec(id, record.ordinal, &record.config, &paths, &self.images);
-        let mut memory = None;
-        let found = match found? {
-            Some((vm, how)) if crate::step::paged(&paths) => {
-                // The previous agent's pager served this VM's memory and
-                // went with it, so the guest waits on its next page fault
-                // until a new pager takes over.
-                match self.take_over_paging(&vm, &paths).await {
-                    Ok(taken) => {
-                        tracing::info!(%id, "took over the VM's memory pager");
-                        memory = Some(taken);
-                        Some((vm, how))
-                    }
-                    Err(error) => {
-                        // Its record still says whether a saved image
-                        // stands in for it.
-                        tracing::warn!(%id, %error, "the VM's memory pager cannot be taken over; stopping the VM");
-                        self.engine
-                            .stop(vm)
-                            .await
-                            .map_err(|error| HostError::Io(error.to_string()))?;
-                        None
-                    }
-                }
-            }
-            found => found,
-        };
-        let (state, vm) = if let Some((vm, found)) = found {
-            (self.adopted_state(&record, found).await?, Some(vm))
+        let (state, vm) = if let Some((vm, found, memory)) = found? {
+            (
+                self.adopted_state(&record, found).await?,
+                Some((vm, memory)),
+            )
         } else {
             // A kernel upgrade on the host reaches the sandbox on its next
             // boot.
@@ -879,7 +895,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let adopted = vm.is_some();
         self.insert(id, paths, spec);
-        if let Some(vm) = vm {
+        if let Some((vm, memory)) = vm {
             // What its memory was based on is unknown, so its next save
             // holds every page.
             let live = self.own(id, vm, memory.unwrap_or_else(LiveMemory::adopted));

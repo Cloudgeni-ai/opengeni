@@ -277,17 +277,16 @@ fn served_memory(
     Ok((Memory::Remote(source), Some(hydration)))
 }
 
-/// Takes over serving the memory of `vm`, a VM found running after an
-/// agent restart whose pager went with the previous agent. Its guest has
+/// Takes over serving the memory `handed` over by a VM found running after
+/// an agent restart whose pager went with the previous agent. Its guest has
 /// been waiting on any page it touched since; it goes on once a new pager
 /// serves them. The pages come from the sandbox's current image: every
 /// image published since the VM was restored is its restore image with
 /// the pages the guest changed merged in, so the pages it has not touched
 /// read the same in each.
 #[cfg(target_os = "linux")]
-pub(crate) async fn take_over_paging<E: Engine>(
-    engine: &E,
-    vm: &E::Vm,
+pub(crate) async fn take_over_paging(
+    handed: compute_engine::PagedMemory,
     paths: &Paths,
     fetcher: Option<&Arc<Fetcher>>,
 ) -> Result<LiveMemory, EngineError> {
@@ -313,7 +312,6 @@ pub(crate) async fn take_over_paging<E: Engine>(
     .await
     .map_err(|error| EngineError::io(OP, error))??;
     let (memory, hydration) = served_memory(&images_of(paths), &image, fetcher, &[])?;
-    let handed = engine.paged_memory(vm)?;
     let paging = Paging::adopt(handed, regions, memory, hydration)
         .map_err(|error| EngineError::io(OP, error))?;
     Ok(LiveMemory {

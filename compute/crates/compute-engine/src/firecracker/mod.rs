@@ -826,28 +826,42 @@ impl Engine for Firecracker {
     }
 
     async fn adopt(&self, spec: &VmSpec) -> Result<Option<(FirecrackerVm, Found)>, EngineError> {
-        const OP: &str = "adopt";
-        let cgroup = self.cgroup_of(spec);
-        if !cgroup.path().exists() {
-            return Ok(None);
-        }
-        let jail =
-            Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        let Ok(vm) = self.attach(spec, &jail) else {
-            // Whatever is left (a jailer that died half way, an empty
-            // group) is of no use.
-            self.discard(spec)
-                .await
-                .map_err(|error| EngineError::io(OP, error))?;
+        let Some(vm) = self.attached(spec).await? else {
             return Ok(None);
         };
-        if let Ok(Ok(Some(found))) = timeout(ADOPT_TIMEOUT, vm.found()).await {
-            Ok(Some((vm, found)))
-        } else {
-            // It never finished starting, or it does not answer.
-            self.kill(&vm).await;
-            Ok(None)
-        }
+        Ok(self.answering(vm).await)
+    }
+
+    async fn adopt_paged<T, F, Fut>(
+        &self,
+        spec: &VmSpec,
+        serve: F,
+    ) -> Result<Option<(FirecrackerVm, Found, T)>, EngineError>
+    where
+        T: Send,
+        F: FnOnce(PagedMemory) -> Fut + Send,
+        Fut: Future<Output = Result<T, EngineError>> + Send,
+    {
+        const OP: &str = "adopt";
+        let Some(vm) = self.attached(spec).await? else {
+            return Ok(None);
+        };
+        let served = match vm.process.paged_memory() {
+            Ok((uffd, vmm)) => serve(PagedMemory { uffd, vmm }).await,
+            Err(error) => Err(EngineError::io(OP, error)),
+        };
+        let served = match served {
+            Ok(served) => served,
+            Err(error) => {
+                self.kill(&vm).await;
+                return Err(EngineError::caused_by(ErrorKind::MemoryLost, OP, error));
+            }
+        };
+        // Without an answer the VM is ended; its handler goes after it.
+        Ok(self
+            .answering(vm)
+            .await
+            .map(|(vm, found)| (vm, found, served)))
     }
 
     async fn clean_up(&self, spec: &VmSpec) -> Result<(), EngineError> {
@@ -868,18 +882,43 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::io("cpu_time", error))
     }
 
-    fn paged_memory(&self, vm: &FirecrackerVm) -> Result<PagedMemory, EngineError> {
-        let (uffd, vmm) = vm
-            .process
-            .paged_memory()
-            .map_err(|error| EngineError::io("paged_memory", error))?;
-        Ok(PagedMemory { uffd, vmm })
-    }
-
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {
         let mut exit = vm.exit_watch();
         async move {
             let _ = exit.wait_for(|exit| *exit == Exit::Exited).await;
+        }
+    }
+}
+
+impl Firecracker {
+    /// The VM process left running for `spec`, without asking it anything
+    /// yet. Whatever is left of one that cannot be used (a jailer that died
+    /// half way, an empty group) is cleared away.
+    async fn attached(&self, spec: &VmSpec) -> Result<Option<FirecrackerVm>, EngineError> {
+        const OP: &str = "adopt";
+        let cgroup = self.cgroup_of(spec);
+        if !cgroup.path().exists() {
+            return Ok(None);
+        }
+        let jail =
+            Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
+        if let Ok(vm) = self.attach(spec, &jail) {
+            return Ok(Some(vm));
+        }
+        self.discard(spec)
+            .await
+            .map_err(|error| EngineError::io(OP, error))?;
+        Ok(None)
+    }
+
+    /// `vm` with what it is doing, or `None` once it is ended because it
+    /// never finished starting or does not answer.
+    async fn answering(&self, vm: FirecrackerVm) -> Option<(FirecrackerVm, Found)> {
+        if let Ok(Ok(Some(found))) = timeout(ADOPT_TIMEOUT, vm.found()).await {
+            Some((vm, found))
+        } else {
+            self.kill(&vm).await;
+            None
         }
     }
 }
