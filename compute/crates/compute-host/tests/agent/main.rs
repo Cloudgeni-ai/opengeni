@@ -125,9 +125,9 @@ struct World {
     /// While set, every pause moves a burst of data, as a VMM writing a
     /// snapshot does: work the host does, not the guest.
     transition_traffic: AtomicBool,
-    /// Traffic readings taken, so a test can line up with the agent's
-    /// sampling.
-    samples: AtomicUsize,
+    /// Every traffic reading: which VM, and when, so a test can line up
+    /// with the agent's sampling.
+    readings: Mutex<Vec<(String, Instant)>>,
 }
 
 /// What a fake VM process is, independent of any agent's handle to it.
@@ -721,7 +721,11 @@ impl Engine for Fake {
     }
 
     fn io_bytes(&self, vm: &FakeVm) -> Result<u64, EngineError> {
-        self.world.samples.fetch_add(1, Ordering::SeqCst);
+        self.world
+            .readings
+            .lock()
+            .unwrap()
+            .push((vm.name.clone(), Instant::now()));
         if self.world.unreadable_io.load(Ordering::SeqCst) {
             return Err(EngineError::new(
                 ErrorKind::Transient,
