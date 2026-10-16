@@ -17,8 +17,11 @@ const MAX_REQUEST: u64 = 64 << 10;
 /// How long a guest port may take to accept after the sandbox runs. Only a
 /// fresh boot needs more than a few milliseconds.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+/// First and longest pause after accepting a connection fails.
+const ACCEPT_BACKOFF: (Duration, Duration) = (Duration::from_millis(10), Duration::from_secs(1));
 
-/// Accepts connections on `socket` until the listener fails.
+/// Accepts connections on `socket` for as long as the agent runs. Fails only
+/// if it cannot listen.
 pub async fn serve(handle: Handle, socket: &Path) -> io::Result<()> {
     match std::fs::remove_file(socket) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
@@ -26,8 +29,22 @@ pub async fn serve(handle: Handle, socket: &Path) -> io::Result<()> {
     }
     let listener = UnixListener::bind(socket)?;
     tracing::info!(socket = %socket.display(), "serving");
+    let mut backoff = ACCEPT_BACKOFF.0;
     loop {
-        let (stream, _) = listener.accept().await?;
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => {
+                backoff = ACCEPT_BACKOFF.0;
+                stream
+            }
+            // Running out of open files or memory passes as connections end.
+            // Giving up would take the API away from every sandbox here.
+            Err(error) => {
+                tracing::warn!(%error, retry_in_ms = backoff.as_millis(), "accepting an API connection failed");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(ACCEPT_BACKOFF.1);
+                continue;
+            }
+        };
         let handle = handle.clone();
         tokio::spawn(async move {
             if let Err(error) = serve_one(&handle, stream).await {
