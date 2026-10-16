@@ -125,6 +125,53 @@ async function listCalls(): Promise<SessionSidebarEvidence["listCalls"]> {
   return page.evaluate(() => window.sessionSidebarQa.listCalls);
 }
 
+test("session titles fade into icons without ellipsis across themes and widths", async () => {
+  for (const theme of ["dark", "light"]) {
+    for (const width of [1160, 390]) {
+      await page.setViewportSize({ width, height: 850 });
+      await page.goto(`${url}?scenario=hover&theme=${theme}`);
+      const link = page
+        .locator("a[data-session-row]")
+        .filter({ hasText: "Astra strategy takeover" })
+        .first();
+      await link.waitFor();
+      const title = link.locator("[data-session-row-title]");
+      const metadata = link.locator("[data-session-row-metadata]");
+      const computed = await title.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          mask: style.maskImage,
+          overflow: style.textOverflow,
+          clipped: element.scrollWidth > element.clientWidth,
+        };
+      });
+      expect(computed.mask).toContain("linear-gradient");
+      expect(computed.overflow).toBe("clip");
+      expect(computed.clipped).toBe(true);
+      const titleBox = (await title.boundingBox())!;
+      const metadataBox = (await metadata.boundingBox())!;
+      expect(titleBox.x + titleBox.width).toBeCloseTo(metadataBox.x + 8, 0);
+      const sidebar = page.getByRole("complementary", { name: "Workspace sidebar" });
+      expect(await sidebar.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+        true,
+      );
+      await capture(`title-fade-${theme}-${width}`);
+      if (screenshots) {
+        await sidebar.screenshot({
+          path: `${screenshots}/title-fade-${theme}-${width}-sidebar.png`,
+          animations: "disabled",
+        });
+      }
+      await link.hover();
+      expect(await title.boundingBox()).toEqual(titleBox);
+      expect(await metadata.boundingBox()).toEqual(metadataBox);
+      await link.focus();
+      expect(await title.boundingBox()).toEqual(titleBox);
+      expect(await metadata.boundingBox()).toEqual(metadataBox);
+    }
+  }
+}, 30_000);
+
 test("projects start at four roots and fetch the next displayed step independently", async () => {
   await openActive();
   expect(await group("Archived").count()).toBe(0);
