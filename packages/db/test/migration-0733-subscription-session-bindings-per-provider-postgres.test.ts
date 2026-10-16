@@ -393,6 +393,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
     // routines. Current readiness must report exactly those missing routines
     // both before and after provisioning; no other posture failure is allowed.
     const SITE_DATA_TABLES = [
+      // 0792 (schedule blocker reviews) is also a later runtime/protected table.
+      "scheduled_task_blocker_reviews",
       "site_abuse_reports",
       "site_auth_codes",
       "site_data_collections",
