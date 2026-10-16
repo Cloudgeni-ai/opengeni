@@ -253,11 +253,11 @@ impl Fetcher {
 
     /// Counts a chunk as failing for longer than [`STALL_AFTER`] until the
     /// returned guard drops.
-    fn stalled(&self, error: &compute_storage::Error) -> Stalled<'_> {
+    fn stalled(&self, error: &str) -> Stalled<'_> {
         let mut stall = lock(&self.stall);
         stall.failing += 1;
         if stall.since.is_none() {
-            tracing::warn!(%error, "the store does not answer; sandboxes waiting on remote memory stall until it does");
+            tracing::warn!(%error, "remote memory cannot be filled; sandboxes waiting on it stall until it can");
             stall.since = Some(std::time::Instant::now());
         }
         Stalled(&self.stall)
@@ -569,6 +569,18 @@ impl Hydration {
         if !self.claim(index) {
             return Ok(());
         }
+        let written = self.write_chunk(index, &range, plain);
+        self.settle(index, written)
+    }
+
+    /// Writes the pages of chunk `index` the pack did not fill, and checks
+    /// those it did.
+    fn write_chunk(
+        &self,
+        index: usize,
+        range: &std::ops::Range<u64>,
+        plain: &[u8],
+    ) -> Result<(), Unavailable> {
         let failed = |error: io::Error| Unavailable::passing(format!("chunk {index}: {error}"));
         let within = |at: u64| usize::try_from(at - range.start).unwrap_or(usize::MAX);
         for (run, filled) in self.filled.runs(range.clone()) {
@@ -588,10 +600,11 @@ impl Hydration {
                     )));
                 }
             } else {
+                #[cfg(test)]
+                tests::failing_write(&self.file).map_err(failed)?;
                 self.file.write_all_at(bytes, run.start).map_err(failed)?;
             }
         }
-        self.arrived(index);
         Ok(())
     }
 
@@ -601,6 +614,11 @@ impl Hydration {
         if !self.claim(index) {
             return Ok(());
         }
+        let checked = self.check_in_place(index);
+        self.settle(index, checked)
+    }
+
+    fn check_in_place(&self, index: usize) -> Result<(), Unavailable> {
         let range = chunk_range(index, self.len);
         let mut held = vec![0; usize::try_from(range.end - range.start).unwrap_or(0)];
         self.file
@@ -611,8 +629,18 @@ impl Hydration {
                 "pages the working-set pack filled differ from chunk {index}"
             )));
         }
-        self.arrived(index);
         Ok(())
+    }
+
+    /// Counts chunk `index`, claimed by this caller, as in place once
+    /// `outcome` succeeded; otherwise lets go of it, so the next try writes
+    /// it again.
+    fn settle(&self, index: usize, outcome: Result<(), Unavailable>) -> Result<(), Unavailable> {
+        match outcome {
+            Ok(()) => self.arrived(index),
+            Err(_) => self.claimed[index].store(false, Ordering::Release),
+        }
+        outcome
     }
 
     fn arrived(&self, index: usize) {
@@ -724,9 +752,10 @@ async fn fill(
 }
 
 /// Fetches chunk `index` and stores it, retrying failures that may pass
-/// until hydration stops (see [`STALL_AFTER`]). A chunk the store proves
-/// bad or gone fails at once: [`ChunkStore::get_chunk`] has already read it
-/// twice.
+/// until hydration stops (see [`STALL_AFTER`]): the store's, and the
+/// host's own, such as a full disk, so the sandbox waits for room rather
+/// than dying. A chunk the store proves bad or gone fails at once:
+/// [`ChunkStore::get_chunk`] has already read it twice.
 fn fetch_one(
     fetcher: &Arc<Fetcher>,
     hydration: &Arc<Hydration>,
@@ -739,32 +768,32 @@ fn fetch_one(
         let Some(reference) = hydration.refs[index].clone() else {
             return (index, Ok(()));
         };
-        if hydration.filled.covers(chunk_range(index, hydration.len)) {
-            let checked = write(&hydration, move |hydration| hydration.check_filled(index));
-            return (index, checked.await);
-        }
+        let in_place = hydration.filled.covers(chunk_range(index, hydration.len));
         let started = tokio::time::Instant::now();
         let mut delay = Duration::from_millis(50);
         let mut stalled = None;
         loop {
-            match fetcher.get(&reference, background).await {
-                Ok(plain) => {
-                    drop(stalled);
-                    let stored = write(&hydration, move |hydration| hydration.store(index, &plain));
-                    return (index, stored.await);
+            let attempt = if in_place {
+                write(&hydration, move |hydration| hydration.check_filled(index)).await
+            } else {
+                match fetcher.get(&reference, background).await {
+                    Ok(plain) => {
+                        write(&hydration, move |hydration| hydration.store(index, &plain)).await
+                    }
+                    Err(error) if error.is_permanent() => {
+                        Err(Unavailable::permanent(format!("chunk {index}: {error}")))
+                    }
+                    Err(error) => Err(Unavailable::passing(format!("chunk {index}: {error}"))),
                 }
-                Err(error) if error.is_permanent() => {
-                    return (
-                        index,
-                        Err(Unavailable::permanent(format!("chunk {index}: {error}"))),
-                    );
-                }
-                Err(error) => {
-                    tracing::debug!(index, %error, "chunk fetch failed; trying again");
+            };
+            match attempt {
+                Err(failed) if !failed.permanent && !hydration.cancelled.is_cancelled() => {
+                    tracing::debug!(index, reason = %failed.reason, "filling a chunk failed; trying again");
                     if stalled.is_none() && started.elapsed() >= STALL_AFTER {
-                        stalled = Some(fetcher.stalled(&error));
+                        stalled = Some(fetcher.stalled(&failed.reason));
                     }
                 }
+                done => return (index, done),
             }
             tokio::select! {
                 () = hydration.cancelled.cancelled() => {
@@ -823,11 +852,45 @@ pub(crate) fn chunk_hash(plain: &[u8]) -> Hash {
 mod tests {
     use super::*;
 
+    /// Local writes still to fail, by the memory file's inode.
+    static FAILING: Mutex<Vec<(u64, u32)>> = Mutex::new(Vec::new());
+
+    /// Fails a write into `file` while failures are left for it, as a
+    /// full disk would.
+    pub(super) fn failing_write(file: &File) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        let inode = file.metadata()?.ino();
+        let mut failing = lock(&FAILING);
+        match failing
+            .iter_mut()
+            .find(|(at, left)| *at == inode && *left > 0)
+        {
+            Some((_, left)) => {
+                *left -= 1;
+                Err(io::Error::new(
+                    io::ErrorKind::StorageFull,
+                    "simulated full disk",
+                ))
+            }
+            None => Ok(()),
+        }
+    }
+
     const PAGE: u64 = 4096;
 
     /// Hydrates a three-chunk image whose chunk 1 is never stored, with
     /// `filled` written into the memory file first by `prefill`.
     async fn hydrate(
+        filled: &[std::ops::Range<u64>],
+        prefill: impl Fn(&File, &[Vec<u8>]),
+    ) -> (Result<(), Unavailable>, Vec<u8>, Vec<u8>) {
+        hydrate_failing(0, filled, prefill).await
+    }
+
+    /// [`hydrate`], with the first `failing` writes into the memory file
+    /// failing as on a full disk.
+    async fn hydrate_failing(
+        failing: u32,
         filled: &[std::ops::Range<u64>],
         prefill: impl Fn(&File, &[Vec<u8>]),
     ) -> (Result<(), Unavailable>, Vec<u8>, Vec<u8>) {
@@ -854,6 +917,10 @@ mod tests {
             .unwrap();
         file.set_len(3 * CHUNK_BYTES).unwrap();
         prefill(&file, &plain);
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            lock(&FAILING).push((file.metadata().unwrap().ino(), failing));
+        }
         let (hydration, _arrivals) = Hydration::start(
             Arc::new(Fetcher::new(chunks, Arc::default())),
             &path,
@@ -883,6 +950,21 @@ mod tests {
             file.write_all_at(&plain[1], CHUNK_BYTES).unwrap();
         })
         .await;
+        finished.unwrap();
+        assert_eq!(held, image);
+    }
+
+    /// A write that fails on the host's own disk, such as a full one, is
+    /// tried again with the chunk already fetched: the sandbox waits for
+    /// room instead of losing its memory.
+    #[tokio::test]
+    async fn a_failing_local_write_is_tried_again() {
+        let filled = CHUNK_BYTES..2 * CHUNK_BYTES;
+        let (finished, held, image) =
+            hydrate_failing(3, std::slice::from_ref(&filled), |file, plain| {
+                file.write_all_at(&plain[1], CHUNK_BYTES).unwrap();
+            })
+            .await;
         finished.unwrap();
         assert_eq!(held, image);
     }
@@ -1055,7 +1137,15 @@ mod tests {
             .await
             .expect("hydration carries on once the store answers")
             .unwrap();
-        assert_eq!(fetcher.stalled_for(), None);
+        // The stall ends with the fetch that wrote the last chunk, just
+        // after that write completed hydration.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while fetcher.stalled_for().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("no longer stalled once every chunk is in place");
         let mut held = vec![0; 3 * chunk];
         file.read_exact_at(&mut held, 0).unwrap();
         assert_eq!(held, plain.concat());
