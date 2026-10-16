@@ -12,16 +12,61 @@
   or security/audit attestation.
   Opening a pre-existing conversation does not relabel it. Existing unlabelled
   sessions are not guessed/backfilled from prompts or publishing sessions.
-- Ordinary browsing groups unfiled, unpinned Site-created root conversations in
-  a stable Site row. Recent/working activity lifts the row using existing rail
-  ordering. Counts cover the currently loaded authorized trees, like scheduled
-  run grouping; opening the Site's Conversations panel provides paginated history.
-- Explicit projects and pins win. Search and custom browsing remain session-first.
-  The origin link remains on individual rows and in the session header regardless
-  of placement. The group is presentation only: no fake session is persisted and
-  no parent-control authority is introduced.
-- The host Site detail page has a Conversations tab: search, active/archived,
-  refresh, and pagination. It works independently of generated Site navigation.
+- New Site execution is private to its viewer. Console viewers and signed-in
+  workspace members use native `user_private` sessions owned by their verified
+  human identity. Published guests and signed-in outsiders retain the existing
+  Site service execution and limits, with an immutable Site/viewer audience on
+  the native session and descendants. A guest's existing cookie/visitor principal
+  supplies continuity; losing it does not grant access to another visit.
+- Site sessions are omitted from ordinary workspace lists, sidebar, pins,
+  message search and discovery snapshots, including for their owner. Explicit
+  Site history is still available through the Site's Conversations tab and
+  `originSiteId` filter, only for the authorized viewer. Hiding is presentation;
+  native authorization and restrictive RLS independently protect reads, events,
+  files, controls and agent descendants, including direct guessed URLs.
+- Disabling private sessions explicitly refuses new Site conversations. There
+  is no shared fallback. Existing native privacy policy and membership checks
+  remain authoritative. App code cannot choose another owner or share a session.
+- Historical published-host mappings are backfilled from their exact recorded
+  audience. Old console origin labels do not prove a sole viewer, so those
+  shared histories are not silently converted or exposed as new private Site
+  history. Existing Site HTML and source are not rewritten.
+
+## Inline AI and app-defined interaction
+
+`createOpenGeniSiteClient().ai` is a convenience over native session creation and
+replayable events, not another execution engine. Apps choose their own prompts,
+context serialization, input controls and result presentation. No visible chat
+history, conversation selector, task buttons or prompt templates are required.
+
+```ts
+const site = createOpenGeniSiteClient();
+const result = await site.ai.run({
+  initialMessage: appDefinedPrompt,
+  idempotencyKey: actionId, // retain this across retries of the same action
+}, {
+  onSession: rememberHandle,
+  onText: appendOutput,
+  signal: observationAbort.signal,
+});
+if (result.status === "completed") renderAppResult(result.text);
+else renderWaitingOrCancelled(result.status);
+```
+
+The app may validate/parse returned text into its own result schema. Model
+failure rejects; approval/input waits return `pending`, not a successful answer.
+Aborting observation does not cancel execution. Use native session control when
+cancellation is intended. `site.ai.result(id)` replays without creating work;
+pass the retained `turnId` to resume a particular pending turn. With `after`,
+output contains only the subsequent suffix, so retain earlier text; omit it to
+rebuild the full answer. Retain handles only in viewer-private storage, never a
+shared Site Data row. Published opaque frames have no browser local/session storage.
+
+For an app that needs chat, use `SessionConversation` and native history. A
+selector and New conversation are optional product choices. Never send the
+initial prompt again after successful creation. Private conversation ownership
+does not make separately published artifacts or shared Site Data private; use
+their existing audience controls deliberately.
 
 ## API and implementation
 
@@ -151,17 +196,21 @@ matched percent-decoded, as the router sees them, and reading stays open.
 registered route table. A session started from a Site page cannot get
 session admin access (409), and an agent acting for a Site page cannot run
 `admin_action_call`.
-Published Sites start their agents as `site:<siteId>` with the publication's
-own tools and limits instead (see `docs/site-runtime-api.md`): workspace
+Published members start as their verified human identity; outsiders start as
+`site:<siteId>` with an immutable viewer binding. Both use the publication's
+own tools and existing authority ceilings (see `docs/site-runtime-api.md`): workspace
 tools only for members who may use connections, never for people outside
 the workspace, and the limits of the viewer's audience
 (`docs/published-sites.md`, "Limits and billing").
 
 ## Agent defaults
 
-Every published-host conversation gets this Site's `site_data_query` and
+Published-host conversations get this Site's `site_data_query` and
 `site_data_write`; enabled SQL adds `site_sql_run`, and members also get read-only
-`site_sql_query`. Calls act as the conversation's viewer and refuse other Site ids
+`site_sql_query`, each intersected with the member's live permissions. A member
+without artifact-publishing permission can still use AI, without unavailable
+write tools; a member without data-read permission can use plain AI without data
+tools. Calls act as the conversation's viewer and refuse other Site ids
 and management operations. There is no sandbox, and publication settings offer no
 sandbox opt-in. Members get no Site budget or stamped session usage limit, even
 after a previous conversation; they retain normal model selection and subscriptions.
@@ -201,15 +250,85 @@ or turn and stamps only the newly funded allowance. The initialization marker is
 checked again under the admission lock so a concurrent successful repair is replayed
 without reserving more money.
 
-The Sites skill recommends a selector for this Site's conversations plus New
-conversation. First Send creates one session with a retry-stable idempotency key;
-thereafter the standard `SessionConversation` owns chat interaction. No project
-is created just for grouping. A user may instead request a project-wide or
-workspace-wide interface. These are defaults, not product restrictions.
+## Accounting and Insights
+
+Immutable session origin stamps `site_id` on model facts and model debit ledger
+entries. Workspace Insights → Site AI groups those source-stamped amounts by
+Site, never guessed titles. Actual credit charges come from negative model
+debits; API-equivalent amounts are frozen estimates, with subscription and own-key
+estimates separate and incomplete pricing identified. They are not extra charges.
+Private/unavailable Site identities are grouped anonymously. No viewer identity,
+conversation ID, prompt or output is returned. Existing Insights detail readers
+also apply the Site audience when their definer owner bypasses RLS.
+
+Site platform requests, rows and storage live in Insights separately from AI
+costs; their existing usage-only/shadow/credit mode remains explicit. Usage
+retains limit settings. Historical console work without proven Site attribution
+remains in workspace totals, not a guessed Site bucket.
 
 ## Validation
 
 Cover origin stamping/concurrent isolation, actual MCP transport propagation,
-host/preview binding, SQL filtering before pagination and cursor binding,
-project/pin precedence, search, aggregate counts and keyboard projection.
-Inspect the Conversations tab and origin links in the local browser before handoff.
+console/published-host ownership, cross-viewer and guest denial across reads,
+events/files/control, discovery/pagination/search, policy refusal, native
+cancellation and exact accounting. Preview the actual Insights and limits UI
+in light/dark desktop/mobile before handoff.
+
+### Staging acceptance (release-coordinator owned)
+
+These migrations require a maintenance cutover: drain old API and worker writers,
+apply the reviewed release's migrations and role provisioning, then start the
+matching source. Do not run old Site writers against the new audience schema.
+The backfill only binds historical published conversations with an existing
+viewer mapping; existing Site source, titles and historical console chats are
+not rewritten. This recipe does not authorize a deployment.
+
+Run the deterministic source checks against an isolated PostgreSQL fixture first:
+
+```sh
+OPENGENI_REQUIRE_REAL_DB=1 bun test --max-concurrency=4 \
+  packages/db/test/migration-0793-private-site-sessions.test.ts \
+  apps/api/test/site-frame-boundary-postgres.test.ts \
+  apps/api/test/published-sites-postgres.test.ts
+bun test packages/sdk/test/site-ai.test.ts apps/api/test/sse-stream-bounds.test.ts
+bun scripts/public-api/check.ts
+OPENGENI_REQUIRE_REAL_DB=1 bun scripts/public-api/sdk-compat.ts
+```
+
+Use the repository's pinned Bun/Node and an explicitly configured
+`OPENGENI_TEST_PG_URL`; do not point test fixtures at the staging application
+database. After the coordinator deploys the exact reviewed source:
+
+1. Create a disposable Site and two ordinary test members. Open both the console
+   iframe and its published host as each member. Start one optional chat and one
+   `client.ai.run({ initialMessage: appPrompt, idempotencyKey })` action. The app
+   renders its own streamed/final output; no chat component is required. Verify
+   retrying the same key does not create another session.
+2. Verify the signed-in creator/owner is the real member, not the Site author or
+   a service identity. Verify each action is absent from ordinary workspace
+   session lists, sidebar, message search and pins. An explicit Site-origin list
+   may return only work the requesting viewer is allowed to see.
+3. Try the other viewer's known ID through detail, events, live stream, queue,
+   turns, file-list/download and control/send paths. Expect refusal, including
+   for workspace administrators. Repeat with two independent guest cookie jars;
+   a guest's current jar may reconnect, the second must not. Do not inspect or
+   publish private prompts in the acceptance record.
+4. In the disposable organization, disable private sessions and verify explicit
+   creation refusal, not shared fallback. Restore the setting. Revoke one test
+   member or unpublish the disposable Site; verify the published host refuses
+   further admission/stream delivery and native cancellation stops existing work.
+5. Exercise a small deterministic pending/approval fixture, cancellation, failure,
+   reconnect and observation abort. Pending is not success; observation abort is
+   not execution cancellation. Existing tool selection, approvals and model
+   eligibility remain authoritative. Use mocked providers for automated coverage;
+   no load test or paid model probe is necessary for this source acceptance.
+6. Check a member's ordinary model/subscription eligibility and an outsider's
+   credit-only model and Site/per-person caps. In Insights compare source-stamped
+   Site actual charges to model-debit ledger totals, separately from frozen
+   API-equivalent/subscription/own-key estimates. Private/unavailable Site names
+   must aggregate anonymously, with no session/viewer/prompt fields. Platform
+   requests/rows/storage appear separately with their billing mode. Usage shows
+   limit settings, not those analytics.
+7. Inspect actual Insights and Usage in light/dark at desktop and mobile widths.
+   Record the deployed source SHA, test outcomes and any limitations, then remove
+   only the disposable test Site/accounts and restore settings changed above.

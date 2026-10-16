@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   normalizeSitesDomain,
   OPENGENI_API_CONTRACT_HEADER,
@@ -23,6 +24,7 @@ import {
   siteAgentClamp,
   siteViewerForGrant,
   type ApiRouteDeps,
+  type cancelPublishedSiteSession,
 } from "@opengeni/core";
 import {
   bumpSitePublicationGeneration,
@@ -38,7 +40,7 @@ import {
   readSiteRuntimeUsage,
   recordSitePublicationScan,
   getPublishedSite,
-  listActiveSiteRuntimeConversations,
+  listSiteRuntimeCancellationCandidates,
   revokeSiteViewerSessions,
   SitePublishingError,
   SITE_RUNTIME_SITE_PRINCIPAL,
@@ -174,24 +176,20 @@ export const SITE_EFFECT_CONCURRENCY = 4;
 const SITE_EFFECT_QUEUE_LIMIT = 2_000;
 
 const effectsBySettings = new WeakMap<object, SitePublishingEffects>();
-const dispatchBySettings = new WeakMap<object, (request: Request) => Promise<Response>>();
+type SiteCancellation = (
+  input: Parameters<typeof cancelPublishedSiteSession>[1],
+) => Promise<unknown>;
+const cancellationBySettings = new WeakMap<object, SiteCancellation>();
 
 /**
- * The app's in-process dispatch, registered with the site-runtime routes, so
- * publication changes can cancel a Site's conversations through the ordinary
- * session routes. Without it (the operator script) cancellation is skipped.
+ * Internal host lifecycle adapter. This never grants the Site service bearer
+ * ordinary session access and never impersonates a conversation's viewer.
  */
-export function setSitePublishingDispatch(
+export function setSitePublishingCancellation(
   settings: ApiRouteDeps["settings"],
-  dispatch: (request: Request) => Promise<Response>,
+  cancel: SiteCancellation,
 ): void {
-  dispatchBySettings.set(settings, dispatch);
-}
-
-export function sitePublishingDispatch(
-  settings: ApiRouteDeps["settings"],
-): ((request: Request) => Promise<Response>) | null {
-  return dispatchBySettings.get(settings) ?? null;
+  cancellationBySettings.set(settings, cancel);
 }
 
 type SitePublishingEffectsOptions = {
@@ -643,26 +641,29 @@ export async function siteServiceSessionRequest(
     "x-opengeni-site-id": site.id,
   });
   if (site.versionId) headers.set("x-opengeni-site-version", site.versionId);
-  if (input.body !== undefined) headers.set("content-type", "application/json");
+  const body = input.body === undefined ? undefined : JSON.stringify(input.body);
+  if (body !== undefined) {
+    headers.set("content-type", "application/json");
+    // Preserve the exact Request carrying verified-human dispatch proof.
+    headers.set("content-length", String(Buffer.byteLength(body)));
+  }
   return new Request(new URL(input.path, input.origin), {
     method: input.method,
     headers,
-    ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
+    ...(body === undefined ? {} : { body }),
   });
 }
 
-/** Conversations cancelled per stop (newest activity first); the rest end on their own caps. */
-const STOP_CONVERSATIONS_LIMIT = 200;
+/** Bound each database page, not the complete cancellation operation. */
+const STOP_CONVERSATIONS_PAGE_SIZE = 200;
 
 /**
  * Stop a Site's viewers after a takedown, unpublish or narrower access:
  * revoke every site-session now, and after commit cancel the Site's agent
  * conversations that may still be working (in-flight turns and queued
- * messages), as the Site itself through the ordinary control route. The
- * gateway refuses new work at once regardless: every site-runtime call
- * re-checks the publication. Without an in-process dispatch (the operator
- * script) the cancellation is skipped and logged; per-conversation caps
- * still bound what running turns can spend.
+ * messages), through the native cancel-only lifecycle adapter. The original
+ * actor survives queued background execution. No transcript access is granted.
+ * Every page is drained, including old conversations; there is no age cutoff.
  */
 export async function stopSiteViewers(
   deps: SitePublishingDeps,
@@ -688,68 +689,55 @@ export async function stopSiteViewers(
     }
   }
   if (options.cancelConversations === false) return { revokedSessions };
-  const dispatch = sitePublishingDispatch(deps.settings);
-  if (!dispatch) {
-    console.warn("[site-publishing] conversation cancel skipped: no in-process dispatch", {
+  const cancel = cancellationBySettings.get(deps.settings);
+  if (!cancel) {
+    console.warn("[site-publishing] conversation cancel unavailable: no lifecycle adapter", {
       siteId,
     });
     return { revokedSessions };
   }
   const effects = sitePublishingEffects(deps.settings);
-  const origin = deps.settings.publicBaseUrl ?? "http://localhost";
-  effects.schedule("cancel conversations", async () => {
-    const sessionIds = await listActiveSiteRuntimeConversations(deps.db, scope, {
-      siteId,
-      limit: STOP_CONVERSATIONS_LIMIT,
-      ...(options.toolsNarrowedTo ? { toolsNarrowedTo: options.toolsNarrowedTo } : {}),
-    });
-    if (sessionIds.length === 0) return;
-    // The Site acts with its own origin (a Site and one of its versions).
-    const versionId = (await getPublishedSite(deps.db, scope, siteId))?.currentVersionId ?? null;
-    if (!versionId) {
-      console.warn("[site-publishing] conversation cancel skipped: the Site has no version", {
-        siteId,
-      });
-      return;
-    }
-    const operation = crypto.randomUUID();
-    for (const sessionId of sessionIds) {
-      try {
-        const response = await dispatch(
-          await siteServiceSessionRequest(
-            deps,
-            scope,
-            { id: siteId, versionId },
-            {
-              origin,
-              method: "POST",
-              path: `/v1/workspaces/${scope.workspaceId}/sessions/${sessionId}/control`,
-              body: {
-                action: "cancel",
-                clientEventId: `site-stop:${operation}:${sessionId}`.slice(0, 200),
-                reason: options.reason.slice(0, 500),
-              },
-              label: "Published Site",
-            },
-          ),
-        );
-        if (!response.ok)
-          console.warn("[site-publishing] could not cancel a Site conversation", {
-            siteId,
-            sessionId,
-            status: response.status,
-            body: (await response.text().catch(() => "")).slice(0, 300),
-          });
-        else await response.body?.cancel().catch(() => undefined);
-      } catch (error) {
-        console.warn("[site-publishing] could not cancel a Site conversation", {
+  const runInContext = AsyncLocalStorage.snapshot();
+  const operation = crypto.randomUUID();
+  const startedBefore = new Date();
+  const run = () =>
+    runInContext(async () => {
+      let after: string | undefined;
+      let failed = 0;
+      for (;;) {
+        const sessionIds = await listSiteRuntimeCancellationCandidates(deps.db, scope, {
           siteId,
-          sessionId,
-          error: error instanceof Error ? error.message : String(error),
+          limit: STOP_CONVERSATIONS_PAGE_SIZE,
+          startedBefore,
+          ...(after ? { after } : {}),
+          ...(options.toolsNarrowedTo ? { toolsNarrowedTo: options.toolsNarrowedTo } : {}),
         });
+        if (sessionIds.length === 0) break;
+        for (const sessionId of sessionIds) {
+          try {
+            await cancel({
+              ...scope,
+              siteId,
+              sessionId,
+              operationKey: `site-stop:${operation}:${sessionId}`,
+              reason: options.reason.slice(0, 500),
+            });
+          } catch (error) {
+            failed += 1;
+            console.warn("[site-publishing] could not cancel a Site conversation", {
+              siteId,
+              sessionId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+        after = sessionIds.at(-1)!;
       }
-    }
-  });
+      if (failed > 0)
+        throw new Error(`Site lifecycle cancellation failed for ${failed} conversations`);
+    });
+  // A saturated best-effort effects queue must not silently drop cancellation.
+  if (!effects.schedule("cancel conversations", run)) await run();
   return { revokedSessions };
 }
 

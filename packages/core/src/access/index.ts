@@ -37,6 +37,7 @@ import {
   listWorkspacesForSubject,
   findActiveApiKeyByHash,
   getWorkspaceGrant,
+  subjectHasLiveWorkspaceAuthorityInScope,
   requireWorkspace,
   resolveNamedManagedPersonalWorkspaceGrant,
   type Database,
@@ -216,6 +217,7 @@ const delegatedHumanAuthorizationSchema = z.object({
 
 const delegatedHumanRequests = new WeakMap<Request, DelegatedHumanAuthorization>();
 const delegatedHumanContexts = new WeakMap<AccessContext, DelegatedHumanAuthorization>();
+const verifiedSiteViewerProofs = new WeakSet<DelegatedHumanAuthorization>();
 const delegatedHumanProfileSchema = z.object({
   id: z.string(),
   name: z.string().nullable(),
@@ -281,6 +283,48 @@ export function stampDelegatedHumanAuthorization(
   };
   Object.freeze(proof.permissions);
   delegatedHumanRequests.set(request, Object.freeze(proof));
+}
+
+/**
+ * Verified published-Site dispatch only: the caller has verified the signed
+ * gateway, served host and opaque viewer cookie. This is exact-workspace
+ * ownership for session routes, not a console login or a generic Site bearer.
+ * Native people use the existing delegated-human resolver; external owning
+ * users reload their existing membership without provisioning a new identity.
+ */
+export function stampSiteViewerSessionAuthorization(
+  request: Request,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    subjectId: string;
+    permissions: Permission[];
+  },
+): void {
+  if (input.subjectId.startsWith("user:")) {
+    stampDelegatedHumanAuthorization(request, {
+      ...input,
+      workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] },
+    });
+    return;
+  }
+  if (delegatedHumanRequests.has(request) || accessResolvedRequests.has(request))
+    throw new HTTPException(403, { message: "request access authorization already resolved" });
+  const parsed = delegatedHumanAuthorizationSchema
+    .extend({
+      subjectId: z
+        .string()
+        .max(1024)
+        .regex(/^external_user:[^\s\u0000-\u001f\u007f]+$/),
+    })
+    .parse({ ...input, workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] } });
+  if (parsed.workspaceScope.kind !== "selected") throw new Error("Site workspace scope required");
+  Object.freeze(parsed.permissions);
+  Object.freeze(parsed.workspaceScope.workspaceIds);
+  Object.freeze(parsed.workspaceScope);
+  const proof = Object.freeze(parsed);
+  verifiedSiteViewerProofs.add(proof);
+  delegatedHumanRequests.set(request, proof);
 }
 
 /** Token prefix of personal API keys, which act as the person who made them. */
@@ -1520,6 +1564,62 @@ async function resolveDelegatedHumanAccessContext(
     throw new HTTPException(403, {
       message: "delegated humans require native organization access",
     });
+  }
+  if (verifiedSiteViewerProofs.has(proof)) {
+    const workspaceId =
+      proof.workspaceScope.kind === "selected" && proof.workspaceScope.workspaceIds.length === 1
+        ? proof.workspaceScope.workspaceIds[0]
+        : null;
+    if (!workspaceId)
+      throw new HTTPException(403, { message: "Site viewer workspace unavailable" });
+    const grant = await withWorkspaceSubjectRls(
+      deps.db,
+      workspaceId,
+      proof.subjectId,
+      async (tx) => {
+        if (
+          !(await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+            accountId: proof.organizationId,
+            workspaceId,
+            subjectId: proof.subjectId,
+          }))
+        )
+          return null;
+        return getWorkspaceGrant(tx, proof.subjectId, workspaceId, {
+          principalKind: "human_session",
+        });
+      },
+    );
+    if (!grant || grant.accountId !== proof.organizationId)
+      throw new HTTPException(403, { message: "Site viewer membership unavailable" });
+    const bounded = Object.freeze({
+      ...grant,
+      permissionMode: "explicit" as const,
+      permissions: Object.freeze(
+        explicitPermissions(
+          Permission.options.filter(
+            (permission) =>
+              hasPermission(grant.permissions, permission) &&
+              hasPermission(proof.permissions, permission, "explicit"),
+          ),
+        ),
+      ) as Permission[],
+    });
+    const accountGrant = Object.freeze({
+      accountId: proof.organizationId,
+      subjectId: proof.subjectId,
+      permissions: Object.freeze([] as Permission[]) as Permission[],
+    });
+    const context: AccessContext = Object.freeze({
+      mode: "managed",
+      subjectId: proof.subjectId,
+      accountGrants: Object.freeze([accountGrant]) as AccountGrant[],
+      workspaceGrants: Object.freeze([bounded]) as AccessGrant[],
+      defaultAccountId: proof.organizationId,
+      defaultWorkspaceId: workspaceId,
+    });
+    delegatedHumanContexts.set(context, proof);
+    return context;
   }
   const userId = proof.subjectId.slice("user:".length);
   const profiles = await getManagedUserProfilesByIds(deps.db, [userId]);

@@ -312,6 +312,47 @@ test("a published Site frame reaches only SITE_OPERATIONS and only its own Site'
     versionId: siteA.versionId,
   });
   expect((await f.turns(fromA)).map((turn) => turn.surface)).toEqual(["site"]);
+  const [audience] =
+    await shared.admin`select visibility,owner_subject_id,site_id,site_owner_subject_id
+    from sessions where id=${fromA}`;
+  expect(audience).toMatchObject({
+    visibility: "user_private",
+    owner_subject_id: f.grant.subjectId,
+    site_id: siteA.siteId,
+    site_owner_subject_id: f.grant.subjectId,
+  });
+  const other = await ensureExternalIdentity(db.db, {
+    accountId: f.accountId,
+    source: "example:instance",
+    externalId: crypto.randomUUID(),
+  });
+  const added = await f.app.request(`/v1/workspaces/${f.workspace.id}/external-members`, {
+    method: "POST",
+    headers: f.service,
+    body: JSON.stringify({
+      identity: { source: "example:instance", externalId: other.externalId },
+      permissions,
+      operationId: crypto.randomUUID(),
+    }),
+  });
+  expect(added.status).toBe(200);
+  const otherActor = {
+    "x-opengeni-external-actor": encodeURIComponent(
+      JSON.stringify({
+        mode: "external",
+        identity: { source: "example:instance", externalId: other.externalId },
+      }),
+    ),
+  };
+  for (const suffix of ["", "/events", "/events/stream", "/queue"]) {
+    expect(
+      (await f.call("GET", `/sessions/${fromA}${suffix}`, { ...frameA, ...otherActor })).status,
+    ).toBe(404);
+    expect((await f.call("GET", `/sessions/${fromA}${suffix}`, otherActor)).status).toBe(404);
+  }
+  const ordinary = await f.call("GET", "/sessions");
+  expect(ordinary.status).toBe(200);
+  expect(await ordinary.text()).not.toContain(fromA);
   const plain = await f.startSession();
   expect((await f.sessionRow(plain)).metadata._opengeniSiteOrigin).toBeUndefined();
 
@@ -510,11 +551,20 @@ test("agents started from a Site cannot create or change schedules or reach othe
   const fromFrame = await f.startSession(f.inline("frame-1"));
   const plain = await f.startSession();
   // A child an inline-frame session spawned acts for that frame too.
+  const frameAgent = await f.liveAgentGrant(fromFrame);
   const child = await withSessionRlsActorContext({ subjectId: f.grant.subjectId }, () =>
     createSession(db.db, {
       accountId: f.accountId,
       workspaceId: f.workspace.id,
       parentSessionId: fromFrame,
+      visibility: "user_private",
+      createdByActor: {
+        type: "agent_attempt",
+        sessionId: fromFrame,
+        turnId: String(frameAgent.metadata!.turnId),
+        attemptId: String(frameAgent.metadata!.attemptId),
+        executionGeneration: Number(frameAgent.metadata!.executionGeneration),
+      },
       initialMessage: "Child work",
       resources: [],
       metadata: {},
@@ -1708,6 +1758,14 @@ test("Site artifact edits need declared tools and creation in the clamped sessio
       accountId: f.accountId,
       workspaceId: f.workspace.id,
       parentSessionId: String(fromEditor.metadata!.sessionId),
+      visibility: "user_private",
+      createdByActor: {
+        type: "agent_attempt",
+        sessionId: String(fromEditor.metadata!.sessionId),
+        turnId: String(fromEditor.metadata!.turnId),
+        attemptId: String(fromEditor.metadata!.attemptId),
+        executionGeneration: Number(fromEditor.metadata!.executionGeneration),
+      },
       initialMessage: "Child",
       resources: [],
       metadata: {},

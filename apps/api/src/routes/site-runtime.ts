@@ -1,5 +1,8 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
+  ReasoningEffort,
+  LatencyMode,
+  permissionsRequiredByFirstPartyTools,
   DeleteSessionQueueItemRequest,
   EditSessionQueueItemRequest,
   matchSiteOperation,
@@ -30,6 +33,7 @@ import {
   type ToolRef,
 } from "@opengeni/contracts";
 import {
+  cancelPublishedSiteSession,
   withHostSessionUsageLimit,
   withSiteSessionOrigin,
   admissibleWorkspaceModel,
@@ -42,6 +46,7 @@ import {
   consumeSiteAuthCode,
   finishSiteRuntimeAdmission,
   withSiteRuntimeAdmission,
+  withSiteViewerRlsContext,
   createSiteAbuseReport,
   getSiteWorkspaceMemberPermissions,
   readSitePlatformUsage,
@@ -65,7 +70,6 @@ import {
   type SiteRuntimeConversationRecord,
 } from "@opengeni/db";
 import {
-  SITE_AGENT_DATA_TOOL_PERMISSIONS,
   siteAgentDataToolsForStart,
   siteAgentInstructions,
   sitePublishedDataViewer,
@@ -145,7 +149,7 @@ import {
   configuredSitesDomain,
   healSiteEdgeIfStale,
   notifySiteAbuse,
-  setSitePublishingDispatch,
+  setSitePublishingCancellation,
   siteHostMapRecord,
   sitePublishingError,
 } from "../site-publishing/service";
@@ -212,6 +216,9 @@ const CreateConversationRequest = z
   .object({
     initialMessage: z.string().trim().min(1).max(MESSAGE_MAX_CHARS),
     idempotencyKey: z.string().min(1).max(200).optional(),
+    model: z.string().min(1).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
+    latencyMode: LatencyMode.optional(),
   })
   .passthrough();
 const SendMessageRequest = z
@@ -497,8 +504,8 @@ type RuntimeRequest = {
 export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   const dispatch = async (request: Request): Promise<Response> =>
     await app.fetch(markLocalInternalDispatch(request));
-  // Publication changes cancel a Site's conversations through this dispatch.
-  setSitePublishingDispatch(deps.settings, dispatch);
+  // Lifecycle cancellation is a native internal command, never viewer dispatch.
+  setSitePublishingCancellation(deps.settings, (input) => cancelPublishedSiteSession(deps, input));
 
   const handler = async (context: Context): Promise<Response> => {
     const domain = configuredSitesDomain(deps.settings);
@@ -1232,7 +1239,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     throw unsupported();
   };
 
-  /** The viewer's own agent conversations on this Site, run as `site:<siteId>`. */
+  /** The viewer's own conversations, with native member or viewer-bound outsider authority. */
   const sessions = async (
     request: RuntimeRequest,
     id: string,
@@ -1246,6 +1253,20 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
     // carries the Site and version headers the API's Site frame guard
     // validates; sessions and turns it starts record this Site and version.
     const siteOrigin = { siteId: host.site.id, title: host.site.title, versionId: host.versionId };
+    const reauthorizeViewer = async () => {
+      const liveHost = await requireServedSiteRuntimeHost(deps, host.domain, request.fields.host);
+      const liveViewer = await resolveSiteRuntimeViewer(deps, liveHost, request.fields);
+      if (
+        liveHost.site.id !== host.site.id ||
+        liveViewer.principal !== viewer.principal ||
+        liveViewer.kind !== viewer.kind ||
+        liveViewer.sessionId !== viewer.sessionId
+      )
+        throw siteNotAvailableForViewer(
+          "agent",
+          "This conversation is no longer available to this viewer",
+        );
+    };
     let pendingAdmission: { sessionId: string; admissionId: string } | undefined;
     const send = async (
       method: string,
@@ -1253,16 +1274,20 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       body?: unknown,
       extraPermissions?: readonly Permission[],
     ) => {
+      await reauthorizeViewer();
       const execute = () =>
-        withSiteSessionOrigin(siteOrigin, async () =>
-          dispatch(
-            await siteRuntimeSessionRequest(deps, host, viewer, {
-              origin: url.origin,
-              method,
-              path,
-              ...(body === undefined ? {} : { body }),
-              ...(extraPermissions ? { extraPermissions } : {}),
-            }),
+        withSiteViewerRlsContext({ siteId: host.site.id, principal: viewer.principal }, () =>
+          withSiteSessionOrigin(siteOrigin, async () =>
+            dispatch(
+              await siteRuntimeSessionRequest(deps, host, viewer, {
+                origin: url.origin,
+                method,
+                path,
+                reauthorize: reauthorizeViewer,
+                ...(body === undefined ? {} : { body }),
+                ...(extraPermissions ? { extraPermissions } : {}),
+              }),
+            ),
           ),
         );
       const pending = pendingAdmission;
@@ -1344,6 +1369,11 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (viewer.kind === "guest" || viewer.kind === "user")
         await requireSitePlatformOpen(deps, "guest_agent");
       const models = await siteViewerModels(host, viewer, limits);
+      if (input.model && !models.allowed.includes(input.model))
+        throw siteNotAvailableForViewer(
+          "agent_model",
+          "This model is not available to you on this Site",
+        );
       if (models.unavailable)
         throw siteNotAvailableForViewer(
           "agent_model",
@@ -1402,6 +1432,11 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         }
       }
       // Settle the viewer's recent spend so the day budget sees it.
+      if (!repair && viewer.kind !== "member" && deps.settings.privacyOnlyMeAllowed === false)
+        throw siteNotAvailableForViewer(
+          "private_conversations",
+          "Private Site conversations are disabled by this deployment",
+        );
       for (const conversation of await listOwnedSiteRuntimeConversations(deps.db, host.scope, {
         siteId: host.site.id,
         viewerPrincipal: viewer.principal,
@@ -1455,7 +1490,9 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         host.scope,
         host.site.id,
         viewer.kind,
+        viewer.kind === "member" ? (memberPermissions ?? []) : undefined,
       );
+      const dataToolPermissions = permissionsRequiredByFirstPartyTools(dataTools);
       // One transaction counts the start and reserves a per-turn estimate
       // against the visitor's and the Site's windows; only the funded allowance
       // becomes the session's usage limit, set in the create transaction. The
@@ -1491,15 +1528,14 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       const body = {
         initialMessage: input.initialMessage,
         requestedSessionId,
+        ...(viewer.kind === "member" ? { visibility: "private" } : {}),
         startMode: "standard",
         agentAccess: "session",
         memoryScope: "off",
         rigId: null,
         // Only this Site's data tools; never management or workspace tools.
         firstPartyMcpTools: dataTools,
-        ...(dataTools.length > 0
-          ? { firstPartyMcpPermissions: [...SITE_AGENT_DATA_TOOL_PERMISSIONS] }
-          : {}),
+        ...(dataTools.length > 0 ? { firstPartyMcpPermissions: dataToolPermissions } : {}),
         agent: {
           capabilities: {
             from: "none",
@@ -1511,7 +1547,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         // No sandbox: a Site's agent answers from the page and the Site's
         // data, with no shell or workspace files.
         sandboxBackend: "none",
-        ...(repair ? { model: repair.model } : models.default ? { model: models.default } : {}),
+        ...(repair
+          ? { model: repair.model }
+          : input.model || models.default
+            ? { model: input.model ?? models.default }
+            : {}),
+        ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
+        ...(input.latencyMode === undefined ? {} : { latencyMode: input.latencyMode }),
         instructions: siteAgentInstructions(host, viewer, dataTools, agent.instructions),
         // Always explicit: an empty list means no workspace tools at all.
         tools: mcpTools,
@@ -1525,8 +1567,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         },
         ...(input.idempotencyKey ? { idempotencyKey: `site-runtime:${requestedSessionId}` } : {}),
       };
-      const start = () =>
-        send("POST", base, body, dataTools.length > 0 ? SITE_AGENT_DATA_TOOL_PERMISSIONS : []);
+      const start = () => send("POST", base, body, dataToolPermissions);
       // Workspace members get no Site budget at all: their conversation is an
       // ordinary session under the workspace's normal limits, so no session
       // usage limit is stamped on it, whatever the Site's limits say.
@@ -1694,6 +1735,7 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         viewer,
         conversation.sessionId,
         conversation.toolIds,
+        viewer.kind === "member" ? (memberPermissions ?? []) : undefined,
       );
       const usage = await settleSiteRuntimeSpend(deps, host, conversation);
       // Clear the stamped session cap before dropping the durable conversation
