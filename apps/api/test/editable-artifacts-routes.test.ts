@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessGrant, type Permission } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
+import { isRlsScopeSetup } from "@opengeni/testing/rls-scope-fake";
 import {
   EditableArtifactCompatibilityError,
   EditableArtifactOfficeImportError,
@@ -11,6 +12,7 @@ import {
   type EditableArtifactOfficeImportPort,
 } from "@opengeni/core";
 import { getTableName, type SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { Hono } from "hono";
 
 import {
@@ -187,6 +189,14 @@ function sessionAuthorizationDb(privateSessionOwner?: string) {
         await execute(transaction()),
       execute: async (query): Promise<Record<string, unknown>[]> => {
         const text = sqlText(query);
+        if (isRlsScopeSetup(new PgDialect().sqlToQuery(query).sql)) {
+          // The scope's one setup statement applies the tenant and reads it back.
+          rls.accountId = ACCOUNT_ID;
+          rls.workspaceId = WORKSPACE_ID;
+          return [
+            { resolved_account_id: ACCOUNT_ID, account_id: ACCOUNT_ID, workspace_id: WORKSPACE_ID },
+          ];
+        }
         let appliedTenantContext = false;
         if (text.includes("set_config('opengeni.account_id'")) {
           rls.accountId = ACCOUNT_ID;

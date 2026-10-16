@@ -38,27 +38,33 @@ describe("setRlsContext query budget", () => {
   test("applies the base tenant and protocol context in one database round trip", async () => {
     let executeCalls = 0;
     let executedQuery: SQL | undefined;
+    const accountId = "00000000-0000-0000-0000-000000000001";
+    const workspaceId = "00000000-0000-0000-0000-000000000002";
     const db = {
       execute: async (query: SQL) => {
         executeCalls += 1;
         executedQuery = query;
-        return [];
+        // The same statement reads the applied tenant back.
+        return [
+          { resolved_account_id: accountId, account_id: accountId, workspace_id: workspaceId },
+        ];
       },
     } as unknown as Database;
 
-    await setRlsContext(db, {
-      accountId: "00000000-0000-0000-0000-000000000001",
-      workspaceId: "00000000-0000-0000-0000-000000000002",
-    });
+    await setRlsContext(db, { accountId, workspaceId });
 
     expect(executeCalls).toBe(1);
-    const queryText = executedQuery?.queryChunks
-      .flatMap((chunk) =>
-        typeof chunk === "object" && chunk !== null && "value" in chunk
-          ? (chunk.value as readonly string[])
-          : [],
-      )
-      .join("");
+    // The statement is composed from nested SQL fragments; collect their text.
+    const text = (chunks: readonly unknown[]): string =>
+      chunks
+        .map((chunk) => {
+          if (typeof chunk !== "object" || chunk === null) return "";
+          if ("queryChunks" in chunk) return text(chunk.queryChunks as readonly unknown[]);
+          if ("value" in chunk && Array.isArray(chunk.value)) return chunk.value.join("");
+          return "";
+        })
+        .join("");
+    const queryText = text(executedQuery?.queryChunks ?? []);
     expect(queryText).toContain("set_config('opengeni.account_id'");
     expect(queryText).toContain("set_config('opengeni.workspace_id'");
     expect(queryText).toContain("set_config('opengeni.lossless_content_writer'");

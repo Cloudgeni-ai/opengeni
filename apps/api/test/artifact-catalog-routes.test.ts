@@ -77,6 +77,7 @@ function fixture(
       )
         return [
           {
+            resolved_account_id: accountId,
             account_id: accountId,
             workspace_id: workspaceId,
             subject_id: "user:catalog",
