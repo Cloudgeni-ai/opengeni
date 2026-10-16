@@ -1153,8 +1153,11 @@ async function findLinuxManagedBrowserProcess(
   for (const pid of pids) {
     if (requireCompleteInventory) {
       try {
+        // Only the command line is evidence here. The executable link of
+        // another user's (or root's) process is unreadable to an unprivileged
+        // agent, and it says nothing about which profile the process uses, so
+        // requiring it made absence unprovable on any real Linux host.
         const commandLine = await readFile(`/proc/${pid}/cmdline`);
-        await realpath(await readlink(`/proc/${pid}/exe`));
         // This is refusal evidence only. Even an unverified or rewritten
         // profile mention prevents a new exact-directory launch.
         if (commandLine.includes(profileArgument)) {
