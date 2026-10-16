@@ -20,6 +20,7 @@ import {
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
+  BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
   createDb,
   createSession,
   ensureManagedAccessForUser,
@@ -32,6 +33,7 @@ import {
   RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES,
   SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
   SESSION_USAGE_LIMIT_RUNTIME_ROUTINES,
+  SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
 } from "../src";
 import { rawRows, withRlsContext, type Database } from "../src/database";
 import { migrate } from "../src/migrate";
@@ -395,6 +397,10 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
     // routines. Current readiness must report exactly those missing routines
     // both before and after provisioning; no other posture failure is allowed.
     const SITE_DATA_TABLES = [
+      // 0796 and 0797 (billing operations and subscription plans).
+      "billing_subscription_operations",
+      "organization_plans",
+      "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
       "scheduled_task_blocker_reviews",
       "site_abuse_reports",
@@ -436,6 +442,9 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       ...retiredSubscriptionObjectDescriptions().map(retiredSubscriptionObjectViolation),
       "database is missing the xai subscription-core cutover receipt (0747_subscription_core_xai_cutover.sql); apply the pending migrations first",
       "database is missing the claude subscription-core cutover receipt (0748_subscription_core_claude_cutover.sql); apply the pending migrations first",
+      // Nor subscription plans and billing operations (0796-0798).
+      "subscription plan maintenance inventory is missing",
+      "subscription plan Free anniversary helper is missing",
       "subscription M3 precursor private routine subscription_core_personal_sharing(text, uuid, text, uuid, integer) is missing or unsafe",
       ...missing0735Routines,
       // Nor Site Data (0776), published Sites (0782) or Site SQL (0783), whose
@@ -446,9 +455,14 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES.map(
         (routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`,
       ),
+      "owner-internal target-schema helper set_subscription_plan_catalog(jsonb, text, text) is missing or ambiguous",
+      ...[...BILLING_SUBSCRIPTION_OPERATION_ROUTINES, ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES].map(
+        (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
+      ),
       ...SESSION_USAGE_LIMIT_RUNTIME_ROUTINES.map(
         (routine) => `target-schema runtime capability ${routine} is missing or ambiguous`,
       ),
+      "runtime role cannot read the subscription plan catalog",
       ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES.map(
         (table) => `session usage limit private table ${table} is missing or unsafe`,
       ),
