@@ -49,6 +49,7 @@ import {
   CLEARED_RUN_STATE_BLOB,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+  MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY,
   MODEL_ATTACHMENT_REFS_FIELD,
   OPEN_SUFFIX_RUN_STATE_BLOB,
   sessionSystemUpdateBatchHistoryItem,
@@ -2493,17 +2494,19 @@ describe("runtime event normalization", () => {
     async function mcpToolApprovalMap(
       requireApproval: boolean | string[] | undefined,
       connectionBacked = false,
+      toolMeta?: Record<string, Record<string, unknown>>,
+      serverId = "docs",
     ): Promise<Record<string, boolean>> {
-      const mcp = startTestMcpServer();
+      const mcp = startTestMcpServer(toolMeta ? { toolMeta } : {});
       const serverConfig = {
-        id: "docs",
+        id: serverId,
         name: "Document Search",
         url: mcp.url,
         cacheToolsList: false,
         ...(requireApproval !== undefined ? { requireApproval } : {}),
       };
       const prepared = await prepareAgentTools(testSettings({ mcpServers: [serverConfig] }), [
-        { kind: "mcp", id: "docs" },
+        { kind: "mcp", id: serverId },
       ]);
       try {
         const agent = buildOpenGeniAgent(
@@ -2555,6 +2558,74 @@ describe("runtime event normalization", () => {
         docs__search_documents: false,
         docs__fetch_document: false,
       });
+    });
+
+    test("a tool's recommendedPermission _meta makes Ask its default", async () => {
+      const map = await mcpToolApprovalMap(
+        undefined,
+        false,
+        {
+          fetch_document: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" },
+          search_documents: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "allow" },
+        },
+        "host",
+      );
+      expect(map).toEqual({
+        host__search_documents: false,
+        host__fetch_document: true,
+      });
+    });
+
+    test("a tool's Allow recommendation never removes requireApproval", async () => {
+      const map = await mcpToolApprovalMap(
+        ["search_documents"],
+        false,
+        {
+          search_documents: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "allow" },
+          fetch_document: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" },
+        },
+        "host",
+      );
+      expect(map).toEqual({
+        host__search_documents: true,
+        host__fetch_document: true,
+      });
+    });
+
+    test("a recommendation added to a server's tools/list applies from the session's next attempt", async () => {
+      // The host changes its tools/list between attempts of one session, as when
+      // it ships a new Ask tool; nothing about the session is re-created or patched.
+      const toolMeta: Record<string, Record<string, unknown>> = {};
+      const mcp = startTestMcpServer({ toolMeta });
+      const serverConfig = { id: "host", name: "Host", url: mcp.url, cacheToolsList: true };
+      const settings = testSettings({ sandboxBackend: "none", mcpServers: [serverConfig] });
+      const attempt = async () => {
+        const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "host" }]);
+        const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
+        return { prepared, agent };
+      };
+      const first = await attempt();
+      try {
+        expect(await approvalMapForAgent(first.agent)).toEqual({
+          host__search_documents: false,
+          host__fetch_document: false,
+        });
+        toolMeta.fetch_document = { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" };
+        // A running attempt keeps the list it started with.
+        expect((await approvalMapForAgent(first.agent)).host__fetch_document).toBe(false);
+        const second = await attempt();
+        try {
+          expect(await approvalMapForAgent(second.agent)).toEqual({
+            host__search_documents: false,
+            host__fetch_document: true,
+          });
+        } finally {
+          await second.prepared.close();
+        }
+      } finally {
+        await first.prepared.close();
+        mcp.close();
+      }
     });
 
     test("connection-backed MCP with requireApproval false builds without requesting approval", async () => {
@@ -3182,6 +3253,94 @@ describe("runtime event normalization", () => {
           connectionId: expectedId,
           defaultDecision: "allow",
         });
+      } finally {
+        await prepared.close();
+        mcp.close();
+      }
+    });
+
+    test("a host tool's _meta recommendation is the default on model and Codemode calls", async () => {
+      const mcp = startTestMcpServer({
+        toolMeta: { fetch_document: { [MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY]: "ask" } },
+      });
+      const serverId = "cloudgeni";
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [{ id: serverId, name: "CloudGeni", url: mcp.url, cacheToolsList: false }],
+      });
+      const seen: Array<{ toolName: string; defaultDecision?: string; approvalMode?: string }> = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        // No saved rule: the recommendation decides.
+        prepare: async (call) => {
+          seen.push({
+            toolName: call.toolName,
+            defaultDecision: call.defaultDecision,
+            approvalMode: call.approvalMode,
+          });
+          return { managed: true, decision: call.defaultDecision ?? "allow" };
+        },
+        begin: async (call) =>
+          call.defaultDecision === "ask"
+            ? { allowed: false, managed: true, requestId: "request-ask", reason: "approval" }
+            : { allowed: true, managed: true, requestId: "request-allow" },
+        complete: async () => undefined,
+      };
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: serverId }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        connectorActionPolicy: hooks,
+      });
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+      });
+      try {
+        const tools = await agent.getMcpTools(new RunContext());
+        const byName = (name: string) => {
+          const tool = tools.find(
+            (candidate) => candidate.type === "function" && candidate.name === name,
+          );
+          if (!tool || tool.type !== "function") throw new Error(`${name} missing`);
+          return tool;
+        };
+        expect(
+          await byName(`${serverId}__fetch_document`).needsApproval(
+            new RunContext(),
+            { id: "doc-1" },
+            "call-fetch",
+          ),
+        ).toBe(true);
+        expect(
+          await byName(`${serverId}__search_documents`).needsApproval(
+            new RunContext(),
+            { query: "n" },
+            "call-search",
+          ),
+        ).toBe(false);
+        expect(seen).toEqual([
+          { toolName: "fetch_document", defaultDecision: "ask", approvalMode: "session_mcp" },
+          { toolName: "search_documents", defaultDecision: "allow", approvalMode: undefined },
+        ]);
+
+        // Codemode reaches the same tool through the attempt gateway with the same default.
+        seen.length = 0;
+        const environment = prepared.attemptToolEnvironment!;
+        const result = await environment
+          .call({
+            catalogDigest: environment.catalog.digest,
+            operationId: crypto.randomUUID(),
+            identity: { serverId, toolName: "fetch_document" },
+            arguments: { id: "doc-1" },
+            caller: { kind: "codemode", subjectId: "worker:test" },
+          })
+          .catch((error: unknown) => error);
+        expect(seen[0]).toMatchObject({ toolName: "fetch_document", defaultDecision: "ask" });
+        expect(result).toBeDefined();
+        expect(mcp.calls).toEqual([]);
       } finally {
         await prepared.close();
         mcp.close();
