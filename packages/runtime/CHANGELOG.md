@@ -1,5 +1,36 @@
 # @opengeni/runtime
 
+## 3.1.2
+
+### Minor Changes
+
+- 1e67711: An MCP server can recommend Ask for a tool with `_meta: { "opengeni/recommendedPermission": "ask" }` in `tools/list` (`MCP_TOOL_RECOMMENDED_PERMISSION_META_KEY`). It applies on model and Codemode calls from the next attempt of every session, and only when the workspace has saved no choice for the tool. A tool asks when either this or the session's `requireApproval` says so. Connector permission settings show the same recommendation.
+
+### Patch Changes
+
+- 0bdb953: Photo-heavy chats no longer compact over and over. After compaction only the newest user message that has attachments keeps its images inline; photos of older retained messages move to the dated attachment catalog, where the agent can reopen them, and those messages are charged only for their text. Newly sent photos are shown to every model at most 2000 px on the longest side (the file itself stays full resolution, and the receipt says so); photos sent before this change keep their original projection, so requests already sent are unchanged. The local image token estimate now prices images by the patches they cover at the sent resolution, so a full-resolution phone photo counts as about 15k tokens instead of 765.
+- Updated dependencies [17d61c6]
+- Updated dependencies [74a259d]
+- Updated dependencies [0b164a9]
+- Updated dependencies [99d545d]
+- Updated dependencies [1e67711]
+- Updated dependencies [0bdb953]
+- Updated dependencies [79af429]
+- Updated dependencies [877c70d]
+  - @opengeni/contracts@3.1.0
+  - @opengeni/sdk@3.1.0
+  - @opengeni/observability@3.1.0
+  - @opengeni/codemode@3.1.0
+  - @opengeni/capabilities@3.1.0
+  - @opengeni/codex@3.1.0
+  - @opengeni/config@3.1.0
+  - @opengeni/interaction@3.1.0
+  - @opengeni/tool-gateway@3.1.0
+  - @opengeni/vaults@3.1.0
+  - @opengeni/agent-proto@3.1.0
+  - @opengeni/network@3.1.0
+  - @opengeni/xai-subscription@3.1.0
+
 ## 3.0.0
 
 ### Minor Changes

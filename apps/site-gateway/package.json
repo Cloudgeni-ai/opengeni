@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/site-gateway",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Cloudflare Worker that serves published Opengeni Sites on their own hostnames.",
   "type": "module",

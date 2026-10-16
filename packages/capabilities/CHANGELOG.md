@@ -1,5 +1,17 @@
 # @opengeni/capabilities
 
+## 3.1.2
+
+### Patch Changes
+
+- Updated dependencies [17d61c6]
+- Updated dependencies [1e67711]
+- Updated dependencies [0bdb953]
+- Updated dependencies [79af429]
+- Updated dependencies [877c70d]
+  - @opengeni/contracts@3.1.0
+  - @opengeni/network@3.1.0
+
 ## 3.0.0
 
 ### Patch Changes
