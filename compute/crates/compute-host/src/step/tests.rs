@@ -182,6 +182,7 @@ impl Sandbox {
             kernel: self.root.path().join("vmlinux"),
             #[cfg(target_os = "linux")]
             fetcher: None,
+            pager: crate::PagerConfig::new(self.root.path().join("no-pager")),
             launches: 0,
         }
     }

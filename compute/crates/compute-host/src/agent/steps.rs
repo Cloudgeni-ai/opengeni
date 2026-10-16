@@ -193,6 +193,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             kernel: self.images.kernel.clone(),
             #[cfg(target_os = "linux")]
             fetcher: self.fetcher.clone(),
+            pager: self.pager.clone(),
             launches: 0,
         };
         let events = self.events_tx.clone();
@@ -331,7 +332,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _records = records;
             let mut result = engine.stop(live.vm).await;
             let mut delay = Duration::from_millis(100);
-            while let Err(error) = result {
+            while let Err(error) = &result {
                 tracing::error!(%id, %error, "could not tear down a dead VM; retrying");
                 let Some(spec) = &spec else {
                     break;
@@ -343,6 +344,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
                 delay = (delay * 2).min(TEARDOWN_RETRY);
                 result = engine.clean_up(spec).await;
+            }
+            // Only once the process is gone: its pager may still serve it.
+            // A wake from the same image starts only after this teardown,
+            // so the old hydration never writes beside a new one.
+            if result.is_ok() {
+                live.memory.close().await;
             }
             let _ = events.send(Event::TornDown { id });
         });
@@ -401,7 +408,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         let removers = std::mem::take(&mut slot.removers);
         if let Some(record) = self.records.get(id) {
-            self.remove_recorded(&record, live.map(|live| live.vm), removers);
+            self.remove_recorded(&record, live.map(|live| (live.vm, live.memory)), removers);
         } else {
             tracing::error!(%id, "removing a sandbox without a record");
             for remover in removers {
@@ -415,7 +422,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn remove_recorded(
         &mut self,
         record: &Record,
-        vm: Option<E::Vm>,
+        vm: Option<(E::Vm, LiveMemory)>,
         removers: Vec<Reply<()>>,
     ) {
         let id = record.id;
@@ -563,7 +570,7 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
     async fn run(
         &self,
         fence: Fence,
-        vm: Option<E::Vm>,
+        vm: Option<(E::Vm, LiveMemory)>,
         spec: &VmSpec,
         dir: &Path,
     ) -> Result<(), HostError> {
@@ -573,7 +580,13 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
             .commit(id, fence, Change::new().removing())
             .await?;
         let stopped = match vm {
-            Some(vm) => self.engine.stop(vm).await,
+            Some((vm, memory)) => {
+                let stopped = self.engine.stop(vm).await;
+                // Whatever serves or fetches its memory writes into the
+                // directory about to go, so it ends first.
+                memory.close().await;
+                stopped
+            }
             None => self.engine.clean_up(spec).await,
         };
         stopped.map_err(|error| HostError::Io(error.to_string()))?;
@@ -590,11 +603,20 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
             .await
             .map_err(|error| HostError::Io(error.to_string()))?;
         self.records.remove(id, record.fence()).await?;
-        match tokio::fs::remove_dir_all(dir).await {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                Err(HostError::Io(error.to_string()))
+        // The pager of a VM that ended on its own may still be writing its
+        // last file here; a moment later the directory is quiet.
+        let mut tries = 0;
+        loop {
+            match tokio::fs::remove_dir_all(dir).await {
+                Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty && tries < 10 => {
+                    tries += 1;
+                    sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    return Err(HostError::Io(error.to_string()));
+                }
+                _ => return Ok(()),
             }
-            _ => Ok(()),
         }
     }
 }

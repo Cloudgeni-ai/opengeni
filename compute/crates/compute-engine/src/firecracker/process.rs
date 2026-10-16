@@ -84,6 +84,17 @@ impl Process {
     }
 }
 
+/// Makes `command` start its process in a session of its own, away from
+/// the agent's terminal and process group, so signals aimed at the agent
+/// (such as Ctrl-C) never reach a VM or its pager.
+pub(crate) fn detach(command: &mut tokio::process::Command) {
+    // SAFETY: the closure runs in the forked child before exec and makes
+    // one setsid(2) call, which is async-signal-safe.
+    unsafe {
+        command.pre_exec(|| rustix::process::setsid().map(drop).map_err(io::Error::from));
+    }
+}
+
 /// Whether process `pid` currently belongs to the cgroup at `relative`
 /// (its path below the cgroup v2 mount, starting with `/`).
 pub(crate) fn in_cgroup(pid: Pid, relative: &Path) -> io::Result<bool> {

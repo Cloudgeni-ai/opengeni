@@ -106,6 +106,12 @@ pub struct ChunkRef {
     pub plain_len: u32,
     pub stored_len: u32,
     pub codec: Codec,
+    /// CRC32C and MD5 of the stored bytes (`crc32c=<b64>,md5=<b64>`), the
+    /// checksums a store that reports them keeps for the object. Comparing
+    /// them proves a stored object intact without downloading it; without
+    /// them (older manifests) the object must be read to be proven.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksums: Option<String>,
 }
 
 impl ChunkRef {
@@ -119,6 +125,10 @@ impl ChunkRef {
             || self.plain_len as usize > MAX_CHUNK
             || self.stored_len == 0
             || self.stored_len as usize > MAX_CHUNK
+            || self
+                .checksums
+                .as_ref()
+                .is_some_and(|checksums| checksums.len() > 128 || !checksums.is_ascii())
         {
             return Err(Error::Invalid("chunk reference"));
         }
@@ -166,6 +176,7 @@ impl EncodedChunk {
                 stored_len: u32::try_from(bytes.len())
                     .map_err(|_| Error::Invalid("stored length"))?,
                 codec,
+                checksums: Some(crate::upload::checksums(&bytes)),
             },
             bytes,
         })

@@ -41,7 +41,8 @@ pub(crate) enum Created {
     Exists,
 }
 
-/// Create-only, checksummed uploads to one Google Cloud Storage bucket.
+/// Checksummed uploads to one Google Cloud Storage bucket: create-only, or
+/// replacing an object only to repair it.
 #[derive(Clone)]
 pub(crate) struct Gcs {
     client: HttpClient,
@@ -75,12 +76,22 @@ impl Gcs {
     /// checks the CRC32C and MD5 sent with the bytes and refuses the upload
     /// if either differs, so bytes corrupted in transit are never stored.
     pub(crate) async fn create(&self, path: &Path, bytes: &Bytes) -> Result<Created> {
+        self.send(path, bytes, true).await
+    }
+
+    /// Stores `bytes` at `path`, replacing whatever is there, checked in
+    /// transit as [`Self::create`] is.
+    pub(crate) async fn replace(&self, path: &Path, bytes: &Bytes) -> Result<()> {
+        self.send(path, bytes, false).await.map(drop)
+    }
+
+    async fn send(&self, path: &Path, bytes: &Bytes, create_only: bool) -> Result<Created> {
         let hashes = checksums(bytes);
         let url = self.url(path);
         let mut delay = Duration::from_millis(100);
         let mut attempt = 1;
         loop {
-            match self.put(&url, bytes, &hashes).await? {
+            match self.put(&url, bytes, &hashes, create_only).await? {
                 Put::Done(created) => return Ok(created),
                 Put::Retry(reason) | Put::Fail(reason) if attempt >= ATTEMPTS => {
                     return Err(Error::Transfer(format!("PUT {path}: {reason}")));
@@ -144,9 +155,9 @@ impl Gcs {
         format!("{}/{}", self.bucket_url, encode(path.as_ref()))
     }
 
-    async fn put(&self, url: &str, bytes: &Bytes, hashes: &str) -> Result<Put> {
+    async fn put(&self, url: &str, bytes: &Bytes, hashes: &str, create_only: bool) -> Result<Put> {
         let token = self.credentials.get_credential().await?;
-        let request = http::Request::builder()
+        let mut request = http::Request::builder()
             .method(http::Method::PUT)
             .uri(url)
             .header(
@@ -154,9 +165,12 @@ impl Gcs {
                 format!("Bearer {}", token.bearer),
             )
             .header(http::header::CONTENT_LENGTH, bytes.len())
-            .header("x-goog-hash", hashes)
+            .header("x-goog-hash", hashes);
+        if create_only {
             // Create only: generation 0 means "no live object".
-            .header("x-goog-if-generation-match", "0")
+            request = request.header("x-goog-if-generation-match", "0");
+        }
+        let request = request
             .body(HttpRequestBody::from(bytes.clone()))
             .map_err(|error| Error::Transfer(error.to_string()))?;
         let response = match self.client.execute(request).await {
@@ -216,7 +230,7 @@ fn encode(name: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -228,8 +242,8 @@ mod tests {
     /// A GCS stand-in that verifies `x-goog-hash` as the real service does,
     /// optionally after corrupting the first `corrupt` uploads in transit.
     #[derive(Debug, Default)]
-    struct Fake {
-        objects: Mutex<HashMap<String, Bytes>>,
+    pub(crate) struct Fake {
+        pub(crate) objects: Mutex<HashMap<String, Bytes>>,
         corrupt: Mutex<u32>,
         puts: Mutex<u32>,
     }
@@ -280,7 +294,9 @@ mod tests {
                 return Ok(reply(400, "<Code>BadDigest</Code>"));
             }
             let mut objects = self.0.objects.lock().unwrap();
-            if objects.contains_key(&key) {
+            if parts.headers.contains_key("x-goog-if-generation-match")
+                && objects.contains_key(&key)
+            {
                 return Ok(reply(412, ""));
             }
             objects.insert(key, bytes);
@@ -288,7 +304,7 @@ mod tests {
         }
     }
 
-    fn gcs(fake: &Arc<Fake>) -> Gcs {
+    pub(crate) fn gcs(fake: &Arc<Fake>) -> Gcs {
         let credentials = Arc::new(StaticCredentialProvider::new(GcpCredential {
             bearer: "token".to_owned(),
         }));
@@ -313,6 +329,9 @@ mod tests {
         assert_eq!(store.create(&path, &bytes).await.unwrap(), Created::Exists);
         assert_eq!(store.stored(&path).await.unwrap(), Some(checksums(&bytes)));
         assert_eq!(store.stored(&Path::from("p/none")).await.unwrap(), None);
+        let other = Bytes::from_static(b"other bytes");
+        store.replace(&path, &other).await.unwrap();
+        assert_eq!(fake.objects.lock().unwrap()["/bucket/p/chunks/v1/a"], other);
     }
 
     #[tokio::test(start_paused = true)]

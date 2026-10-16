@@ -15,6 +15,5 @@
 [pattern_ratchet.pure_core]
 
 [pattern_ratchet.unsafe_code]
-"crates/compute-engine/src/firecracker/mod.rs" = 1
 "crates/compute-pager/src/main.rs" = 1
 "crates/compute-storage/src/bin/storage-density.rs" = 5

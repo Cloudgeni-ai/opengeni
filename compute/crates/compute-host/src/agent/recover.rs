@@ -5,16 +5,20 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use compute_core::{Durability, Input, Level, SandboxId, State};
-use compute_engine::{Engine, Found};
+use compute_engine::{Engine, EngineError, ErrorKind, Found, VmSpec};
 use futures::StreamExt;
 
 use crate::layout::{Images, Paths, vm_spec};
 use crate::protocol::Id;
 use crate::state::{Change, Disk, Record, StateError, Stray};
-use crate::step::{DiskWatch, LiveMemory};
+use crate::step::{DiskWatch, LiveMemory, Reconnected};
 use crate::store::Store;
 
 use super::{HostAgent, HostError};
+
+/// A VM found still running after an agent restart, with what it is doing
+/// and, if its memory is paged, the agent's side of its pager.
+type FoundVm<E> = (<E as Engine>::Vm, Found, Option<Reconnected>);
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) async fn recover(&mut self, strays: Vec<Stray>) {
@@ -147,7 +151,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) async fn find_vms(
         &self,
         records: &[Record],
-    ) -> HashMap<SandboxId, Result<Option<(E::Vm, Found)>, HostError>> {
+    ) -> HashMap<SandboxId, Result<Option<FoundVm<E>>, HostError>> {
         /// Enough to hide each lookup's round trip to its VMM without
         /// opening thousands of descriptors at once.
         const CONCURRENT: usize = 64;
@@ -157,8 +161,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let spec = vm_spec(record, &paths, &self.images);
                 let found = match record.disk {
                     Disk::Local => self
-                        .engine
-                        .adopt(&spec)
+                        .adopt_local(record.id, &spec, &paths)
                         .await
                         .map_err(|error| HostError::Io(error.to_string())),
                     // An eviction that could not delete everything left
@@ -176,6 +179,74 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .buffer_unordered(CONCURRENT)
             .collect()
             .await
+    }
+
+    /// Takes back the VM left running for a sandbox whose disk is local.
+    ///
+    /// A VM whose memory a pager serves keeps that pager, a process of its
+    /// own; the agent reconnects to it first, so filling resumes before
+    /// anything asks the VMM. A VM whose pager died while the guest still
+    /// needed it can never run again: the engine ends it, and the record
+    /// still says whether a saved image stands in for it. Anything less
+    /// certain leaves the VM as it is.
+    async fn adopt_local(
+        &self,
+        id: Id,
+        spec: &VmSpec,
+        paths: &Paths,
+    ) -> Result<Option<FoundVm<E>>, EngineError> {
+        let memory = if crate::step::paged(paths) {
+            match self.reconnect_paging(paths).await {
+                Ok(memory) => memory,
+                Err(error) if error.kind == ErrorKind::MemoryLost => {
+                    // Its pager runs but nothing it waits for can come.
+                    tracing::warn!(%id, %error, "the VM's memory cannot be served; ending it");
+                    return match self.engine.adopt(spec).await {
+                        Ok(Some((vm, _))) => self.engine.stop(vm).await.map(|()| None),
+                        Ok(None) => Ok(None),
+                        // The engine saw the same loss and ended the VM itself.
+                        Err(error) if error.kind == ErrorKind::MemoryLost => Ok(None),
+                        Err(error) => Err(error),
+                    };
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        let found = self.engine.adopt(spec).await;
+        match found {
+            Ok(Some((vm, how))) => {
+                if memory.is_some() {
+                    tracing::info!(%id, "reconnected to the VM's memory pager");
+                }
+                Ok(Some((vm, how, memory)))
+            }
+            other => {
+                if let Some(memory) = memory {
+                    memory.close().await;
+                }
+                match other {
+                    Err(error) if error.kind == ErrorKind::MemoryLost => {
+                        tracing::warn!(%id, %error, "the VM's memory pager died; the VM was ended");
+                        Ok(None)
+                    }
+                    other => other.map(|found| found.map(|(vm, how)| (vm, how, None))),
+                }
+            }
+        }
+    }
+
+    async fn reconnect_paging(&self, paths: &Paths) -> Result<Option<Reconnected>, EngineError> {
+        #[cfg(target_os = "linux")]
+        {
+            crate::step::reconnect_paging(paths, self.fetcher.as_ref()).await
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = paths;
+            Ok(None)
+        }
     }
 
     /// Makes sure every recorded sandbox's network is complete and has the
@@ -231,7 +302,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) async fn recover_one(
         &mut self,
         record: Record,
-        found: Result<Option<(E::Vm, Found)>, HostError>,
+        found: Result<Option<FoundVm<E>>, HostError>,
     ) -> Result<bool, HostError> {
         let id = record.id;
         let policy = self
@@ -239,23 +310,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .map_err(HostError::Invalid)?;
         let paths = Paths::new(&self.root, id);
         let spec = vm_spec(&record, &paths, &self.images);
-        let found = match found? {
-            Some((vm, _)) if crate::step::paged(&paths) => {
-                // The previous agent's pager served this VM's memory and
-                // went with it: the guest would stall on its next page
-                // fault. Its record still says whether a saved image
-                // stands in for it.
-                tracing::warn!(%id, "the VM's memory pager is gone; stopping the VM");
-                self.engine
-                    .stop(vm)
-                    .await
-                    .map_err(|error| HostError::Io(error.to_string()))?;
-                None
-            }
-            found => found,
-        };
-        let (state, vm) = if let Some((vm, found)) = found {
-            (self.adopted_state(&record, found).await?, Some(vm))
+        let (state, vm) = if let Some((vm, found, memory)) = found? {
+            (
+                self.adopted_state(&record, found).await?,
+                Some((vm, memory)),
+            )
         } else {
             (self.sleeping_state(&record, &paths).await?, None)
         };
@@ -264,7 +323,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // it sees what the disk lost while no agent watched; see
         // `DiskWatch`.
         let watch = match &vm {
-            Some(vm) => {
+            Some((vm, _)) => {
                 let held = self.engine.held(vm).await.unwrap_or_else(|error| {
                     tracing::warn!(%id, %error, "could not take back the disk watch");
                     None
@@ -275,10 +334,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let unsavable = watch.as_ref().is_some_and(DiskWatch::failed);
         self.insert(id, paths, spec);
-        if let (Some(vm), Some(watch)) = (vm, watch) {
+        if let (Some((vm, pager)), Some(watch)) = (vm, watch) {
             // What its memory was based on is unknown, so its next save
             // holds every page.
-            let live = self.own(id, vm, LiveMemory::adopted(watch));
+            let memory = match pager {
+                Some(pager) => LiveMemory::reconnected(watch, pager),
+                None => LiveMemory::adopted(watch),
+            };
+            let live = self.own(id, vm, memory);
             if let Some(slot) = self.slots.get_mut(&id.0) {
                 slot.incarnation = Some(live.incarnation);
                 slot.vm = Some(live);
@@ -372,11 +435,28 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     return Err(HostError::Io("the recorded local disk is missing".into()));
                 }
                 let mut image = record.image;
-                if image && !crate::step::recover_images(paths) {
-                    tracing::warn!(id = %record.id, "recorded memory image is missing; its programs are lost");
-                    let lost = Change::new().image(false);
-                    self.records.commit(record.id, record.fence(), lost).await?;
-                    image = false;
+                if image {
+                    let images = paths.clone();
+                    let recovered =
+                        tokio::task::spawn_blocking(move || crate::step::recover_images(&images))
+                            .await
+                            .map_err(|error| HostError::Io(error.to_string()))?;
+                    match recovered {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::warn!(id = %record.id, "recorded memory image is missing; its programs are lost");
+                            let lost = Change::new().image(false);
+                            self.records.commit(record.id, record.fence(), lost).await?;
+                            image = false;
+                        }
+                        // The record keeps vouching for the image: a wake
+                        // checks it again, and never boots fresh over it.
+                        Err(error) => tracing::warn!(
+                            id = %record.id,
+                            %error,
+                            "memory image unreadable for now; keeping it"
+                        ),
+                    }
                 }
                 Ok(if record.archived {
                     State::new(Level::Archived, Durability::Remote, image)

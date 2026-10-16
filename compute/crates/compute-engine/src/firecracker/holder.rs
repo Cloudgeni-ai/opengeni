@@ -82,16 +82,20 @@ fn find(cgroup: &Cgroup, relative: &Path, vmm: Pid) -> io::Result<Option<OwnedFd
     Ok(None)
 }
 
-/// Whether a process other than a holder may be in `cgroup`, at
-/// `relative` below the cgroup v2 mount, such as a VMM. Reads a few small
-/// kernel files.
-pub(super) fn besides_holders(cgroup: &Cgroup, relative: &Path) -> io::Result<bool> {
+/// Whether a process other than a holder, or another helper `helper`
+/// vouches for, may be in `cgroup`, at `relative` below the cgroup v2
+/// mount, such as a VMM. Reads a few small kernel files.
+pub(super) fn besides_holders(
+    cgroup: &Cgroup,
+    relative: &Path,
+    helper: impl Fn(Pid) -> bool,
+) -> io::Result<bool> {
     if !cgroup.is_populated()? {
         return Ok(false);
     }
     for pid in cgroup.processes()? {
         // One that ended meanwhile is not known to be a holder either.
-        if pin(pid, relative)?.is_none() {
+        if !helper(pid) && pin(pid, relative)?.is_none() {
             return Ok(true);
         }
     }

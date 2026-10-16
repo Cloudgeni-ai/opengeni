@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+use compute_engine::CancellationToken;
 use compute_host::protocol::Id;
 use compute_host::{
     CHUNK_BYTES, Chunked, FetchInto, FetchedMemory, JailedFile, SavedFiles, SavedImage, Store,
@@ -90,10 +91,20 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
         .parse()
         .unwrap();
     let started = Instant::now();
-    let receipt = store.archive(id, &saved).await.unwrap();
+    let receipt = store
+        .archive(id, &saved, &CancellationToken::new())
+        .await
+        .unwrap()
+        .stored()
+        .unwrap();
     let first = started.elapsed();
     let started = Instant::now();
-    let again_receipt = store.archive(id, &saved).await.unwrap();
+    let again_receipt = store
+        .archive(id, &saved, &CancellationToken::new())
+        .await
+        .unwrap()
+        .stored()
+        .unwrap();
     let again = started.elapsed();
     assert_eq!(
         receipt, again_receipt,

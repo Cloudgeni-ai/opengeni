@@ -344,6 +344,70 @@ pub(crate) fn copy_file(source: &File, to: &Path) -> io::Result<()> {
     target.sync_all()
 }
 
+/// A file being written beside `target` under a name of its own, so work
+/// left running by an abandoned attempt never writes into another
+/// attempt's file. Removed unless published.
+#[derive(Debug)]
+pub(crate) struct Staging {
+    path: PathBuf,
+    target: PathBuf,
+    published: bool,
+}
+
+impl Staging {
+    /// A fresh staging name beside `target`. Staging files an earlier
+    /// agent process left there are removed: only one agent holds the
+    /// state root, so nothing of theirs can still be writing.
+    pub(crate) fn beside(target: &Path) -> io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+
+        let name = target
+            .file_name()
+            .ok_or_else(|| io::Error::other("staging a path without a file name"))?;
+        let mut prefix = name.to_owned();
+        prefix.push(".fetching");
+        let prefix = prefix.to_string_lossy().into_owned();
+        let ours = format!("{prefix}.{}.", std::process::id());
+        if let Some(parent) = target.parent() {
+            for entry in fs::read_dir(parent)? {
+                let entry = entry?;
+                let found = entry.file_name();
+                let found = found.to_string_lossy();
+                if found.starts_with(&prefix) && !found.starts_with(&ours) {
+                    remove_if_present(&entry.path())?;
+                }
+            }
+        }
+        let attempt = ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        Ok(Self {
+            path: target.with_file_name(format!("{ours}{attempt}")),
+            target: target.to_owned(),
+            published: false,
+        })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Makes the staged file durable and moves it into place.
+    pub(crate) fn publish(mut self) -> io::Result<()> {
+        sync_file(&self.path)?;
+        fs::rename(&self.path, &self.target)?;
+        self.published = true;
+        sync_parent(&self.target)
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn copy_contents(source: &File, target: &File) -> io::Result<()> {
     use rustix::fs::SeekFrom;
