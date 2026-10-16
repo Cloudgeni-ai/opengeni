@@ -101,6 +101,7 @@ async fn start<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> Ag
         network: None,
         busy: None,
         can_compress: true,
+        host_lock: None,
     };
     let socket = root.join("agent.sock");
     let (handle, agent) = HostAgent::start(config, engine, store).await.unwrap();

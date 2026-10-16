@@ -88,6 +88,11 @@ struct World {
     /// The latest VM process of every sandbox, by name, so a restarted
     /// agent can take it back and a test can crash it.
     vms: Mutex<HashMap<String, Process>>,
+    /// VMs whose teardown is under way, by name.
+    tearing_down: Mutex<HashSet<String>>,
+    /// VMs that cannot be checked on, by name: adopting one fails as when
+    /// its VMM does not answer.
+    unadoptable: Mutex<HashSet<String>>,
 }
 
 /// What a fake VM process is, independent of any agent's handle to it.
@@ -169,6 +174,11 @@ impl Fake {
         let name = spec.name.clone();
         if !self.world.live.lock().unwrap().insert(name.clone()) {
             self.world.violation(format!("two VMs at once for {name}"));
+        }
+        if self.world.tearing_down.lock().unwrap().contains(&name) {
+            self.world.violation(format!(
+                "a VM for {name} started during an old one's teardown"
+            ));
         }
         let vsock = spec.vsock_path();
         std::fs::create_dir_all(&spec.dir).unwrap();
@@ -424,11 +434,17 @@ impl Engine for Fake {
     }
 
     async fn stop(&self, vm: FakeVm) -> Result<(), EngineError> {
+        self.world
+            .tearing_down
+            .lock()
+            .unwrap()
+            .insert(vm.name.clone());
         sleep(self.delays.stop).await;
         let _ = vm.exit.send(true);
         vm.guest.abort();
         let _ = std::fs::remove_file(&vm.vsock);
         self.world.live.lock().unwrap().remove(&vm.name);
+        self.world.tearing_down.lock().unwrap().remove(&vm.name);
         Ok(())
     }
 
@@ -436,6 +452,13 @@ impl Engine for Fake {
         &self,
         spec: &VmSpec,
     ) -> impl Future<Output = Result<Option<(FakeVm, Found)>, EngineError>> + Send {
+        if self.world.unadoptable.lock().unwrap().contains(&spec.name) {
+            return ready(Err(EngineError::new(
+                ErrorKind::Transient,
+                "adopt",
+                "the VMM did not answer",
+            )));
+        }
         let process = self
             .world
             .vms
@@ -539,6 +562,7 @@ impl Lab {
                 window: Duration::from_millis(100),
             }),
             can_compress: true,
+            host_lock: None,
         };
         configure(&mut config);
         let engine = Fake {
@@ -1456,10 +1480,19 @@ async fn requests_for_a_replaced_execution_are_refused() {
         Reply::Woken { .. }
     ));
 
-    // A save and restore keep the guest's programs but replace the
-    // execution.
+    // Saving and restoring keep the guest's programs, so the execution
+    // goes on.
     lab.wait_level(sandbox, LevelName::Saved).await;
     assert_eq!(lab.run(sandbox, &["get"]).await, ["first"]);
+    assert_eq!(lab.current(sandbox).await.generation, first);
+    assert!(matches!(
+        lab.client.call(&wake(first)).await.unwrap(),
+        Reply::Woken { .. }
+    ));
+
+    // A crash loses them: the next boot is a new execution.
+    lab.world.crash(&vm_name(sandbox));
+    assert_eq!(lab.run(sandbox, &["get"]).await, [""]);
     let second = lab.current(sandbox).await.generation;
     assert_eq!(second, first + 1);
     let reply = lab.client.call(&wake(first)).await.unwrap();
@@ -1562,8 +1595,8 @@ async fn an_unreadable_record_blocks_its_id() {
 
     let status = lab.status().await;
     assert!(status.sandboxes.is_empty(), "{status:?}");
-    assert_eq!(status.unreadable.len(), 1);
-    assert_eq!(status.unreadable[0].id, broken);
+    assert_eq!(status.blocked.len(), 1);
+    assert_eq!(status.blocked[0].id, broken);
     assert!(
         lab.world.live.lock().unwrap().contains(&vm_name(broken)),
         "its VM is left running"
@@ -1602,6 +1635,141 @@ async fn an_unreadable_record_blocks_its_id() {
     assert!(path.exists(), "its files are left alone");
     lab.create(other, NEVER).await;
     assert_ne!(lab.record(other)["ordinal"], ordinal);
+    lab.assert_clean();
+}
+
+fn create_request(id: Id) -> Request {
+    Request::Create {
+        id,
+        config: SandboxConfig {
+            vcpus: 1,
+            memory_mib: 256,
+            sleep: NEVER,
+        },
+    }
+}
+
+fn is_error(reply: &Reply, expected: ErrorCode) -> bool {
+    matches!(reply, Reply::Error { code, .. } if *code == expected)
+}
+
+/// A sandbox whose recovery fails is blocked, never forgotten: its record
+/// and files stay, its id cannot be created afresh over them, and removing
+/// it deletes it properly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_recovery_blocks_the_id_until_removed() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(43);
+    lab.create(sandbox, SAVE_QUICKLY).await;
+    lab.run(sandbox, &["set x"]).await;
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    let dir = lab.sandbox_dir(sandbox);
+    let (root, world) = lab.stop().await;
+    std::fs::remove_file(dir.join("root/disk.ext4")).unwrap();
+
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    let status = lab.status().await;
+    assert!(status.sandboxes.is_empty(), "{status:?}");
+    assert_eq!(status.blocked.len(), 1);
+    assert_eq!(status.blocked[0].id, sandbox);
+    let reply = lab.client.call(&create_request(sandbox)).await.unwrap();
+    assert!(is_error(&reply, ErrorCode::Broken), "{reply:?}");
+    assert!(dir.join("sandbox.json").exists(), "its record is kept");
+
+    let reply = lab
+        .client
+        .call(&Request::Remove {
+            id: sandbox,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply, Reply::Done);
+    assert!(!dir.exists());
+    assert_eq!(lab.status().await.blocked.len(), 0);
+    lab.create(sandbox, NEVER).await;
+    assert_eq!(lab.run(sandbox, &["get"]).await, [""]);
+    lab.assert_clean();
+}
+
+/// A VM the restarted agent cannot check on is left running and its
+/// sandbox blocked; only removing it stops the VM.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vm_that_cannot_be_checked_is_left_running() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(44);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set alive"]).await;
+    let (root, world) = lab.stop().await;
+    world.unadoptable.lock().unwrap().insert(vm_name(sandbox));
+
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    let status = lab.status().await;
+    assert_eq!(status.blocked.len(), 1, "{status:?}");
+    assert!(
+        lab.world.live.lock().unwrap().contains(&vm_name(sandbox)),
+        "the VM was stopped"
+    );
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
+    let reply = lab
+        .client
+        .call(&Request::Remove {
+            id: sandbox,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply, Reply::Done);
+    assert!(!lab.world.live.lock().unwrap().contains(&vm_name(sandbox)));
+    lab.assert_clean();
+}
+
+/// A VM that died is torn down before its replacement starts, however long
+/// the teardown takes, so the teardown never touches the new VM's jail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replacement_waits_for_the_dead_vms_teardown() {
+    let delays = Delays {
+        stop: Duration::from_millis(300),
+        ..Delays::default()
+    };
+    let lab = Lab::new(delays, HostPolicy::default()).await;
+    let sandbox = id(45);
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set lost"]).await;
+    lab.world.crash(&vm_name(sandbox));
+    let started = Instant::now();
+    assert_eq!(lab.run(sandbox, &["get"]).await, [""]);
+    assert!(started.elapsed() >= Duration::from_millis(250));
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
+    lab.assert_clean();
+}
+
+/// A sandbox recorded as remote whose eviction left local files behind has
+/// them deleted on the next start; nothing relies on them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_files_an_eviction_left_are_deleted_on_restart() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(46);
+    lab.create(sandbox, SAVE_QUICKLY).await;
+    lab.run(sandbox, &["set x"]).await;
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    let dir = lab.sandbox_dir(sandbox);
+    let (root, world) = lab.stop().await;
+    // As if the eviction recorded the disk remote, then failed to delete.
+    let path = dir.join("sandbox.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["disk"] = "remote".into();
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    assert!(dir.join("root/disk.ext4").exists());
+
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    assert_eq!(lab.current(sandbox).await.level, LevelName::Remote);
+    assert!(!dir.join("root/disk.ext4").exists());
+    assert!(
+        std::fs::read_dir(dir.join("images")).map_or(true, |entries| entries.count() == 0),
+        "memory images are left"
+    );
     lab.assert_clean();
 }
 

@@ -40,6 +40,7 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 
 use compute_engine::Network;
+use serde::{Deserialize, Serialize};
 
 use crate::protocol::Id;
 
@@ -107,6 +108,11 @@ impl Ipv4Net {
     fn size(self) -> u64 {
         1_u64 << (32 - u32::from(self.prefix))
     }
+
+    /// The network's mask; `/0` has none.
+    fn mask(prefix: u8) -> u32 {
+        u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0)
+    }
 }
 
 impl fmt::Display for Ipv4Net {
@@ -126,11 +132,10 @@ impl FromStr for Ipv4Net {
             .parse()
             .map_err(|error| format!("{text}: {error}"))?;
         let prefix: u8 = prefix.parse().map_err(|error| format!("{text}: {error}"))?;
-        if prefix > 30 {
-            return Err(format!("{text}: prefix must be at most 30"));
+        if prefix > 32 {
+            return Err(format!("{text}: prefix must be at most 32"));
         }
-        let mask = u32::MAX << (32 - u32::from(prefix));
-        if u32::from(address) & !mask != 0 {
+        if u32::from(address) & !Self::mask(prefix) != 0 {
             return Err(format!("{text}: host bits are set"));
         }
         Ok(Self { address, prefix })
@@ -169,6 +174,34 @@ impl Default for NetworkConfig {
 }
 
 impl NetworkConfig {
+    /// Checks the settings that are not checked as they are parsed.
+    ///
+    /// # Errors
+    ///
+    /// The pool holds no pair of link addresses.
+    pub fn check(&self) -> Result<(), String> {
+        if self.pool.prefix > 31 {
+            return Err(format!(
+                "network pool {} must hold at least two addresses",
+                self.pool
+            ));
+        }
+        Ok(())
+    }
+
+    /// The link addresses of the sandbox numbered `ordinal`.
+    pub(crate) fn addresses(&self, ordinal: u32) -> Result<LinkAddresses, PoolFull> {
+        let offset = u64::from(ordinal) * 2;
+        if offset + 1 >= self.pool.size() {
+            return Err(PoolFull);
+        }
+        let base = u64::from(u32::from(self.pool.address)) + offset;
+        Ok(LinkAddresses {
+            host: Ipv4Addr::from(u32::try_from(base).map_err(|_| PoolFull)?),
+            inner: Ipv4Addr::from(u32::try_from(base + 1).map_err(|_| PoolFull)?),
+        })
+    }
+
     /// The kernel command line arguments that configure the guest's
     /// interface at boot.
     #[must_use]
@@ -286,6 +319,16 @@ impl NetError {
 #[error("the host's link pool has no room for another sandbox")]
 pub struct PoolFull;
 
+/// The two ends of the link between the host and one sandbox's namespace,
+/// given to the sandbox when it is created and kept for its life.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LinkAddresses {
+    /// The host's end.
+    pub host: Ipv4Addr,
+    /// The namespace's end, which guest traffic leaves the namespace from.
+    pub inner: Ipv4Addr,
+}
+
 /// One sandbox's network.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Link {
@@ -301,30 +344,17 @@ pub(crate) struct Link {
 }
 
 impl Link {
-    /// The network of the sandbox numbered `ordinal`, whose VMM runs as
-    /// `uid`/`gid`.
-    pub fn new(
-        config: &NetworkConfig,
-        id: Id,
-        ordinal: u32,
-        uid: u32,
-        gid: u32,
-    ) -> Result<Self, PoolFull> {
-        let offset = u64::from(ordinal) * 2;
-        if offset + 1 >= config.pool.size() {
-            return Err(PoolFull);
-        }
-        let base = u64::from(u32::from(config.pool.address)) + offset;
-        let host_ip = Ipv4Addr::from(u32::try_from(base).map_err(|_| PoolFull)?);
-        let inner_ip = Ipv4Addr::from(u32::try_from(base + 1).map_err(|_| PoolFull)?);
-        Ok(Self {
+    /// The network of sandbox `id`, numbered `ordinal`, at `addresses`,
+    /// whose VMM runs as `uid`/`gid`.
+    pub fn new(id: Id, ordinal: u32, addresses: LinkAddresses, uid: u32, gid: u32) -> Self {
+        Self {
             namespace: namespace_name(id),
             host: format!("{PREFIX}{ordinal}"),
-            host_ip,
-            inner_ip,
+            host_ip: addresses.host,
+            inner_ip: addresses.inner,
             uid,
             gid,
-        })
+        }
     }
 
     /// The namespace's path, which the VMM joins.
@@ -341,25 +371,38 @@ impl Link {
         }
     }
 
-    /// `ip -batch` lines run on the host.
-    fn host_commands(&self, mtu: u32) -> String {
+    /// `ip -batch` lines run on the host, given which parts exist. Every
+    /// line sets a value rather than adding one, so running them again
+    /// changes nothing that is right.
+    fn host_commands(&self, mtu: u32, namespace_exists: bool, link_exists: bool) -> String {
         let Self {
             namespace,
             host,
             host_ip,
             ..
         } = self;
-        format!(
-            "netns add {namespace}
-link add {host} mtu {mtu} type veth peer name {UPLINK} mtu {mtu} netns {namespace}
-addr add {host_ip}/31 dev {host}
+        let mut commands = String::new();
+        if !namespace_exists {
+            let _ = writeln!(commands, "netns add {namespace}");
+        }
+        if !link_exists {
+            let _ = writeln!(
+                commands,
+                "link add {host} mtu {mtu} type veth peer name {UPLINK} mtu {mtu} netns {namespace}"
+            );
+        }
+        let _ = write!(
+            commands,
+            "addr replace {host_ip}/31 dev {host}
 link set dev {host} up
 "
-        )
+        );
+        commands
     }
 
-    /// `ip -batch` lines run inside the namespace.
-    fn namespace_commands(&self) -> String {
+    /// `ip -batch` lines run inside the namespace, given whether its tap
+    /// exists. A tap in use by a VM is never replaced, only set right.
+    fn namespace_commands(&self, tap_exists: bool) -> String {
         let Self {
             host_ip,
             inner_ip,
@@ -367,18 +410,28 @@ link set dev {host} up
             gid,
             ..
         } = self;
-        format!(
+        let mut commands = format!(
             "link set dev lo up
-addr add {inner_ip}/31 dev {UPLINK}
+addr replace {inner_ip}/31 dev {UPLINK}
 link set dev {UPLINK} up
-route add default via {host_ip} dev {UPLINK}
-tuntap add dev {TAP} mode tap user {uid} group {gid}
-link set dev {TAP} address {TAP_MAC}
-addr add {GATEWAY_IP}/{LINK_PREFIX} dev {TAP}
+route replace default via {host_ip} dev {UPLINK}
+"
+        );
+        if !tap_exists {
+            let _ = writeln!(
+                commands,
+                "tuntap add dev {TAP} mode tap user {uid} group {gid}"
+            );
+        }
+        let _ = write!(
+            commands,
+            "link set dev {TAP} address {TAP_MAC}
+addr replace {GATEWAY_IP}/{LINK_PREFIX} dev {TAP}
 link set dev {TAP} up
 neigh replace {GUEST_IP} lladdr {GUEST_MAC} dev {TAP} nud permanent
 "
-        )
+        );
+        commands
     }
 }
 
@@ -413,30 +466,27 @@ impl Networks {
         })
     }
 
-    /// Makes sure `link` exists and carries the current rules. A complete
-    /// network is left as it is, so a VM using it keeps running; a partial
-    /// one, from a crash part way through setting up, is rebuilt.
+    /// Makes sure `link` exists, complete, with the current rules: what is
+    /// missing is added and every setting set, whatever an earlier attempt
+    /// cut short left. Nothing that exists is replaced, so a VM using the
+    /// network keeps running.
     pub fn ensure(&self, link: &Link) -> Result<(), NetError> {
         let path = link.namespace_path();
-        if path.exists() {
-            let complete = in_namespace(&path, || Ok(has_interface(TAP)))?;
-            if !complete {
-                self.remove(&link.namespace)?;
-                self.create(link)?;
-            }
-        } else {
-            self.create(link)?;
+        let namespace_exists = path.exists();
+        // A veth pair lives and dies as one, so a host end without the
+        // namespace belongs to an earlier one that is gone.
+        let mut link_exists = has_interface(&link.host);
+        if link_exists && !namespace_exists {
+            run("ip", &["link", "del", "dev", &link.host], None)?;
+            link_exists = false;
         }
+        let host = link.host_commands(self.mtu, namespace_exists, link_exists);
+        run("ip", &["-batch", "-"], Some(&host))?;
+        in_namespace(&path, || {
+            let inner = link.namespace_commands(has_interface(TAP));
+            run("ip", &["-batch", "-"], Some(&inner))
+        })?;
         self.configure(link)
-    }
-
-    fn create(&self, link: &Link) -> Result<(), NetError> {
-        // A host link left by a namespace that is gone would block the name.
-        let _ = run("ip", &["link", "del", "dev", &link.host], None);
-        run("ip", &["-batch", "-"], Some(&link.host_commands(self.mtu)))?;
-        in_namespace(&link.namespace_path(), || {
-            run("ip", &["-batch", "-"], Some(&link.namespace_commands()))
-        })
     }
 
     /// Sets the namespace's kernel settings and rules to the current ones.
@@ -597,22 +647,40 @@ mod tests {
         assert_eq!(pool.to_string(), "198.18.0.0/15");
         assert!("198.18.0.1/15".parse::<Ipv4Net>().is_err());
         assert!("198.18.0.0".parse::<Ipv4Net>().is_err());
-        assert!("198.18.0.0/31".parse::<Ipv4Net>().is_err());
+        assert!("198.18.0.0/33".parse::<Ipv4Net>().is_err());
+        // Single hosts and everything are valid ranges to block.
+        let everything: Ipv4Net = "0.0.0.0/0".parse().unwrap();
+        assert_eq!(everything.size(), 1 << 32);
+        assert!("1.0.0.0/0".parse::<Ipv4Net>().is_err());
+        let host: Ipv4Net = "203.0.113.7/32".parse().unwrap();
+        assert_eq!(host.size(), 1);
+        let pair: Ipv4Net = "203.0.113.6/31".parse().unwrap();
+        assert!("203.0.113.7/31".parse::<Ipv4Net>().is_err());
+        // A pool needs room for one sandbox's pair.
+        let pool_of = |pool| NetworkConfig {
+            pool,
+            ..NetworkConfig::default()
+        };
+        assert!(pool_of(host).check().is_err());
+        pool_of(pair).check().unwrap();
+        assert!(pool_of(pair).addresses(0).is_ok());
+        assert_eq!(pool_of(pair).addresses(1), Err(PoolFull));
     }
 
     #[test]
     fn each_sandbox_gets_its_own_pair_of_link_addresses() {
         let config = NetworkConfig::default();
-        let first = Link::new(&config, id(), 0, 1000, 1000).unwrap();
+        let link = |ordinal| Link::new(id(), ordinal, config.addresses(ordinal).unwrap(), 7, 7);
+        let first = link(0);
         assert_eq!(first.host, "ogc0");
         assert_eq!(first.host_ip, Ipv4Addr::new(198, 18, 0, 0));
         assert_eq!(first.inner_ip, Ipv4Addr::new(198, 18, 0, 1));
-        let later = Link::new(&config, id(), 300, 1300, 1300).unwrap();
+        let later = link(300);
         assert_eq!(later.host_ip, Ipv4Addr::new(198, 18, 2, 88));
         assert_eq!(later.inner_ip, Ipv4Addr::new(198, 18, 2, 89));
-        let last = Link::new(&config, id(), (1 << 16) - 1, 0, 0).unwrap();
+        let last = link((1 << 16) - 1);
         assert_eq!(last.inner_ip, Ipv4Addr::new(198, 19, 255, 255));
-        assert_eq!(Link::new(&config, id(), 1 << 16, 0, 0), Err(PoolFull));
+        assert_eq!(config.addresses(1 << 16), Err(PoolFull));
         assert_eq!(
             first.namespace_path(),
             Path::new("/run/netns/ogc-000000000000000000000000000000ab")
@@ -668,15 +736,29 @@ mod tests {
 
     #[test]
     fn setup_names_the_namespace_link_and_tap() {
-        let link = Link::new(&NetworkConfig::default(), id(), 2, 1002, 1002).unwrap();
-        let host = link.host_commands(1460);
+        let addresses = NetworkConfig::default().addresses(2).unwrap();
+        let link = Link::new(id(), 2, addresses, 1002, 1002);
+        let host = link.host_commands(1460, false, false);
+        assert!(host.contains("netns add ogc-"));
         assert!(
             host.contains("link add ogc2 mtu 1460 type veth peer name uplink mtu 1460 netns ogc-")
         );
-        assert!(host.contains("addr add 198.18.0.4/31 dev ogc2"));
-        let inner = link.namespace_commands();
-        assert!(inner.contains("route add default via 198.18.0.4 dev uplink"));
+        assert!(host.contains("addr replace 198.18.0.4/31 dev ogc2"));
+        let inner = link.namespace_commands(false);
+        assert!(inner.contains("route replace default via 198.18.0.4 dev uplink"));
         assert!(inner.contains("tuntap add dev tap0 mode tap user 1002 group 1002"));
         assert!(inner.contains("neigh replace 169.254.0.21 lladdr 06:00:a9:fe:00:15"));
+
+        // Repairing a network adds only what is missing and sets the rest.
+        let host = link.host_commands(1460, true, true);
+        assert!(!host.contains("netns add") && !host.contains("link add"));
+        assert!(host.contains("link set dev ogc2 up"));
+        let inner = link.namespace_commands(true);
+        assert!(
+            !inner.contains("tuntap add"),
+            "a live tap is never replaced"
+        );
+        assert!(inner.contains("addr replace 169.254.0.22/30 dev tap0"));
+        assert!(inner.contains("link set dev tap0 address 06:00:a9:fe:00:16"));
     }
 }

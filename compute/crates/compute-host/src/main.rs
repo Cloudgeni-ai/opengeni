@@ -101,8 +101,12 @@ struct ServeArgs {
     jailer: PathBuf,
     /// User id of the first sandbox; each sandbox's VMM runs as its own
     /// user and group from here up.
-    #[arg(long, default_value_t = 1 << 30)]
+    #[arg(long, default_value_t = 1 << 30, value_parser = clap::value_parser!(u32).range(1..))]
     first_uid: u32,
+    /// A host-wide lock file: only one agent may manage VMs, users and
+    /// networks on a host, whatever state root it uses.
+    #[arg(long, default_value = "/run/opengeni-compute.lock")]
+    host_lock: PathBuf,
     #[arg(long)]
     kernel: PathBuf,
     /// Root disk image new sandboxes start from.
@@ -455,6 +459,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         guest_ports: args.guest_ports,
         restore_notice_port: args.restore_notice_port,
         first_uid: args.first_uid,
+        host_lock: Some(args.host_lock),
         network: args.network.then_some(NetworkConfig {
             pool: args.network_pool,
             trusted: args.trusted,

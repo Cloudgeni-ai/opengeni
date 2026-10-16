@@ -33,7 +33,7 @@ use compute_engine::{
 use serde::{Deserialize, Serialize};
 
 use crate::image::{Generation, Images, Parts, Suspect, Verified};
-use crate::layout::{Paths, remove_durably, remove_if_present, write_atomic};
+use crate::layout::{Paths, link_kernel, remove_durably, remove_if_present, write_atomic};
 #[cfg(target_os = "linux")]
 use crate::lazy::{ChunkSource, Fetcher, Hydration, Memory, Paging, WakeProfile};
 use crate::protocol::Id;
@@ -152,6 +152,8 @@ pub(crate) struct Job<E: Engine, S> {
     /// The image new sandboxes' disks are copied from, which a fetched
     /// disk probably still mostly matches.
     pub base_image: PathBuf,
+    /// The host's guest kernel, linked into the jail at each boot.
+    pub kernel: PathBuf,
     /// Fetches remote memory for every VM on the host, when the store keeps
     /// memory as chunks.
     #[cfg(target_os = "linux")]
@@ -488,7 +490,15 @@ impl<E: Engine, S: Store> Job<E, S> {
         live.memory.base = Base::Unknown;
         self.engine.snapshot(&live.vm, &files, kind).await?;
         let snapshot = started.elapsed();
+        let (scratch, disk) = (self.paths.dir.join("saving"), self.paths.disk.clone());
         let published = blocking(move || {
+            // The VMM wrote these inside its jail, where it could have put
+            // links instead: they move somewhere only the host reaches and
+            // must prove to be plain files before anything reads them.
+            let files = take_written(&files, &scratch)?;
+            // The image is only good with the disk as it was when the
+            // snapshot was taken, so the disk must be durable first.
+            sync_jailed(&disk)?;
             let parts = match base {
                 Base::Image(generation) if kind == SnapshotKind::Diff => Parts::Diff {
                     base: generation,
@@ -564,7 +574,8 @@ impl<E: Engine, S: Store> Job<E, S> {
             Err(error) => return (failure(&error), After::NoVm),
         };
         let archived = self.record.archived;
-        let running = Change::new().image(false).archived(false).execution();
+        // A restore continues the saved execution: the generation stays.
+        let running = Change::new().image(false).archived(false);
         if let Err(error) = self.commit(running).await {
             return (self.end(vm, state_failure(&error)).await, After::NoVm);
         }
@@ -789,6 +800,15 @@ impl<E: Engine, S: Store> Job<E, S> {
             return (state_failure(&error), After::NoVm);
         }
         drop_snapshot(&self.paths);
+        // Linked now rather than at creation, so a kernel upgrade reaches
+        // every sandbox's next boot. No VMM of this sandbox runs meanwhile.
+        let (kernel, paths) = (self.kernel.clone(), self.paths.clone());
+        let linked = blocking(move || link_kernel(&kernel, &paths))
+            .await
+            .and_then(|linked| linked);
+        if let Err(error) = linked {
+            return (io_failure("boot", error), After::NoVm);
+        }
         match self.engine.boot(&self.spec).await {
             Ok(vm) => (Outcome::Done, After::New(vm, LiveMemory::booted())),
             Err(error) => (failure(&error), After::NoVm),
@@ -909,20 +929,12 @@ impl<E: Engine, S: Store> Job<E, S> {
         if let Err(error) = self.commit(Change::new().disk(Disk::Remote)).await {
             return state_failure(&error);
         }
-        let paths = self.paths.clone();
-        let removed = blocking(move || {
-            remove_if_present(&paths.disk)?;
-            remove_if_present(&paths.snapshot.state)?;
-            remove_if_present(&paths.snapshot.memory)?;
-            remove_if_present(&paged_marker(&paths))?;
-            images_of(&paths).clear()
-        })
-        .await
-        .and_then(|removed| removed);
-        match removed {
-            Ok(()) => Outcome::Done,
-            Err(error) => io_failure(OP, error),
+        // The sandbox is remote from here on, whatever happens to the local
+        // files: what is left behind is deleted on the next recovery.
+        if let Err(error) = clear_local(&self.paths).await {
+            tracing::warn!(id = %self.id, %error, "local copy not fully deleted after eviction; recovery finishes it");
         }
+        Outcome::Done
     }
 
     /// Brings the stored copy back: the disk and device state whole, memory
@@ -932,6 +944,15 @@ impl<E: Engine, S: Store> Job<E, S> {
         let paths = self.paths.clone();
         let scratch = paths.dir.join("fetching");
         let _ = fs::remove_dir_all(&scratch);
+        // The store writes a new file, never through whatever an earlier
+        // VMM may have left at the disk's path.
+        let stale = paths.disk.clone();
+        if let Err(error) = blocking(move || remove_if_present(&stale))
+            .await
+            .and_then(|removed| removed)
+        {
+            return io_failure(OP, error);
+        }
         let into = FetchInto {
             disk: paths.disk.clone(),
             scratch: scratch.clone(),
@@ -1046,6 +1067,63 @@ impl<E: Engine, S: Store> Job<E, S> {
     }
 }
 
+/// Moves the snapshot files a VMM wrote in its jail into `scratch`, a
+/// directory only the host can reach, and checks each is a plain file of
+/// its own. A renamed link stays a link, so the check sees what the VMM
+/// left, and nothing jailed can swap it afterwards.
+fn take_written(files: &SnapshotFiles, scratch: &Path) -> io::Result<SnapshotFiles> {
+    match fs::remove_dir_all(scratch) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    fs::create_dir(scratch)?;
+    let taken = SnapshotFiles {
+        state: scratch.join("save.state"),
+        memory: scratch.join("save.mem"),
+    };
+    for (written, moved) in [(&files.state, &taken.state), (&files.memory, &taken.memory)] {
+        fs::rename(written, moved)?;
+        compute_engine::confined::check_written(moved)?;
+    }
+    Ok(taken)
+}
+
+/// Flushes a file in a VM's jail to disk without following a link or
+/// blocking on a pipe the VMM might have put in its place.
+fn sync_jailed(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    crate::layout::failpoint(path, "sync")?;
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags.bits().cast_signed())
+        .open(path)?;
+    let kind = file.metadata()?.file_type();
+    if !kind.is_file() || kind.is_fifo() {
+        return Err(io::Error::other(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    file.sync_all()
+}
+
+/// Deletes the sandbox's local disk, memory images and snapshot files.
+pub(crate) async fn clear_local(paths: &Paths) -> io::Result<()> {
+    let paths = paths.clone();
+    blocking(move || {
+        remove_if_present(&paths.disk)?;
+        remove_if_present(&paths.snapshot.state)?;
+        remove_if_present(&paths.snapshot.memory)?;
+        remove_if_present(&paged_marker(&paths))?;
+        images_of(&paths).clear()
+    })
+    .await
+    .and_then(|removed| removed)
+}
+
 fn drop_snapshot(paths: &Paths) {
     let _ = remove_if_present(&paths.snapshot.state);
     let _ = remove_if_present(&paths.snapshot.memory);
@@ -1055,4 +1133,64 @@ fn drop_snapshot(paths: &Paths) {
     let _ = remove_if_present(&files.state);
     let _ = remove_if_present(&files.memory);
     let _ = images_of(paths).clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn written(jail: &Path) -> SnapshotFiles {
+        SnapshotFiles {
+            state: jail.join("save.state"),
+            memory: jail.join("save.mem"),
+        }
+    }
+
+    #[test]
+    fn snapshot_outputs_must_be_plain_files_of_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let (jail, scratch) = (dir.path().join("jail"), dir.path().join("saving"));
+        fs::create_dir(&jail).unwrap();
+        let secret = dir.path().join("secret");
+        fs::write(&secret, "host only").unwrap();
+        let files = written(&jail);
+
+        fs::write(&files.state, "state").unwrap();
+        fs::write(&files.memory, "memory").unwrap();
+        let taken = take_written(&files, &scratch).unwrap();
+        assert_eq!(fs::read_to_string(&taken.memory).unwrap(), "memory");
+        assert!(!files.memory.exists());
+
+        // A link to a host file, by name or by inode, is refused.
+        fs::write(&files.state, "state").unwrap();
+        std::os::unix::fs::symlink(&secret, &files.memory).unwrap();
+        assert!(take_written(&files, &scratch).is_err());
+        // The refused link was moved out of the jail with the rest.
+        assert!(fs::symlink_metadata(&files.memory).is_err());
+        fs::hard_link(&secret, &files.memory).unwrap();
+        fs::write(&files.state, "state").unwrap();
+        assert!(take_written(&files, &scratch).is_err());
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "host only");
+    }
+
+    #[test]
+    fn syncing_a_jailed_file_follows_no_link_and_opens_no_pipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("disk.ext4");
+        fs::write(&disk, "disk").unwrap();
+        sync_jailed(&disk).unwrap();
+
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&disk, &link).unwrap();
+        assert!(sync_jailed(&link).is_err());
+
+        let pipe = dir.path().join("pipe");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &pipe,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+        assert!(sync_jailed(&pipe).is_err(), "a pipe must not block or pass");
+    }
 }
