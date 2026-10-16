@@ -16,6 +16,9 @@ index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2
 diff --git a/node_modules/@openai/agents-core/.bun-tag-ac46de758592501 b/.bun-tag-ac46de758592501
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@openai/agents-core/.bun-tag-b6cfd288f3599860 b/.bun-tag-b6cfd288f3599860
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@openai/agents-core/.bun-tag-c0c42b29c1e5d144 b/.bun-tag-c0c42b29c1e5d144
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -2117,6 +2120,126 @@ index 34dc1b761aee009ea97f2a26529f7246c44d018e..4ff195c2cfe634b56b942a675491b1f2
          if (resolved.type === 'not_found') {
              if (toolNotFoundBehavior !== 'return_error_to_model') {
                  throwFunctionToolNotFound(resolved.toolName, agent);
+diff --git a/dist/runner/toolExecution.js b/dist/runner/toolExecution.js
+index e512db81769570ddd61957d4c6e12835025559f1..ef1024121867d155415264c4f1314c89efa09f53 100644
+--- a/dist/runner/toolExecution.js
++++ b/dist/runner/toolExecution.js
+@@ -262,7 +262,7 @@ async function executeFunctionToolCalls(agent, toolRuns, runner, state, toolErro
+         }
+     };
+     try {
+-        const results = await executeToolRunsWithConcurrency(toolRuns, getMaxFunctionToolConcurrency(agentToolParentRunConfig?.toolExecution ?? runner.config.toolExecution), executeToolRun, signal, onFatalFailure);
++        const results = await executeToolRunsWithConcurrency(toolRuns, getMaxFunctionToolConcurrency(agentToolParentRunConfig?.toolExecution ?? runner.config.toolExecution), orderExclusiveToolRuns(toolRuns, executeToolRun), signal, onFatalFailure);
+         return results;
+     }
+     catch (e) {
+@@ -285,6 +285,46 @@ async function executeFunctionToolCalls(agent, toolRuns, runner, state, toolErro
+             : state);
+     }
+ }
++/**
++ * A function tool marked `exclusiveExecution` (for example a file edit) runs in
++ * model order: it starts only after every earlier call from the same response
++ * has settled, and every later call starts only after it has settled. Other
++ * calls still run concurrently with each other.
++ */
++function orderExclusiveToolRuns(toolRuns, executeToolRun) {
++    if (!toolRuns.some((toolRun) => toolRun.tool?.exclusiveExecution === true)) {
++        return executeToolRun;
++    }
++    const gates = new Map();
++    const settle = new Map();
++    let barrier = Promise.resolve();
++    let sinceBarrier = [];
++    for (const toolRun of toolRuns) {
++        let markSettled = () => { };
++        const settled = new Promise((resolve) => {
++            markSettled = resolve;
++        });
++        settle.set(toolRun, markSettled);
++        if (toolRun.tool?.exclusiveExecution === true) {
++            gates.set(toolRun, Promise.all([barrier, ...sinceBarrier]));
++            barrier = settled;
++            sinceBarrier = [];
++        }
++        else {
++            gates.set(toolRun, barrier);
++            sinceBarrier.push(settled);
++        }
++    }
++    return async (toolRun, signal) => {
++        try {
++            await gates.get(toolRun);
++            return await executeToolRun(toolRun, signal);
++        }
++        finally {
++            settle.get(toolRun)?.();
++        }
++    };
++}
+ function getMaxFunctionToolConcurrency(toolExecution) {
+     return toolExecution?.maxFunctionToolConcurrency ?? undefined;
+ }
+diff --git a/dist/runner/toolExecution.mjs b/dist/runner/toolExecution.mjs
+index afe9d23168c0aff1474008da0b267a04312b2c12..847ce99450b9ec1c4f83f7c25ddc737501cf4280 100644
+--- a/dist/runner/toolExecution.mjs
++++ b/dist/runner/toolExecution.mjs
+@@ -219,7 +219,7 @@ export async function executeFunctionToolCalls(agent, toolRuns, runner, state, t
+         }
+     };
+     try {
+-        const results = await executeToolRunsWithConcurrency(toolRuns, getMaxFunctionToolConcurrency(agentToolParentRunConfig?.toolExecution ?? runner.config.toolExecution), executeToolRun, signal, onFatalFailure);
++        const results = await executeToolRunsWithConcurrency(toolRuns, getMaxFunctionToolConcurrency(agentToolParentRunConfig?.toolExecution ?? runner.config.toolExecution), orderExclusiveToolRuns(toolRuns, executeToolRun), signal, onFatalFailure);
+         return results;
+     }
+     catch (e) {
+@@ -242,6 +242,46 @@ export async function executeFunctionToolCalls(agent, toolRuns, runner, state, t
+             : state);
+     }
+ }
++/**
++ * A function tool marked `exclusiveExecution` (for example a file edit) runs in
++ * model order: it starts only after every earlier call from the same response
++ * has settled, and every later call starts only after it has settled. Other
++ * calls still run concurrently with each other.
++ */
++function orderExclusiveToolRuns(toolRuns, executeToolRun) {
++    if (!toolRuns.some((toolRun) => toolRun.tool?.exclusiveExecution === true)) {
++        return executeToolRun;
++    }
++    const gates = new Map();
++    const settle = new Map();
++    let barrier = Promise.resolve();
++    let sinceBarrier = [];
++    for (const toolRun of toolRuns) {
++        let markSettled = () => { };
++        const settled = new Promise((resolve) => {
++            markSettled = resolve;
++        });
++        settle.set(toolRun, markSettled);
++        if (toolRun.tool?.exclusiveExecution === true) {
++            gates.set(toolRun, Promise.all([barrier, ...sinceBarrier]));
++            barrier = settled;
++            sinceBarrier = [];
++        }
++        else {
++            gates.set(toolRun, barrier);
++            sinceBarrier.push(settled);
++        }
++    }
++    return async (toolRun, signal) => {
++        try {
++            await gates.get(toolRun);
++            return await executeToolRun(toolRun, signal);
++        }
++        finally {
++            settle.get(toolRun)?.();
++        }
++    };
++}
+ function getMaxFunctionToolConcurrency(toolExecution) {
+     return toolExecution?.maxFunctionToolConcurrency ?? undefined;
+ }
 diff --git a/dist/runner/turnPreparation.js b/dist/runner/turnPreparation.js
 index 614a7400173bbd735b7d789592d902172898d0cf..8dde349e682a079c7e91518d6ef49de618a2d46c 100644
 --- a/dist/runner/turnPreparation.js
@@ -2173,6 +2296,97 @@ index e4b43a344a81c50b1dce9b9e9adba292f711c7e0..20f71ccc6c7113ceea4db70cea1e7314
          rawResponses: state._modelResponses,
          lastAgent: agent,
          state,
+diff --git a/dist/sandbox/capabilities/filesystem.js b/dist/sandbox/capabilities/filesystem.js
+index 54de1bee2ad8b7f0986d3ab9c8f67e4a7a8c2ea5..f68d5839453404f28394d9d9e9f85502bdeaf310 100644
+--- a/dist/sandbox/capabilities/filesystem.js
++++ b/dist/sandbox/capabilities/filesystem.js
+@@ -366,6 +366,8 @@ function applyPatchFunctionTool(editor) {
+         parameters: applyPatchFunctionParameters,
+         strict: false,
+         deferLoading: false,
++        // File edits run in model order relative to the other calls of a response.
++        exclusiveExecution: true,
+         needsApproval: async () => false,
+         isEnabled: async () => true,
+         invoke: async (runContext, input) => {
+diff --git a/dist/sandbox/capabilities/filesystem.mjs b/dist/sandbox/capabilities/filesystem.mjs
+index e4f72866c7965294d65850edef7d114eb49dd292..e58b7b7346102eee1fda9dcfcb5ca74e3470dc8a 100644
+--- a/dist/sandbox/capabilities/filesystem.mjs
++++ b/dist/sandbox/capabilities/filesystem.mjs
+@@ -363,6 +363,8 @@ function applyPatchFunctionTool(editor) {
+         parameters: applyPatchFunctionParameters,
+         strict: false,
+         deferLoading: false,
++        // File edits run in model order relative to the other calls of a response.
++        exclusiveExecution: true,
+         needsApproval: async () => false,
+         isEnabled: async () => true,
+         invoke: async (runContext, input) => {
+diff --git a/dist/sandbox/capabilities/shell.d.ts b/dist/sandbox/capabilities/shell.d.ts
+index 159858f69fd30a5be0b055df7d094cb12e422074..d0842a134de3560d78135e9169bd9232674f65bc 100644
+--- a/dist/sandbox/capabilities/shell.d.ts
++++ b/dist/sandbox/capabilities/shell.d.ts
+@@ -2,10 +2,12 @@ import { type Tool } from '../../tool';
+ import { Capability, type ConfigureCapabilityTools } from './base';
+ export type ShellArgs = {
+     configureTools?: ConfigureCapabilityTools;
++    execCommandErrorFunction?: (context: unknown, error: unknown, details?: unknown) => string | Promise<string>;
+ };
+ declare class ShellCapability extends Capability {
+     readonly type = "shell";
+     private readonly configureTools?;
++    private readonly execCommandErrorFunction?;
+     constructor(args?: ShellArgs);
+     tools(): Tool<any>[];
+     instructions(): string;
+diff --git a/dist/sandbox/capabilities/shell.js b/dist/sandbox/capabilities/shell.js
+index 45565a96a4efd78e1e93b337dc07a8edbca3ee4a..fb0cad88e79344f39b52ecc97b7c256946497592 100644
+--- a/dist/sandbox/capabilities/shell.js
++++ b/dist/sandbox/capabilities/shell.js
+@@ -19,9 +19,11 @@ const SHELL_INSTRUCTIONS = [
+ class ShellCapability extends base_1.Capability {
+     type = 'shell';
+     configureTools;
++    execCommandErrorFunction;
+     constructor(args = {}) {
+         super();
+         this.configureTools = args.configureTools;
++        this.execCommandErrorFunction = args.execCommandErrorFunction;
+     }
+     tools() {
+         const session = (0, base_1.requireBoundSession)(this.type, this._session);
+@@ -31,6 +33,7 @@ class ShellCapability extends base_1.Capability {
+         const tools = [
+             (0, tool_1.tool)({
+                 name: 'exec_command',
++                ...(this.execCommandErrorFunction ? { errorFunction: this.execCommandErrorFunction } : {}),
+                 description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction.',
+                 parameters: zod_1.z.object({
+                     cmd: zod_1.z.string().min(1).describe('Shell command to execute.'),
+diff --git a/dist/sandbox/capabilities/shell.mjs b/dist/sandbox/capabilities/shell.mjs
+index 29e8ca92cbe26162aaebda2b0cca493561a08a71..44a62e864ac22885f24cc2b5f50167e84b51efc0 100644
+--- a/dist/sandbox/capabilities/shell.mjs
++++ b/dist/sandbox/capabilities/shell.mjs
+@@ -16,9 +16,11 @@ const SHELL_INSTRUCTIONS = [
+ class ShellCapability extends Capability {
+     type = 'shell';
+     configureTools;
++    execCommandErrorFunction;
+     constructor(args = {}) {
+         super();
+         this.configureTools = args.configureTools;
++        this.execCommandErrorFunction = args.execCommandErrorFunction;
+     }
+     tools() {
+         const session = requireBoundSession(this.type, this._session);
+@@ -28,6 +30,7 @@ class ShellCapability extends Capability {
+         const tools = [
+             tool({
+                 name: 'exec_command',
++                ...(this.execCommandErrorFunction ? { errorFunction: this.execCommandErrorFunction } : {}),
+                 description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction.',
+                 parameters: z.object({
+                     cmd: z.string().min(1).describe('Shell command to execute.'),
 diff --git a/dist/sandbox/manifest.js b/dist/sandbox/manifest.js
 index c7f81e3d0e9bdc08c475371c1cd6ccd508722a69..ba577c045f4fc776fe72382b4cae41f658e3c096 100644
 --- a/dist/sandbox/manifest.js
@@ -2463,6 +2677,22 @@ index fc2aa3141933c96cc080d65b05f7cffb13ee18d7..c4324d271c7bc90128dad0285198f687
 +}
  //# sourceMappingURL=workspacePaths.mjs.map
 \ No newline at end of file
+diff --git a/dist/tool.d.ts b/dist/tool.d.ts
+index b0e0743ce55d1e5475ea91eb652879a9cdc0cf0f..ef965a36fe56c8419ab99d49d96b26b0101c1ca3 100644
+--- a/dist/tool.d.ts
++++ b/dist/tool.d.ts
+@@ -195,6 +195,11 @@ export type FunctionTool<Context = UnknownContext, TParameters extends ToolInput
+      * Responses API only. Hides a top-level function tool definition until tool search loads it.
+      */
+     deferLoading?: boolean;
++    /**
++     * Run this tool in model order: it starts after every earlier call from the
++     * same model response has settled, and later calls start after it settles.
++     */
++    exclusiveExecution?: boolean;
+     /**
+      * Additional provider-specific metadata forwarded with the function tool definition.
+      */
 diff --git a/dist/tracing/provider.js b/dist/tracing/provider.js
 index cbb32c71706cde4fae21cb80eca21c4d6194ba98..82ed11cc3f279eabf5c99133b31fe50aadedf278 100644
 --- a/dist/tracing/provider.js
@@ -2527,64 +2757,3 @@ index 99b8962bc8a73330e8c6b7080a75fff64b39ae2f..352b3b33d60e90c641f9d06403d52093
  export function getGlobalTraceProvider() {
      const symbol = Symbol.for('openai.agents.core.traceProvider');
      try {
-diff --git a/dist/sandbox/capabilities/shell.d.ts b/dist/sandbox/capabilities/shell.d.ts
---- a/dist/sandbox/capabilities/shell.d.ts
-+++ b/dist/sandbox/capabilities/shell.d.ts
-@@ -3,9 +3,11 @@ import { Capability, type ConfigureCapabilityTools } from './base';
- export type ShellArgs = {
-     configureTools?: ConfigureCapabilityTools;
-+    execCommandErrorFunction?: (context: unknown, error: unknown, details?: unknown) => string | Promise<string>;
- };
- declare class ShellCapability extends Capability {
-     readonly type = "shell";
-     private readonly configureTools?;
-+    private readonly execCommandErrorFunction?;
-     constructor(args?: ShellArgs);
-     tools(): Tool<any>[];
-     instructions(): string;
-diff --git a/dist/sandbox/capabilities/shell.js b/dist/sandbox/capabilities/shell.js
---- a/dist/sandbox/capabilities/shell.js
-+++ b/dist/sandbox/capabilities/shell.js
-@@ -19,9 +19,11 @@ const SHELL_INSTRUCTIONS = [
- class ShellCapability extends base_1.Capability {
-     type = 'shell';
-     configureTools;
-+    execCommandErrorFunction;
-     constructor(args = {}) {
-         super();
-         this.configureTools = args.configureTools;
-+        this.execCommandErrorFunction = args.execCommandErrorFunction;
-     }
-     tools() {
-         const session = (0, base_1.requireBoundSession)(this.type, this._session);
-@@ -31,6 +33,7 @@ class ShellCapability extends base_1.Capability {
-         const tools = [
-             (0, tool_1.tool)({
-                 name: 'exec_command',
-+                ...(this.execCommandErrorFunction ? { errorFunction: this.execCommandErrorFunction } : {}),
-                 description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction.',
-                 parameters: zod_1.z.object({
-                     cmd: zod_1.z.string().min(1).describe('Shell command to execute.'),
-diff --git a/dist/sandbox/capabilities/shell.mjs b/dist/sandbox/capabilities/shell.mjs
---- a/dist/sandbox/capabilities/shell.mjs
-+++ b/dist/sandbox/capabilities/shell.mjs
-@@ -16,9 +16,11 @@ const SHELL_INSTRUCTIONS = [
- class ShellCapability extends Capability {
-     type = 'shell';
-     configureTools;
-+    execCommandErrorFunction;
-     constructor(args = {}) {
-         super();
-         this.configureTools = args.configureTools;
-+        this.execCommandErrorFunction = args.execCommandErrorFunction;
-     }
-     tools() {
-         const session = requireBoundSession(this.type, this._session);
-@@ -28,6 +30,7 @@ class ShellCapability extends Capability {
-         const tools = [
-             tool({
-                 name: 'exec_command',
-+                ...(this.execCommandErrorFunction ? { errorFunction: this.execCommandErrorFunction } : {}),
-                 description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction.',
-                 parameters: z.object({
-                     cmd: z.string().min(1).describe('Shell command to execute.'),
