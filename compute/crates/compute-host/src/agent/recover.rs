@@ -343,6 +343,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         } else {
             (self.sleeping_state(&record, &paths).await?, None)
         };
+        // A running VM may be in use right now. A sleeping sandbox has been
+        // idle since its record says, so a restart resets no retention clock.
+        let last_activity = match record.last_used_ms {
+            Some(unix_ms) if state.level != Level::Running => self.at_unix_ms(unix_ms),
+            _ => self.now(),
+        };
         let adopted = vm.is_some();
         // Taken back before the agent can ask the VMM to sync the disk, so
         // it sees what the disk lost while no agent watched; see
@@ -376,6 +382,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sandbox: id.0,
             state,
             policy,
+            last_activity,
         });
         if unsavable {
             // It still runs and wakes, but is never saved.

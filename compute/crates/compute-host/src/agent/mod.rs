@@ -57,6 +57,19 @@ const HANDOVER: Duration = Duration::from_secs(10);
 /// Longest pause between attempts to release what a dead VM left.
 const TEARDOWN_RETRY: Duration = Duration::from_secs(30);
 
+/// Where the agent's clock for the decision core starts, so a sandbox found
+/// on disk can have been idle since long before this agent started.
+const CLOCK_BASE: Duration = Duration::from_secs(10 * 365 * 86_400);
+
+/// Milliseconds since the Unix epoch.
+fn unix_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 /// How a host is set up.
 #[derive(Clone, Debug)]
 pub struct HostConfig {
@@ -717,7 +730,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let deadline = self
                 .core
                 .next_deadline()
-                .map(|at| self.origin + at.since_origin());
+                .map(|at| self.origin + at.since_origin().saturating_sub(CLOCK_BASE));
             tokio::select! {
                 biased;
                 Some(event) = self.events.recv() => self.on_event(event),
@@ -737,7 +750,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     fn now(&self) -> At {
-        At::from_duration(self.origin.elapsed())
+        At::from_duration(CLOCK_BASE + self.origin.elapsed())
+    }
+
+    /// `at` in milliseconds since the Unix epoch.
+    fn unix_ms(&self, at: At) -> u64 {
+        let ago = self.now().saturating_since(at);
+        unix_ms_now().saturating_sub(u64::try_from(ago.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    /// The time `unix_ms` milliseconds after the Unix epoch on the agent's
+    /// clock; one before the clock's start counts as its start.
+    fn at_unix_ms(&self, unix_ms: u64) -> At {
+        let ago = Duration::from_millis(unix_ms_now().saturating_sub(unix_ms));
+        At::from_duration(self.now().since_origin().saturating_sub(ago))
     }
 
     fn input(&mut self, input: Input) {

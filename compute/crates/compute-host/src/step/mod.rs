@@ -136,6 +136,9 @@ pub(crate) struct Job<E: Engine, S> {
     pub pager: crate::PagerConfig,
     /// VM processes this job has started; zero when it is issued.
     pub launches: u32,
+    /// The sandbox's last activity when the step was issued, in
+    /// milliseconds since the Unix epoch; every write of the record keeps it.
+    pub last_used_ms: u64,
 }
 
 fn failure(error: &EngineError) -> Outcome {
@@ -342,6 +345,7 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// nothing: an unknown fate says nothing about the sandbox's copies,
     /// so it is never taken as their loss.
     async fn commit(&mut self, change: Change) -> Result<(), StateError> {
+        let change = change.last_used(self.last_used_ms);
         let before = self.record.clone();
         let failed = match self.records.commit(self.id, before.fence(), change).await {
             Ok(record) => {

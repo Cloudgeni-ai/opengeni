@@ -184,6 +184,7 @@ impl Sandbox {
             fetcher: None,
             pager: crate::PagerConfig::new(self.root.path().join("no-pager")),
             launches: 0,
+            last_used_ms: 1_700_000_000_000,
         }
     }
 

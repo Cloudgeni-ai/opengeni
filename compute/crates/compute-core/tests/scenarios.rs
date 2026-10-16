@@ -55,10 +55,23 @@ impl Rig {
     }
 
     fn add(&mut self, id: u128, state: State, policy: SleepPolicy) -> Vec<Action> {
+        let last_activity = self.now;
+        self.add_idle_since(id, state, policy, last_activity)
+    }
+
+    /// Adds a sandbox found on disk, idle since `last_activity`.
+    fn add_idle_since(
+        &mut self,
+        id: u128,
+        state: State,
+        policy: SleepPolicy,
+        last_activity: At,
+    ) -> Vec<Action> {
         self.send(Input::Add {
             sandbox: SandboxId(id),
             state,
             policy,
+            last_activity,
         })
     }
 
@@ -161,6 +174,36 @@ fn an_idle_sandbox_pauses_gets_protected_in_memory_and_leaves_disk_after_days() 
     assert_eq!(step, Step::Fetch);
     let (step, _) = only_start(&rig.finish(1, op, Outcome::Done));
     assert_eq!(step, Step::Boot);
+}
+
+#[test]
+fn a_sandbox_found_on_disk_keeps_its_idle_time() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.at(secs(40 * DAY));
+    // Archived and dropped 29 days ago: a day from forgetting its memory.
+    let archived = state(Level::Remote, Durability::Remote, true);
+    rig.add_idle_since(
+        1,
+        archived,
+        recommended(),
+        At::from_duration(secs(11 * DAY)),
+    );
+    assert_eq!(
+        rig.host.next_deadline(),
+        Some(At::from_duration(secs(41 * DAY)))
+    );
+    assert_eq!(only_start(&rig.tick_at_deadline()).0, Step::Forget);
+    // A time after now counts as now.
+    rig.add_idle_since(
+        2,
+        archived,
+        recommended(),
+        At::from_duration(secs(90 * DAY)),
+    );
+    assert_eq!(
+        rig.host.sandbox(SandboxId(2)).unwrap().last_activity,
+        rig.now
+    );
 }
 
 #[test]

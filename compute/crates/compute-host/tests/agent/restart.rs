@@ -492,6 +492,54 @@ async fn local_files_an_eviction_left_are_deleted_on_restart() {
     lab.assert_clean();
 }
 
+/// A restart does not reset how long a sleeping sandbox has been idle, so
+/// its retention clocks run on: a sandbox idle for almost its forget time
+/// forgets its memory soon after the restart, not a full period later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_keeps_how_long_a_sandbox_has_been_idle() {
+    const FORGET_MS: u64 = 60_000;
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(47);
+    let config = SleepConfig {
+        forget_after_ms: Some(FORGET_MS),
+        ..SAVE_QUICKLY
+    };
+    let unix_ms = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    };
+    lab.create(sandbox, config).await;
+    let used = unix_ms();
+    lab.run(sandbox, &["set x"]).await;
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    let recorded = lab.record(sandbox)["last_used_ms"].as_u64().unwrap();
+    assert!(
+        (used..=unix_ms()).contains(&recorded),
+        "the save recorded the last activity: {recorded} not after {used}"
+    );
+    let dir = lab.sandbox_dir(sandbox);
+    let (root, world) = lab.stop().await;
+    // As if its last activity were most of a forget period ago.
+    let path = dir.join("sandbox.json");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["last_used_ms"] = (unix_ms() - FORGET_MS + 500).into();
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    lab.wait_until("the memory forgotten", |status| {
+        !Lab::sandbox(status, sandbox).memory_saved
+    })
+    .await;
+    assert_eq!(lab.run(sandbox, &["get"]).await, [""], "booted fresh");
+    lab.assert_clean();
+}
+
 /// Creating a sandbox whose directory is already there is refused, and the
 /// directory is left as it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

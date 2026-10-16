@@ -62,6 +62,9 @@ fn random_change(rng: &mut Rng) -> Change {
     if rng.chance(20) {
         change = change.execution();
     }
+    if rng.chance(30) {
+        change = change.last_used(1_700_000_000_000 + rng.below(1_000));
+    }
     change
 }
 
@@ -122,6 +125,21 @@ fn writes_apply_only_against_the_current_fence() {
         apply(id(1), None, fence, Change::new()),
         Err(StateError::NotFound(_))
     ));
+}
+
+#[test]
+fn last_use_never_moves_backwards() {
+    let mut record = Record::new(id(1), 0, allocation(), config());
+    Change::new().last_used(2_000).apply_to(&mut record);
+    assert_eq!(record.last_used_ms, Some(2_000));
+    Change::new().last_used(1_000).apply_to(&mut record);
+    assert_eq!(record.last_used_ms, Some(2_000), "an older time is ignored");
+    // A record written before the field existed reads as never recorded.
+    let mut json = serde_json::to_value(Record::new(id(1), 0, allocation(), config())).unwrap();
+    assert!(json.get("last_used_ms").is_none());
+    json.as_object_mut().unwrap().remove("removing");
+    let old: Record = serde_json::from_value(json).unwrap();
+    assert_eq!(old.last_used_ms, None);
 }
 
 #[test]

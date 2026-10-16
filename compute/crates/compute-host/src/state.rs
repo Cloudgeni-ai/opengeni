@@ -108,6 +108,11 @@ pub(crate) struct Record {
     /// Removal has begun; it finishes even across a restart.
     #[serde(default)]
     pub removing: bool,
+    /// Its last activity, in milliseconds since the Unix epoch, as of the
+    /// record's latest write, so a restart does not reset how long it has
+    /// been idle. Steps write it along with what they change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_ms: Option<u64>,
 }
 
 impl Record {
@@ -125,6 +130,7 @@ impl Record {
             image: false,
             archived: false,
             removing: false,
+            last_used_ms: None,
         }
     }
 
@@ -164,6 +170,7 @@ pub(crate) struct Change {
     archived: Option<bool>,
     execution: bool,
     removing: bool,
+    last_used_ms: Option<u64>,
 }
 
 impl Change {
@@ -198,6 +205,12 @@ impl Change {
         self
     }
 
+    /// Records the sandbox's last activity. It never moves backwards.
+    pub fn last_used(mut self, unix_ms: u64) -> Self {
+        self.last_used_ms = Some(unix_ms);
+        self
+    }
+
     fn apply_to(self, record: &mut Record) {
         if let Some(disk) = self.disk {
             record.disk = disk;
@@ -212,6 +225,9 @@ impl Change {
             record.generation += 1;
         }
         record.removing |= self.removing;
+        if let Some(at) = self.last_used_ms {
+            record.last_used_ms = Some(record.last_used_ms.map_or(at, |was| was.max(at)));
+        }
     }
 }
 

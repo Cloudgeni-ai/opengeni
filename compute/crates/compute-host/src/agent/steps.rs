@@ -50,6 +50,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     sandbox: id.0,
                     state: State::new(Level::Saved, Durability::Local, false),
                     policy,
+                    last_activity: self.now(),
                 });
                 let _ = reply.send(Ok(()));
             }
@@ -158,6 +159,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Runs the step the slot's `op` names.
     pub(super) fn spawn_job(&mut self, id: Id, op: OpId, step: Step) {
+        let last_activity = self
+            .core
+            .sandbox(id.0)
+            .map_or_else(|| self.now(), |view| view.last_activity);
+        let last_used_ms = self.unix_ms(last_activity);
         let (Some(slot), Some(record)) = (self.slots.get_mut(&id.0), self.records.get(id)) else {
             tracing::error!(%id, ?step, "step for a sandbox without a record");
             let _ = self.events_tx.send(Event::StepDone {
@@ -195,6 +201,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             fetcher: self.fetcher.clone(),
             pager: self.pager.clone(),
             launches: 0,
+            last_used_ms,
         };
         let events = self.events_tx.clone();
         tokio::spawn(async move {
