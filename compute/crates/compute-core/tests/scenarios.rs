@@ -341,6 +341,7 @@ fn pressured_rig() -> Rig {
             low_watermark: 8 * GIB,
             high_watermark: 9 * GIB,
             compressed_percent: 30,
+            balloon_grace: Duration::from_secs(2),
         }),
         ..HostPolicy::default()
     })

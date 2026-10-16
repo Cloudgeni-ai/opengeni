@@ -19,7 +19,7 @@ old one; old records stay as history.
 | 11 | [The same guest network everywhere, firewalled per sandbox](0011-fixed-guest-network.md) | Accepted |
 | 12 | [Templates and a ready pool for new sandboxes](0012-templates-and-ready-pool.md) | Accepted, in progress |
 | 13 | [Structure rules checked on every change](0013-structure-rules.md) | Accepted |
-| 14 | [Requests, limits and admission](0014-requests-limits-and-admission.md) | Accepted, in progress |
+| 14 | [Requests, limits and admission](0014-requests-limits-and-admission.md) | Accepted |
 | 15 | [Placement and moving sandboxes between hosts](0015-placement-and-moves-between-hosts.md) | Proposed |
 
 ## Format

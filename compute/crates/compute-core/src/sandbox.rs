@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::host::{Failure, Notice, Outcome, Size};
+use crate::host::{Balloon, Failure, Notice, Outcome, Size, Squeeze};
 use crate::ids::{HoldId, OpId, SandboxId};
 use crate::level::{Durability, Level, Priority, State, Step};
 use crate::policy::{Backoff, SleepPolicy};
@@ -70,6 +70,12 @@ pub(crate) struct Sandbox {
     /// A wake for it was refused for want of memory, and is not tried again
     /// until asked anew or its memory fits; see [`crate::Notice::HostFull`].
     pub refused: bool,
+    /// What the host asks of its running VM's balloon, if anything.
+    pub balloon: Option<Balloon>,
+    /// Bytes its VM's balloon was last set to take.
+    pub balloon_sent: u64,
+    /// Whether it was paused for host memory while in use.
+    pub squeeze: Squeeze,
     pub in_flight: Option<InFlight>,
     /// The VM process died while a step was in flight.
     pub process_lost: bool,
@@ -105,6 +111,9 @@ impl Sandbox {
             resident: None,
             size,
             refused: false,
+            balloon: None,
+            balloon_sent: 0,
+            squeeze: Squeeze::None,
             in_flight: None,
             process_lost: false,
             retry: None,
@@ -253,6 +262,8 @@ impl Sandbox {
             self.health = Health::Sound;
         }
         self.resident = None;
+        self.balloon = None;
+        self.balloon_sent = 0;
     }
 
     /// Latest reported resident memory in bytes, 0 if none was.
@@ -317,7 +328,8 @@ impl Sandbox {
         if self.retry.is_some_and(|retry| retry.not_before > now) {
             return None;
         }
-        if self.wants_awake() {
+        // Pausing and saving it for host memory goes on whoever wants it.
+        if self.wants_awake() && !self.leaving() {
             if self.refused {
                 return None;
             }

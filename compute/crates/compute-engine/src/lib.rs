@@ -190,4 +190,20 @@ pub trait Engine: Send + Sync + 'static {
     /// [`Engine::stop`]. The future does not borrow the VM, so the host can
     /// watch for a VM dying on its own while a step uses it.
     fn exited(&self, vm: &Self::Vm) -> impl Future<Output = ()> + Send + 'static;
+
+    /// Asks the guest of the running VM to give `bytes` of its memory back
+    /// to the host through its balloon, or none for 0. The guest gives what
+    /// it can spare, file cache first, and takes pages back from the
+    /// balloon rather than run out of memory. Every pause lets the balloon
+    /// go first, and a request that comes once the VM is paused does
+    /// nothing, so a VM never sleeps with its balloon set. The future does
+    /// not borrow the VM. Engines without balloons do nothing.
+    fn set_balloon(
+        &self,
+        vm: &Self::Vm,
+        bytes: u64,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        let _ = (vm, bytes);
+        std::future::ready(Ok(()))
+    }
 }

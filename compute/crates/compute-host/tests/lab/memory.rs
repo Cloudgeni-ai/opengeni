@@ -6,7 +6,7 @@ use super::*;
 const MIB: u64 = 1 << 20;
 
 /// The value of `field` in `/proc/meminfo`.
-fn meminfo(field: &str) -> u64 {
+pub(super) fn meminfo(field: &str) -> u64 {
     let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap();
     meminfo
         .lines()
@@ -38,7 +38,7 @@ impl Drop for ShrunkPool {
     }
 }
 
-fn nested() -> bool {
+pub(super) fn nested() -> bool {
     std::env::var("COMPUTE_TEST_PROFILE").is_ok_and(|profile| profile == "nested")
 }
 
@@ -201,7 +201,7 @@ const COMPRESS_WHEN_NEEDED: SleepConfig = SleepConfig {
 const SQUEEZED: &str = "/sys/fs/cgroup/compute-test-squeezed";
 
 /// Holds `sandbox` awake and waits until it runs.
-async fn hold_running(agent: &Agent, sandbox: Id) {
+pub(super) async fn hold_running(agent: &Agent, sandbox: Id) {
     let hold = Request::Hold {
         id: sandbox,
         generation: None,

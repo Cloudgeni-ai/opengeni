@@ -8,6 +8,7 @@
 //! takes it back.
 
 mod api;
+mod balloon;
 mod holder;
 mod jail;
 mod pager;
@@ -27,6 +28,7 @@ use tokio::time::{Instant, sleep, timeout};
 
 use self::api::Api;
 pub use self::api::ApiError;
+use self::balloon::Balloon;
 pub use self::jail::BINARY_NAME;
 use self::jail::{
     API_SOCKET, Jail, LAUNCH_LEFTOVERS, Launch, PID_FILE, jailer_args, remove_if_present,
@@ -364,10 +366,12 @@ impl Firecracker {
         // The host's out-of-memory killer ends anything else first.
         process::protect_from_oom(pid)
             .map_err(|error| format!("protecting VMM {} from OOM: {error}", pid.as_raw_pid()))?;
+        let api = Api::new(spec.api_socket());
         Ok(FirecrackerVm {
             name: spec.name.clone(),
             process,
-            api: Api::new(spec.api_socket()),
+            balloon: Balloon::new(&api, spec.free_page_reporting),
+            api,
             cgroup: self.cgroup_of(spec),
             jail: jail.clone(),
             memory_low: u64::from(spec.memory_request_mib) << 20,
@@ -522,6 +526,7 @@ pub struct FirecrackerVm {
     jail: Jail,
     /// Bytes of its memory protected from reclaim for others while it runs.
     memory_low: u64,
+    balloon: Balloon,
 }
 
 impl FirecrackerVm {
@@ -833,7 +838,9 @@ impl Engine for Firecracker {
     }
 
     async fn pause(&self, vm: &FirecrackerVm) -> Result<(), EngineError> {
-        vm.set_state("pause", RunState::Paused).await?;
+        vm.balloon
+            .pausing(vm.set_state("pause", RunState::Paused))
+            .await?;
         // Idle, its guarantee goes to the VMs that run: the kernel may now
         // take its file pages before theirs. Best effort, since the pause
         // itself took effect; the next resume sets it again either way.
@@ -844,7 +851,9 @@ impl Engine for Firecracker {
     async fn resume(&self, vm: &FirecrackerVm) -> Result<(), EngineError> {
         vm.guard_running()
             .map_err(|error| EngineError::io("resume", error))?;
-        vm.set_state("resume", RunState::Running).await
+        vm.balloon
+            .resuming(vm.set_state("resume", RunState::Running))
+            .await
     }
 
     async fn compress(
@@ -991,6 +1000,14 @@ impl Engine for Firecracker {
             let _ = exit.wait_for(|exit| *exit == Exit::Exited).await;
         }
     }
+
+    fn set_balloon(
+        &self,
+        vm: &FirecrackerVm,
+        bytes: u64,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        vm.balloon.set(bytes)
+    }
 }
 
 impl Firecracker {
@@ -1006,7 +1023,10 @@ impl Firecracker {
         let jail =
             Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
         match self.attach(spec, &jail) {
-            Ok(vm) => Ok(Some(vm)),
+            Ok(mut vm) => {
+                vm.balloon = Balloon::unknown(&vm.api, spec.free_page_reporting);
+                Ok(Some(vm))
+            }
             Err(error) => {
                 // The VM's own helpers, its pager and the engine's
                 // holders, may outlive its VMM; anything else may be it.

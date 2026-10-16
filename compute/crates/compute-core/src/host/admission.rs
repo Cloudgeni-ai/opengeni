@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use super::{Action, Host, Notice};
+use super::{Action, Host, Notice, Squeeze};
 use crate::ids::SandboxId;
 use crate::level::{Level, Priority, Step};
 use crate::sandbox::{QueueKey, Sandbox};
@@ -222,12 +222,11 @@ impl Host {
     /// wake fits, counting instant relief, next to every wake already
     /// queued for memory: a retried wake queues behind those, and
     /// [`Self::admit_measured`] charges it their need too, so a sandbox let
-    /// through here is not refused again for the same shortfall. Returns
-    /// whether any did.
+    /// through here is not refused again for the same shortfall. One paused
+    /// for host memory waits, besides, until the memory it held is free
+    /// above the high watermark. Returns whether any did.
     pub(super) fn retry_refused(&mut self, now: At) -> bool {
-        let Some(capacity) = self.capacity() else {
-            return false;
-        };
+        let capacity = self.capacity();
         let percent = self.compressed_percent();
         let mut wanted: u64 = Step::ALL
             .into_iter()
@@ -242,8 +241,16 @@ impl Host {
                 continue;
             };
             let need = slot.wake_need(percent);
-            let (dropping, droppable) = self.instant_room(now, *id);
-            if wanted + need <= capacity.free() + dropping + droppable {
+            if let Squeeze::Waiting { bytes } = slot.squeeze
+                && !self.room_returned(bytes)
+            {
+                continue;
+            }
+            let fits = capacity.is_none_or(|capacity| {
+                let (dropping, droppable) = self.instant_room(now, *id);
+                wanted + need <= capacity.free() + dropping + droppable
+            });
+            if fits {
                 wanted += need;
                 ready.push(*id);
             }
@@ -264,6 +271,7 @@ impl Host {
             && let Some(slot) = self.sandboxes.get_mut(&id)
         {
             slot.refused = false;
+            slot.squeeze = Squeeze::None;
         }
     }
 
@@ -374,35 +382,44 @@ impl Host {
             .map(|slot| slot.wake_need(percent))
             .sum();
         let needed = (admission.buffer + held).saturating_sub(capacity.free() + planned);
-        needed > 0 && self.push_idle(now, needed, Measure::Occupancy)
+        needed > 0 && self.push_idle(now, needed, Measure::Occupancy).0
     }
 
     /// When available memory drops below the low watermark, pushes the least
     /// recently used idle sandboxes deeper until the expected available
-    /// memory reaches the high watermark. Returns whether any floor changed.
+    /// memory reaches the high watermark, and squeezes sandboxes in use
+    /// above their request when that is not enough; lets their balloons go
+    /// once there is room for what they gave. Returns whether anything
+    /// changed.
     pub(super) fn relieve_pressure(&mut self, now: At) -> bool {
         let (Some(memory), Some(available)) = (self.policy.memory, self.available_memory) else {
             return false;
         };
+        let released = self.release_balloons(now, memory, available);
         if available >= memory.low_watermark {
-            return false;
+            return released;
         }
         let needed = memory
             .high_watermark
             .saturating_sub(available)
             .saturating_sub(self.pending_relief)
             .saturating_sub(self.settled_relief);
-        needed > 0 && self.push_idle(now, needed, Measure::Resident)
+        if needed == 0 {
+            return released;
+        }
+        let (pushed, rest) = self.push_idle(now, needed, Measure::Resident);
+        released | pushed | (rest > 0 && self.squeeze_busy(now, memory, rest))
     }
 
-    /// Pushes idle sandboxes deeper, least recently used first, until `needed` bytes of `measure` are expected back.
-    /// Returns whether any floor changed.
+    /// Pushes idle sandboxes deeper, least recently used first, until
+    /// `needed` bytes of `measure` are expected back. Returns whether any
+    /// floor changed, and how much it could not find.
     ///
     /// Each pass moves every candidate at most one level deeper, oldest
     /// first. When even that is not enough, the next pass goes deeper, so
     /// a large shortfall ends processes directly instead of compressing
     /// memory that is about to be freed anyway.
-    fn push_idle(&mut self, now: At, mut needed: u64, measure: Measure) -> bool {
+    fn push_idle(&mut self, now: At, mut needed: u64, measure: Measure) -> (bool, u64) {
         let percent = self.compressed_percent();
         let grace = self.busy_grace();
         let mut changed = false;
@@ -445,7 +462,7 @@ impl Host {
                 self.mark(id);
             }
         }
-        changed
+        (changed, needed)
     }
 }
 

@@ -11,8 +11,10 @@ use crate::sandbox::{Health, InFlight, QueueKey, Sandbox, Wake};
 use crate::time::At;
 
 mod admission;
+mod squeeze;
 
 pub use admission::{Capacity, Size};
+pub(crate) use squeeze::{Balloon, Squeeze};
 
 /// Something that happened, fed to [`Host::handle`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,6 +206,16 @@ pub enum Action {
         /// What changed.
         notice: Notice,
     },
+    /// Ask the guest of the sandbox's running VM to give `bytes` of its
+    /// memory back to the host through its balloon, or none for 0. Comes
+    /// only while the VM runs and no step holds it; the engine lets the
+    /// balloon go before any pause, so a VM never sleeps with it set.
+    Balloon {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// Bytes the balloon takes.
+        bytes: u64,
+    },
 }
 
 /// A change worth reporting.
@@ -262,6 +274,12 @@ pub struct SandboxView {
     pub unsavable: bool,
     /// Whether it is beyond recovery on this host.
     pub broken: bool,
+    /// Bytes of host memory its VM held when the host paused it, or began
+    /// pausing and saving it, for memory while it was in use above its
+    /// request; it wakes again by itself once there is room.
+    pub paused_for_memory: Option<u64>,
+    /// Bytes its VM's balloon takes back from its guest for the host.
+    pub balloon: u64,
 }
 
 /// The decision core for one host.
@@ -370,6 +388,11 @@ impl Host {
             requested: sandbox.requested,
             unsavable: sandbox.health == Health::Unsavable,
             broken: sandbox.is_broken(),
+            paused_for_memory: match sandbox.squeeze {
+                Squeeze::None => None,
+                Squeeze::Leaving { bytes } | Squeeze::Waiting { bytes } => Some(bytes),
+            },
+            balloon: sandbox.balloon_sent,
         })
     }
 
@@ -542,6 +565,9 @@ impl Host {
             }
         }
         if slot.cannot_save() {
+            if slot.leaving() {
+                slot.squeeze = Squeeze::None;
+            }
             if slot.floor >= Level::Saved {
                 self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
                 slot.floor = Level::Running;
@@ -692,9 +718,20 @@ impl Host {
         };
         slot.dirty = false;
         slot.expire_holds(now);
+        if let Squeeze::Leaving { bytes } = slot.squeeze
+            && !slot.state.level.has_process()
+            && slot.in_flight.is_none()
+        {
+            // Saved for host memory: it waits, wanted awake, for room.
+            slot.squeeze = Squeeze::Waiting { bytes };
+            slot.request_wake(Priority::Background, now);
+            slot.refused = true;
+            self.refused.insert(id);
+        }
         if slot.refused && !slot.wants_awake() {
             // Nothing wants it awake any more, so nothing waits for room.
             slot.refused = false;
+            slot.squeeze = Squeeze::None;
             self.refused.remove(&id);
         }
         if slot.state.level == Level::Running && slot.in_flight.is_none() {
@@ -705,7 +742,7 @@ impl Host {
                 since: now,
             });
         }
-        if slot.wants_awake() {
+        if slot.wants_awake() && !slot.leaving() {
             if slot.floor != Level::Running {
                 self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
                 slot.floor = Level::Running;
@@ -746,6 +783,13 @@ impl Host {
                 self.queues[step.index()].insert(key);
             }
             slot.queued = wanted;
+        }
+        if slot.state.level == Level::Running && slot.in_flight.is_none() {
+            let bytes = slot.balloon.map_or(0, |balloon| balloon.bytes);
+            if bytes != slot.balloon_sent {
+                slot.balloon_sent = bytes;
+                out.push(Action::Balloon { sandbox: id, bytes });
+            }
         }
         let deadline = slot.next_deadline(now);
         if deadline != slot.timer {
@@ -791,6 +835,9 @@ impl Host {
         };
         debug_assert_eq!(slot.queued, Some((step, key)));
         slot.queued = None;
+        // The engine lets the balloon go before the VM pauses.
+        slot.balloon = None;
+        slot.balloon_sent = 0;
         let op = OpId(self.next_op);
         self.next_op += 1;
         slot.in_flight = Some(InFlight {

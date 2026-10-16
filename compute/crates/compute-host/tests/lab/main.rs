@@ -34,6 +34,7 @@ use tokio::time::{Instant, sleep, timeout};
 mod admission;
 mod memory;
 mod spoofing;
+mod squeeze;
 
 const PORT: u32 = 52;
 

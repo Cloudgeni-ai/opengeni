@@ -1,0 +1,186 @@
+//! Relief from sandboxes in use above their request, once idle ones have
+//! nothing left to give: first their balloons, so their guests give file
+//! cache back, then pausing and saving the one furthest above its request,
+//! which wakes again by itself once there is room. Like all relief it runs
+//! in the background, never inside a request, and never touches a sandbox
+//! within its request.
+
+use super::Host;
+use crate::ids::SandboxId;
+use crate::level::Level;
+use crate::policy::MemoryPolicy;
+use crate::sandbox::{Health, Sandbox};
+use crate::time::At;
+
+/// What the host asked of a running sandbox's balloon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Balloon {
+    /// Bytes its guest is asked to give back: all its memory above its
+    /// request. The guest gives what it can spare, file cache first, and
+    /// takes pages back from the balloon rather than run out.
+    pub bytes: u64,
+    /// Bytes the host held for it above its request when asked: what the
+    /// host expects back at most.
+    pub relief: u64,
+    /// When the host asked.
+    pub since: At,
+}
+
+/// Whether a sandbox was paused for host memory while in use.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Squeeze {
+    /// It was not.
+    #[default]
+    None,
+    /// It is being paused and saved, whoever wants it awake; its VM held
+    /// `bytes`.
+    Leaving {
+        /// Host memory its VM held.
+        bytes: u64,
+    },
+    /// It is saved and waits, wanted awake, until `bytes` fit above the
+    /// high watermark.
+    Waiting {
+        /// Host memory its VM held.
+        bytes: u64,
+    },
+}
+
+impl Sandbox {
+    /// Bytes of host memory it holds above its request. None for a sandbox
+    /// whose request is its whole size: what its VM holds beyond that is
+    /// the VMM's own.
+    fn above_request(&self) -> u64 {
+        if self.size.request >= self.size.limit {
+            0
+        } else {
+            self.resident_bytes().saturating_sub(self.size.request)
+        }
+    }
+
+    /// Whether it is being paused and saved for host memory.
+    pub(crate) fn leaving(&self) -> bool {
+        matches!(self.squeeze, Squeeze::Leaving { .. })
+    }
+
+    /// Whether it runs above its request with nothing in the way of
+    /// squeezing it, nor anything already making it sleep.
+    fn squeezable(&self) -> bool {
+        self.state.level == Level::Running
+            && self.in_flight.is_none()
+            && self.health == Health::Sound
+            && self.squeeze == Squeeze::None
+            && self.floor == Level::Running
+            && self.above_request() > 0
+    }
+}
+
+impl Host {
+    /// Frees `needed` bytes that pushing idle sandboxes could not: asks the
+    /// guests of sandboxes in use above their request to give memory back
+    /// through their balloons, furthest above first, and when even all of
+    /// that, counted as given, falls short, pauses and saves the sandbox
+    /// furthest above its request, then the next. Balloons asked within
+    /// [`MemoryPolicy::balloon_grace`] count as on their way. Returns
+    /// whether anything changed.
+    pub(super) fn squeeze_busy(&mut self, now: At, memory: MemoryPolicy, needed: u64) -> bool {
+        let coming = |slot: &Sandbox| {
+            slot.balloon
+                .filter(|balloon| now.saturating_since(balloon.since) < memory.balloon_grace)
+                .map_or(0, |balloon| balloon.relief)
+        };
+        let mut needed = needed.saturating_sub(self.sandboxes.values().map(coming).sum());
+        let mut above: Vec<(u64, SandboxId)> = self
+            .sandboxes
+            .iter()
+            .filter(|(_, slot)| slot.squeezable() && slot.balloon.is_none())
+            .map(|(id, slot)| (slot.above_request(), *id))
+            .collect();
+        above.sort_unstable_by(|a, b| b.cmp(a));
+        let mut changed = false;
+        for (relief, id) in above {
+            if needed == 0 {
+                break;
+            }
+            let Some(slot) = self.sandboxes.get_mut(&id) else {
+                continue;
+            };
+            slot.balloon = Some(Balloon {
+                bytes: slot.size.limit - slot.size.request,
+                relief,
+                since: now,
+            });
+            needed = needed.saturating_sub(relief);
+            changed = true;
+            self.mark(id);
+        }
+        while needed > 0 {
+            let furthest = self
+                .sandboxes
+                .iter()
+                .filter(|(_, slot)| slot.squeezable())
+                .map(|(id, slot)| (slot.above_request(), *id))
+                .max();
+            let Some((_, id)) = furthest else {
+                break;
+            };
+            let Some(slot) = self.sandboxes.get_mut(&id) else {
+                break;
+            };
+            let bytes = slot.resident_bytes();
+            let counted = coming(slot);
+            slot.squeeze = Squeeze::Leaving { bytes };
+            slot.floor = Level::Saved;
+            slot.floor_relief += bytes;
+            self.pending_relief += bytes;
+            needed = needed.saturating_sub(bytes.saturating_sub(counted));
+            changed = true;
+            self.mark(id);
+        }
+        changed
+    }
+
+    /// Lets balloons go, the longest set first, once each has been given
+    /// time and its guest could take back all it gave with the high
+    /// watermark still free. Returns whether any went.
+    pub(super) fn release_balloons(
+        &mut self,
+        now: At,
+        memory: MemoryPolicy,
+        available: u64,
+    ) -> bool {
+        let mut room = available.saturating_sub(memory.high_watermark);
+        let mut set: Vec<(At, SandboxId, u64)> = self
+            .sandboxes
+            .iter()
+            .filter_map(|(id, slot)| Some((*id, slot.balloon?)))
+            .filter(|(_, balloon)| now.saturating_since(balloon.since) >= memory.balloon_grace)
+            .map(|(id, balloon)| (balloon.since, id, balloon.relief))
+            .collect();
+        set.sort_unstable();
+        let mut changed = false;
+        for (_, id, relief) in set {
+            if relief > room {
+                break;
+            }
+            room -= relief;
+            if let Some(slot) = self.sandboxes.get_mut(&id) {
+                slot.balloon = None;
+            }
+            changed = true;
+            self.mark(id);
+        }
+        changed
+    }
+
+    /// Whether a sandbox that held `bytes` when it was paused for host
+    /// memory may wake: they fit with the high watermark still free.
+    pub(super) fn room_returned(&self, bytes: u64) -> bool {
+        match (self.policy.memory, self.available_memory) {
+            (Some(memory), Some(available)) => {
+                available.saturating_sub(bytes) >= memory.high_watermark
+            }
+            _ => true,
+        }
+    }
+}

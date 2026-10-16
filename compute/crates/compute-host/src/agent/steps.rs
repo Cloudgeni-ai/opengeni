@@ -95,7 +95,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     pub(super) fn execute(&mut self, action: Action) {
         match action {
-            Action::Start { sandbox, op, step } => self.start_step(Id(sandbox), op, step),
+            Action::Start { sandbox, op, step } => {
+                if step == Step::Pause
+                    && self
+                        .core
+                        .sandbox(sandbox)
+                        .is_some_and(|view| view.paused_for_memory.is_some())
+                {
+                    tracing::warn!(id = %Id(sandbox), "pausing and saving a sandbox in use for host memory");
+                }
+                self.start_step(Id(sandbox), op, step);
+            }
             Action::Cancel { sandbox, op } => {
                 let Some(slot) = self.slots.get_mut(&sandbox) else {
                     return;
@@ -125,7 +135,24 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             Action::Notify { sandbox, notice } => self.notify(Id(sandbox), notice),
+            Action::Balloon { sandbox, bytes } => self.set_balloon(Id(sandbox), bytes),
         }
+    }
+
+    /// Asks the guest of `id`'s running VM to give `bytes` back through its
+    /// balloon, in the background: a VM that fails to only keeps its
+    /// memory, and the host relieves pressure further if it must.
+    fn set_balloon(&self, id: Id, bytes: u64) {
+        let Some(live) = self.slots.get(&id.0).and_then(|slot| slot.vm.as_ref()) else {
+            return;
+        };
+        let set = self.engine.set_balloon(&live.vm, bytes);
+        tokio::spawn(async move {
+            match set.await {
+                Ok(()) => tracing::info!(%id, mib = bytes >> 20, "balloon set"),
+                Err(error) => tracing::warn!(%id, %error, "could not set the balloon"),
+            }
+        });
     }
 
     pub(super) fn start_step(&mut self, id: Id, op: OpId, step: Step) {

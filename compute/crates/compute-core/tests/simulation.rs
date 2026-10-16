@@ -183,6 +183,7 @@ impl World {
                 low_watermark: 8 * GIB,
                 high_watermark: 10 * GIB,
                 compressed_percent: 30,
+                balloon_grace: Duration::from_secs(2),
             }),
             ..HostPolicy::default()
         };
@@ -253,6 +254,10 @@ impl World {
                 }
             }
             Action::Destroy { sandbox } => assert!(!self.live.contains_key(&sandbox)),
+            // Every sandbox here requests its whole size.
+            Action::Balloon { sandbox, .. } => {
+                panic!("{sandbox:?} squeezed within its request");
+            }
             Action::Notify { sandbox, notice } => {
                 let Some(truth) = self.live.get_mut(&sandbox) else {
                     return;

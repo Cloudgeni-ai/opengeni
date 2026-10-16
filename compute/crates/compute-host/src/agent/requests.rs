@@ -408,6 +408,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     unsavable: view.unsavable,
                     broken: view.broken,
                     waiting_for_room: self.core.room_needed(*id),
+                    paused_for_memory: view.paused_for_memory,
+                    balloon_bytes: (view.balloon > 0).then_some(view.balloon),
                     memory: slot
                         .vm
                         .as_ref()

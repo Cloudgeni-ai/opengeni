@@ -148,6 +148,13 @@ keeps `--memory-buffer-mib` (default a sixteenth of the capacity) free by
 pushing idle sandboxes deeper in the background, least recently used
 first, and also makes room for sandboxes that are held while refused, which
 then wake by themselves. Held or recently busy sandboxes are never touched.
+When that is not enough on a bare-metal host, sandboxes in use above their
+request give way, furthest above first: their balloons take file cache
+back from their guests, and if the host is still short one is paused and
+saved, held or not, and wakes by itself with its programs once there is
+room. A sandbox within its request is never touched. The status shows
+`balloon_bytes` and `paused_for_memory` for such sandboxes, and
+`waiting_for_room` while one waits.
 The status reports the capacity (total, reserved, occupied, free, awake), and
 a restarted agent rebuilds it from its records.
 
@@ -266,7 +273,9 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
   time; it also fills a host until it answers `host_full` and checks the
   cgroup guarantees. `memory` checks that a busy VM is never compressed
   under host memory pressure (bare metal) and what a guest does when the
-  huge-page pool runs out (nested).
+  huge-page pool runs out (nested); `squeeze` takes host memory away until
+  a busy sandbox above its request gives way through its balloon, then is
+  paused, saved and woken again (bare metal).
 - `smoke/` runs SPACE's E2B-style scenarios through one adapter for our API,
   plus our own: sleep levels, concurrent wakes, holds, and an agent restart
   in the middle ([smoke/README.md](smoke/README.md)).
@@ -275,9 +284,6 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
 
 - **A control plane**: placement, moving sandboxes between hosts, recovery
   after losing a host, autoscaling ([ADR 15](docs/adr/0015-placement-and-moves-between-hosts.md)).
-- **Relief for busy sandboxes above their request**: shrinking their guests
-  with the balloon, then pausing and saving the one furthest above its
-  request ([ADR 14](docs/adr/0014-requests-limits-and-admission.md)).
 - **Observability** and the **Opengeni integration**.
 
 ## Credits

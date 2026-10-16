@@ -463,6 +463,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
             low_watermark: low << 20,
             high_watermark: high << 20,
             compressed_percent: 25,
+            balloon_grace: Duration::from_secs(3),
         });
     }
     let config = HostConfig {

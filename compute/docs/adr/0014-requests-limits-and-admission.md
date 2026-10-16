@@ -1,6 +1,6 @@
 # 14. Requests, limits and admission
 
-Status: Accepted, 2026-10-16. Built except relief steps 2 and 3.
+Status: Accepted, 2026-10-16. Built.
 
 ## Context
 
@@ -43,11 +43,24 @@ pick a VM.
   that would make a leaking agent hang at its limit instead of restarting.
 - On bare-metal hosts, use above the request shares whatever is free. When
   the host runs short, background relief acts in this order:
-  1. idle sandboxes leave memory, least recently used first (built);
-  2. the balloon takes file cache back from sandboxes above their request
-     (not built);
-  3. the sandbox furthest above its request is paused and saved, and wakes
-     when there is room (not built).
+  1. idle sandboxes leave memory, least recently used first;
+  2. the balloons of sandboxes in use above their request, furthest above
+     first, ask for everything above the request; the guest gives file
+     cache and free memory first and deflates the balloon rather than run
+     out (`deflate_on_oom`). Relief waits a short grace
+     (`balloon_grace`, 3 s) for a balloon to fill before going further,
+     and lets balloons go, oldest first, once memory is back above the
+     high watermark;
+  3. if that is still not enough, the sandbox furthest above its request
+     is paused and saved, held or not. It loses nothing: once its recorded
+     footprint fits above the high watermark it wakes by itself with its
+     programs.
+  Sandboxes within their request are never touched by any of these.
+- Congestion is visible: the status shows `balloon_bytes` for a sandbox
+  whose balloon is out and `paused_for_memory` (the bytes it held) for one
+  saved for host memory, with `waiting_for_room` while it waits; refused
+  requests get `host_full` with what they needed. A control plane can then
+  move such a sandbox ([15](0015-placement-and-moves-between-hosts.md)).
 - On huge-page hosts (the nested profile) guest memory cannot be compressed
   or ballooned back, so a sandbox's request is its limit: a running sandbox
   is booked at its full size against the pool, a paused one at what its
@@ -61,12 +74,12 @@ pick a VM.
 ## Consequences
 
 - A sandbox that stays within its request is never squeezed, paused or
-  killed for memory. Above it, it may be squeezed or, once step 3 exists,
-  paused, never lose data.
-- Until steps 2 and 3 exist, a bare-metal host whose busy sandboxes all grow
-  past their requests relies on the kernel reclaiming file cache and
-  unprotected memory; VMMs are the last processes its out-of-memory killer
-  picks.
+  killed for memory. Above it, it may be squeezed or paused for a few
+  seconds, never lose data.
+- Whether a sandbox was paused for memory lives only in the agent: after an
+  agent restart it stays Saved until it is used again.
+- The room a paused sandbox waits for is its VM's cgroup footprint, file
+  cache included, so it may wait somewhat longer than its guest needs.
 - Free page reporting does not return huge pages, so on nested hosts a
   guest's freed memory stays booked until the VM is saved and ended.
 - Nested hosts hold fewer running sandboxes for the same memory, in exchange

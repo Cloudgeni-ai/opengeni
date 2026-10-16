@@ -372,16 +372,23 @@ impl Backoff {
     }
 }
 
-/// When the host frees memory held by idle sandboxes.
+/// When the host frees memory held by idle sandboxes and, once they have
+/// none left to give, by sandboxes in use above their request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryPolicy {
     /// Below this many available bytes, idle sandboxes are pushed deeper,
-    /// least recently used first.
+    /// least recently used first; when that is not enough, sandboxes in
+    /// use above their request are asked to give memory back through
+    /// their balloons, and then the one furthest above its request is
+    /// paused and saved until there is room again.
     pub low_watermark: u64,
     /// Pushing continues until the expected available memory reaches this.
     pub high_watermark: u64,
     /// Share of a sandbox's memory that remains after compression, in percent.
     pub compressed_percent: u8,
+    /// How long a guest asked to give memory back through its balloon is
+    /// expected to take, counted as on its way meanwhile.
+    pub balloon_grace: Duration,
 }
 
 /// Host-wide policy.

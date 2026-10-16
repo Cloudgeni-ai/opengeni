@@ -497,9 +497,21 @@ pub struct SandboxStatus {
     pub broken: bool,
     /// Bytes of memory it waits for while held awake with its wake refused
     /// because the host is full ([`ErrorCode::HostFull`]); it wakes by
-    /// itself once room can be made.
+    /// itself once room can be made. Also set while it waits after being
+    /// paused for host memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_for_room: Option<u64>,
+    /// Bytes of host memory its VM held when the host paused it, or began
+    /// pausing and saving it, to free memory while it was in use above its
+    /// memory request; set until it wakes again. It loses nothing and
+    /// wakes by itself once there is room; a control plane may rather move
+    /// it to another host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_for_memory: Option<u64>,
+    /// Bytes the host asked its guest to give back through its balloon
+    /// while it runs above its memory request, when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balloon_bytes: Option<u64>,
     /// Its VM's zswap traffic and memory pressure, when a VM process exists
     /// and the engine reports them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
