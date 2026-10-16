@@ -1,9 +1,51 @@
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { InteractionControllerError } from "@opengeni/interaction";
 import { UnsettledCleanupError } from "../cleanup-error";
 import { linuxWorkerLauncher, ownLinuxWorkerGroup } from "./linux-worker";
 
 const compiled = /^(?:\/\$bunfs\/|B:[\\/]~BUN[\\/])/i.test(import.meta.path);
+
+/** The X11 libraries CUA's Linux SDK and worker link against, with their
+ * Debian and Ubuntu packages. glibc and libgcc are assumed to exist. */
+const LINUX_CUA_LIBRARIES: Readonly<Record<string, string>> = {
+  "libX11.so.6": "libx11-6",
+  "libXi.so.6": "libxi6",
+  "libxkbcommon.so.0": "libxkbcommon0",
+};
+
+/**
+ * The dynamic loader reports only the first library it can't find, deep in an
+ * SDK or worker startup error. Turn that into a plain, actionable failure that
+ * names the library and every package CUA needs, so one install fixes it.
+ */
+export function missingLinuxLibraryError(error: unknown): InteractionControllerError | null {
+  const texts: string[] = [];
+  for (let current: unknown = error, depth = 0; current && depth < 5; depth += 1) {
+    texts.push(current instanceof Error ? current.message : String(current));
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  const missing = [
+    ...new Set(
+      texts.flatMap((text) =>
+        [...text.matchAll(/([\w+.-]+\.so(?:\.\d+)*): cannot open shared object file/g)].map(
+          (match) => match[1]!,
+        ),
+      ),
+    ),
+  ];
+  if (missing.length === 0) return null;
+  const listed =
+    missing.length === 1 ? missing[0] : `${missing.slice(0, -1).join(", ")} and ${missing.at(-1)}`;
+  return new InteractionControllerError(
+    "resource_unavailable",
+    `this machine can't start computer use because the system ${
+      missing.length === 1 ? "library" : "libraries"
+    } ${listed} can't be loaded. Computer use on Linux needs libX11, libXi and libxkbcommon. On Debian or Ubuntu, install with: sudo apt install ${Object.values(
+      LINUX_CUA_LIBRARIES,
+    ).join(" ")}`,
+  );
+}
 
 /** Compiled Bun cannot resolve CUA's native packages inside its virtual FS.
  * Releases carry the unmodified SDK bundle and native assets in the same
