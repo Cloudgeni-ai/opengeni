@@ -20,6 +20,15 @@ use super::{HostAgent, HostError};
 /// and, if its memory is paged, the agent's side of its pager.
 type FoundVm<E> = (<E as Engine>::Vm, Found, Option<Reconnected>);
 
+/// For a VM found running that recovery leaves as it is, blocked: the
+/// memory its pager still misses keeps coming, so its guest never waits
+/// forever on a page.
+fn keep_serving<E: Engine>(found: Result<Option<FoundVm<E>>, HostError>) {
+    if let Ok(Some((_, _, Some(memory)))) = found {
+        memory.serve_detached();
+    }
+}
+
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) async fn recover(&mut self, strays: Vec<Stray>) {
         for stray in strays {
@@ -101,8 +110,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .unwrap_or_else(|| Err(HostError::Io("no result from looking for the VM".into())));
             let result = match broken_networks.get(&id.0) {
                 // A VM found running is left as it is: its guest's programs
-                // matter more than its network.
-                Some(error) => Err(HostError::Io(format!("network not repaired: {error}"))),
+                // matter more than its network, and its memory keeps coming.
+                Some(error) => {
+                    keep_serving(vm);
+                    Err(HostError::Io(format!("network not repaired: {error}")))
+                }
                 None => self.recover_one(record, vm).await,
             };
             match result {
@@ -311,16 +323,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         found: Result<Option<FoundVm<E>>, HostError>,
     ) -> Result<bool, HostError> {
         let id = record.id;
-        let policy = self
-            .sleep_policy(&record.config)
-            .map_err(HostError::Invalid)?;
+        let policy = match self.sleep_policy(&record.config) {
+            Ok(policy) => policy,
+            Err(error) => {
+                keep_serving(found);
+                return Err(HostError::Invalid(error));
+            }
+        };
         let paths = Paths::new(&self.root, id);
         let spec = vm_spec(&record, &paths, &self.images);
         let (state, vm) = if let Some((vm, found, memory)) = found? {
-            (
-                self.adopted_state(&record, found).await?,
-                Some((vm, memory)),
-            )
+            match self.adopted_state(&record, found).await {
+                Ok(state) => (state, Some((vm, memory))),
+                Err(error) => {
+                    keep_serving(Ok(Some((vm, found, memory))));
+                    return Err(error);
+                }
+            }
         } else {
             (self.sleeping_state(&record, &paths).await?, None)
         };
