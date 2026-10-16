@@ -67,13 +67,23 @@ const FETCHES_PER_HOST: usize = 512;
 /// Recently fetched chunks kept in memory, shared by every VM: sandboxes
 /// started from the same template share most of their memory.
 const CACHE_BYTES: usize = 1 << 30;
-/// How long a chunk keeps being retried while the store or host fails in
-/// ways that may pass (timeouts, dropped connections, local resource
-/// limits) before the VM's memory counts as lost. The guest waits on a
-/// demand fetch meanwhile, which beats losing its programs.
-const RETRY_FOR: Duration = Duration::from_secs(60);
-/// The longest pause between two tries of a chunk.
+/// A chunk is retried for as long as its VM lives while the store or host
+/// fails in ways that may pass (timeouts, dropped connections, refused
+/// credentials, local resource limits): the guest stalls on a demand fetch
+/// meanwhile and loses nothing. Only a chunk the store proves bad or gone
+/// loses the VM's memory.
+///
+/// A chunk failing this long marks the store as stalled, which the host's
+/// status shows until a fetch succeeds again.
+const STALL_AFTER: Duration = Duration::from_secs(5);
+/// How long failing tries follow each other quickly; after that the store
+/// is probably down, and the host's fetches slow to
+/// [`STALLED_RETRY_DELAY`] apart so they do not flood it as it comes back.
+const RETRY_QUICKLY_FOR: Duration = Duration::from_secs(60);
+/// The longest pause between two quick tries of a chunk.
 const RETRY_DELAY_MAX: Duration = Duration::from_secs(2);
+/// The pause between two tries of a chunk once the store seems down.
+const STALLED_RETRY_DELAY: Duration = Duration::from_secs(10);
 /// How long one try at a chunk may take once it has its transfer slot.
 /// Every slot is held for at most this long, so a try waiting for one
 /// waits a bounded time too.
@@ -128,6 +138,30 @@ pub(crate) struct Fetcher {
     all: Arc<Semaphore>,
     /// Background fetches give way to the ones somebody waits on.
     lanes: Arc<Lanes>,
+    /// Chunks failing for longer than [`STALL_AFTER`], and since when.
+    stall: Mutex<Stall>,
+}
+
+#[derive(Debug, Default)]
+struct Stall {
+    failing: usize,
+    since: Option<std::time::Instant>,
+}
+
+/// One chunk failing for longer than [`STALL_AFTER`]; dropping it, however
+/// the fetch ends, stops counting it.
+struct Stalled<'a>(&'a Mutex<Stall>);
+
+impl Drop for Stalled<'_> {
+    fn drop(&mut self) {
+        let mut stall = lock(self.0);
+        stall.failing -= 1;
+        if stall.failing == 0
+            && let Some(since) = stall.since.take()
+        {
+            tracing::info!(stalled_for = ?since.elapsed(), "the store answers again");
+        }
+    }
 }
 
 /// A chunk request under way and how many wait for it.
@@ -206,7 +240,27 @@ impl Fetcher {
             requests: AtomicU64::new(0),
             all: Arc::new(Semaphore::new(FETCHES_PER_HOST)),
             lanes,
+            stall: Mutex::default(),
         }
+    }
+
+    /// How long chunks have been failing to arrive from a store that does
+    /// not answer, if they are. Sandboxes waiting on remote memory stall
+    /// meanwhile and lose nothing.
+    pub fn stalled_for(&self) -> Option<Duration> {
+        lock(&self.stall).since.map(|since| since.elapsed())
+    }
+
+    /// Counts a chunk as failing for longer than [`STALL_AFTER`] until the
+    /// returned guard drops.
+    fn stalled(&self, error: &compute_storage::Error) -> Stalled<'_> {
+        let mut stall = lock(&self.stall);
+        stall.failing += 1;
+        if stall.since.is_none() {
+            tracing::warn!(%error, "the store does not answer; sandboxes waiting on remote memory stall until it does");
+            stall.since = Some(std::time::Instant::now());
+        }
+        Stalled(&self.stall)
     }
 
     /// The plain bytes of `reference`, checked against its hashes.
@@ -670,8 +724,9 @@ async fn fill(
 }
 
 /// Fetches chunk `index` and stores it, retrying failures that may pass
-/// for up to [`RETRY_FOR`]. A chunk the store proves bad or gone fails at
-/// once: [`ChunkStore::get_chunk`] has already read it twice.
+/// until hydration stops (see [`STALL_AFTER`]). A chunk the store proves
+/// bad or gone fails at once: [`ChunkStore::get_chunk`] has already read it
+/// twice.
 fn fetch_one(
     fetcher: &Arc<Fetcher>,
     hydration: &Arc<Hydration>,
@@ -690,9 +745,11 @@ fn fetch_one(
         }
         let started = tokio::time::Instant::now();
         let mut delay = Duration::from_millis(50);
+        let mut stalled = None;
         loop {
             match fetcher.get(&reference, background).await {
                 Ok(plain) => {
+                    drop(stalled);
                     let stored = write(&hydration, move |hydration| hydration.store(index, &plain));
                     return (index, stored.await);
                 }
@@ -702,18 +759,24 @@ fn fetch_one(
                         Err(Unavailable::permanent(format!("chunk {index}: {error}"))),
                     );
                 }
-                Err(error) if started.elapsed() >= RETRY_FOR => {
-                    return (
-                        index,
-                        Err(Unavailable::passing(format!("chunk {index}: {error}"))),
-                    );
-                }
                 Err(error) => {
                     tracing::debug!(index, %error, "chunk fetch failed; trying again");
+                    if stalled.is_none() && started.elapsed() >= STALL_AFTER {
+                        stalled = Some(fetcher.stalled(&error));
+                    }
                 }
             }
-            tokio::time::sleep(delay).await;
-            delay = (delay * 2).min(RETRY_DELAY_MAX);
+            tokio::select! {
+                () = hydration.cancelled.cancelled() => {
+                    return (index, Err(Unavailable::passing("filling stopped".to_owned())));
+                }
+                () = tokio::time::sleep(delay) => {}
+            }
+            delay = if started.elapsed() < RETRY_QUICKLY_FOR {
+                (delay * 2).min(RETRY_DELAY_MAX)
+            } else {
+                STALLED_RETRY_DELAY
+            };
         }
     }
 }
@@ -844,5 +907,157 @@ mod tests {
         )
         .await;
         assert!(finished.unwrap_err().permanent);
+    }
+
+    /// An in-memory store whose reads fail, as if it did not answer, while
+    /// `down` is set.
+    #[derive(Debug, Default)]
+    struct Flaky {
+        inner: object_store::memory::InMemory,
+        down: AtomicBool,
+    }
+
+    impl std::fmt::Display for Flaky {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("flaky")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for Flaky {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            if self.down.load(Ordering::Relaxed) {
+                return Err(object_store::Error::Generic {
+                    store: "flaky",
+                    source: "connection refused".into(),
+                });
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        async fn delete(&self, location: &object_store::path::Path) -> object_store::Result<()> {
+            self.inner.delete(location).await
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+        ) -> object_store::Result<()> {
+            self.inner.copy(from, to).await
+        }
+
+        async fn copy_if_not_exists(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+        ) -> object_store::Result<()> {
+            self.inner.copy_if_not_exists(from, to).await
+        }
+    }
+
+    /// A store that stops answering stalls hydration, which carries on
+    /// once it answers again: nothing is lost however long it takes.
+    #[tokio::test]
+    async fn a_store_that_does_not_answer_stalls_hydration_without_losing_it() {
+        let chunk = usize::try_from(CHUNK_BYTES).unwrap();
+        let plain: Vec<Vec<u8>> = (1..=3_u8).map(|fill| vec![fill; chunk]).collect();
+        let backend = Arc::new(Flaky::default());
+        let chunks = ChunkStore::new(
+            Arc::clone(&backend) as Arc<dyn object_store::ObjectStore>,
+            object_store::path::Path::from("p"),
+        );
+        let encoded: Vec<_> = plain
+            .iter()
+            .map(|bytes| compute_storage::chunk::EncodedChunk::encode(bytes, 1).unwrap())
+            .collect();
+        for chunk in &encoded {
+            chunks.put_chunk(chunk).await.unwrap();
+        }
+        backend.down.store(true, Ordering::Relaxed);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory");
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(3 * CHUNK_BYTES).unwrap();
+        let fetcher = Arc::new(Fetcher::new(chunks, Arc::default()));
+        let (hydration, _arrivals) = Hydration::start(
+            Arc::clone(&fetcher),
+            &path,
+            encoded
+                .iter()
+                .map(|chunk| Some(chunk.reference.clone()))
+                .collect(),
+            plain.iter().map(|bytes| chunk_hash(bytes)).collect(),
+            PageSet::new(&[]),
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let waited = tokio::time::Instant::now();
+        while fetcher.stalled_for().is_none() {
+            assert!(
+                waited.elapsed() < STALL_AFTER + Duration::from_secs(10),
+                "never reported as stalled"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), hydration.finished())
+                .await
+                .is_err(),
+            "a store that does not answer neither fails nor finishes hydration"
+        );
+
+        backend.down.store(false, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_secs(30), hydration.finished())
+            .await
+            .expect("hydration carries on once the store answers")
+            .unwrap();
+        assert_eq!(fetcher.stalled_for(), None);
+        let mut held = vec![0; 3 * chunk];
+        file.read_exact_at(&mut held, 0).unwrap();
+        assert_eq!(held, plain.concat());
     }
 }

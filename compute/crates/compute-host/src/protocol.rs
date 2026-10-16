@@ -479,6 +479,12 @@ pub struct HostStatus {
     /// when its record is readable.
     #[serde(default)]
     pub blocked: Vec<BlockedSandbox>,
+    /// How long, in milliseconds, memory has been failing to arrive from an
+    /// object store that does not answer, if it is. Sandboxes waking from
+    /// the store stall meanwhile; they lose nothing and carry on once it
+    /// answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_stalled_ms: Option<u64>,
 }
 
 /// A sandbox the host cannot manage.

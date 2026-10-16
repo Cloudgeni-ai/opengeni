@@ -294,6 +294,7 @@ name = "compute-host"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "blake3",
  "clap",
  "compute-core",

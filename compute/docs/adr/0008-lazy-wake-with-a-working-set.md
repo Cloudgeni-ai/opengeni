@@ -22,6 +22,10 @@ guest's first-touched pages are scattered across most of its chunks.
   exits when the memory is complete. A restarted agent reconnects to it; if
   the pager dies, the VM is ended and the sandbox recovers as
   [10](0010-crash-safety-bar.md) says.
+- A store that does not answer stalls a loading guest; it never ends it.
+  Chunks are retried for as long as the VM lives, quickly for a minute and
+  then every 10 s, and the host's status shows how long the store has been
+  stalled. Only a chunk the store proves bad or gone loses the VM's memory.
 
 ## Consequences
 

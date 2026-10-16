@@ -406,6 +406,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 (step_name(*step).to_owned(), stats)
             })
             .collect();
+        #[cfg(target_os = "linux")]
+        let store_stalled_ms = self
+            .fetcher
+            .as_ref()
+            .and_then(|fetcher| fetcher.stalled_for())
+            .map(|stalled| u64::try_from(stalled.as_millis()).unwrap_or(u64::MAX));
+        #[cfg(not(target_os = "linux"))]
+        let store_stalled_ms = None;
         HostStatus {
             sandboxes,
             steps,
@@ -419,6 +427,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     problem: problem.clone(),
                 })
                 .collect(),
+            store_stalled_ms,
         }
     }
 }
