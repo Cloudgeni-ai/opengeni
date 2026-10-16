@@ -81,7 +81,7 @@ pub(super) async fn start(
         }
         let (socket, cgroup) = (pager.socket.clone(), vm.cgroup.clone());
         tokio::task::spawn_blocking(move || {
-            crate::confined::hand_over(&socket, uid, gid)?;
+            crate::confined::hand_over(&socket, crate::confined::Owned::Socket, uid, gid)?;
             cgroup.add(pid)
         })
         .await
@@ -119,14 +119,14 @@ const API_SOCKET_ARG: &str = "--api-socket";
 /// not hide its death; a process whose command line cannot be read counts
 /// as a pager, which keeps the VM.
 pub(super) fn lost(vmm: Pid, group: &Cgroup, api: &Path) -> io::Result<bool> {
-    let vmm = vmm.as_raw_pid().unsigned_abs();
     if group
         .processes()?
         .into_iter()
-        .any(|pid| pid != vmm && is_pager(pid, api))
+        .any(|pid| pid != vmm && is_pager(pid.as_raw_pid().unsigned_abs(), api))
     {
         return Ok(false);
     }
+    let vmm = vmm.as_raw_pid().unsigned_abs();
     Ok(registered(vmm)? || waits_for_event_reader(vmm))
 }
 
@@ -139,6 +139,13 @@ fn is_pager(pid: u32, api: &Path) -> bool {
         return Path::new(&format!("/proc/{pid}")).exists();
     };
     names_pager(&cmdline, api)
+}
+
+/// Whether process `pid` is certainly the pager of the VM whose API
+/// listens at `api`: one whose command line cannot be read is not.
+pub(super) fn certainly_pager(pid: Pid, api: &Path) -> bool {
+    fs::read(format!("/proc/{}/cmdline", pid.as_raw_pid()))
+        .is_ok_and(|cmdline| names_pager(&cmdline, api))
 }
 
 /// Whether a NUL-separated command line passes `api` as the API socket.

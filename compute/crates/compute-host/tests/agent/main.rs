@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::ready;
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -75,6 +76,9 @@ struct World {
     adopted: AtomicUsize,
     /// While set, every resume is refused before the guest runs.
     refuse_resumes: AtomicBool,
+    /// While set, every boot fails as a launch does that could not prove
+    /// the VMM it may have started is gone.
+    stuck_boots: AtomicBool,
     /// While set, a refused resume also makes the sandbox's directory
     /// read-only, as a failing disk would.
     freeze_on_refusal: AtomicBool,
@@ -97,6 +101,14 @@ struct World {
     /// VMs that cannot be checked on, by name: adopting one fails as when
     /// its VMM does not answer.
     unadoptable: Mutex<HashSet<String>>,
+    /// While set, no VM's processor time can be read.
+    unreadable_cpu: AtomicBool,
+    /// While set, every pause moves a burst of data, as a VMM writing a
+    /// snapshot does: work the host does, not the guest.
+    transition_traffic: AtomicBool,
+    /// Traffic readings taken, so a test can line up with the agent's
+    /// sampling.
+    samples: AtomicUsize,
 }
 
 /// What a fake VM process is, independent of any agent's handle to it.
@@ -107,7 +119,9 @@ struct Process {
     paused: Arc<Mutex<bool>>,
     exit: watch::Sender<bool>,
     guest: AbortHandle,
-    cpu: Arc<Mutex<CpuMeter>>,
+    work: Arc<Mutex<Work>>,
+    /// What [`Engine::hold`] keeps for it, which ends with it.
+    held: Arc<Mutex<Option<OwnedFd>>>,
 }
 
 impl World {
@@ -145,15 +159,23 @@ impl std::ops::Deref for FakeVm {
     }
 }
 
-/// Processor time a fake VM used: one full processor while its guest is
-/// told to be busy.
+/// What a fake VM's guest is told to be doing.
 #[derive(Debug, Default)]
-struct CpuMeter {
+struct Work {
+    /// One full processor while busy.
+    cpu: Meter,
+    /// A byte of traffic every microsecond while streaming.
+    io: Meter,
+}
+
+/// Time a fake VM spent on one kind of work.
+#[derive(Debug, Default)]
+struct Meter {
     used: Duration,
     busy_since: Option<Instant>,
 }
 
-impl CpuMeter {
+impl Meter {
     fn total(&self) -> Duration {
         self.used
             + self
@@ -189,14 +211,14 @@ impl Fake {
         let _ = std::fs::remove_file(&vsock);
         let listener = UnixListener::bind(&vsock).unwrap();
         let memory = Arc::new(Mutex::new(memory));
-        let cpu = Arc::new(Mutex::new(CpuMeter::default()));
+        let work = Arc::new(Mutex::new(Work::default()));
         let (exit, mut exited) = watch::channel(false);
         let guest = tokio::spawn(guest(
             listener,
             Arc::clone(&memory),
             spec.drives[0].path.clone(),
             Arc::new(AtomicBool::new(false)),
-            Arc::clone(&cpu),
+            Arc::clone(&work),
         ));
         let world = Arc::clone(&self.world);
         let dead = name.clone();
@@ -214,7 +236,8 @@ impl Fake {
             paused: Arc::default(),
             exit,
             guest: guest.abort_handle(),
-            cpu,
+            work,
+            held: Arc::default(),
         };
         self.world
             .vms
@@ -263,13 +286,13 @@ async fn guest(
     memory: Arc<Mutex<String>>,
     disk: PathBuf,
     told_restored: Arc<AtomicBool>,
-    cpu: Arc<Mutex<CpuMeter>>,
+    work: Arc<Mutex<Work>>,
 ) {
     while let Ok((stream, _)) = listener.accept().await {
         let memory = Arc::clone(&memory);
         let disk = disk.clone();
         let told_restored = Arc::clone(&told_restored);
-        let cpu = Arc::clone(&cpu);
+        let work = Arc::clone(&work);
         tokio::spawn(async move {
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
@@ -299,11 +322,19 @@ async fn guest(
                     }
                     ("told-restored?", _) => told_restored.load(Ordering::SeqCst).to_string(),
                     ("busy", _) => {
-                        cpu.lock().unwrap().set_busy(true);
+                        work.lock().unwrap().cpu.set_busy(true);
                         "ok".into()
                     }
                     ("quiet", _) => {
-                        cpu.lock().unwrap().set_busy(false);
+                        work.lock().unwrap().cpu.set_busy(false);
+                        "ok".into()
+                    }
+                    ("stream", _) => {
+                        work.lock().unwrap().io.set_busy(true);
+                        "ok".into()
+                    }
+                    ("still", _) => {
+                        work.lock().unwrap().io.set_busy(false);
                         "ok".into()
                     }
                     (other, _) => format!("unknown {other}"),
@@ -326,6 +357,13 @@ impl Engine for Fake {
     async fn boot(&self, spec: &VmSpec) -> Result<FakeVm, EngineError> {
         sleep(self.delays.boot).await;
         self.world.boots.fetch_add(1, Ordering::Relaxed);
+        if self.world.stuck_boots.load(Ordering::SeqCst) {
+            return Err(EngineError::new(
+                ErrorKind::Fatal,
+                "boot",
+                "attaching failed; then what it started could not be cleaned up",
+            ));
+        }
         Ok(self.launch(spec, String::new()))
     }
 
@@ -343,11 +381,13 @@ impl Engine for Fake {
             left.checked_sub(1).map(|fewer| *left = fewer)
         };
         if refuse.is_some() {
+            // As Firecracker does: the VMM starts, then refuses the load.
             return Err(EngineError::new(
                 ErrorKind::MemoryLost,
                 "restore",
                 "snapshot load refused",
-            ));
+            )
+            .after_launch());
         }
         let MemorySource::File(path) = &files.memory else {
             panic!("a bare-metal host restores local images from files");
@@ -364,6 +404,10 @@ impl Engine for Fake {
     }
 
     fn pause(&self, vm: &FakeVm) -> impl Future<Output = Result<(), EngineError>> + Send {
+        if self.world.transition_traffic.load(Ordering::SeqCst) {
+            // A second of streaming: a million bytes.
+            vm.work.lock().unwrap().io.used += Duration::from_secs(1);
+        }
         ready(self.set_paused(vm, "pause", true))
     }
 
@@ -488,6 +532,30 @@ impl Engine for Fake {
         ready(Ok(found))
     }
 
+    fn hold(
+        &self,
+        vm: &FakeVm,
+        file: OwnedFd,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+        *vm.held.lock().unwrap() = Some(file);
+        ready(Ok(()))
+    }
+
+    fn held(
+        &self,
+        vm: &FakeVm,
+    ) -> impl Future<Output = Result<Option<OwnedFd>, EngineError>> + Send {
+        ready(
+            vm.held
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(OwnedFd::try_clone)
+                .transpose()
+                .map_err(|error| EngineError::io("held", error)),
+        )
+    }
+
     async fn clean_up(&self, spec: &VmSpec) -> Result<(), EngineError> {
         self.world.crash(&spec.name);
         // Give the crash watcher a moment to release the name.
@@ -505,7 +573,20 @@ impl Engine for Fake {
     }
 
     fn cpu_time(&self, vm: &FakeVm) -> Result<Duration, EngineError> {
-        Ok(vm.cpu.lock().unwrap().total())
+        if self.world.unreadable_cpu.load(Ordering::SeqCst) {
+            return Err(EngineError::new(
+                ErrorKind::Transient,
+                "cpu_time",
+                "cpu.stat unreadable",
+            ));
+        }
+        Ok(vm.work.lock().unwrap().cpu.total())
+    }
+
+    fn io_bytes(&self, vm: &FakeVm) -> Result<u64, EngineError> {
+        self.world.samples.fetch_add(1, Ordering::SeqCst);
+        let streamed = vm.work.lock().unwrap().io.total();
+        Ok(u64::try_from(streamed.as_micros()).unwrap_or(u64::MAX))
     }
 
     fn exited(&self, vm: &FakeVm) -> impl Future<Output = ()> + Send + 'static {
@@ -563,6 +644,7 @@ impl Lab {
             network: None,
             busy: Some(BusyRule {
                 cpu_percent: 50,
+                io_bytes_per_second: 100_000,
                 window: Duration::from_millis(100),
             }),
             can_compress: true,

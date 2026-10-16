@@ -17,9 +17,15 @@ saving and restoring the sandbox, and are gone after a fresh boot, exactly
 like the programs themselves.
 
 With `--notice`, the service also answers the host agent's restore notice
-(`restored <unix time in nanoseconds>`, answered with `ok`): it sets the
-clock and counts restores, which `ping` reports, so a scenario can tell how
-many times its own sandbox was restored from a memory image.
+(`restored <unix time in nanoseconds> [key=value ...]`, answered with `ok`):
+it sets the clock, counts restores and takes the `sandbox=<id>` field as its
+own sandbox id, ignoring fields it does not know. `ping` reports both, so a
+scenario can tell that its sandbox was restored from a memory image, and
+which sandbox a guest started from a template believes it is. The host
+retries a notice whose answer got lost, so the count can run ahead of the
+restores. The id is kept in the state directory before the answer, so a
+restarted service still knows it; a guest booted from its disk finds its id
+on the kernel command line instead, as `opengeni.sandbox=<id>`.
 """
 
 from __future__ import annotations
@@ -47,8 +53,12 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 MAX_REQUEST = 64 << 20
-MAX_NOTICE = 64
+# Room for the time, the sandbox id and fields a later host may add.
+MAX_NOTICE = 1024
+SANDBOX_ARG = "opengeni.sandbox"
 OUTPUT_DIR = Path(os.environ.get("SMOKE_GUEST_STATE", "/run/smoke-guest"))
+# The id the latest restore notice gave, kept across restarts of the service.
+SANDBOX_FILE = OUTPUT_DIR / "sandbox"
 _OUTPUT_NAMES = itertools.count()
 
 
@@ -176,26 +186,73 @@ PROCESSES = Processes()
 
 
 class Restores:
-    """How many restore notices this service has acknowledged."""
+    """How many restore notices this service has acknowledged, and which
+    sandbox the latest one (or the kernel command line) said it is. A new id
+    is written to SANDBOX_FILE before it counts, so it outlives the
+    service."""
 
-    def __init__(self) -> None:
+    def __init__(self, sandbox: str | None) -> None:
         self._lock = threading.Lock()
         self._count = 0
+        self._sandbox = sandbox
 
-    def record(self) -> None:
+    def record(self, sandbox: str | None) -> None:
         with self._lock:
+            if sandbox is not None and sandbox != self._sandbox:
+                _keep_sandbox(sandbox)
             self._count += 1
+            if sandbox is not None:
+                self._sandbox = sandbox
 
     def count(self) -> int:
         with self._lock:
             return self._count
 
+    def sandbox(self) -> str | None:
+        with self._lock:
+            return self._sandbox
 
-RESTORES = Restores()
+
+def boot_sandbox(cmdline: str) -> str | None:
+    """The sandbox id the host put on a kernel command line, if any."""
+
+    for word in cmdline.split():
+        key, equals, value = word.partition("=")
+        if equals and key == SANDBOX_ARG and value:
+            return value
+    return None
+
+
+def _keep_sandbox(sandbox: str) -> None:
+    """Writes `sandbox` to SANDBOX_FILE, replacing it whole."""
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    staged = SANDBOX_FILE.with_name(f".{SANDBOX_FILE.name}.{os.getpid()}")
+    staged.write_text(sandbox, encoding="ascii")
+    os.replace(staged, SANDBOX_FILE)
+
+
+def _starting_sandbox() -> str | None:
+    """The id a starting service takes: the one a restore notice gave an
+    earlier run of the service, else the kernel command line's."""
+
+    try:
+        kept = SANDBOX_FILE.read_text(encoding="ascii").strip()
+    except OSError:
+        kept = ""
+    if kept:
+        return kept
+    try:
+        return boot_sandbox(Path("/proc/cmdline").read_text(encoding="ascii", errors="replace"))
+    except OSError:
+        return None
+
+
+RESTORES = Restores(_starting_sandbox())
 
 
 def op_ping(_request: dict[str, Any]) -> dict[str, Any]:
-    return {"pid": os.getpid(), "restores": RESTORES.count()}
+    return {"pid": os.getpid(), "restores": RESTORES.count(), "sandbox": RESTORES.sandbox()}
 
 
 def op_exec(request: dict[str, Any]) -> dict[str, Any]:
@@ -391,8 +448,24 @@ class Inotify:
 
     A move away is held for `MOVE_PAIR_SECONDS` in case its arrival in the
     tree comes in a later read; only then does it count as moved out.
-    Both outcomes act on the watches the directory had when it left, so a
-    new directory made at the old path in the meantime keeps its own.
+    A move out removes the watches the directory had when it left, so a
+    new directory made at the old path in the meantime keeps its own. Each
+    watch belongs to at most one pending departure, the earliest: a parent
+    moving while its child's departure is pending leaves the child's watch
+    to the child's departure. A move whose arrival is seen rewrites the
+    paths of every watch below the old path, and the old paths of
+    departures pending below it, so later moves start from where things are
+    now.
+
+    Every directory that arrives in the tree, paired with its departure or
+    not, is walked and watched again. Asking the kernel to watch a directory
+    it already watches hands back the same watch, so a watch the walk finds
+    belongs to the tree again and is left alone when the departure that
+    took it settles: a directory that returns under another name, or a
+    child that comes back on its own while its parent is still away. The
+    walk sees only what is in the tree now, so it never takes back a watch
+    that is still outside. A directory arriving inside one that is away is
+    not walked; it goes or returns with that one.
     """
 
     def __init__(
@@ -416,6 +489,8 @@ class Inotify:
         # Directories moved away whose arrival is not seen yet: by cookie,
         # their old path, when to give up waiting and the watches they took.
         self._departed: dict[int, tuple[Path, float, list[int]]] = {}
+        # Which pending departure each of those watches still belongs to.
+        self._departing: dict[int, int] = {}
         self._watch(root)
         if recursive:
             self._watch_below(root)
@@ -434,6 +509,9 @@ class Inotify:
             error = ctypes.get_errno()
             raise OSError(error, f"cannot watch {directory}: {os.strerror(error)}")
         self._dirs[descriptor] = directory
+        # The kernel hands back the watch an inode already has: a directory
+        # that left and came back is the tree's again, not its departure's.
+        self._departing.pop(descriptor, None)
 
     def _watch_below(self, top: Path) -> None:
         """Watches every directory below `top`. One that vanishes on the way
@@ -444,6 +522,15 @@ class Inotify:
                 with contextlib.suppress(OSError):
                     self._watch(Path(directory) / name)
 
+    def _watch_tree(self, top: Path) -> None:
+        """Watches `top` and everything below it as they are now. Anything
+        inside may predate the watch: a directory moved in arrives full, and
+        a new one fills fast."""
+
+        with contextlib.suppress(OSError):
+            self._watch(top)
+        self._watch_below(top)
+
     def _below(self, top: Path) -> list[tuple[int, Path]]:
         return [
             (descriptor, path)
@@ -451,16 +538,50 @@ class Inotify:
             if path == top or top in path.parents
         ]
 
-    def _moved_within(self, old: Path, new: Path, descriptors: list[int]) -> None:
-        for descriptor in descriptors:
-            path = self._dirs.get(descriptor)
-            if path is not None and (path == old or old in path.parents):
-                self._dirs[descriptor] = new / path.relative_to(old)
+    def _moved_within(self, old: Path, new: Path) -> None:
+        """Rewrites `old` to `new` in every watched path and every pending
+        departure's old path at or below it."""
+
+        for descriptor, path in self._below(old):
+            self._dirs[descriptor] = new / path.relative_to(old)
+        for cookie, (path, deadline, taken) in list(self._departed.items()):
+            if path == old or old in path.parents:
+                self._departed[cookie] = (new / path.relative_to(old), deadline, taken)
 
     def _moved_out(self, descriptors: list[int]) -> None:
         for descriptor in descriptors:
             if self._dirs.pop(descriptor, None) is not None:
                 self._remove(self._fd, descriptor)
+
+    def _depart(self, cookie: int, path: Path) -> None:
+        """Holds the watches at and below `path` for the move `cookie`,
+        except those an earlier pending departure holds: they stay its own,
+        to remove or keep when it settles."""
+
+        taken = [
+            descriptor for descriptor, _ in self._below(path) if descriptor not in self._departing
+        ]
+        self._departed[cookie] = (path, self._clock() + MOVE_PAIR_SECONDS, taken)
+        for descriptor in taken:
+            self._departing[descriptor] = cookie
+
+    def _settle(self, cookie: int) -> tuple[Path, list[int]]:
+        """Ends the departure `cookie`: its old path and the watches it
+        still holds."""
+
+        old, _, taken = self._departed.pop(cookie)
+        held = [descriptor for descriptor in taken if self._departing.get(descriptor) == cookie]
+        for descriptor in held:
+            del self._departing[descriptor]
+        return old, held
+
+    def _join(self, cookie: int, descriptors: list[int]) -> None:
+        """Gives `descriptors` to the pending departure `cookie`: they moved
+        into a directory that is away, so they go or return with it."""
+
+        self._departed[cookie][2].extend(descriptors)
+        for descriptor in descriptors:
+            self._departing[descriptor] = cookie
 
     def read_events(self) -> list[dict[str, str]]:
         """The events waiting now, possibly none. Call it again within
@@ -473,10 +594,10 @@ class Inotify:
             buffer = b""
         events = self.parse(buffer)
         now = self._clock()
-        for cookie, (_, deadline, descriptors) in list(self._departed.items()):
+        for cookie, (_, deadline, _) in list(self._departed.items()):
             if deadline <= now:
-                del self._departed[cookie]
-                self._moved_out(descriptors)
+                _, held = self._settle(cookie)
+                self._moved_out(held)
         return events
 
     def settle_seconds(self) -> float | None:
@@ -501,21 +622,22 @@ class Inotify:
             directory = self._dirs.get(descriptor)
             if mask & IN_IGNORED or directory is None:
                 self._dirs.pop(descriptor, None)
+                self._departing.pop(descriptor, None)
                 continue
             path = directory / os.fsdecode(raw) if raw else directory
             if self._recursive and mask & IN_ISDIR:
                 if mask & IN_MOVED_FROM:
-                    taken = [descriptor for descriptor, _ in self._below(path)]
-                    self._departed[cookie] = (path, self._clock() + MOVE_PAIR_SECONDS, taken)
+                    self._depart(cookie, path)
                 elif mask & IN_MOVED_TO and cookie in self._departed:
-                    old, _, taken = self._departed.pop(cookie)
-                    self._moved_within(old, path, taken)
-                elif mask & (IN_CREATE | IN_MOVED_TO):
-                    # Anything inside may predate the watch: a directory
-                    # moved in arrives full, and a new one fills fast.
-                    with contextlib.suppress(OSError):
-                        self._watch(path)
-                    self._watch_below(path)
+                    old, held = self._settle(cookie)
+                    self._moved_within(old, path)
+                    away = self._departing.get(descriptor)
+                    if away is None:
+                        self._watch_tree(path)
+                    else:
+                        self._join(away, held)
+                elif mask & (IN_CREATE | IN_MOVED_TO) and descriptor not in self._departing:
+                    self._watch_tree(path)
             events.append(
                 {
                     "name": path.relative_to(self._root).as_posix(),
@@ -634,23 +756,51 @@ def serve(server: socket.socket) -> None:
         ).start()
 
 
+def parse_notice(line: bytes) -> tuple[int, dict[str, str]] | None:
+    """Splits `restored <nanos> [key=value ...]` into the time and its fields.
+
+    Returns None for anything else, including a line longer than
+    MAX_NOTICE. Words without `=` are skipped like unknown fields, so a later
+    host can add to the line without older guests refusing it."""
+
+    if len(line) > MAX_NOTICE:
+        return None
+    words = line.decode("ascii", errors="replace").split()
+    if len(words) < 2 or words[0] != "restored" or not words[1].isdigit():
+        return None
+    fields = {}
+    for word in words[2:]:
+        key, equals, value = word.partition("=")
+        if equals and key:
+            fields[key] = value
+    return int(words[1]), fields
+
+
 def serve_notice(connection: socket.socket, *, set_clock: bool) -> None:
-    """Acts on one restore notice: sets the clock, counts the restore and
-    answers `ok`. Anything else closes the connection unanswered."""
+    """Acts on one restore notice: sets the clock, counts the restore, takes
+    the sandbox id and answers `ok`. Anything else closes the connection
+    unanswered."""
 
     with connection, connection.makefile("rb") as reader:
         line = reader.readline(MAX_NOTICE + 1)
-        word, _, nanos = line.decode("ascii", errors="replace").strip().partition(" ")
-        if word != "restored" or not nanos.isdigit():
-            print(f"ignored restore notice {line[:MAX_NOTICE]!r}", file=sys.stderr, flush=True)
+        notice = parse_notice(line)
+        if notice is None:
+            print(f"ignored restore notice {line[:80]!r}", file=sys.stderr, flush=True)
             return
+        nanos, fields = notice
         if set_clock:
             try:
-                time.clock_settime_ns(time.CLOCK_REALTIME, int(nanos))
+                time.clock_settime_ns(time.CLOCK_REALTIME, nanos)
             except OSError as error:
                 # A guest that cannot set its clock still counts the restore.
                 print(f"cannot set the clock: {error}", file=sys.stderr, flush=True)
-        RESTORES.record()
+        try:
+            RESTORES.record(fields.get("sandbox") or None)
+        except OSError as error:
+            # Unanswered, the host tries again: an id the guest could not
+            # keep is not taken.
+            print(f"cannot keep the sandbox id: {error}", file=sys.stderr, flush=True)
+            return
         with contextlib.suppress(BrokenPipeError, ConnectionResetError):
             connection.sendall(b"ok\n")
 

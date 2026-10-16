@@ -7,6 +7,7 @@ use std::time::Duration;
 use compute_core::HostPolicy;
 use compute_host::protocol::{
     DurabilityName, ErrorCode, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
+    SleepConfig,
 };
 use tokio::time::Instant;
 
@@ -250,6 +251,65 @@ async fn an_unreadable_record_blocks_its_id() {
     lab.assert_clean();
 }
 
+/// A record so damaged that the user and network its sandbox holds cannot
+/// be told stops all creation: any newcomer could be handed the same ones.
+/// Creation resumes once the damaged sandbox is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unknown_ordinal_stops_creation_until_it_is_resolved() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let (broken, other) = (id(42), id(43));
+    lab.create(broken, NEVER).await;
+    let (root, world) = lab.stop().await;
+    let dir = root.join("state/vm/firecracker").join(broken.to_string());
+    std::fs::write(dir.join("sandbox.json"), b"{ not a record").unwrap();
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+
+    assert_eq!(lab.status().await.blocked.len(), 1);
+    let reply = lab.client.call(&create_request(other)).await.unwrap();
+    assert!(is_error(&reply, ErrorCode::Internal), "{reply:?}");
+
+    let (root, world) = lab.stop().await;
+    world.live.lock().unwrap().remove(&vm_name(broken));
+    std::fs::remove_dir_all(&dir).unwrap();
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    lab.create(other, NEVER).await;
+    lab.assert_clean();
+}
+
+/// A removal that deleted the record but not the files can be retried
+/// with Remove, and a successful retry unblocks the id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removal_that_left_files_behind_is_retried_by_removing_again() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let doomed = id(44);
+    lab.create(doomed, NEVER).await;
+    let stuck = lab.sandbox_dir(doomed).join("stuck");
+    std::fs::create_dir(&stuck).unwrap();
+    std::fs::write(stuck.join("file"), b"").unwrap();
+    if !super::freeze(&stuck) {
+        // Root deletes it anyway; nothing to test.
+        super::thaw(&stuck);
+        return;
+    }
+    let remove = Request::Remove {
+        id: doomed,
+        generation: None,
+    };
+    let reply = lab.client.call(&remove).await.unwrap();
+    assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+    let status = lab.status().await;
+    assert_eq!(status.blocked.len(), 1, "{status:?}");
+    assert!(!lab.sandbox_dir(doomed).join("sandbox.json").exists());
+
+    super::thaw(&stuck);
+    assert_eq!(lab.client.call(&remove).await.unwrap(), Reply::Done);
+    let status = lab.status().await;
+    assert!(status.blocked.is_empty(), "{status:?}");
+    assert!(!lab.sandbox_dir(doomed).exists());
+    lab.create(doomed, NEVER).await;
+    lab.assert_clean();
+}
+
 fn create_request(id: Id) -> Request {
     Request::Create {
         id,
@@ -353,6 +413,53 @@ async fn a_replacement_waits_for_the_dead_vms_teardown() {
     assert_eq!(lab.run(sandbox, &["get"]).await, [""]);
     assert!(started.elapsed() >= Duration::from_millis(250));
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
+    lab.assert_clean();
+}
+
+/// An agent that stops part way through checking a VM's disk leaves no
+/// proof the disk kept every write. The next agent takes the VM back and
+/// never saves it, but the sandbox is not broken: it still wakes and runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vm_whose_disk_check_was_cut_short_still_wakes_and_runs() {
+    const SAVE_LATER: SleepConfig = SleepConfig {
+        pause_after_ms: Some(30),
+        save_after_ms: Some(1_500),
+        ..NEVER
+    };
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(47);
+    lab.create(sandbox, SAVE_LATER).await;
+    lab.run(sandbox, &["set alive"]).await;
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    let marker = lab.sandbox_dir(sandbox).join("disk-check");
+    let (root, world) = lab.stop().await;
+    // As if the agent stopped after the VMM synced the disk but before it
+    // learned how that went.
+    std::fs::write(&marker, "").unwrap();
+
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    let view = lab.current(sandbox).await;
+    assert!(view.unsavable && !view.broken, "{view:?}");
+    let reply = lab.sleep_to(sandbox, LevelName::Saved).await;
+    assert!(is_error(&reply, ErrorCode::Invalid), "{reply:?}");
+    // Well past its save time it is still only paused, and never saved.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let view = lab.current(sandbox).await;
+    assert_eq!(
+        (view.level, view.durability),
+        (LevelName::Paused, DurabilityName::Volatile),
+        "{view:?}"
+    );
+    assert!(!lab.image(sandbox));
+    assert!(marker.exists(), "the record of the cut-short check went");
+
+    let reply = lab.wake(sandbox).await;
+    assert!(matches!(reply, Reply::Woken { .. }), "{reply:?}");
+    assert_eq!(lab.run(sandbox, &["get"]).await, ["alive"]);
+    let view = lab.current(sandbox).await;
+    assert!(view.unsavable && !view.broken, "{view:?}");
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 0);
     lab.assert_clean();
 }
 

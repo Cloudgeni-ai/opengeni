@@ -9,7 +9,6 @@
 
 use std::fs;
 use std::io;
-use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 
 use tokio::net::UnixStream;
@@ -21,19 +20,86 @@ fn refused(path: &Path, what: &str) -> io::Error {
     )
 }
 
-/// Gives the regular file or socket at `path` to `uid`/`gid`, refusing
-/// anything else (such as a symbolic link) and never following a link.
+/// What the host hands a VMM in its jail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owned {
+    /// A regular file, such as a writable drive.
+    File,
+    /// A Unix socket the VMM connects to.
+    Socket,
+}
+
+impl Owned {
+    fn refusal(self) -> &'static str {
+        match self {
+            Self::File => "not a regular file",
+            Self::Socket => "not a socket",
+        }
+    }
+}
+
+/// Gives the entry at `path` to `uid`/`gid`, if it is of the `kind` asked
+/// for and has no other name.
+///
+/// The entry is pinned by a descriptor opened without following a link, its
+/// type is read through that descriptor and its owner changed through it,
+/// so swapping the entry for something else after the check changes only
+/// the pinned one. A file with another name is refused: it may be a hard
+/// link to a host file the jail can see.
 ///
 /// # Errors
 ///
-/// The entry is missing, of another type, or cannot be changed.
-pub fn hand_over(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
-    let kind = fs::symlink_metadata(path)?.file_type();
-    if !(kind.is_file() || kind.is_socket()) {
-        return Err(refused(path, "not a regular file or socket"));
+/// The entry is missing, of another kind, has other names, or cannot be
+/// changed.
+#[cfg(target_os = "linux")]
+pub fn hand_over(path: &Path, kind: Owned, uid: u32, gid: u32) -> io::Result<()> {
+    use rustix::fs::{AtFlags, FileType, Gid, Mode, OFlags, Uid};
+
+    let fd = rustix::fs::open(
+        path,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let stat = rustix::fs::fstat(&fd)?;
+    let expected = match kind {
+        Owned::File => FileType::RegularFile,
+        Owned::Socket => FileType::Socket,
+    };
+    if FileType::from_raw_mode(stat.st_mode) != expected {
+        return Err(refused(path, kind.refusal()));
     }
-    // Should the entry be swapped for a link after the check, `lchown`
-    // changes only the link.
+    if stat.st_nlink != 1 {
+        return Err(refused(path, "a file with other names"));
+    }
+    rustix::fs::chownat(
+        &fd,
+        "",
+        Some(Uid::from_raw(uid)),
+        Some(Gid::from_raw(gid)),
+        AtFlags::EMPTY_PATH,
+    )?;
+    Ok(())
+}
+
+/// Gives the entry at `path` to `uid`/`gid`, if it is of the `kind` asked
+/// for. Jails exist only on Linux; this checks the type and never follows
+/// a link.
+///
+/// # Errors
+///
+/// The entry is missing, of another kind, or cannot be changed.
+#[cfg(not(target_os = "linux"))]
+pub fn hand_over(path: &Path, kind: Owned, uid: u32, gid: u32) -> io::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+
+    let found = fs::symlink_metadata(path)?.file_type();
+    let matches = match kind {
+        Owned::File => found.is_file(),
+        Owned::Socket => found.is_socket(),
+    };
+    if !matches {
+        return Err(refused(path, kind.refusal()));
+    }
     std::os::unix::fs::lchown(path, Some(uid), Some(gid))
 }
 
@@ -108,11 +174,49 @@ mod tests {
         fs::write(&file, b"disk").unwrap();
         let planted = dir.path().join("planted");
         std::os::unix::fs::symlink(&file, &planted).unwrap();
-        assert!(hand_over(&planted, 1, 1).is_err(), "handed over a link");
+        assert!(
+            hand_over(&planted, Owned::File, 1, 1).is_err(),
+            "handed over a link"
+        );
         assert!(check_written(&planted).is_err(), "trusted a link");
         check_written(&file).unwrap();
         let second = dir.path().join("second");
         fs::hard_link(&file, &second).unwrap();
         assert!(check_written(&file).is_err(), "trusted a hard link");
+    }
+
+    /// A VMM owns its jail and can replace its drive with a hard link to a
+    /// host file the jail can see, or with something of another kind; the
+    /// host must then change no owner at all.
+    #[tokio::test]
+    async fn only_entries_of_their_own_of_the_kind_asked_for_are_handed_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let (uid, gid) = (
+            rustix::process::getuid().as_raw(),
+            rustix::process::getgid().as_raw(),
+        );
+        let disk = dir.path().join("disk.ext4");
+        fs::write(&disk, b"disk").unwrap();
+        hand_over(&disk, Owned::File, uid, gid).unwrap();
+        assert!(hand_over(&disk, Owned::Socket, uid, gid).is_err());
+
+        // The drive renamed away and a hard link to the host's file put in
+        // its place.
+        let host = dir.path().join("vmlinux");
+        fs::write(&host, b"host kernel").unwrap();
+        fs::rename(&disk, dir.path().join("moved")).unwrap();
+        fs::hard_link(&host, &disk).unwrap();
+        assert!(
+            hand_over(&disk, Owned::File, uid, gid).is_err(),
+            "handed over a second name of a host file"
+        );
+
+        let socket = dir.path().join("vsock.sock_53");
+        let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        hand_over(&socket, Owned::Socket, uid, gid).unwrap();
+        assert!(hand_over(&socket, Owned::File, uid, gid).is_err());
+        let doubled = dir.path().join("second.sock");
+        fs::hard_link(&socket, &doubled).unwrap();
+        assert!(hand_over(&socket, Owned::Socket, uid, gid).is_err());
     }
 }

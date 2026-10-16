@@ -8,12 +8,14 @@
 //! takes it back.
 
 mod api;
+mod holder;
 mod jail;
 mod pager;
 mod process;
 
 use std::fs::{self, File};
 use std::io;
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -26,10 +28,13 @@ use tokio::time::{Instant, sleep, timeout};
 use self::api::Api;
 pub use self::api::ApiError;
 pub use self::jail::BINARY_NAME;
-use self::jail::{API_SOCKET, Jail, LAUNCH_LEFTOVERS, Launch, PID_FILE, jailer_args};
+use self::jail::{
+    API_SOCKET, Jail, LAUNCH_LEFTOVERS, Launch, PID_FILE, jailer_args, remove_if_present,
+};
 pub use self::process::Exit;
 use self::process::{Process, in_cgroup, parse_pid};
 use crate::cgroup::Cgroup;
+use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
 use crate::spec::{MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
@@ -237,19 +242,23 @@ impl Firecracker {
         Cgroup::at(self.cgroups.path().join(&spec.name))
     }
 
-    /// The VM's cgroup as `/proc/<pid>/cgroup` shows it.
-    fn cgroup_name(&self, spec: &VmSpec) -> PathBuf {
-        Path::new("/").join(&self.cgroup_relative).join(&spec.name)
+    /// The cgroup of VM `name` as `/proc/<pid>/cgroup` shows it.
+    fn cgroup_name(&self, name: &str) -> PathBuf {
+        Path::new("/").join(&self.cgroup_relative).join(name)
     }
 
     /// Starts a jailed VMM for `spec` and waits for its API. `owned` are
-    /// files the VMM must be able to write, such as its drives; they are
-    /// handed to the VM's user first.
+    /// entries the VMM must be able to write or connect to, such as its
+    /// drives; they are handed to the VM's user first. A failure counts as a
+    /// launch ([`EngineError::launched`]) once the VMM the jailer started was
+    /// found in the VM's cgroup. Before that, a jailer that failed or hung
+    /// may have got as far as starting one, but anything it left in the
+    /// cgroup is ended unseen and not counted.
     async fn launch(
         &self,
         spec: &VmSpec,
         operation: &'static str,
-        owned: Vec<PathBuf>,
+        owned: Vec<(PathBuf, Owned)>,
     ) -> Result<FirecrackerVm, EngineError> {
         let jail = Jail::new(spec)
             .map_err(|error| EngineError::new(ErrorKind::Fatal, operation, error))?;
@@ -289,30 +298,36 @@ impl Firecracker {
         // namespace; Firecracker is then nobody's child but init's.
         let Ok(status) = timeout(JAILER_TIMEOUT, jailer.wait()).await else {
             let _ = jailer.kill().await;
-            let _ = self.discard(spec).await;
-            return Err(EngineError::new(
-                ErrorKind::Transient,
+            return Err(launch_failed(
                 operation,
                 format!("the jailer did not finish within {JAILER_TIMEOUT:?}"),
+                self.discard(spec).await,
             ));
         };
-        let status = status.map_err(|error| EngineError::io(operation, error))?;
+        let status = match status {
+            Ok(status) => status,
+            Err(error) => {
+                return Err(launch_failed(
+                    operation,
+                    format!("waiting for the jailer: {error}"),
+                    self.discard(spec).await,
+                ));
+            }
+        };
         if !status.success() {
-            let _ = self.discard(spec).await;
-            return Err(EngineError::new(
-                ErrorKind::Transient,
+            return Err(launch_failed(
                 operation,
                 format!(
                     "the jailer failed ({status}); see {}",
                     spec.logs.join("vmm.log").display()
                 ),
+                self.discard(spec).await,
             ));
         }
         let vm = match self.attach(spec, &jail) {
             Ok(vm) => vm,
             Err(error) => {
-                let _ = self.discard(spec).await;
-                return Err(EngineError::new(ErrorKind::Transient, operation, error));
+                return Err(launch_failed(operation, error, self.discard(spec).await));
             }
         };
         if let Err(error) = vm.wait_for_api(self.startup_timeout).await {
@@ -337,7 +352,7 @@ impl Firecracker {
         // Checked after pinning: had the VMM exited and its pid been reused
         // before the pidfd was opened, the new process would not be in the
         // VM's cgroup.
-        let cgroup = self.cgroup_name(spec);
+        let cgroup = self.cgroup_name(&spec.name);
         if !in_cgroup(pid, &cgroup).map_err(|error| error.to_string())? || !process.is_running() {
             return Err(format!(
                 "process {} is not the VMM in {}",
@@ -354,9 +369,10 @@ impl Firecracker {
         })
     }
 
-    /// Kills the VMM, waits for it to exit and releases its cgroup and the
-    /// jailer's per-launch files. Fails without waiting if the process
-    /// cannot be signalled, and after it exited if releasing fails.
+    /// Kills the VMM, waits for it to exit, ends whatever else is left in
+    /// its cgroup, such as holders, and releases the group and the jailer's
+    /// per-launch files. Fails without waiting if the process cannot be
+    /// signalled, and after it exited if releasing fails.
     async fn kill(&self, vm: &FirecrackerVm) -> Result<(), EngineError> {
         const OP: &str = "stop";
         // A pidfd only ever signals its own process, even if it is gone.
@@ -366,24 +382,29 @@ impl Firecracker {
         vm.process.exited().await;
         // A pager may still run in the group; it goes with the VM.
         let (cgroup, jail) = (vm.cgroup.clone(), vm.jail.clone());
-        tokio::task::spawn_blocking(move || release(&cgroup, Some(&jail)))
-            .await
-            .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
-            .map_err(|error| EngineError::io(OP, error))
+        tokio::task::spawn_blocking(move || {
+            cgroup.end_all()?;
+            cgroup.remove()?;
+            tidy(&jail)
+        })
+        .await
+        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
+        .map_err(|error| EngineError::io(OP, error))
     }
 
     /// Ends a VM whose start failed with `error` and returns that error, or
     /// a fatal one if the VM would not end: nothing may start in its place
-    /// while it may still run.
+    /// while it may still run. Either way the error records the launch.
     async fn ended(&self, vm: &FirecrackerVm, error: EngineError) -> EngineError {
-        match self.kill(vm).await {
+        let error = match self.kill(vm).await {
             Ok(()) => error,
             Err(stuck) => EngineError::new(
                 ErrorKind::Fatal,
                 error.operation,
                 format!("{error}; then the VM could not be ended: {stuck}"),
             ),
-        }
+        };
+        error.after_launch()
     }
 
     /// Kills whatever runs in the VM's cgroup, for VMMs the host holds no
@@ -391,9 +412,13 @@ impl Firecracker {
     async fn discard(&self, spec: &VmSpec) -> io::Result<()> {
         let cgroup = self.cgroup_of(spec);
         let jail = Jail::new(spec).ok();
-        tokio::task::spawn_blocking(move || release(&cgroup, jail.as_ref()))
-            .await
-            .map_err(io::Error::other)?
+        tokio::task::spawn_blocking(move || {
+            cgroup.end_all()?;
+            cgroup.remove()?;
+            jail.map_or(Ok(()), |jail| tidy(&jail))
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     /// Runs `body` and, if it fails, kills the half-started VM.
@@ -409,20 +434,24 @@ impl Firecracker {
     }
 }
 
-/// Kills whatever still runs in a VM's `cgroup`, waits briefly for it to
-/// go, and removes the group and the jailer's per-launch files.
-fn release(cgroup: &Cgroup, jail: Option<&Jail>) -> io::Result<()> {
-    cgroup.kill_all()?;
-    let mut delay = Duration::from_millis(1);
-    for _ in 0..12 {
-        if !cgroup.is_populated()? {
-            break;
-        }
-        std::thread::sleep(delay);
-        delay *= 2;
+/// The error a launch ends with when it failed before the host held the
+/// VMM it may have started. Whatever it started was then discarded, with
+/// `discarded` saying how that went: only once that is proven, by the VM's
+/// cgroup being empty and gone, is the failure transient. Otherwise a VMM
+/// may still run on the sandbox's disk, and nothing may start beside it.
+fn launch_failed(
+    operation: &'static str,
+    message: String,
+    discarded: io::Result<()>,
+) -> EngineError {
+    match discarded {
+        Ok(()) => EngineError::new(ErrorKind::Transient, operation, message),
+        Err(error) => EngineError::new(
+            ErrorKind::Fatal,
+            operation,
+            format!("{message}; then what it started could not be cleaned up: {error}"),
+        ),
     }
-    cgroup.remove()?;
-    jail.map_or(Ok(()), tidy)
 }
 
 /// The cgroup v2 mount point.
@@ -441,15 +470,15 @@ fn cgroup2_mount() -> io::Result<PathBuf> {
 fn prepare(
     jail: &Jail,
     logs: &Path,
-    owned: &[PathBuf],
+    owned: &[(PathBuf, Owned)],
     uid: u32,
     gid: u32,
 ) -> io::Result<(File, File)> {
     fs::create_dir_all(jail.root())?;
     tidy(jail)?;
     // The jail is the VMM's: an earlier one may have left links in it.
-    for path in owned {
-        crate::confined::hand_over(path, uid, gid)?;
+    for (path, kind) in owned {
+        crate::confined::hand_over(path, *kind, uid, gid)?;
     }
     fs::create_dir_all(logs)?;
     Ok((
@@ -676,7 +705,7 @@ impl Engine for Firecracker {
             .drives
             .iter()
             .filter(|drive| !drive.read_only)
-            .map(|drive| drive.path.clone())
+            .map(|drive| (drive.path.clone(), Owned::File))
             .collect();
         let vm = self.launch(spec, OP, owned).await?;
         let configure = async {
@@ -694,6 +723,10 @@ impl Engine for Firecracker {
             )
             .await?;
             for drive in &spec.drives {
+                // No `cache_type`: Firecracker's default, `Unsafe`, offers
+                // the guest no flush, so the VMM syncs a drive only while
+                // it takes a snapshot. Callers that check a disk for lost
+                // writes around each snapshot rely on that.
                 vm.call(
                     OP,
                     ErrorKind::Fatal,
@@ -760,11 +793,11 @@ impl Engine for Firecracker {
             Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
         let body = load_request(spec, &jail, files, self.memory)
             .map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        let owned: Vec<PathBuf> = spec
+        let owned: Vec<(PathBuf, Owned)> = spec
             .drives
             .iter()
             .filter(|drive| !drive.read_only)
-            .map(|drive| drive.path.clone())
+            .map(|drive| (drive.path.clone(), Owned::File))
             .collect();
         // Saved state and memory are only read; they stay the host's, so the
         // VMM cannot change an image it restores from.
@@ -885,6 +918,22 @@ impl Engine for Firecracker {
         }
     }
 
+    fn hold(
+        &self,
+        vm: &FirecrackerVm,
+        file: OwnedFd,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+        std::future::ready(holder::hold(&vm.cgroup, JAILER_PATH, file))
+    }
+
+    fn held(
+        &self,
+        vm: &FirecrackerVm,
+    ) -> impl Future<Output = Result<Option<OwnedFd>, EngineError>> + Send {
+        let relative = self.cgroup_name(&vm.name);
+        std::future::ready(holder::held(&vm.cgroup, &relative, vm.process.pid()))
+    }
+
     async fn clean_up(&self, spec: &VmSpec) -> Result<(), EngineError> {
         self.discard(spec)
             .await
@@ -901,6 +950,12 @@ impl Engine for Firecracker {
         vm.cgroup
             .cpu_time()
             .map_err(|error| EngineError::io("cpu_time", error))
+    }
+
+    fn io_bytes(&self, vm: &FirecrackerVm) -> Result<u64, EngineError> {
+        vm.cgroup
+            .io_bytes()
+            .map_err(|error| EngineError::io("io_bytes", error))
     }
 
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {
@@ -926,18 +981,24 @@ impl Firecracker {
         match self.attach(spec, &jail) {
             Ok(vm) => Ok(Some(vm)),
             Err(error) => {
-                let populated = cgroup
-                    .is_populated()
+                // The VM's own helpers, its pager and the engine's
+                // holders, may outlive its VMM; anything else may be it.
+                let api = spec.api_socket();
+                let besides =
+                    holder::besides_holders(&cgroup, &self.cgroup_name(&spec.name), |pid| {
+                        pager::certainly_pager(pid, &api)
+                    })
                     .map_err(|error| EngineError::io(OP, error))?;
-                if populated {
+                if besides {
                     return Err(EngineError::new(
                         ErrorKind::Transient,
                         OP,
                         format!("a process runs in the VM's group but is not its VMM: {error}"),
                     ));
                 }
-                // An empty group: a jailer that died half way, or a VMM
-                // that exited. Nothing runs, so nothing is lost.
+                // A group with no VMM: a jailer that died half way, or a
+                // VMM that exited, perhaps leaving its pager and holders.
+                // No guest runs, so nothing is lost.
                 self.discard(spec)
                     .await
                     .map_err(|error| EngineError::io(OP, error))?;
@@ -971,13 +1032,6 @@ impl Firecracker {
                 "the VMM runs but did not answer within {ADOPT_TIMEOUT:?}"
             ))),
         }
-    }
-}
-
-async fn remove_if_present(path: &Path) -> io::Result<()> {
-    match tokio::fs::remove_file(path).await {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
     }
 }
 

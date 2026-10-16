@@ -102,6 +102,32 @@ async fn assert_processor_time_follows_work(engine: &Firecracker, vm: &Firecrack
     eprintln!("processor time: busy loop {busy:?}, paused 300 ms {paused:?}");
 }
 
+/// Traffic is the other half of the activity rule: a guest writing its disk
+/// must show up in it, and a paused VM must stay well under the default
+/// 4 KiB a second. Leaves the VM running.
+async fn assert_traffic_follows_io(engine: &Firecracker, vm: &FirecrackerVm, uds: &Path) {
+    let before = engine.io_bytes(vm).unwrap();
+    exec(
+        uds,
+        "dd if=/dev/zero of=/var/tmp/io-probe bs=1M count=8 conv=fsync 2>/dev/null; \
+         rm -f /var/tmp/io-probe; sync",
+    )
+    .await
+    .unwrap();
+    let written = engine.io_bytes(vm).unwrap().saturating_sub(before);
+    assert!(
+        written >= 8 << 20,
+        "writing 8 MiB to disk showed only {written} bytes of traffic"
+    );
+    engine.pause(vm).await.unwrap();
+    let before = engine.io_bytes(vm).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let paused = engine.io_bytes(vm).unwrap().saturating_sub(before);
+    engine.resume(vm).await.unwrap();
+    assert!(paused < 1024, "a paused VM moved {paused} bytes in 300 ms");
+    eprintln!("traffic: 8 MiB write {written} bytes, paused 300 ms {paused} bytes");
+}
+
 /// A VM's spec in the jail layout the jailer expects, with its own copy of
 /// the base disk and a hard link to the lab kernel.
 fn jailed_spec(lab: &Path, name: &str, uid: u32) -> VmSpec {
@@ -202,6 +228,7 @@ async fn boot_pause_compress_snapshot_restore() {
     assert_ne!(output.trim(), "");
     let awake = engine.resident_bytes(&vm).unwrap();
     assert_processor_time_follows_work(&engine, &vm, &uds).await;
+    assert_traffic_follows_io(&engine, &vm, &uds).await;
 
     let started = Instant::now();
     engine.pause(&vm).await.unwrap();
@@ -269,7 +296,9 @@ async fn boot_pause_compress_snapshot_restore() {
 }
 
 /// A VM outlives the engine instance that started it, and a new instance
-/// takes it back with its guest's running programs intact.
+/// takes it back with its guest's running programs intact, and with the
+/// open file the first one had kept for it. The VM's end ends its holder,
+/// and a holder left after its VMM died does not stop a clean-up.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_engine_adopts_a_running_vm_without_disturbing_it() {
     let Some(lab) = lab() else {
@@ -287,6 +316,11 @@ async fn a_new_engine_adopts_a_running_vm_without_disturbing_it() {
     let guest_pid = output.trim().to_owned();
     assert_ne!(guest_pid, "");
     let pid = vm.pid();
+    let disk = std::fs::File::open(&spec.drives[0].path).unwrap();
+    first
+        .hold(&vm, disk.try_clone().unwrap().into())
+        .await
+        .unwrap();
     // The agent goes away: its handles are dropped, nothing is stopped.
     drop(vm);
     drop(first);
@@ -295,6 +329,18 @@ async fn a_new_engine_adopts_a_running_vm_without_disturbing_it() {
     let (vm, found) = second.adopt(&spec).await.unwrap().expect("VM not adopted");
     assert_eq!(found, Found::Running);
     assert_eq!(vm.pid(), pid);
+    let kept = std::fs::File::from(second.held(&vm).await.unwrap().expect("nothing kept"));
+    // One open file description: a status flag set through one descriptor
+    // shows through the other.
+    let flags = rustix::fs::fcntl_getfl(&kept).unwrap();
+    assert!(!flags.contains(rustix::fs::OFlags::APPEND));
+    rustix::fs::fcntl_setfl(&disk, flags | rustix::fs::OFlags::APPEND).unwrap();
+    assert!(
+        rustix::fs::fcntl_getfl(&kept)
+            .unwrap()
+            .contains(rustix::fs::OFlags::APPEND)
+    );
+    drop(kept);
     let (output, _) = exec(&uds, &format!("cat /proc/{guest_pid}/comm"))
         .await
         .unwrap();
@@ -312,11 +358,63 @@ async fn a_new_engine_adopts_a_running_vm_without_disturbing_it() {
     second.stop(vm).await.unwrap();
     assert!(!cgroup.exists(), "cgroup left behind");
     assert!(second.adopt(&spec).await.unwrap().is_none());
+
+    // A VMM that dies leaves its holder behind, which ends with it.
+    let vm = second.boot(&spec).await.unwrap();
+    second
+        .hold(&vm, disk.try_clone().unwrap().into())
+        .await
+        .unwrap();
+    let pid = rustix::process::Pid::from_raw(vm.pid()).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+    vm.exited().await;
+    drop(vm);
+    assert!(
+        engine(&lab).adopt(&spec).await.unwrap().is_none(),
+        "a dead VMM was taken back"
+    );
+    assert!(!cgroup.exists(), "the holder outlived its VM");
     for leftover in ["firecracker", "firecracker.pid", "dev", "api.sock"] {
         assert!(
             !spec.dir.join(leftover).exists(),
             "{leftover} left in the jail"
         );
     }
+    std::fs::remove_dir_all(&spec.logs).unwrap();
+}
+
+/// A launch counts once the engine saw the VMM running: a jailer that fails
+/// before starting one is no launch, a VMM that then refuses its snapshot is
+/// one.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_vmm_seen_running_counts_as_a_launch() {
+    let Some(lab) = lab() else {
+        eprintln!("skipped: set COMPUTE_TEST_LAB to run against Firecracker");
+        return;
+    };
+    let name = format!("launch-test-{}", std::process::id());
+    let spec = jailed_spec(&lab, &name, 3_900_003);
+    let failing = Firecracker::new(FirecrackerConfig {
+        firecracker: lab.join("bin/firecracker"),
+        jailer: "/bin/false".into(),
+        cgroup_parent: "/sys/fs/cgroup/compute-test".into(),
+    })
+    .unwrap();
+    let error = failing.boot(&spec).await.unwrap_err();
+    assert!(!error.launched, "a jailer that failed counted: {error}");
+
+    let state = spec.dir.join("vm.state");
+    let memory = spec.dir.join("vm.mem");
+    std::fs::write(&state, b"not a snapshot").unwrap();
+    std::fs::write(&memory, vec![0_u8; 4096]).unwrap();
+    let files = RestoreFiles {
+        state,
+        memory: MemorySource::File(memory),
+    };
+    let error = engine(&lab).restore(&spec, &files).await.unwrap_err();
+    assert!(
+        error.launched,
+        "a VMM that refused its snapshot did not count: {error}"
+    );
     std::fs::remove_dir_all(&spec.logs).unwrap();
 }

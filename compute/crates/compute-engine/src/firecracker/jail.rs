@@ -14,6 +14,7 @@
 //! inside it to the paths the confined VMM sees.
 
 use std::ffi::OsString;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::spec::VmSpec;
@@ -161,6 +162,14 @@ pub fn jailer_args(spec: &VmSpec, jail: &Jail, launch: &Launch<'_>) -> Vec<OsStr
 /// Whether `id` is a valid jailer and Firecracker instance id.
 fn valid_id(id: &str) -> bool {
     (1..=64).contains(&id.len()) && id.chars().all(|c| c == '-' || c.is_ascii_alphanumeric())
+}
+
+/// Removes the file at `path`; succeeds if there is none.
+pub(super) async fn remove_if_present(path: &Path) -> io::Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]

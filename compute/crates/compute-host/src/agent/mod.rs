@@ -31,7 +31,7 @@ use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
 use crate::protocol::{HostStatus, Id, SandboxConfig, StepStats};
-use crate::state::{Record, Records, StateError, lock_exclusive};
+use crate::state::{Record, Records, StateError, claim_host};
 use crate::step::{After, Live};
 use crate::store::Store;
 
@@ -40,6 +40,15 @@ mod recover;
 mod requests;
 mod sample;
 mod steps;
+
+/// Takes the host's lock at `path` for state root `root`; see
+/// [`HostConfig::host_lock`].
+async fn claim(path: PathBuf, root: PathBuf) -> Result<std::fs::File, HostError> {
+    tokio::task::spawn_blocking(move || claim_host(&path, &root, HANDOVER))
+        .await
+        .map_err(|error| HostError::Io(error.to_string()))?
+        .map_err(HostError::from)
+}
 
 /// How long a starting agent waits for the previous one to let go of the
 /// state root.
@@ -86,8 +95,11 @@ pub struct HostConfig {
     pub can_compress: bool,
     /// A lock file every agent on this host takes, whatever its state root:
     /// user ids, sandbox networks and firewall rules are the host's, so one
-    /// agent at a time may hand them out. `None` only where no two agents
-    /// can meet, as in tests with fake VMs.
+    /// agent at a time may hand them out. The file also names the state root
+    /// they belong to: an agent of another root is refused while that root
+    /// still has sandboxes, whose VMs may outlive their agent. Work an agent
+    /// leaves in flight when it ends keeps the lock until it finishes. `None`
+    /// only where no two agents can meet, as in tests with fake VMs.
     pub host_lock: Option<PathBuf>,
     /// How VMs whose memory needs a fault handler get one.
     pub pager: PagerConfig,
@@ -123,33 +135,75 @@ impl PagerConfig {
     }
 }
 
-/// When a running sandbox counts as busy: its VM used at least
-/// `cpu_percent` of one processor, averaged over `window`.
+/// When a running sandbox counts as busy: over `window`, its VM used at
+/// least `cpu_percent` of one processor on average, or moved at least
+/// `io_bytes_per_second` on average through its network and disk (see
+/// [`Engine::io_bytes`]).
+///
+/// Vsock traffic is not reliably measured here: some of it reaches the
+/// traffic counters and can count toward the rule, but no keep-awake
+/// guarantee rests on it. Streams the host opens into the guest hold the
+/// sandbox awake while they are open. Connections the
+/// guest opens to its host (see [`crate::guest_ports`]) deliberately do
+/// not: a control link carries keepalives for as long as the guest lives,
+/// so its traffic alone must not keep a sandbox awake. Data arriving on one
+/// can wake the sandbox, and the guest's own work for it shows as
+/// processor use.
 ///
 /// This is how the host sees work nobody told it about, such as a build or
-/// test run an agent left in the background. A quiet guest uses well under
-/// one percent; short periodic jobs average out over the window.
+/// test run an agent left in the background, or a download that mostly
+/// waits on the network. A quiet guest uses well under one percent of a
+/// processor and moves no data at all; short periodic jobs average out over
+/// the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BusyRule {
-    /// Percent of one processor.
+    /// Percent of one processor; 0 ignores processor use.
     pub cpu_percent: u32,
+    /// Bytes per second; 0 ignores traffic.
+    pub io_bytes_per_second: u64,
     /// Averaging window. Readings come every [`HostConfig::sample_every`],
     /// so the effective window is at least that long.
     pub window: Duration,
 }
 
 impl BusyRule {
-    /// A quarter of one processor over five seconds.
+    /// A quarter of one processor, or 4 KiB a second of traffic, over five
+    /// seconds. An idle guest moves nothing; a guest still writing back a
+    /// finished command's files, or fetching something slowly, moves more.
     pub const DEFAULT: Self = Self {
         cpu_percent: 25,
+        io_bytes_per_second: 4 << 10,
         window: Duration::from_secs(5),
     };
 
-    /// Whether using `used` processor time over `elapsed` counts as busy.
+    /// Whether using `used` processor time and moving `moved` bytes over
+    /// `elapsed` counts as busy.
     #[must_use]
-    pub fn is_busy(&self, used: Duration, elapsed: Duration) -> bool {
-        !elapsed.is_zero()
-            && used.as_micros() * 100 >= elapsed.as_micros() * u128::from(self.cpu_percent)
+    pub fn is_busy(&self, used: Duration, moved: u64, elapsed: Duration) -> bool {
+        let elapsed_us = elapsed.as_micros();
+        if elapsed_us == 0 {
+            return false;
+        }
+        // Saturating: a product too large to hold is a bar nothing reaches.
+        let cpu = self.cpu_percent > 0
+            && used.as_micros().saturating_mul(100)
+                >= elapsed_us.saturating_mul(u128::from(self.cpu_percent));
+        let io = self.io_bytes_per_second > 0
+            && u128::from(moved).saturating_mul(1_000_000)
+                >= elapsed_us.saturating_mul(u128::from(self.io_bytes_per_second));
+        cpu || io
+    }
+
+    /// Whether the rule reads processor use at all.
+    #[must_use]
+    pub fn watches_cpu(&self) -> bool {
+        self.cpu_percent > 0
+    }
+
+    /// Whether the rule reads traffic at all.
+    #[must_use]
+    pub fn watches_io(&self) -> bool {
+        self.io_bytes_per_second > 0
     }
 }
 
@@ -308,7 +362,8 @@ enum Event<V> {
     },
     Destroyed {
         id: Id,
-        ordinal: u32,
+        /// The ordinal it held, when known.
+        ordinal: Option<u32>,
         result: Result<(), HostError>,
     },
     /// Everything a VM process of `id` left behind is released.
@@ -325,12 +380,17 @@ struct Running {
     started: Instant,
 }
 
-/// The start of one VM's current processor-use window.
+/// The start of one VM's current activity window. Each reading is kept only
+/// when the rule wants it and it worked, so one signal failing leaves the
+/// other to judge alone.
 #[derive(Clone, Copy, Debug)]
-struct CpuWindow {
+struct ActivityWindow {
     incarnation: u64,
     started: Instant,
-    cpu: Duration,
+    /// Processor time so far.
+    cpu: Option<Duration>,
+    /// Traffic so far.
+    io: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -355,8 +415,8 @@ struct Slot<V> {
     waiters: Vec<Waiter>,
     /// A step the core started that waits for a dead VM's teardown.
     deferred: Option<Step>,
-    /// Processor use measured so far, while the VM runs.
-    cpu: Option<CpuWindow>,
+    /// Processor use and traffic measured so far, while the VM runs.
+    activity: Option<ActivityWindow>,
 }
 
 /// A request waiting for a sandbox to run.
@@ -424,6 +484,14 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// refused and their files and VMs left alone.
     blocked: BTreeMap<SandboxId, String>,
     destroying: HashMap<SandboxId, Vec<Reply<()>>>,
+    /// Blocked sandboxes whose record is gone but whose files a removal
+    /// could not finish deleting, with the ordinal they still hold if
+    /// known. Removing one again retries.
+    leftovers: HashMap<SandboxId, Option<u32>>,
+    /// Blocked sandboxes with an unreadable record whose ordinal is
+    /// unknown. Any new sandbox could clash with one, so none is created
+    /// while there are any.
+    unknown_ordinals: BTreeSet<SandboxId>,
     /// Dead VM processes of each sandbox still being torn down. Nothing new
     /// starts for a sandbox until its count is back to zero, so no teardown
     /// ever removes files of a newer VM.
@@ -433,8 +501,6 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Stops teardowns retrying once the agent ends; the next agent
     /// finishes them.
     shutdown: CancellationToken,
-    /// The host-wide lock, held for the agent's life.
-    _host_lock: Option<std::fs::File>,
     commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::UnboundedReceiver<Event<E::Vm>>,
     events_tx: mpsc::UnboundedSender<Event<E::Vm>>,
@@ -501,14 +567,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             network.check().map_err(HostError::Invalid)?;
         }
         let host_lock = match config.host_lock.clone() {
-            Some(path) => Some(
-                tokio::task::spawn_blocking(move || lock_exclusive(&path, HANDOVER))
-                    .await
-                    .map_err(|error| HostError::Io(error.to_string()))??,
-            ),
+            Some(path) => Some(claim(path, config.root.clone()).await?),
             None => None,
         };
-        let (records, strays) = Records::open(config.root.clone(), HANDOVER).await?;
+        let (records, strays) = Records::open(config.root.clone(), HANDOVER, host_lock).await?;
         let images = Images {
             kernel: config.kernel,
             boot_args: match &config.network {
@@ -564,10 +626,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             ordinals: BTreeSet::new(),
             blocked: BTreeMap::new(),
             destroying: HashMap::new(),
+            leftovers: HashMap::new(),
+            unknown_ordinals: BTreeSet::new(),
             tearing_down: HashMap::new(),
             teardowns: tokio::task::JoinSet::new(),
             shutdown: CancellationToken::new(),
-            _host_lock: host_lock,
             commands,
             events,
             events_tx,
@@ -632,7 +695,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 removers: Vec::new(),
                 waiters: Vec::new(),
                 deferred: None,
-                cpu: None,
+                activity: None,
             },
         );
     }

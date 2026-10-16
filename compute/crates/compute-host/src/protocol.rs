@@ -426,11 +426,17 @@ pub struct SandboxStatus {
     /// Reasons it is held awake.
     pub holds: usize,
     /// VM processes started for it, boots and restores alike, since the
-    /// host agent started.
+    /// host agent started: every one the engine saw running, including
+    /// those that then failed to boot or restore.
     #[serde(default)]
     pub launches: u64,
     /// Host memory it holds, when a VM process exists.
     pub resident_bytes: Option<u64>,
+    /// Whether no copy of its VM process can be trusted, such as when its
+    /// disk may have lost writes: it keeps running and pausing, but sleeps
+    /// no deeper than compressed until its VM process is replaced.
+    #[serde(default)]
+    pub unsavable: bool,
     /// Whether it is beyond recovery on this host.
     pub broken: bool,
 }

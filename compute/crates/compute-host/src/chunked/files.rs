@@ -35,12 +35,13 @@ impl Chunked {
     pub(super) async fn put_file(
         &self,
         path: &Path,
+        file: io::Result<File>,
         earlier: HashMap<u64, ChunkRef>,
         known: Option<Arc<Vec<Hash>>>,
         cancel: &CancellationToken,
     ) -> Result<Option<String>, EngineError> {
         const OP: &str = "archive";
-        let file = File::open(path).map_err(|error| EngineError::io(OP, error))?;
+        let file = file.map_err(|error| EngineError::io(OP, error))?;
         let length = file
             .metadata()
             .map_err(|error| EngineError::io(OP, error))?

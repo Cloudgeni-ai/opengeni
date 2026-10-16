@@ -10,8 +10,9 @@
 //! store still holds that copy: the local files may be the only good copy.
 
 use std::fmt::Write as _;
-use std::fs;
+use std::fs::{self, File};
 use std::future::ready;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_storage::store::ChunkStore;
 use serde::{Deserialize, Serialize};
 
-use crate::layout::{copy_sparse, sync_file};
+use crate::layout::{copy_file, copy_sparse, sync_file};
 use crate::protocol::Id;
 
 /// A memory image as the store sees it.
@@ -35,11 +36,40 @@ pub struct SavedImage {
     pub chunks: Option<Arc<Vec<[u8; 32]>>>,
 }
 
+/// A file in a VM's jail. Its VMM can put a link to a host file or a pipe
+/// in its place at any time, so it is only read through
+/// [`JailedFile::open`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JailedFile(PathBuf);
+
+impl JailedFile {
+    /// The file at `path`, inside a VM's jail.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self(path.into())
+    }
+
+    /// Opens it for reading without following a link or blocking on a
+    /// pipe, and only if it is a regular file with no other name.
+    ///
+    /// # Errors
+    ///
+    /// It is anything else, or opening it fails.
+    pub fn open(&self) -> io::Result<File> {
+        crate::layout::open_jailed(&self.0)
+    }
+
+    /// Where it is, for messages.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
 /// The local files that make up a saved sandbox.
 #[derive(Clone, Debug)]
 pub struct SavedFiles {
-    /// The root disk.
-    pub disk: PathBuf,
+    /// The root disk, in the sandbox's jail.
+    pub disk: JailedFile,
     /// The memory image, when the sandbox has one.
     pub memory: Option<SavedImage>,
     /// The learned order in which the guest touches memory after a wake,
@@ -351,7 +381,8 @@ impl Store for Directory {
     ) -> Result<Archive, EngineError> {
         let stored = self.dir(id);
         let cancel = cancel.clone();
-        let mut pairs = vec![(files.disk.clone(), "disk")];
+        let disk = files.disk.clone();
+        let mut pairs = Vec::new();
         if let Some(memory) = &files.memory {
             pairs.push((memory.state.clone(), "state"));
             pairs.push((memory.memory.clone(), "memory"));
@@ -370,7 +401,13 @@ impl Store for Directory {
                 }
             }
             fs::create_dir_all(&staging)?;
-            let mut names = Vec::with_capacity(pairs.len());
+            if cancel.is_cancelled() {
+                fs::remove_dir_all(&staging)?;
+                return Ok(Archive::Cancelled);
+            }
+            copy_file(&disk.open()?, &staging.join("disk"))?;
+            let mut names = Vec::with_capacity(pairs.len() + 1);
+            names.push("disk");
             for (local, name) in &pairs {
                 if cancel.is_cancelled() {
                     fs::remove_dir_all(&staging)?;
@@ -501,7 +538,7 @@ mod tests {
         let disk = dir.path().join("disk");
         fs::write(&disk, b"first").unwrap();
         let files = SavedFiles {
-            disk: disk.clone(),
+            disk: JailedFile::new(disk.clone()),
             memory: None,
             profile: None,
         };
@@ -527,7 +564,7 @@ mod tests {
     async fn a_directory_receipt_vouches_for_the_stored_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let files = SavedFiles {
-            disk: dir.path().join("disk"),
+            disk: JailedFile::new(dir.path().join("disk")),
             memory: Some(SavedImage {
                 state: dir.path().join("state"),
                 memory: dir.path().join("memory"),
@@ -536,9 +573,9 @@ mod tests {
             profile: None,
         };
         for (path, bytes) in [
-            (&files.disk, &b"disk"[..]),
-            (&files.memory.as_ref().unwrap().state, b"state"),
-            (&files.memory.as_ref().unwrap().memory, b"memory"),
+            (files.disk.path(), &b"disk"[..]),
+            (files.memory.as_ref().unwrap().state.as_path(), b"state"),
+            (files.memory.as_ref().unwrap().memory.as_path(), b"memory"),
         ] {
             fs::write(path, bytes).unwrap();
         }
@@ -571,7 +608,7 @@ mod tests {
     async fn a_directory_fetch_brings_back_only_what_was_archived() {
         let dir = tempfile::tempdir().unwrap();
         let files = SavedFiles {
-            disk: dir.path().join("disk"),
+            disk: JailedFile::new(dir.path().join("disk")),
             memory: Some(SavedImage {
                 state: dir.path().join("state"),
                 memory: dir.path().join("memory"),
@@ -579,7 +616,7 @@ mod tests {
             }),
             profile: None,
         };
-        fs::write(&files.disk, b"GOOD").unwrap();
+        fs::write(files.disk.path(), b"GOOD").unwrap();
         fs::write(&files.memory.as_ref().unwrap().state, b"state").unwrap();
         fs::write(&files.memory.as_ref().unwrap().memory, b"memory").unwrap();
         let store = Directory::new(dir.path().join("store"));

@@ -3,6 +3,20 @@ use crate::spec::Network;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 
+/// The core retries a transient failure at once, so a launch reports one
+/// only when nothing it started can still run.
+#[test]
+fn a_launch_that_could_not_clean_up_is_fatal() {
+    let cleaned = launch_failed("boot", "attaching failed".into(), Ok(()));
+    assert_eq!(cleaned.kind, ErrorKind::Transient);
+    let stuck = launch_failed(
+        "boot",
+        "attaching failed".into(),
+        Err(io::Error::other("the cgroup is still populated")),
+    );
+    assert_eq!(stuck.kind, ErrorKind::Fatal);
+}
+
 /// A VMM API that answers `PATCH /vm` with `patch` and `GET /` with
 /// `get`.
 fn vmm(patch: Answer, get: Answer) -> (Socket, Api) {

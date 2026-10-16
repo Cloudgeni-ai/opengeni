@@ -313,6 +313,64 @@ impl Chunked {
             pages,
         })
     }
+
+    /// Stores the learned wake profile `learned`, if there is one, and
+    /// returns its reference.
+    async fn put_profile(
+        &self,
+        learned: Option<&[u8]>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<ChunkRef>, EngineError> {
+        let Some(bytes) = learned else {
+            return Ok(None);
+        };
+        if cancel.is_cancelled() {
+            return Ok(None);
+        }
+        let chunk = EncodedChunk::encode(bytes, ZSTD_LEVEL)
+            .map_err(|error| storage_error("archive", error))?;
+        self.chunks
+            .put_chunk(&chunk)
+            .await
+            .map_err(|error| storage_error("archive", error))?;
+        Ok(Some(chunk.reference))
+    }
+
+    /// Stores the working-set pack the learned profile `learned` asks for
+    /// from the image in `files`. Only makes the next wake faster: a pack
+    /// that cannot be stored is left out.
+    async fn put_pack(
+        &self,
+        id: Id,
+        files: &SavedFiles,
+        learned: Option<&[u8]>,
+        cancel: &CancellationToken,
+    ) -> Option<ChunkRef> {
+        let (Some(image), Some(learned)) = (&files.memory, learned) else {
+            return None;
+        };
+        if cancel.is_cancelled() {
+            return None;
+        }
+        let profile = WakeProfile::parse(learned);
+        match working_set::put(
+            &self.chunks,
+            &self.transfers,
+            &image.memory,
+            image.chunks.clone(),
+            &profile,
+            cancel,
+        )
+        .await
+        {
+            Ok(index) => index,
+            Err(working_set::PackError::Cancelled) => None,
+            Err(error) => {
+                tracing::warn!(%id, %error, "working-set pack not stored; the next wake fetches by chunk");
+                None
+            }
+        }
+    }
 }
 
 impl Store for Chunked {
@@ -336,7 +394,13 @@ impl Store for Chunked {
             self.earlier(memory_before.map(|memory| memory.state.as_str())),
             self.earlier(memory_before.map(|memory| memory.memory.as_str())),
         );
-        let disk = self.put_file(&files.disk, disk_before, None, cancel);
+        let disk = self.put_file(
+            files.disk.path(),
+            files.disk.open(),
+            disk_before,
+            None,
+            cancel,
+        );
         let memory = async {
             let Some(image) = &files.memory else {
                 return Ok(Some(None));
@@ -344,8 +408,20 @@ impl Store for Chunked {
             // Both run to the end, so neither is still writing when the
             // other fails.
             let (state, memory) = tokio::join!(
-                self.put_file(&image.state, state_before, None, cancel),
-                self.put_file(&image.memory, memory_before, image.chunks.clone(), cancel),
+                self.put_file(
+                    &image.state,
+                    File::open(&image.state),
+                    state_before,
+                    None,
+                    cancel
+                ),
+                self.put_file(
+                    &image.memory,
+                    File::open(&image.memory),
+                    memory_before,
+                    image.chunks.clone(),
+                    cancel,
+                ),
             );
             Ok(match (state?, memory?) {
                 (Some(state), Some(memory)) => Some(Some(MemoryHead { state, memory })),
@@ -359,49 +435,8 @@ impl Store for Chunked {
                 .filter(|bytes| !bytes.is_empty()),
             None => None,
         };
-        let profile = async {
-            let Some(bytes) = &learned else {
-                return Ok(None);
-            };
-            if cancel.is_cancelled() {
-                return Ok(None);
-            }
-            let chunk = EncodedChunk::encode(bytes, ZSTD_LEVEL)
-                .map_err(|error| storage_error(OP, error))?;
-            self.chunks
-                .put_chunk(&chunk)
-                .await
-                .map_err(|error| storage_error(OP, error))?;
-            Ok(Some(chunk.reference))
-        };
-        // Only makes the next wake faster: a pack that cannot be stored is
-        // left out.
-        let pack = async {
-            let (Some(image), Some(learned)) = (&files.memory, &learned) else {
-                return None;
-            };
-            if cancel.is_cancelled() {
-                return None;
-            }
-            let profile = WakeProfile::parse(learned);
-            match working_set::put(
-                &self.chunks,
-                &self.transfers,
-                &image.memory,
-                image.chunks.clone(),
-                &profile,
-                cancel,
-            )
-            .await
-            {
-                Ok(index) => index,
-                Err(working_set::PackError::Cancelled) => None,
-                Err(error) => {
-                    tracing::warn!(%id, %error, "working-set pack not stored; the next wake fetches by chunk");
-                    None
-                }
-            }
-        };
+        let profile = self.put_profile(learned.as_deref(), cancel);
+        let pack = self.put_pack(id, files, learned.as_deref(), cancel);
         let (disk, memory, profile, pack) = tokio::join!(disk, memory, profile, pack);
         let (Some(disk), Some(memory), profile) = (disk?, memory?, profile?) else {
             return Ok(Archive::Cancelled);

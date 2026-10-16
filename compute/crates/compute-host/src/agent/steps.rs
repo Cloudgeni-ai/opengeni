@@ -66,14 +66,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 ordinal,
                 result,
             } => {
-                // A removal that stopped part way keeps its ordinal and
-                // record, and its id stays blocked until removing it again
-                // or the next start of the agent finishes it.
+                // A removal that stopped part way keeps its ordinal, and its
+                // id stays blocked until removing it again or the next
+                // start of the agent finishes it.
                 match &result {
                     Ok(()) => {
-                        self.ordinals.remove(&ordinal);
+                        if let Some(ordinal) = ordinal {
+                            self.ordinals.remove(&ordinal);
+                        }
+                        self.leftovers.remove(&id.0);
                     }
-                    Err(error) => self.block(id, format!("removal failed: {error}")),
+                    Err(error) => {
+                        self.block(id, format!("removal failed: {error}"));
+                        if self.records.get(id).is_none() {
+                            self.leftovers.insert(id.0, ordinal);
+                        }
+                    }
                 }
                 for remover in self.destroying.remove(&id.0).unwrap_or_default() {
                     let _ = remover.send(result.clone());
@@ -130,6 +138,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             });
             return;
         };
+        // What the VM does from here is the step's work, not the guest's.
+        slot.activity = None;
         slot.op = Some(Running {
             op,
             step,
@@ -439,6 +449,41 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             let _ = events.send(Event::Destroyed {
                 id,
+                ordinal: Some(ordinal),
+                result,
+            });
+        });
+    }
+
+    /// Deletes in the background what a removal left of a sandbox whose
+    /// record is already gone: its network and its directory.
+    pub(super) fn remove_leftovers(&mut self, id: Id, ordinal: Option<u32>, reply: Reply<()>) {
+        self.blocked.remove(&id.0);
+        self.leftovers.remove(&id.0);
+        self.destroying.insert(id.0, vec![reply]);
+        let dir = Paths::new(&self.root, id).dir;
+        let net = self.net.clone();
+        let records = Arc::clone(&self.records);
+        let events = self.events_tx.clone();
+        tokio::spawn(async move {
+            // Keeps the state root, and the host, locked until it is done.
+            let _records = records;
+            let failed = |error: &dyn std::fmt::Display| HostError::Io(error.to_string());
+            let result = async {
+                if let Some(net) = net {
+                    tokio::task::spawn_blocking(move || net.remove(id, ordinal))
+                        .await
+                        .map_err(|error| failed(&error))?
+                        .map_err(|error| failed(&error))?;
+                }
+                match tokio::fs::remove_dir_all(&dir).await {
+                    Err(error) if error.kind() != io::ErrorKind::NotFound => Err(failed(&error)),
+                    _ => Ok(()),
+                }
+            }
+            .await;
+            let _ = events.send(Event::Destroyed {
+                id,
                 ordinal,
                 result,
             });
@@ -458,6 +503,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Notice::Retrying { step, failures } => {
                 tracing::warn!(%id, ?step, failures, "step failed; retrying");
             }
+            Notice::Unsavable => tracing::warn!(
+                %id,
+                "no copy of the VM can be trusted; it sleeps no deeper than compressed"
+            ),
             Notice::Broken => {
                 tracing::error!(%id, "sandbox broken on this host");
                 self.settle(id);
@@ -542,7 +591,9 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
         };
         stopped.map_err(|error| HostError::Io(error.to_string()))?;
         if let Some(net) = self.net.clone() {
-            tokio::task::spawn_blocking(move || net.remove_for(id))
+            // The record holds its ordinal until it is removed below.
+            let ordinal = record.allocation.link.map(|_| record.ordinal);
+            tokio::task::spawn_blocking(move || net.remove(id, ordinal))
                 .await
                 .map_err(|error| HostError::Io(error.to_string()))?
                 .map_err(|error| HostError::Io(error.to_string()))?;

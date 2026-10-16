@@ -455,8 +455,9 @@ class Sandbox:
 
     def restore_count(self, *, timeout: float = DEFAULT_TIMEOUT) -> int:
         """How many restore notices the guest service has acknowledged since
-        it started: how often this sandbox was restored from a memory image.
-        Waking it to ask does not restore it."""
+        it started. Every restore from a memory image adds at least one; a
+        notice the host repeats after losing the answer adds another. Waking
+        the sandbox to ask does not restore it."""
 
         return int(self._guest.call("ping", io_timeout=timeout)["restores"])
 

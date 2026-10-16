@@ -17,6 +17,7 @@ mod spec;
 pub mod vsock;
 
 use std::future::Future;
+use std::os::fd::OwnedFd;
 use std::time::Duration;
 
 pub use error::{EngineError, ErrorKind};
@@ -135,6 +136,23 @@ pub trait Engine: Send + Sync + 'static {
         spec: &VmSpec,
     ) -> impl Future<Output = Result<Option<(Self::Vm, Found)>, EngineError>> + Send;
 
+    /// Keeps `file` open, as the same open file description, for as long as
+    /// `vm`'s process lives, outliving the host agent as the VM does, so
+    /// state that belongs to the description survives an agent restart;
+    /// [`Engine::held`] gets it back. The host keeps its disk watch there.
+    fn hold(
+        &self,
+        vm: &Self::Vm,
+        file: OwnedFd,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send;
+
+    /// A new descriptor for the open file description [`Engine::hold`]
+    /// keeps for `vm`, or `None` if nothing is kept for it.
+    fn held(
+        &self,
+        vm: &Self::Vm,
+    ) -> impl Future<Output = Result<Option<OwnedFd>, EngineError>> + Send;
+
     /// Ends any VM process left behind for `spec` and releases its host
     /// resources. Succeeds when there is none.
     fn clean_up(&self, spec: &VmSpec) -> impl Future<Output = Result<(), EngineError>> + Send;
@@ -146,6 +164,14 @@ pub trait Engine: Send + Sync + 'static {
     /// thread of its VMM. The host compares readings to tell a sandbox busy
     /// with work of its own from an idle one.
     fn cpu_time(&self, vm: &Self::Vm) -> Result<Duration, EngineError>;
+
+    /// Bytes the VM's processes have moved through system calls since they
+    /// started: its network and disk traffic, and possibly part of its
+    /// vsock traffic (an engine documents what it counts). The host compares
+    /// readings to see work that waits on data rather than the processor,
+    /// such as a slow download. Only differences between readings of the
+    /// same VM mean anything.
+    fn io_bytes(&self, vm: &Self::Vm) -> Result<u64, EngineError>;
 
     /// Resolves once the VM process has ended for any reason, including
     /// [`Engine::stop`]. The future does not borrow the VM, so the host can

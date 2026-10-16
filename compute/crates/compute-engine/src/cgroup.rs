@@ -61,6 +61,31 @@ impl Cgroup {
         parse_cpu_usage(&stat)
     }
 
+    /// Bytes the group's processes have passed through read and write
+    /// system calls (`rchar` plus `wchar` in `/proc/<pid>/io`, every thread
+    /// counted). For a Firecracker VMM that covers its network device (the
+    /// tap's `readv`/`writev`), its synchronous block device, and vsock
+    /// data it copies straight between guest memory and a socket. Vsock
+    /// data it buffers under backpressure leaves through `send(2)`, which
+    /// these counters miss. A process that ends between listing and reading
+    /// is left out, so only differences between readings of the same
+    /// processes mean anything.
+    pub fn io_bytes(&self) -> io::Result<u64> {
+        let procs = fs::read_to_string(self.path.join("cgroup.procs"))?;
+        let mut total = 0_u64;
+        for pid in procs.split_whitespace() {
+            match fs::read_to_string(format!("/proc/{pid}/io")) {
+                Ok(counters) => total = total.saturating_add(parse_io_bytes(&counters)?),
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound
+                        || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => {
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(total)
+    }
+
     /// Pushes the group's memory out of RAM: anonymous pages into compressed
     /// memory (zswap, never written to disk), file pages dropped.
     ///
@@ -100,22 +125,46 @@ impl Cgroup {
         }
     }
 
-    /// Moves process `pid` into the group, with every thread it has.
+    /// Moves process `pid` into the group.
     pub fn add(&self, pid: u32) -> io::Result<()> {
         fs::write(self.path.join("cgroup.procs"), pid.to_string())
     }
 
-    /// The processes in the group, as this host's PID namespace numbers
+    /// The processes in the group, as the host's PID namespace numbers
     /// them; none if the group is gone.
-    pub fn processes(&self) -> io::Result<Vec<u32>> {
-        match fs::read_to_string(self.path.join("cgroup.procs")) {
-            Ok(text) => text
-                .lines()
-                .map(|line| line.trim().parse().map_err(io::Error::other))
-                .collect(),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(error) => Err(error),
+    pub fn processes(&self) -> io::Result<Vec<rustix::process::Pid>> {
+        let procs = match fs::read_to_string(self.path.join("cgroup.procs")) {
+            Ok(procs) => procs,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        procs
+            .lines()
+            .map(|line| {
+                line.trim()
+                    .parse()
+                    .ok()
+                    .and_then(rustix::process::Pid::from_raw)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, format!("bad pid {line:?}"))
+                    })
+            })
+            .collect()
+    }
+
+    /// Kills every process in the group and waits a few seconds at most
+    /// for them all to be gone. Blocks.
+    pub fn end_all(&self) -> io::Result<()> {
+        self.kill_all()?;
+        let mut delay = Duration::from_millis(1);
+        for _ in 0..12 {
+            if !self.is_populated()? {
+                break;
+            }
+            std::thread::sleep(delay);
+            delay *= 2;
         }
+        Ok(())
     }
 
     /// Whether any process is still in the group.
@@ -164,6 +213,17 @@ fn parse_cpu_usage(stat: &str) -> io::Result<Duration> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "cpu.stat has no usage_usec"))
 }
 
+fn parse_io_bytes(counters: &str) -> io::Result<u64> {
+    let field = |name: &str| {
+        counters
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("io has no {name}")))
+    };
+    Ok(field("rchar:")?.saturating_add(field("wchar:")?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +236,13 @@ mod tests {
             Duration::from_micros(1_234_567)
         );
         assert!(parse_cpu_usage("user_usec 5\n").is_err());
+    }
+
+    #[test]
+    fn reads_traffic_from_proc_io() {
+        let counters = "rchar: 1000\nwchar: 234\nsyscr: 7\nsyscw: 3\nread_bytes: 4096\n\
+                        write_bytes: 0\ncancelled_write_bytes: 0\n";
+        assert_eq!(parse_io_bytes(counters).unwrap(), 1234);
+        assert!(parse_io_bytes("rchar: 5\n").is_err());
     }
 }

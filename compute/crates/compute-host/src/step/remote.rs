@@ -15,7 +15,7 @@ use super::{
 use crate::image::{Parts, Suspect};
 use crate::layout::{remove_if_present, write_atomic};
 use crate::state::{Change, Disk};
-use crate::store::{Archive, FetchInto, FetchedMemory, SavedFiles, SavedImage, Store};
+use crate::store::{Archive, FetchInto, FetchedMemory, JailedFile, SavedFiles, SavedImage, Store};
 
 impl<E: Engine, S: Store> Job<E, S> {
     pub(super) async fn archive(&mut self) -> Outcome {
@@ -63,7 +63,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
         let profile = wake_profile(&self.paths);
         let files = SavedFiles {
-            disk: self.paths.disk.clone(),
+            disk: JailedFile::new(&self.paths.disk),
             memory: memory.as_ref().map(|(image, chunks)| SavedImage {
                 state: images.state(image.generation()),
                 memory: images.memory(image.generation()),

@@ -4,7 +4,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use compute_core::{HoldId, Input, Level, Priority, Step};
+use compute_core::{Durability, HoldId, Input, Level, Priority, Step};
 use compute_engine::Engine;
 
 use crate::layout::{Images, Paths, copy_sparse, sync_parent};
@@ -119,7 +119,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // removal stops whatever VM it has and retries any removal that
             // stopped part way.
             let Some(record) = self.records.get(id) else {
-                let _ = reply.send(Err(HostError::Broken(id)));
+                match self.leftovers.get(&id.0) {
+                    Some(&ordinal) => self.remove_leftovers(id, ordinal, reply),
+                    None => {
+                        let _ = reply.send(Err(HostError::Broken(id)));
+                    }
+                }
                 return;
             };
             if let Err(error) = check_generation(&record, generation) {
@@ -209,6 +214,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 "this host has no store, so sandboxes cannot be archived".into(),
             ));
         }
+        if level >= Level::Saved
+            && self
+                .core
+                .sandbox(id.0)
+                .is_some_and(|view| view.unsavable && view.state.durability == Durability::Volatile)
+        {
+            return Err(HostError::Invalid(format!(
+                "sandbox {id}'s VM may have lost disk writes, so it cannot be saved; \
+                 it sleeps no deeper than compressed until its VM is replaced"
+            )));
+        }
         if level == Level::Compressed && !self.can_compress {
             return Err(HostError::Invalid(
                 "this host cannot compress memory; ask for saved instead".into(),
@@ -244,6 +260,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
         if self.blocked.contains_key(&id.0) {
             let _ = reply.send(Err(HostError::Broken(id)));
+            return;
+        }
+        if let Some(unknown) = self.unknown_ordinals.first() {
+            let _ = reply.send(Err(HostError::Io(format!(
+                "sandbox {}'s record is unreadable and the user and network it holds unknown; \
+                 no sandbox is created until it is resolved",
+                Id(*unknown)
+            ))));
             return;
         }
         if self.slots.contains_key(&id.0)
@@ -298,12 +322,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // The directory must be new: one already there belongs to a
                 // sandbox this agent does not know, and is left alone.
                 std::fs::create_dir(&paths.dir)?;
-                std::fs::create_dir_all(&paths.jail)?;
+                std::fs::create_dir(&paths.jail)?;
                 copy_sparse(&base, &paths.disk)?;
                 // The record, written next, vouches for these: their
-                // directory entries must outlast a crash first.
+                // directory entries must outlast a crash first, all the way
+                // up to the one in the sandboxes' directory.
                 sync_parent(&paths.disk)?;
                 sync_parent(&paths.jail)?;
+                sync_parent(&paths.dir)?;
                 if let (Some(net), Some(link)) = (&networks, &link) {
                     net.ensure(link)?;
                 }
@@ -331,7 +357,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // The id stays reserved until this is done, so it cannot
                 // remove a newer sandbox's files or network.
                 if let Some(net) = net {
-                    let _ = tokio::task::spawn_blocking(move || net.remove_for(id)).await;
+                    let _ =
+                        tokio::task::spawn_blocking(move || net.remove(id, Some(ordinal))).await;
                 }
                 let _ = tokio::fs::remove_dir_all(&dir).await;
             }
@@ -365,6 +392,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         .vm
                         .as_ref()
                         .and_then(|live| self.engine.resident_bytes(&live.vm).ok()),
+                    unsavable: view.unsavable,
                     broken: view.broken,
                 })
             })
