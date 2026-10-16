@@ -66,6 +66,8 @@ struct World {
     refuse_restores: Mutex<usize>,
     resumes: AtomicUsize,
     adopted: AtomicUsize,
+    /// While set, every resume is refused before the guest runs.
+    refuse_resumes: AtomicBool,
     restoring: AtomicUsize,
     max_restoring: AtomicUsize,
     compress_cancelled: AtomicUsize,
@@ -335,6 +337,13 @@ impl Engine for Fake {
     }
 
     fn resume(&self, vm: &FakeVm) -> impl Future<Output = Result<(), EngineError>> + Send {
+        if self.world.refuse_resumes.load(Ordering::SeqCst) {
+            return ready(Err(EngineError::new(
+                ErrorKind::Transient,
+                "resume",
+                "refused",
+            )));
+        }
         let resumed = self.set_paused(vm, "resume", false);
         if resumed.is_ok() {
             self.world.resumes.fetch_add(1, Ordering::Relaxed);
@@ -829,6 +838,63 @@ async fn a_crash_after_a_save_loses_nothing() {
     lab.wait_level(sandbox, LevelName::Saved).await;
     assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["hello", "kept"]);
     assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_resume_keeps_the_saved_copy_for_a_crash() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(15);
+    lab.create(sandbox, SAVE_IN_PLACE).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    lab.wait_until("the save to finish", |status| {
+        let view = Lab::sandbox(status, sandbox);
+        view.durability == DurabilityName::Local && view.step.is_none()
+    })
+    .await;
+
+    lab.world.refuse_resumes.store(true, Ordering::SeqCst);
+    let reply = lab
+        .client
+        .call(&Request::Touch {
+            id: sandbox,
+            generation: None,
+            priority: PriorityName::Interactive,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply, Reply::Done);
+    lab.wait_until("a refused resume", |status| {
+        status
+            .steps
+            .iter()
+            .any(|(name, stats)| name == "resume" && stats.failed > 0)
+    })
+    .await;
+    let status = lab.status().await;
+    let view = Lab::sandbox(&status, sandbox);
+    assert_eq!(view.level, LevelName::Paused);
+    assert_eq!(view.durability, DurabilityName::Local, "nothing changed");
+    assert!(
+        lab.image(sandbox),
+        "the guest never ran, so its copy is still marked good"
+    );
+
+    // The VM dies before a retry gets through: the copy takes its place,
+    // and a restore that is refused keeps it too.
+    lab.world.crash(&vm_name(sandbox));
+    lab.wait_until("a refused restore", |status| {
+        status
+            .steps
+            .iter()
+            .any(|(name, stats)| name == "restore" && stats.failed > 0)
+    })
+    .await;
+    assert!(lab.image(sandbox));
+    lab.world.refuse_resumes.store(false, Ordering::SeqCst);
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["hello", "kept"]);
+    assert!(lab.world.restores.load(Ordering::Relaxed) >= 2);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
     lab.assert_clean();
 }
 

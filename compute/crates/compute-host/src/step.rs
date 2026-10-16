@@ -308,18 +308,33 @@ impl<E: Engine, S: Store> Job<E, S> {
     }
 
     /// Resumes a paused VM. A saved copy of it goes stale the moment the
-    /// guest runs and its disk moves on, so it is unmarked first.
+    /// guest runs and its disk moves on, so it is unmarked first, and marked
+    /// again if the resume was refused: the guest never ran, and the core
+    /// counts on a transient failure having changed nothing.
     async fn resume(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
         // The image stays on disk as the base the VM's next save is a diff
         // against; only the record stops vouching for it.
-        if (self.record.image || self.record.archived)
+        let (image, archived) = (self.record.image, self.record.archived);
+        if (image || archived)
             && let Err(error) = self
                 .commit(Change::new().image(false).archived(false))
                 .await
         {
             return (state_failure(&error), After::Kept(live));
         }
-        self.simple(self.engine.resume(&live.vm).await, live)
+        let result = self.engine.resume(&live.vm).await;
+        if let Err(error) = &result
+            && error.kind == ErrorKind::Transient
+            && (image || archived)
+            && let Err(error) = self
+                .commit(Change::new().image(image).archived(archived))
+                .await
+        {
+            // The copy is still good but no longer vouched for, so the host
+            // just stops relying on it; nothing stale can be restored.
+            tracing::error!(id = %self.id, %error, "saved copy not marked again after a refused resume");
+        }
+        self.simple(result, live)
     }
 
     async fn compress(&self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
@@ -530,10 +545,16 @@ impl<E: Engine, S: Store> Job<E, S> {
             paging.prefetched(PREFETCH_LIMIT).await;
         }
         if let Err(error) = self.engine.resume(&vm).await {
-            // The guest never ran, so the image is still good: keep it.
             let _ = self.engine.stop(vm).await;
-            let kept = Change::new().image(true).archived(archived);
-            let _ = self.commit(kept).await;
+            // A refused resume never ran the guest, so the image is still
+            // good: vouch for it again. After any other failure the guest
+            // may have run and moved the disk on, so the image stays stale.
+            if error.kind == ErrorKind::Transient {
+                let kept = Change::new().image(true).archived(archived);
+                if let Err(error) = self.commit(kept).await {
+                    tracing::error!(id = %self.id, %error, "image not vouched for again after a refused resume");
+                }
+            }
             return (failure(&error), After::NoVm);
         }
         self.tell_guest_restored().await;

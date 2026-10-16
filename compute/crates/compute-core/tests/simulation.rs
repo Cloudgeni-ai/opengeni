@@ -264,8 +264,14 @@ impl World {
             && truth.op.is_some_and(|(op, _)| op == pending.op)
         {
             truth.op = None;
-            if pending.step == Step::Resume && outcome != Outcome::Done {
-                // The guest may have run, so the saved copy is stale.
+            if pending.step == Step::Resume
+                && matches!(
+                    outcome,
+                    Outcome::Failed(Failure::MemoryLost | Failure::Fatal)
+                )
+            {
+                // The guest may have run, so the saved copy is stale. A
+                // refused or cancelled resume changed nothing.
                 truth.state = State::new(truth.state.level, Durability::Volatile, false);
             }
             match outcome {

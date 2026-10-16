@@ -76,10 +76,13 @@ pub trait Engine: Send + Sync + 'static {
         files: &RestoreFiles,
     ) -> impl Future<Output = Result<Self::Vm, EngineError>> + Send;
 
-    /// Stops the VM's processors. Memory stays in place.
+    /// Stops the VM's processors. Memory stays in place. A transient
+    /// failure means the processors kept running.
     fn pause(&self, vm: &Self::Vm) -> impl Future<Output = Result<(), EngineError>> + Send;
 
-    /// Restarts the processors of a paused VM.
+    /// Restarts the processors of a paused VM. A transient failure means
+    /// the guest did not run; whether it ran after any other failure is
+    /// unknown.
     fn resume(&self, vm: &Self::Vm) -> impl Future<Output = Result<(), EngineError>> + Send;
 
     /// Moves a paused VM's memory into compressed host RAM, in small chunks
