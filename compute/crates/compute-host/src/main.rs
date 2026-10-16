@@ -439,6 +439,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     .with_context(|| format!("memory profile {}", args.memory_profile))?;
     check_huge_pages(args.memory_profile)?;
     raise_open_file_limit();
+    protect_from_oom()?;
     let mut policy = HostPolicy::default();
     for (step, limit) in args.limits {
         policy.limits = policy.limits.with(step, limit);
@@ -540,6 +541,20 @@ fn raise_open_file_limit() {
             tracing::warn!(%error, current = ?limit.current, "could not raise the open-file limit");
         }
     }
+}
+
+/// What the out-of-memory killer adds to the agent's badness, in
+/// thousandths of the memory it weighs: the agent outlasts every VM
+/// process (VMMs and pagers raise theirs to -900) and nearly anything
+/// else on a short host. Not -1000: that makes a process unkillable even
+/// inside its own service unit, so an agent that leaked up to the unit's
+/// `MemoryMax` would hang in reclaim instead of being killed and restarted.
+/// Its helpers inherit it.
+const OOM_SCORE_ADJ: i32 = -999;
+
+fn protect_from_oom() -> anyhow::Result<()> {
+    std::fs::write("/proc/self/oom_score_adj", OOM_SCORE_ADJ.to_string())
+        .context("lowering the agent's oom_score_adj (needs CAP_SYS_RESOURCE)")
 }
 
 /// One number from `/proc/meminfo`, such as `MemTotal:` (in KiB) or

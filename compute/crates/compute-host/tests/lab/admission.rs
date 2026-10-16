@@ -93,8 +93,8 @@ async fn exec_when_room(client: &Client, sandbox: Id, script: &str) -> (String, 
 
 /// Checks that the cgroup of `sandbox`'s VM carries what it is guaranteed
 /// and that the out-of-memory killer ends nearly anything else before its
-/// VMM.
-fn check_guarantees(sandbox: Id) {
+/// VMM, and the VMM before the agent, whose own cgroup lies outside it.
+fn check_guarantees(agent: &Agent, sandbox: Id) {
     assert_eq!(cgroup_value(sandbox, "cpu.weight"), "100");
     assert_eq!(cgroup_value(sandbox, "memory.low"), (512 * MIB).to_string());
     assert_eq!(cgroup_value(sandbox, "memory.zswap.max"), "0");
@@ -112,6 +112,18 @@ fn check_guarantees(sandbox: Id) {
         })
         .collect();
     assert_eq!(vmms, ["-900"]);
+    let pid = agent.child.id();
+    let adjust = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj")).unwrap();
+    assert_eq!(adjust.trim(), "-999");
+    let own = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap();
+    let own = Path::new(own.trim().strip_prefix("0::").unwrap());
+    let parent = Path::new(CGROUP.strip_prefix("/sys/fs/cgroup").unwrap());
+    assert!(
+        own == Path::new("/") || !parent.starts_with(own),
+        "the agent's cgroup {} encloses the VMs' {}",
+        own.display(),
+        parent.display()
+    );
 }
 
 /// On a full host, waking `sandbox` and creating then waking `unknown` are
@@ -206,7 +218,7 @@ async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
 
     // Two sandboxes held awake fill the host.
     hold_with_tokens(&agent, &ids[..2]).await;
-    check_guarantees(ids[0]);
+    check_guarantees(&agent, ids[0]);
     let capacity = agent.status().await.capacity.expect("admission is on");
     assert_eq!(
         (

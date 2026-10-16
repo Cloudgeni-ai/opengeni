@@ -37,7 +37,10 @@ pick a VM.
   zswap refuses is not swapped out either. Status shows each VM's zswap
   traffic and memory pressure; a running VM with zswap stores is a bug.
 - VMMs and pagers run with `oom_score_adj` -900, so the host's
-  out-of-memory killer ends nearly anything else first.
+  out-of-memory killer ends nearly anything else first, and the agent with
+  -999, so it outlasts the VMs it can bring back. It runs in a service unit
+  of its own with a `MemoryMax`; VM cgroups lie outside it. Not -1000:
+  that would make a leaking agent hang at its limit instead of restarting.
 - On bare-metal hosts, use above the request shares whatever is free. When
   the host runs short, background relief acts in this order:
   1. idle sandboxes leave memory, least recently used first (built);

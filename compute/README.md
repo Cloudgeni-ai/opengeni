@@ -208,6 +208,31 @@ nothing of each other. `cargo arch` keeps every production file under 1,000
 code lines, keeps I/O, clocks and randomness out of `compute-core`, and allows
 `unsafe` only in a short list of files ([ADR 13](docs/adr/0013-structure-rules.md)).
 
+## Running a host
+
+`lab/host-setup.sh` prepares a host (Firecracker, kernel, base image, huge
+pages on nested hosts). Run the agent as a systemd service of its own, so a
+leak in the agent ends only the agent and the VMs keep running while
+systemd restarts it:
+
+```ini
+[Service]
+ExecStart=/usr/local/bin/compute-host --socket /run/compute-host.sock serve \
+  --root /var/lib/compute --cgroup /sys/fs/cgroup/compute ...
+Restart=always
+RestartSec=1
+# The agent and its helpers only: room for the 1 GiB chunk cache.
+MemoryMax=2G
+MemoryMin=256M
+```
+
+VMs live in their own cgroups under `--cgroup`, outside the unit's, so its
+`MemoryMax` never counts them and stopping the unit never ends them; the
+agent refuses to start if `--cgroup` lies inside its own cgroup. The agent
+lowers its `oom_score_adj` to -999 at start, below its VMs' -900, so the
+host's out-of-memory killer takes VMs before the agent that would bring
+them back, yet the agent stays killable inside its own unit.
+
 ## Testing
 
 The crates target Linux hosts with KVM.

@@ -285,9 +285,71 @@ fn parse_io_bytes(counters: &str) -> io::Result<u64> {
     Ok(field("rchar:")?.saturating_add(field("wchar:")?))
 }
 
+/// Refuses VM groups at `relative` (below the cgroup v2 root) that lie
+/// inside the calling process's own group: a memory limit on the caller,
+/// such as its service unit's `MemoryMax`, would then count the VMs, and
+/// stopping the unit would end them. A caller in the root group belongs to
+/// no unit.
+pub fn check_outside_own(relative: &Path) -> io::Result<()> {
+    let own = parse_own(&fs::read_to_string("/proc/self/cgroup")?).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "no cgroup v2 entry in /proc/self/cgroup",
+        )
+    })?;
+    if encloses(&own, relative) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "VM cgroup /{} is inside this process's own cgroup /{}: its limits \
+                 would count the VMs and stopping it would end them",
+                relative.display(),
+                own.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The caller's group below the root, from `/proc/self/cgroup`.
+fn parse_own(text: &str) -> Option<PathBuf> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .map(|path| PathBuf::from(path.trim().trim_start_matches('/')))
+}
+
+/// Whether group `inner` is `outer` or below it; the root encloses nothing
+/// here.
+fn encloses(outer: &Path, inner: &Path) -> bool {
+    !outer.as_os_str().is_empty() && inner.starts_with(outer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vm_groups_must_lie_outside_the_callers_own() {
+        let own = parse_own("0::/system.slice/compute-host.service\n").unwrap();
+        assert_eq!(own, Path::new("system.slice/compute-host.service"));
+        assert!(!encloses(&own, Path::new("compute")));
+        assert!(!encloses(
+            &own,
+            Path::new("system.slice/compute-host.service2")
+        ));
+        assert!(encloses(
+            &own,
+            Path::new("system.slice/compute-host.service/vms")
+        ));
+        assert!(encloses(
+            &own,
+            Path::new("system.slice/compute-host.service")
+        ));
+        // A process in the root group, as in a container without a unit.
+        let root = parse_own("0::/\n").unwrap();
+        assert!(!encloses(&root, Path::new("compute")));
+        assert_eq!(parse_own("1:name=systemd:/x\n"), None);
+    }
 
     #[test]
     fn reads_processor_time_from_cpu_stat() {

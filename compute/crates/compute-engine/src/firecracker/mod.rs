@@ -220,6 +220,7 @@ impl Firecracker {
                 "VMs need a parent cgroup below the cgroup v2 root",
             ));
         }
+        crate::cgroup::check_outside_own(&cgroup_relative)?;
         Ok(Self {
             binary,
             jailer: config.jailer,
