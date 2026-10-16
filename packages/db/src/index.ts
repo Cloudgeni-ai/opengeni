@@ -85921,7 +85921,6 @@ export * from "./model-context-snapshots";
 export * from "./session-content-blobs";
 export * from "./session-content-compaction";
 export * from "./session-archive";
-export * from "./session-delta-folding";
 export * from "./codemode-operations";
 export * from "./codemode-approvals";
 export * from "./tool-action-reviews";

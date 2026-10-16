@@ -1,23 +1,109 @@
 import type { SessionEventType } from "@opengeni/contracts";
 import { TURN_ACTIVITY_CANCELLATION_HEARTBEAT_INTERVAL_MS } from "@opengeni/core";
 import type { AppendEventInput } from "@opengeni/db";
+import { SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES } from "@opengeni/events";
 import { Context } from "@temporalio/activity";
 
 // Trailing-flush window. A burst of coalesced deltas followed by model silence
 // must not sit in `pending` unbounded — without a timer, flush fires only on
-// the NEXT push. Matched to the 33ms coalesce window so the client-visible
-// latency added by batching is bounded to ~one window (imperceptible, and far
-// cheaper than the per-delta DB round-trip it replaces).
-const TRAILING_FLUSH_MS = 33;
+// the NEXT push. The first fragment after a flush or a silence is sent at once
+// (time to first token is unchanged); later fragments wait at most one window.
+// Each flush stores adjacent text fragments as one row, so the window sets how
+// many delta rows a stream writes: on staging traffic, 100ms stores about a
+// fifth of the provider fragments.
+export const TRAILING_FLUSH_MS = 100;
 const MAX_BATCH_EVENTS = 50;
 // Keep model ingestion independent from a slow durable append, but never let a
 // provider outrun storage without bound. At the high-water mark `push` waits for
 // the serialized drain before consuming more provider output.
 const MAX_BUFFERED_EVENTS = 1_000;
 
+const MERGEABLE_TEXT_DELTA_TYPES: ReadonlySet<string> = new Set([
+  "agent.message.delta",
+  "agent.reasoning.delta",
+]);
+const textEncoder = new TextEncoder();
+
+type PlainTextDelta = { text: string; messageId?: string; phase?: string };
+
+/** The plain fragment shape only: any other payload field would not survive a merge. */
+function plainTextDelta(event: AppendEventInput): PlainTextDelta | null {
+  if (!MERGEABLE_TEXT_DELTA_TYPES.has(event.type)) return null;
+  for (const key of Object.keys(event)) {
+    if (key !== "type" && key !== "payload") return null;
+  }
+  const payload = event.payload;
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  if (typeof record.text !== "string") return null;
+  for (const key of Object.keys(record)) {
+    if (key !== "text" && key !== "messageId" && key !== "phase") return null;
+  }
+  if (record.messageId !== undefined && typeof record.messageId !== "string") return null;
+  if (record.phase !== undefined && typeof record.phase !== "string") return null;
+  return record as PlainTextDelta;
+}
+
+/**
+ * Stores adjacent text fragments of one stream as one delta: same type,
+ * message and phase, at most the live stream's 48 KiB bound. The text and the
+ * order of every other event are unchanged; only the provider's fragment
+ * boundaries are dropped.
+ */
+export function mergeAdjacentTextDeltas(events: AppendEventInput[]): AppendEventInput[] {
+  const merged: AppendEventInput[] = [];
+  let run: {
+    first: AppendEventInput;
+    head: PlainTextDelta;
+    parts: string[];
+    bytes: number;
+  } | null = null;
+  const flushRun = () => {
+    if (!run) return;
+    merged.push(
+      run.parts.length === 1
+        ? run.first
+        : {
+            type: run.first.type,
+            payload: {
+              text: run.parts.join(""),
+              ...(run.head.messageId !== undefined ? { messageId: run.head.messageId } : {}),
+              ...(run.head.phase !== undefined ? { phase: run.head.phase } : {}),
+            },
+          },
+    );
+    run = null;
+  };
+  for (const event of events) {
+    const delta = plainTextDelta(event);
+    if (!delta) {
+      flushRun();
+      merged.push(event);
+      continue;
+    }
+    const bytes = textEncoder.encode(delta.text).byteLength;
+    if (
+      run &&
+      run.first.type === event.type &&
+      run.head.messageId === delta.messageId &&
+      run.head.phase === delta.phase &&
+      run.bytes + bytes <= SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES
+    ) {
+      run.parts.push(delta.text);
+      run.bytes += bytes;
+      continue;
+    }
+    flushRun();
+    run = { first: event, head: delta, parts: [delta.text], bytes };
+  }
+  flushRun();
+  return merged;
+}
+
 /** Optional metrics seam for the batcher. `onFlush` fires once per flush (on both
- *  success and failure) with the coalesced event count and the flush duration, so
- *  the worker can meter batch shape without the batcher knowing about Observability.
+ *  success and failure) with the stored event count (after adjacent text deltas
+ *  merge) and the flush duration, so the worker can meter batch shape without the
+ *  batcher knowing about Observability.
  *  `now` is injectable for deterministic tests. Both are optional; absent ⇒ no-op. */
 export type RuntimeBatcherOptions = {
   onFlush?: (info: { events: number; durationSeconds: number }) => void;
@@ -43,11 +129,12 @@ export function createRuntimeBatcher(
   let flushFailure: unknown;
   // The high-volume token deltas (agent.message.delta, agent.reasoning.delta,
   // sandbox.command.output.delta) are DELIBERATELY NOT here: they coalesce
-  // under the 50-event / 33ms policy into one appendSessionEvents txn + one
-  // publish per flush, instead of one DB round-trip per token. Only events that
+  // under the 50-event / TRAILING_FLUSH_MS policy into one appendSessionEvents
+  // txn + one publish per flush, instead of one DB round-trip per token, and
+  // adjacent text fragments in a flush are stored as one row. Only events that
   // must be delivered promptly stay structural (flush-immediately). PTY bytes
   // stay structural on purpose — an interactive terminal is useless batched
-  // 33ms behind (P4.4).
+  // behind a window (P4.4).
   const structural = new Set<SessionEventType>([
     "terminal.pty.output.delta",
     "agent.toolCall.created",
@@ -128,7 +215,7 @@ export function createRuntimeBatcher(
     clearTrailingTimer();
     const running = (async () => {
       while (pending.length > 0) {
-        const events = pending.splice(0, MAX_BATCH_EVENTS);
+        const events = mergeAdjacentTextDeltas(pending.splice(0, MAX_BATCH_EVENTS));
         activeBatchSize = events.length;
         lastFlush = Date.now();
         const startedAt = now();
