@@ -1492,3 +1492,115 @@ describe("SelfhostedSession — secret references (W1, CM-1/CM-2)", () => {
     expect(mock.requests.filter((entry) => entry.req.op?.$case === "fsRemove")).toHaveLength(1);
   });
 });
+
+describe("SelfhostedSession.browserControlHttp", () => {
+  const call = {
+    scopeId: `${WS}:attached:device-1`,
+    scopeGeneration: "connection-1",
+    method: "GET" as const,
+    path: "/v1/health",
+    bearerToken: "a".repeat(32),
+    timeoutMs: 1_000,
+    maxResponseBytes: 64,
+  };
+
+  function nativeSession(
+    answer: (request: ControlRequest) => ControlResponse["result"] | ControlResponse["error"],
+    supported = true,
+  ) {
+    const ops: ControlRequest[] = [];
+    const rpc: ControlRpc = {
+      request: async (_subject, req) => {
+        ops.push(req);
+        const answered = answer(req);
+        if (answered && "code" in answered) return { requestId: req.requestId, error: answered };
+        return { requestId: req.requestId, result: answered };
+      },
+    };
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
+      controlRpc: rpc,
+      relay: RELAY,
+      workspaceRoot: "/home/user/project",
+      browserControlHttpSupported: supported,
+    });
+    return { session, ops };
+  }
+
+  test("an incapable runner is never asked", async () => {
+    const { session, ops } = nativeSession(() => undefined, false);
+    expect(await session.browserControlHttp(call)).toEqual({ kind: "unsupported" });
+    expect(ops).toHaveLength(0);
+  });
+
+  test("an absent controller is reported as undelivered", async () => {
+    const { session } = nativeSession(() => ({
+      code: ErrorCode.ERROR_CODE_NOT_FOUND,
+      message: "no controller",
+      retryable: false,
+    }));
+    expect(await session.browserControlHttp(call)).toEqual({ kind: "controller_absent" });
+  });
+
+  test("a spooled body is drained in order without repeating the request", async () => {
+    const full = new TextEncoder().encode("0123456789abcdefghij");
+    const { session, ops } = nativeSession((req) => {
+      const op = req.op;
+      if (op?.$case === "browserControlHttp") {
+        expect(op.browserControlHttp).toMatchObject({
+          scopeId: call.scopeId,
+          method: "GET",
+          path: "/v1/health",
+          hasBody: false,
+          maxResponseBytes: "64",
+        });
+        return {
+          $case: "browserControlHttp",
+          browserControlHttp: {
+            status: 200,
+            headers: [{ name: "Content-Type", value: "application/json" }],
+            body: full.slice(0, 8),
+            totalBytes: String(full.byteLength),
+            spoolId: "spool-1",
+          },
+        };
+      }
+      if (op?.$case === "browserControlHttpRead") {
+        const offset = Number(op.browserControlHttpRead.offset);
+        const data = full.slice(offset, offset + 8);
+        return {
+          $case: "browserControlHttpRead",
+          browserControlHttpRead: { data, done: offset + data.byteLength >= full.byteLength },
+        };
+      }
+      throw new Error(`unexpected op ${op?.$case}`);
+    });
+    const outcome = await session.browserControlHttp(call);
+    expect(outcome.kind).toBe("response");
+    if (outcome.kind !== "response") return;
+    expect(outcome.status).toBe(200);
+    expect(outcome.headers.get("content-type")).toBe("application/json");
+    expect(new TextDecoder().decode(outcome.body)).toBe("0123456789abcdefghij");
+    expect(ops.map((op) => op.op?.$case)).toEqual([
+      "browserControlHttp",
+      "browserControlHttpRead",
+      "browserControlHttpRead",
+    ]);
+  });
+
+  test("a response longer than the caller's bound is refused", async () => {
+    const { session } = nativeSession(() => ({
+      $case: "browserControlHttp",
+      browserControlHttp: {
+        status: 200,
+        headers: [],
+        body: new Uint8Array(4),
+        totalBytes: "65",
+        spoolId: "spool-1",
+      },
+    }));
+    await expect(session.browserControlHttp(call)).rejects.toThrow(/length is invalid/);
+  });
+});

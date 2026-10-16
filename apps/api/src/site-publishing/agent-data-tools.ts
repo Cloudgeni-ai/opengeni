@@ -1,10 +1,12 @@
 import {
   siteHostname,
+  permissionsRequiredByFirstPartyTools,
   type FirstPartyMcpToolName,
+  type Permission,
   type SiteLimitProfileKind,
 } from "@opengeni/contracts";
 import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { hasPermission, type ApiRouteDeps } from "@opengeni/core";
 import {
   consumeSiteRuntimeRate,
   findSiteRuntimeAgentConversation,
@@ -47,12 +49,6 @@ export const SITE_AGENT_MEMBER_SQL_TOOLS = Object.freeze([
   "site_sql_query",
 ] as const satisfies readonly FirstPartyMcpToolName[]);
 
-/** The first-party permissions those tools need (Site Data writes need publish). */
-export const SITE_AGENT_DATA_TOOL_PERMISSIONS = Object.freeze([
-  "artifacts:read",
-  "artifacts:publish",
-] as const);
-
 export const SITE_AGENT_OTHER_SITE_MESSAGE = "This Site's assistant can only use this Site's data";
 export const SITE_AGENT_MANAGEMENT_MESSAGE =
   "This Site's assistant can use the Site's data, not manage the Site";
@@ -64,13 +60,23 @@ export function siteAgentDataToolNames(input: {
   siteSql: boolean;
   /** The deployment's first-party tool allowlist. */
   allowed: readonly string[];
+  /** Live member ceiling; omitted only where the native caller filters tools itself. */
+  memberPermissions?: readonly Permission[];
 }): FirstPartyMcpToolName[] {
   const names: FirstPartyMcpToolName[] = [
     ...SITE_AGENT_DATA_TOOLS,
     ...(input.siteSql ? SITE_AGENT_SQL_TOOLS : []),
     ...(input.siteSql && input.viewerKind === "member" ? SITE_AGENT_MEMBER_SQL_TOOLS : []),
   ];
-  return names.filter((name) => input.allowed.includes(name));
+  return names.filter(
+    (name) =>
+      input.allowed.includes(name) &&
+      (input.viewerKind !== "member" ||
+        input.memberPermissions === undefined ||
+        permissionsRequiredByFirstPartyTools([name]).every((permission) =>
+          hasPermission(input.memberPermissions!, permission),
+        )),
+  );
 }
 
 /** Whether Site SQL is offered on this deployment and turned on for the Site. */
@@ -90,11 +96,13 @@ export async function siteAgentDataToolsForStart(
   scope: { accountId: string; workspaceId: string },
   siteId: string,
   viewerKind: SiteRuntimeConversationViewerKind,
+  memberPermissions?: readonly Permission[],
 ): Promise<FirstPartyMcpToolName[]> {
   return siteAgentDataToolNames({
     viewerKind,
     siteSql: await siteAgentSiteSqlOn(deps, scope, siteId),
     allowed: resolveFirstPartyMcpToolPolicy(deps.settings).allowed,
+    ...(memberPermissions === undefined ? {} : { memberPermissions }),
   });
 }
 

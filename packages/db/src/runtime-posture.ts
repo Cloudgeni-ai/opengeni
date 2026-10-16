@@ -521,6 +521,13 @@ const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_PREDICATE_ROUTINE =
 const SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE = "scheduled_personal_resource_capabilities";
 const VARIABLE_SET_CAPABILITY_PREDICATE_ROUTINE = "variable_set_authority_capability_active(text)";
 const VARIABLE_SET_CAPABILITY_TABLE = "variable_set_authority_capabilities";
+const SITE_CANCELLATION_CAPABILITY_TABLE = "site_session_cancellation_capabilities";
+const SITE_CANCELLATION_PREDICATE =
+  "site_session_cancellation_capability_active(uuid, uuid, uuid, uuid)";
+const SITE_CANCELLATION_PRIVATE_ROUTINES = [
+  "begin_site_session_cancellation(uuid, uuid, uuid, uuid)",
+  "end_site_session_cancellation(uuid)",
+] as const;
 const PERSONAL_DOCUMENT_CAPABILITY_PREDICATE_ROUTINE =
   "personal_document_authority_capability_active(text)";
 const PERSONAL_DOCUMENT_CAPABILITY_TABLE = "personal_document_authority_capabilities";
@@ -3068,15 +3075,15 @@ export async function inspectRuntimeDatabasePosture(
             -- Column-only grants on capability tables are also unsafe; a pin
             -- table must remain EXECUTE-only even after column ACL drift.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}, ${SITE_CANCELLATION_CAPABILITY_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_SESSION_USAGE_LIMIT_PRIVATE_TABLES, "session_usage_limit_capabilities"])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
@@ -3098,6 +3105,7 @@ export async function inspectRuntimeDatabasePosture(
               ${PERSONAL_RESOURCE_CAPABILITY_TABLE},
               ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE},
               ${VARIABLE_SET_CAPABILITY_TABLE},
+              ${SITE_CANCELLATION_CAPABILITY_TABLE},
               ${VAULT_CAPABILITY_TABLE},
               ${PERSONAL_DOCUMENT_CAPABILITY_TABLE},
               ${DOCUMENT_MIGRATION_CAPABILITY_TABLE},
@@ -3159,6 +3167,7 @@ export async function inspectRuntimeDatabasePosture(
         can_execute: boolean;
         public_execute: boolean;
         security_definer: boolean;
+        configuration: string[] | null;
       }>(
         await tx.execute(sql`
           select
@@ -3170,7 +3179,8 @@ export async function inspectRuntimeDatabasePosture(
               from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
               where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
             ) as public_execute,
-            p.prosecdef as security_definer
+            p.prosecdef as security_definer,
+            p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
           where n.nspname = ${targetSchema}
@@ -3178,9 +3188,11 @@ export async function inspectRuntimeDatabasePosture(
             and (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')') = any(
               array[
                 ${sql.join(
-                  [...targetSchemaCapabilityRoutines, ...targetSchemaForbiddenRoutines].map(
-                    (name) => sql`${name}`,
-                  ),
+                  [
+                    ...targetSchemaCapabilityRoutines,
+                    ...targetSchemaForbiddenRoutines,
+                    SITE_CANCELLATION_PREDICATE,
+                  ].map((name) => sql`${name}`),
                   sql`, `,
                 )}
               ]::text[]
@@ -3194,6 +3206,7 @@ export async function inspectRuntimeDatabasePosture(
           execute: row.can_execute,
           publicExecute: row.public_execute,
           securityDefiner: row.security_definer,
+          configuration: row.configuration,
         }))
         .sort((left, right) => left.name.localeCompare(right.name));
 
@@ -5550,6 +5563,62 @@ export function evaluateRuntimeDatabasePosture(
       aggregateRoutine.owner !== capability.owner
     ) {
       violations.push("organization usage aggregate capability is missing or unsafe");
+    }
+  }
+  const siteCancellation = posture.privateTables.find(
+    (table) => table.name === SITE_CANCELLATION_CAPABILITY_TABLE,
+  );
+  const siteCancellationPredicate = posture.targetRoutines.filter(
+    (routine) => routine.name === SITE_CANCELLATION_PREDICATE,
+  );
+  const siteCancellationRoutines = posture.privateRoutines.filter((routine) =>
+    (SITE_CANCELLATION_PRIVATE_ROUTINES as readonly string[]).includes(routine.name),
+  );
+  // Require the current production contract; reduced fixture/embedding inventories
+  // may omit Sites, but any installed half must satisfy the complete capability.
+  if (
+    !options.protectedTables ||
+    siteCancellation ||
+    siteCancellationPredicate.length ||
+    siteCancellationRoutines.length
+  ) {
+    if (
+      !siteCancellation ||
+      siteCancellation.owner === expectedRole ||
+      siteCancellation.owner !== tableByName.get("sessions")?.owner ||
+      siteCancellation.select ||
+      siteCancellation.insert ||
+      siteCancellation.update ||
+      siteCancellation.delete ||
+      siteCancellation.truncate ||
+      siteCancellation.references ||
+      siteCancellation.trigger
+    )
+      violations.push("Site cancellation capability ledger is missing or unsafe");
+    const predicate = siteCancellationPredicate[0];
+    if (
+      siteCancellationPredicate.length !== 1 ||
+      !predicate?.securityDefiner ||
+      !predicate.execute ||
+      !predicate.publicExecute ||
+      predicate.owner !== siteCancellation?.owner ||
+      !predicate.configuration?.includes("search_path=pg_catalog")
+    )
+      violations.push("Site cancellation policy predicate is missing or unsafe");
+    for (const name of SITE_CANCELLATION_PRIVATE_ROUTINES) {
+      const matches = siteCancellationRoutines.filter((routine) => routine.name === name);
+      const routine = matches[0];
+      if (
+        matches.length !== 1 ||
+        !routine?.securityDefiner ||
+        !routine.execute ||
+        routine.publicExecute ||
+        routine.owner !== siteCancellation?.owner ||
+        !(name.startsWith("end_")
+          ? routine.configuration?.includes("search_path=pg_catalog")
+          : safeSearchPath(routine))
+      )
+        violations.push(`Site cancellation routine ${name} is missing or unsafe`);
     }
   }
   const modelCallFactsOwner = tableByName.get("model_call_facts")?.owner;

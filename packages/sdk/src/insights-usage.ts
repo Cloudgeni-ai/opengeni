@@ -8,6 +8,9 @@ import type {
 } from "@opengeni/contracts/insights-usage";
 
 export type {
+  InsightsSiteUsageQuery,
+  InsightsSiteUsageRow,
+  InsightsSiteUsageResponse,
   InsightsUsageRange,
   InsightsUsageGroupBy,
   InsightsUsagePayer,

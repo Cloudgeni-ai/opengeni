@@ -56,10 +56,15 @@ function titleEvent(sequence: number, title: string): SessionEvent {
 const realDb = await import("@opengeni/db");
 const realListSessionEventPage = realDb.listSessionEventPage;
 const realListWorkspaceControlEvents = realDb.listWorkspaceControlEvents;
+const realGetWorkspaceControlEvent = realDb.getWorkspaceControlEvent;
 const realGetWorkspaceInteractionRevisionState = realDb.getWorkspaceInteractionRevisionState;
 const realReadSessionEventStorageGapEnd = realDb.readSessionEventStorageGapEnd;
 mock.module("@opengeni/db", () => ({
   ...realDb,
+  getWorkspaceControlEvent: async (db: unknown, workspaceId: string, eventId: string) => {
+    if (db !== fakeDb) return realGetWorkspaceControlEvent(db as never, workspaceId, eventId);
+    return durableControlEvents.find((entry) => entry.id === eventId) ?? null;
+  },
   readSessionEventStorageGapEnd: async (
     db: unknown,
     workspaceId: string,
@@ -1018,6 +1023,38 @@ test("workspace-control SSE reconnects across a legitimate sparse revision gap",
     { after: 0, limit: 100 },
     { after: 1, limit: 6 },
   ]);
+  await reader.cancel();
+});
+
+test("workspace-control live fanout rechecks durable actor visibility and never forwards a private bus payload", async () => {
+  durableControlEvents = [];
+  let publish: ((event: WorkspaceControlEvent) => void) | undefined;
+  const bus = {
+    subscribeWorkspaceControl: async (
+      _workspaceId: string,
+      listener: (event: WorkspaceControlEvent) => void,
+    ) => {
+      publish = listener;
+      return () => {};
+    },
+  } as unknown as EventBus;
+  const response = await sseWorkspaceControlStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    0,
+    new AbortController().signal,
+    { stallTimeoutMs: 1_000 },
+  );
+  const reader = response.body!.getReader();
+  await waitFor(() => publish !== undefined);
+  publish!({ ...controlEvent(1), reason: "Private visitor content", actor: "guest-secret" });
+  durableControlEvents = [controlEvent(2)];
+  publish!(controlEvent(2));
+  const received = await readControlEvents(reader, 1);
+  expect(received.map((entry) => entry.sequence)).toEqual([2]);
+  expect(JSON.stringify(received)).not.toContain("Private visitor content");
+  expect(JSON.stringify(received)).not.toContain("guest-secret");
   await reader.cancel();
 });
 

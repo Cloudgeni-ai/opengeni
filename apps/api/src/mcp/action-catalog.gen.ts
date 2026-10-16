@@ -3638,6 +3638,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getWorkspaceInsightsSiteUsage",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/insights/sites",
+    "request": [
+      "InsightsSiteUsageQuery"
+    ],
+    "response": [
+      "InsightsSiteUsageResponse"
+    ]
+  },
+  {
     "id": "getWorkspaceInsightsUsage",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/insights/usage",

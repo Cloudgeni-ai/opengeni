@@ -1991,6 +1991,15 @@ Canonical: [`site-conversations.md`](site-conversations.md), [`artifact-engine.m
 [`artifact-collaboration.md`](artifact-collaboration.md), and
 [`connected-machines.md`](connected-machines.md).
 
+Site AI uses native sessions, not a second executor. Verified members own native
+private sessions; published outsiders retain capped Site-service execution with
+an immutable Site/viewer binding inherited by descendants. Core authorization
+and restrictive RLS protect every native surface independently of the ordinary
+discovery exclusion. The SDK's `site.ai.run/result` folds native events into
+app-designed inline results without requiring chat UI. Source-stamped Site IDs
+on model facts and debit ledger rows support aggregate Insights without private
+conversation or viewer disclosure; Usage retains limits, not Site analytics.
+
 ### 7.6 SDK, React, web, and embedding
 
 `@opengeni/sdk` owns client contracts; `@opengeni/react` owns hooks/UI.

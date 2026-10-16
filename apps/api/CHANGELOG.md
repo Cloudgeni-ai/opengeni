@@ -1,5 +1,85 @@
 # @opengeni/api-router
 
+## 3.3.0
+
+### Patch Changes
+
+- d6a5631: Browser and computer actions on a Connected Machine make fewer database round trips before reaching the controller. The source session is read alongside its authorization check (a denial still wins), the machine route check reuses the live-attempt reads that authorization just made instead of repeating them, and computer actions reuse the machine connection the request already resolved instead of looking it up again. Everything from the controller call onward still reads fresh.
+- Updated dependencies [190a322]
+- Updated dependencies [38ac98e]
+  - @opengeni/agent-proto@3.3.0
+  - @opengeni/runtime@3.3.0
+  - @opengeni/contracts@3.3.0
+  - @opengeni/core@3.3.0
+  - @opengeni/db@3.3.0
+  - @opengeni/codemode@3.3.0
+  - @opengeni/artifact-tool@3.3.0
+  - @opengeni/capabilities@3.3.0
+  - @opengeni/codex@3.3.0
+  - @opengeni/config@3.3.0
+  - @opengeni/documents@3.3.0
+  - @opengeni/events@3.3.0
+  - @opengeni/github@3.3.0
+  - @opengeni/interaction@3.3.0
+  - @opengeni/observability@3.3.0
+  - @opengeni/storage@3.3.0
+  - @opengeni/tool-gateway@3.3.0
+  - @opengeni/vaults@3.3.0
+  - @opengeni/vaults-keeper@3.3.0
+  - @opengeni/vaults-onepassword@3.3.0
+  - @opengeni/vaults-protonpass@3.3.0
+  - @opengeni/network@3.3.0
+  - @opengeni/xai-subscription@3.3.0
+
+## 3.2.2
+
+### Minor Changes
+
+- a0c35a1: Add `@opengeni/vaults-protonpass`, a Proton Pass provider that runs an operator-installed `pass-cli` 2.4.2 under a scoped personal access token (live reads, file reads, creating logins, notes and custom items, and moving items to trash), and `@opengeni/vaults-keeper`, a Keeper Secrets Manager provider on the pinned official SDK 17.6.0 (one-time token bootstrap, persisted key rotation, live reads, file reads, creating logins and notes, and field updates with revision checks).
+
+  The API and worker load both through `createNativeExternalVaultFactories(settings)`: Keeper always, with every request and file download DNS-pinned, and Proton Pass only when `OPENGENI_PROTON_PASS_CLI_PATH` names an operator-installed CLI, with one pooled CLI session per token. Both images ship the Keeper SDK as an installed package.
+
+### Patch Changes
+
+- a0c35a1: Settle connected-vault inventory and status together against the cache epoch read before provider I/O. A late overlapping refresh cannot overwrite another completed check, including unchanged checks and failures. Superseded refreshes are not replayed; reference resolution rereads the settled inventory.
+
+  Preflight managed 1Password creation through the exact local link checks, rolling back all local trial effects before provider I/O. Predictable name, quota and authority refusals create nothing upstream. If a race or a later step fails after confirmed creation, return the existing provider vault identity and link/refresh recovery guidance instead of inviting another create. Failed group grants retain the created identity and still link the vault; unknown creates are never automatically retried. No destructive compensation or exactly-once guarantee is introduced.
+
+- Updated dependencies [5af5889]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [7e50b4a]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [d5858bb]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+  - @opengeni/db@3.2.0
+  - @opengeni/core@3.2.0
+  - @opengeni/config@3.2.0
+  - @opengeni/vaults-protonpass@3.2.0
+  - @opengeni/vaults-keeper@3.2.0
+  - @opengeni/vaults-onepassword@3.2.0
+  - @opengeni/vaults@3.2.0
+  - @opengeni/runtime@3.2.0
+  - @opengeni/contracts@3.2.0
+  - @opengeni/documents@3.2.0
+  - @opengeni/events@3.2.0
+  - @opengeni/github@3.2.0
+  - @opengeni/storage@3.2.0
+  - @opengeni/artifact-tool@3.2.0
+  - @opengeni/capabilities@3.2.0
+  - @opengeni/codemode@3.2.0
+  - @opengeni/codex@3.2.0
+  - @opengeni/interaction@3.2.0
+  - @opengeni/observability@3.2.0
+  - @opengeni/tool-gateway@3.2.0
+  - @opengeni/agent-proto@3.2.0
+  - @opengeni/network@3.2.0
+  - @opengeni/xai-subscription@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/vaults",
-  "version": "3.1.2",
+  "version": "3.3.0",
   "description": "Vault provider interface, registry, shell splicers and test doubles for Opengeni secrets.",
   "license": "Apache-2.0",
   "repository": {

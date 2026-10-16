@@ -206,6 +206,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/artifact-desktop.browser.e2e.ts": ["opengeni-web", "@opengeni/react", "@opengeni/testing"],
   "test/e2e/embedded-artifact-viewer.browser.e2e.ts": [
     "@opengeni/react",
     "@opengeni/sdk",

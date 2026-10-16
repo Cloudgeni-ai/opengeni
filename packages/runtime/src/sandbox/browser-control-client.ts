@@ -87,6 +87,7 @@ import {
 } from "./browser-control-server";
 import { parseExecResponseBanner } from "./exec-banner";
 import { controllerStreamRequest, parseControllerStreamResponse } from "./browser-control-stream";
+import type { BrowserControlHttpCall, BrowserControlHttpOutcome } from "./browser-control-http";
 import {
   buildStreamUrl,
   exposedPortAllowsHostFetch,
@@ -177,6 +178,8 @@ export type BrowserControlPlacementSession = {
   ensureBrowserControl?: (
     request: BrowserControlEnsureRequest,
   ) => Promise<BrowserControlEnsureResponse>;
+  /** Agent-native controller transport, addressed by authority scope. */
+  browserControlHttp?: (request: BrowserControlHttpCall) => Promise<BrowserControlHttpOutcome>;
   openBrowserFrames?: (
     request: BrowserFramesOpenRequest,
   ) => Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint }>;
@@ -1176,6 +1179,19 @@ export class BrowserControlClient {
       );
     }
 
+    const native = await this.requestNative(input, BROWSER_CONTROL_MAX_JSON_BYTES);
+    if (native) {
+      let text: string;
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(native.body);
+      } catch (error) {
+        throw new BrowserControlProtocolError("browser controller response is not UTF-8", {
+          cause: error,
+        });
+      }
+      return parseEnvelope(text, native.status);
+    }
+
     if (
       this.session.execWithInput &&
       (input.body === undefined || Buffer.byteLength(JSON.stringify(input.body)) <= 32 * 1024)
@@ -1357,6 +1373,18 @@ export class BrowserControlClient {
       );
     }
 
+    const nativeFrame = await this.requestNative(
+      input,
+      input.surface === "browser" ? 24 * 1024 * 1024 : COMPUTER_SCREENSHOT_MAX_BYTES,
+    );
+    if (nativeFrame) {
+      if (nativeFrame.status < 200 || nativeFrame.status >= 300) {
+        parseEnvelope(new TextDecoder().decode(nativeFrame.body), nativeFrame.status);
+        throw new BrowserControlProtocolError("browser controller image response is invalid");
+      }
+      return controllerImageFrame(nativeFrame.body, nativeFrame.headers, input);
+    }
+
     if (this.session.execWithInput) {
       try {
         const response = await this.requestStream(
@@ -1513,7 +1541,68 @@ export class BrowserControlClient {
 
   private async controllerPort(): Promise<number> {
     if (!this.nativeAuthority || !this.session.ensureBrowserControl) return this.port;
+    return await this.ensureControllerPort(false);
+  }
+
+  /** The agent-native transport: one in-process loopback request on the
+   * Connected Machine, addressed by authority scope, with no process started.
+   * Null when the placement does not serve it; the caller then keeps its
+   * command transport. A controller that is not running receives nothing, so
+   * it is ensured and the request sent once more whatever its method. */
+  private async requestNative(
+    input: { method: string; path: string; token: string; body?: unknown; timeoutMs?: number },
+    maxResponseBytes: number,
+    retry = true,
+  ): Promise<{ status: number; headers: Map<string, string>; body: Uint8Array } | null> {
+    const authority = this.nativeAuthority;
+    if (!authority || !this.session.browserControlHttp || !this.session.ensureBrowserControl) {
+      return null;
+    }
+    const method = input.method;
+    if (method !== "GET" && method !== "POST" && method !== "PUT" && method !== "DELETE") {
+      throw new BrowserControlProtocolError("browser controller request method is invalid");
+    }
+    // Validates the path exactly as the command transport does.
+    localControllerUrl(this.port, input.path);
+    const body =
+      input.body === undefined ? undefined : new TextEncoder().encode(JSON.stringify(input.body));
+    if (body !== undefined && body.byteLength > BROWSER_CONTROL_MAX_JSON_BYTES) {
+      throw new RangeError("browser controller request body is too large");
+    }
+    let outcome: BrowserControlHttpOutcome;
+    try {
+      outcome = await this.session.browserControlHttp({
+        scopeId: authority.scopeId,
+        scopeGeneration: authority.scopeGeneration,
+        method,
+        path: input.path,
+        bearerToken: requireToken(input.token, "browser controller token"),
+        ...(body === undefined ? {} : { body }),
+        timeoutMs: boundedTimeout(input.timeoutMs ?? this.timeoutMs),
+        maxResponseBytes,
+      });
+    } catch (error) {
+      if (retry && method === "GET") {
+        await this.ensureControllerPort(true);
+        return await this.requestNative(input, maxResponseBytes, false);
+      }
+      throw new BrowserControlTransportError("browser controller request transport failed", {
+        cause: error,
+      });
+    }
+    if (outcome.kind === "unsupported") return null;
+    if (outcome.kind === "controller_absent") {
+      if (!retry) throw new BrowserControlTransportError("browser controller is not running");
+      await this.ensureControllerPort(true);
+      return await this.requestNative(input, maxResponseBytes, false);
+    }
+    return outcome;
+  }
+
+  private async ensureControllerPort(replace: boolean): Promise<number> {
+    if (!this.nativeAuthority || !this.session.ensureBrowserControl) return this.port;
     const key = nativeControllerKey(this.nativeAuthority);
+    if (replace) nativeControllerPorts.delete(key);
     const cached = nativeControllerPorts.get(key);
     if (cached !== undefined) return cached;
     const ensured = await this.session.ensureBrowserControl({

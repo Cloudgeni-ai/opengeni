@@ -2169,6 +2169,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             transactional_fs_write: link.platform.transactional_fs_write_supported(),
             credential_renew: true,
             mac_permissions,
+            browser_control_http: link.platform.browser_control_http_supported(),
         }
     }
 
@@ -2625,6 +2626,8 @@ fn op_label(req: &ControlRequest) -> &'static str {
         Some(Op::DesktopInput(_)) => "desktop_input",
         Some(Op::DesktopScreenshot(_)) => "desktop_screenshot",
         Some(Op::BrowserControlEnsure(_)) => "browser_control_ensure",
+        Some(Op::BrowserControlHttp(_)) => "browser_control_http",
+        Some(Op::BrowserControlHttpRead(_)) => "browser_control_http_read",
         Some(Op::BrowserFramesOpen(_)) => "browser_frames_open",
         Some(Op::ComputerFramesOpen(_)) => "computer_frames_open",
         Some(Op::AgentUpdateApply(_)) => "agent_update_apply",

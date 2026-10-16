@@ -25,6 +25,7 @@ import {
   requireVerifiedDelegatedHumanContext,
   requireWorkspaceSettingsGrant,
   stampDelegatedHumanAuthorization,
+  stampSiteViewerSessionAuthorization,
   verifiedDelegatedHumanAuthorizationForRequest,
   type AccessDeps,
   type AccessGrantAuthorization,
@@ -174,6 +175,44 @@ describe("request-local verified delegated native human", () => {
     });
     return harness;
   }
+
+  test("verified native Site viewers retain their own live identity and exact workspace bounds", async () => {
+    const siteRequest = (target = workspaceId) => {
+      const request = new Request(`http://test/workspaces/${target}`);
+      stampSiteViewerSessionAuthorization(request, {
+        organizationId,
+        workspaceId,
+        subjectId,
+        permissions: ["workspace:read", "sessions:read", "sessions:create"],
+      });
+      return request;
+    };
+    const request = siteRequest();
+    expect((await app("sessions:create").fetch(request)).status).toBe(200);
+    expect(observed[0]!.grant).toMatchObject({
+      subjectId,
+      principalKind: "human_session",
+      accountId: organizationId,
+      workspaceId,
+      permissions: ["workspace:read", "sessions:create", "sessions:read"],
+    });
+    expect(hasVerifiedOwningUserAuthorization(observed[0]!)).toBe(true);
+    expect(native).toHaveBeenCalledWith(expect.anything(), {
+      userId,
+      email: "native@example.test",
+      name: "Native person",
+      provisionFallbackOrganization: false,
+      bindPendingInvitations: false,
+    });
+    expect(verifiedDelegatedHumanAuthorizationForRequest(request.clone())).toBeNull();
+    expect((await app().fetch(siteRequest(secondWorkspaceId))).status).toBe(403);
+    expect((await app("connections:write").fetch(siteRequest())).status).toBe(403);
+    live.workspaceGrants = live.workspaceGrants.filter(
+      (grant) => grant.workspaceId !== workspaceId,
+    );
+    expect((await app().fetch(siteRequest())).status).toBe(403);
+    expect(fallback).not.toHaveBeenCalled();
+  });
 
   test("proof is immutable, exact-request-local, and never follows clone or wrapping", async () => {
     const permissions: Permission[] = ["sessions:read"];

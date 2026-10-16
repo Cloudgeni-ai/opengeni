@@ -20,7 +20,22 @@ const requestJson = mock(
     return nextUsage;
   },
 );
-const context = { client: { requestJson } };
+const context = {
+  client: {
+    requestJson,
+    getWorkspaceInsightsSiteUsage: async () => ({ rows: [] }),
+    getSitePlatformUsage: async () => ({
+      workspaceId: "ws",
+      periodStart: "2026-10-01",
+      billingMode: "usage_only",
+      meters: [],
+      estimatedMicros: 0,
+      chargedMicros: 0,
+      shadowMicros: 0,
+      brake: { engaged: false, engagedAt: null },
+    }),
+  },
+};
 mock.module("@/context", () => ({ useAppContext: () => context }));
 
 beforeAll(() => {

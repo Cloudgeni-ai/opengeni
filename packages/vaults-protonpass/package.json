@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/vaults-protonpass",
-  "version": "3.1.2",
+  "version": "3.3.0",
   "description": "Proton Pass provider for Opengeni vaults over an operator-installed, version-pinned pass-cli and a scoped personal access token. Load it only through dynamic import() from the API and worker.",
   "license": "Apache-2.0",
   "repository": {

@@ -2370,3 +2370,232 @@ test("serializes only explicit internal directory recovery and refuses navigatio
     await server.stop(true);
   }
 });
+
+describe("agent-native controller transport", () => {
+  type NativeCall = Parameters<
+    NonNullable<BrowserControlPlacementSession["browserControlHttp"]>
+  >[0];
+
+  function nativeSession(
+    port: () => number,
+    behavior: (call: NativeCall, attempt: number) => "forward" | "absent" | "unsupported" | "throw",
+  ) {
+    const calls: NativeCall[] = [];
+    const ensures: unknown[] = [];
+    let execs = 0;
+    const session: BrowserControlPlacementSession = {
+      async exec() {
+        execs += 1;
+        throw new Error("the native transport must not start a process");
+      },
+      async execWithInput() {
+        execs += 1;
+        throw new Error("the native transport must not start a process");
+      },
+      async ensureBrowserControl(request) {
+        ensures.push(request);
+        return { port: port(), sidecarGeneration: `sidecar-${ensures.length}` };
+      },
+      async browserControlHttp(call) {
+        calls.push(call);
+        const action = behavior(call, calls.length);
+        if (action === "unsupported") return { kind: "unsupported" };
+        if (action === "absent") return { kind: "controller_absent" };
+        if (action === "throw") throw new Error("synthetic transport loss");
+        const response = await fetch(`http://127.0.0.1:${port()}${call.path}`, {
+          method: call.method,
+          headers: {
+            authorization: `Bearer ${call.bearerToken}`,
+            ...(call.body ? { "content-type": "application/json" } : {}),
+          },
+          ...(call.body ? { body: call.body } : {}),
+        });
+        const headers = new Map<string, string>();
+        response.headers.forEach((value, name) => headers.set(name.toLowerCase(), value));
+        return {
+          kind: "response",
+          status: response.status,
+          headers,
+          body: new Uint8Array(await response.arrayBuffer()),
+        };
+      },
+    };
+    return { session, calls, ensures, execs: () => execs };
+  }
+
+  const authority = () => ({ scopeId: randomUUID(), scopeGeneration: "connection-1" });
+
+  test("sends JSON and image requests in-process, addressed by scope, without exec", async () => {
+    const browserSessionId = randomUUID();
+    const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    const metadata = {
+      frameId: "frame-1",
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      targetId: "tab-1",
+      targetGeneration: "target-1",
+      documentGeneration: "document-1",
+      sequence: 0,
+      mediaType: "image/jpeg",
+      width: 1,
+      height: 1,
+      deviceScaleFactor: 1,
+      scrollX: 0,
+      scrollY: 0,
+      capturedAt: "2026-09-23T12:00:00.000Z",
+    };
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        if (request.method === "GET") {
+          return new Response(image.slice().buffer, {
+            headers: {
+              "content-type": "image/jpeg",
+              "x-opengeni-browser-frame": Buffer.from(JSON.stringify(metadata)).toString(
+                "base64url",
+              ),
+            },
+          });
+        }
+        const body = (await request.json()) as { origins: string[] };
+        return success({ origins: body.origins });
+      },
+    });
+    const native = nativeSession(
+      () => server.port,
+      () => "forward",
+    );
+    const scope = authority();
+    try {
+      const client = new BrowserControlClient(native.session, {
+        adminToken,
+        nativeAuthority: scope,
+      });
+      expect(await client.addAllowedOrigins(["https://example.test"])).toEqual([
+        "https://example.test",
+      ]);
+      const browser = client.sessionClient({
+        reference: { browserSessionId, controllerGeneration: "controller-1" },
+        controlToken,
+        viewToken,
+      });
+      expect((await browser.capture("tab-1")).data).toEqual(image);
+      expect(native.execs()).toBe(0);
+      expect(native.calls).toHaveLength(2);
+      expect(native.calls[0]).toMatchObject({
+        ...scope,
+        method: "PUT",
+        bearerToken: adminToken,
+      });
+      expect(JSON.parse(new TextDecoder().decode(native.calls[0]!.body))).toEqual({
+        origins: ["https://example.test"],
+      });
+      expect(native.calls[1]).toMatchObject({ ...scope, method: "GET", bearerToken: viewToken });
+      expect(native.calls[1]!.body).toBeUndefined();
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("keeps the command transport when the runner does not serve it", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const body = (await request.json()) as { origins: string[] };
+        return success({ origins: body.origins });
+      },
+    });
+    const placement = await localPlacement();
+    let nativeCalls = 0;
+    placement.session.ensureBrowserControl = async () => ({
+      port: server.port,
+      sidecarGeneration: "sidecar-1",
+    });
+    placement.session.browserControlHttp = async () => {
+      nativeCalls += 1;
+      return { kind: "unsupported" };
+    };
+    try {
+      const client = new BrowserControlClient(placement.session, {
+        adminToken,
+        nativeAuthority: authority(),
+      });
+      expect(await client.addAllowedOrigins(["https://example.test"])).toEqual([
+        "https://example.test",
+      ]);
+      expect(nativeCalls).toBe(1);
+      expect(placement.commands.length).toBeGreaterThan(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("an absent controller is ensured again and the undelivered request sent once more", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const body = (await request.json()) as { origins: string[] };
+        return success({ origins: body.origins });
+      },
+    });
+    const native = nativeSession(
+      () => server.port,
+      (_call, attempt) => (attempt === 1 ? "absent" : "forward"),
+    );
+    try {
+      const client = new BrowserControlClient(native.session, {
+        adminToken,
+        nativeAuthority: authority(),
+      });
+      expect(await client.addAllowedOrigins(["https://example.test"])).toEqual([
+        "https://example.test",
+      ]);
+      expect(native.calls).toHaveLength(2);
+      expect(native.ensures).toHaveLength(1);
+
+      const stillAbsent = nativeSession(
+        () => server.port,
+        () => "absent",
+      );
+      const absent = new BrowserControlClient(stillAbsent.session, {
+        adminToken,
+        nativeAuthority: authority(),
+      });
+      await expect(absent.addAllowedOrigins(["https://example.test"])).rejects.toBeInstanceOf(
+        BrowserControlTransportError,
+      );
+      expect(stillAbsent.calls).toHaveLength(2);
+      expect(stillAbsent.execs()).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("an uncertain transport loss retries reads once and never replays a mutation", async () => {
+    const browserSessionId = randomUUID();
+    const native = nativeSession(
+      () => 1,
+      () => "throw",
+    );
+    const client = new BrowserControlClient(native.session, {
+      adminToken,
+      nativeAuthority: authority(),
+    });
+    await expect(client.addAllowedOrigins(["https://example.test"])).rejects.toBeInstanceOf(
+      BrowserControlTransportError,
+    );
+    expect(native.calls).toHaveLength(1);
+    const browser = client.sessionClient({
+      reference: { browserSessionId, controllerGeneration: "controller-1" },
+      controlToken,
+      viewToken,
+    });
+    await expect(browser.listTargets()).rejects.toBeInstanceOf(BrowserControlTransportError);
+    expect(native.calls).toHaveLength(3);
+    expect(native.calls.slice(1).every((call) => call.method === "GET")).toBe(true);
+    expect(native.execs()).toBe(0);
+  });
+});

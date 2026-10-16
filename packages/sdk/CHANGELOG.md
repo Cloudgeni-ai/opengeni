@@ -1,5 +1,32 @@
 # @opengeni/sdk
 
+## 3.3.0
+
+### Minor Changes
+
+- 38ac98e: Run Site AI privately per viewer through native sessions, with optional headless
+  inline results and app-defined prompts. Keep app work out of ordinary workspace
+  discovery, preserve native permissions and accounting, and expose private-safe
+  per-Site AI costs and separate platform metrics in Insights. Usage retains limits.
+
+### Patch Changes
+
+- Updated dependencies [38ac98e]
+  - @opengeni/contracts@3.3.0
+  - @opengeni/connect@3.3.0
+
+## 3.2.2
+
+### Minor Changes
+
+- a0c35a1: Add the signed remote vault protocol `opengeni.vault.v1`. `@opengeni/contracts/vault-provider-wire` defines its bounded request and response schemas; item metadata has no value fields. `@opengeni/vaults` adds `createRemoteVaultProvider`, which signs each request with the connection secret, verifies signed responses, pages inventory without silent truncation, and reports an uncertain write as `provider_outcome_unknown` instead of retrying it. Server-side embedders can serve their own password manager with `createExternalVaultReceiver` from `@opengeni/sdk/external-vault-receiver`. It checks the signature, request age and replay, maps Opengeni's account, workspace and user to the host's tenant and user on every request, and records writes in a caller-owned durable store keyed by idempotency key.
+
+### Patch Changes
+
+- Updated dependencies [a0c35a1]
+  - @opengeni/contracts@3.2.0
+  - @opengeni/connect@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes

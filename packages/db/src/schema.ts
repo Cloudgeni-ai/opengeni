@@ -5003,6 +5003,12 @@ export const sessions = pgTable(
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
     ownerSubjectId: text("owner_subject_id"),
     visibility: text("visibility").notNull().default("workspace_shared"),
+    // Immutable server-derived Site audience. Independent of mutable metadata,
+    // reservations, and native member ownership; descendants inherit the binding.
+    siteId: uuid("site_id"),
+    siteAccessRootId: uuid("site_access_root_id"),
+    siteViewerPrincipal: text("site_viewer_principal"),
+    siteOwnerSubjectId: text("site_owner_subject_id"),
     createRequestedVisibility: text("create_requested_visibility")
       .notNull()
       .default("workspace_shared"),
@@ -12885,6 +12891,8 @@ export const modelCallFacts = pgTable(
     initiatorKind: text("initiator_kind"),
     initiatorSubjectId: text("initiator_subject_id"),
     scheduledTaskId: uuid("scheduled_task_id"),
+    // Source-stamped attribution survives session/Site deletion. Not a foreign key.
+    siteId: uuid("site_id"),
     inputTokens: bigint("input_tokens", { mode: "number" }),
     outputTokens: bigint("output_tokens", { mode: "number" }),
     cachedTokens: bigint("cached_tokens", { mode: "number" }),
@@ -13251,6 +13259,8 @@ export const creditLedgerEntries = pgTable(
     currency: text("currency").notNull().default("usd"),
     sourceType: text("source_type"),
     sourceId: text("source_id"),
+    // Immutable execution-origin attribution, not an allocated platform charge.
+    siteId: uuid("site_id"),
     idempotencyKey: text("idempotency_key").notNull(),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),

@@ -521,6 +521,7 @@ export * from "./site-data";
 export * from "./site-publishing";
 export { withSiteRuntimeAdmission } from "./site-runtime-admission";
 export * from "./site-platform";
+export * from "./insights-site-usage";
 export * from "./scheduled-slack-bot-messages";
 export * from "./organization-signup-use-cases";
 export * from "./site-sql";
@@ -1014,6 +1015,7 @@ import {
   workspaceControlLockBudget,
   workspaceControlRequestLockTimeoutMs,
   lockWorkspaceInferenceControl,
+  mutateSessionControlInTransaction,
   registerInternalUpdateWakeInTransaction,
   registerSessionWorkflowWakeInTransaction,
   SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS,
@@ -1249,6 +1251,7 @@ export * from "./billing-subscription-operations";
 
 import {
   dbBindingFor,
+  isTransactionHandle,
   rawRows,
   retryRlsPersistence,
   retryWorkspacePersistence,
@@ -1305,6 +1308,9 @@ export {
 } from "./database";
 export {
   currentSessionRlsActorIdentityKey,
+  currentSessionRlsActorContext,
+  currentSiteViewerRlsContext,
+  withSiteViewerRlsContext,
   currentSessionRlsActorInitiatingHumanSubjectId,
   withSessionRlsActorContext,
 } from "./database";
@@ -29697,7 +29703,7 @@ async function createSessionInTransaction(
   );
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
-  if (createRequestedVisibility === "user_private") {
+  if (createRequestedVisibility === "user_private" || sessionMetadata._opengeniSiteOrigin) {
     // Private creation later proves the owner's live organization membership
     // and, for a fresh top-level organization session, reads the mutable
     // owner/admin enablement setting. Serialize both checks with organization
@@ -30901,6 +30907,10 @@ export type SessionAuthorityProjection = SessionAccessProjection & {
   authorityEpoch: number;
   visibility: "user_private" | "workspace_shared";
   ownerSubjectId: string | null;
+  siteId: string | null;
+  siteAccessRootId: string | null;
+  siteViewerPrincipal: string | null;
+  siteOwnerSubjectId: string | null;
 };
 
 type SessionAccessRow = Pick<
@@ -30942,6 +30952,10 @@ export async function getSessionAuthorityProjection(
         visibility: schema.sessions.visibility,
         authorityEpoch: schema.sessions.authorityEpoch,
         ownerSubjectId: schema.sessions.ownerSubjectId,
+        siteId: schema.sessions.siteId,
+        siteAccessRootId: schema.sessions.siteAccessRootId,
+        siteViewerPrincipal: schema.sessions.siteViewerPrincipal,
+        siteOwnerSubjectId: schema.sessions.siteOwnerSubjectId,
         agentAccess: schema.sessions.agentAccess,
         scopeSubjectId: schema.sessions.scopeSubjectId,
         memoryScope: schema.sessions.memoryScope,
@@ -30956,6 +30970,10 @@ export async function getSessionAuthorityProjection(
       rootSessionId: row.rootSessionId,
       visibility: row.visibility as SessionAuthorityProjection["visibility"],
       ownerSubjectId: row.ownerSubjectId ?? null,
+      siteId: row.siteId ?? null,
+      siteAccessRootId: row.siteAccessRootId ?? null,
+      siteViewerPrincipal: row.siteViewerPrincipal ?? null,
+      siteOwnerSubjectId: row.siteOwnerSubjectId ?? null,
       agentAccess: sessionAgentAccessFromRow(row),
       scopeSubjectId: sessionEndUserFromRow(row),
       memoryScope: sessionMemoryScopeFromRow(row),
@@ -32566,7 +32584,17 @@ function sessionFilters(
   }
   if (options.originSiteId) {
     filters.push(
-      sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.originSiteId}`,
+      eq(schema.sessions.siteId, options.originSiteId),
+      sql`${schema.sessions.siteAccessRootId} is not null`,
+    );
+  } else {
+    // App-internal execution is not ordinary workspace conversation discovery.
+    // This is presentation scope only: native ownership and Site RLS still apply.
+    const ownRoot = options.authorizationScope?.agentAccessViewer?.callerRootSessionId;
+    filters.push(
+      ownRoot
+        ? sql`(${schema.sessions.siteAccessRootId} is null OR ${schema.sessions.rootSessionId} = ${ownRoot}::uuid)`
+        : sql`${schema.sessions.siteAccessRootId} is null`,
     );
   }
   const archivedRoot = sql`exists (
@@ -33298,7 +33326,7 @@ async function readSessionListForSubject(
             throw new SessionListCursorError();
           }
           let nextOffset: number | null = null;
-          if (options.authorizationScope) {
+          {
             // A host may revoke rows between pages. Scan the immutable snapshot
             // in bounded database-filtered batches until this page is full plus
             // one authorized lookahead; never hydrate a stale broad slice and
@@ -33319,7 +33347,10 @@ async function readSessionListForSubject(
                   and(
                     eq(schema.sessions.workspaceId, workspaceId),
                     inArray(schema.sessions.id, candidates),
-                    sessionAuthorizationScopeFilter(options.authorizationScope),
+                    sql`${schema.sessions.siteAccessRootId} is null`,
+                    ...(options.authorizationScope
+                      ? [sessionAuthorizationScopeFilter(options.authorizationScope)]
+                      : []),
                   ),
                 );
               const allowed = new Set(allowedRows.map((row) => row.id));
@@ -33335,12 +33366,6 @@ async function readSessionListForSubject(
             pageIds = visible.slice(0, limit).map((row) => row.id);
             if (visible.length > limit) {
               nextOffset = visible[limit - 1]!.offsetAfter;
-            }
-          } else {
-            pageIds = snapshot.ordinarySessionIds.slice(cursor.offset, cursor.offset + limit);
-            const candidateOffset = cursor.offset + pageIds.length;
-            if (candidateOffset < snapshot.ordinarySessionIds.length) {
-              nextOffset = candidateOffset;
             }
           }
           if (nextOffset !== null) {
@@ -34773,7 +34798,15 @@ async function selectSessionDiscoveryPageRows(
   }
   if (options.filters.originSiteId) {
     authorizationFilters.push(
-      sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.filters.originSiteId}`,
+      eq(schema.sessions.siteId, options.filters.originSiteId),
+      sql`${schema.sessions.siteAccessRootId} is not null`,
+    );
+  } else {
+    const ownRoot = options.authorizationScope?.agentAccessViewer?.callerRootSessionId;
+    authorizationFilters.push(
+      ownRoot
+        ? sql`(${schema.sessions.siteAccessRootId} is null OR ${schema.sessions.rootSessionId} = ${ownRoot}::uuid)`
+        : sql`${schema.sessions.siteAccessRootId} is null`,
     );
   }
   if (options.filters.activeOnly) {
@@ -36829,6 +36862,104 @@ export async function getSessionEvent(
       .limit(1);
     return row ? mapEvent(row) : null;
   });
+}
+
+/**
+ * Trusted Site lifecycle only: cancel an exact published root using native
+ * controls. No request/agent endpoint exposes this adapter or its transaction.
+ * The host has authorized the Site mutation; its actor stays unchanged.
+ * Only the receipt and events written by this command leave the capability.
+ */
+export async function cancelSiteRuntimeConversation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    siteId: string;
+    sessionId: string;
+    operationKey: string;
+    reason: string;
+  },
+) {
+  // Own the complete transaction, including activity finalization. A nested
+  // activity gate could otherwise outlive the exact-root visibility witness.
+  if (isTransactionHandle(db)) throw new Error("Site cancellation requires its own transaction");
+  return await runIdempotentPersistenceTransaction(
+    {
+      stage: "site_lifecycle.cancel",
+      eventTypes: ["session.control.paused", "turn.cancelled"],
+      maxAttempts: 3,
+    },
+    () =>
+      withRlsContext(db, input, async (scopedDb) => {
+        const [opened] = await rawRows<{ token: string | null }>(
+          scopedDb,
+          sql`
+        select opengeni_private.begin_site_session_cancellation(
+          ${input.accountId}::uuid,${input.workspaceId}::uuid,${input.siteId}::uuid,${input.sessionId}::uuid
+        ) as token`,
+        );
+        if (!opened?.token) return null;
+        const value = await withRestoredSessionActivityRlsContext(scopedDb, input, async (tx) => {
+          const [context] = await rawRows<{ actor: string | null }>(
+            tx,
+            sql`
+          select nullif(current_setting('opengeni.subject_id',true),'') as actor`,
+          );
+          // Serialize the active-state decision with native admission/control.
+          // Replays still enter the native receipt path after terminal settlement.
+          await lockWorkspaceInferenceControl(tx, input.workspaceId, "update");
+          const [candidate] = await rawRows<{ needed: boolean }>(
+            tx,
+            sql`
+          select exists(select 1 from sessions s
+            where s.workspace_id=${input.workspaceId} and s.site_access_root_id=${input.sessionId}::uuid
+              and s.status in ('queued','running','requires_action','recovering','waiting_capacity'))
+          or exists(select 1 from session_command_receipts r
+            where r.workspace_id=${input.workspaceId} and r.target_session_id=${input.sessionId}::uuid
+              and r.operation_key=${input.operationKey} and r.actor_type='service'
+              and r.actor_subject_id=${context?.actor ?? "site-lifecycle"}) as needed`,
+          );
+          if (!candidate?.needed) return null;
+          const result = await mutateSessionControlInTransaction(tx, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            actor: { type: "service", subjectId: context?.actor ?? "site-lifecycle" },
+            operationKey: input.operationKey,
+            action: "cancel",
+            reason: input.reason,
+          });
+          const events: SessionEvent[] = [];
+          for (const affected of result.affectedSessionEvents) {
+            for (const eventId of affected.eventIds) {
+              const event = await getSessionEvent(tx, input.workspaceId, eventId);
+              if (!event || event.sessionId !== affected.sessionId)
+                throw new Error("Site cancellation lost its committed event");
+              events.push(event);
+            }
+          }
+          const workspaceEvent = result.workspaceControlEventId
+            ? await getWorkspaceControlEvent(tx, input.workspaceId, result.workspaceControlEventId)
+            : null;
+          return {
+            receiptId: result.receipt.id,
+            replay: result.replay,
+            cancelledSessionCount: result.cancelledSessionCount,
+            cancelledTurnCount: result.cancelledTurnCount,
+            wakeCount: result.wakeCount,
+            events,
+            workspaceEvent,
+          };
+        });
+        // Also covers activity-revision stamping. On error the outer transaction
+        // rolls the witness back, without masking the original SQL diagnostic.
+        await scopedDb.execute(
+          sql`select opengeni_private.end_site_session_cancellation(${opened.token}::uuid)`,
+        );
+        return value;
+      }),
+  );
 }
 
 /** Read one durable event under the exact human subject visibility projection. */

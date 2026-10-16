@@ -151,6 +151,7 @@ import {
 import {
   requireAccessGrant,
   requireSessionAuthorization,
+  withSessionAuthorizationReadReuse,
   recordWorkspaceUsage,
   requireLimit,
   relayConfigFromSettings,
@@ -2834,6 +2835,7 @@ export function registerBrowserSessionRoutes(
           enrollment.agentCapabilities.operationResourcePolicy === true,
         operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
         transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+        browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
         ...(deps.settings.agentOpStreamEnabled === true &&
         enrollment.opStream === true &&
         deps.bus.getOpStreamConnection
@@ -3157,16 +3159,40 @@ export function registerBrowserSessionRoutes(
     browserSessionId: string,
     authorizationOperation: SessionAuthorizationOperation,
     channelOperation: ChannelAOperation,
-    callback: (input: {
-      client: BrowserControlClient;
-      sessionClient: ReturnType<BrowserControlClient["sessionClient"]>;
-      record: BrowserSessionControlRecord;
-      binding: NonNullable<BrowserSessionControlRecord["session"]["controller"]>;
-      placement: BrowserPlacement;
-      sourceAuthorization: ResolvedSessionAuthorization | null;
-    }) => Promise<T>,
+    callback: ActiveBrowserControllerCallback<T>,
     recoverMissing = true,
     stages?: InteractionRouteStages,
+  ): Promise<T> {
+    // The source-session check and the machine-route check that follows it
+    // prove the same live agent attempt; they share those reads. Everything
+    // from the controller call onward reads fresh.
+    return await withSessionAuthorizationReadReuse((authorizationReads) =>
+      withActiveBrowserControllerReads(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        authorizationOperation,
+        channelOperation,
+        callback,
+        recoverMissing,
+        stages,
+        authorizationReads,
+      ),
+    );
+  }
+
+  async function withActiveBrowserControllerReads<T>(
+    context: Context,
+    grant: AccessGrant,
+    workspaceId: string,
+    browserSessionId: string,
+    authorizationOperation: SessionAuthorizationOperation,
+    channelOperation: ChannelAOperation,
+    callback: ActiveBrowserControllerCallback<T>,
+    recoverMissing: boolean,
+    stages: InteractionRouteStages | undefined,
+    authorizationReads: { handOffToToolDispatch(): void },
   ): Promise<T> {
     try {
       const record = await getBrowserSessionControlRecord(deps.db, {
@@ -3175,17 +3201,25 @@ export function registerBrowserSessionRoutes(
         browserSessionId,
       });
       stages?.mark("record");
-      const sourceAuthorization = await authorizeSourceSession(
-        deps,
-        grant,
-        record.sourceSessionId,
-        authorizationOperation,
-      );
+      // A Connected Machine (or any placement without a cached controller URL)
+      // always needs the source session; read it alongside authorization. A
+      // denial still wins, and the session is only used once authorized.
+      const sourceSessionNeeded =
+        record.session.placement?.kind === "connected_machine" ||
+        !record.controllerHostSandboxGroupId;
+      const [authorized, sourceRead] = await Promise.allSettled([
+        authorizeSourceSession(deps, grant, record.sourceSessionId, authorizationOperation),
+        sourceSessionNeeded
+          ? requireSourceSession(deps, workspaceId, record.sourceSessionId)
+          : Promise.resolve(null),
+      ]);
+      if (authorized.status === "rejected") throw authorized.reason;
+      if (sourceRead.status === "rejected") throw sourceRead.reason;
+      const sourceAuthorization = authorized.value;
       stages?.mark("authorize");
-      let sourceSession: Session | null = null;
+      let sourceSession: Session | null = sourceRead.value;
       if (record.session.placement?.kind === "connected_machine") {
-        sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
-        if (sourceSession.activeSandboxId !== record.session.placement.sandboxId) {
+        if (sourceSession?.activeSandboxId !== record.session.placement.sandboxId) {
           return await throwBrowserSourcePlacementChanged(
             grant,
             record.sourceSessionId,
@@ -3217,6 +3251,7 @@ export function registerBrowserSessionRoutes(
         placement: BrowserPlacement,
         provisionedClient?: BrowserControlClient,
       ): Promise<T> => {
+        authorizationReads.handOffToToolDispatch();
         // An active binding already proves browserd was provisioned. Reusing
         // it avoids restarting/checking the sidecar on every live input.
         const client = provisionedClient ?? connectController(deps, grant, record, placement);
@@ -4630,6 +4665,15 @@ async function settleBrowserRevisionCaptureFailure(
     error: error.error,
   });
 }
+
+type ActiveBrowserControllerCallback<T> = (input: {
+  client: BrowserControlClient;
+  sessionClient: ReturnType<BrowserControlClient["sessionClient"]>;
+  record: BrowserSessionControlRecord;
+  binding: NonNullable<BrowserSessionControlRecord["session"]["controller"]>;
+  placement: BrowserPlacement;
+  sourceAuthorization: ResolvedSessionAuthorization | null;
+}) => Promise<T>;
 
 async function requireSourceSession(
   deps: ApiRouteDeps,

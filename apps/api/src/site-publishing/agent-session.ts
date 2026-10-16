@@ -1,11 +1,16 @@
-import { resolveAgentConfig, type SessionToolPolicy, type ToolRef } from "@opengeni/contracts";
+import {
+  permissionsRequiredByFirstPartyTools,
+  resolveAgentConfig,
+  type Permission,
+  type SessionToolPolicy,
+  type ToolRef,
+} from "@opengeni/contracts";
 import { agentConfigDeploymentPolicy, resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import { siteSessionOriginFromMetadata, type ApiRouteDeps } from "@opengeni/core";
 import { appendSessionEventsWithLockedSessionUpdate, getSiteSqlDatabase } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   resolveSiteAgentDataContext,
-  SITE_AGENT_DATA_TOOL_PERMISSIONS,
   siteAgentDataToolNames,
   siteAgentInstructions,
 } from "./agent-data-tools";
@@ -14,7 +19,7 @@ import type { SiteRuntimeViewer } from "./viewer";
 import { sitePublishingError } from "./service";
 import { siteSqlOffered } from "../site-sql/gateway";
 
-export const SITE_AGENT_DEFAULTS_VERSION = 1;
+export const SITE_AGENT_DEFAULTS_VERSION = 2;
 
 /**
  * Before admitting more work, converge pre-redesign published-host sessions to
@@ -33,6 +38,7 @@ export async function normalizeSiteAgentSession(
   viewer: SiteRuntimeViewer,
   sessionId: string,
   retainedToolIds: readonly string[],
+  memberPermissions?: readonly Permission[],
 ): Promise<void> {
   const data = await resolveSiteAgentDataContext(deps, host.scope, sessionId);
   if (
@@ -55,7 +61,9 @@ export async function normalizeSiteAgentSession(
     viewerKind: viewer.kind,
     siteSql: sqlEnabled,
     allowed: resolveFirstPartyMcpToolPolicy(deps.settings).allowed,
+    ...(memberPermissions === undefined ? {} : { memberPermissions }),
   });
+  const dataToolPermissions = permissionsRequiredByFirstPartyTools(dataTools);
   const config = resolveAgentConfig({
     creator: "api",
     request: {
@@ -83,7 +91,12 @@ export async function normalizeSiteAgentSession(
     (session) => {
       if (
         session.parentSessionId ||
-        session.createdBy.subjectId !== `site:${host.site.id}` ||
+        (session.createdBy.subjectId !== `site:${host.site.id}` &&
+          !(
+            viewer.kind === "member" &&
+            session.createdBy.kind === "subject" &&
+            session.createdBy.subjectId === viewer.subjectId
+          )) ||
         siteSessionOriginFromMetadata(session.metadata)?.siteId !== host.site.id
       )
         throw sitePublishingError(
@@ -97,7 +110,12 @@ export async function normalizeSiteAgentSession(
         raw && typeof raw === "object" && !Array.isArray(raw)
           ? (raw as Record<string, unknown>)
           : {};
-      if (stamp.agentDefaultsVersion === SITE_AGENT_DEFAULTS_VERSION) return { events: [] };
+      if (
+        stamp.agentDefaultsVersion === SITE_AGENT_DEFAULTS_VERSION &&
+        session.firstPartyMcpTools.join(",") === dataTools.join(",") &&
+        session.firstPartyMcpPermissions?.join(",") === dataToolPermissions.join(",")
+      )
+        return { events: [] };
       // Never restore workspace defaults or add a newly declared connector to
       // an old conversation. Preserve only its still-authorized exact refs.
       const allowed = new Set(["opengeni", ...retainedToolIds]);
@@ -126,7 +144,7 @@ export async function normalizeSiteAgentSession(
         ],
         update: {
           firstPartyMcpTools: dataTools,
-          firstPartyMcpPermissions: [...SITE_AGENT_DATA_TOOL_PERMISSIONS],
+          firstPartyMcpPermissions: dataToolPermissions,
           agentConfig: config,
           instructions,
           tools,
