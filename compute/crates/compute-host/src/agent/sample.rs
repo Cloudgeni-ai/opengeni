@@ -14,9 +14,7 @@ use super::{ActivityWindow, BusyRule, HostAgent};
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn sample(&mut self) {
         let huge = self.engine.memory_profile().pages == PageSize::Huge;
-        self.available_memory = std::fs::read_to_string("/proc/meminfo")
-            .ok()
-            .and_then(|meminfo| available_memory(&meminfo, huge));
+        self.available_memory = crate::host_memory::available(huge);
         #[cfg(target_os = "linux")]
         if let Some(fetcher) = &self.fetcher {
             fetcher.forget_old();
@@ -188,22 +186,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 }
 
-/// The memory a new guest can have, from `/proc/meminfo`. Guests on a
-/// huge-page profile take their memory from the reserved pool, which
-/// `MemAvailable` leaves out, so the smaller of the two counts.
-fn available_memory(meminfo: &str, huge: bool) -> Option<u64> {
-    let field = |name: &str| -> Option<u64> {
-        let line = meminfo.lines().find(|line| line.starts_with(name))?;
-        line.split_whitespace().nth(1)?.parse().ok()
-    };
-    let available = field("MemAvailable:")? * 1024;
-    if !huge {
-        return Some(available);
-    }
-    let pool = field("HugePages_Free:")? * field("Hugepagesize:")? * 1024;
-    Some(available.min(pool))
-}
-
 /// What the filesystem holding the state root has available to the agent.
 /// One without a fixed number of inodes, such as btrfs, reports none, and
 /// never runs out of them.
@@ -217,23 +199,4 @@ fn read_disk(root: &std::path::Path) -> Option<DiskSpace> {
             stat.f_favail
         },
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::available_memory;
-
-    const MEMINFO: &str = "MemTotal: 131072000 kB
-MemAvailable:   16777216 kB
-HugePages_Total:   55000
-HugePages_Free:     1024
-Hugepagesize:       2048 kB
-";
-
-    #[test]
-    fn huge_page_guests_count_the_free_pool() {
-        assert_eq!(available_memory(MEMINFO, false), Some(16 << 30));
-        assert_eq!(available_memory(MEMINFO, true), Some(2 << 30));
-        assert_eq!(available_memory("MemAvailable: 4 kB\n", true), None);
-    }
 }

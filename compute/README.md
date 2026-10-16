@@ -176,8 +176,10 @@ the buffer and the high watermark that no waiting wake wants, and only
 once memory has been read since the agent started, booked before it starts,
 and ready sandboxes are the first memory given back, ahead of any
 sandbox, for a wake, the buffer or memory pressure. A claimed ready sandbox
-moves into the sandbox's place in the same decision. On huge-page hosts
-available memory is the smaller of `MemAvailable` and the free pool.
+moves into the sandbox's place in the same decision. Available memory is
+`MemAvailable` plus the free pages on the kernel's per-CPU lists, which it
+leaves out (on many-CPU hosts gigabytes for tens of seconds after a process
+exits), and on huge-page hosts no more than the free pool.
 The status reports the capacity (total, reserved, occupied, free, awake), and
 a restarted agent rebuilds it from its records, counting every VM it takes
 back at its full size until it is measured, and any it cannot take back at

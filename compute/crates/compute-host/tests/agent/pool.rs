@@ -453,17 +453,6 @@ async fn a_build_waits_for_disk_its_snapshot_may_take() {
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 0, "nothing booted");
 }
 
-/// The host's `MemAvailable`, which the agent reads as available memory
-/// with the fake engine's base pages.
-fn mem_available() -> Option<u64> {
-    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let line = meminfo
-        .lines()
-        .find(|line| line.starts_with("MemAvailable:"))?;
-    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-    Some(kib << 10)
-}
-
 /// Keeps templates of `shape`, with `ready` ready sandboxes.
 fn keeping(shape: Shape, ready: u32) -> impl FnOnce(&mut HostConfig) {
     move |config| {
@@ -479,7 +468,7 @@ fn keeping(shape: Shape, ready: u32) -> impl FnOnce(&mut HostConfig) {
 /// high watermark: no ready sandbox takes that room until it is gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_surviving_build_keeps_its_claim_on_memory_across_a_restart() {
-    let Some(available) = mem_available() else {
+    let Some(available) = compute_host::host_memory::available(false) else {
         return;
     };
     // A shape of a quarter of what the host has free; the fake engine

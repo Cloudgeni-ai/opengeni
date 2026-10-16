@@ -14,6 +14,7 @@ mod agent;
 mod chunked;
 pub mod client;
 pub mod guest_ports;
+pub mod host_memory;
 mod image;
 mod lanes;
 mod layout;

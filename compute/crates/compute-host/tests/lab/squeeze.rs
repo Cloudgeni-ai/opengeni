@@ -2,7 +2,7 @@
 //! use above their request give way, first through their balloons, then
 //! by being paused and saved until there is room again.
 
-use super::memory::{hold_running, meminfo, nested};
+use super::memory::{hold_running, nested};
 use super::*;
 
 const MIB: u64 = 1 << 20;
@@ -18,10 +18,31 @@ fn hog(mib: u64) -> Child {
         .unwrap()
 }
 
-/// Takes host memory until `MemAvailable` is `mib` MiB below `low`,
+/// MiB of memory available for new guests, read as the agent reads it.
+fn available_mib() -> u64 {
+    compute_host::host_memory::available(false).unwrap() >> 20
+}
+
+/// Waits, within two minutes, until available memory stops rising or
+/// falling, such as while an earlier test's VMs are still being freed:
+/// watermarks set from a reading taken before then mean nothing after.
+async fn settle() {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut last = available_mib();
+    loop {
+        sleep(Duration::from_secs(2)).await;
+        let now = available_mib();
+        if now.abs_diff(last) < 64 || Instant::now() >= deadline {
+            return;
+        }
+        last = now;
+    }
+}
+
+/// Takes host memory until available memory is `mib` MiB below `low`,
 /// whatever else the host freed or took since the agent started.
 fn short_by(low: u64, mib: u64) -> Child {
-    hog((meminfo("MemAvailable:") / 1024).saturating_sub(low) + mib)
+    hog(available_mib().saturating_sub(low) + mib)
 }
 
 fn find(status: &HostStatus, sandbox: Id) -> &SandboxStatus {
@@ -108,7 +129,8 @@ async fn busy_sandboxes_above_their_request_give_way_when_the_host_runs_short() 
         eprintln!("skipped: on huge pages a request is the whole VM");
         return;
     }
-    let free = meminfo("MemAvailable:") / 1024;
+    settle().await;
+    let free = available_mib();
     let low = free - 4096;
     let host = Host::new(
         &lab,

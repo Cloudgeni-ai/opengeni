@@ -64,17 +64,15 @@ async fn ready_sandboxes_start_at_once_and_each_its_own() {
 
     // The pool refilled behind the claims; a restart that keeps none
     // removes every ready sandbox it finds.
-    let restarted = Host {
-        extra: [
-            &notice[..],
-            &["--template-ready-port", "54", "--template", "1x512"],
-        ]
-        .concat()
-        .iter()
-        .map(|&arg| arg.to_owned())
-        .collect(),
-        ..ready
-    };
+    let mut restarted = ready;
+    restarted.extra = [
+        &notice[..],
+        &["--template-ready-port", "54", "--template", "1x512"],
+    ]
+    .concat()
+    .iter()
+    .map(|&arg| arg.to_owned())
+    .collect();
     let agent = restarted.start().await;
     let deadline = Instant::now() + Duration::from_secs(120);
     while firecrackers() > 0 {

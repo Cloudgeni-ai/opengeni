@@ -126,9 +126,12 @@ pick a VM.
   its directory, for a later agent) and are no relief, until a later
   build of the same VM or the next start of the agent ends them; one still
   filling keeps its claim above the high watermark until it is gone, and
-  a later agent claims the same for a build VM it finds and cannot end. On
-  huge-page hosts available memory is the smaller of `MemAvailable` and
-  the free huge-page pool.
+  a later agent claims the same for a build VM it finds and cannot end.
+  Available memory is `MemAvailable` plus the free pages the kernel keeps
+  on per-CPU lists (`/proc/zoneinfo`), which `MemAvailable` leaves out:
+  on a 192-CPU host about 1 GiB of a 6 GiB process that exited was still
+  there 15 s later, so a sandbox waiting for room woke 12 to 34 s late.
+  On huge-page hosts it is no more than the free huge-page pool.
 - Local disk is booked the same way, because a full disk blocks the very
   saves that relieve memory. Every VM whose state is not saved yet books
   its worst-case next save: its memory size once where files share extents

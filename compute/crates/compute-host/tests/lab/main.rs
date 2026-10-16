@@ -171,13 +171,36 @@ impl Host {
     /// Keeps the agent's log with the results, then deletes the host's
     /// files.
     fn finish(self, name: &str) {
+        self.keep_log(name);
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+
+    /// Copies the agent's log to the results, as `name`.
+    fn keep_log(&self, name: &str) {
         if let Some(dir) = std::env::var_os("COMPUTE_TEST_RESULTS") {
             let _ = std::fs::copy(
                 self.root.join("agent.log"),
                 PathBuf::from(dir).join(format!("{name}-agent.log")),
             );
         }
-        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+impl Drop for Host {
+    /// A test that fails part way must fail alone: the sandbox records it
+    /// leaves would keep every later agent on the host from taking it over
+    /// from this state root. Its agent, dropped before it, has ended its
+    /// VMs; its log is kept with the results.
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let name = self.root.file_name().map_or_else(
+                || "host".to_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            self.keep_log(&format!("{name}-failed"));
+            let _ = std::fs::remove_dir_all(&self.root);
+            let _ = std::fs::remove_dir_all(&self.state);
+        }
     }
 }
 
