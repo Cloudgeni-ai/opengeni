@@ -1,5 +1,36 @@
 # @opengeni/core
 
+## 3.4.0
+
+### Patch Changes
+
+- 3418893: Report authorized browser and computer entry tools as upfront in the effective tool projection, matching the runtime's progressive disclosure behavior.
+- Updated dependencies [28844d8]
+- Updated dependencies [a544972]
+- Updated dependencies [0ed367a]
+- Updated dependencies [fbb2765]
+- Updated dependencies [462fa87]
+- Updated dependencies [2f370c3]
+- Updated dependencies [ad17c9e]
+- Updated dependencies [cac0334]
+- Updated dependencies [c594c1d]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+- Updated dependencies [8053c9b]
+  - @opengeni/contracts@3.4.0
+  - @opengeni/runtime@3.4.0
+  - @opengeni/db@3.4.0
+  - @opengeni/config@3.4.0
+  - @opengeni/capabilities@3.4.0
+  - @opengeni/codex@3.4.0
+  - @opengeni/documents@3.4.0
+  - @opengeni/events@3.4.0
+  - @opengeni/observability@3.4.0
+  - @opengeni/storage@3.4.0
+  - @opengeni/vaults@3.4.0
+  - @opengeni/network@3.4.0
+
 ## 3.3.0
 
 ### Patch Changes

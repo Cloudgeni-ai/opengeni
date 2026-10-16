@@ -1,5 +1,32 @@
 # @opengeni/db
 
+## 3.4.0
+
+### Minor Changes
+
+- c594c1d: The session list can show only your workstreams. `mineOnly=true` (with `view=page`; SDK `listSessionPage`/`listSessionSummaryPage` `mineOnly`, React `useWorkspaceSessions` `mineOnly`) keeps a workstream when any session in its tree was created by you or received a message you sent directly; agent-relayed messages and service turns do not count. Matching roots list their children in full, totals follow the filter, and the response echoes `mineOnly: true`. The web sidebar's view menu adds an "Only mine" option. A new online index (`session_turns_human_prompt_subject_idx`, built concurrently in rolling migration 0799) keeps the probe to one index lookup per tree session.
+- 7998676: Add an inert subscription-plan catalog, organization plan state, non-rollover period credit accounting, and database-enforced human seat caps. Expose optional plan funding and seat information in billing balances without enrolling existing organizations.
+
+### Patch Changes
+
+- 2f370c3: Direct database connections now use named prepared statements. Before, every parameterized query was sent unprepared, so it cost two round trips (postgres-js waits for a Describe reply before it can bind) and Postgres parsed and planned it again each time. Pools now prepare by default, except when the URL targets port 6432 (PgBouncer, including Azure Flexible Server's built-in pooler). Set `OPENGENI_DATABASE_PREPARED_STATEMENTS=false` for any other transaction-pooling proxy.
+- cac0334: Scoped database work makes fewer round trips to PostgreSQL. Each tenant-scoped transaction used to look up the workspace's account, then set the tenant, subject and actor settings, read them back and take its advisory locks in separate statements, about nine sequential round trips for a single read. One statement now resolves the account, applies every setting, takes the locks in the same order and reads the result back, so a standalone scoped read is BEGIN, setup, query and COMMIT. Isolation, lock order, nested-scope restore and the fail-loud checks are unchanged.
+- 7998676: Bind subscription upgrade, downgrade and cancellation requests to durable organization-scoped intent and result receipts before Stripe mutations. Preserve original targets across database rollback, replacement subscriptions and provider idempotency-key expiry. Refund duplicate subscription funding according to payment timestamps rather than invoice creation time.
+- 8053c9b: A Connected Machine that stops answering in the middle of a command now fails only that command. Previously the turn could not finish: it kept trying to cancel the command on the unreachable machine until the worker's quiescence watchdog drained the whole worker, ending the turn and every other turn on it. The command is now recorded in the session's command ledger with a stop request, the turn finishes normally, and the reconciler stops or settles the command when the machine returns or its runner is retired. The error the model sees is unchanged, and the later stop adds no model input. If the ledger cannot record the command, the turn keeps ownership as before.
+- Updated dependencies [28844d8]
+- Updated dependencies [2f370c3]
+- Updated dependencies [c594c1d]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+  - @opengeni/contracts@3.4.0
+  - @opengeni/config@3.4.0
+  - @opengeni/codemode@3.4.0
+  - @opengeni/codex@3.4.0
+  - @opengeni/observability@3.4.0
+  - @opengeni/network@3.4.0
+  - @opengeni/subscriptions@3.4.0
+  - @opengeni/xai-subscription@3.4.0
+
 ## 3.3.0
 
 ### Patch Changes
