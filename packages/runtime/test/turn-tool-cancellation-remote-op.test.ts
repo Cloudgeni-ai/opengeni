@@ -8,7 +8,11 @@ import {
   InMemoryOpStreamTransport,
   type FakeOpScript,
 } from "../src/sandbox/selfhosted/op-testing";
-import { SelfhostedSession, type SelfhostedSessionDeps } from "../src/sandbox/selfhosted/session";
+import {
+  SelfhostedSession,
+  type SelfhostedBackgroundCommandAdoption,
+  type SelfhostedSessionDeps,
+} from "../src/sandbox/selfhosted/session";
 import { SandboxChannelAService } from "../src/sandbox/channel-a";
 import {
   createTurnToolCancellationController,
@@ -115,7 +119,119 @@ function opIdFromStart(request: ControlRequest): string | null {
   return request.op?.$case === "opStart" ? request.requestId : null;
 }
 
+function machineOfflineError(): SelfhostedControlError {
+  return new SelfhostedControlError({
+    message: "machine offline",
+    code: ErrorCode.ERROR_CODE_AGENT_OFFLINE,
+    reason: "agent_offline",
+    retryable: false,
+    agentOffline: true,
+  });
+}
+
 describe("remote synchronous command custody", () => {
+  test("a command whose machine stops answering fails alone and does not hold the turn open", async () => {
+    let machineAnswers = true;
+    const adoptions: SelfhostedBackgroundCommandAdoption[] = [];
+    const commandId = "22222222-2222-4222-8222-222222222222";
+    const opId = "machine_went_away:0";
+    const rig = makeRig({
+      beforeRequest: (request) => {
+        if (request.op?.$case === "opStart") {
+          machineAnswers = false;
+          return;
+        }
+        if (!machineAnswers) throw machineOfflineError();
+      },
+      defaultScript: () => ({ frames: [], live: true, holdUntilCancel: true }),
+      sessionDeps: {
+        execTimeoutMs: 0,
+        adoptBackgroundCommand: async (input) => {
+          adoptions.push(input);
+          return { commandId };
+        },
+      },
+    });
+    const controller = createTurnToolCancellationController();
+    const result = await sdkExec(controller, rig.session).invoke(
+      {} as never,
+      JSON.stringify({ cmd: "long running command" }),
+      {
+        toolCall: {
+          type: "function_call",
+          callId: "machine_went_away",
+          name: "exec_command",
+          arguments: "{}",
+        },
+      },
+    );
+
+    expect(result).toContain("machine offline");
+    expect(adoptions).toEqual([
+      {
+        controlWorkspaceId: WORKSPACE,
+        enrollmentId: AGENT,
+        connectionInstanceId: CONNECTION,
+        opId,
+        command: "long running command",
+        abandoned: true,
+      },
+    ]);
+    // The turn finishes while the machine is still unreachable: the ledger,
+    // not this turn, now owns stopping the command.
+    const drain = controller.waitForQuiescence();
+    expect(await remainsPending(drain)).toBe(false);
+    await drain;
+    expect(rig.runner.starts.map((start) => start.opId)).toEqual([opId]);
+    expect(rig.runner.runs.get(opId)?.exit.cancelled).toBe(false);
+    machineAnswers = true;
+    await rig.session.cancelExecCommand(opId);
+  });
+
+  test("an unreachable command stays with the turn when the ledger cannot record it", async () => {
+    let machineAnswers = true;
+    let adoptionAttempts = 0;
+    const opId = "unrecorded_unreachable:0";
+    const rig = makeRig({
+      beforeRequest: (request) => {
+        if (request.op?.$case === "opStart") {
+          machineAnswers = false;
+          return;
+        }
+        if (!machineAnswers) throw machineOfflineError();
+      },
+      defaultScript: () => ({ frames: [], live: true, holdUntilCancel: true }),
+      sessionDeps: {
+        execTimeoutMs: 0,
+        adoptBackgroundCommand: async () => {
+          adoptionAttempts++;
+          throw new Error("ledger unavailable");
+        },
+      },
+    });
+    const controller = createTurnToolCancellationController();
+    const result = await sdkExec(controller, rig.session).invoke(
+      {} as never,
+      JSON.stringify({ cmd: "long running command" }),
+      {
+        toolCall: {
+          type: "function_call",
+          callId: "unrecorded_unreachable",
+          name: "exec_command",
+          arguments: "{}",
+        },
+      },
+    );
+
+    expect(result).toContain("machine offline");
+    expect(adoptionAttempts).toBe(1);
+    const drain = controller.waitForQuiescence();
+    expect(await remainsPending(drain)).toBe(true);
+    machineAnswers = true;
+    await drain;
+    expect(rig.runner.runs.get(opId)?.exit.cancelled).toBe(true);
+  });
+
   test.each(["synchronous", "model"] as const)(
     "trusted local admission refusal settles an unstarted %s command with no RPC",
     async (mode) => {

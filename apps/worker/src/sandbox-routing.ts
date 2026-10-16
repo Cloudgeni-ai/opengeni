@@ -1038,6 +1038,7 @@ export function wrapTurnBoxWithRouting(
               connectionInstanceId: command.connectionInstanceId,
               opId: command.opId,
               command: command.command,
+              ...(command.abandoned ? { abandoned: true } : {}),
             });
             return { commandId: adopted.id };
           },
@@ -1337,6 +1338,7 @@ export function wrapLazyTurnBoxWithRouting(
               connectionInstanceId: command.connectionInstanceId,
               opId: command.opId,
               command: command.command,
+              ...(command.abandoned ? { abandoned: true } : {}),
             });
             return { commandId: adopted.id };
           },
@@ -1750,6 +1752,7 @@ export async function establishSelfhostedTurnSession(
               connectionInstanceId: command.connectionInstanceId,
               opId: command.opId,
               command: command.command,
+              ...(command.abandoned ? { abandoned: true } : {}),
             });
             return { commandId: adopted.id };
           },
