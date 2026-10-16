@@ -196,6 +196,9 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "subscription_plan_definition(text)",
+  "plan_period_usage(plan_credit_periods, timestamp with time zone)",
+  "enforce_organization_plan_seats()",
   // Migration 0598's Claude pool activation receipt. Readiness no longer
   // requires it (the retirement migration 0751 dropped the pool routines);
   // it stays as a receipt the runtime need not execute.
@@ -1375,7 +1378,18 @@ export const SESSION_USAGE_LIMIT_INTERNAL_ROUTINES = [
   "seed_session_usage_limit_root()",
   "meter_session_usage_limit_event()",
 ] as const;
+export const SUBSCRIPTION_PLAN_RUNTIME_ROUTINES = [
+  "free_plan_credit_eligible(uuid)",
+  "organization_plan_seats_used(uuid)",
+  "upsert_organization_plan(uuid, text, text, text, timestamp with time zone, timestamp with time zone, boolean)",
+  "expire_plan_credit_period(uuid, uuid, boolean)",
+  "grant_plan_credit_period(uuid, text, timestamp with time zone, timestamp with time zone, text)",
+  "replace_plan_credit_period(uuid, text, timestamp with time zone, timestamp with time zone, text)",
+  "read_organization_plan_balance(uuid)",
+] as const;
+
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  ...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
   "scheduled_task_is_exhausted(uuid)",
   "lock_live_native_original_origin_v2(jsonb)",
   "modal_native_origin_member_read_active(uuid, text)",
@@ -1468,11 +1482,13 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
   VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE,
   "set_credit_promotion_policy(jsonb, text, text)",
+  "set_subscription_plan_catalog(jsonb, text, text)",
   MANAGED_AUTH_NEW_SIGNUPS_SWITCH_SETTER_ROUTINE,
   ...DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "set_subscription_plan_catalog(jsonb, text, text)",
   "scheduled_task_is_exhausted(uuid)",
   "set_credit_promotion_policy(jsonb, text, text)",
   CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
@@ -1708,6 +1724,7 @@ export const FORCE_RLS_TABLES = [
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",
   "organization_model_provider_custom_models",
+  "organization_plans",
   "organization_privacy_preferences",
   "organization_private_session_setting_events",
   "organization_private_session_settings",
@@ -1743,6 +1760,7 @@ export const FORCE_RLS_TABLES = [
   "personal_github_repository_selection_operations",
   "personal_github_repository_selections",
   "personal_resource_once_consumption_receipts",
+  "plan_credit_periods",
   "pr_review_app_registrations",
   "pr_review_managed_github_authority_nonces",
   "pr_review_repository_bindings",
@@ -2251,6 +2269,8 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "nested_agent_depth_configuration",
   "organization_integration_policies",
   "organization_integration_policy_operations",
+  "organization_plans",
+  "plan_credit_periods",
   "preference_registry_events",
   "preference_registry_snapshots",
   "session_tenancy_activations",
@@ -3095,6 +3115,7 @@ export async function inspectRuntimeDatabasePosture(
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE},
               ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE},
               'credit_promotion_policy_revisions',
+              'subscription_plan_catalog_revisions',
               ${MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE}
             )
         `),
@@ -3674,6 +3695,22 @@ export function evaluateRuntimeDatabasePosture(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
           );
         }
+      }
+    } else if ((SUBSCRIPTION_PLAN_RUNTIME_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = [
+        "organization_plans",
+        "plan_credit_periods",
+        "credit_ledger_entries",
+      ];
+      if (
+        (!options.protectedTables || authorityTables.some((name) => tableByName.has(name))) &&
+        authorityTables.some(
+          (name) => !tableByName.has(name) || tableByName.get(name)!.owner !== routine.owner,
+        )
+      ) {
+        violations.push(
+          `subscription plan capability ${routine.name} authority table owners do not match`,
+        );
       }
     } else if (routine.name === MCP_OPERATION_CAPABILITY_ROUTINE) {
       const missing = MCP_OPERATION_AUTHORITY_TABLES.filter((name) => !tableByName.has(name));
@@ -4860,6 +4897,20 @@ export function evaluateRuntimeDatabasePosture(
   const creditPolicyTable = posture.privateTables.find(
     (table) => table.name === "credit_promotion_policy_revisions",
   );
+  const planCatalogTable = posture.privateTables.find(
+    (table) => table.name === "subscription_plan_catalog_revisions",
+  );
+  if (!planCatalogTable?.select)
+    violations.push("runtime role cannot read the subscription plan catalog");
+  if (
+    planCatalogTable &&
+    (planCatalogTable.owner === expectedRole ||
+      planCatalogTable.insert ||
+      planCatalogTable.update ||
+      planCatalogTable.delete)
+  ) {
+    violations.push("runtime role has forbidden write authority on the subscription plan catalog");
+  }
   if (!creditPolicyTable) {
     violations.push("credit promotion policy table is missing");
   } else if (!creditPolicyTable.select) {

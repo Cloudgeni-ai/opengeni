@@ -50,6 +50,7 @@ export {
   type ConnectionMetadataWithVerification,
 } from "./connection-metadata";
 export { readCreditPromotionPolicy } from "./credit-promotion-policy";
+export * from "./subscription-plans";
 import {
   getBillingBalance,
   getSpendableCreditBalance,
@@ -6201,6 +6202,8 @@ export async function applyCreditLedgerEntryOnce(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
+      // Funding and usage adjustments share the expiry boundary too.
+      await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
       const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)
         .values({
@@ -6214,6 +6217,7 @@ export async function applyCreditLedgerEntryOnce(
           idempotencyKey: input.idempotencyKey,
           metadata: input.metadata ?? {},
           occurredAt: input.occurredAt ?? new Date(),
+          createdAt: sql`clock_timestamp()`,
         })
         .onConflictDoNothing({
           target: schema.creditLedgerEntries.idempotencyKey,
@@ -6287,6 +6291,7 @@ export async function applyCreditDebitUpToBalance(
             creditPolicyRevision: before.creditPolicyRevision,
           },
           occurredAt: input.occurredAt ?? new Date(),
+          createdAt: sql`clock_timestamp()`,
         })
         .onConflictDoNothing({
           target: schema.creditLedgerEntries.idempotencyKey,
@@ -6345,11 +6350,11 @@ export async function applyCreditDebitAfterUse(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
+      // Serialize ALL post-use charges with plan expiry, including resources
+      // that cannot allocate promotional grants.
+      await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
       if (input.usage) {
-        // Same account lock as the model debit, so grant remainders are not
-        // allocated twice by concurrent charges.
-        await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
         allocations = planPostUseCreditAllocations(
           await getBillingBalance(scopedDb, input.accountId),
           input.amountMicros,
@@ -6368,6 +6373,7 @@ export async function applyCreditDebitAfterUse(
           idempotencyKey: input.idempotencyKey,
           metadata: input.metadata ?? {},
           occurredAt: input.occurredAt ?? new Date(),
+          createdAt: sql`clock_timestamp()`,
         })
         .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
         .returning({ id: schema.creditLedgerEntries.id });

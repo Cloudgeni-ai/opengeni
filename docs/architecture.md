@@ -9,6 +9,8 @@ Overview: §2–4/§6; subsystems: §13; updates: §14.
 ---
 
 Keys/coupons: [providers](model-providers.md), [billing](deployment.md).
+Organization subscription plans (runtime catalog, period credit and seats):
+[foundation contract](subscription-plans.md). No plan row preserves existing behavior.
 
 ## 1. Startup
 

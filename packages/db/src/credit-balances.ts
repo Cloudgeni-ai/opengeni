@@ -1,4 +1,8 @@
-import type { BillingBalance, PromotionalCreditBalance } from "@opengeni/contracts";
+import type {
+  BillingBalance,
+  BillingPlanBalance,
+  PromotionalCreditBalance,
+} from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withAccountRls } from "./database";
@@ -17,6 +21,7 @@ export async function getBillingBalance(
       balance: string;
       grants: PromotionalCreditBalance[];
       revision: number;
+      plan: BillingPlanBalance | null;
     }>(
       tx,
       sql`
@@ -27,6 +32,7 @@ export async function getBillingBalance(
       )
       select
         coalesce((select revision from current_policy), 0)::int as revision,
+        read_organization_plan_balance(${accountId}::uuid) as plan,
         (select coalesce(sum(amount_micros), 0)::text
           from ${schema.creditLedgerEntries} where account_id = ${accountId}) as balance,
         coalesce((select jsonb_agg(jsonb_build_object(
@@ -61,6 +67,7 @@ export async function getBillingBalance(
       generalBalanceMicros:
         balanceMicros - promotionalCredits.reduce((sum, grant) => sum + grant.remainingMicros, 0),
       promotionalCredits,
+      plan: row?.plan ?? null,
       currency: "usd",
       updatedAt: new Date().toISOString(),
     };

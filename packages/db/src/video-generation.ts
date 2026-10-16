@@ -1366,6 +1366,7 @@ async function debitVideoGenerationCredits(
         pricedCostMicros: operation.pricedCostMicros,
       },
       occurredAt: now,
+      createdAt: sql`clock_timestamp()`,
     })
     .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
     .returning({ id: schema.creditLedgerEntries.id });
@@ -1418,6 +1419,7 @@ async function refundVideoGenerationCredits(
         pricedCostMicros: operation.pricedCostMicros,
       },
       occurredAt: now,
+      createdAt: sql`clock_timestamp()`,
     })
     .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
     .returning({ id: schema.creditLedgerEntries.id });

@@ -10765,6 +10765,7 @@
         "$.balanceMicros": "integer!",
         "$.currency": "const!=[\"\\\"usd\\\"\"]",
         "$.generalBalanceMicros": "integer?",
+        "$.plan": "ref(BillingPlanBalance)? null",
         "$.promotionalCredits": "array?",
         "$.promotionalCredits[]": "ref(PromotionalCreditBalance)",
         "$.updatedAt": "string!"
@@ -10785,6 +10786,23 @@
         "$.credit.promotionalScope": "ref(PromotionalCreditScope)?",
         "$.credit.state": "enum!=[\"\\\"granted\\\"\",\"\\\"pending\\\"\"]",
         "$.status": "enum!=[\"\\\"complete\\\"\",\"\\\"expired\\\"\",\"\\\"open\\\"\"]"
+      }
+    },
+    "BillingPlanBalance": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.cancelAtPeriodEnd": "boolean!",
+        "$.creditGrantedMicros": "integer!",
+        "$.creditRemainingMicros": "integer!",
+        "$.key": "string!",
+        "$.label": "string!",
+        "$.periodResetAt": "string! null",
+        "$.seatLimit": "integer! null",
+        "$.seatsUsed": "integer!",
+        "$.status": "string!"
       }
     },
     "BrowserAction": {
@@ -29644,6 +29662,7 @@
       "BillingCheckoutStatus": "type",
       "BillingEntitlementsResponse": "type",
       "BillingMode": "type",
+      "BillingPlanBalance": "type",
       "BillingSummary": "type",
       "BillingUsageResponse": "type",
       "BROWSER_CONTROL_MAX_FRAME_HEADER_BYTES": "value",
@@ -30994,6 +31013,8 @@
       "SubmitHumanInputResponseRequest": "type",
       "SubmittedTimelineAnnotation": "type",
       "SubscriptionAccountSummary": "type",
+      "SubscriptionPlan": "type",
+      "SubscriptionPlanCatalog": "type",
       "SubscriptionPoolSettings": "type",
       "SuperGrokAccount": "type",
       "SuperGrokAccountScope": "type",

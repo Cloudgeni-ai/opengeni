@@ -501,6 +501,14 @@ function safePosture(): RuntimeDatabasePosture {
         delete: false,
       },
       {
+        name: "subscription_plan_catalog_revisions",
+        owner: "opengeni_migrator",
+        select: true,
+        insert: false,
+        update: false,
+        delete: false,
+      },
+      {
         name: "personal_resource_delegation_capabilities",
         owner: "opengeni_migrator",
         select: false,
@@ -1699,6 +1707,12 @@ describe("runtime database posture evaluator", () => {
           // 0748: the five legacy Claude pool tables and its usage table too.
           (tables === RUNTIME_FULL_DML_TABLES ? 6 : 0) +
           embeddingTableCount +
+          // 0793 adds two account-isolated read-only plan tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_ONLY_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 2
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1739,7 +1753,8 @@ describe("runtime database posture evaluator", () => {
         10 + // 0782 published Sites tables: FORCE-RLS; nine full-DML, one read-only.
         5 + // 0783 Site SQL tables: full-DML, FORCE-RLS.
         4 + // 0790 Site platform usage tables: full-DML, FORCE-RLS.
-        1; // 0792 schedule blocker reviews: full-DML, FORCE-RLS.
+        1 + // 0792 schedule blocker reviews: full-DML, FORCE-RLS.
+        2; // 0793 subscription plan state and periods: read-only, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_FULL_DML_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_TABLE_PRIVILEGES.organization_model_defaults).toEqual([
