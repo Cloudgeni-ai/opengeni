@@ -474,16 +474,16 @@ impl Drop for Staging {
     }
 }
 
-/// Bytes a copy of `from` by [`copy_sparse`] can take on disk, wherever it
-/// lands: every data range of `from`, widened to whole 64 KiB blocks, as
-/// where extents cannot be shared each is written out, whatever `from`'s
-/// own filesystem compresses or shares; its whole length where its holes
-/// cannot be found.
+/// Bytes a copy of `from` by [`copy_sparse`] can take on a filesystem that
+/// allocates in units of `unit` bytes (see [`allocation_unit`]): every
+/// data range of `from`, widened to whole units, as where extents cannot
+/// be shared each is written out, whatever `from`'s own filesystem
+/// compresses or shares; its whole length where its holes cannot be found.
 #[cfg(target_os = "linux")]
-pub(crate) fn copy_size(from: &Path) -> io::Result<u64> {
+pub(crate) fn copy_size(from: &Path, unit: u64) -> io::Result<u64> {
     use rustix::fs::SeekFrom;
-    const BLOCK: u64 = 64 << 10;
 
+    let unit = unit.max(1);
     let source = File::open(from)?;
     let length = source.metadata()?.len();
     let mut size = 0_u64;
@@ -492,10 +492,10 @@ pub(crate) fn copy_size(from: &Path) -> io::Result<u64> {
         let start = match rustix::fs::seek(&source, SeekFrom::Data(offset)) {
             Ok(start) => start,
             Err(rustix::io::Errno::NXIO) => break,
-            Err(_) => return Ok(length.next_multiple_of(BLOCK)),
+            Err(_) => return Ok(length.next_multiple_of(unit)),
         };
         let end = rustix::fs::seek(&source, SeekFrom::Hole(start)).map_err(io::Error::from)?;
-        size = size.saturating_add(end.next_multiple_of(BLOCK) - start / BLOCK * BLOCK);
+        size = size.saturating_add(end.next_multiple_of(unit) - start / unit * unit);
         offset = end;
     }
     Ok(size)
@@ -503,8 +503,42 @@ pub(crate) fn copy_size(from: &Path) -> io::Result<u64> {
 
 /// [`copy_size`] where holes cannot be found: the whole length.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn copy_size(from: &Path) -> io::Result<u64> {
-    Ok(fs::metadata(from)?.len())
+pub(crate) fn copy_size(from: &Path, unit: u64) -> io::Result<u64> {
+    Ok(fs::metadata(from)?.len().next_multiple_of(unit.max(1)))
+}
+
+/// The bytes the filesystem holding `dir` allocates for the smallest write,
+/// learned by writing one: 4 KiB that do not compress, made durable, then
+/// what the file takes; no less than the block size it reports, as some
+/// filesystems count what a write takes only later. Ext4 with bigalloc,
+/// for one, allocates whole clusters of up to megabytes.
+pub(crate) fn allocation_unit(dir: &Path) -> io::Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+
+    let probe = dir.join(".allocation-probe");
+    let result = (|| {
+        let mut file = File::create(&probe)?;
+        // Bytes no filesystem compresses away: a simple generator's output.
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let block: Vec<u8> = (0..4096)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()[0]
+            })
+            .collect();
+        file.write_all(&block)?;
+        file.sync_all()?;
+        let metadata = file.metadata()?;
+        Ok(metadata
+            .blocks()
+            .saturating_mul(512)
+            .max(metadata.blksize())
+            .max(4096))
+    })();
+    let _ = fs::remove_file(&probe);
+    result
 }
 
 #[cfg(target_os = "linux")]
@@ -628,6 +662,16 @@ pub(crate) mod tests {
         );
         FAILPOINTS.lock().unwrap().retain(|(path, _)| path != &made);
         create_dir_durably(&made).unwrap();
+    }
+
+    /// The unit is learned from the filesystem itself: at least a block,
+    /// and the probe leaves nothing behind.
+    #[test]
+    fn the_allocation_unit_is_learned_from_the_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = allocation_unit(dir.path()).unwrap();
+        assert!(unit >= 4096 && unit.is_power_of_two(), "{unit}");
+        assert!(!dir.path().join(".allocation-probe").exists());
     }
 
     /// What a VMM can leave in its jail in place of a file is never read.

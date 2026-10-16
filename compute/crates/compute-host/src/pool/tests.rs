@@ -46,14 +46,37 @@ fn a_build_books_its_copies_of_the_base_image_and_kernel_and_its_snapshot() {
     file.sync_all().unwrap();
     let kernel = dir.path().join("vmlinux");
     fs::write(&kernel, vec![9; 16 << 20]).unwrap();
-    let booked = build_disk(shape(1, 1), &[&image, &kernel], 2, MIB).unwrap();
+    let booked = build_disk(shape(1, 1), &[&image, &kernel], 4096, 2, MIB).unwrap();
     assert!(
         (27 * MIB..36 * MIB).contains(&booked.bytes),
         "8 + 16 MiB copied, 2 x 1 MiB of memory and 1 MiB besides: {booked:?}"
     );
     assert!(booked.inodes > DiskSpace::save(0).inodes, "{booked:?}");
     let missing = dir.path().join("missing");
-    assert!(build_disk(shape(1, 1), &[&image, &missing], 1, 0).is_err());
+    assert!(build_disk(shape(1, 1), &[&image, &missing], 4096, 1, 0).is_err());
+}
+
+/// On a filesystem that allocates in large clusters, such as ext4 with
+/// bigalloc, every data range of a sparse input takes whole clusters.
+#[test]
+fn sparse_copies_are_booked_in_whole_allocation_units() {
+    const MIB: u64 = 1 << 20;
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("base.img");
+    let file = fs::File::create(&image).unwrap();
+    // Eight 4 KiB data ranges, 4 MiB apart.
+    for range in 0..8 {
+        std::os::unix::fs::FileExt::write_all_at(&file, &[7; 4096], range * 4 * MIB).unwrap();
+    }
+    file.set_len(32 * MIB).unwrap();
+    file.sync_all().unwrap();
+    let snapshot = DiskSpace::save(shape(1, 1).bytes()).bytes;
+    let booked = build_disk(shape(1, 1), &[&image], MIB, 1, 0).unwrap();
+    assert_eq!(
+        booked.bytes - snapshot,
+        8 * MIB,
+        "one 1 MiB cluster per range"
+    );
 }
 
 #[test]

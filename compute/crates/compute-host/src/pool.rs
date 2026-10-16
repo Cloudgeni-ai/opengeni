@@ -927,20 +927,21 @@ async fn attempt<E: Engine>(
 }
 
 /// What a build of `shape` may write to local disk at most: its copies of
-/// the files it copies in, `copied` (the base image and the kernel), as
-/// [`copy_size`] counts them, and a snapshot of the whole of guest memory,
-/// `copies` times where publishing it cannot share extents, plus `extra`
-/// for its device state; with the inodes of two saves for the build's few
-/// files.
+/// the files it copies in, `sources` (the base image and the kernel), as
+/// [`copy_size`] counts them on a filesystem allocating `unit` bytes at a
+/// time, and a snapshot of the whole of guest memory, `copies` times where
+/// publishing it cannot share extents, plus `extra` for its device state;
+/// with the inodes of two saves for the build's few files.
 pub(crate) fn build_disk(
     shape: Shape,
-    copied: &[&Path],
+    sources: &[&Path],
+    unit: u64,
     copies: u64,
     extra: u64,
 ) -> io::Result<DiskSpace> {
     let mut copy = 0_u64;
-    for file in copied {
-        copy = copy.saturating_add(copy_size(file)?);
+    for file in sources {
+        copy = copy.saturating_add(copy_size(file, unit)?);
     }
     let snapshot = DiskSpace::save(shape.bytes().saturating_mul(copies).saturating_add(extra));
     Ok(DiskSpace {

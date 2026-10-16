@@ -145,9 +145,11 @@ pick a VM.
   stays counted until a reading taken after it shows what the save used,
   and before the first reading after a start nothing that needs disk is
   admitted. A template build books its copies of the base image and the
-  kernel (their data ranges in whole 64 KiB blocks, as written where
-  extents cannot be shared) and its worst-case snapshot the same way
-  before it starts, and waits without the room;
+  kernel (their data ranges in whole allocation units of the state
+  filesystem, as written where extents cannot be shared; the agent
+  learns the unit at start by writing a probe, so ext4 bigalloc's
+  clusters count) and its worst-case snapshot the same way before it
+  starts, and waits without the room;
   what it wrote stays booked until the next reading after it ends. Ready
   clones' disk copies, which share extents with their template where
   the filesystem can, and guests' disk growth are not booked. A wake that

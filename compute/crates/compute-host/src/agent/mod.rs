@@ -341,6 +341,13 @@ fn save_copies(root: &std::path::Path) -> Result<u64, HostError> {
     }
 }
 
+/// The bytes the filesystem holding `root` allocates at a time, which
+/// sparse copies onto it are booked in.
+fn allocation_unit(root: &std::path::Path) -> Result<u64, HostError> {
+    crate::layout::allocation_unit(root)
+        .map_err(|error| HostError::Io(format!("probing the state root: {error}")))
+}
+
 /// What a host-full refusal counts.
 fn shortage(resource: Resource) -> &'static str {
     match resource {
@@ -699,6 +706,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Copies of guest memory a save may write at most: one where files
     /// share extents, otherwise also the merged image.
     save_copies: u64,
+    /// The bytes the state root's filesystem allocates at a time.
+    allocation_unit: u64,
     pager: PagerConfig,
     /// What the host runs, as status reports it.
     about: About,
@@ -841,6 +850,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let can_compress = config.can_compress && engine.memory_profile().compress;
         let reserve_whole = engine.memory_profile().pages == PageSize::Huge;
         let save_copies = save_copies(&config.root)?;
+        let allocation_unit = allocation_unit(&config.root)?;
         // Template VMs an earlier agent left are ended before any sandbox
         // can be given the user one of them ran as.
         let warm::Started {
@@ -908,6 +918,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             can_compress,
             reserve_whole,
             save_copies,
+            allocation_unit,
             about,
             commands_tx: commands_tx.downgrade(),
         };
