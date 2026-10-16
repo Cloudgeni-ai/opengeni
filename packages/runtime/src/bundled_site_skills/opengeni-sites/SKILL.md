@@ -61,6 +61,45 @@ say which designs are possible and ask before building.
 - Keep secrets, Opengeni access keys, OAuth tokens, workspace ids, API base
   URLs, and signed URLs out of the source and generated HTML.
 
+## Make new Sites readable by default
+
+Choose a clear type scale before building. For new Sites without an explicit
+type scale, start main reading text at 16–18px, controls and table content at
+14–16px, and reserve smaller text for genuinely secondary metadata, not
+descriptions, navigation, labels needed to use a control, or key results.
+Use comfortable line heights (about 1.5–1.7 for prose) and reading widths of
+roughly 60–75 characters. Check the chosen font at its rendered size: a large
+headline does not make small body copy readable.
+
+Use `rem`/`em` for text, keep the browser's root font size, and allow browser
+zoom and user text scaling. Do not shrink primary copy on mobile to fit more
+columns; reflow the layout, wrap content, or scroll a wide table instead.
+Keep form text readable and let controls grow with their labels.
+
+These are authoring defaults, not a mandatory theme or runtime CSS override.
+Honor a user's deliberate design, retain an existing app's type system, and
+leave embedded components such as `SessionConversation` on their own styles.
+Do not inject a blanket font-size rule into existing Sites or use `!important`
+to force this scale onto a component library. If `frontend-design` is available,
+use it for visual direction alongside these readability defaults.
+
+For a new page, this optional starting point applies only to elements you mark
+with these classes; adapt it to the design rather than importing a global reset.
+The sizes below assume the usual 16px browser default and scale with it.
+
+```css
+.site-copy { font-size: 1.0625rem; line-height: 1.6; max-width: 70ch; }
+.site-control { font: inherit; font-size: 1rem; line-height: 1.5; }
+.site-table { font-size: 0.9375rem; line-height: 1.5; }
+.site-meta { font-size: 0.8125rem; line-height: 1.5; }
+```
+
+Before publishing, inspect actual paragraphs, labels, inputs, buttons, table
+cells and empty/error states at desktop and narrow mobile widths, then with
+text enlarged to 200%. Check computed sizes and look for clipped or overlapping
+text; fix layout pressure rather than making the content smaller. A fixture can
+demonstrate a type scale, but does not prove every generated Site follows it.
+
 ## Use normal Bun + React
 
 Use the repository's pinned Bun version and ordinary package scripts. A minimal
@@ -672,6 +711,8 @@ with `textContent` or React text, never `innerHTML`.
 - The compiled runtime is one self-contained HTML document within the published
   size limit.
 - Desktop and mobile interactions were exercised in the sandbox-local preview.
+- Reading text, controls and tables follow the chosen readable type scale;
+  mobile and 200% text scaling do not clip or shrink primary content.
 - Exercise live tools and SDK operations locally through `/__opengeni/site-tools/*`
   wherever the attempt's Codemode authority permits. Report remaining
   viewer-only checks explicitly; those do not by themselves block publication.
