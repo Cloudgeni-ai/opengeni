@@ -131,7 +131,9 @@ pick a VM.
   on per-CPU lists (`/proc/zoneinfo`), which `MemAvailable` leaves out:
   on a 192-CPU host about 1 GiB of a 6 GiB process that exited was still
   there 15 s later, so a sandbox waiting for room woke 12 to 34 s late.
-  On huge-page hosts it is no more than the free huge-page pool.
+  When `MemAvailable` reads zero it is zero: the kernel clamps a negative
+  estimate there, and the per-CPU pages may cover only part of it. On
+  huge-page hosts it is no more than the free huge-page pool.
 - Local disk is booked the same way, because a full disk blocks the very
   saves that relieve memory. Every VM whose state is not saved yet books
   its worst-case next save: its memory size once where files share extents
@@ -142,9 +144,10 @@ pick a VM.
   filesystem has free, read every sample. A booking whose save has written
   stays counted until a reading taken after it shows what the save used,
   and before the first reading after a start nothing that needs disk is
-  admitted. A template build books its copy of the base image (its
-  allocated blocks) and its worst-case snapshot the same way before it
-  starts, and waits without the room;
+  admitted. A template build books its copies of the base image and the
+  kernel (their data ranges in whole 64 KiB blocks, as written where
+  extents cannot be shared) and its worst-case snapshot the same way
+  before it starts, and waits without the room;
   what it wrote stays booked until the next reading after it ends. Ready
   clones' disk copies, which share extents with their template where
   the filesystem can, and guests' disk growth are not booked. A wake that

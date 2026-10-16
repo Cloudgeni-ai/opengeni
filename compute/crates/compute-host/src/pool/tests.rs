@@ -31,11 +31,11 @@ fn kept_shapes_parse_with_an_optional_ready_count() {
     }
 }
 
-/// A build books its copy of the base image as well as its snapshot, so a
-/// base image larger than guest memory is booked at its allocated size;
-/// holes cost nothing.
+/// A build books its copies of the base image and the kernel as well as
+/// its snapshot, so inputs larger than guest memory are booked at the size
+/// of their data; holes cost nothing.
 #[test]
-fn a_build_books_its_base_image_copy_and_its_snapshot() {
+fn a_build_books_its_copies_of_the_base_image_and_kernel_and_its_snapshot() {
     const MIB: u64 = 1 << 20;
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("base.img");
@@ -44,13 +44,16 @@ fn a_build_books_its_base_image_copy_and_its_snapshot() {
     std::io::Write::write_all(&mut &file, &vec![7; 8 << 20]).unwrap();
     file.set_len(72 * MIB).unwrap();
     file.sync_all().unwrap();
-    let booked = build_disk(shape(1, 1), &image, 2, MIB).unwrap();
+    let kernel = dir.path().join("vmlinux");
+    fs::write(&kernel, vec![9; 16 << 20]).unwrap();
+    let booked = build_disk(shape(1, 1), &[&image, &kernel], 2, MIB).unwrap();
     assert!(
-        (11 * MIB..20 * MIB).contains(&booked.bytes),
-        "8 MiB copied, 2 x 1 MiB of memory and 1 MiB besides: {booked:?}"
+        (27 * MIB..36 * MIB).contains(&booked.bytes),
+        "8 + 16 MiB copied, 2 x 1 MiB of memory and 1 MiB besides: {booked:?}"
     );
     assert!(booked.inodes > DiskSpace::save(0).inodes, "{booked:?}");
-    assert!(build_disk(shape(1, 1), &dir.path().join("missing"), 1, 0).is_err());
+    let missing = dir.path().join("missing");
+    assert!(build_disk(shape(1, 1), &[&image, &missing], 1, 0).is_err());
 }
 
 #[test]

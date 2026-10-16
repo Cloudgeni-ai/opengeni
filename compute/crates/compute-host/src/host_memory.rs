@@ -28,9 +28,14 @@ pub(crate) fn parse(meminfo: &str, zoneinfo: &str, huge: bool) -> Option<u64> {
         line.split_whitespace().nth(1)?.parse().ok()
     };
     let page = u64::try_from(rustix::param::page_size()).unwrap_or(4096);
-    let available = field("MemAvailable:")?
-        .saturating_mul(1024)
-        .saturating_add(per_cpu_pages(zoneinfo).saturating_mul(page));
+    // The kernel clamps a negative estimate to zero, so at zero the
+    // per-CPU pages may only make up part of a shortfall it hides.
+    let available = match field("MemAvailable:")? {
+        0 => 0,
+        kib => kib
+            .saturating_mul(1024)
+            .saturating_add(per_cpu_pages(zoneinfo).saturating_mul(page)),
+    };
     if !huge {
         return Some(available);
     }
@@ -92,5 +97,12 @@ Hugepagesize:       2048 kB
             Some((16 << 30) + 1024 * page)
         );
         assert_eq!(parse(MEMINFO, ZONEINFO, true), Some(2 << 30));
+    }
+
+    /// At zero `MemAvailable` may hide a shortfall larger than what the
+    /// per-CPU lists hold: nothing is available.
+    #[test]
+    fn nothing_is_available_when_mem_available_is_zero() {
+        assert_eq!(parse("MemAvailable: 0 kB\n", ZONEINFO, false), Some(0));
     }
 }

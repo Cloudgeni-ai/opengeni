@@ -73,8 +73,8 @@ use tokio::time::{Instant, sleep, timeout};
 
 use crate::image::{Depth, Images, Parts, Suspect};
 use crate::layout::{
-    Machine, Paths, copy_sparse, link_kernel, remove_if_present, sync_parent, templates_dir,
-    write_atomic,
+    Machine, Paths, copy_size, copy_sparse, link_kernel, remove_if_present, sync_parent,
+    templates_dir, write_atomic,
 };
 use crate::net::Isolated;
 use crate::protocol::{MAX_MEMORY_MIB, SandboxConfig, TemplateState, TemplateStatus};
@@ -926,18 +926,22 @@ async fn attempt<E: Engine>(
     blocking(move || publish(&root, inputs, &paths, &files, &runtime)).await
 }
 
-/// What a build of `shape` from `base_image` may write to local disk at
-/// most: its copy of the base image's allocated blocks, and a snapshot of
-/// the whole of guest memory, `copies` times where publishing it cannot
-/// share extents, plus `extra` for its device state; with the inodes of
-/// two saves for the build's few files.
+/// What a build of `shape` may write to local disk at most: its copies of
+/// the files it copies in, `copied` (the base image and the kernel), as
+/// [`copy_size`] counts them, and a snapshot of the whole of guest memory,
+/// `copies` times where publishing it cannot share extents, plus `extra`
+/// for its device state; with the inodes of two saves for the build's few
+/// files.
 pub(crate) fn build_disk(
     shape: Shape,
-    base_image: &Path,
+    copied: &[&Path],
     copies: u64,
     extra: u64,
 ) -> io::Result<DiskSpace> {
-    let copy = fs::metadata(base_image)?.blocks().saturating_mul(512);
+    let mut copy = 0_u64;
+    for file in copied {
+        copy = copy.saturating_add(copy_size(file)?);
+    }
     let snapshot = DiskSpace::save(shape.bytes().saturating_mul(copies).saturating_add(extra));
     Ok(DiskSpace {
         bytes: snapshot.bytes.saturating_add(copy),

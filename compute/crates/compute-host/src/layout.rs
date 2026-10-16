@@ -474,6 +474,39 @@ impl Drop for Staging {
     }
 }
 
+/// Bytes a copy of `from` by [`copy_sparse`] can take on disk, wherever it
+/// lands: every data range of `from`, widened to whole 64 KiB blocks, as
+/// where extents cannot be shared each is written out, whatever `from`'s
+/// own filesystem compresses or shares; its whole length where its holes
+/// cannot be found.
+#[cfg(target_os = "linux")]
+pub(crate) fn copy_size(from: &Path) -> io::Result<u64> {
+    use rustix::fs::SeekFrom;
+    const BLOCK: u64 = 64 << 10;
+
+    let source = File::open(from)?;
+    let length = source.metadata()?.len();
+    let mut size = 0_u64;
+    let mut offset = 0_u64;
+    while offset < length {
+        let start = match rustix::fs::seek(&source, SeekFrom::Data(offset)) {
+            Ok(start) => start,
+            Err(rustix::io::Errno::NXIO) => break,
+            Err(_) => return Ok(length.next_multiple_of(BLOCK)),
+        };
+        let end = rustix::fs::seek(&source, SeekFrom::Hole(start)).map_err(io::Error::from)?;
+        size = size.saturating_add(end.next_multiple_of(BLOCK) - start / BLOCK * BLOCK);
+        offset = end;
+    }
+    Ok(size)
+}
+
+/// [`copy_size`] where holes cannot be found: the whole length.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn copy_size(from: &Path) -> io::Result<u64> {
+    Ok(fs::metadata(from)?.len())
+}
+
 #[cfg(target_os = "linux")]
 fn copy_contents(source: &File, target: &File) -> io::Result<()> {
     use rustix::fs::SeekFrom;

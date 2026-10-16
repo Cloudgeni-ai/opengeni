@@ -297,7 +297,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }) else {
             return;
         };
-        let disk = pool::build_disk(shape, &sources.base_image, self.save_copies, SAVE_EXTRA);
+        let disk = pool::build_disk(
+            shape,
+            &[&sources.base_image, &sources.kernel],
+            self.save_copies,
+            SAVE_EXTRA,
+        );
         if !disk
             .as_ref()
             .is_ok_and(|disk| self.core.spare_fits(shape.bytes(), *disk))
@@ -305,7 +310,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             if let Some(warm) = &mut self.warm {
                 let problem = match &disk {
                     Ok(_) => "the host has no memory or disk to spare for a template build".into(),
-                    Err(error) => format!("reading the base image: {error}"),
+                    Err(error) => format!("reading the base image or kernel: {error}"),
                 };
                 warm.pool.built(shape, Err(problem), Instant::now());
             }

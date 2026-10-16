@@ -179,7 +179,8 @@ sandbox, for a wake, the buffer or memory pressure. A claimed ready sandbox
 moves into the sandbox's place in the same decision. Available memory is
 `MemAvailable` plus the free pages on the kernel's per-CPU lists, which it
 leaves out (on many-CPU hosts gigabytes for tens of seconds after a process
-exits), and on huge-page hosts no more than the free pool.
+exits), zero when `MemAvailable` is zero, and on huge-page hosts no more
+than the free pool.
 The status reports the capacity (total, reserved, occupied, free, awake), and
 a restarted agent rebuilds it from its records, counting every VM it takes
 back at its full size until it is measured, and any it cannot take back at
@@ -192,8 +193,8 @@ twice, plus 64 MiB), and bookings plus `--disk-reserve-mib` and
 `--disk-reserve-inodes` (default a twentieth of the filesystem) stay within
 what is free. A booking stays until a reading after its save shows what
 the save used, and nothing needing disk is admitted before the first
-reading. A template build books its copy of the base image and its
-snapshot like a save before it starts and waits without the room; ready
+reading. A template build books its copies of the base image and kernel
+and its snapshot like a save before it starts and waits without the room; ready
 sandboxes' disk copies and guests' disk growth are not booked. A wake the
 disk cannot book gets `host_full` naming disk or inodes; archived idle
 sandboxes give up their local copies in the background to make room. The
