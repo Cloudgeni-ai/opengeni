@@ -136,6 +136,59 @@ function familyCompanions<T extends Tool & { name: string }>(disclosed: T[], poo
 }
 
 /**
+ * The tool that starts each interaction family. It stays in the first request,
+ * so a browser or computer task begins with its first real call instead of a
+ * search round trip, and opening discloses the rest of the family right after
+ * the open result (see the lazy-tool transport). Only a tool the attempt
+ * actually prepared can be visible: a first-party interaction tool, or one the
+ * `interaction` server listed, never a same-named tool from another server.
+ */
+const INTERACTION_ENTRY_TOOLS: ReadonlySet<string> = new Set(["browser_open", "computer_open"]);
+
+/** True when a prepared function tool is an interaction family's entry tool. */
+export function isInteractionEntryFunctionTool(
+  tool: unknown,
+  mcpServerIds: ReadonlySet<string> = NO_MCP_SERVER_IDS,
+  modelServerIds?: ReadonlyMap<string, string>,
+): boolean {
+  if (!tool || typeof tool !== "object" || (tool as { type?: unknown }).type !== "function") {
+    return false;
+  }
+  const name = (tool as { name?: unknown }).name;
+  if (typeof name !== "string" || !isInteractionEntryToolName(name)) return false;
+  const serverId = mcpServerIdForTool(tool, mcpServerIds, modelServerIds);
+  return serverId === null || serverId === INTERACTION_MCP_SERVER_ID;
+}
+
+/** True when a model tool name is an interaction family's entry tool. */
+export function isInteractionEntryToolName(name: string): boolean {
+  const short = interactionToolName(name);
+  return short !== null && INTERACTION_ENTRY_TOOLS.has(short);
+}
+
+/**
+ * The companions an entry tool discloses once it is called: the rest of its
+ * family that is still searchable, within the same byte budgets as a search.
+ */
+export function interactionEntryCompanions(entryName: string, searchable: Tool[]): Tool[] {
+  if (!isInteractionEntryToolName(entryName)) return [];
+  const pool = searchable.filter(
+    (tool): tool is Tool & { name: string } =>
+      tool.type === "function" && typeof (tool as { name?: unknown }).name === "string",
+  );
+  const disclosed: Tool[] = [];
+  let disclosedBytes = 0;
+  for (const tool of familyCompanions([{ name: entryName } as Tool & { name: string }], pool)) {
+    const toolBytes = mcpSerializedSizeBytes(tool);
+    if (toolBytes > MCP_MAX_TOOL_DEFINITION_BYTES) continue;
+    if (disclosedBytes + toolBytes > MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES) continue;
+    disclosedBytes += toolBytes;
+    disclosed.push(tool);
+  }
+  return disclosed;
+}
+
+/**
  * True when a prepared MCP function tool is one of the harness control tools
  * served by the authorized first-party `opengeni` server. These stay in the
  * first request on every transport even though the server's other schemas
