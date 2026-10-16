@@ -27,6 +27,8 @@ describe("migration 0189 retained session image formats", () => {
         from pg_constraint
         where conrelid = 'retained_screenshot_artifacts'::regclass
           and conname like 'retained_screenshot_artifacts_media_type%'
+          -- PostgreSQL 18 also lists column NOT NULL constraints here.
+          and contype <> 'n'
         order by conname`;
       expect([...constraints]).toEqual([
         {

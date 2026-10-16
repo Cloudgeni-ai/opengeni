@@ -1490,6 +1490,9 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
               || pg_get_constraintdef(constraint_value.oid, false)
             from pg_constraint constraint_value
             where constraint_value.conrelid = relation.oid
+              -- PostgreSQL 18 also lists column NOT NULL constraints, which
+              -- the columns snapshot above already covers.
+              and constraint_value.contype <> 'n'
             order by constraint_value.conname
           ) as constraints,
           (select count(*)::int from aclexplode(coalesce(

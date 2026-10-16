@@ -281,6 +281,10 @@ describe("migration 0521 verified signup trial runtime switch", () => {
             ON opengeni_private.credit_promotion_policy_revisions;
           DROP TRIGGER credit_promotion_policy_revisions_no_truncate
             ON opengeni_private.credit_promotion_policy_revisions;
+          DROP TRIGGER subscription_plan_catalog_immutable
+            ON opengeni_private.subscription_plan_catalog_revisions;
+          DROP TRIGGER subscription_plan_catalog_no_truncate
+            ON opengeni_private.subscription_plan_catalog_revisions;
           DROP FUNCTION public.reject_verified_signup_trial_switch_revision_mutation();
           ALTER DEFAULT PRIVILEGES IN SCHEMA opengeni_private
             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO opengeni_app;
@@ -333,6 +337,20 @@ describe("migration 0521 verified signup trial runtime switch", () => {
     expect([...restoredPolicyGuards]).toEqual([
       { name: "credit_promotion_policy_revisions_immutable", enabled: "O" },
       { name: "credit_promotion_policy_revisions_no_truncate", enabled: "O" },
+    ]);
+    const restoredPlanCatalogGuards = await owner<Array<{ name: string; enabled: string }>>`
+      select tgname as name, tgenabled as enabled
+      from pg_trigger
+      where tgrelid = 'opengeni_private.subscription_plan_catalog_revisions'::regclass
+        and tgname in (
+          'subscription_plan_catalog_immutable',
+          'subscription_plan_catalog_no_truncate'
+        )
+        and tgfoid = 'public.reject_verified_signup_trial_switch_revision_mutation()'::regprocedure
+      order by tgname`;
+    expect([...restoredPlanCatalogGuards]).toEqual([
+      { name: "subscription_plan_catalog_immutable", enabled: "O" },
+      { name: "subscription_plan_catalog_no_truncate", enabled: "O" },
     ]);
   }, 60_000);
 

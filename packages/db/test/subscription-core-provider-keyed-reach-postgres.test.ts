@@ -711,6 +711,8 @@ describe("provider-keyed reach on the shared subscription core (migration 0713)"
       const constraints = await database!.admin<{ name: string; definition: string }[]>`
         select conname as name, pg_get_constraintdef(oid) as definition from pg_constraint
         where conrelid = 'opengeni_private.subscription_codex_auto_assignments'::regclass
+          -- PostgreSQL 18 also lists column NOT NULL constraints here.
+          and contype <> 'n'
         order by contype, conname`;
       // 0689's connection key, primary key and reach check stay; the
       // provider is keyed by the registry.
