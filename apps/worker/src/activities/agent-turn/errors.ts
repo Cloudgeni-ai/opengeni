@@ -57,7 +57,10 @@ import {
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import type { ProviderErrorOutcome } from "@opengeni/subscriptions";
 import { CODEX_USAGE_EXHAUSTED_PCT } from "./codex-usage-policy";
-import { RetainedAttachmentTransportLimitError } from "../run-input";
+import {
+  RetainedAttachmentTransportLimitError,
+  RetainedAttachmentUnavailableError,
+} from "../run-input";
 import type { CodexAccountStatus } from "@opengeni/db";
 import {
   CODEX_USAGE_LIMIT_ERROR_TYPE,
@@ -144,6 +147,21 @@ export function providerRecoveryJitterMs(delayMs: number, sample: number): numbe
   return Math.floor(Math.min(5_000, delayMs * 0.2) * bounded);
 }
 export const POST_COMPACTION_CONTINUATION_EMPTY_CODE = "post_compaction_continuation_empty";
+export const RETAINED_ATTACHMENT_UNAVAILABLE_CODE = "retained_attachment_unavailable";
+
+function findRetainedAttachmentUnavailableError(
+  error: unknown,
+): RetainedAttachmentUnavailableError | null {
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (current instanceof RetainedAttachmentUnavailableError) return current;
+    if (seen.has(current)) break;
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
 
 export class PostCompactionContinuationEmptyError extends Error {
   readonly code = POST_COMPACTION_CONTINUATION_EMPTY_CODE;
@@ -221,6 +239,7 @@ export function providerRecoveryResult(input: {
           input.failureCode === "provider_unavailable" ||
           input.failureCode === "upstream_connectivity_unavailable" ||
           input.failureCode === "sandbox_command_start_unavailable" ||
+          input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
           input.failureCode === "mcp_transport_timeout" ||
           input.failureCode === "mcp_transport_unavailable" ||
           input.failureCode === "turn_execution_policy_definition_mismatch" ||
@@ -1808,6 +1827,16 @@ function baseAgentRunFailurePayload(
   }
   if (error instanceof RetainedAttachmentTransportLimitError) {
     return { error: error.message, code: "retained_attachment_transport_limit", retryable: false };
+  }
+  if (findRetainedAttachmentUnavailableError(error)) {
+    // Storage may lag after a replica outage. The same turn retries with the
+    // connectivity backoff and never continues without the image's pixels.
+    return {
+      error:
+        "An image attached earlier in this conversation can't be read from storage right now. The same turn will retry after a short delay.",
+      code: RETAINED_ATTACHMENT_UNAVAILABLE_CODE,
+      retryable: true,
+    };
   }
   if (error instanceof MandatoryHistoryPersistenceError) {
     const databaseFailure =

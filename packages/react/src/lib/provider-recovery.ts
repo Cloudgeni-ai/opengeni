@@ -58,6 +58,7 @@ const RECOVERY_CODES: ReadonlySet<string> = new Set([
   "mcp_transport_timeout",
   "mcp_transport_unavailable",
   "sandbox_command_start_unavailable",
+  "retained_attachment_unavailable",
   "turn_execution_policy_definition_mismatch",
 ]);
 
@@ -154,6 +155,8 @@ export function providerRecoverySubject(facts: ProviderRecoveryFacts): string {
       return "A required MCP server is unreachable";
     case "sandbox_command_start_unavailable":
       return "The sandbox isn't ready yet";
+    case "retained_attachment_unavailable":
+      return "An image from earlier in this conversation can't be read from storage";
     case "turn_execution_policy_definition_mismatch":
       return "Opengeni is applying a configuration update";
     case "sandbox_deadline_rotation":

@@ -9,10 +9,15 @@ import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import { prepareRunInput, type AgentSegmentInput, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createHash } from "node:crypto";
-import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
+import {
+  MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+  agentRunFailurePayload,
+  providerRecoveryResult,
+} from "../src/activities/agent-turn/errors";
 import {
   MAX_INLINE_MODEL_ATTACHMENT_BYTES,
   RetainedAttachmentTransportLimitError,
+  RetainedAttachmentUnavailableError,
   createModelHistoryAttachmentProjector,
   modelAttachmentContentForFiles,
   turnInput,
@@ -871,6 +876,71 @@ describe("retained upload replay", () => {
     );
     await expect(projector(history)).rejects.toThrow("Retained attachment bytes");
     await expect(projector(history)).rejects.toThrow("Retained attachment bytes");
+  });
+  test("a storage miss for a retained image retries the same turn and later sends the same pixels", async () => {
+    const bytes = new TextEncoder().encode("image");
+    const asset = {
+      ...file("00000000-0000-4000-8000-000000000084", "image/png", bytes.length, "a.png"),
+      sha256: sha256(bytes),
+    };
+    const history = [
+      { ...user("inspect"), [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }] },
+    ];
+    let storageReady = false;
+    const projector = createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => {
+        if (!storageReady) throw new Error("attachment object is missing");
+        return bytes;
+      },
+      async () => [asset],
+    );
+    const missed = await projector(history).catch((error) => error);
+    expect(missed).toBeInstanceOf(RetainedAttachmentUnavailableError);
+    expect(missed.fileIds).toEqual([asset.id]);
+    expect(String(missed.message)).not.toContain(asset.id);
+    expect(agentRunFailurePayload(missed)).toMatchObject({
+      code: "retained_attachment_unavailable",
+      retryable: true,
+    });
+    expect(
+      agentRunFailurePayload(new Error("Failed to run the turn", { cause: missed })),
+    ).toMatchObject({ code: "retained_attachment_unavailable", retryable: true });
+    // Same finite connectivity backoff as other upstream outages.
+    expect(
+      providerRecoveryResult({
+        failureCode: "retained_attachment_unavailable",
+        attemptNumber: 1,
+      }),
+    ).toEqual({ status: "recovering", continueDelayMs: 2_000 });
+    expect(
+      providerRecoveryResult({
+        failureCode: "retained_attachment_unavailable",
+        attemptNumber: MAX_AUTOMATIC_PROVIDER_RECOVERIES + 1,
+      }),
+    ).toMatchObject({ status: "exhausted" });
+    storageReady = true;
+    expect(JSON.stringify(await projector(history))).toContain(
+      Buffer.from(bytes).toString("base64"),
+    );
+  });
+  test("different bytes for a retained image stay a terminal integrity failure", async () => {
+    const bytes = new TextEncoder().encode("image");
+    const asset = {
+      ...file("00000000-0000-4000-8000-000000000085", "image/png", bytes.length, "a.png"),
+      sha256: sha256(new TextEncoder().encode("other")),
+    };
+    const history = [
+      { ...user("inspect"), [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: asset.id }] },
+    ];
+    const projector = createModelHistoryAttachmentProjector(
+      { supportsImageInput: true, inputFileMediaTypes: [] },
+      async () => bytes,
+      async () => [asset],
+    );
+    const corrupt = await projector(history).catch((error) => error);
+    expect(corrupt).not.toBeInstanceOf(RetainedAttachmentUnavailableError);
+    expect(agentRunFailurePayload(corrupt).retryable).not.toBe(true);
   });
 });
 
