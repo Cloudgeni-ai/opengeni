@@ -9,7 +9,11 @@ import {
   type SiteLimits,
   type SiteViewerCapabilities,
 } from "@opengeni/contracts";
-import { sessionUsageLimitsProducerEnabled, type ApiRouteDeps } from "@opengeni/core";
+import {
+  sessionUsageLimitsProducerEnabled,
+  stampSiteViewerSessionAuthorization,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   consumeSiteRuntimeRate,
   findSiteHostname,
@@ -40,6 +44,7 @@ import {
   type SiteRuntimeReservation,
 } from "@opengeni/db";
 import type { SiteGatewayFields } from "./gateway-signature";
+import { bindSiteSessionRequestAuthority } from "./session-request-authority";
 import { effectiveSiteLimits, siteViewerLimits, sourceSiteLimitProfile } from "./limits";
 import {
   siteLimitInputs,
@@ -59,8 +64,8 @@ import {
 /**
  * Site-runtime: the narrow API a Site gateway calls for one published Site
  * host, after the gateway signature passed. Everything here works for exactly
- * one Site: the host names it, the viewer is resolved for it, and the agent
- * principal is `site:<siteId>`.
+ * one Site: the host names it and the viewer is resolved for it. Members retain
+ * their human identity; outsiders use the viewer-bound `site:<siteId>` principal.
  */
 
 export type SiteRuntimeDeps = Pick<ApiRouteDeps, "db" | "settings" | "objectStorage">;
@@ -219,6 +224,7 @@ export async function resolveSiteRuntimeViewer(
 /** What a viewer cannot do on a Site: 403 with `details.code` `not_available_for_viewer`. */
 export type SiteViewerFeature =
   | "agent"
+  | "private_conversations"
   | "agent_model"
   | "workspace_tools"
   | "site_data"
@@ -796,9 +802,9 @@ export async function meterSiteRuntime(
 // --- in-process dispatch ------------------------------------------------------------
 
 /**
- * Run an ordinary session route in this process as the Site's service
- * principal (`site:<siteId>`), with a 60-second delegated token carrying only
- * session permissions and the viewer as its display label. The Site and the
+ * Run an ordinary session route in this process as the verified member, or
+ * the Site service principal for an outsider. The latter uses a 60-second
+ * delegated token plus the separate trusted viewer audience. The Site and the
  * served version ride along as the request's Site origin, so new sessions and
  * turns record where they came from. The route authorizes as usual.
  */
@@ -812,14 +818,30 @@ export async function siteRuntimeSessionRequest(
     path: string;
     body?: unknown;
     extraPermissions?: readonly Permission[];
+    reauthorize: () => Promise<void>;
   },
 ): Promise<Request> {
-  return await siteServiceSessionRequest(
+  const request = await siteServiceSessionRequest(
     deps,
     host.scope,
     { id: host.site.id, versionId: host.versionId },
     { ...input, label: `${siteRuntimeViewerLabel(viewer)} on ${host.hostname}` },
   );
+  bindSiteSessionRequestAuthority(request, input.reauthorize);
+  if (viewer.kind === "member" && viewer.subjectId && viewer.sessionId) {
+    // The gateway already verified the host and opaque Site cookie. Native
+    // resolution reloads this person's live membership, roles and models.
+    // This is delegated ownership, never fabricated managed-cookie proof.
+    stampSiteViewerSessionAuthorization(request, {
+      organizationId: host.scope.accountId,
+      subjectId: viewer.subjectId,
+      permissions: [
+        ...new Set([...SITE_RUNTIME_AGENT_PERMISSIONS, ...(input.extraPermissions ?? [])]),
+      ],
+      workspaceId: host.scope.workspaceId,
+    });
+  }
+  return request;
 }
 
 /** A forwarded response without cookies (site-runtime never sets any). */

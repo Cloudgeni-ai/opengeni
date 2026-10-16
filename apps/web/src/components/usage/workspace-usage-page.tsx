@@ -14,7 +14,6 @@ import { apiErrorDetails, userErrorTextWithoutReference } from "@/lib/api-error"
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { CONSOLE_ALLOWANCE_LABELS, formatCredits } from "@/lib/usage-allowances";
 import { MemberLimitsSection, type MemberName } from "./member-limits-section";
-import { SitePlatformUsageSection } from "./site-platform-usage-section";
 import { isForbidden, useWorkspaceBudget } from "./use-workspace-budget";
 
 /**
@@ -82,7 +81,6 @@ export function WorkspaceUsagePage({
       </Section>
     );
   }
-  const sites = <SitePlatformUsageSection client={context.client} workspaceId={workspaceId} />;
   if (summary.state === "unlimited") {
     return (
       <SectionStack>
@@ -97,7 +95,6 @@ export function WorkspaceUsagePage({
           }`}
           action={manageBudget}
         />
-        {sites}
       </SectionStack>
     );
   }
@@ -157,8 +154,6 @@ export function WorkspaceUsagePage({
           onChangeRule={budget.setMemberRule}
         />
       ) : null}
-
-      {sites}
     </SectionStack>
   );
 }

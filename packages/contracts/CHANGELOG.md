@@ -1,5 +1,14 @@
 # @opengeni/contracts
 
+## 3.3.0
+
+### Minor Changes
+
+- 38ac98e: Run Site AI privately per viewer through native sessions, with optional headless
+  inline results and app-defined prompts. Keep app work out of ordinary workspace
+  discovery, preserve native permissions and accounting, and expose private-safe
+  per-Site AI costs and separate platform metrics in Insights. Usage retains limits.
+
 ## 3.2.2
 
 ### Minor Changes

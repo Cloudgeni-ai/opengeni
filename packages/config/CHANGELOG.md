@@ -1,5 +1,14 @@
 # @opengeni/config
 
+## 3.3.0
+
+### Patch Changes
+
+- Updated dependencies [38ac98e]
+  - @opengeni/contracts@3.3.0
+  - @opengeni/codex@3.3.0
+  - @opengeni/xai-subscription@3.3.0
+
 ## 3.2.2
 
 ### Patch Changes

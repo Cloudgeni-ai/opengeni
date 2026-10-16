@@ -9,7 +9,7 @@ import {
 } from "@tanstack/react-router";
 import { Toaster } from "../src/components/ui/sonner";
 import { ArtifactDetailRoute } from "../src/routes/artifacts";
-import { SitePlatformUsageSection } from "../src/components/usage/site-platform-usage-section";
+import { SitePlatformUsageSection } from "../src/components/insights/site-platform-usage-section";
 import { SectionStack } from "../src/components/ui/section";
 import { SiteAuthorizeRoute } from "../src/routes/site-auth";
 import { artifactReturnSearch } from "../src/lib/routes";
@@ -31,8 +31,8 @@ const site = createRoute({
   validateSearch: artifactReturnSearch,
   component: () => <ArtifactDetailRoute {...site.useParams()} />,
 });
-// Workspace settings > Usage, the published Sites section alone (the agent
-// budget sections above it are covered by their own previews).
+// Insights, the Site platform section alone (AI costs and limits have their
+// actual page previews in insights-preview-fixture.tsx).
 const usage = createRoute({
   getParentRoute: () => root,
   path: "/workspaces/$workspaceId/settings/usage",

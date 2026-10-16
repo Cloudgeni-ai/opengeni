@@ -1027,6 +1027,28 @@ describe("BrowserSession route discipline", () => {
     );
   });
 
+  test("shares attempt reads only until the controller call, and lets a denial win", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const active = source.slice(
+      source.indexOf("async function withActiveBrowserController"),
+      source.indexOf("async function throwBrowserSourcePlacementChanged"),
+    );
+    // The source-session check and Channel-A's machine-route check prove the
+    // same live attempt back to back; the controller call and anything after
+    // it read fresh.
+    expect(active).toContain("withSessionAuthorizationReadReuse(");
+    const run = active.slice(active.indexOf("const run = async ("));
+    expect(run.indexOf("authorizationReads.handOffToToolDispatch()")).toBeGreaterThan(-1);
+    expect(run.indexOf("authorizationReads.handOffToToolDispatch()")).toBeLessThan(
+      run.indexOf("await callback(controller)"),
+    );
+    // The source session is read alongside authorization; a denial is
+    // surfaced first and the session is used only once authorized.
+    expect(active.indexOf('if (authorized.status === "rejected")')).toBeLessThan(
+      active.indexOf('if (sourceRead.status === "rejected")'),
+    );
+  });
+
   test("serves no brokered credential fill route; logins use secret references in actions", async () => {
     const source = await readFile(routeUrl, "utf8");
     expect(source).not.toContain("/protected-fill");

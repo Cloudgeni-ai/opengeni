@@ -1,5 +1,30 @@
 # @opengeni/runtime
 
+## 3.3.0
+
+### Patch Changes
+
+- 190a322: Browser and computer actions on Connected Machines and attached Chrome are faster. The agent now forwards each controller request itself over loopback, instead of starting a shell, curl and base64 for every click, screenshot or state check. Large responses such as screenshots are read back in pieces, so they stay within the message size limit. Older agents that do not advertise this keep using the previous path.
+- 38ac98e: Run Site AI privately per viewer through native sessions, with optional headless
+  inline results and app-defined prompts. Keep app work out of ordinary workspace
+  discovery, preserve native permissions and accounting, and expose private-safe
+  per-Site AI costs and separate platform metrics in Insights. Usage retains limits.
+- Updated dependencies [190a322]
+- Updated dependencies [38ac98e]
+  - @opengeni/agent-proto@3.3.0
+  - @opengeni/sdk@3.3.0
+  - @opengeni/contracts@3.3.0
+  - @opengeni/codemode@3.3.0
+  - @opengeni/capabilities@3.3.0
+  - @opengeni/codex@3.3.0
+  - @opengeni/config@3.3.0
+  - @opengeni/interaction@3.3.0
+  - @opengeni/observability@3.3.0
+  - @opengeni/tool-gateway@3.3.0
+  - @opengeni/vaults@3.3.0
+  - @opengeni/network@3.3.0
+  - @opengeni/xai-subscription@3.3.0
+
 ## 3.2.2
 
 ### Patch Changes
