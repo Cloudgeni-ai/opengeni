@@ -68,7 +68,7 @@ test("the model client's Codex Responses requests go over the WebSocket", async 
 
   const { data: stream, response } = await pending;
   expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toMatch(
-    /^websocket; connection=new; handshake_ms=\d+$/,
+    /^websocket; connection=new; input=full; handshake_ms=\d+$/,
   );
   const events: string[] = [];
   for await (const event of stream) events.push(event.type);
@@ -127,7 +127,7 @@ test("a Codex turn's warmed connection carries its first model request", async (
   // The SDK's own headers did not split the connection: the warmed one served
   // the request, which waited for none of its handshake.
   expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
-    "websocket; connection=new; handshake_ms=0",
+    "websocket; connection=new; input=full; handshake_ms=0",
   );
   for await (const _event of stream) {
     // drain

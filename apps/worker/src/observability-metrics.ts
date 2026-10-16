@@ -2197,16 +2197,25 @@ const MODEL_REQUEST_PHASE_BUCKETS = [
  */
 /**
  * How a model request reached its provider, where the provider has more than
- * one transport (Codex: a new or reused Responses WebSocket, or HTTP). Empty
- * for providers with a single transport.
+ * one transport (Codex: a new or reused Responses WebSocket, a reused one
+ * continuing the previous response with only new input, or HTTP). Empty for
+ * providers with a single transport.
  */
-export type ModelRequestTransportLabel = "" | "websocket_new" | "websocket_reused" | "http";
+export type ModelRequestTransportLabel =
+  | ""
+  | "websocket_new"
+  | "websocket_reused"
+  | "websocket_incremental"
+  | "http";
 
 /** The bounded metric label for how a Codex request was carried. */
 export function codexRequestTransportLabel(
-  transport: { kind: "websocket"; connection: "new" | "reused" } | { kind: "http" },
+  transport:
+    | { kind: "websocket"; connection: "new" | "reused"; input: "full" | "incremental" }
+    | { kind: "http" },
 ): ModelRequestTransportLabel {
   if (transport.kind === "http") return "http";
+  if (transport.input === "incremental") return "websocket_incremental";
   return transport.connection === "reused" ? "websocket_reused" : "websocket_new";
 }
 

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   CODEX_RESPONSES_WEBSOCKET_BETA,
   CODEX_TRANSPORT_HEADER,
@@ -131,7 +131,7 @@ test("streams a response over one reused connection as SSE with usage headers", 
   expect(response.headers.get("content-type")).toBe("text/event-stream");
   expect(response.headers.get("x-request-id")).toBe("upstream-1");
   expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
-    "websocket; connection=new; handshake_ms=0",
+    "websocket; connection=new; input=full; handshake_ms=0",
   );
   expect(parseCodexUsageHeaders(response.headers)).toMatchObject({
     primaryUsedPercent: 12,
@@ -154,7 +154,9 @@ test("streams a response over one reused connection as SSE with usage headers", 
   expect(socket.sent).toHaveLength(2);
   socket.emit({ type: "response.completed", response: { id: "r2" } });
   const reused = await second;
-  expect(reused.headers.get(CODEX_TRANSPORT_HEADER)).toBe("websocket; connection=reused");
+  expect(reused.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+    "websocket; connection=reused; input=full",
+  );
   await reused.text();
   expect(sockets).toHaveLength(1);
   expect(httpCalls).toEqual([]);
@@ -187,7 +189,7 @@ test("a connection warmed ahead of the first request carries it without another 
   const response = await pending;
   // The request waited for none of the handshake.
   expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
-    "websocket; connection=new; handshake_ms=0",
+    "websocket; connection=new; input=full; handshake_ms=0",
   );
   await response.text();
   expect(sockets).toHaveLength(1);
@@ -207,7 +209,7 @@ test("a request waits for its conversation's handshake already in progress", asy
   socket.emit({ type: "response.completed", response: { id: "r1" } });
   const response = await pending;
   expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
-    "websocket; connection=new; handshake_ms=120",
+    "websocket; connection=new; input=full; handshake_ms=120",
   );
   await response.text();
   expect(sockets).toHaveLength(1);
@@ -281,7 +283,7 @@ test("a streamed request body, as the model client sends it, goes over the socke
   socket.emit({ type: "response.completed", response: { id: "r1" } });
   const response = await pending;
   expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
-    "websocket; connection=new; handshake_ms=0",
+    "websocket; connection=new; input=full; handshake_ms=0",
   );
   await response.text();
 });
@@ -325,7 +327,7 @@ test("a refused request keeps the HTTP error shape and the connection", async ()
   const response = await pending;
   expect(response.status).toBe(429);
   expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
-    "websocket; connection=new; handshake_ms=0",
+    "websocket; connection=new; input=full; handshake_ms=0",
   );
   expect(await response.json()).toEqual({
     error: { type: "usage_limit_reached", message: "limit" },
@@ -419,9 +421,9 @@ test("non-streaming and non-Responses requests stay on HTTP", async () => {
 
 test("a transport label round-trips and unknown labels are refused", () => {
   for (const transport of [
-    { kind: "websocket", connection: "new" },
-    { kind: "websocket", connection: "new", handshakeMs: 240 },
-    { kind: "websocket", connection: "reused" },
+    { kind: "websocket", connection: "new", input: "full" },
+    { kind: "websocket", connection: "new", input: "full", handshakeMs: 240 },
+    { kind: "websocket", connection: "reused", input: "incremental" },
     { kind: "http", reason: "connection_busy" },
     { kind: "http", reason: "unavailable" },
   ] as const) {
@@ -429,6 +431,13 @@ test("a transport label round-trips and unknown labels are refused", () => {
   }
   expect(parseCodexRequestTransport(null)).toBeNull();
   expect(parseCodexRequestTransport("websocket; connection=other")).toBeNull();
+  expect(parseCodexRequestTransport("websocket; connection=new; input=partial")).toBeNull();
+  // Labels written before continuations existed always sent the full input.
+  expect(parseCodexRequestTransport("websocket; connection=reused")).toEqual({
+    kind: "websocket",
+    connection: "reused",
+    input: "full",
+  });
   expect(parseCodexRequestTransport("http; reason=other")).toBeNull();
   expect(parseCodexRequestTransport("carrier-pigeon")).toBeNull();
 });
@@ -451,4 +460,215 @@ test("an immutable HTTP response is labelled without losing its body", async () 
   const response = await labelled(URL, request({ model: "m", input: [], stream: false }));
   expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=not_eligible");
   expect(await response.text()).toBe("from-http");
+});
+
+describe("continuing the previous response on a connection", () => {
+  const tools = [{ type: "function", name: "get_time", parameters: { type: "object" } }];
+  const base = { model: "m", instructions: "be brief", tools, stream: true, store: false };
+  const user = {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: "what time is it?" }],
+  };
+  // As the backend streams them: ids, status, annotations and logprobs.
+  const reasoning = {
+    id: "rs_1",
+    type: "reasoning",
+    summary: [],
+    encrypted_content: "opaque-reasoning",
+  };
+  const preamble = {
+    id: "msg_1",
+    type: "message",
+    role: "assistant",
+    status: "completed",
+    content: [{ type: "output_text", text: "Checking.", annotations: [], logprobs: [] }],
+  };
+  const call = {
+    id: "fc_1",
+    type: "function_call",
+    status: "completed",
+    call_id: "call_1",
+    name: "get_time",
+    arguments: "{}",
+  };
+  // As the client sends the same items back.
+  const sentBack = [
+    { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "opaque-reasoning" },
+    {
+      type: "message",
+      role: "assistant",
+      id: "msg_1",
+      content: [{ type: "output_text", text: "Checking.", annotations: [] }],
+    },
+    { type: "function_call", call_id: "call_1", name: "get_time", arguments: "{}" },
+  ];
+  const result = { type: "function_call_output", call_id: "call_1", output: "12:34" };
+
+  async function complete(socket: FakeSocket, pending: Promise<Response>, id: string) {
+    for (const item of [reasoning, preamble, call]) {
+      socket.emit({ type: "response.output_item.done", item });
+    }
+    socket.emit({ type: "response.completed", response: { id } });
+    const response = await pending;
+    await response.text();
+    return response;
+  }
+
+  async function sendNext(
+    transport: ReturnType<typeof harness>["transport"],
+    socket: FakeSocket,
+    body: Record<string, unknown>,
+  ) {
+    const count = socket.sent.length;
+    const pending = transport(URL, request(body));
+    for (let i = 0; i < 50 && socket.sent.length === count; i++) await Bun.sleep(1);
+    return { pending, sent: socket.sent.at(-1)! };
+  }
+
+  test("a request extending the previous response sends only its new items", async () => {
+    const { transport, sockets } = harness();
+    const first = transport(URL, request({ ...base, input: [user] }));
+    const socket = await nextSend(() => sockets[0]);
+    expect(socket.sent[0]).not.toHaveProperty("previous_response_id");
+    const firstResponse = await complete(socket, first, "resp_1");
+    expect(firstResponse.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+      "websocket; connection=new; input=full",
+    );
+
+    const { pending, sent } = await sendNext(transport, socket, {
+      ...base,
+      input: [user, ...sentBack, result],
+    });
+    expect(sent).toEqual({
+      ...base,
+      type: "response.create",
+      previous_response_id: "resp_1",
+      input: [result],
+    });
+    socket.emit({ type: "response.completed", response: { id: "resp_2" } });
+    const second = await pending;
+    expect(second.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+      "websocket; connection=reused; input=incremental",
+    );
+    await second.text();
+
+    // The chain carries on from the response the continuation produced.
+    const { pending: third, sent: thirdSent } = await sendNext(transport, socket, {
+      ...base,
+      input: [user, ...sentBack, result, { type: "message", role: "user", content: "thanks" }],
+    });
+    expect(thirdSent).toMatchObject({
+      previous_response_id: "resp_2",
+      input: [{ type: "message", role: "user", content: "thanks" }],
+    });
+    socket.emit({ type: "response.completed", response: { id: "resp_3" } });
+    await (await third).text();
+  });
+
+  for (const [label, body] of [
+    [
+      "changed instructions",
+      { ...base, instructions: "be thorough", input: [user, ...sentBack, result] },
+    ],
+    [
+      "an edited earlier item",
+      {
+        ...base,
+        input: [
+          { ...user, content: [{ type: "input_text", text: "edited" }] },
+          ...sentBack,
+          result,
+        ],
+      },
+    ],
+    [
+      "a different model output",
+      {
+        ...base,
+        input: [user, ...sentBack.slice(0, 2), { ...sentBack[2], arguments: '{"tz":"x"}' }, result],
+      },
+    ],
+    [
+      "changed reasoning",
+      {
+        ...base,
+        input: [user, { ...sentBack[0], encrypted_content: "other" }, ...sentBack.slice(1), result],
+      },
+    ],
+    ["no new item", { ...base, input: [user, ...sentBack] }],
+  ] as const) {
+    test(`${label} sends the full request`, async () => {
+      const { transport, sockets } = harness();
+      const first = transport(URL, request({ ...base, input: [user] }));
+      const socket = await nextSend(() => sockets[0]);
+      await complete(socket, first, "resp_1");
+      const { pending, sent } = await sendNext(transport, socket, body as Record<string, unknown>);
+      expect(sent).not.toHaveProperty("previous_response_id");
+      expect(sent.input).toEqual((body as unknown as { input: unknown[] }).input);
+      socket.emit({ type: "response.completed", response: { id: "resp_2" } });
+      const response = await pending;
+      expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+        "websocket; connection=reused; input=full",
+      );
+      await response.text();
+    });
+  }
+
+  test("a response that did not complete is never continued", async () => {
+    const { transport, sockets } = harness();
+    const first = transport(URL, request({ ...base, input: [user] }));
+    const socket = await nextSend(() => sockets[0]);
+    socket.emit({ type: "response.output_item.done", item: call });
+    socket.emit({ type: "response.failed", response: { id: "resp_1" } });
+    await (await first).text();
+    const { pending, sent } = await sendNext(transport, socket, {
+      ...base,
+      input: [user, sentBack[2], result],
+    });
+    expect(sent).not.toHaveProperty("previous_response_id");
+    socket.emit({ type: "response.completed", response: { id: "resp_2" } });
+    await (await pending).text();
+  });
+
+  test("a continuation the backend refuses is sent again in full on the same socket", async () => {
+    const { transport, sockets } = harness();
+    const first = transport(URL, request({ ...base, input: [user] }));
+    const socket = await nextSend(() => sockets[0]);
+    await complete(socket, first, "resp_1");
+    const full = { ...base, input: [user, ...sentBack, result] };
+    const { pending, sent } = await sendNext(transport, socket, full);
+    expect(sent).toMatchObject({ previous_response_id: "resp_1", input: [result] });
+    socket.emit({
+      type: "error",
+      status: 400,
+      error: { type: "invalid_request_error", message: "Invalid `previous_response_id`." },
+    });
+    for (let i = 0; i < 50 && socket.sent.length < 3; i++) await Bun.sleep(1);
+    expect(socket.sent.at(-1)).toEqual({ ...full, type: "response.create" });
+    socket.emit({ type: "response.output_text.delta", delta: "12:34" });
+    socket.emit({ type: "response.completed", response: { id: "resp_2" } });
+    const response = await pending;
+    expect(response.status).toBe(200);
+    expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+      "websocket; connection=reused; input=full",
+    );
+    expect(await response.text()).toContain("12:34");
+    expect(sockets).toHaveLength(1);
+  });
+
+  test("another refusal of a continuation keeps its error", async () => {
+    const { transport, sockets } = harness();
+    const first = transport(URL, request({ ...base, input: [user] }));
+    const socket = await nextSend(() => sockets[0]);
+    await complete(socket, first, "resp_1");
+    const { pending } = await sendNext(transport, socket, {
+      ...base,
+      input: [user, ...sentBack, result],
+    });
+    socket.emit({ type: "error", status: 429, error: { type: "usage_limit_reached" } });
+    const response = await pending;
+    expect(response.status).toBe(429);
+    expect(socket.sent).toHaveLength(2);
+  });
 });

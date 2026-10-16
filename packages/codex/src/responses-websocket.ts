@@ -24,7 +24,9 @@ export const CODEX_TRANSPORT_HEADER = "x-opengeni-codex-transport";
 
 /**
  * How one Codex Responses request was carried. A WebSocket request either
- * opened its connection or reused a warm one. An HTTP request names why the
+ * opened its connection or reused a warm one, and sent either its full input
+ * or only the items after the previous response on that connection (see
+ * {@link continuationInput}). An HTTP request names why the
  * socket did not carry it: the request was not a streaming Responses POST, the
  * conversation's connection was busy with another request, a recent handshake
  * failed (backoff), this handshake failed, or the conversation's connection
@@ -37,6 +39,7 @@ export type CodexRequestTransport =
   | {
       kind: "websocket";
       connection: "new" | "reused";
+      input: "full" | "incremental";
       /** Milliseconds this request waited for its new connection's handshake. */
       handshakeMs?: number;
     }
@@ -62,9 +65,10 @@ const HTTP_REASONS = new Set([
 
 export function formatCodexRequestTransport(transport: CodexRequestTransport): string {
   if (transport.kind === "http") return `http; reason=${transport.reason}`;
+  const base = `websocket; connection=${transport.connection}; input=${transport.input}`;
   return transport.handshakeMs === undefined
-    ? `websocket; connection=${transport.connection}`
-    : `websocket; connection=${transport.connection}; handshake_ms=${Math.max(0, Math.round(transport.handshakeMs))}`;
+    ? base
+    : `${base}; handshake_ms=${Math.max(0, Math.round(transport.handshakeMs))}`;
 }
 
 /** The transport a response was carried over; null when it does not say. */
@@ -81,11 +85,13 @@ export function parseCodexRequestTransport(
   );
   if (kind === "websocket") {
     const connection = fields.get("connection");
+    const input = fields.get("input") ?? "full";
     if (connection !== "new" && connection !== "reused") return null;
+    if (input !== "full" && input !== "incremental") return null;
     const handshakeMs = Number(fields.get("handshake_ms") ?? Number.NaN);
     return Number.isFinite(handshakeMs) && handshakeMs >= 0
-      ? { kind: "websocket", connection, handshakeMs }
-      : { kind: "websocket", connection };
+      ? { kind: "websocket", connection, input, handshakeMs }
+      : { kind: "websocket", connection, input };
   }
   if (kind === "http") {
     const reason = fields.get("reason");
@@ -206,6 +212,114 @@ const TIMING_EVENT = "responsesapi.websocket_timing";
 
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
+/**
+ * The last completed response on a connection, which the backend keeps so the
+ * next request may continue it with `previous_response_id` (even with
+ * `store: false`) and send only its new input items.
+ */
+type ResponseChain = {
+  /** Every request field except `input`, canonically encoded. */
+  shape: string;
+  /** The full input that request carried, one canonical encoding per item. */
+  input: string[];
+  /** The response's output items, as the model sees them. */
+  output: string[];
+  responseId: string;
+};
+
+const CONTINUATION_EXCLUDED_FIELDS = new Set(["input", "previous_response_id", "type"]);
+
+function canonicalJson(value: unknown): string {
+  const normalize = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(normalize);
+    if (input && typeof input === "object") {
+      return Object.fromEntries(
+        Object.entries(input as Record<string, unknown>)
+          .filter(([, child]) => child !== undefined)
+          .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+          .map(([key, child]) => [key, normalize(child)]),
+      );
+    }
+    return input;
+  };
+  return JSON.stringify(normalize(value));
+}
+
+function requestShape(payload: Record<string, unknown>): string {
+  return canonicalJson(
+    Object.fromEntries(
+      Object.entries(payload).filter(([key]) => !CONTINUATION_EXCLUDED_FIELDS.has(key)),
+    ),
+  );
+}
+
+/**
+ * An output item as the model sees it, so the backend's copy and the one the
+ * client sends back compare equal. Item ids, completion status, empty or null
+ * fields and output-text annotations and logprobs carry nothing the model
+ * reads; every other field (text, arguments, call ids, encrypted reasoning)
+ * must match exactly.
+ */
+function modelVisibleItem(item: unknown): string {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return canonicalJson(item);
+  const visible: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(item as Record<string, unknown>)) {
+    if (key === "id" || key === "status") continue;
+    if (value === null || value === undefined) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    visible[key] =
+      key === "content" && Array.isArray(value)
+        ? value.map((part) => {
+            if (!part || typeof part !== "object" || Array.isArray(part)) return part;
+            const {
+              annotations: _annotations,
+              logprobs: _logprobs,
+              ...rest
+            } = part as Record<string, unknown>;
+            return rest;
+          })
+        : value;
+  }
+  return canonicalJson(visible);
+}
+
+/**
+ * The input items a request adds after the previous response on its
+ * connection, or null when it does not continue that response exactly: the
+ * same request fields, the previous input unchanged, then the previous
+ * response's output as the model saw it, then at least one new item.
+ */
+export function continuationInput(
+  chain: Pick<ResponseChain, "shape" | "input" | "output">,
+  payload: Record<string, unknown>,
+  input: readonly string[],
+): number | null {
+  if (requestShape(payload) !== chain.shape) return null;
+  const items = payload.input as unknown[];
+  const continued = chain.input.length + chain.output.length;
+  if (items.length <= continued) return null;
+  for (let index = 0; index < chain.input.length; index += 1) {
+    if (input[index] !== chain.input[index]) return null;
+  }
+  for (let index = 0; index < chain.output.length; index += 1) {
+    if (modelVisibleItem(items[chain.input.length + index]) !== chain.output[index]) return null;
+  }
+  return continued;
+}
+
+/** The backend no longer holds the response a continuation named. */
+function previousResponseRefused(event: Record<string, unknown>): boolean {
+  if (event.status !== 400) return false;
+  const error = event.error;
+  if (!error || typeof error !== "object") return false;
+  const { code, param, message } = error as Record<string, unknown>;
+  return (
+    param === "previous_response_id" ||
+    code === "previous_response_not_found" ||
+    (typeof message === "string" && message.includes("previous_response_id"))
+  );
+}
+
 type Connection = {
   key: string;
   socket: CodexWebSocketLike;
@@ -216,6 +330,8 @@ type Connection = {
   requests: number;
   /** Opened ahead of its first request by {@link CodexResponsesTransport.warm}. */
   warmed: boolean;
+  /** The response the next request may continue; null after anything else. */
+  chain: ResponseChain | null;
   idleTimer: ReturnType<typeof setTimeout> | null;
   /** Receives every message while a request is in flight. */
   onEvent: ((event: Record<string, unknown>) => void) | null;
@@ -385,6 +501,7 @@ export function codexResponsesTransport(
         closed: false,
         requests: 0,
         warmed: false,
+        chain: null,
         idleTimer: null,
         onEvent: null,
         onClose: null,
@@ -574,9 +691,19 @@ export function codexResponsesTransport(
       if (connection.busy) return await viaHttp("connection_busy");
     }
     const active = connection;
-    const transport: CodexRequestTransport = {
+    // Continue the connection's previous response when this request extends
+    // it exactly; otherwise send the full request. Either way the chain is
+    // consumed here and only a completed response re-establishes it.
+    const fullInput = Array.isArray(payload.input) ? (payload.input as unknown[]) : null;
+    const inputKeys = fullInput?.map(canonicalJson) ?? null;
+    const chain = active.chain;
+    active.chain = null;
+    const continued =
+      chain && fullInput && inputKeys ? continuationInput(chain, payload, inputKeys) : null;
+    const transport: Extract<CodexRequestTransport, { kind: "websocket" }> = {
       kind: "websocket",
       connection: active.requests === 0 ? "new" : "reused",
+      input: continued === null ? "full" : "incremental",
       // Only the request that waited for this handshake reports it; a request
       // that joined a connection another request opened waited for none.
       ...(handshakeMs !== undefined && connection.requests === 0 ? { handshakeMs } : {}),
@@ -587,10 +714,8 @@ export function codexResponsesTransport(
     active.idleTimer = null;
 
     return await new Promise<Response>((resolve, reject) => {
-      const headers = new Headers({
-        "content-type": "text/event-stream",
-        [CODEX_TRANSPORT_HEADER]: formatCodexRequestTransport(transport),
-      });
+      const headers = new Headers({ "content-type": "text/event-stream" });
+      const output: unknown[] = [];
       let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
       let started = false;
       let finished = false;
@@ -633,12 +758,21 @@ export function codexResponsesTransport(
 
       const begin = (status = 200, errorBody?: string) => {
         started = true;
+        headers.set(CODEX_TRANSPORT_HEADER, formatCodexRequestTransport(transport));
         if (errorBody !== undefined) {
           headers.set("content-type", "application/json");
           resolve(new Response(errorBody, { status, headers }));
           return;
         }
         resolve(new Response(stream, { status, headers }));
+      };
+
+      const send = (message: Record<string, unknown>) => {
+        try {
+          active.socket.send(JSON.stringify({ ...message, type: "response.create" }));
+        } catch (error) {
+          finish(error);
+        }
       };
 
       active.onClose = (error) => {
@@ -660,6 +794,18 @@ export function codexResponsesTransport(
           return;
         }
         if (type === TIMING_EVENT) return;
+        if (
+          !started &&
+          type === "error" &&
+          transport.input === "incremental" &&
+          previousResponseRefused(event)
+        ) {
+          // The backend no longer holds the previous response; nothing has
+          // reached the caller yet, so send the full request on this socket.
+          transport.input = "full";
+          send(payload);
+          return;
+        }
         if (!started && type === "error" && typeof event.status === "number") {
           // The SSE endpoint answers a refused request with an HTTP error and a
           // JSON body; keep that shape so limits and auth stay classified.
@@ -673,17 +819,35 @@ export function codexResponsesTransport(
           return;
         }
         if (!started) begin();
+        if (type === "response.output_item.done" && event.item !== undefined) {
+          output.push(event.item);
+        }
+        if ((type === "response.completed" || type === "response.done") && fullInput && inputKeys) {
+          const response = event.response as Record<string, unknown> | undefined;
+          if (response && typeof response.id === "string" && response.id) {
+            active.chain = {
+              shape: requestShape(payload),
+              input: inputKeys,
+              output: output.map(modelVisibleItem),
+              responseId: response.id,
+            };
+          }
+        }
         const block = sseBlock(event);
         if (controller) controller.enqueue(block);
         else pending.push(block);
         if (TERMINAL_EVENTS.has(type)) finish();
       };
 
-      try {
-        active.socket.send(JSON.stringify({ ...payload, type: "response.create" }));
-      } catch (error) {
-        finish(error);
-      }
+      send(
+        continued === null || !fullInput || !chain
+          ? payload
+          : {
+              ...payload,
+              previous_response_id: chain.responseId,
+              input: fullInput.slice(continued),
+            },
+      );
     });
   };
   return Object.assign(send, { warm });
