@@ -192,17 +192,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "adoptBrowserSessionWorkingCopy",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions",
-    "request": [
-      "BrowserWorkingCopyAdoptionRequest"
-    ],
-    "response": [
-      "BrowserWorkingCopyAdoptionResponse"
-    ]
-  },
-  {
     "id": "advanceConnectAttempt",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/connect/attempts/:attemptId/advance",
@@ -2109,6 +2098,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/codemode/calls/:operationId",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/codemode/calls/:operationId",
@@ -2648,15 +2644,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "BrowserSession"
-    ]
-  },
-  {
-    "id": "getBrowserSessionWorkingCopyAdoption",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId",
-    "request": [],
-    "response": [
-      "BrowserWorkingCopyAdoptionResponse"
     ]
   },
   {
@@ -3933,15 +3920,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SiteSqlImportRequest"
     ],
     "response": []
-  },
-  {
-    "id": "inspectBrowserSessionWorkingCopy",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/inspection",
-    "request": [],
-    "response": [
-      "BrowserWorkingCopyInspection"
-    ]
   },
   {
     "id": "inspectMcpAuthentication",
@@ -5429,6 +5407,27 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId/revert",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId/revert",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "POST /v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/inspection",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/inspection",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/chat/completions",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/chat/completions",
@@ -6656,15 +6655,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "SessionRetryResponse"
-    ]
-  },
-  {
-    "id": "revertBrowserSessionWorkingCopyAdoption",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/working-copy/adoptions/:operationId/revert",
-    "request": [],
-    "response": [
-      "BrowserWorkingCopyAdoptionResponse"
     ]
   },
   {
