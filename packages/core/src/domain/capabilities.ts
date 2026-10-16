@@ -43,6 +43,7 @@ import {
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getConnectionMetadata,
+  isTransactionHandle,
   readCodexCutoverDisposition,
   resolveSubscriptionCoreCodexAppsDesignation,
   rlsContextForWorkspace,
@@ -93,6 +94,28 @@ export async function buildCapabilityCatalog(input: {
   /** The workspace's organization, when the caller knows it (skips a lookup). */
   accountId?: string;
 }): Promise<CapabilityCatalogResponse> {
+  // Scoped readers use savepoints and transaction-local actor settings. They
+  // must not overlap on a caller's transaction: one reader can otherwise
+  // restore another reader's subject instead of the enclosing caller's.
+  // Independent pool reads keep their existing parallel execution.
+  const serial = isTransactionHandle(input.db);
+  const reads = [
+    () => listCapabilityCatalogItems(input.db, input.workspaceId),
+    () => listCapabilityInstallations(input.db, input.workspaceId),
+    () => listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
+    () => listConnectionsMetadata(input.db, input.workspaceId, null),
+    () => discoverCuratedSkillLibraryItems(),
+    () => listInstalledSkills(input.db, input.workspaceId),
+    () =>
+      input.settings.codexConnectedAppsEnabled
+        ? resolveCodexAppsDesignationForRun(
+            input.db,
+            input.workspaceId,
+            input.accountId ? { accountId: input.accountId } : {},
+          )
+        : Promise.resolve(null),
+    () => listEnabledMcpCapabilityServers(input.db, input.workspaceId),
+  ] as const;
   const [
     persistedItems,
     capabilityInstallations,
@@ -102,22 +125,27 @@ export async function buildCapabilityCatalog(input: {
     installedSkills,
     codexAppsDesignation,
     runnableMcpServers,
-  ] = await Promise.all([
-    listCapabilityCatalogItems(input.db, input.workspaceId),
-    listCapabilityInstallations(input.db, input.workspaceId),
-    listSocialConnections(input.db, input.workspaceId, 500, input.subjectId),
-    listConnectionsMetadata(input.db, input.workspaceId, null),
-    discoverCuratedSkillLibraryItems(),
-    listInstalledSkills(input.db, input.workspaceId),
-    input.settings.codexConnectedAppsEnabled
-      ? resolveCodexAppsDesignationForRun(
-          input.db,
-          input.workspaceId,
-          input.accountId ? { accountId: input.accountId } : {},
-        )
-      : Promise.resolve(null),
-    listEnabledMcpCapabilityServers(input.db, input.workspaceId),
-  ]);
+  ] = serial
+    ? ([
+        await reads[0](),
+        await reads[1](),
+        await reads[2](),
+        await reads[3](),
+        await reads[4](),
+        await reads[5](),
+        await reads[6](),
+        await reads[7](),
+      ] as const)
+    : await Promise.all([
+        reads[0](),
+        reads[1](),
+        reads[2](),
+        reads[3](),
+        reads[4](),
+        reads[5](),
+        reads[6](),
+        reads[7](),
+      ]);
   const runnableCapabilityIds = new Set(runnableMcpServers.map((server) => server.capabilityId));
   const operatorOAuthClientConfigured = operatorOAuthClientResolver(input.settings);
   const catalogInstallations = capabilityInstallations.filter(

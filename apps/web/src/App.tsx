@@ -157,6 +157,10 @@ const LazyOnboardingPreviewRoute = lazyRouteComponent(
   () => import("@/routes/onboarding-preview"),
   "OnboardingPreviewRoute",
 );
+const LazySubscriptionPlansPreview = lazyRouteComponent(
+  () => import("@/dev/subscription-plans-preview"),
+  "SubscriptionPlansPreview",
+);
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
 const LazyReadOnlyChatsRoute = lazyRouteComponent(
   () => import("@/routes/read-only-chats"),
@@ -363,6 +367,11 @@ const onboardingPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/onboarding",
   component: LazyOnboardingPreviewRoute,
+});
+const subscriptionPlansPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/subscription-plans",
+  component: LazySubscriptionPlansPreview,
 });
 // DEV-only: production MessageTimeline replaying deterministic scenarios (native parity reference).
 const devSessionTimelineRoute = createRoute({
@@ -816,7 +825,12 @@ const routeTree = rootRoute.addChildren([
   nativeSignInRoute,
   siteAuthorizeRoute,
   ...(import.meta.env.DEV
-    ? [composerChromeGalleryRoute, onboardingPreviewRoute, devSessionTimelineRoute]
+    ? [
+        composerChromeGalleryRoute,
+        onboardingPreviewRoute,
+        subscriptionPlansPreviewRoute,
+        devSessionTimelineRoute,
+      ]
     : []),
   ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
   workspaceRoute.addChildren([

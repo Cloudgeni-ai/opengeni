@@ -15,6 +15,8 @@ import {
   SUBSCRIPTION_CODEX_TWIN_PRIVATE_ROUTINES,
   SUBSCRIPTION_RETIRED_ROUTINES,
   SUBSCRIPTION_RENAMED_ROUTINES,
+  SUBSCRIPTION_PLAN_RUNTIME_ROUTINES,
+  BILLING_SUBSCRIPTION_OPERATION_ROUTINES,
 } from "./runtime-posture";
 import {
   classifyRoleRelationships,
@@ -1734,6 +1736,22 @@ BEGIN
     END IF;
     -- The trial-credit kill switch setter is operator-only (migration owner).
     -- Reprovisioning repairs any accidental runtime or PUBLIC grant.
+    IF to_regprocedure(format('%I.set_subscription_plan_catalog(jsonb,text,text)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.set_subscription_plan_catalog(jsonb,text,text) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.set_subscription_plan_catalog(jsonb,text,text) FROM %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    FOREACH routine_signature IN ARRAY ARRAY[${[...SUBSCRIPTION_PLAN_RUNTIME_ROUTINES, ...BILLING_SUBSCRIPTION_OPERATION_ROUTINES].map(literal).join(", ")}] LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, routine_signature);
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I', ${literal(schema)}, routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
+    FOREACH routine_signature IN ARRAY ARRAY['subscription_plan_definition(text)', 'plan_period_usage(' || quote_ident(${literal(schema)}) || '.plan_credit_periods,timestamptz)', 'plan_general_balance(uuid)', 'expire_refunded_plan_credit()', 'enforce_organization_plan_seats()'] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM PUBLIC', routine_signature);
+        EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM %I', routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     IF to_regprocedure(format('%I.set_credit_promotion_policy(jsonb,text,text)', ${literal(schema)})) IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON FUNCTION %I.set_credit_promotion_policy(jsonb,text,text) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.set_credit_promotion_policy(jsonb,text,text) FROM %I', ${literal(schema)}, ${literal(role)});
@@ -2376,6 +2394,8 @@ BEGIN
       EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_quiescence_receipt_wake_repairs_v1(integer,uuid,uuid) TO %I', ${literal(role)});
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
+      'opengeni_private.list_subscription_plan_maintenance_accounts(integer)',
+      'opengeni_private.subscription_plan_free_anniversary(timestamp with time zone,timestamp with time zone)',
       'opengeni_private.list_exhausted_scheduled_tasks(integer)',
       'opengeni_private.list_scheduled_task_schedule_reconciliations(integer)',
       format('%I.scheduled_task_is_exhausted(uuid)', ${literal(schema)})
@@ -2475,6 +2495,11 @@ BEGIN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.credit_promotion_policy_revisions FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.credit_promotion_policy_revisions FROM PUBLIC;
       EXECUTE format('GRANT SELECT ON TABLE opengeni_private.credit_promotion_policy_revisions TO %I', ${literal(role)});
+    END IF;
+    IF to_regclass('opengeni_private.subscription_plan_catalog_revisions') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.subscription_plan_catalog_revisions FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.subscription_plan_catalog_revisions FROM PUBLIC;
+      EXECUTE format('GRANT SELECT ON TABLE opengeni_private.subscription_plan_catalog_revisions TO %I', ${literal(role)});
     END IF;
     IF to_regclass('opengeni_private.verified_signup_trial_switch_revisions') IS NOT NULL THEN
       -- Read-only for the operator gauge. Only the owner-only audited setter

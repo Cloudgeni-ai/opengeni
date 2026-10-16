@@ -90,8 +90,26 @@ import {
   type InteractionTransport,
 } from "@opengeni/sdk";
 import { z } from "zod";
-import { browserActionInputJsonSchema } from "./browser-action-json-schema";
+import {
+  BrowserTargetResolutionError,
+  CurrentBrowserTab,
+  expandRefShorthand,
+  type ResolvedBrowserSession,
+  type ResolvedBrowserTarget,
+} from "./browser-current-tab";
+import {
+  describeInvalidToolArguments,
+  interactionToolInputJsonSchema,
+  withRefShorthandLocators,
+} from "./interaction-tool-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
+import {
+  browserActionText,
+  browserObservationText,
+  browserOpenText,
+  browserReadText,
+  browserTabsText,
+} from "./browser-model-text";
 
 export const INTERACTION_ATTEMPT_TOOL_NAMES = FIRST_PARTY_IN_PROCESS_TOOL_NAMES;
 
@@ -189,10 +207,22 @@ const CompactBrowserActionReceipt = z
   })
   .strict();
 const BrowserAgentActionReceipt = z.union([BrowserActionReceipt, CompactBrowserActionReceipt]);
+/** Browser tools default to the browser and tab the agent used last. */
+const CurrentBrowserSessionId = z
+  .string()
+  .uuid()
+  .optional()
+  .describe("Omit to use the browser you used last.");
+const CurrentBrowserTargetId = z
+  .string()
+  .min(1)
+  .max(512)
+  .optional()
+  .describe("Omit to use the tab you used last.");
 const BrowserScreenshotInput = z
   .object({
-    browserSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    browserSessionId: CurrentBrowserSessionId,
+    targetId: CurrentBrowserTargetId,
     fullPage: z.boolean().optional(),
     quality: z.number().int().min(1).max(100).optional(),
   })
@@ -217,8 +247,8 @@ const BrowserScreenshotOutput = z
   .strict();
 const BrowserReadInput = z
   .object({
-    browserSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    browserSessionId: CurrentBrowserSessionId,
+    targetId: CurrentBrowserTargetId,
     mode: z.enum(["matches", "count", "subtree", "dom"]).optional(),
     dom: z
       .discriminatedUnion("kind", [
@@ -478,25 +508,25 @@ const BrowserOpenOutput = z
   .strict();
 
 const BrowserTabsInput = z.discriminatedUnion("operation", [
-  z.object({ operation: z.literal("list"), browserSessionId: z.string().uuid() }).strict(),
+  z.object({ operation: z.literal("list"), browserSessionId: CurrentBrowserSessionId }).strict(),
   z
     .object({
       operation: z.literal("open"),
-      browserSessionId: z.string().uuid(),
+      browserSessionId: CurrentBrowserSessionId,
       url: z.string().url().max(16_384).optional(),
     })
     .strict(),
   z
     .object({
       operation: z.literal("select"),
-      browserSessionId: z.string().uuid(),
+      browserSessionId: CurrentBrowserSessionId,
       targetId: z.string().min(1).max(512),
     })
     .strict(),
   z
     .object({
       operation: z.literal("close"),
-      browserSessionId: z.string().uuid(),
+      browserSessionId: CurrentBrowserSessionId,
       targetId: z.string().min(1).max(512),
     })
     .strict(),
@@ -511,28 +541,28 @@ const BrowserTabsOutput = z
 
 const BrowserObserveInput = z
   .object({
-    browserSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    browserSessionId: CurrentBrowserSessionId,
+    targetId: CurrentBrowserTargetId,
     view: z.enum(["compact", "full"]).optional(),
     includeScreenshot: z.boolean().optional(),
   })
   .strict();
 const BrowserActInput = z
   .object({
-    browserSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    browserSessionId: CurrentBrowserSessionId,
+    targetId: CurrentBrowserTargetId,
     expectedTargetGeneration: z.string().min(1).max(256).optional(),
     expectedDocumentGeneration: z.string().min(1).max(256).nullable().optional(),
     expectedFrameId: z.string().min(1).max(256).nullable().optional(),
     view: z.enum(["compact", "full", "none"]).optional(),
-    action: z.union([BrowserAction, BrowserActionBatch]),
+    action: z.preprocess(expandRefShorthand, z.union([BrowserAction, BrowserActionBatch])),
   })
   .strict();
 const BrowserClipboardInput = z.object({ browserSessionId: z.string().uuid() }).strict();
 const BrowserDebugInput = z
   .object({
-    browserSessionId: z.string().uuid(),
-    targetId: z.string().min(1).max(512),
+    browserSessionId: CurrentBrowserSessionId,
+    targetId: CurrentBrowserTargetId,
     kinds: z
       .array(z.enum(["console", "page_error", "failed_request", "download"]))
       .max(4)
@@ -759,16 +789,67 @@ export function createInteractionAttemptToolDefinitions(
   const selected = new Set(input.selectedTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS);
   const permissions = input.permissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
   const definitions: AttemptToolDefinition[] = [];
+  const currentTab = new CurrentBrowserTab({
+    listLiveSessions: async () =>
+      filterDiscoveredSessions(
+        (
+          await input.transport.listBrowserSessions(input.workspaceId, {
+            associatedSessionId: input.sessionId,
+            includeTerminal: false,
+          })
+        ).sessions,
+        input.sessionId,
+        "current_session",
+        false,
+      ),
+    listTargets: async (browserSessionId) =>
+      (await input.transport.listBrowserTargets(input.workspaceId, browserSessionId)).targets,
+  });
+  /** Run one call on the requested or current tab and remember it on success. */
+  const onTab = async <T>(
+    value: { browserSessionId?: string | undefined; targetId?: string | undefined },
+    run: (tab: ResolvedBrowserTarget) => Promise<T>,
+  ): Promise<T> => {
+    const tab = await currentTab.target(value);
+    try {
+      const output = await run(tab);
+      currentTab.use(tab.browserSessionId, tab.targetId);
+      return output;
+    } catch (error) {
+      if (isGoneBrowserError(error)) currentTab.failed(tab);
+      throw error;
+    }
+  };
+  /** Run one call on the requested or current browser and remember it on success. */
+  const onBrowser = async <T>(
+    browserSessionId: string | undefined,
+    run: (browser: ResolvedBrowserSession) => Promise<T>,
+  ): Promise<T> => {
+    const browser = await currentTab.session(browserSessionId);
+    try {
+      const output = await run(browser);
+      currentTab.use(browser.browserSessionId);
+      return output;
+    } catch (error) {
+      if (isGoneBrowserError(error)) currentTab.failed(browser);
+      throw error;
+    }
+  };
   const add = <TInput extends z.ZodType, TOutput extends z.ZodType>(options: {
     name: InteractionAttemptToolName;
     codemodePath: readonly string[];
     title: string;
     description: string;
     input: TInput;
+    /** Adjusts the model's view of the input schema; validation is unchanged. */
+    modelInputSchema?: (schema: AttemptToolJsonSchema) => AttemptToolJsonSchema;
     output: TOutput;
     readOnly: boolean;
     idempotent: boolean;
     approval?: "none" | "human" | "policy";
+    /** The model's text view of a successful result. The complete typed value
+     * stays in structuredContent; without this the text is that value as JSON. */
+    modelText?: (output: z.output<TOutput>) => string;
     execute: (
       value: z.output<TInput>,
       context: AttemptToolExecutionContext,
@@ -786,10 +867,9 @@ export function createInteractionAttemptToolDefinitions(
       codemodePath: options.codemodePath,
       title: options.title,
       description: options.description,
-      inputSchema:
-        options.name === "browser_act"
-          ? browserActionInputJsonSchema(options.input)
-          : jsonSchema(options.input),
+      inputSchema: (options.modelInputSchema ?? ((schema) => schema))(
+        interactionToolInputJsonSchema(options.input),
+      ),
       outputSchema: jsonSchema(options.output),
       annotations: {
         title: options.title,
@@ -808,6 +888,7 @@ export function createInteractionAttemptToolDefinitions(
           context,
           options.execute,
           options.readOnly,
+          options.modelText,
         ),
     });
   };
@@ -885,13 +966,28 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state, plus observation: a compact snapshot of the opened (or selected) tab when one is available. With initialUrl, targets holds only the opened tab and otherTabCount counts the rest (browser_tabs list shows them). Reuse its refs and generations for the first action instead of observing again.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
     idempotent: true,
-    execute: async (value, context) =>
-      await openBrowser(input.transport, input.workspaceId, input.sessionId, value, context),
+    modelText: browserOpenText,
+    execute: async (value, context) => {
+      const opened = await openBrowser(
+        input.transport,
+        input.workspaceId,
+        input.sessionId,
+        value,
+        context,
+      );
+      currentTab.use(
+        opened.session.id,
+        opened.observation?.target.id ??
+          opened.targets.find((target) => target.selected)?.id ??
+          null,
+      );
+      return opened;
+    },
   });
 
   add({
@@ -899,45 +995,46 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "tabs"],
     title: "Manage browser tabs",
     description:
-      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation. Open/select also return mutationObservation, the operation's compact page snapshot. Reuse its refs and generations for immediate actions; refresh after later page changes.",
+      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation. Open/select also return the page outline. Act on its elements directly; observe again after later page changes.",
     input: BrowserTabsInput,
     output: BrowserTabsOutput,
     readOnly: false,
     idempotent: false,
-    execute: async (value) => {
-      let mutationObservation: z.infer<typeof BrowserObservation> | undefined;
-      if (value.operation === "open") {
-        mutationObservation = await input.transport.openBrowserTarget(
-          input.workspaceId,
-          value.browserSessionId,
-          { ...(value.url ? { url: value.url } : {}) },
-        );
-      } else if (value.operation === "select") {
-        mutationObservation = await input.transport.selectBrowserTarget(
-          input.workspaceId,
-          value.browserSessionId,
-          value.targetId,
-        );
-      } else if (value.operation === "close") {
-        return agentTargetList(
-          await input.transport.closeBrowserTarget(
+    modelText: browserTabsText,
+    execute: async (value) =>
+      await onBrowser(value.browserSessionId, async ({ browserSessionId }) => {
+        let mutationObservation: z.infer<typeof BrowserObservation> | undefined;
+        if (value.operation === "open") {
+          mutationObservation = await input.transport.openBrowserTarget(
             input.workspaceId,
-            value.browserSessionId,
+            browserSessionId,
+            { ...(value.url ? { url: value.url } : {}) },
+          );
+        } else if (value.operation === "select") {
+          mutationObservation = await input.transport.selectBrowserTarget(
+            input.workspaceId,
+            browserSessionId,
             value.targetId,
-          ),
-        );
-      }
-      const tabs = await input.transport.listBrowserTargets(
-        input.workspaceId,
-        value.browserSessionId,
-      );
-      return mutationObservation
-        ? {
+          );
+        } else if (value.operation === "close") {
+          const closed = await input.transport.closeBrowserTarget(
+            input.workspaceId,
+            browserSessionId,
+            value.targetId,
+          );
+          currentTab.forgetTarget(browserSessionId, value.targetId);
+          return agentTargetList(closed);
+        }
+        const tabs = await input.transport.listBrowserTargets(input.workspaceId, browserSessionId);
+        if (mutationObservation) {
+          currentTab.use(browserSessionId, mutationObservation.target.id);
+          return {
             ...agentTargetList(tabs),
             mutationObservation: projectBrowserObservation(mutationObservation, "compact"),
-          }
-        : agentTargetList(tabs);
-    },
+          };
+        }
+        return agentTargetList(tabs);
+      }),
   });
 
   add({
@@ -945,56 +1042,54 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "observe"],
     title: "Observe browser tab",
     description:
-      "Read one tab's URL, title, viewport, causal generations, and a bounded accessibility view. Compact view is the default: agentView lists selected refs, and omittedNodeCount or clippedFieldCount appear only when something was left out; it is not a complete page tree. Empty and default fields are omitted. Set view=full for the complete accessibility snapshot. Set includeScreenshot=true to add a current still image as tool image content; browser_screenshot is faster when only pixels are needed.",
+      "Read one tab's URL, title, viewport and accessibility outline: one line per element, role \"name\" [ref] value and states, indented by nesting. Locate an element by role and name, or by ref ({kind:'ref',ref}); refs are listed on controls and other actionable elements, not on text and layout lines. The default view is selective and says how many elements it left out; it is not a complete page tree. Set view=full for every element with its ref. Set includeScreenshot=true to add a current still image as tool image content; browser_screenshot is faster when only pixels are needed.",
     input: BrowserObserveInput,
     output: BrowserAgentObservation,
     readOnly: true,
     idempotent: true,
-    execute: async (value) => {
-      const observationRequest = input.transport.observeBrowserTarget(
-        input.workspaceId,
-        value.browserSessionId,
-        value.targetId,
-      );
-      if (!value.includeScreenshot)
-        return projectBrowserObservation(await observationRequest, value.view ?? "compact");
-      // These are independent reads. Settle both before returning an error so
-      // the tool never leaves an outstanding capture behind after a failed read.
-      const [observed, captured] = await Promise.allSettled([
-        observationRequest,
-        Promise.resolve().then(() =>
-          input.transport.captureBrowserTarget(
-            input.workspaceId,
-            value.browserSessionId,
-            value.targetId,
-          ),
-        ),
-      ]);
-      if (observed.status === "rejected") throw observed.reason;
-      if (captured.status === "rejected") throw captured.reason;
-      let observation = observed.value;
-      const frame = captured.value;
-      if (
-        observation.target.targetGeneration !== frame.targetGeneration ||
-        observation.target.documentGeneration !== frame.documentGeneration
-      ) {
-        observation = await input.transport.observeBrowserTarget(
+    modelText: agentObservationText,
+    execute: async (value) =>
+      await onTab(value, async ({ browserSessionId, targetId }) => {
+        const observationRequest = input.transport.observeBrowserTarget(
           input.workspaceId,
-          value.browserSessionId,
-          value.targetId,
+          browserSessionId,
+          targetId,
         );
-      }
-      if (
-        observation.target.targetGeneration !== frame.targetGeneration ||
-        observation.target.documentGeneration !== frame.documentGeneration
-      ) {
-        throw new Error("browser target changed while its visual observation was captured");
-      }
-      return new InteractionExecutionResult(
-        projectBrowserObservation(observation, value.view ?? "compact"),
-        [browserToolImageContent(frame.data, frame.mediaType)],
-      );
-    },
+        if (!value.includeScreenshot)
+          return projectBrowserObservation(await observationRequest, value.view ?? "compact");
+        // These are independent reads. Settle both before returning an error so
+        // the tool never leaves an outstanding capture behind after a failed read.
+        const [observed, captured] = await Promise.allSettled([
+          observationRequest,
+          Promise.resolve().then(() =>
+            input.transport.captureBrowserTarget(input.workspaceId, browserSessionId, targetId),
+          ),
+        ]);
+        if (observed.status === "rejected") throw observed.reason;
+        if (captured.status === "rejected") throw captured.reason;
+        let observation = observed.value;
+        const frame = captured.value;
+        if (
+          observation.target.targetGeneration !== frame.targetGeneration ||
+          observation.target.documentGeneration !== frame.documentGeneration
+        ) {
+          observation = await input.transport.observeBrowserTarget(
+            input.workspaceId,
+            browserSessionId,
+            targetId,
+          );
+        }
+        if (
+          observation.target.targetGeneration !== frame.targetGeneration ||
+          observation.target.documentGeneration !== frame.documentGeneration
+        ) {
+          throw new Error("browser target changed while its visual observation was captured");
+        }
+        return new InteractionExecutionResult(
+          projectBrowserObservation(observation, value.view ?? "compact"),
+          [browserToolImageContent(frame.data, frame.mediaType)],
+        );
+      }),
   });
 
   add({
@@ -1007,70 +1102,69 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserReadToolOutput,
     readOnly: true,
     idempotent: true,
-    execute: async (value) => {
-      if (value.mode === "dom") {
-        const state =
-          value.expectedTargetGeneration !== undefined &&
-          value.expectedDocumentGeneration !== undefined &&
-          value.expectedFrameId !== undefined
-            ? null
-            : await input.transport.getBrowserTargetState(
-                input.workspaceId,
-                value.browserSessionId,
-                value.targetId,
-              );
-        const fences = {
-          expectedTargetGeneration: value.expectedTargetGeneration ?? state!.targetGeneration,
-          expectedDocumentGeneration:
-            value.expectedDocumentGeneration === undefined
-              ? state!.documentGeneration
-              : value.expectedDocumentGeneration,
-          expectedFrameId:
-            value.expectedFrameId === undefined ? state!.frameId : value.expectedFrameId,
-        };
-        const documentGeneration = fences.expectedDocumentGeneration;
-        const frameId = fences.expectedFrameId;
-        if (documentGeneration === null || frameId === null) {
-          throw new OpenGeniApiError(409, "browser target has no inspectable document", {
-            code: "document_unavailable",
-            retryable: true,
-          });
+    modelText: (output) =>
+      output.source === "accessibility" ? browserReadText(output) : JSON.stringify(output),
+    execute: async (value) =>
+      await onTab(value, async ({ browserSessionId, targetId }) => {
+        if (value.mode === "dom") {
+          const state =
+            value.expectedTargetGeneration !== undefined &&
+            value.expectedDocumentGeneration !== undefined &&
+            value.expectedFrameId !== undefined
+              ? null
+              : await input.transport.getBrowserTargetState(
+                  input.workspaceId,
+                  browserSessionId,
+                  targetId,
+                );
+          const fences = {
+            expectedTargetGeneration: value.expectedTargetGeneration ?? state!.targetGeneration,
+            expectedDocumentGeneration:
+              value.expectedDocumentGeneration === undefined
+                ? state!.documentGeneration
+                : value.expectedDocumentGeneration,
+            expectedFrameId:
+              value.expectedFrameId === undefined ? state!.frameId : value.expectedFrameId,
+          };
+          const documentGeneration = fences.expectedDocumentGeneration;
+          const frameId = fences.expectedFrameId;
+          if (documentGeneration === null || frameId === null) {
+            throw new OpenGeniApiError(409, "browser target has no inspectable document", {
+              code: "document_unavailable",
+              retryable: true,
+            });
+          }
+          const inspectedFences = {
+            expectedTargetGeneration: fences.expectedTargetGeneration,
+            expectedDocumentGeneration: documentGeneration,
+            expectedFrameId: frameId,
+          };
+          const dom = value.dom!;
+          const request =
+            dom.kind === "element"
+              ? {
+                  ...inspectedFences,
+                  kind: "element" as const,
+                  locator: dom.locator,
+                  ...(dom.attributes ? { attributes: dom.attributes } : {}),
+                  maxChars: dom.maxChars ?? 4_096,
+                }
+              : { ...inspectedFences, kind: "count" as const, selector: dom.selector };
+          return {
+            ...(await input.transport.readBrowserDom(
+              input.workspaceId,
+              browserSessionId,
+              targetId,
+              request,
+            )),
+            source: "dom" as const,
+          };
         }
-        const inspectedFences = {
-          expectedTargetGeneration: fences.expectedTargetGeneration,
-          expectedDocumentGeneration: documentGeneration,
-          expectedFrameId: frameId,
-        };
-        const dom = value.dom!;
-        const request =
-          dom.kind === "element"
-            ? {
-                ...inspectedFences,
-                kind: "element" as const,
-                locator: dom.locator,
-                ...(dom.attributes ? { attributes: dom.attributes } : {}),
-                maxChars: dom.maxChars ?? 4_096,
-              }
-            : { ...inspectedFences, kind: "count" as const, selector: dom.selector };
-        return {
-          ...(await input.transport.readBrowserDom(
-            input.workspaceId,
-            value.browserSessionId,
-            value.targetId,
-            request,
-          )),
-          source: "dom" as const,
-        };
-      }
-      return readBrowserObservation(
-        await input.transport.observeBrowserTarget(
-          input.workspaceId,
-          value.browserSessionId,
-          value.targetId,
-        ),
-        value,
-      );
-    },
+        return readBrowserObservation(
+          await input.transport.observeBrowserTarget(input.workspaceId, browserSessionId, targetId),
+          value,
+        );
+      }),
   });
 
   add({
@@ -1083,34 +1177,38 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserScreenshotOutput,
     readOnly: true,
     idempotent: true,
-    execute: async (value) => {
-      const frame = await input.transport.captureBrowserTarget(
-        input.workspaceId,
-        value.browserSessionId,
-        value.targetId,
-        {},
-        { fullPage: value.fullPage ?? false, ...(value.quality ? { quality: value.quality } : {}) },
-      );
-      return new InteractionExecutionResult(
-        {
-          kind: "browser_screenshot" as const,
-          browserSessionId: frame.browserSessionId,
-          targetId: frame.targetId,
-          frameId: frame.frameId,
-          targetGeneration: frame.targetGeneration,
-          documentGeneration: frame.documentGeneration,
-          mediaType: frame.mediaType,
-          width: frame.width,
-          height: frame.height,
-          deviceScaleFactor: frame.deviceScaleFactor,
-          scrollX: frame.scrollX,
-          scrollY: frame.scrollY,
-          capturedAt: frame.capturedAt,
-          fullPage: value.fullPage ?? false,
-        },
-        [browserToolImageContent(frame.data, frame.mediaType)],
-      );
-    },
+    execute: async (value) =>
+      await onTab(value, async ({ browserSessionId, targetId }) => {
+        const frame = await input.transport.captureBrowserTarget(
+          input.workspaceId,
+          browserSessionId,
+          targetId,
+          {},
+          {
+            fullPage: value.fullPage ?? false,
+            ...(value.quality ? { quality: value.quality } : {}),
+          },
+        );
+        return new InteractionExecutionResult(
+          {
+            kind: "browser_screenshot" as const,
+            browserSessionId: frame.browserSessionId,
+            targetId: frame.targetId,
+            frameId: frame.frameId,
+            targetGeneration: frame.targetGeneration,
+            documentGeneration: frame.documentGeneration,
+            mediaType: frame.mediaType,
+            width: frame.width,
+            height: frame.height,
+            deviceScaleFactor: frame.deviceScaleFactor,
+            scrollX: frame.scrollX,
+            scrollY: frame.scrollY,
+            capturedAt: frame.capturedAt,
+            fullPage: value.fullPage ?? false,
+          },
+          [browserToolImageContent(frame.data, frame.mediaType)],
+        );
+      }),
   });
 
   add({
@@ -1118,20 +1216,20 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; set view=full for every element, or view=none when no post-action outline is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
+    modelInputSchema: withRefShorthandLocators,
     output: BrowserAgentActionReceipt,
     readOnly: false,
     idempotent: true,
-    execute: async (value, context) => {
-      // Omitted fences are resolved by the API from the live target in the same
-      // request, so acting on the current document costs one round trip.
-      const receipt = await input.transport.actInBrowser(
-        input.workspaceId,
-        value.browserSessionId,
-        {
+    modelText: agentActionText,
+    execute: async (value, context) =>
+      await onTab(value, async ({ browserSessionId, targetId }) => {
+        // Omitted fences are resolved by the API from the live target in the same
+        // request, so acting on the current document costs one round trip.
+        const receipt = await input.transport.actInBrowser(input.workspaceId, browserSessionId, {
           operationId: context.operationId,
-          targetId: value.targetId,
+          targetId,
           ...(value.expectedTargetGeneration === undefined
             ? {}
             : { expectedTargetGeneration: value.expectedTargetGeneration }),
@@ -1143,10 +1241,9 @@ export function createInteractionAttemptToolDefinitions(
             : { expectedFrameId: value.expectedFrameId }),
           ...(value.view === "none" ? { observationMode: "none" as const } : {}),
           action: value.action,
-        },
-      );
-      return value.view === "full" ? receipt : compactActionReceipt(receipt);
-    },
+        });
+        return value.view === "full" ? receipt : compactActionReceipt(receipt);
+      }),
   });
 
   add({
@@ -1174,15 +1271,19 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: true,
     idempotent: true,
     execute: async (value) =>
-      await input.transport.listBrowserDiagnostics(
-        input.workspaceId,
-        value.browserSessionId,
-        value.targetId,
-        {
-          ...(value.kinds ? { kinds: value.kinds } : {}),
-          ...(value.after !== undefined ? { after: value.after } : {}),
-          ...(value.limit !== undefined ? { limit: value.limit } : {}),
-        },
+      await onTab(
+        value,
+        async ({ browserSessionId, targetId }) =>
+          await input.transport.listBrowserDiagnostics(
+            input.workspaceId,
+            browserSessionId,
+            targetId,
+            {
+              ...(value.kinds ? { kinds: value.kinds } : {}),
+              ...(value.after !== undefined ? { after: value.after } : {}),
+              ...(value.limit !== undefined ? { limit: value.limit } : {}),
+            },
+          ),
       ),
   });
 
@@ -1503,6 +1604,7 @@ export function createInteractionAttemptToolDefinitions(
           request,
         );
       }
+      currentTab.forgetSession(value.browserSessionId);
       return await input.transport.endBrowserSession(
         input.workspaceId,
         value.browserSessionId,
@@ -1516,7 +1618,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "open"],
     title: "Open or reuse computer",
     description:
-      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. Returns exact apps/windows/screens.",
+      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. Returns exact apps/windows/screens. Call it first for any computer task; computer_observe and computer_act then work on the session it returns.",
     input: ComputerOpenInput,
     output: ComputerOpenOutput,
     readOnly: false,
@@ -1912,6 +2014,9 @@ async function openBrowser(
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
   let created = false;
+  // A create that launched the browser in this call returns its tabs and the
+  // opened tab's observation, which replaces the two reads below.
+  let initialView: Awaited<ReturnType<InteractionTransport["createBrowserSession"]>>["initialView"];
   let profileChoice: AttachedProfileChoice | undefined;
   if (value.browserSessionId) {
     session = await transport.getBrowserSession(workspaceId, value.browserSessionId);
@@ -1967,23 +2072,23 @@ async function openBrowser(
       const placement = profileChoice
         ? { kind: "attached_device" as const, deviceId: profileChoice.chosen.id }
         : (value.placement as z.infer<typeof InteractionPlacement> | undefined);
-      session = (
-        await transport.createBrowserSession(workspaceId, {
-          operationId: context.operationId,
-          sessionId: sourceSessionId,
-          ...(value.name ? { name: value.name } : {}),
-          ...(value.initialUrl ? { initialUrl: value.initialUrl } : {}),
-          headless: requestedHeadless,
-          ...(value.storageMode ? { storageMode: value.storageMode } : {}),
-          ...(placement ? { placement } : {}),
-          ...(value.identityId ? { identityId: value.identityId } : {}),
-          ...(value.baseRevisionId ? { baseRevisionId: value.baseRevisionId } : {}),
-          ...(value.networkRouteId ? { networkRouteId: value.networkRouteId } : {}),
-          ...(value.linkedComputerSessionId
-            ? { linkedComputerSessionId: value.linkedComputerSessionId }
-            : {}),
-        })
-      ).session;
+      const createdResponse = await transport.createBrowserSession(workspaceId, {
+        operationId: context.operationId,
+        sessionId: sourceSessionId,
+        ...(value.name ? { name: value.name } : {}),
+        ...(value.initialUrl ? { initialUrl: value.initialUrl } : {}),
+        headless: requestedHeadless,
+        ...(value.storageMode ? { storageMode: value.storageMode } : {}),
+        ...(placement ? { placement } : {}),
+        ...(value.identityId ? { identityId: value.identityId } : {}),
+        ...(value.baseRevisionId ? { baseRevisionId: value.baseRevisionId } : {}),
+        ...(value.networkRouteId ? { networkRouteId: value.networkRouteId } : {}),
+        ...(value.linkedComputerSessionId
+          ? { linkedComputerSessionId: value.linkedComputerSessionId }
+          : {}),
+      });
+      session = createdResponse.session;
+      initialView = createdResponse.initialView;
     }
   }
   if (session.lifecycle === "suspended") {
@@ -2002,7 +2107,8 @@ async function openBrowser(
       }
     : {};
   if (session.lifecycle !== "active") return { session, targets: [], ...chosenProfile };
-  let targets = (await transport.listBrowserTargets(workspaceId, session.id)).targets;
+  let targets =
+    initialView?.targets ?? (await transport.listBrowserTargets(workspaceId, session.id)).targets;
   if (
     value.initialUrl &&
     !created &&
@@ -2031,9 +2137,11 @@ async function openBrowser(
     targets = inventory.targets;
   }
   const primary = openedBrowserTarget(targets, value.initialUrl);
-  const observation = primary
-    ? await observeOpenedBrowserTarget(transport, workspaceId, session.id, primary)
-    : undefined;
+  const observation = !primary
+    ? undefined
+    : initialView?.observation.target.id === primary.id
+      ? projectBrowserObservation(initialView.observation, "compact")
+      : await observeOpenedBrowserTarget(transport, workspaceId, session.id, primary);
   // A browser opened on a URL is about that tab. A person's own Chrome profile
   // can hold dozens of unrelated tabs; listing them all costs context on every
   // later step, so only the opened tab is returned with a count of the rest
@@ -2574,6 +2682,79 @@ function readBrowserObservation(
   };
 }
 
+/** A tool's model text, or its JSON when it has none. Rendering is a pure view
+ * of a value that already passed its output schema; should it ever fail, the
+ * model still gets the complete value rather than an error for a call that
+ * succeeded. */
+function resultModelText<T>(output: T, modelText: ((output: T) => string) | undefined): string {
+  if (modelText) {
+    try {
+      return modelText(output);
+    } catch {
+      // Fall through to the complete value.
+    }
+  }
+  return JSON.stringify(output);
+}
+
+/** The text view of a complete observation (view=full): every node, every ref. */
+function fullObservationText(observation: z.infer<typeof BrowserObservation>): string {
+  const semantic = observation.semantic;
+  const roots =
+    semantic?.kind === "snapshot"
+      ? semantic.roots
+      : semantic?.kind === "diff"
+        ? semantic.changed
+        : [];
+  return browserObservationText(
+    {
+      target: observation.target,
+      viewport: observation.viewport,
+      focusedRef: observation.focusedRef,
+      changedRegions: observation.changedRegions,
+      diagnostics: observation.diagnostics,
+      dialog: observation.dialog,
+      screenshot: observation.screenshot ?? undefined,
+      agentView: {
+        sourceKind: semantic?.kind ?? "none",
+        nodes: flattenBrowserNodes(roots).map(({ node, depth }) => ({
+          ref: node.ref,
+          role: node.role,
+          depth,
+          ...(node.name !== undefined ? { name: node.name } : {}),
+          ...(node.description !== undefined ? { description: node.description } : {}),
+          ...(node.value !== undefined ? { value: node.value } : {}),
+          states: node.states,
+          actions: node.actions,
+        })),
+        ...(semantic?.kind === "diff" && semantic.removedRefs.length > 0
+          ? { removedRefCount: semantic.removedRefs.length }
+          : {}),
+      },
+    },
+    { allRefs: true },
+  );
+}
+
+function agentObservationText(observation: z.infer<typeof BrowserAgentObservation>): string {
+  return "agentView" in observation
+    ? browserObservationText(observation)
+    : fullObservationText(observation);
+}
+
+function agentActionText(receipt: z.infer<typeof BrowserAgentActionReceipt>): string {
+  if ("protocolVersion" in receipt) {
+    const text = browserActionText({
+      targetId: receipt.targetId,
+      state: receipt.state,
+      error: receipt.error,
+      ...(receipt.targets ? { targets: receipt.targets } : {}),
+    });
+    return receipt.observation ? `${text}\n${fullObservationText(receipt.observation)}` : text;
+  }
+  return browserActionText(receipt);
+}
+
 async function safeInteractionExecution<TInput extends z.ZodType, TOutput extends z.ZodType>(
   inputSchema: TInput,
   outputSchema: TOutput,
@@ -2584,6 +2765,7 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     context: AttemptToolExecutionContext,
   ) => Promise<z.input<TOutput> | InteractionExecutionResult<z.input<TOutput>>>,
   readOnly: boolean,
+  modelText?: (output: z.output<TOutput>) => string,
 ): Promise<AttemptToolResultValue> {
   try {
     const value = inputSchema.parse(raw);
@@ -2593,7 +2775,7 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     );
     const result = {
       content: [
-        { type: "text" as const, text: JSON.stringify(structuredContent) },
+        { type: "text" as const, text: resultModelText(structuredContent, modelText) },
         ...(executed instanceof InteractionExecutionResult ? executed.additionalContent : []),
       ],
       structuredContent: structuredContent as NonNullable<
@@ -2603,7 +2785,10 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     return result;
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return interactionErrorResult("invalid_arguments", "Interaction tool arguments are invalid.");
+      return interactionErrorResult("invalid_arguments", describeInvalidToolArguments(error));
+    }
+    if (error instanceof BrowserTargetResolutionError) {
+      return interactionErrorResult(error.code, error.message);
     }
     // A failed read is still a useful tool result. Preserve the API's public
     // explanation; mutations and uncertain outcomes retain their failure path.
@@ -2707,6 +2892,11 @@ function browserToolImageContent(
     );
   }
   return { type: "image", data: Buffer.from(data).toString("base64"), mimeType };
+}
+
+/** The remembered browser or tab no longer exists. */
+function isGoneBrowserError(error: unknown): boolean {
+  return error instanceof OpenGeniApiError && (error.status === 404 || error.status === 410);
 }
 
 function interactionErrorResult(

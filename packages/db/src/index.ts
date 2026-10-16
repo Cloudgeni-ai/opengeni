@@ -50,6 +50,9 @@ export {
   type ConnectionMetadataWithVerification,
 } from "./connection-metadata";
 export { readCreditPromotionPolicy } from "./credit-promotion-policy";
+export * from "./subscription-plans";
+import { beginPlanCreditSettlement } from "./subscription-plans";
+export * from "./subscription-plan-maintenance";
 import {
   getBillingBalance,
   getSpendableCreditBalance,
@@ -611,6 +614,7 @@ import {
   captureScheduledExternalLinkTurnAuthority,
   cloneExternalLinkTaskAuthority,
   getExternalLinkTurnAuthorization,
+  externalLinkWorkSnapshotIsLive,
 } from "./external-link-work";
 
 import {
@@ -1040,6 +1044,7 @@ import {
   settleConnectedMachineSessionBackgroundCommandWithMutation,
   settleSessionBackgroundCommandForRetainedProcessInTransaction,
   unobservableRetainedProcessOutcomeSql,
+  UNREACHABLE_MACHINE_STOP_REQUESTER,
   type ConnectedMachineBackgroundCommandClaim,
 } from "./session-background-commands";
 import {
@@ -1244,6 +1249,7 @@ export {
 // Workspace Memory V1 pure domain surface (gates, render, canonical prompt text).
 export * from "./memory-domain";
 export * from "./model-catalog";
+export * from "./billing-subscription-operations";
 
 import {
   dbBindingFor,
@@ -1272,6 +1278,8 @@ import {
 export {
   createDb,
   databaseReconnectBackoffSeconds,
+  defaultDatabasePreparedStatements,
+  isTransactionHandle,
   registerDbBinding,
   retrySessionActivityRls,
   rlsContextForWorkspace,
@@ -3027,6 +3035,23 @@ export async function getWorkspace(db: Database, workspaceId: string): Promise<W
         await workspaceKindProjection(db, row),
       )
     : null;
+}
+
+/**
+ * Only a workspace's settings, as {@link getWorkspace} maps them: one read
+ * instead of its three, for callers that need nothing else. Null when the
+ * workspace is absent or not visible.
+ */
+export async function getWorkspaceSettings(
+  db: Database,
+  workspaceId: string,
+): Promise<Record<string, unknown> | null> {
+  const [row] = await db
+    .select({ settings: schema.workspaces.settings })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .limit(1);
+  return row ? ((row.settings ?? {}) as Record<string, unknown>) : null;
 }
 
 export async function getManagedAccount(
@@ -6207,6 +6232,9 @@ export async function applyCreditLedgerEntryOnce(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
+      // Funding and usage adjustments share the expiry boundary too.
+      await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
+      const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
       const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)
         .values({
@@ -6220,6 +6248,7 @@ export async function applyCreditLedgerEntryOnce(
           idempotencyKey: input.idempotencyKey,
           metadata: input.metadata ?? {},
           occurredAt: input.occurredAt ?? new Date(),
+          createdAt: sql`${settledAt}::timestamptz`,
         })
         .onConflictDoNothing({
           target: schema.creditLedgerEntries.idempotencyKey,
@@ -6271,7 +6300,13 @@ export async function applyCreditDebitUpToBalance(
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
-      const before = await getBillingBalance(scopedDb, input.accountId, input.creditPolicyRevision);
+      const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
+      const before = await getBillingBalance(
+        scopedDb,
+        input.accountId,
+        input.creditPolicyRevision,
+        settledAt,
+      );
       const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
       const candidateDebitMicros = plan.debitedMicros;
       // Keep a zero-cost receipt too: retrying after a top-up must not charge
@@ -6293,6 +6328,7 @@ export async function applyCreditDebitUpToBalance(
             creditPolicyRevision: before.creditPolicyRevision,
           },
           occurredAt: input.occurredAt ?? new Date(),
+          createdAt: sql`${settledAt}::timestamptz`,
         })
         .onConflictDoNothing({
           target: schema.creditLedgerEntries.idempotencyKey,
@@ -6338,8 +6374,9 @@ export async function applyCreditDebitAfterUse(
     metadata?: Record<string, unknown>;
     occurredAt?: Date;
     /**
-     * What the charge paid for. When set, grants covering it pay first (oldest
-     * first) and general credit takes the rest. Omitted: general credit only.
+     * What the charge paid for. Monthly plan credit pays first, then grants
+     * covering the excess (oldest first), then other general credit.
+     * Omitted: general credit only.
      */
     usage?: CreditUsage;
   },
@@ -6351,13 +6388,14 @@ export async function applyCreditDebitAfterUse(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
+      // Serialize ALL post-use charges with plan expiry, including resources
+      // that cannot allocate promotional grants.
+      await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
+      const settledAt = await beginPlanCreditSettlement(scopedDb, input.accountId);
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
       if (input.usage) {
-        // Same account lock as the model debit, so grant remainders are not
-        // allocated twice by concurrent charges.
-        await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
         allocations = planPostUseCreditAllocations(
-          await getBillingBalance(scopedDb, input.accountId),
+          await getBillingBalance(scopedDb, input.accountId, undefined, settledAt),
           input.amountMicros,
           input.usage,
         );
@@ -6374,6 +6412,7 @@ export async function applyCreditDebitAfterUse(
           idempotencyKey: input.idempotencyKey,
           metadata: input.metadata ?? {},
           occurredAt: input.occurredAt ?? new Date(),
+          createdAt: sql`${settledAt}::timestamptz`,
         })
         .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
         .returning({ id: schema.creditLedgerEntries.id });
@@ -13857,48 +13896,6 @@ export async function getSlackInteractionSessionAccess(
       )
       .limit(1);
     return row ?? null;
-  });
-}
-
-export async function getSlackInteractionSessionAccessForSession(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-  },
-): Promise<
-  | (Pick<SlackInteraction, "owningSubjectId" | "visibility"> & {
-      rootSessionId: string;
-    })
-  | null
-> {
-  return await withRlsContext(db, input, async (scopedDb) => {
-    const rows = await scopedDb.execute<{
-      rootSessionId: string;
-      owningSubjectId: string | null;
-      visibility: SlackInteraction["visibility"] | null;
-    }>(sql`
-      select
-        session.root_session_id as "rootSessionId",
-        interaction.owning_subject_id as "owningSubjectId",
-        interaction.visibility
-      from ${schema.sessions} session
-      left join ${schema.slackInteractions} interaction
-        on interaction.account_id = ${input.accountId}
-        and interaction.workspace_id = ${input.workspaceId}
-        and interaction.session_reservation_id = session.root_session_id
-      where session.account_id = ${input.accountId}
-        and session.workspace_id = ${input.workspaceId}
-        and session.id = ${input.sessionId}
-    `);
-    const root = rows[0];
-    if (!root?.owningSubjectId || !root.visibility) return null;
-    return {
-      rootSessionId: root.rootSessionId,
-      owningSubjectId: root.owningSubjectId,
-      visibility: root.visibility,
-    };
   });
 }
 
@@ -30419,26 +30416,6 @@ export async function getInitializedSessionCreateReplay(
   );
 }
 
-/** Read target identity for authorization without expanding chat content or controls. */
-export async function getSessionAuthorizationTargetProjection(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<Pick<Session, "id" | "accountId" | "rootSessionId"> | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        id: schema.sessions.id,
-        accountId: schema.sessions.accountId,
-        rootSessionId: schema.sessions.rootSessionId,
-      })
-      .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .limit(1);
-    return row ?? null;
-  });
-}
-
 export async function getSession(
   db: Database,
   workspaceId: string,
@@ -30980,6 +30957,221 @@ export async function getSessionAccessProjection(
   };
 }
 
+/** The caller session and live turn behind one agent attempt's authority. */
+export type SessionAuthorizationCallerFacts = {
+  session: {
+    accountId: string;
+    rootSessionId: string;
+    parentSessionId: string | null;
+    agentAccess: SessionAgentAccess;
+    scopeSubjectId: SessionScopeSubjectId | null;
+  } | null;
+  /**
+   * The turn this exact attempt is live on: a claimed or running attempt that
+   * is its turn's active attempt, on the session's active turn, with no
+   * pending interruption and (for a linked external turn) live link
+   * authority. The same fence as `getLiveSessionAttemptTurn`.
+   */
+  turn: {
+    id: string;
+    executionGeneration: number;
+    initiator: TurnInitiator;
+    initiatorContext: TurnInitiatorContext;
+    initiatingHumanSubjectId: string | null;
+  } | null;
+};
+
+export type SessionAuthorizationFacts = {
+  /** Null when the target does not exist or the caller's RLS context hides it. */
+  target:
+    | (SessionAuthorityProjection & {
+        accountId: string;
+        /** The Slack interaction that owns the target's root, when one does. */
+        slackAccess: { owningSubjectId: string; visibility: SlackInteraction["visibility"] } | null;
+      })
+    | null;
+  /** Present only when a caller attempt was named. */
+  caller: SessionAuthorizationCallerFacts | null;
+};
+
+/**
+ * Everything session authorization reads, in one scoped statement: the target
+ * session's authority projection and Slack ownership, and (for an agent
+ * attempt) the caller session and its live attempt turn. Authorization used to
+ * make five sequential scoped reads (plus the full caller-session projection);
+ * this is one round trip inside one RLS scope, so every fact is read under the
+ * same visibility and the same snapshot. A linked external turn additionally
+ * proves its link is still live, in the same scope.
+ */
+export async function getSessionAuthorizationFacts(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    caller?: { sessionId: string; attemptId: string } | undefined;
+  },
+): Promise<SessionAuthorizationFacts> {
+  const callerSessionId = input.caller?.sessionId ?? null;
+  const attemptId = input.caller?.attemptId ?? null;
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{
+      target_id: string | null;
+      target_account_id: string | null;
+      target_root_session_id: string | null;
+      target_visibility: string | null;
+      target_authority_epoch: number | null;
+      target_owner_subject_id: string | null;
+      target_site_id: string | null;
+      target_site_access_root_id: string | null;
+      target_site_viewer_principal: string | null;
+      target_site_owner_subject_id: string | null;
+      target_agent_access: string | null;
+      target_scope_subject_id: string | null;
+      target_memory_scope: string | null;
+      slack_owning_subject_id: string | null;
+      slack_visibility: SlackInteraction["visibility"] | null;
+      caller_account_id: string | null;
+      caller_root_session_id: string | null;
+      caller_parent_session_id: string | null;
+      caller_agent_access: string | null;
+      caller_scope_subject_id: string | null;
+      turn_id: string | null;
+      turn_account_id: string | null;
+      turn_execution_generation: number | null;
+      turn_initiator_kind: string | null;
+      turn_initiator_subject_id: string | null;
+      turn_initiator_context: TurnInitiatorContext | null;
+      turn_initiating_human_subject_id: string | null;
+      turn_link_snapshot: unknown;
+    }>(
+      scopedDb,
+      sql`
+        select
+          target.id as target_id,
+          target.account_id as target_account_id,
+          target.root_session_id as target_root_session_id,
+          target.visibility as target_visibility,
+          target.authority_epoch as target_authority_epoch,
+          target.owner_subject_id as target_owner_subject_id,
+          target.site_id as target_site_id,
+          target.site_access_root_id as target_site_access_root_id,
+          target.site_viewer_principal as target_site_viewer_principal,
+          target.site_owner_subject_id as target_site_owner_subject_id,
+          target.agent_access as target_agent_access,
+          target.scope_subject_id as target_scope_subject_id,
+          target.memory_scope as target_memory_scope,
+          slack.owning_subject_id as slack_owning_subject_id,
+          slack.visibility as slack_visibility,
+          caller.account_id as caller_account_id,
+          caller.root_session_id as caller_root_session_id,
+          caller.parent_session_id as caller_parent_session_id,
+          caller.agent_access as caller_agent_access,
+          caller.scope_subject_id as caller_scope_subject_id,
+          turn.id as turn_id,
+          turn.account_id as turn_account_id,
+          turn.execution_generation as turn_execution_generation,
+          turn.initiator_kind as turn_initiator_kind,
+          turn.initiator_subject_id as turn_initiator_subject_id,
+          turn.initiator_context as turn_initiator_context,
+          turn.initiating_human_subject_id as turn_initiating_human_subject_id,
+          link.canonical_snapshot as turn_link_snapshot
+        from (select 1) as anchor
+        left join ${schema.sessions} target
+          on target.workspace_id = ${input.workspaceId}
+          and target.id = ${input.sessionId}
+        left join ${schema.slackInteractions} slack
+          on slack.account_id = ${input.accountId}
+          and slack.workspace_id = ${input.workspaceId}
+          and slack.session_reservation_id = target.root_session_id
+          and target.account_id = ${input.accountId}
+        left join ${schema.sessions} caller
+          on ${callerSessionId}::uuid is not null
+          and caller.workspace_id = ${input.workspaceId}
+          and caller.id = ${callerSessionId}::uuid
+        left join ${schema.sessionTurnAttempts} attempt
+          on attempt.workspace_id = ${input.workspaceId}
+          and attempt.session_id = caller.id
+          and attempt.id = ${attemptId}::uuid
+          and attempt.state in ('claimed', 'running')
+          and not exists (
+            select 1 from ${schema.sessionAttemptInterruptions} interruption
+            where interruption.workspace_id = ${input.workspaceId}
+              and interruption.attempt_id = ${attemptId}::uuid
+              and interruption.state in ('pending', 'delivered', 'acknowledged')
+          )
+        left join ${schema.sessionTurns} turn
+          on turn.workspace_id = attempt.workspace_id
+          and turn.id = attempt.turn_id
+          and turn.active_attempt_id = attempt.id
+          and turn.id = caller.active_turn_id
+          and turn.status in ('running', 'requires_action', 'recovering', 'waiting_capacity')
+        left join external_link_turn_authorities link
+          on link.account_id = turn.account_id
+          and link.workspace_id = turn.workspace_id
+          and link.turn_id = turn.id
+      `,
+    );
+    const target: SessionAuthorizationFacts["target"] =
+      row?.target_id && row.target_account_id && row.target_root_session_id
+        ? {
+            sessionId: row.target_id,
+            accountId: row.target_account_id,
+            authorityEpoch: Number(row.target_authority_epoch),
+            rootSessionId: row.target_root_session_id,
+            visibility: row.target_visibility as SessionAuthorityProjection["visibility"],
+            ownerSubjectId: row.target_owner_subject_id ?? null,
+            siteId: row.target_site_id ?? null,
+            siteAccessRootId: row.target_site_access_root_id ?? null,
+            siteViewerPrincipal: row.target_site_viewer_principal ?? null,
+            siteOwnerSubjectId: row.target_site_owner_subject_id ?? null,
+            agentAccess: sessionAgentAccessFromRow({ agentAccess: row.target_agent_access ?? "" }),
+            scopeSubjectId: sessionEndUserFromRow({ scopeSubjectId: row.target_scope_subject_id }),
+            memoryScope: sessionMemoryScopeFromRow({ memoryScope: row.target_memory_scope ?? "" }),
+            slackAccess:
+              row.slack_owning_subject_id && row.slack_visibility
+                ? { owningSubjectId: row.slack_owning_subject_id, visibility: row.slack_visibility }
+                : null,
+          }
+        : null;
+    if (!input.caller) return { target, caller: null };
+    const session: SessionAuthorizationCallerFacts["session"] =
+      row?.caller_account_id && row.caller_root_session_id
+        ? {
+            accountId: row.caller_account_id,
+            rootSessionId: row.caller_root_session_id,
+            parentSessionId: row.caller_parent_session_id ?? null,
+            agentAccess: sessionAgentAccessFromRow({ agentAccess: row.caller_agent_access ?? "" }),
+            scopeSubjectId: sessionEndUserFromRow({ scopeSubjectId: row.caller_scope_subject_id }),
+          }
+        : null;
+    let turn: SessionAuthorizationCallerFacts["turn"] = null;
+    if (
+      row?.turn_id &&
+      row.turn_execution_generation !== null &&
+      row.turn_initiator_kind !== null &&
+      row.turn_initiator_subject_id !== null &&
+      // A linked external turn keeps its authority only while the link is live.
+      (row.turn_link_snapshot === null ||
+        (await externalLinkWorkSnapshotIsLive(scopedDb, row.turn_link_snapshot)))
+    ) {
+      const initiatorContext = row.turn_initiator_context ?? {};
+      turn = {
+        id: row.turn_id,
+        executionGeneration: Number(row.turn_execution_generation),
+        initiator: initiatorFromStorage(
+          row.turn_initiator_kind,
+          row.turn_initiator_subject_id,
+          initiatorContext,
+        ),
+        initiatorContext,
+        initiatingHumanSubjectId: row.turn_initiating_human_subject_id ?? null,
+      };
+    }
+    return { target, caller: { session, turn } };
+  });
+}
+
 /**
  * The typed Memory selector an agent on this session reads and writes. The
  * user subject comes from the verified active execution, not a conversation
@@ -31398,6 +31590,11 @@ export type SessionListFilterOptions = {
   needsYouOnly?: boolean;
   /** Only sessions moved to the idle-session archive (read-only). */
   contentArchivedOnly?: boolean;
+  /**
+   * Only workstreams the listing subject started or messaged: a session in
+   * the tree was created by them, or they prompted a turn in it directly.
+   */
+  mineOnly?: boolean;
   /** Exact opaque end-user label pair (both parts). */
   scopeSubjectId?: SessionScopeSubjectId;
 };
@@ -32374,6 +32571,42 @@ function sessionNeedsYouSql(scope: SessionAuthorizationListScope | undefined): S
 }
 
 /**
+ * A workstream is the subject's when any session in its tree was created by
+ * them or received a prompt they sent directly. Agent-relayed and service
+ * turns do not count, even when they carry the human's causal authority.
+ * Applies to every row through its root, so a root page and its children
+ * agree. The turn probe is served by session_turns_human_prompt_subject_idx.
+ */
+function sessionMineSql(subjectId: string): SQL {
+  return sql`(
+    exists (
+      select 1 from ${schema.sessions} mine_created
+      where mine_created.workspace_id = ${schema.sessions.workspaceId}
+        and mine_created.root_session_id = ${schema.sessions.rootSessionId}
+        and mine_created.created_by_kind = 'subject'
+        and mine_created.created_by_subject_id = ${subjectId}
+    )
+    or exists (
+      select 1 from ${schema.sessions} mine_tree
+      join ${schema.sessionTurns} mine_turn
+        on mine_turn.workspace_id = mine_tree.workspace_id
+        and mine_turn.session_id = mine_tree.id
+      where mine_tree.workspace_id = ${schema.sessions.workspaceId}
+        and mine_tree.root_session_id = ${schema.sessions.rootSessionId}
+        and ${sessionTurnHumanPromptSql(sql`mine_turn`)}
+        and mine_turn.initiator_subject_id = ${subjectId}
+    )
+  )`;
+}
+
+/** Exact partial-index predicate for a prompt a person sent directly. */
+function sessionTurnHumanPromptSql(turn: SQL): SQL {
+  return sql`${turn}.initiator_kind = 'subject'
+        and ${turn}.source in ('user', 'api')
+        and ${turn}.surface is distinct from 'agent'`;
+}
+
+/**
  * One content-free graph aggregation, before pagination. Each root owns a
  * disjoint tree: a single-parent cycle cannot be reachable from a parentless
  * root. UNION also deduplicates defensive legacy edges. Exact target scopes
@@ -32548,6 +32781,7 @@ function sessionFilters(
     | "scopeSubjectId"
     | "needsYouOnly"
     | "contentArchivedOnly"
+    | "mineOnly"
   >,
 ): SQL[] {
   const filters: SQL[] = [
@@ -32564,6 +32798,7 @@ function sessionFilters(
   if (options.contentArchivedOnly) {
     filters.push(sql`${schema.sessions.contentArchiveState} = 'archived'`);
   }
+  if (options.mineOnly) filters.push(sessionMineSql(options.subjectId));
   if (options.originSiteId) {
     filters.push(
       eq(schema.sessions.siteId, options.originSiteId),
@@ -32822,7 +33057,8 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     !options.createdBefore &&
     !options.scopeSubjectId &&
     !options.needsYouOnly &&
-    !options.contentArchivedOnly
+    !options.contentArchivedOnly &&
+    !options.mineOnly
   ) {
     return "all";
   }
@@ -32837,6 +33073,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     options.scopeSubjectId ? ["scopeSubjectId", options.scopeSubjectId] : null,
     ...(options.needsYouOnly ? [["needsYouOnly", true]] : []),
     ...(options.contentArchivedOnly ? [["contentArchivedOnly", true]] : []),
+    ...(options.mineOnly ? [["mineOnly", true]] : []),
   ]);
 }
 
@@ -33617,6 +33854,7 @@ async function readSessionListForSubject(
             ...(totals ? { totals } : {}),
             ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
             ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
+            ...(options.mineOnly ? { mineOnly: true as const } : {}),
             pinned: pinnedRows.map((row) => sessionListEntry(mapListSession(row))),
             pinnedTruncated,
             sessions: pageRows.map((row) => sessionListEntry(mapListSession(row))),
@@ -33628,6 +33866,7 @@ async function readSessionListForSubject(
           ...(totals ? { totals } : {}),
           ...(options.needsYouOnly ? { needsYouOnly: true as const } : {}),
           ...(options.contentArchivedOnly ? { contentArchivedOnly: true as const } : {}),
+          ...(options.mineOnly ? { mineOnly: true as const } : {}),
           pinned: pinnedRows.map(mapListSession),
           pinnedTruncated,
           sessions: pageRows.map(mapListSession),
@@ -38386,6 +38625,12 @@ export async function adoptConnectedMachineSessionBackgroundCommand(
     connectionInstanceId: string;
     opId: string;
     command: string;
+    /** Record an operation the turn already reported as failed because its
+     * machine stopped answering. It enters the ledger with a stop request and
+     * needs only proof that this exact attempt launched it: recording a stop
+     * grants nothing, so Pause, cancellation or a finished attempt must not
+     * leave the operation owned by a turn that can no longer stop it. */
+    abandoned?: boolean;
   },
 ) {
   return await withRlsContext(
@@ -38403,6 +38648,24 @@ export async function adoptConnectedMachineSessionBackgroundCommand(
           [input.workspaceId, input.controlWorkspaceId],
           "share",
         );
+        if (input.abandoned) {
+          const [attempt] = await tx
+            .select({ id: schema.sessionTurnAttempts.id })
+            .from(schema.sessionTurnAttempts)
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.accountId, input.accountId),
+                eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+                eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+                eq(schema.sessionTurnAttempts.turnId, input.turnId),
+                eq(schema.sessionTurnAttempts.executionGeneration, input.executionGeneration),
+                eq(schema.sessionTurnAttempts.id, input.attemptId),
+              ),
+            )
+            .limit(1);
+          if (!attempt) throw new SessionBackgroundCommandAdoptionFencedError("not_found");
+          return await insertConnectedMachineSessionBackgroundCommandInTransaction(tx, input);
+        }
         const fence = await lockTurnAttemptWriteFenceTx(tx, {
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
@@ -82498,6 +82761,21 @@ function backgroundCommandTerminalMutation(input: {
         )
         .limit(1);
       if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+      // An operation abandoned on an unreachable machine already failed in the
+      // turn that launched it; its later stop is audit, not new model input.
+      const [stopRequest] = await tx
+        .select({ requestedBy: schema.sessionBackgroundCommands.cancelRequestedBy })
+        .from(schema.sessionBackgroundCommands)
+        .where(
+          and(
+            eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+            eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+            eq(schema.sessionBackgroundCommands.id, command.id),
+          ),
+        )
+        .limit(1);
+      const abandonedOnUnreachableMachine =
+        stopRequest?.requestedBy === UNREACHABLE_MACHINE_STOP_REQUESTER;
       const terminalOccurredAt = new Date(command.settledAt);
       const now = new Date();
       const reason = boundedSessionBackgroundCommandReason(
@@ -82544,7 +82822,8 @@ function backgroundCommandTerminalMutation(input: {
       if (
         session.status === "cancelled" ||
         session.status === "failed" ||
-        command.completionObservedAt
+        command.completionObservedAt ||
+        abandonedOnUnreachableMachine
       ) {
         await tx
           .update(schema.sessions)

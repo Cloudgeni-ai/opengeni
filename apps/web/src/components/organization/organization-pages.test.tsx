@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { OpenGeniApiError, type BillingPlanBalance } from "@opengeni/sdk";
 import { act, StrictMode, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import * as RouterPackage from "@tanstack/react-router";
@@ -571,9 +572,106 @@ describe("organization directory", () => {
     expect(first.initialWorkspaceIds).toEqual(["ws-platform"]);
     await view.unmount();
   });
+
+  test("seat refusal survives directory error projection alongside partial invite success", async () => {
+    const create = mock(async (_org: string, request: { email: string }) => {
+      if (request.email === "full@example.test")
+        throw Object.assign(new Error("Your plan has no seats left"), {
+          status: 402,
+          body: JSON.stringify({ error: "seat_limit_reached" }),
+        });
+      return { ...invitation("member"), id: "new-seat", targetEmail: request.email };
+    });
+    const client = makeClient({ createOrganizationInvitation: create });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <Capture />
+      </Provider>,
+    );
+    await flush();
+    let result!: Awaited<ReturnType<NonNullable<typeof captured>["invite"]>>;
+    await act(async () => {
+      result = await captured!.invite({
+        emails: ["fits@example.test", "full@example.test"],
+        role: "member",
+        workspaceIds: [],
+      });
+    });
+    expect(result.sent.map((item) => item.targetEmail)).toEqual(["fits@example.test"]);
+    expect(result.failed[0]).toMatchObject({ email: "full@example.test", seatLimitReached: true });
+    await view.unmount();
+  });
 });
 
 describe("People page", () => {
+  test("a seat refusal during billing load gains its upgrade action when the verified plan arrives", async () => {
+    const plan: BillingPlanBalance = {
+      key: "free",
+      label: "Free",
+      status: "active",
+      creditGrantedMicros: 10_000_000,
+      creditRemainingMicros: 0,
+      periodResetAt: null,
+      seatsUsed: 5,
+      seatLimit: 5,
+      cancelAtPeriodEnd: false,
+    };
+    let resolveBilling!: (value: { balance: { plan: BillingPlanBalance } }) => void;
+    const billing = new Promise<{ balance: { plan: BillingPlanBalance } }>((resolve) => {
+      resolveBilling = resolve;
+    });
+    const client = makeClient({
+      getBilling: mock(() => billing),
+      getBillingSubscriptionPlans: mock(async () => ({ plan })),
+      createOrganizationInvitation: mock(async () => {
+        throw new OpenGeniApiError(
+          402,
+          JSON.stringify({
+            error: "seat_limit_reached",
+            message: "Your organization has reached its seat limit.",
+          }),
+        );
+      }),
+    });
+    const view = mount(null);
+    try {
+      await view.render(
+        <Provider client={client}>
+          <OrganizationPeoplePage workspaceId="workspace-a" view="invite" />
+        </Provider>,
+      );
+      await flush();
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", {
+        value: { getData: () => "new@example.test," },
+      });
+      await act(async () =>
+        view.container.querySelector("input[type=email]")!.dispatchEvent(paste),
+      );
+      await act(async () =>
+        view.container
+          .querySelector("form")!
+          .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      await flush();
+      expect(view.container.textContent).toContain("Couldn't send the invitation");
+      expect(view.container.textContent).not.toContain("View upgrade options");
+      await act(async () => resolveBilling({ balance: { plan } }));
+      await flush();
+      expect(view.container.textContent).toContain("5 / 5 seats used");
+      expect(view.container.textContent).toContain("View upgrade options");
+      expect(view.container.textContent).not.toContain("Couldn't send the invitation");
+      expect(view.container.textContent).toContain("new@example.test");
+      await act(async () => button(view.container, "View upgrade options").click());
+      expect(navigate).toHaveBeenCalledWith(
+        expect.objectContaining({ search: { section: "billing" } }),
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("names the person in the suspend confirmation and says access is removed", async () => {
     const client = makeClient();
     const view = mount(null);

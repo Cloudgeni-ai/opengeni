@@ -1,5 +1,64 @@
 # @opengeni/api-router
 
+## 3.4.0
+
+### Minor Changes
+
+- ceaf911: Browsers: a browser whose working directory was copied or restored (for example after a machine's disk was replaced) can now be continued from that copy instead of staying unavailable. `inspectBrowserSessionWorkingCopy` reports why the copy is refused and, when it can be adopted, the exact digest of its bytes; `adoptBrowserSessionWorkingCopy` adopts exactly those bytes under the browser's existing control authority, and `getBrowserSessionWorkingCopyAdoption` reports an adoption's recorded outcome, without changing it, when a reply was lost; retrying the same adoption settles one that stopped part way and never repeats a step. How recent the copy is stays explicitly unknown. Only controller-owned derived entries are left out of the copy, and inspection lists them. An adopted copy is never replaced by an older checkpoint afterwards, the directory it replaced is kept, and every step is journaled so a crash at any point is finished or reported, never guessed. Supported on Linux machines only for now. When a preserved browser is refused, its error now says why and what to do next.
+- 7998676: Add default-off organization subscription checkout, paid-invoice plan synchronization, immediate paid upgrades, period-end changes/cancellation, and hosted portal endpoints with typed SDK methods. Serialize Stripe customer creation across billing entry points and recover duplicate subscriptions without treating their payments as prepaid credit purchases.
+
+### Patch Changes
+
+- 28844d8: Opening a new browser makes two fewer API round trips. A create that launches the browser now returns `initialView` with the tab inventory and the opened tab's observation exactly as the controller produced them, so an agent's browser_open no longer lists targets and observes again. Replayed, failed and older-controller creates omit it, and callers fall back to reading as before. The tool result the model sees is unchanged.
+- b7a7c93: Creating a browser reads its replay record and source session alongside the authorization check instead of after it. A denial still wins, neither read is used before the request is authorized, and each failure is reported at the same point as before.
+- 888d82f: First-party MCP handshakes cost one database read. Every POST to the first-party MCP route used to build the whole tool surface first: session authorization, the agent's learning policy, the workspace, its model catalog, Memory scope and admin access, about 42 statements in eleven transactions. A client connect is three POSTs (initialize, notifications/initialized, tools/list), so each turn's connect paid that three times. For a session-bound agent attempt, `initialize`, `ping` and notifications now only prove that the caller is the live attempt (BEGIN, setup, one read, COMMIT) and are answered by a tool-less server with the same name, version and capabilities, so the reply is identical. A stale attempt is refused with the same error as before, and `tools/*` requests still build the full surface.
+- 960fea8: A first-party MCP tool listing reads its tool surface (workspace settings, model catalog, Memory selector and admin access) together and alongside the bound-session check, and an agent attempt's learning policy alongside its liveness check. Authorization still decides before anything is disclosed. The listing now waits on two rounds of database reads instead of nine, and no longer reads the workspace's control state and kind.
+- Updated dependencies [28844d8]
+- Updated dependencies [e5a48d2]
+- Updated dependencies [a544972]
+- Updated dependencies [0ed367a]
+- Updated dependencies [ceaf911]
+- Updated dependencies [42caae1]
+- Updated dependencies [fbb2765]
+- Updated dependencies [acc2718]
+- Updated dependencies [462fa87]
+- Updated dependencies [2f370c3]
+- Updated dependencies [960fea8]
+- Updated dependencies [3418893]
+- Updated dependencies [ad17c9e]
+- Updated dependencies [cac0334]
+- Updated dependencies [33bf04d]
+- Updated dependencies [ab48465]
+- Updated dependencies [8d93488]
+- Updated dependencies [c594c1d]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+- Updated dependencies [8053c9b]
+  - @opengeni/contracts@3.4.0
+  - @opengeni/runtime@3.4.0
+  - @opengeni/db@3.4.0
+  - @opengeni/codex@3.4.0
+  - @opengeni/core@3.4.0
+  - @opengeni/config@3.4.0
+  - @opengeni/artifact-tool@3.4.0
+  - @opengeni/capabilities@3.4.0
+  - @opengeni/codemode@3.4.0
+  - @opengeni/documents@3.4.0
+  - @opengeni/events@3.4.0
+  - @opengeni/github@3.4.0
+  - @opengeni/interaction@3.4.0
+  - @opengeni/observability@3.4.0
+  - @opengeni/storage@3.4.0
+  - @opengeni/tool-gateway@3.4.0
+  - @opengeni/vaults@3.4.0
+  - @opengeni/vaults-keeper@3.4.0
+  - @opengeni/vaults-onepassword@3.4.0
+  - @opengeni/vaults-protonpass@3.4.0
+  - @opengeni/agent-proto@3.4.0
+  - @opengeni/network@3.4.0
+  - @opengeni/xai-subscription@3.4.0
+
 ## 3.3.0
 
 ### Patch Changes

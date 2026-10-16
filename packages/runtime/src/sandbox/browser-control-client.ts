@@ -270,6 +270,8 @@ export type PlacementBrowserSessionReference = {
 
 export type PlacementBrowserSession = PlacementBrowserSessionReference & {
   observation: BrowserObservationValue;
+  /** The tab inventory at creation, when the controller reports it. */
+  targets?: BrowserTargetValue[];
 };
 
 export type PlacementComputerSessionReference = {
@@ -413,6 +415,73 @@ export type PlacementBrowserStateCaptureReceipt = PlacementBrowserSessionReferen
     architecture: "x64" | "arm64";
     tabs: Array<{ url: string; selected: boolean }>;
   };
+};
+
+/** The exact controller authority a preserved working copy was launched
+ * under; the controller refuses any other. */
+export type PlacementBrowserWorkingCopyAuthority = PlacementBrowserSessionReference & {
+  tokenGeneration: number;
+  controlToken: string;
+  viewToken: string;
+};
+
+export const BROWSER_WORKING_COPY_REFUSALS = [
+  "unsupported_platform",
+  "browser_running",
+  "working_copy_invalid",
+  "receipt_not_adoptable",
+  "authority_changed",
+  "process_state_unknown",
+  "adoption_not_needed",
+  "adoption_unresolved",
+] as const;
+export type PlacementBrowserWorkingCopyRefusal = (typeof BROWSER_WORKING_COPY_REFUSALS)[number];
+
+export const BROWSER_WORKING_COPY_ADOPTION_PHASES = [
+  "intent",
+  "copied",
+  "receipt",
+  "source_preserved",
+  "adopted",
+  "interrupted",
+  "failed",
+  "collision",
+  "reverting",
+  "reverted",
+] as const;
+export type PlacementBrowserWorkingCopyAdoptionPhase =
+  (typeof BROWSER_WORKING_COPY_ADOPTION_PHASES)[number];
+
+export type PlacementBrowserWorkingCopyAdoption = PlacementBrowserSessionReference & {
+  operationId: string;
+  manifestDigest: string;
+  phase: PlacementBrowserWorkingCopyAdoptionPhase;
+  failureCode: string | null;
+  /** Directories this adoption kept beside the browser's own, by name. */
+  retainedDirectories: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PlacementBrowserWorkingCopyInspection = PlacementBrowserSessionReference & {
+  platformSupported: boolean;
+  refusal: PlacementBrowserWorkingCopyRefusal | null;
+  /** Exact digest of the bytes an adoption would take; null when refused. */
+  manifest: { digest: string; entries: number; bytes: number; excluded: string[] } | null;
+  profileIdentityMatches: boolean;
+  /** false only when no process provably uses the profile. */
+  profileInUse: boolean | null;
+  receipt: {
+    operationId: string;
+    intent: "launch" | "suspend" | "retire" | "adopt";
+    state: string;
+    directoryLaunchAllowed: boolean;
+    authorityMatches: boolean;
+    /** True when this working copy was first launched from a saved checkpoint. */
+    launchedFromCheckpoint: boolean;
+    adoption: { operationId: string; manifestDigest: string } | null;
+  } | null;
+  activeAdoption: PlacementBrowserWorkingCopyAdoption | null;
 };
 
 export type ProvisionBrowserControlClientInput = {
@@ -652,6 +721,7 @@ export class BrowserControlClient {
     return {
       ...returnedReference,
       observation: BrowserObservation.parse(data.observation),
+      ...creationTargets(data.targets, returnedReference),
     };
   }
 
@@ -880,6 +950,103 @@ export class BrowserControlClient {
       );
     }
     return receipt;
+  }
+
+  /** Read-only evidence about a preserved working copy whose controller
+   * memory was lost: the exact digest of its bytes and whether it can be
+   * adopted. Hashing a large profile can take minutes. */
+  async inspectWorkingCopy(
+    input: PlacementBrowserWorkingCopyAuthority,
+  ): Promise<PlacementBrowserWorkingCopyInspection> {
+    const reference = parseReference(input);
+    const data = await this.requestJson({
+      method: "POST",
+      path: `/v1/browser-sessions/${reference.browserSessionId}/working-copy/inspection`,
+      token: this.adminToken,
+      body: workingCopyAuthorityBody(reference, input),
+      timeoutMs: BROWSER_STATE_TRANSFER_TIMEOUT_MS,
+    });
+    return parseWorkingCopyInspection(data, reference);
+  }
+
+  /** Adopt the exact inspected bytes of a preserved working copy. A lost reply
+   * is checked with {@link workingCopyAdoption}. Sending the same operation id
+   * again never repeats a side effect: it only settles what that operation
+   * already did, under the authority that approved it. */
+  async adoptWorkingCopy(
+    input: PlacementBrowserWorkingCopyAuthority & { operationId: string; manifestDigest: string },
+  ): Promise<PlacementBrowserWorkingCopyAdoption> {
+    const reference = parseReference(input);
+    const operationId = requireUuid(input.operationId, "working copy adoption id");
+    const data = await this.requestJson({
+      method: "POST",
+      path: `/v1/browser-sessions/${reference.browserSessionId}/working-copy/adoptions`,
+      token: this.adminToken,
+      body: {
+        ...workingCopyAuthorityBody(reference, input),
+        operationId,
+        manifestDigest: sha256(input.manifestDigest, "working copy manifest digest"),
+      },
+      timeoutMs: BROWSER_STATE_TRANSFER_TIMEOUT_MS,
+    });
+    const adoption = parseWorkingCopyAdoption(data, reference, "current");
+    if (adoption.operationId !== operationId) {
+      throw new BrowserControlProtocolError("browser controller returned another adoption");
+    }
+    return adoption;
+  }
+
+  /** The recorded state of one adoption, read without changing it. */
+  async workingCopyAdoption(
+    reference: PlacementBrowserSessionReference,
+    operationId: string,
+  ): Promise<{ inFlight: boolean; adoption: PlacementBrowserWorkingCopyAdoption | null }> {
+    const binding = parseReference(reference);
+    const id = requireUuid(operationId, "working copy adoption id");
+    const data = await this.requestJson({
+      method: "GET",
+      path: `/v1/browser-sessions/${binding.browserSessionId}/working-copy/adoptions/${id}`,
+      token: this.adminToken,
+    });
+    if (!isRecord(data) || typeof data.inFlight !== "boolean") {
+      throw new BrowserControlProtocolError(
+        "browser controller returned malformed adoption status",
+      );
+    }
+    const adoption =
+      data.adoption === null ? null : parseWorkingCopyAdoption(data.adoption, binding, "recorded");
+    if (adoption && adoption.operationId !== id) {
+      throw new BrowserControlProtocolError("browser controller returned another adoption");
+    }
+    return { inFlight: data.inFlight, adoption };
+  }
+
+  /** Revert one unfinished adoption under the browser's current authority:
+   * its own directory goes back to the live path and the staged copy is
+   * kept. Retrying the same revert finishes one that stopped part way. */
+  async revertWorkingCopyAdoption(
+    input: PlacementBrowserWorkingCopyAuthority & { operationId: string },
+  ): Promise<{ inFlight: boolean; adoption: PlacementBrowserWorkingCopyAdoption | null }> {
+    const reference = parseReference(input);
+    const id = requireUuid(input.operationId, "working copy adoption id");
+    const data = await this.requestJson({
+      method: "POST",
+      path: `/v1/browser-sessions/${reference.browserSessionId}/working-copy/adoptions/${id}/revert`,
+      token: this.adminToken,
+      body: workingCopyAuthorityBody(reference, input),
+      timeoutMs: BROWSER_STATE_TRANSFER_TIMEOUT_MS,
+    });
+    if (!isRecord(data) || typeof data.inFlight !== "boolean") {
+      throw new BrowserControlProtocolError("browser controller returned malformed revert status");
+    }
+    const adoption =
+      data.adoption === null
+        ? null
+        : parseWorkingCopyAdoption(data.adoption, reference, "recorded");
+    if (adoption && adoption.operationId !== id) {
+      throw new BrowserControlProtocolError("browser controller returned another adoption");
+    }
+    return { inFlight: data.inFlight, adoption };
   }
 
   sessionClient(input: {
@@ -2704,6 +2871,28 @@ function parseReference(value: unknown): PlacementBrowserSessionReference {
   };
 }
 
+/** A create's tab inventory is a convenience: an older controller omits it,
+ * and an inventory that does not validate, or that belongs to another
+ * binding, is dropped rather than failing a browser that did launch. */
+function creationTargets(
+  value: unknown,
+  reference: PlacementBrowserSessionReference,
+): { targets?: BrowserTargetValue[] } {
+  if (!Array.isArray(value) || value.length > 10_000) return {};
+  const targets: BrowserTargetValue[] = [];
+  for (const entry of value) {
+    const parsed = BrowserTarget.safeParse(entry);
+    if (
+      !parsed.success ||
+      parsed.data.browserSessionId !== reference.browserSessionId ||
+      parsed.data.controllerGeneration !== reference.controllerGeneration
+    )
+      return {};
+    targets.push(parsed.data);
+  }
+  return { targets };
+}
+
 function parseComputerReference(value: unknown): PlacementComputerSessionReference {
   if (!isRecord(value)) {
     throw new BrowserControlProtocolError("computer session binding is invalid");
@@ -2877,6 +3066,140 @@ function boundedProxyUrl(value: string): string {
     throw new BrowserControlProtocolError("browser proxy authority is invalid");
   }
   return url.toString();
+}
+
+function workingCopyAuthorityBody(
+  reference: PlacementBrowserSessionReference,
+  input: PlacementBrowserWorkingCopyAuthority,
+) {
+  return {
+    controllerGeneration: reference.controllerGeneration,
+    tokenGeneration: positiveSafeInteger(input.tokenGeneration, "token generation"),
+    controlToken: requireToken(input.controlToken, "control token"),
+    viewToken: requireToken(input.viewToken, "view token"),
+  };
+}
+
+/**
+ * An adoption record. `generation: "current"` (a new adoption) requires the
+ * record to belong to the requesting controller generation. `"recorded"`
+ * (status, revert, inspection) keeps the generation the adoption was recorded
+ * under: recovering an unfinished adoption after a controller restart means
+ * reading and reverting a record made by an earlier generation, under the
+ * browser's legitimate current control. The browser and operation always
+ * have to match exactly.
+ */
+function parseWorkingCopyAdoption(
+  value: unknown,
+  reference: PlacementBrowserSessionReference,
+  generation: "current" | "recorded",
+): PlacementBrowserWorkingCopyAdoption {
+  if (
+    !isRecord(value) ||
+    value.browserSessionId !== reference.browserSessionId ||
+    (generation === "current" && value.controllerGeneration !== reference.controllerGeneration) ||
+    !BROWSER_WORKING_COPY_ADOPTION_PHASES.includes(
+      value.phase as PlacementBrowserWorkingCopyAdoptionPhase,
+    ) ||
+    !(value.failureCode === null || typeof value.failureCode === "string") ||
+    !Array.isArray(value.retainedDirectories) ||
+    value.retainedDirectories.length > 64 ||
+    !value.retainedDirectories.every(
+      (name) => typeof name === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u.test(name),
+    )
+  ) {
+    throw new BrowserControlProtocolError("browser controller returned a malformed adoption");
+  }
+  return {
+    browserSessionId: reference.browserSessionId,
+    controllerGeneration:
+      generation === "current"
+        ? reference.controllerGeneration
+        : requireGeneration(value.controllerGeneration),
+    operationId: requireUuid(value.operationId, "working copy adoption id"),
+    manifestDigest: sha256(value.manifestDigest, "working copy manifest digest"),
+    phase: value.phase as PlacementBrowserWorkingCopyAdoptionPhase,
+    failureCode:
+      value.failureCode === null ? null : requireOpaqueId(value.failureCode, "failure code"),
+    retainedDirectories: value.retainedDirectories as string[],
+    createdAt: timestamp(value.createdAt, "adoption created at"),
+    updatedAt: timestamp(value.updatedAt, "adoption updated at"),
+  };
+}
+
+function parseWorkingCopyInspection(
+  value: unknown,
+  reference: PlacementBrowserSessionReference,
+): PlacementBrowserWorkingCopyInspection {
+  if (
+    !isRecord(value) ||
+    value.browserSessionId !== reference.browserSessionId ||
+    value.controllerGeneration !== reference.controllerGeneration ||
+    typeof value.platformSupported !== "boolean" ||
+    typeof value.profileIdentityMatches !== "boolean" ||
+    !(value.profileInUse === null || typeof value.profileInUse === "boolean") ||
+    !(
+      value.refusal === null ||
+      BROWSER_WORKING_COPY_REFUSALS.includes(value.refusal as PlacementBrowserWorkingCopyRefusal)
+    )
+  ) {
+    throw new BrowserControlProtocolError("browser controller returned a malformed inspection");
+  }
+  let manifest: PlacementBrowserWorkingCopyInspection["manifest"] = null;
+  if (value.manifest !== null) {
+    if (!isRecord(value.manifest)) {
+      throw new BrowserControlProtocolError("browser controller returned a malformed manifest");
+    }
+    manifest = {
+      digest: sha256(value.manifest.digest, "working copy manifest digest"),
+      entries: nonnegativeSafeInteger(value.manifest.entries, "working copy entries"),
+      bytes: nonnegativeSafeInteger(value.manifest.bytes, "working copy bytes"),
+      excluded: excludedWorkingCopyEntries(value.manifest.excluded),
+    };
+  }
+  let receipt: PlacementBrowserWorkingCopyInspection["receipt"] = null;
+  if (value.receipt !== null) {
+    const raw = value.receipt;
+    if (
+      !isRecord(raw) ||
+      !["launch", "suspend", "retire", "adopt"].includes(raw.intent as string) ||
+      typeof raw.state !== "string" ||
+      typeof raw.directoryLaunchAllowed !== "boolean" ||
+      typeof raw.authorityMatches !== "boolean" ||
+      !(raw.restoreAuthorityDigest === null || typeof raw.restoreAuthorityDigest === "string") ||
+      !(raw.adoption === null || isRecord(raw.adoption))
+    ) {
+      throw new BrowserControlProtocolError("browser controller returned a malformed receipt");
+    }
+    receipt = {
+      operationId: requireUuid(raw.operationId, "working runtime receipt id"),
+      intent: raw.intent as "launch" | "suspend" | "retire" | "adopt",
+      state: requireOpaqueId(raw.state, "working runtime receipt state"),
+      directoryLaunchAllowed: raw.directoryLaunchAllowed,
+      authorityMatches: raw.authorityMatches,
+      launchedFromCheckpoint: raw.restoreAuthorityDigest !== null,
+      adoption: isRecord(raw.adoption)
+        ? {
+            operationId: requireUuid(raw.adoption.operationId, "working copy adoption id"),
+            manifestDigest: sha256(raw.adoption.manifestDigest, "working copy manifest digest"),
+          }
+        : null,
+    };
+  }
+  return {
+    browserSessionId: reference.browserSessionId,
+    controllerGeneration: reference.controllerGeneration,
+    platformSupported: value.platformSupported,
+    refusal: value.refusal as PlacementBrowserWorkingCopyRefusal | null,
+    manifest,
+    profileIdentityMatches: value.profileIdentityMatches,
+    profileInUse: value.profileInUse,
+    receipt,
+    activeAdoption:
+      value.activeAdoption === null || value.activeAdoption === undefined
+        ? null
+        : parseWorkingCopyAdoption(value.activeAdoption, reference, "recorded"),
+  };
 }
 
 function parseStateCaptureReceipt(value: unknown): PlacementBrowserStateCaptureReceipt {
@@ -3685,6 +4008,19 @@ function nonnegativeSafeInteger(value: unknown, label: string): number {
     throw new RangeError(`${label} is invalid`);
   }
   return value;
+}
+
+function excludedWorkingCopyEntries(value: unknown): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > 16 ||
+    !value.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= 256)
+  ) {
+    throw new BrowserControlProtocolError(
+      "browser controller returned malformed working copy exclusions",
+    );
+  }
+  return [...value];
 }
 
 function parseUnsignedInteger(value: string, label: string): number {

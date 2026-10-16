@@ -1078,9 +1078,14 @@ export async function startWorker() {
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
   const searchPath = dbSearchPath(settings);
+  const preparedStatements =
+    settings.databasePreparedStatements === undefined
+      ? {}
+      : { preparedStatements: settings.databasePreparedStatements };
   const dbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
+    ...preparedStatements,
   });
   // Readiness must prove PostgreSQL independently of activity demand. Sharing
   // the default application pool makes the probe wait behind live turns when
@@ -1090,6 +1095,7 @@ export async function startWorker() {
   const readinessDbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
+    ...preparedStatements,
     max: 1,
   });
   const databasePosture = {

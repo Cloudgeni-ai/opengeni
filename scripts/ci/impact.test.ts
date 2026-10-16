@@ -56,6 +56,7 @@ const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
 const TIMELINE_TIP_FOLLOW_BROWSER_E2E = "test/e2e/timeline-tip-follow.browser.e2e.ts";
 const TIMELINE_EXCHANGE_FOLD_BROWSER_E2E = "test/e2e/timeline-exchange-fold.browser.e2e.ts";
 const RESTORED_ATTACHMENT_PREVIEW_E2E = "test/e2e/restored-attachment-preview.browser.e2e.ts";
+const ARTIFACT_DESKTOP_E2E = "test/e2e/artifact-desktop.browser.e2e.ts";
 const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
 
@@ -599,6 +600,32 @@ describe("fail-closed change impact", () => {
     ]) {
       expect(createImpactPlan([path]).browserAcceptanceLanes).toContain("accounts");
     }
+  });
+
+  test("desktop artifact coverage follows its real fixture without widening leaf plans", () => {
+    expect(discoverTestFiles().e2e).toContain(ARTIFACT_DESKTOP_E2E);
+    expect(usesBrowserRunner(ARTIFACT_DESKTOP_E2E)).toBe(true);
+    expect(readFileSync("scripts/run-browser-e2e.ts", "utf8")).toContain(
+      `"./${ARTIFACT_DESKTOP_E2E}"`,
+    );
+    for (const path of [
+      ARTIFACT_DESKTOP_E2E,
+      "apps/web/test/artifact-desktop.html",
+      "apps/web/test/artifact-desktop-fixture.tsx",
+      "apps/web/src/styles.css",
+      "packages/react/src/components/artifacts/artifact-sandbox.tsx",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(ARTIFACT_DESKTOP_E2E);
+      expect(plan.unitTests, path).not.toContain(ARTIFACT_DESKTOP_E2E);
+      expect(plan.integrationTests, path).not.toContain(ARTIFACT_DESKTOP_E2E);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
+      ARTIFACT_DESKTOP_E2E,
+    );
   });
 
   test("artifact browser dependency rules do not widen unrelated leaf package plans", () => {

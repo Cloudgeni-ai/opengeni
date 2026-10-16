@@ -1369,8 +1369,10 @@ describe("session_events writer inventory", () => {
     );
     expect(writers.size).toBeGreaterThanOrEqual(61);
     const database = readFileSync(join(repoRoot, "packages/db/src/database.ts"), "utf8");
+    // Workspace RLS entry takes the shared session-tenancy fence in its setup
+    // statement, before the callback runs (behavior: rls-scope-round-trips).
     expect(database).toMatch(
-      /withRlsContext[\s\S]*?setRlsContext[\s\S]*?pg_advisory_xact_lock_shared[\s\S]*?const value = await fn/u,
+      /function sessionTenancyLock[\s\S]*?mode: "shared"[\s\S]*?withRlsContext[\s\S]*?sessionTenancyLock\(workspaceId\)[\s\S]*?applyRlsScope\(scoped[\s\S]*?value = await fn/u,
     );
     const migration = readFileSync(
       join(repoRoot, "packages/db/drizzle/0345_tenant_scoped_session_tenancy_fence.sql"),

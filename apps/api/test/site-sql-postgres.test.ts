@@ -20,6 +20,7 @@ import {
   createSiteViewerSession,
   createWorkspace,
   ensureExternalIdentity,
+  withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
@@ -103,6 +104,9 @@ const memberPermissions = [
   "workspace:read",
   "sessions:read",
   "sessions:create",
+  // Continuing a conversation is a distinct viewer grant. The dedicated
+  // published-Site suite also proves refusal when this grant is absent.
+  "sessions:control",
   "artifacts:read",
   "artifacts:publish",
 ] as const;
@@ -160,6 +164,7 @@ async function fixture(overrides: Partial<Settings> = SQL_SETTINGS) {
       "members:manage",
       "sessions:read",
       "sessions:create",
+      "sessions:control",
       "artifacts:read",
       "artifacts:publish",
       "account:admin",
@@ -863,7 +868,7 @@ async function agentTools(
 ) {
   if (options.existingSessionId)
     return await attachAgentTools(f, options.existingSessionId, options);
-  const session = await createSession(db.db, {
+  const createInput = {
     accountId: f.accountId,
     workspaceId: f.workspace.id,
     initialMessage: "Build a dashboard",
@@ -871,10 +876,49 @@ async function agentTools(
     tools: [],
     metadata: options.metadata ?? {},
     model: "gpt-5.6-sol",
-    reasoningEffort: "medium",
-    latencyMode: "standard",
-    sandboxBackend: "none",
-  });
+    reasoningEffort: "medium" as const,
+    latencyMode: "standard" as const,
+    sandboxBackend: "none" as const,
+  };
+  let session: { id: string };
+  const origin = options.metadata?._opengeniSiteOrigin as { siteId: string } | undefined;
+  if (origin) {
+    const [site] = await shared.admin`select current_version_id from workspace_artifacts
+      where id=${origin.siteId} and workspace_id=${f.workspace.id}`;
+    // Establish real external-owning-user authority through the production
+    // console route. A metadata-only service insert is no longer a Site viewer.
+    const response = await f.app.request(`/v1/workspaces/${f.workspace.id}/sessions`, {
+      method: "POST",
+      headers: {
+        ...f.owner.headers,
+        "x-opengeni-site-id": origin.siteId,
+        "x-opengeni-site-version": String(site!.current_version_id),
+      },
+      body: JSON.stringify({ startMode: "realtime" }),
+    });
+    expect(response.status, await response.clone().text()).toBeLessThan(300);
+    session = (await response.json()) as { id: string };
+  } else if (options.parentSessionId) {
+    const [parent] = await shared.admin`select t.id,t.active_attempt_id,t.execution_generation
+      from session_turns t join sessions s on s.active_turn_id=t.id
+      where s.id=${options.parentSessionId}`;
+    session = await withSessionRlsActorContext({ subjectId: f.owner.subjectId }, () =>
+      createSession(db.db, {
+        ...createInput,
+        parentSessionId: options.parentSessionId,
+        visibility: "user_private",
+        createdBy: { kind: "subject", subjectId: f.owner.subjectId },
+        subjectId: f.owner.subjectId,
+        createdByActor: {
+          type: "agent_attempt",
+          sessionId: options.parentSessionId!,
+          turnId: String(parent!.id),
+          attemptId: String(parent!.active_attempt_id),
+          executionGeneration: Number(parent!.execution_generation),
+        },
+      }),
+    );
+  } else session = await createSession(db.db, createInput);
   const [turn] = await shared.admin<{ id: string }[]>`
     INSERT INTO session_turns (
       account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
@@ -900,13 +944,6 @@ async function agentTools(
         'running', 'site-sql-wf', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0, '{}'::jsonb
       )`;
   });
-  if (options.parentSessionId) {
-    await shared.admin.begin(async (tx) => {
-      await tx`set local session_replication_role = replica`;
-      await tx`UPDATE sessions SET parent_session_id = ${options.parentSessionId!}
-        WHERE id = ${session.id}`;
-    });
-  }
   return await connectAgentTools(f, { id: session.id }, turn!.id, attemptId, 1, options);
 }
 
@@ -1094,6 +1131,14 @@ test("agents started from a Site page run only the queries the page could", asyn
   const origin = { _opengeniSiteOrigin: { siteId, title: "Notes" } };
 
   const checkClamped = async (agent: Awaited<ReturnType<typeof agentTools>>, note: string) => {
+    const [binding] = await shared.admin`select visibility,site_id,site_owner_subject_id,
+      site_access_root_id from sessions where id=${agent.session.id}`;
+    expect(binding).toMatchObject({
+      visibility: "user_private",
+      site_id: siteId,
+      site_owner_subject_id: f.owner.subjectId,
+    });
+    expect(binding!.site_access_root_id).toBeTruthy();
     const read = await agent.callTool("site_sql_query", { siteId, sql: "SELECT * FROM notes" });
     expect(read.isError).toBe(false);
     const crossSite = await agent.callTool("site_sql_query", {

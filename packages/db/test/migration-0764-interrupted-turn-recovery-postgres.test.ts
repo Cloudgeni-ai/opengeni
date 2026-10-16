@@ -36,6 +36,7 @@ import {
   parseInterruptedTurnRetirementManifest,
   type InterruptedTurnRetirementManifest,
 } from "../src/interrupted-turn-retirement-migration";
+import { stageSiteSessionAudienceColumns } from "./vault-policy-column-fixture";
 
 let shared: NonNullable<Awaited<ReturnType<typeof acquireOwnerMigratedTestDatabase>>>;
 let client: ReturnType<typeof createDb>;
@@ -51,6 +52,9 @@ beforeAll(async () => {
         await owner`insert into schema_migrations(name) values (${name})`;
     }
     await migrate(shared.ownerUrl);
+    // The schema stops before 0764 for good (0793 stays marked applied), but
+    // the current session adapter names the 0793 Site audience columns.
+    await stageSiteSessionAudienceColumns(shared.ownerUrl);
     await provisionRoles(shared.adminUrl, { appPassword: shared.appPassword });
   } finally {
     await owner.end();

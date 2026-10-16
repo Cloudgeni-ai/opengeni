@@ -76,7 +76,7 @@ async function render(node: React.ReactNode) {
 test("shows metered usage without implying an allowance is a cap in usage_only", async () => {
   const view = await render(<module.SitePlatformUsageView usage={usage()} />);
   const text = view.container.textContent ?? "";
-  expect(text).toContain("Site platform");
+  expect(text).toContain("Platform activity");
   expect(text).toContain("Not charged.");
   expect(text).toContain("Requests");
   expect(text).toContain("Rows written");

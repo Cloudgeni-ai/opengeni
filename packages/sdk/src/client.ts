@@ -202,6 +202,9 @@ import {
   type BrowserSessionMutationResponse,
   type BrowserTargetState,
   type BrowserTargetListResponse,
+  type BrowserWorkingCopyAdoptionRequest,
+  type BrowserWorkingCopyAdoptionResponse,
+  type BrowserWorkingCopyInspection,
   type BrowserRevisionListResponse,
   type ComputerActionReceipt,
   type ComputerActionRequest,
@@ -415,6 +418,12 @@ import type {
   InstalledSkill,
   ListInstalledSkillsResponse,
   CreateBillingPortalRequest,
+  BillingSubscriptionCatalog,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
+  ChangeBillingSubscriptionRequest,
+  CancelBillingSubscriptionRequest,
+  BillingSubscriptionChange,
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
   BillingCheckoutStatus,
@@ -787,6 +796,11 @@ export type SessionListPageOptions = {
   needsYouOnly?: boolean;
   /** Only read-only sessions moved to the idle-session archive. */
   contentArchivedOnly?: boolean;
+  /**
+   * Only workstreams the caller started or messaged directly (any session in
+   * the tree). Agent-relayed messages do not count.
+   */
+  mineOnly?: boolean;
   /** Created through this Site. In a Site-bound client, "current" resolves to its own Site. */
   originSiteId?: string;
   limit?: number;
@@ -841,6 +855,7 @@ function hasSessionPageFilters(options: SessionListPageOptions): boolean {
   return (
     Boolean(options.needsYouOnly) ||
     Boolean(options.contentArchivedOnly) ||
+    Boolean(options.mineOnly) ||
     SESSION_PAGE_FILTER_KEYS.some((key) => options[key] !== undefined)
   );
 }
@@ -1939,6 +1954,7 @@ export class OpenGeniClient {
       if (options.includeTotals) query.includeTotals = "true";
       if (options.needsYouOnly) query.needsYouOnly = "true";
       if (options.contentArchivedOnly) query.contentArchivedOnly = "true";
+      if (options.mineOnly) query.mineOnly = "true";
       if (options.includePinned === false) query.includePinned = "false";
       if (options.archivedOnly) query.archivedOnly = "true";
       result = await this.requestJson<SessionListResponse | SessionListEntryResponse | Session[]>(
@@ -2000,6 +2016,8 @@ export class OpenGeniClient {
       throw unsupportedSessionPage("attention session filtering");
     if (options.contentArchivedOnly && response.contentArchivedOnly !== true)
       throw unsupportedSessionPage("read-only session filtering");
+    if (options.mineOnly && response.mineOnly !== true)
+      throw unsupportedSessionPage("your-sessions filtering");
     if (filtered && response.filtersApplied !== true) {
       throw unsupportedSessionPage("filtered session lists");
     }
@@ -4842,6 +4860,75 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/end`,
       request,
+      {},
+      options,
+    );
+  }
+
+  /** Inspect an active browser's preserved working copy after its controller
+   * lost it, for example when its machine's disk was restored from a copy.
+   * Read-only; returns the exact manifest digest an adoption must name. */
+  async inspectBrowserSessionWorkingCopy(
+    workspaceId: string,
+    browserSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserWorkingCopyInspection> {
+    return await this.requestJson<BrowserWorkingCopyInspection>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/working-copy/inspection`,
+      {},
+      {},
+      options,
+    );
+  }
+
+  /** Adopt the exact inspected bytes of a preserved working copy as the
+   * browser's state. If the reply is lost, read the recorded outcome of the
+   * same operationId instead of sending again. */
+  async adoptBrowserSessionWorkingCopy(
+    workspaceId: string,
+    browserSessionId: string,
+    request: BrowserWorkingCopyAdoptionRequest,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserWorkingCopyAdoptionResponse> {
+    return await this.requestJson<BrowserWorkingCopyAdoptionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/working-copy/adoptions`,
+      request,
+      {},
+      options,
+    );
+  }
+
+  async getBrowserSessionWorkingCopyAdoption(
+    workspaceId: string,
+    browserSessionId: string,
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserWorkingCopyAdoptionResponse> {
+    return await this.requestJson<BrowserWorkingCopyAdoptionResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/working-copy/adoptions/${encodeURIComponent(operationId)}`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
+  /** Revert an unfinished adoption: the browser's own directory goes back in
+   * place and the staged copy is kept, never used. The supported way out of
+   * a collision or of an adoption nobody wants finished. Retrying the same
+   * revert finishes one that stopped part way. */
+  async revertBrowserSessionWorkingCopyAdoption(
+    workspaceId: string,
+    browserSessionId: string,
+    operationId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<BrowserWorkingCopyAdoptionResponse> {
+    return await this.requestJson<BrowserWorkingCopyAdoptionResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/working-copy/adoptions/${encodeURIComponent(operationId)}/revert`,
+      {},
       {},
       options,
     );
@@ -10455,6 +10542,45 @@ export class OpenGeniClient {
       "/v1/billing/portal",
       request,
     );
+  }
+
+  /** Current runtime catalog, USD prices, self-service availability and plan balance. */
+  async getBillingSubscriptionPlans(
+    options: { accountId?: string } = {},
+  ): Promise<BillingSubscriptionCatalog> {
+    return await this.requestJson("GET", "/v1/billing/subscription/plans", undefined, options);
+  }
+
+  async createSubscriptionCheckout(
+    request: CreateSubscriptionCheckoutRequest,
+  ): Promise<CreateSubscriptionCheckoutResponse> {
+    return await this.requestJson("POST", "/v1/billing/subscription/checkout", request);
+  }
+
+  /** Charge immediately, reset the monthly anchor and replace plan credit after payment. */
+  async upgradeBillingSubscription(
+    request: ChangeBillingSubscriptionRequest,
+  ): Promise<BillingSubscriptionChange> {
+    return await this.requestJson("POST", "/v1/billing/subscription/upgrade", request);
+  }
+
+  /** Schedule a lower-priced plan at the end of the already-paid period. */
+  async changeBillingSubscription(
+    request: ChangeBillingSubscriptionRequest,
+  ): Promise<BillingSubscriptionChange> {
+    return await this.requestJson("POST", "/v1/billing/subscription/change", request);
+  }
+
+  async cancelBillingSubscription(
+    request: CancelBillingSubscriptionRequest,
+  ): Promise<BillingSubscriptionChange> {
+    return await this.requestJson("POST", "/v1/billing/subscription/cancel", request);
+  }
+
+  async createSubscriptionPortalSession(
+    request: CreateBillingPortalRequest = {},
+  ): Promise<CreateBillingPortalResponse> {
+    return await this.requestJson("POST", "/v1/billing/subscription/portal", request);
   }
 
   // --- Embedding transport -----------------------------------------------------

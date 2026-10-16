@@ -2608,6 +2608,27 @@ The chart defaults API, worker, and web deployments to zero-surge rolling update
 
 The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
+The in-cluster Postgres runs PostgreSQL 18 (`pgvector/pgvector:pg18-bookworm`). An
+init container checks the data directory's major version before the server
+starts. A directory from an older major (for example one created by an earlier
+chart that defaulted to PostgreSQL 17) does not start until you choose:
+
+- keep the old major: set `postgres.image.tag` back to that major's image
+  (for example `pg17`), or
+- upgrade in place: take a backup, plan a short outage, and set
+  `postgres.majorUpgrade.enabled=true` with `postgres.majorUpgrade.fromImage` at
+  the old major on the same OS release (the default is
+  `pgvector/pgvector:pg17`). The init container runs `pg_upgrade --link`, keeps
+  the old directory as `pgdata.pre-upgrade-from-<major>` and then starts
+  PostgreSQL 18. Until the new server has started once, rolling back is
+  restoring that directory and the old image; after that, restore from backup.
+  Every extension library the old databases use must exist in the new image
+  (drop unused extensions whose library is missing first). Afterwards run
+  `vacuumdb --all --analyze-in-stages --missing-stats-only`, then
+  `vacuumdb --all --analyze-only`, and `ALTER EXTENSION ... UPDATE` for each
+  extension, turn `majorUpgrade.enabled` off again, and delete the retained
+  directory once you have verified the new cluster.
+
 Production self-hosted platform dependencies should use mature upstream projects rather than Opengeni-owned replicas of those systems:
 
 - NATS: official NATS Helm chart, or an existing managed/customer NATS endpoint.
@@ -2761,6 +2782,11 @@ Use this boundary when building a production cluster:
 The runtime secret must provide values such as:
 
 - `OPENGENI_DATABASE_URL`
+- `OPENGENI_DATABASE_PREPARED_STATEMENTS=false` when the database URL goes through
+  a transaction-pooling proxy on a port other than 6432. Opengeni uses named
+  prepared statements on direct connections, which saves a round trip and a
+  re-plan per query, and turns them off by itself on port 6432 (PgBouncer,
+  including Azure Flexible Server's built-in pooler).
 - `OPENGENI_RUNTIME_DATABASE_ROLE=opengeni_app` for standalone FORCE-RLS deployments (the default)
 - `OPENGENI_TEMPORAL_HOST`
 - `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud; it enables TLS automatically
@@ -2789,6 +2815,17 @@ The runtime secret must provide values such as:
 - `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON
 - `OPENGENI_PRODUCT_ACCESS_MODE=local|configured|managed`, independent of cloud/infrastructure profile
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
+- `OPENGENI_SUBSCRIPTION_PLANS_ENABLED=false` is the default. Enabling it opts into
+  subscription API/webhook plan writes (and the separately integrated maintenance
+  service); prepaid top-ups remain independent. Configure the operator runtime
+  plan catalog's monthly USD Stripe prices first; Enterprise is operator-only.
+  Subscription checkout, immediate paid upgrades, period-end changes/cancellation
+  and portal access live under `/v1/billing/subscription`; the `plans` GET returns
+  runtime prices, credit, seats and self-service availability. All new subscription
+  endpoints return 404 while disabled; ordinary top-up webhooks continue to run.
+  Disabled subscription deliveries are retained but not marked processed, so they
+  can be replayed after activation. Stripe readiness/products/webhook configuration
+  are separate operator activation work, not performed by this flag.
 - `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. It is the master opt-in; the database runtime switch from migration 0521 can pause and resume grants without a deploy or restart (see "Verified signup trial runtime switch (0521)" above). The grant is account-wide. Operators can restrict and update eligible models with `bun run credits:policy`; `OPENGENI_CREDIT_PROMOTION_POLICY_JSON` is a bootstrap fallback until the first runtime policy revision. With neither configured, new grants remain unrestricted. See [scoped promotional credits](scoped-promotional-credits.md) for activation and existing-balance behavior. No payment card is required. A completed in-flight resource can leave a negative general balance, and future top-ups clear that balance first; no card is automatically charged. New work that names no model chooses a funded credits-billed model unless a saved workspace default or connected subscription wins; with no funded candidate it falls back to the deployment default. The signup welcome shows the amount, and the picker shows each model's current payment source. See "Default model for new work" in [`model-providers.md`](model-providers.md).
 - `OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only|shadow|credits` and `OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE=usage_only|shadow|credits` are independent of Stripe and default to `usage_only`. `shadow` is operator-only comparison, never a customer debit. Paid sandbox mode additionally needs a reviewed backend warm rate in `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON`; paid deployment-funded embeddings need `OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES` (integer USD micros per million input UTF-8 bytes) and `OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT` (ISO UTC timestamp; earlier queued jobs stay unpriced). This PR leaves commercial rates and production activation unset.
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
@@ -2865,6 +2902,17 @@ charge.dispute.updated
 customer.created
 customer.updated
 ```
+
+With subscription plans enabled, also subscribe to
+`customer.subscription.created`, `customer.subscription.updated`,
+`customer.subscription.deleted`, `invoice.paid`, and `invoice.payment_failed`.
+Only a paid subscription invoice grants monthly plan credit; a subscription
+update or failed invoice never grants. Paid invoices replace, rather than stack
+with, the previous Free/paid period. Downgrades and cancellation are period-end
+operations. Configure Stripe's hosted portal accordingly before enabling plan
+changes there; the API's `change` endpoint uses a period-end subscription schedule.
+Ordinary subscription refunds/disputes remain an operator procedure; the automatic
+duplicate-subscription recovery cancels/refunds only the detected duplicate.
 
 Credits are granted only once Stripe reports the Checkout payment `paid`: at
 `checkout.session.completed` for immediate payment methods, or at

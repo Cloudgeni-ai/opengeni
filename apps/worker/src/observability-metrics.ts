@@ -2194,6 +2194,21 @@ const MODEL_REQUEST_PHASE_BUCKETS = [
  * Provider ids come from the resolved provider registry; phase/outcome are closed
  * enums. This function never performs I/O outside the in-memory metrics registry.
  */
+/**
+ * How a model request reached its provider, where the provider has more than
+ * one transport (Codex: a new or reused Responses WebSocket, or HTTP). Empty
+ * for providers with a single transport.
+ */
+export type ModelRequestTransportLabel = "" | "websocket_new" | "websocket_reused" | "http";
+
+/** The bounded metric label for how a Codex request was carried. */
+export function codexRequestTransportLabel(
+  transport: { kind: "websocket"; connection: "new" | "reused" } | { kind: "http" },
+): ModelRequestTransportLabel {
+  if (transport.kind === "http") return "http";
+  return transport.connection === "reused" ? "websocket_reused" : "websocket_new";
+}
+
 export function recordModelRequestPhase(
   observability: Observability,
   input: {
@@ -2201,19 +2216,21 @@ export function recordModelRequestPhase(
     phase: "headers" | "first_byte" | "terminal";
     outcome?: "completed" | "failed" | "timed_out";
     durationSeconds: number;
+    transport?: ModelRequestTransportLabel;
   },
 ): void {
   const outcome = input.outcome ?? "";
+  const transport = input.transport ?? "";
   observability.incrementCounter({
     name: "opengeni_model_request_phases_total",
-    help: "Provider model-request lifecycle phases by bounded phase and outcome.",
-    labels: { provider: input.provider, phase: input.phase, outcome },
+    help: "Provider model-request lifecycle phases by bounded phase, outcome and transport.",
+    labels: { provider: input.provider, phase: input.phase, outcome, transport },
   });
   observability.observeHistogram({
     name: "opengeni_model_request_phase_duration_seconds",
     help: "Monotonic seconds from provider dispatch to a model-request lifecycle phase.",
     buckets: MODEL_REQUEST_PHASE_BUCKETS,
-    labels: { provider: input.provider, phase: input.phase },
+    labels: { provider: input.provider, phase: input.phase, transport },
     value: Math.max(0, input.durationSeconds),
   });
 }

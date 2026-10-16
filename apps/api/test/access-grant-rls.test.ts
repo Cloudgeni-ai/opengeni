@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
-import { withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
+import { alongsideAuthorization, withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
 import { ApiHttpError } from "../src/http/api-error";
 import { httpRejectionFactsFromEnvelope } from "../src/http/rejection-telemetry";
 
@@ -146,6 +146,84 @@ describe("access-grant session RLS context", () => {
     ).toBe("agent_attempt_caller_stale");
     expect(context).not.toHaveBeenCalled();
   });
+  test("reads the claimed attempt's learning policy while the liveness check runs", async () => {
+    spyOn(db, "withSessionRlsActorContext").mockImplementation(async (_actor, fn) => fn());
+    const attemptId = "55555555-5555-4555-8555-555555555555";
+    let settleLiveness!: (actor: unknown) => void;
+    spyOn(core, "requireLiveAgentAttemptAuthorization").mockReturnValue(
+      new Promise((settle) => {
+        settleLiveness = settle;
+      }) as never,
+    );
+    const policyReads: unknown[] = [];
+    spyOn(db, "freezeAgentLearningPolicy").mockImplementation(async (_db, context) => {
+      policyReads.push(context.actor);
+      return { defaultScope: "workspace", subjectId: null } as never;
+    });
+    const access = grant({
+      subjectId: "worker:first-party-mcp",
+      principalKind: "agent_attempt",
+      metadata: { sessionId, turnId, attemptId, executionGeneration: 3 },
+    });
+
+    const result = withAccessGrantSessionRlsContext({ db: {} } as never, access, async () => "ok");
+    await Bun.sleep(0);
+    const claimed = { kind: "agent", sessionId, turnId, attemptId, executionGeneration: 3 };
+    expect(policyReads).toEqual([claimed]);
+    settleLiveness({
+      subjectId: "worker:first-party-mcp",
+      callerSessionId: sessionId,
+      turnId,
+      attemptId,
+      executionGeneration: 3,
+      initiatingHumanSubjectId: null,
+    });
+    await expect(result).resolves.toBe("ok");
+    // The verified attempt is the claimed one, so the policy is not read again.
+    expect(policyReads).toEqual([claimed]);
+  });
+
+  test("a refused liveness check is the answer even when the policy read also fails", async () => {
+    const context = spyOn(db, "withSessionRlsActorContext");
+    spyOn(core, "requireLiveAgentAttemptAuthorization").mockRejectedValue(
+      new core.SessionAuthorizationDeniedError("caller_stale"),
+    );
+    spyOn(db, "freezeAgentLearningPolicy").mockRejectedValue(new Error("policy unavailable"));
+    let caught: unknown;
+    try {
+      await withAccessGrantSessionRlsContext(
+        { db: {} } as never,
+        grant({
+          principalKind: "agent_attempt",
+          metadata: { sessionId, turnId, attemptId: turnId, executionGeneration: 1 },
+        }),
+        async () => "unreachable",
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect((caught as ApiHttpError).details).toEqual({ code: "agent_attempt_caller_stale" });
+    expect(context).not.toHaveBeenCalled();
+  });
+
+  test("work started alongside a gate is dropped when the gate refuses", async () => {
+    const refused = new Error("refused");
+    await expect(
+      alongsideAuthorization(Promise.reject(refused), async () => {
+        throw new Error("work failed");
+      }),
+    ).rejects.toBe(refused);
+    await expect(
+      alongsideAuthorization(Promise.resolve("allowed"), async () => "read"),
+    ).resolves.toEqual(["allowed", "read"]);
+    const failed = new Error("work failed");
+    await expect(
+      alongsideAuthorization(Promise.resolve("allowed"), async () => {
+        throw failed;
+      }),
+    ).rejects.toBe(failed);
+  });
+
   test("API-key grants retain pure-service billing attribution, not a human subject", async () => {
     spyOn(db, "withSessionRlsActorContext").mockImplementation(async (_actor, fn) => fn());
     await withAccessGrantSessionRlsContext(

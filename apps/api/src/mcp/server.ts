@@ -976,6 +976,34 @@ export function slackBotFileContentResult(
   };
 }
 
+/**
+ * The first-party server as seen by MCP protocol messages that touch no tool:
+ * `initialize`, `ping` and notifications. It advertises exactly what the full
+ * server does (the same name, version and tools capability) without the
+ * workspace, catalog, Memory and admin reads that registering tools needs.
+ * Never route `tools/*` here: it lists no tools.
+ */
+export function buildOpenGeniMcpProtocolServer(grant: AccessGrant): McpServer {
+  const sessionId =
+    typeof grant.metadata?.["sessionId"] === "string"
+      ? (grant.metadata["sessionId"] as string)
+      : null;
+  const server = new PolicyMcpServer(grant, sessionId, new Set());
+  server.ensureToolsListHandler();
+  return server;
+}
+
+/** JSON-RPC methods {@link buildOpenGeniMcpProtocolServer} answers like the full server. */
+export function isOpenGeniMcpProtocolOnlyMessage(message: unknown): boolean {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return false;
+  const method = (message as { method?: unknown }).method;
+  if (typeof method !== "string") return false;
+  if (method === "initialize" || method === "ping") return true;
+  // Notifications carry no id and get no response. The stateless transport
+  // holds no in-flight request a cancellation could reach.
+  return method.startsWith("notifications/") && !("id" in message);
+}
+
 export function buildOpenGeniMcpServer(
   deps: ApiRouteDeps,
   grant: AccessGrant,

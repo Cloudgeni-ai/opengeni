@@ -5864,6 +5864,21 @@ export const PromotionalCreditBalance = /* @__PURE__ */ defineSchema(() =>
 );
 export type PromotionalCreditBalance = z.infer<typeof PromotionalCreditBalance>;
 
+export {
+  SubscriptionPlan,
+  SubscriptionPlanCatalog,
+  BillingPlanBalance,
+} from "./subscription-plans";
+export {
+  BillingSubscriptionCatalog,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
+  ChangeBillingSubscriptionRequest,
+  CancelBillingSubscriptionRequest,
+  BillingSubscriptionChange,
+} from "./billing-subscriptions";
+import { BillingPlanBalance } from "./subscription-plans";
+
 export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
   z.object({
     accountId: z.string().uuid(),
@@ -5873,6 +5888,8 @@ export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
     /** General credits, including unrestricted legacy grants. May be negative after use. */
     generalBalanceMicros: z.number().int().optional(),
     promotionalCredits: z.array(PromotionalCreditBalance).optional(),
+    /** Absent/null until an operator or subscription worker activates this organization. */
+    plan: BillingPlanBalance.nullable().optional(),
   }),
 );
 export type BillingBalance = z.infer<typeof BillingBalance>;
@@ -15798,6 +15815,8 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
     needsYouOnly: z.literal(true).optional(),
     /** Explicit receipt for the read-only (archived idle session) filter. */
     contentArchivedOnly: z.literal(true).optional(),
+    /** Explicit receipt for the started-or-messaged-by-you filter. */
+    mineOnly: z.literal(true).optional(),
     totals: SessionListTotals.optional(),
     /** Effective server ordering; name uses ASCII-space trim, ASCII case fold,
      * UTF-8 byte order, then id ASC. Date keys and their id ties use DESC. */

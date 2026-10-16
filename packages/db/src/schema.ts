@@ -7594,6 +7594,14 @@ export const sessionTurns = pgTable(
         table.createdAt.desc(),
       )
       .where(sql`${table.finishedAt} is not null`),
+    // "Mine" session-list filter (migration 0799): prompts a person sent
+    // directly, by sender, so a workstream probe is one index lookup per tree
+    // session. Agent-relayed and service turns are excluded by the predicate.
+    humanPromptSubject: index("session_turns_human_prompt_subject_idx")
+      .on(table.workspaceId, table.initiatorSubjectId, table.sessionId)
+      .where(
+        sql`${table.initiatorKind} = 'subject' and ${table.source} in ('user', 'api') and ${table.surface} is distinct from 'agent'`,
+      ),
     latencyModeValid: check(
       "session_turns_latency_mode_check",
       sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
@@ -13290,6 +13298,113 @@ export const creditLedgerEntries = pgTable(
       table.accountId,
       table.createdAt,
     ),
+  }),
+);
+
+export const subscriptionPlanCatalogRevisions = opengeniPrivateSchema.table(
+  "subscription_plan_catalog_revisions",
+  {
+    revision: bigint("revision", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    catalog: jsonb("catalog")
+      .$type<import("@opengeni/contracts").SubscriptionPlanCatalog>()
+      .notNull(),
+    operator: text("operator").notNull(),
+    reason: text("reason").notNull(),
+    databaseRole: text("database_role")
+      .notNull()
+      .default(sql`session_user`),
+    changedAt: timestamp("changed_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+  },
+);
+
+export const billingSubscriptionOperations = pgTable(
+  "billing_subscription_operations",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    operationKey: uuid("operation_key").notNull(),
+    kind: text("kind").notNull(),
+    request: jsonb("request").$type<Record<string, unknown>>().notNull(),
+    intent: jsonb("intent").$type<Record<string, unknown>>().notNull(),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.accountId, table.operationKey] }),
+    pending: uniqueIndex("billing_subscription_operations_pending_idx")
+      .on(table.accountId)
+      .where(sql`${table.completedAt} is null`),
+  }),
+);
+
+export const organizationPlans = pgTable("organization_plans", {
+  accountId: uuid("account_id")
+    .primaryKey()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  planKey: text("plan_key").notNull(),
+  status: text("status").notNull(),
+  stripeSubscriptionId: text("stripe_subscription_id").unique(),
+  currentPeriodStart: timestamp("current_period_start", { withTimezone: true }),
+  currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
+  cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .default(sql`clock_timestamp()`),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .default(sql`clock_timestamp()`),
+});
+
+export const planCreditPeriods = pgTable(
+  "plan_credit_periods",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    planKey: text("plan_key").notNull(),
+    catalogRevision: bigint("catalog_revision", { mode: "number" })
+      .notNull()
+      .references(() => subscriptionPlanCatalogRevisions.revision),
+    stripeSubscriptionId: text("stripe_subscription_id"),
+    periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+    grantedMicros: bigint("granted_micros", { mode: "number" }).notNull(),
+    openingDebtMicros: bigint("opening_debt_micros", { mode: "number" }).notNull(),
+    grantEntryId: uuid("grant_entry_id").notNull().unique(),
+    idempotencyKey: text("idempotency_key").notNull().unique(),
+    grantedAt: timestamp("granted_at", { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    expiredAt: timestamp("expired_at", { withTimezone: true }),
+    expiryEntryId: uuid("expiry_entry_id").unique(),
+    usageAtExpiryMicros: bigint("usage_at_expiry_micros", { mode: "number" }),
+  },
+  (table) => ({
+    openingDebt: check(
+      "plan_credit_periods_opening_debt_check",
+      sql`${table.openingDebtMicros} between 0 and ${table.grantedMicros}`,
+    ),
+    grant: foreignKey({
+      columns: [table.grantEntryId, table.accountId],
+      foreignColumns: [creditLedgerEntries.id, creditLedgerEntries.accountId],
+    }),
+    expiry: foreignKey({
+      columns: [table.expiryEntryId, table.accountId],
+      foreignColumns: [creditLedgerEntries.id, creditLedgerEntries.accountId],
+    }),
+    open: uniqueIndex("plan_credit_periods_open_idx")
+      .on(table.accountId)
+      .where(sql`${table.expiredAt} is null`),
+    due: index("plan_credit_periods_due_idx")
+      .on(table.periodEnd, table.accountId)
+      .where(sql`${table.expiredAt} is null`),
   }),
 );
 

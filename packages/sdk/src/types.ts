@@ -1924,6 +1924,8 @@ export type SessionListResponse = {
   needsYouOnly?: true;
   /** Receipt for the read-only (archived idle session) filter. */
   contentArchivedOnly?: true;
+  /** Receipt for the started-or-messaged-by-you filter. */
+  mineOnly?: true;
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
@@ -9223,6 +9225,19 @@ export type PromotionalCreditBalance = PromotionalCreditScope & {
   coversVoice?: boolean | undefined;
 };
 
+export type {
+  BillingPlanBalance,
+  SubscriptionPlan,
+  SubscriptionPlanCatalog,
+  BillingSubscriptionCatalog,
+  CreateSubscriptionCheckoutRequest,
+  CreateSubscriptionCheckoutResponse,
+  ChangeBillingSubscriptionRequest,
+  CancelBillingSubscriptionRequest,
+  BillingSubscriptionChange,
+} from "@opengeni/contracts";
+import type { BillingPlanBalance } from "@opengeni/contracts";
+
 export type BillingBalance = {
   accountId: string;
   balanceMicros: number;
@@ -9230,6 +9245,7 @@ export type BillingBalance = {
   updatedAt: string;
   generalBalanceMicros?: number | undefined;
   promotionalCredits?: PromotionalCreditBalance[] | undefined;
+  plan?: BillingPlanBalance | null | undefined;
 };
 
 export const KNOWN_USAGE_EVENT_TYPES = [

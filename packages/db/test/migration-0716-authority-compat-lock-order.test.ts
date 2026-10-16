@@ -39,6 +39,7 @@ import { provisionRoles } from "../src/provision-roles";
 import {
   stageVaultPolicyColumns,
   stageConnectionAccountIntentColumns,
+  stageSiteSessionAudienceColumns,
 } from "./vault-policy-column-fixture";
 
 const COMPAT = "0716_subscription_authority_compat.sql";
@@ -325,6 +326,7 @@ beforeAll(async () => {
     await migrate(database.ownerUrl);
     await stageVaultPolicyColumns(database.ownerUrl);
     await stageConnectionAccountIntentColumns(database.ownerUrl);
+    await stageSiteSessionAudienceColumns(database.ownerUrl);
     await owner`delete from schema_migrations where name = any(${heldBack}::text[])`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {

@@ -1004,6 +1004,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(query.includeTotals ? { includeTotals: true } : {}),
           ...(query.needsYouOnly ? { needsYouOnly: true } : {}),
           ...(query.contentArchivedOnly ? { contentArchivedOnly: true } : {}),
+          ...(query.mineOnly ? { mineOnly: true } : {}),
           ...(query.includePinned === false ? { includePinned: false } : {}),
           ...(query.archivedOnly ? { archivedOnly: true } : {}),
           ...(query.sortBy ? { sortBy: query.sortBy } : {}),
@@ -5835,6 +5836,7 @@ export function sessionListQuery(
   includeTotals: boolean;
   needsYouOnly: boolean;
   contentArchivedOnly: boolean;
+  mineOnly: boolean;
   archivedOnly: boolean;
   sortBy: "updatedAt" | "createdAt" | "name" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
@@ -5884,17 +5886,20 @@ export function sessionListQuery(
     throw new HTTPException(400, { message: 'includePinned must be "true" or "false"' });
   }
   const includePinned = query.includePinned !== "false";
-  for (const key of ["includeTotals", "needsYouOnly", "contentArchivedOnly"]) {
+  for (const key of ["includeTotals", "needsYouOnly", "contentArchivedOnly", "mineOnly"]) {
     if (query[key] !== undefined && !["true", "false"].includes(query[key]!))
       throw new HTTPException(400, { message: `${key} must be "true" or "false"` });
   }
   const includeTotals = query.includeTotals === "true";
   const needsYouOnly = query.needsYouOnly === "true";
   const contentArchivedOnly = query.contentArchivedOnly === "true";
+  const mineOnly = query.mineOnly === "true";
   if (includeTotals && (!allowCursor || (parentSessionId !== "null" && !pinsOnly)))
     throw new HTTPException(400, { message: "includeTotals requires a root page" });
   if (needsYouOnly && !allowCursor)
     throw new HTTPException(400, { message: 'needsYouOnly requires view="page"' });
+  if (mineOnly && !allowCursor)
+    throw new HTTPException(400, { message: 'mineOnly requires view="page"' });
   if (pinsOnly && !includePinned) {
     throw new HTTPException(400, { message: "pinsOnly requires includePinned" });
   }
@@ -5990,6 +5995,7 @@ export function sessionListQuery(
   const hasPageFilters =
     needsYouOnly ||
     contentArchivedOnly ||
+    mineOnly ||
     originSiteId !== undefined ||
     channelId !== undefined ||
     createdByKind !== undefined ||
@@ -6025,6 +6031,7 @@ export function sessionListQuery(
     includeTotals,
     needsYouOnly,
     contentArchivedOnly,
+    mineOnly,
     archivedOnly,
     sortBy: sortBy.data,
     archiveStatus: archiveStatus.data,

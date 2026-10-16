@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessGrant, type Permission } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
+import { isRlsScopeSetup } from "@opengeni/testing/rls-scope-fake";
 import {
   EditableArtifactCompatibilityError,
   EditableArtifactOfficeImportError,
@@ -11,6 +12,7 @@ import {
   type EditableArtifactOfficeImportPort,
 } from "@opengeni/core";
 import { getTableName, type SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { Hono } from "hono";
 
 import {
@@ -149,32 +151,6 @@ function sessionAuthorizationDb(privateSessionOwner?: string) {
         if (tableName === "workspaces" && selected.size === 1 && selected.has("accountId")) {
           return [{ accountId: ACCOUNT_ID }];
         }
-        if (
-          tableName === "sessions" &&
-          selected.has("sessionId") &&
-          selected.has("rootSessionId") &&
-          selected.has("visibility") &&
-          selected.has("ownerSubjectId")
-        ) {
-          return [
-            {
-              sessionId: SESSION_ID,
-              rootSessionId: SESSION_ID,
-              visibility: privateSessionOwner ? "user_private" : "workspace_shared",
-              ownerSubjectId: privateSessionOwner ?? null,
-            },
-          ];
-        }
-        if (
-          tableName === "sessions" &&
-          selected.size === 3 &&
-          selected.has("id") &&
-          selected.has("accountId") &&
-          selected.has("rootSessionId") &&
-          privateSessionOwner
-        ) {
-          return [];
-        }
         throw new Error("Unexpected editable artifact route select projection");
       },
     };
@@ -187,6 +163,14 @@ function sessionAuthorizationDb(privateSessionOwner?: string) {
         await execute(transaction()),
       execute: async (query): Promise<Record<string, unknown>[]> => {
         const text = sqlText(query);
+        if (isRlsScopeSetup(new PgDialect().sqlToQuery(query).sql)) {
+          // The scope's one setup statement applies the tenant and reads it back.
+          rls.accountId = ACCOUNT_ID;
+          rls.workspaceId = WORKSPACE_ID;
+          return [
+            { resolved_account_id: ACCOUNT_ID, account_id: ACCOUNT_ID, workspace_id: WORKSPACE_ID },
+          ];
+        }
         let appliedTenantContext = false;
         if (text.includes("set_config('opengeni.account_id'")) {
           rls.accountId = ACCOUNT_ID;
@@ -201,7 +185,8 @@ function sessionAuthorizationDb(privateSessionOwner?: string) {
         }
         if (
           text.includes("set_config('opengeni.lossless_content_writer'") ||
-          text.includes("set_config('opengeni.sandbox_recovery_protocol_v2'")
+          text.includes("set_config('opengeni.sandbox_recovery_protocol_v2'") ||
+          text.includes("set_config('opengeni.agent_root_session_id'")
         ) {
           return [];
         }
@@ -214,13 +199,26 @@ function sessionAuthorizationDb(privateSessionOwner?: string) {
         ) {
           return [{ account_id: rls.accountId, workspace_id: rls.workspaceId }];
         }
-        if (
-          query.usedTables.includes("sessions") &&
-          query.usedTables.includes("slack_interactions") &&
-          text.includes('session.root_session_id as "rootSessionId"')
-        ) {
+        if (text.includes("target.id as target_id")) {
           expect(rls).toEqual({ accountId: ACCOUNT_ID, workspaceId: WORKSPACE_ID });
-          return [];
+          const compiled = new PgDialect().sqlToQuery(query);
+          expect(compiled.params).toContain(WORKSPACE_ID);
+          expect(compiled.params).toContain(SESSION_ID);
+          return [
+            {
+              target_id: SESSION_ID,
+              target_account_id: ACCOUNT_ID,
+              target_root_session_id: SESSION_ID,
+              target_visibility: privateSessionOwner ? "user_private" : "workspace_shared",
+              target_authority_epoch: 1,
+              target_owner_subject_id: privateSessionOwner ?? null,
+              target_agent_access: "workspace",
+              target_memory_scope: "workspace",
+              caller_account_id: null,
+              caller_root_session_id: null,
+              turn_id: null,
+            },
+          ];
         }
         throw new Error("Unexpected editable artifact route database operation");
       },

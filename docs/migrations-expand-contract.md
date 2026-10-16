@@ -6,6 +6,21 @@ release keeps working against the new schema. Use
 `-- deployment-mode: maintenance` only when no expand/contract sequence works,
 and say why in the file.
 
+## Historical server compatibility
+
+Published migration files remain byte-for-byte immutable. PostgreSQL 18 added
+column NOT NULL entries to `pg_constraint`, so the migration runner adapts only
+the exact deployed 0345/0598 sources through
+`packages/db/src/migration-postgres-compatibility.ts` on PostgreSQL 18 or newer.
+The adapter verifies the source SHA-256 before excluding `contype = 'n'` from
+three registry/capability comparisons and the pool constraint-copy loop.
+0345 still checks `pg_attribute.attnotnull`; 0598's `CREATE TABLE ... LIKE`
+already copies NOT NULL. Ownership, ACL, RLS and all other constraints remain
+unchanged. Older servers use the original SQL, and already-applied migrations
+are not rerun. Release-schema contracts hash the original files, not adapted
+execution text. A new forward migration cannot repair an earlier fresh-install
+failure, and changing the historical files would invalidate deployed hashes.
+
 ## Why rolling is the default
 
 The deploy applies every pending migration in the pre-upgrade hook, before it

@@ -59,6 +59,10 @@ export const embeddingMigrationTail = [
   "0515_autonomous_learning_defaults.sql",
   // Patches the 0509 trial grant trigger; replay after it.
   "0521_verified_signup_trial_runtime_switch.sql",
+  // The plan catalog uses 0521's immutable-revision guard; its maintenance
+  // routines require that catalog. Replay both after the withheld guard.
+  "0797_subscription_plan_foundation.sql",
+  "0798_subscription_plan_maintenance.sql",
   // Reuses the revision guard installed by withheld 0521; its validation
   // follow-up must run after the original promotional-credit routines.
   "0613_model_scoped_promotional_credits.sql",
@@ -93,6 +97,12 @@ export const embeddingMigrationTail = [
   "0598_claude_subscription_account_pools.sql",
   // Uses the existing session inventory/capability routines withheld by these fixtures.
   "0604_insights_raw_usage_api.sql",
+  // 0793 backfills while disabling the fence trigger introduced by withheld
+  // 0345. 0794 patches 0604's two scoped readers and requires all nine;
+  // 0795 extends 0793's audience predicate. Replay the dependency chain intact.
+  "0793_private_site_sessions.sql",
+  "0794_site_ai_insights.sql",
+  "0795_site_lifecycle_cancellation.sql",
   // Patches the sender-owned capture from withheld 0478 and reads the frozen
   // subscription authority installed by withheld 0598; replay after both.
   "0608_receiver_execution_context.sql",

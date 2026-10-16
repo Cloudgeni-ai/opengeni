@@ -911,8 +911,27 @@ postgres:
   priorityClassName: ""
   image:
     repository: pgvector/pgvector
-    tag: pg17
+    # PostgreSQL 18 on Debian bookworm: the same OS release (and so the same
+    # glibc collations) as the earlier pg17 default, which keeps text indexes
+    # valid across an in-place upgrade.
+    tag: pg18-bookworm
     pullPolicy: IfNotPresent
+  # In-place major-version upgrade of an existing data directory. A data
+  # directory from an older major refuses to start until this is enabled (or
+  # postgres.image.tag is set back to that major). When enabled, an init
+  # container runs pg_upgrade --link from fromImage's binaries, keeps the old
+  # directory beside the new one as pgdata.pre-upgrade-from-<major>, and then
+  # starts the new server. Plan a short outage and a backup first. fromImage
+  # must be the old major on the same OS release as postgres.image, and every
+  # extension library the old databases use must exist in postgres.image.
+  # After the upgrade, run `vacuumdb --all --analyze-in-stages
+  # --missing-stats-only`, then `vacuumdb --all --analyze-only`, and ALTER
+  # EXTENSION ... UPDATE for each extension, then turn this off again.
+  majorUpgrade:
+    enabled: false
+    fromImage:
+      repository: pgvector/pgvector
+      tag: pg17
   auth:
     database: opengeni
     username: opengeni

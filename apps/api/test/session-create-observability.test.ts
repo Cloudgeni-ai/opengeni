@@ -9,6 +9,7 @@ import {
   withoutEmptyLegacyVariableSetFields,
 } from "../src/http/variable-sets-removed";
 import { siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
+import { currentSiteViewerRlsContext } from "@opengeni/db";
 import {
   currentSiteSessionOrigin,
   sessionCreationMetadata,
@@ -83,7 +84,8 @@ function productionRoute() {
       withSiteSessionOrigin, createSessionForRequest, sessionCreateErrorResponse,
       withEffectivePolicy, measureSessionCreatePhase, legacyVariableSetFields,
       variableSetsRemovedResponse, withoutEmptyLegacyVariableSetFields,
-      currentSiteSessionOrigin, siteFrameBodyRefusal, siteFrameSessionProfile } = ports;
+      currentSiteSessionOrigin, currentSiteViewerRlsContext,
+      siteFrameBodyRefusal, siteFrameSessionProfile } = ports;
     ${code}
     return handler;
   `,
@@ -140,6 +142,7 @@ function routeFixture() {
       throw new Error("Unexpected Site scope");
     },
     currentSiteSessionOrigin,
+    currentSiteViewerRlsContext,
     siteFrameBodyRefusal,
     // The route's minimal Site profile (module-private): recorded, payload kept.
     siteFrameSessionProfile: async (_deps: unknown, _workspaceId: unknown, value: unknown) => {

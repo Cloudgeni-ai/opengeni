@@ -110,6 +110,7 @@ import {
   dbSql,
   getManagedAuthSessionSetSnapshot,
   getWorkspace,
+  getWorkspaceSettings,
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
   resolveSessionMemoryAgentScope,
@@ -224,7 +225,11 @@ import {
   assertOrganizationUserSetupQueryTransportConfigured,
 } from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
-import { buildOpenGeniMcpServer } from "./mcp/server";
+import {
+  buildOpenGeniMcpProtocolServer,
+  buildOpenGeniMcpServer,
+  isOpenGeniMcpProtocolOnlyMessage,
+} from "./mcp/server";
 import {
   buildWorkspaceToolGatewayMcpServer,
   approveWorkspaceToolGatewayCall,
@@ -273,7 +278,11 @@ import {
   localBrowserRequestHost,
   markLocalInternalDispatch,
 } from "./http/local-browser-boundary";
-import { withAccessGrantSessionRlsContext } from "./access-grant-rls";
+import {
+  alongsideAuthorization,
+  requireLiveAgentAttemptGrant,
+  withAccessGrantSessionRlsContext,
+} from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
@@ -1795,6 +1804,28 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = authorization.grant;
+    // MCP handshakes (initialize, ping, notifications) read and disclose
+    // nothing scoped. A session-bound agent attempt still proves it is the
+    // live attempt, but skips the workspace, catalog, Memory and admin reads
+    // that building the tool surface costs on every tools/* POST.
+    if (
+      c.req.method === "POST" &&
+      grant.principalKind === "agent_attempt" &&
+      typeof grant.metadata?.sessionId === "string" &&
+      (await isProtocolOnlyMcpRequest(boundedRequest))
+    ) {
+      await requireLiveAgentAttemptGrant(routeDeps, grant);
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        enableJsonResponse: true,
+      });
+      const mcp = buildOpenGeniMcpProtocolServer(grant);
+      try {
+        await mcp.connect(transport);
+        return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+      } finally {
+        await mcp.close().catch(() => undefined);
+      }
+    }
     // Admin actions dispatch back into this API as a person. Capture the
     // context now, before this request takes on the agent's database and
     // billing scope, so none of it carries into those actions.
@@ -1804,7 +1835,8 @@ export function createAppComposition(deps: AppDependencies): {
     return await withSessionAuthorizationReadReuse((reads) =>
       withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
         const boundSessionId = grant.metadata?.sessionId;
-        if (typeof boundSessionId === "string") {
+        const authorizeBoundSession = async () => {
+          if (typeof boundSessionId !== "string") return;
           try {
             await requireSessionAuthorization(routeDeps, grant, {
               sessionId: boundSessionId,
@@ -1822,16 +1854,14 @@ export function createAppComposition(deps: AppDependencies): {
             }
             throw error;
           }
-        }
-        if (c.req.method === "GET") return unsupportedGet();
-        reads.handOffToToolDispatch();
-        const workspace = await getWorkspace(routeDeps.db, workspaceId);
-        const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
-        const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode();
+        };
         const transport = new WebStandardStreamableHTTPServerTransport({
           enableJsonResponse: true,
         });
-        if (!grantUsesAttemptScopedMcp(grant)) {
+        if (c.req.method === "GET" || !grantUsesAttemptScopedMcp(grant)) {
+          await authorizeBoundSession();
+          if (c.req.method === "GET") return unsupportedGet();
+          reads.handOffToToolDispatch();
           const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
           const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
           try {
@@ -1845,39 +1875,58 @@ export function createAppComposition(deps: AppDependencies): {
             await Promise.allSettled([mcp.close(), prepared.close()]);
           }
         }
-        const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
-        // The bound session's frozen Memory selector (migration 0427) decides
-        // which Memory tools the attempt receives and which typed layers they
-        // read and write. A missing row resolves to no Memory tools.
-        const sessionMemory =
-          typeof boundSessionId === "string"
-            ? ((await resolveSessionMemoryAgentScope(
-                routeDeps.db,
-                workspaceId,
-                boundSessionId,
-                grant.metadata,
-              )) ?? {
-                mode: "off" as const,
-                userSubjectId: null,
-                rootSessionId: null,
-              })
-            : null;
-        // Checked live: allowed by the organization, given to this session,
-        // and the person who gave it is still an owner or admin.
-        const sessionAdminAccess =
-          typeof boundSessionId === "string" &&
-          (await resolveSessionAdminAuthority(routeDeps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId: boundSessionId,
-          }))
-            ? {
-                origin: new URL(c.req.url).origin,
-                dispatch: (request: Request) =>
-                  outsideAgentContext(async () => await app.fetch(request, c.env)),
-                signal: c.req.raw.signal,
-              }
-            : null;
+        // The tool surface is four independent reads: workspace settings, the
+        // model catalog, the session's frozen Memory selector and its admin
+        // access. Read them together, alongside the bound-session check, which
+        // still decides before any of them reaches the response.
+        const [, [workspaceSettings, mcpDeps, sessionMemory, sessionAdminAuthority]] =
+          await alongsideAuthorization(authorizeBoundSession(), () =>
+            Promise.all([
+              getWorkspaceSettings(routeDeps.db, workspaceId),
+              resolveWorkspaceMcpRouteDeps(routeDeps, grant),
+              // The bound session's frozen Memory selector (migration 0427)
+              // decides which Memory tools the attempt receives and which typed
+              // layers they read and write. A missing row resolves to no Memory
+              // tools.
+              typeof boundSessionId === "string"
+                ? resolveSessionMemoryAgentScope(
+                    routeDeps.db,
+                    workspaceId,
+                    boundSessionId,
+                    grant.metadata,
+                  ).then(
+                    (scope) =>
+                      scope ?? {
+                        mode: "off" as const,
+                        userSubjectId: null,
+                        rootSessionId: null,
+                      },
+                  )
+                : null,
+              // Checked live: allowed by the organization, given to this
+              // session, and the person who gave it is still an owner or admin.
+              typeof boundSessionId === "string"
+                ? resolveSessionAdminAuthority(routeDeps.db, {
+                    accountId: grant.accountId,
+                    workspaceId,
+                    sessionId: boundSessionId,
+                  })
+                : false,
+            ]),
+          );
+        reads.handOffToToolDispatch();
+        const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(
+          workspaceSettings ?? undefined,
+        );
+        const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode();
+        const sessionAdminAccess = sessionAdminAuthority
+          ? {
+              origin: new URL(c.req.url).origin,
+              dispatch: (request: Request) =>
+                outsideAgentContext(async () => await app.fetch(request, c.env)),
+              signal: c.req.raw.signal,
+            }
+          : null;
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
           workspaceMemoryEnabled,
@@ -2492,6 +2541,19 @@ async function validateCodexAccountTarget(request: Request): Promise<void> {
       message: 'target is required ("auto" or an account id)',
     });
   }
+}
+
+/** Whether a POST carries only MCP protocol messages that touch no tool. */
+async function isProtocolOnlyMcpRequest(request: Request): Promise<boolean> {
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    // The transport answers malformed bodies itself, on the full path.
+    return false;
+  }
+  const messages = Array.isArray(body) ? body : [body];
+  return messages.length > 0 && messages.every(isOpenGeniMcpProtocolOnlyMessage);
 }
 
 async function requireMcpAccessGrantAuthorization(

@@ -47,6 +47,10 @@ let accountId: string,
   deletedId: string,
   subjectId: string;
 const migrationName = "0604_insights_raw_usage_api.sql";
+// 0794 rewrites the two scoped readers introduced by 0604 and checks the
+// complete nine-reader family. Defer it while those prerequisites are absent,
+// then replay both in migration order without weakening that source contract.
+const deferredMigrations = [migrationName, "0794_site_ai_insights.sql"];
 const stagingRevision = "2a5ab6f512a05bf28afce38ac4259dea861d3669";
 const servingCompatibleRevision = "f893cb5a4f226b8568bcd3078b48c8c573e86b92";
 const preMigrationRevision = "a15e7a5f4d7322903b614992a09973ebab268721";
@@ -118,7 +122,8 @@ beforeAll(async () => {
   const owner = postgres(fixture.ownerUrl, { max: 1 });
   try {
     await owner`create table schema_migrations(name text primary key,applied_at timestamptz not null default now())`;
-    await owner`insert into schema_migrations(name) values(${migrationName})`;
+    for (const name of deferredMigrations)
+      await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(fixture.ownerUrl, undefined, {
       applicationDatabaseRoles: ["opengeni_app"],
       preinstalledVector: true,
@@ -211,7 +216,7 @@ beforeAll(async () => {
       baselineViolations.set(revision, { current, old, restored });
     });
   }
-  await fixture.admin`delete from schema_migrations where name=${migrationName}`;
+  await fixture.admin`delete from schema_migrations where name in ${fixture.admin(deferredMigrations)}`;
   await migrate(fixture.ownerUrl, undefined, {
     applicationDatabaseRoles: ["opengeni_app"],
     preinstalledVector: true,

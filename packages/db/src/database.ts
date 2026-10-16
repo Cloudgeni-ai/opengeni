@@ -235,6 +235,12 @@ export type CreateDbOptions = {
    */
   bootConnectGraceMs?: number;
   /**
+   * Use named prepared statements. Unset → {@link defaultDatabasePreparedStatements}:
+   * on for a direct connection, off behind PgBouncer's port. Pass `false` for any
+   * other transaction-pooling proxy.
+   */
+  preparedStatements?: boolean;
+  /**
    * Connection-local default transaction isolation sent in the postgres-js
    * startup parameters. This is intentionally not a role/database default:
    * tests and embedded callers can exercise a different ambient isolation
@@ -393,19 +399,67 @@ export function databaseReconnectBackoffSeconds(retries: number): number {
   return (0.5 + Math.random() / 2) * Math.min(3 ** retries / 100, 2);
 }
 
+/** PgBouncer's port, which Azure Flexible Server's built-in pooler always uses. */
+const PGBOUNCER_PORT = "6432";
+
+/**
+ * Whether a pool should use named prepared statements when the operator has not
+ * said. A direct Postgres connection should: postgres-js otherwise sends every
+ * parameterized statement unnamed and must wait for a Describe reply before it
+ * can Bind, so each such statement costs two round trips instead of one, and the
+ * server re-parses and re-plans it every time. A transaction-pooling PgBouncer
+ * must not: named statements live on one backend, the pooler hands the next
+ * transaction a different one, and execution intermittently fails with
+ * `prepared statement "s_N" does not exist`. Port 6432 is the only signal the URL
+ * carries; other poolers need `preparedStatements: false` explicitly.
+ */
+export function defaultDatabasePreparedStatements(databaseUrl: string): boolean {
+  const authority = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/?#]*@)?([^/?#]*)/i.exec(databaseUrl)?.[1] ?? "";
+  return !authority.split(",").some((host) => host.endsWith(`:${PGBOUNCER_PORT}`));
+}
+
+type PostgresSql = postgres.Sql | postgres.TransactionSql;
+
+/**
+ * Drizzle sends every query through `sql.unsafe(text, params)`, and postgres-js
+ * never prepares `unsafe` queries unless asked per call, whatever the pool's
+ * `prepare` option says. Ask on every call, including inside transactions and
+ * savepoints, which hand Drizzle a fresh transaction-scoped `sql`. Queries without
+ * parameters keep postgres-js's one-message simple protocol.
+ */
+function preparingUnsafe<T extends PostgresSql>(target: T): T {
+  const wrapScoped = (args: unknown[]) =>
+    args.map((arg) =>
+      typeof arg === "function"
+        ? (scoped: postgres.TransactionSql) =>
+            (arg as (scoped: postgres.TransactionSql) => unknown)(preparingUnsafe(scoped))
+        : arg,
+    );
+  return new Proxy(target, {
+    get(base, property) {
+      if (property === "unsafe") {
+        return (query: string, parameters?: unknown[], options?: postgres.UnsafeQueryOptions) =>
+          base.unsafe(query, parameters as never, { prepare: true, ...options });
+      }
+      if (property === "begin" || property === "savepoint") {
+        const method = Reflect.get(base, property) as unknown;
+        if (typeof method !== "function") return method;
+        return (...args: unknown[]) => method.apply(base, wrapScoped(args));
+      }
+      return Reflect.get(base, property);
+    },
+  });
+}
+
 export function createDb(databaseUrl: string, options: CreateDbOptions = {}): DbClient {
-  // `prepare: false` is REQUIRED for Azure Database for PostgreSQL Flexible
-  // Server's transaction-pooling PgBouncer: postgres-js's default named prepared
-  // statements (`s_N`) are bound to one backend, but a transaction pooler hands
-  // each transaction a different backend, so a later `execute` intermittently
-  // throws `prepared statement "s_N" does not exist`. Every RLS read in this
-  // module (set_config + SELECT inside one db.transaction) rides on this pool, so
-  // the failure surfaces as a "worked, then didn't" credential/permission read.
+  const preparedStatements =
+    options.preparedStatements ?? defaultDatabasePreparedStatements(databaseUrl);
   // idle_timeout + max_lifetime recycle connections so a pooler-recycled backend
-  // is never reused indefinitely; application_name aids server-side diagnostics.
+  // is never reused indefinitely, and bound each connection's prepared-statement
+  // cache; application_name aids server-side diagnostics.
   const client = postgres(databaseUrl, {
     max: options.max ?? 10,
-    prepare: false,
+    prepare: preparedStatements,
     idle_timeout: 30,
     max_lifetime: 1800,
     // postgres.js grows one pool-wide reconnect delay after every refused or
@@ -429,9 +483,16 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
       application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
       ...(options.searchPath ? { search_path: options.searchPath } : {}),
       ...(options.isolationLevel ? { default_transaction_isolation: options.isolationLevel } : {}),
+      // Prepared statements are for skipping the Describe round trip and the
+      // re-parse. Keep planning per execution: a cached generic plan cannot see
+      // bound values, so it cannot choose a partial index whose predicate names a
+      // parameterized value, nor the selectivity of one workspace or subject.
+      // Only direct connections prepare, so this startup parameter never reaches
+      // a transaction pooler.
+      ...(preparedStatements ? { plan_cache_mode: "force_custom_plan" } : {}),
     },
   });
-  const db = drizzle(client, { schema });
+  const db = drizzle(preparedStatements ? preparingUnsafe(client) : client, { schema });
   dbBindings.set(db as unknown as object, {
     rlsStrategy: options.rlsStrategy ?? "force",
     ...(options.userLookup ? { userLookup: options.userLookup } : {}),
@@ -474,42 +535,221 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   if (typeof context.accountId !== "string" || context.accountId.trim() === "") {
     throw new Error("setRlsContext: a non-empty accountId is required to establish an RLS context");
   }
-  // Transaction-local writer identity covers supported injected/embedded
-  // database handles whose connection-level application_name is host-owned.
-  // Standalone createDb connections also carry version receipts in their exact
-  // application_name, while old Opengeni binaries set neither current receipt.
-  //
-  // JIT is off for these short request transactions: row-level security
-  // functions inflate planner cost estimates past jit_above_cost, so PostgreSQL
-  // spent seconds compiling queries that execute in milliseconds (the session
-  // list's tree-stats query: 0.4 s of work behind 3.8 s of JIT). Transaction-local,
-  // so it is safe behind transaction poolers and never leaks to other work.
-  await db.execute(sql`select
-    set_config('opengeni.account_id', ${context.accountId}, true),
-    set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true),
-    set_config('opengeni.lossless_content_writer', '1', true),
-    set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
-    set_config('opengeni.pending_tool_event_output_v1', '1', true),
-    set_config('opengeni.session_variable_set_attachments_v1', '1', true),
-    set_config('opengeni.shared_personal_choice_v1', '1', true),
-    set_config('opengeni.site_session_audience_v1', '1', true),
-    set_config('jit', 'off', true)`);
-  const sessionActor = sessionRlsActorContext.getStore();
+  await applyRlsScope(db, {
+    accountId: context.accountId,
+    workspaceId: context.workspaceId ?? null,
+    locks: [],
+    readParent: false,
+  });
+}
+
+/** An advisory transaction lock taken while a scope is established. `key` is
+ * either a literal key or a prefix completed with the scope's account id. */
+type RlsScopeLock = {
+  key: string | { accountPrefix: string };
+  mode: "shared" | "exclusive";
+  hash: "extended" | "text";
+};
+
+type RlsScopeInput = {
+  /** The tenant account, or null to resolve it from `workspaceId` within the
+   * same statement. */
+  accountId: string | null;
+  workspaceId: string | null;
+  /** Authenticated subject for actor-private rows; overrides the ambient
+   * session actor's subject. */
+  subjectId?: string;
+  /** Locks taken in this order, after the context is set. */
+  locks: readonly RlsScopeLock[];
+  /** Return the enclosing scope's settings so a nested scope can restore them. */
+  readParent: boolean;
+};
+
+type AppliedRlsScope = {
+  context: { accountId: string; workspaceId: string | null };
+  parent: RlsContextSettings | null;
+};
+
+function sessionTenancyLock(workspaceId: string): RlsScopeLock {
+  return { key: `session-tenancy:${workspaceId}`, mode: "shared", hash: "extended" };
+}
+
+function rlsScopeLockCall(lock: RlsScopeLock): SQL {
+  const key =
+    typeof lock.key === "string"
+      ? sql`${lock.key}::text`
+      : sql`(${lock.key.accountPrefix}::text || resolved.account_id)`;
+  const hashed =
+    lock.hash === "extended" ? sql`hashtextextended(${key}, 0)` : sql`hashtext(${key})`;
+  return lock.mode === "shared"
+    ? sql`pg_advisory_xact_lock_shared(${hashed})`
+    : sql`pg_advisory_xact_lock(${hashed})`;
+}
+
+/**
+ * Establish a transaction's whole RLS scope in ONE statement, on the backend
+ * that runs the rest of the transaction: read the enclosing scope (nested
+ * only), resolve the tenant account from the workspace when it is not known,
+ * set the tenant, writer-capability, subject and session-actor GUCs, take the
+ * scope's advisory locks in order, and read the applied tenant and subject
+ * back. Each step is a MATERIALIZED CTE that selects from the previous one, so
+ * PostgreSQL evaluates them in exactly that order. A missing workspace yields
+ * no row and fails loud.
+ *
+ * Transaction-local writer identity covers supported injected/embedded
+ * database handles whose connection-level application_name is host-owned.
+ * Standalone createDb connections also carry version receipts in their exact
+ * application_name, while old Opengeni binaries set neither current receipt.
+ *
+ * JIT is off for these short request transactions: row-level security
+ * functions inflate planner cost estimates past jit_above_cost, so PostgreSQL
+ * spent seconds compiling queries that execute in milliseconds (the session
+ * list's tree-stats query: 0.4 s of work behind 3.8 s of JIT). Transaction-local,
+ * so it is safe behind transaction poolers and never leaks to other work.
+ */
+async function applyRlsScope(db: Database, input: RlsScopeInput): Promise<AppliedRlsScope> {
+  if (input.accountId !== null && input.accountId.trim() === "") {
+    throw new Error("setRlsContext: a non-empty accountId is required to establish an RLS context");
+  }
+  if (input.accountId === null && !input.workspaceId) {
+    throw new Error("an RLS scope needs an accountId or a workspaceId to resolve it from");
+  }
+  if (input.subjectId !== undefined && !input.subjectId.trim()) {
+    throw new Error("setSubjectRlsContext: a non-empty subjectId is required");
+  }
+  const actor = sessionRlsActorContext.getStore();
   const siteViewer = siteViewerRlsContext.getStore();
-  await db.execute(sql`select
-    set_config('opengeni.agent_root_session_id', ${sessionActor?.agentRootSessionId ?? ""}, true),
-    set_config('opengeni.site_id', ${siteViewer?.siteId ?? ""}, true),
-    set_config('opengeni.site_viewer_principal', ${siteViewer?.principal ?? ""}, true)`);
-  if (sessionActor) {
-    await setSubjectRlsContext(db, sessionActor.subjectId);
-    await db.execute(
-      sql`select set_config('opengeni.private_file_owner', ${sessionActor.privateFileOwnerSubjectId ?? ""}, true), set_config(
-        'opengeni.initiating_human_subject_id',
-        ${sessionActor.initiatingHumanSubjectId ?? ""},
-        true
-      )`,
+  const subjectId = input.subjectId ?? actor?.subjectId;
+  const account =
+    input.accountId !== null
+      ? sql`${input.accountId}::text`
+      : sql`(select ${schema.workspaces.accountId}::text from ${schema.workspaces} where ${schema.workspaces.id} = ${input.workspaceId}::uuid)`;
+  const settings: SQL[] = [
+    sql`set_config('opengeni.account_id', resolved.account_id, true)`,
+    sql`set_config('opengeni.workspace_id', ${input.workspaceId ?? ""}::text, true)`,
+    sql`set_config('opengeni.lossless_content_writer', '1', true)`,
+    sql`set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`,
+    sql`set_config('opengeni.pending_tool_event_output_v1', '1', true)`,
+    sql`set_config('opengeni.session_variable_set_attachments_v1', '1', true)`,
+    sql`set_config('opengeni.shared_personal_choice_v1', '1', true)`,
+    sql`set_config('opengeni.site_session_audience_v1', '1', true)`,
+    sql`set_config('jit', 'off', true)`,
+    sql`set_config('opengeni.agent_root_session_id', ${actor?.agentRootSessionId ?? ""}::text, true)`,
+    sql`set_config('opengeni.site_id', ${siteViewer?.siteId ?? ""}::text, true)`,
+    sql`set_config('opengeni.site_viewer_principal', ${siteViewer?.principal ?? ""}::text, true)`,
+  ];
+  if (subjectId !== undefined) {
+    settings.push(sql`set_config('opengeni.subject_id', ${subjectId}::text, true)`);
+  }
+  if (actor) {
+    settings.push(
+      sql`set_config('opengeni.private_file_owner', ${actor.privateFileOwnerSubjectId ?? ""}::text, true)`,
+      sql`set_config('opengeni.initiating_human_subject_id', ${actor.initiatingHumanSubjectId ?? ""}::text, true)`,
     );
   }
+  const steps: SQL[] = [
+    sql`parent as materialized (select
+      current_setting('opengeni.account_id', true) as account_id,
+      current_setting('opengeni.workspace_id', true) as workspace_id,
+      current_setting('opengeni.subject_id', true) as subject_id,
+      current_setting('opengeni.private_file_owner', true) as private_file_owner,
+      current_setting('opengeni.initiating_human_subject_id', true) as initiating_human_subject_id,
+      current_setting('opengeni.personal_resource_human_subject_id', true) as personal_resource_human_subject_id,
+      current_setting('opengeni.personal_resource_actor_subject_id', true) as personal_resource_actor_subject_id,
+      current_setting('opengeni.agent_root_session_id', true) as agent_root_session_id,
+      current_setting('opengeni.site_id', true) as site_id,
+      current_setting('opengeni.site_viewer_principal', true) as site_viewer_principal)`,
+    sql`resolved as materialized (select ${account} as account_id from parent)`,
+    sql`scope as materialized (select ${sql.join(
+      settings.map((setting, index) => sql`${setting} as ${sql.raw(`s${index}`)}`),
+      sql`, `,
+    )} from resolved where resolved.account_id is not null and resolved.account_id <> '')`,
+  ];
+  let last = "scope";
+  input.locks.forEach((lock, index) => {
+    const name = `lock_${index}`;
+    steps.push(
+      sql`${sql.raw(name)} as materialized (select ${rlsScopeLockCall(lock)} as locked from ${sql.raw(last)}, resolved)`,
+    );
+    last = name;
+  });
+  const [row] = await rawRows<{
+    resolved_account_id: string;
+    account_id: string | null;
+    workspace_id: string | null;
+    subject_id: string | null;
+    parent_account_id: string | null;
+    parent_workspace_id: string | null;
+    parent_subject_id: string | null;
+    parent_private_file_owner: string | null;
+    parent_initiating_human_subject_id: string | null;
+    parent_personal_resource_human_subject_id: string | null;
+    parent_personal_resource_actor_subject_id: string | null;
+    parent_agent_root_session_id: string | null;
+    parent_site_id: string | null;
+    parent_site_viewer_principal: string | null;
+  }>(
+    db,
+    sql`with ${sql.join(steps, sql`, `)}
+      select
+        resolved.account_id as resolved_account_id,
+        current_setting('opengeni.account_id', true) as account_id,
+        current_setting('opengeni.workspace_id', true) as workspace_id,
+        current_setting('opengeni.subject_id', true) as subject_id,
+        parent.account_id as parent_account_id,
+        parent.workspace_id as parent_workspace_id,
+        parent.subject_id as parent_subject_id,
+        parent.private_file_owner as parent_private_file_owner,
+        parent.initiating_human_subject_id as parent_initiating_human_subject_id,
+        parent.personal_resource_human_subject_id as parent_personal_resource_human_subject_id,
+        parent.personal_resource_actor_subject_id as parent_personal_resource_actor_subject_id,
+        parent.agent_root_session_id as parent_agent_root_session_id,
+        parent.site_id as parent_site_id,
+        parent.site_viewer_principal as parent_site_viewer_principal
+      from ${sql.raw(last)}, resolved, parent`,
+  );
+  if (!row) {
+    if (input.accountId === null) throw new Error(`Workspace not found: ${input.workspaceId}`);
+    throw new Error("RLS context could not be applied on the active backend");
+  }
+  const expectedWorkspaceId = input.workspaceId ?? "";
+  // A caller-supplied account is the expectation; otherwise the account the
+  // same statement resolved from the workspace.
+  const expectedAccountId = input.accountId ?? row.resolved_account_id;
+  // Defense-in-depth: the applied values are read back by the same statement
+  // on the backend that keeps them for the rest of the transaction. A
+  // mismatch means the context was genuinely lost, so fail loud instead of
+  // running scoped reads that would see zero rows (a phantom "not found").
+  if (!expectedAccountId || (row.account_id ?? "") !== expectedAccountId) {
+    throw new Error(
+      `RLS context not applied on the active backend: expected account ${expectedAccountId}, got "${row.account_id ?? ""}"`,
+    );
+  }
+  if ((row.workspace_id ?? "") !== expectedWorkspaceId) {
+    throw new Error(
+      `RLS context not applied on the active backend: expected workspace "${expectedWorkspaceId}", got "${row.workspace_id ?? ""}"`,
+    );
+  }
+  if (subjectId !== undefined && (row.subject_id ?? "") !== subjectId) {
+    throw new Error("Authenticated subject RLS context was not applied on the active backend");
+  }
+  return {
+    context: { accountId: expectedAccountId, workspaceId: input.workspaceId },
+    parent: input.readParent
+      ? {
+          accountId: row.parent_account_id ?? "",
+          workspaceId: row.parent_workspace_id ?? "",
+          subjectId: row.parent_subject_id ?? "",
+          privateFileOwnerSubjectId: row.parent_private_file_owner ?? "",
+          initiatingHumanSubjectId: row.parent_initiating_human_subject_id ?? "",
+          personalResourceHumanSubjectId: row.parent_personal_resource_human_subject_id ?? "",
+          personalResourceActorSubjectId: row.parent_personal_resource_actor_subject_id ?? "",
+          agentRootSessionId: row.parent_agent_root_session_id ?? "",
+          siteId: row.parent_site_id ?? "",
+          siteViewerPrincipal: row.parent_site_viewer_principal ?? "",
+        }
+      : null,
+  };
 }
 
 async function readRlsContextSettings(db: Database): Promise<RlsContextSettings> {
@@ -652,6 +892,35 @@ export async function withRlsContext<T>(
   transactionConfig?: PgTransactionConfig,
   sessionTenancyFence: "shared" | "none" = "shared",
 ): Promise<T> {
+  if (typeof context.accountId !== "string" || context.accountId.trim() === "") {
+    throw new Error("setRlsContext: a non-empty accountId is required to establish an RLS context");
+  }
+  const workspaceId = context.workspaceId || null;
+  return await withRlsScope(
+    db,
+    {
+      accountId: context.accountId,
+      workspaceId: context.workspaceId ?? null,
+      locks:
+        workspaceId && sessionTenancyFence === "shared" ? [sessionTenancyLock(workspaceId)] : [],
+    },
+    (scoped) => fn(scoped),
+    transactionConfig,
+  );
+}
+
+/**
+ * Run `fn` in one transaction (or savepoint, when nested) whose RLS scope is
+ * established by a single statement (see applyRlsScope). The callback gets the
+ * resolved tenant context. A nested scope restores its parent's tenant and
+ * actor settings when it returns.
+ */
+async function withRlsScope<T>(
+  db: Database,
+  scope: Omit<RlsScopeInput, "readParent">,
+  fn: (db: Database, context: AppliedRlsScope["context"]) => Promise<T>,
+  transactionConfig?: PgTransactionConfig,
+): Promise<T> {
   const restoreParentScope = isTransactionHandle(db);
   // Callback entry includes connection admission AND BEGIN/SAVEPOINT round-trip.
   // This is deliberately not advertised as pure pool wait.
@@ -665,25 +934,11 @@ export async function withRlsContext<T>(
         admission("completed");
         const setup = startDatabaseTiming("rls_setup");
         const scoped = tx as unknown as Database;
-        let parentScope: RlsContextSettings | null;
+        let applied: AppliedRlsScope;
         try {
-          parentScope = restoreParentScope ? await readRlsContextSettings(scoped) : null;
-          await setRlsContext(scoped, context);
-          if (context.workspaceId && sessionTenancyFence === "shared") {
-            await scoped.execute(
-              sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`,
-            );
-          }
-          // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
-          // the scoped query. The set_config and this read share one db.transaction,
-          // which a transaction pooler pins to a single backend — so a mismatch here
-          // means the context was genuinely lost (a torn transaction / pooler backend
-          // swap), not normal operation. Without this guard such an event runs the
-          // scoped read with an empty account_id and returns zero RLS-visible rows,
-          // manufacturing a phantom "no active subscription" from a credential that is
-          // in fact active. Convert that silent false into a loud, root-cause-bearing
-          // error so the caller can retry rather than permanently mis-decide.
-          await assertRlsContextApplied(scoped, context);
+          // One statement sets the scope, takes its locks and reads the applied
+          // tenant back on this transaction's backend (see applyRlsScope).
+          applied = await applyRlsScope(scoped, { ...scope, readParent: restoreParentScope });
           setup("completed");
         } catch (error) {
           setup("failed");
@@ -692,7 +947,7 @@ export async function withRlsContext<T>(
         const callback = startDatabaseTiming("scoped_callback");
         let value: T;
         try {
-          value = await fn(scoped);
+          value = await fn(scoped, applied.context);
           callback("completed");
         } catch (error) {
           callback("failed");
@@ -701,7 +956,7 @@ export async function withRlsContext<T>(
         // A nested transaction is a savepoint, and SET LOCAL survives successful
         // savepoint release. Restore the parent tenant and actor proof together;
         // writer/protocol capabilities intentionally remain transaction-wide.
-        if (parentScope) await restoreRlsContextSettings(scoped, parentScope);
+        if (applied.parent) await restoreRlsContextSettings(scoped, applied.parent);
         return value;
       },
       transactionConfig,
@@ -759,10 +1014,11 @@ export async function withWorkspaceRls<T>(
   fn: (db: Database) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
 ): Promise<T> {
-  return await withRlsContext(
+  // The tenant account is resolved inside the scope's setup statement.
+  return await withRlsScope(
     db,
-    await rlsContextForWorkspace(db, workspaceId),
-    fn,
+    { accountId: null, workspaceId, locks: [sessionTenancyLock(workspaceId)] },
+    (scoped) => fn(scoped),
     transactionConfig,
   );
 }
@@ -945,37 +1201,66 @@ export async function withSessionActivityRlsContext<T>(
   fenceMode: "shared" | "none" = "shared",
   organizationMembershipFence = false,
 ): Promise<T> {
-  await assertSessionActivityGateEntry(db);
-  return await withRlsContext(
+  if (typeof context.accountId !== "string" || context.accountId.trim() === "") {
+    throw new Error("setRlsContext: a non-empty accountId is required to establish an RLS context");
+  }
+  return await withSessionActivityRlsScope(
     db,
-    context,
-    async (scopedDb) => {
-      if (organizationMembershipFence) {
-        // Only callers that reauthorize or mutate under the membership
-        // lifecycle lock take it, always exclusively. Acquire membership
-        // before even a shared tenancy fence: an exclusive tenancy/control
-        // waiter can otherwise complete the same lock cycle. The turn claim
-        // deliberately takes no membership fence at all.
-        await scopedDb.execute(sql`select pg_advisory_xact_lock(
-          hashtextextended(${`organization-membership:${context.accountId}`}, 0))`);
-        if (fenceMode === "shared") {
-          await scopedDb.execute(sql`select pg_advisory_xact_lock_shared(
-            hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`);
-        }
-      }
-      const gate = await beginSessionActivityGate(scopedDb, context.workspaceId);
+    { accountId: context.accountId, workspaceId: context.workspaceId },
+    fn,
+    transactionConfig,
+    fenceMode,
+    organizationMembershipFence,
+  );
+}
+
+async function withSessionActivityRlsScope<T>(
+  db: Database,
+  scope: { accountId: string | null; workspaceId: string; subjectId?: string },
+  fn: (db: SessionActivityDatabase) => Promise<T>,
+  transactionConfig: PgTransactionConfig | undefined,
+  fenceMode: "shared" | "none",
+  organizationMembershipFence: boolean,
+): Promise<T> {
+  await assertSessionActivityGateEntry(db);
+  // Only callers that reauthorize or mutate under the membership lifecycle
+  // lock take it, always exclusively, and before even a shared tenancy fence:
+  // an exclusive tenancy/control waiter can otherwise complete the same lock
+  // cycle. The turn claim deliberately takes no membership fence at all. The
+  // scope's setup statement takes both in this order.
+  const locks: RlsScopeLock[] = [
+    ...(organizationMembershipFence
+      ? [
+          {
+            key: { accountPrefix: "organization-membership:" },
+            mode: "exclusive",
+            hash: "extended",
+          } satisfies RlsScopeLock,
+        ]
+      : []),
+    ...(fenceMode === "shared" ? [sessionTenancyLock(scope.workspaceId)] : []),
+  ];
+  return await withRlsScope(
+    db,
+    {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      ...(scope.subjectId !== undefined ? { subjectId: scope.subjectId } : {}),
+      locks,
+    },
+    async (scopedDb, context) => {
+      const gate = await beginSessionActivityGate(scopedDb, scope.workspaceId);
       const value = await fn(gate.db);
       // The finalizer must never trust tenant GUCs that arbitrary callback code
       // could have changed. Nested RLS helpers restore their parent scope; this
       // assertion is the fail-closed commit-boundary proof for every other path.
       await assertRlsContextApplied(gate.db, context);
       if (gate.owner) {
-        await finalizeSessionActivityGate(gate.db, context.workspaceId);
+        await finalizeSessionActivityGate(gate.db, scope.workspaceId);
       }
       return value;
     },
     transactionConfig,
-    organizationMembershipFence ? "none" : fenceMode,
   );
 }
 
@@ -992,9 +1277,10 @@ export async function withWorkspaceSessionActivityRls<T>(
   transactionConfig?: PgTransactionConfig,
   organizationMembershipFence = false,
 ): Promise<T> {
-  return await withSessionActivityRlsContext(
+  // The tenant account is resolved inside the scope's setup statement.
+  return await withSessionActivityRlsScope(
     db,
-    { ...(await rlsContextForWorkspace(db, workspaceId)), workspaceId },
+    { accountId: null, workspaceId },
     fn,
     transactionConfig,
     "shared",
@@ -1104,16 +1390,16 @@ export async function withWorkspaceSubjectRls<T>(
   if (!subjectId.trim()) {
     throw new Error("withWorkspaceSubjectRls: a non-empty subjectId is required");
   }
-  const context = await rlsContextForWorkspace(db, workspaceId);
-  return await withRlsContext(
+  return await withRlsScope(
     db,
-    context,
-    async (scopedDb) => {
-      await setSubjectRlsContext(scopedDb, subjectId);
-      return await fn(scopedDb);
+    {
+      accountId: null,
+      workspaceId,
+      subjectId,
+      locks: sessionTenancyFence === "shared" ? [sessionTenancyLock(workspaceId)] : [],
     },
+    (scoped) => fn(scoped),
     transactionConfig,
-    sessionTenancyFence,
   );
 }
 
@@ -1129,30 +1415,29 @@ export async function withWorkspaceSubjectSessionActivityRls<T>(
   if (!subjectId.trim()) {
     throw new Error("withWorkspaceSubjectSessionActivityRls: a non-empty subjectId is required");
   }
-  const context = await rlsContextForWorkspace(db, workspaceId);
-  return await withSessionActivityRlsContext(
+  return await withSessionActivityRlsScope(
     db,
-    { ...context, workspaceId },
-    async (scopedDb) => {
-      await setSubjectRlsContext(scopedDb, subjectId);
-      return await fn(scopedDb);
-    },
+    { accountId: null, workspaceId, subjectId },
+    fn,
     transactionConfig,
     fenceMode,
     organizationMembershipFence,
   );
 }
 
-/** Apply and verify actor-private RLS on an already transaction-pinned handle. */
+/** Apply and verify actor-private RLS on an already transaction-pinned handle,
+ * in one statement that sets the subject and reads it back. */
 export async function setSubjectRlsContext(db: Database, subjectId: string): Promise<void> {
   if (!subjectId.trim()) {
     throw new Error("setSubjectRlsContext: a non-empty subjectId is required");
   }
-  await db.execute(sql`select set_config('opengeni.subject_id', ${subjectId}, true)`);
-  const applied = await db.execute<{ subject_id: string | null }>(
-    sql`select current_setting('opengeni.subject_id', true) as subject_id`,
+  const [applied] = await rawRows<{ subject_id: string | null }>(
+    db,
+    sql`with applied as materialized (
+      select set_config('opengeni.subject_id', ${subjectId}::text, true) as subject_id
+    ) select current_setting('opengeni.subject_id', true) as subject_id from applied`,
   );
-  if ((applied[0]?.subject_id ?? "") !== subjectId) {
+  if ((applied?.subject_id ?? "") !== subjectId) {
     throw new Error("Authenticated subject RLS context was not applied on the active backend");
   }
 }
@@ -1162,11 +1447,18 @@ export async function withWorkspaceUsageLock<T>(
   workspaceId: string,
   fn: (db: Database) => Promise<T>,
 ): Promise<T> {
-  const context = await rlsContextForWorkspace(db, workspaceId);
-  return await withRlsContext(db, context, async (scopedDb) => {
-    await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${`usage:${workspaceId}`}))`);
-    return await fn(scopedDb);
-  });
+  return await withRlsScope(
+    db,
+    {
+      accountId: null,
+      workspaceId,
+      locks: [
+        sessionTenancyLock(workspaceId),
+        { key: `usage:${workspaceId}`, mode: "exclusive", hash: "text" },
+      ],
+    },
+    (scoped) => fn(scoped),
+  );
 }
 
 export async function withAccountRls<T>(

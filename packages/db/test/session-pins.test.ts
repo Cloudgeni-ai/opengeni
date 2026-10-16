@@ -6,6 +6,7 @@ import {
   createChannel,
   createDb,
   createSession,
+  ensureManagedAccessForUser,
   decodeSessionListCursor,
   getSessionForSubject,
   getWorkspaceGrant,
@@ -31,6 +32,7 @@ import {
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
   withWorkspaceRls,
+  withSessionRlsActorContext,
   withWorkspaceSubjectRls,
   type Database,
   type DbClient,
@@ -64,21 +66,48 @@ async function session(input: {
   channelId?: string | null;
   createdBy?: { kind: "subject" | "service"; subjectId: string; label?: string };
   metadata?: Record<string, unknown>;
+  privateOwnerSubjectId?: string;
 }) {
-  return await createSession(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    initialMessage: input.message,
-    resources: [],
-    metadata: input.metadata ?? {},
-    model: "test-model",
-    reasoningEffort: "medium" as const,
-    latencyMode: "standard" as const,
-    sandboxBackend: "none",
-    ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
-    ...(input.channelId !== undefined ? { channelId: input.channelId } : {}),
-    ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+  const create = () =>
+    createSession(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      initialMessage: input.message,
+      resources: [],
+      metadata: input.metadata ?? {},
+      model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
+      ...(input.channelId !== undefined ? { channelId: input.channelId } : {}),
+      ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+      ...(input.privateOwnerSubjectId
+        ? {
+            visibility: "user_private" as const,
+            subjectId: input.privateOwnerSubjectId,
+          }
+        : {}),
+    });
+  return input.privateOwnerSubjectId
+    ? withSessionRlsActorContext({ subjectId: input.privateOwnerSubjectId }, create)
+    : create();
+}
+
+async function siteViewerWorkspace() {
+  const userId = crypto.randomUUID();
+  const access = await ensureManagedAccessForUser(db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Site list owner",
   });
+  const grant = access.workspaceGrants.find(
+    (item) => item.workspaceId === access.defaultWorkspaceId,
+  )!;
+  return {
+    workspace: { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    subjectId: grant.subjectId,
+  };
 }
 
 /** Removal now requires an explicit administering actor (migration 0278). */
@@ -377,12 +406,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(pinnedAttention.totals?.needsYouCount).toBe(1);
     expect(pinnedAttention.pinned[0]?.treeStats?.totalDescendants).toBe(1000);
     expect(pinnedAttention.pinned[0]?.treeStats?.attentionDescendants).toBe(0);
-  });
+  }, 60_000);
 
   test("compact pages retain authority and display state while excluding large configuration", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
-    const subjectId = "user:compact-list";
+    const { workspace, subjectId } = await siteViewerWorkspace();
     await grantWorkspaceAccess(db, {
       ...workspace,
       subjectId,
@@ -399,6 +427,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         large: "x".repeat(65_536),
       },
       createdBy: { kind: "subject", subjectId, label: "Example member" },
+      privateOwnerSubjectId: subjectId,
     });
     await setSessionPin(db, {
       workspaceId: workspace.workspaceId,
@@ -406,7 +435,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       sessionId: root.id,
       pinned: true,
     });
-    const options = { subjectId, pinsOnly: true };
+    const options = { subjectId, pinsOnly: true, originSiteId: siteId };
+    expect(
+      (await listSessionEntriesForSubject(db, workspace.workspaceId, { subjectId, pinsOnly: true }))
+        .pinned,
+    ).toEqual([]);
     const full = await listSessionsForSubject(db, workspace.workspaceId, options);
     const compact = await listSessionEntriesForSubject(db, workspace.workspaceId, options);
     const row = compact.pinned[0]!;
@@ -426,6 +459,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const target = await listSessionEntriesForSubject(db, workspace.workspaceId, {
       subjectId,
       pinsOnly: true,
+      originSiteId: siteId,
       authorizationScope: { kind: "scoped", rootSessionIds: [], sessionIds: [root.id] },
     });
     expect(target.pinned[0]?.treeStats?.totalDescendants).toBe(0);
@@ -1464,21 +1498,29 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
 
   test("Site origin filters before pagination, survives project moves and binds cursors", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
-    const subjectId = `user:site-${crypto.randomUUID()}`;
-    await grantMember(workspace, subjectId);
+    const { workspace, subjectId } = await siteViewerWorkspace();
     const siteId = crypto.randomUUID();
     const otherSiteId = crypto.randomUUID();
     const metadata = { _opengeniSiteOrigin: { siteId, title: "Analytics" } };
-    const a = await session({ ...workspace, message: "Site A", metadata });
-    const b = await session({ ...workspace, message: "Site B", metadata });
+    const siteSession = (message: string) =>
+      session({
+        ...workspace,
+        message,
+        metadata,
+        privateOwnerSubjectId: subjectId,
+        createdBy: { kind: "subject", subjectId },
+      });
+    const a = await siteSession("Site A");
+    const b = await siteSession("Site B");
     await session({ ...workspace, message: "Newest unrelated" });
     const project = await createChannel(db, { ...workspace, name: "Explicit project" });
-    await setSessionChannel(db, {
-      workspaceId: workspace.workspaceId,
-      sessionId: a.id,
-      channelId: project.id,
-    });
+    await withSessionRlsActorContext({ subjectId }, () =>
+      setSessionChannel(db, {
+        workspaceId: workspace.workspaceId,
+        sessionId: a.id,
+        channelId: project.id,
+      }),
+    );
     const page = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId,
       originSiteId: siteId,

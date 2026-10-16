@@ -9,6 +9,12 @@ Overview: §2–4/§6; subsystems: §13; updates: §14.
 ---
 
 Keys/coupons: [providers](model-providers.md), [billing](deployment.md).
+Organization subscription plans (runtime catalog, period credit and seats):
+[foundation contract](subscription-plans.md). No plan row preserves existing behavior.
+`apps/api/src/billing-subscriptions.ts` owns Stripe subscription synchronization;
+`billing-subscription-store.ts` composes the accounting seams in one org-fenced
+transaction. `/v1/billing/subscription/*` and webhook plan writes are default-off
+behind `OPENGENI_SUBSCRIPTION_PLANS_ENABLED`; prepaid credit billing is independent.
 
 ## 1. Startup
 
@@ -1883,6 +1889,31 @@ end/capture, unconfirmed process shutdown, and older retirement receipts do not 
 Cleanup retains its exact holder and directory until retirement and journal
 closure settle. See [`packages/browserd`](../packages/browserd/README.md).
 
+A working directory that was copied or restored (new directory identity, same
+bytes) is refused by that recovery and continues only through explicit
+adoption ([`working-copy-adoption.ts`](../packages/browserd/src/working-copy-adoption.ts)),
+Linux controllers only. Inspection reports the exact-byte manifest digest and
+the few controller-owned derived entries it leaves out; freshness stays unknown.
+Adoption under the browser's current control authority writes an intent record
+before any effect, copies through held directory descriptors without following
+links, refuses unless both copy and original still hold the approved digest,
+appends an adopt receipt naming the staged profile's own identity, then makes
+two journaled renames (original to a preserved name, staged copy into place).
+Only the approving authority carries a stopped adoption forward, by retrying
+the same operation or launching under that authority; inspection and status
+never settle anything, and a request under another authority changes nothing.
+Before the original moves, any doubt fails the adoption with the original live.
+After that, every step first proves the original is still at its preserved
+name with the approved identity and bytes and the staged copy is unchanged; any
+doubt is a collision that keeps every copy and blocks launches. The supported
+way out of a collision, or of an adoption nobody wants finished, is a revert
+under the browser's current authority: it is journaled, puts the original back
+at its live path, keeps the staged copy, and a retry finishes one that stopped
+part way. Adoption, revert, launch and end each hold one per-browser directory
+lock for their whole transition, across controllers, so only one of them acts
+on the directory at a time. Nothing is deleted automatically, and an adopted
+copy never falls back to an older checkpoint.
+
 Undispatched creates settle under the operation lock; dispatched bindings survive for reconciliation.
 
 Typing batches: [React](../packages/react/README.md).
@@ -2220,6 +2251,12 @@ fail. See [migration delivery rules](../AGENTS.md#deployment-work-notes).
 Managed PostgreSQL may preinstall pgvector for restricted migrators. The
 explicit initial-migration opt-in verifies its public extension-owned type;
 see [deployment](deployment.md#database-identities-and-runtime-posture).
+PostgreSQL 18's additional NOT NULL catalog rows are handled by the closed,
+source-hash-checked `packages/db/src/migration-postgres-compatibility.ts` adapter
+at execution of historical 0345/0598. It changes only their constraint-catalog
+reads, not published SQL bytes, ledger names, release hashes, or schema guards;
+older servers execute the original source. Already-applied migrations stay
+skipped. See [migration compatibility](migrations-expand-contract.md#historical-server-compatibility).
 
 Postgres owns file access/liveness; fork screenshots require ancestry and copied receipts, preserving RLS.
 Storage endpoints and signed URLs are transport details; keep URLs, object keys,
