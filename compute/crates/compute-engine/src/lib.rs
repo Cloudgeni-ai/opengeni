@@ -9,6 +9,7 @@
 //! [`firecracker::Firecracker`] is the first implementation.
 
 pub mod cgroup;
+pub mod confined;
 mod error;
 pub mod firecracker;
 mod profile;
@@ -111,12 +112,18 @@ pub trait Engine: Send + Sync + 'static {
     /// Ends the VM process and releases its host resources. Its disks and
     /// any snapshot stay on disk. Resolves only once the process has ended,
     /// so that nothing is still using the disks when a replacement starts.
+    /// Fails at once if the process cannot be signalled, and after it ended
+    /// if its resources could not be released; [`Engine::clean_up`] then
+    /// releases them later.
     fn stop(&self, vm: Self::Vm) -> impl Future<Output = Result<(), EngineError>> + Send;
 
     /// Takes over the VM an earlier run of the host agent left running for
     /// `spec`, if there is one in a usable state, without disturbing it.
-    /// A VM process that cannot be used (for example one that never
-    /// finished starting) is ended and `None` returned.
+    /// `None` means no guest runs for `spec`: none was found, or the one
+    /// found provably never started its guest or has exited, and has been
+    /// cleaned up. A VM that may hold a running guest but cannot be taken
+    /// over (it does not answer, say) is an error and is left alone, so
+    /// its memory is never lost to a slow probe.
     fn adopt(
         &self,
         spec: &VmSpec,

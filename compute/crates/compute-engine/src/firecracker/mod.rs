@@ -18,7 +18,6 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep, timeout};
@@ -154,7 +153,8 @@ fn create_request(jail: &Jail, files: &SnapshotFiles, kind: SnapshotKind) -> Res
 /// How [`Firecracker`] runs VMs.
 #[derive(Clone, Debug)]
 pub struct FirecrackerConfig {
-    /// The Firecracker binary. Its file name must be [`BINARY_NAME`].
+    /// The Firecracker binary. Its file name, once every symbolic link is
+    /// resolved, must be [`BINARY_NAME`].
     pub firecracker: PathBuf,
     /// The jailer binary from the same Firecracker release.
     pub jailer: PathBuf,
@@ -180,15 +180,15 @@ impl Firecracker {
     /// VMs use the bare-metal memory profile unless
     /// [`Firecracker::with_memory_profile`] says otherwise.
     pub fn new(config: FirecrackerConfig) -> io::Result<Self> {
-        if config
-            .firecracker
-            .file_name()
-            .is_none_or(|name| name != BINARY_NAME)
-        {
+        // The jailer resolves links in the binary's path and names every
+        // jail after the file it finds, so the name is checked there.
+        let binary = fs::canonicalize(&config.firecracker)?;
+        if binary.file_name().is_none_or(|name| name != BINARY_NAME) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "the Firecracker binary must be named {BINARY_NAME}, not {}",
+                    "the Firecracker binary must be named {BINARY_NAME}, not {} (from {})",
+                    binary.display(),
                     config.firecracker.display()
                 ),
             ));
@@ -215,7 +215,7 @@ impl Firecracker {
             ));
         }
         Ok(Self {
-            binary: config.firecracker,
+            binary,
             jailer: config.jailer,
             cgroups: Cgroup::create_parent(config.cgroup_parent)?,
             cgroup_relative,
@@ -322,8 +322,12 @@ impl Firecracker {
             }
         };
         if let Err(error) = vm.wait_for_api(self.startup_timeout).await {
-            self.kill(&vm).await;
-            return Err(EngineError::new(ErrorKind::Transient, operation, error));
+            return Err(self
+                .ended(
+                    &vm,
+                    EngineError::new(ErrorKind::Transient, operation, error),
+                )
+                .await);
         }
         Ok(vm)
     }
@@ -357,17 +361,37 @@ impl Firecracker {
     }
 
     /// Kills the VMM, waits for it to exit and releases its cgroup and the
-    /// jailer's per-launch files.
-    async fn kill(&self, vm: &FirecrackerVm) {
+    /// jailer's per-launch files. Fails without waiting if the process
+    /// cannot be signalled, and after it exited if releasing fails.
+    async fn kill(&self, vm: &FirecrackerVm) -> Result<(), EngineError> {
+        const OP: &str = "stop";
         // A pidfd only ever signals its own process, even if it is gone.
-        let _ = vm.process.kill();
+        vm.process
+            .kill()
+            .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
         vm.process.exited().await;
         let (cgroup, jail) = (vm.cgroup.clone(), vm.jail.clone());
-        let _ = tokio::task::spawn_blocking(move || {
-            let _ = cgroup.remove();
+        tokio::task::spawn_blocking(move || {
+            cgroup.remove()?;
             tidy(&jail)
         })
-        .await;
+        .await
+        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
+        .map_err(|error| EngineError::io(OP, error))
+    }
+
+    /// Ends a VM whose start failed with `error` and returns that error, or
+    /// a fatal one if the VM would not end: nothing may start in its place
+    /// while it may still run.
+    async fn ended(&self, vm: &FirecrackerVm, error: EngineError) -> EngineError {
+        match self.kill(vm).await {
+            Ok(()) => error,
+            Err(stuck) => EngineError::new(
+                ErrorKind::Fatal,
+                error.operation,
+                format!("{error}; then the VM could not be ended: {stuck}"),
+            ),
+        }
     }
 
     /// Kills whatever runs in the VM's cgroup, for VMMs the host holds no
@@ -398,11 +422,10 @@ impl Firecracker {
         vm: &FirecrackerVm,
         body: impl Future<Output = Result<T, EngineError>>,
     ) -> Result<T, EngineError> {
-        let result = body.await;
-        if result.is_err() {
-            self.kill(vm).await;
+        match body.await {
+            Ok(value) => Ok(value),
+            Err(error) => Err(self.ended(vm, error).await),
         }
-        result
     }
 }
 
@@ -428,8 +451,9 @@ fn prepare(
 ) -> io::Result<(File, File)> {
     fs::create_dir_all(jail.root())?;
     tidy(jail)?;
+    // The jail is the VMM's: an earlier one may have left links in it.
     for path in owned {
-        std::os::unix::fs::chown(path, Some(uid), Some(gid))?;
+        crate::confined::hand_over(path, uid, gid)?;
     }
     fs::create_dir_all(logs)?;
     Ok((
@@ -515,7 +539,7 @@ impl FirecrackerVm {
     async fn wait_for_api(&self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
         loop {
-            if UnixStream::connect(self.api.socket()).await.is_ok() {
+            if crate::confined::connect(self.api.socket()).await.is_ok() {
                 return Ok(());
             }
             if !self.is_running() {
@@ -821,32 +845,54 @@ impl Engine for Firecracker {
     }
 
     async fn stop(&self, vm: FirecrackerVm) -> Result<(), EngineError> {
-        self.kill(&vm).await;
-        Ok(())
+        self.kill(&vm).await
     }
 
     async fn adopt(&self, spec: &VmSpec) -> Result<Option<(FirecrackerVm, Found)>, EngineError> {
         const OP: &str = "adopt";
+        // A VMM is discarded only on proof that no guest ever ran in it or
+        // that it is gone; anything less is an error and the VM is left be.
+        let unsure = |why: String| EngineError::new(ErrorKind::Transient, OP, why);
         let cgroup = self.cgroup_of(spec);
         if !cgroup.path().exists() {
             return Ok(None);
         }
         let jail =
             Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        let Ok(vm) = self.attach(spec, &jail) else {
-            // Whatever is left (a jailer that died half way, an empty
-            // group) is of no use.
-            self.discard(spec)
-                .await
-                .map_err(|error| EngineError::io(OP, error))?;
-            return Ok(None);
+        let vm = match self.attach(spec, &jail) {
+            Ok(vm) => vm,
+            Err(error) => {
+                let populated = cgroup
+                    .is_populated()
+                    .map_err(|error| EngineError::io(OP, error))?;
+                if populated {
+                    return Err(unsure(format!(
+                        "a process runs in the VM's group but is not its VMM: {error}"
+                    )));
+                }
+                // An empty group: a jailer that died half way, or a VMM
+                // that exited. Nothing runs, so nothing is lost.
+                self.discard(spec)
+                    .await
+                    .map_err(|error| EngineError::io(OP, error))?;
+                return Ok(None);
+            }
         };
-        if let Ok(Ok(Some(found))) = timeout(ADOPT_TIMEOUT, vm.found()).await {
-            Ok(Some((vm, found)))
-        } else {
-            // It never finished starting, or it does not answer.
-            self.kill(&vm).await;
-            Ok(None)
+        match timeout(ADOPT_TIMEOUT, vm.found()).await {
+            Ok(Ok(Some(found))) => Ok(Some((vm, found))),
+            // The VMM says it never started a guest: a launch cut short.
+            Ok(Ok(None)) => {
+                self.kill(&vm).await?;
+                Ok(None)
+            }
+            _ if !vm.is_running() => {
+                self.kill(&vm).await?;
+                Ok(None)
+            }
+            Ok(Err(error)) => Err(unsure(format!("the VMM runs but its API failed: {error}"))),
+            Err(_) => Err(unsure(format!(
+                "the VMM runs but did not answer within {ADOPT_TIMEOUT:?}"
+            ))),
         }
     }
 

@@ -106,7 +106,7 @@ impl Api {
              Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        let mut stream = timeout_at(deadline, UnixStream::connect(&self.socket))
+        let mut stream = timeout_at(deadline, crate::confined::connect(&self.socket))
             .await
             .map_err(|_| ApiError::Connect(io::ErrorKind::TimedOut.into()))?
             .map_err(ApiError::Connect)?;
