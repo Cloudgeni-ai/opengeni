@@ -518,6 +518,7 @@ export * from "./site-data";
 export * from "./site-publishing";
 export { withSiteRuntimeAdmission } from "./site-runtime-admission";
 export * from "./site-platform";
+export * from "./insights-site-usage";
 export * from "./scheduled-slack-bot-messages";
 export * from "./organization-signup-use-cases";
 export * from "./site-sql";
@@ -1301,6 +1302,9 @@ export {
 } from "./database";
 export {
   currentSessionRlsActorIdentityKey,
+  currentSessionRlsActorContext,
+  currentSiteViewerRlsContext,
+  withSiteViewerRlsContext,
   currentSessionRlsActorInitiatingHumanSubjectId,
   withSessionRlsActorContext,
 } from "./database";
@@ -29679,7 +29683,7 @@ async function createSessionInTransaction(
   );
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
-  if (createRequestedVisibility === "user_private") {
+  if (createRequestedVisibility === "user_private" || sessionMetadata._opengeniSiteOrigin) {
     // Private creation later proves the owner's live organization membership
     // and, for a fresh top-level organization session, reads the mutable
     // owner/admin enablement setting. Serialize both checks with organization
@@ -30883,6 +30887,10 @@ export type SessionAuthorityProjection = SessionAccessProjection & {
   authorityEpoch: number;
   visibility: "user_private" | "workspace_shared";
   ownerSubjectId: string | null;
+  siteId: string | null;
+  siteAccessRootId: string | null;
+  siteViewerPrincipal: string | null;
+  siteOwnerSubjectId: string | null;
 };
 
 type SessionAccessRow = Pick<
@@ -30924,6 +30932,10 @@ export async function getSessionAuthorityProjection(
         visibility: schema.sessions.visibility,
         authorityEpoch: schema.sessions.authorityEpoch,
         ownerSubjectId: schema.sessions.ownerSubjectId,
+        siteId: schema.sessions.siteId,
+        siteAccessRootId: schema.sessions.siteAccessRootId,
+        siteViewerPrincipal: schema.sessions.siteViewerPrincipal,
+        siteOwnerSubjectId: schema.sessions.siteOwnerSubjectId,
         agentAccess: schema.sessions.agentAccess,
         scopeSubjectId: schema.sessions.scopeSubjectId,
         memoryScope: schema.sessions.memoryScope,
@@ -30938,6 +30950,10 @@ export async function getSessionAuthorityProjection(
       rootSessionId: row.rootSessionId,
       visibility: row.visibility as SessionAuthorityProjection["visibility"],
       ownerSubjectId: row.ownerSubjectId ?? null,
+      siteId: row.siteId ?? null,
+      siteAccessRootId: row.siteAccessRootId ?? null,
+      siteViewerPrincipal: row.siteViewerPrincipal ?? null,
+      siteOwnerSubjectId: row.siteOwnerSubjectId ?? null,
       agentAccess: sessionAgentAccessFromRow(row),
       scopeSubjectId: sessionEndUserFromRow(row),
       memoryScope: sessionMemoryScopeFromRow(row),
@@ -32548,8 +32564,16 @@ function sessionFilters(
   }
   if (options.originSiteId) {
     filters.push(
-      sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.originSiteId}`,
+      eq(schema.sessions.siteId, options.originSiteId),
+      sql`${schema.sessions.siteAccessRootId} is not null`,
     );
+  } else {
+    // App-internal execution is not ordinary workspace conversation discovery.
+    // This is presentation scope only: native ownership and Site RLS still apply.
+    const ownRoot = options.authorizationScope?.agentAccessViewer?.callerRootSessionId;
+    filters.push(ownRoot
+      ? sql`(${schema.sessions.siteAccessRootId} is null OR ${schema.sessions.rootSessionId} = ${ownRoot}::uuid)`
+      : sql`${schema.sessions.siteAccessRootId} is null`);
   }
   const archivedRoot = sql`exists (
     select 1
@@ -33280,7 +33304,7 @@ async function readSessionListForSubject(
             throw new SessionListCursorError();
           }
           let nextOffset: number | null = null;
-          if (options.authorizationScope) {
+          {
             // A host may revoke rows between pages. Scan the immutable snapshot
             // in bounded database-filtered batches until this page is full plus
             // one authorized lookahead; never hydrate a stale broad slice and
@@ -33301,7 +33325,8 @@ async function readSessionListForSubject(
                   and(
                     eq(schema.sessions.workspaceId, workspaceId),
                     inArray(schema.sessions.id, candidates),
-                    sessionAuthorizationScopeFilter(options.authorizationScope),
+                    sql`${schema.sessions.siteAccessRootId} is null`,
+                    ...(options.authorizationScope ? [sessionAuthorizationScopeFilter(options.authorizationScope)] : []),
                   ),
                 );
               const allowed = new Set(allowedRows.map((row) => row.id));
@@ -33317,12 +33342,6 @@ async function readSessionListForSubject(
             pageIds = visible.slice(0, limit).map((row) => row.id);
             if (visible.length > limit) {
               nextOffset = visible[limit - 1]!.offsetAfter;
-            }
-          } else {
-            pageIds = snapshot.ordinarySessionIds.slice(cursor.offset, cursor.offset + limit);
-            const candidateOffset = cursor.offset + pageIds.length;
-            if (candidateOffset < snapshot.ordinarySessionIds.length) {
-              nextOffset = candidateOffset;
             }
           }
           if (nextOffset !== null) {
@@ -34755,8 +34774,14 @@ async function selectSessionDiscoveryPageRows(
   }
   if (options.filters.originSiteId) {
     authorizationFilters.push(
-      sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.filters.originSiteId}`,
+      eq(schema.sessions.siteId, options.filters.originSiteId),
+      sql`${schema.sessions.siteAccessRootId} is not null`,
     );
+  } else {
+    const ownRoot = options.authorizationScope?.agentAccessViewer?.callerRootSessionId;
+    authorizationFilters.push(ownRoot
+      ? sql`(${schema.sessions.siteAccessRootId} is null OR ${schema.sessions.rootSessionId} = ${ownRoot}::uuid)`
+      : sql`${schema.sessions.siteAccessRootId} is null`);
   }
   if (options.filters.activeOnly) {
     authorizationFilters.push(notInArray(schema.sessions.status, ["failed", "cancelled"]));

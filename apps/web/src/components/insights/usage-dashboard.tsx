@@ -76,6 +76,8 @@ import {
   type TokenClassId,
 } from "./usage-format";
 import { loadUsage, loadUsageCalls, type UsageLoad } from "./usage-source";
+import { SitePlatformUsageSection } from "./site-platform-usage-section";
+import { SiteAiUsageSection } from "./site-ai-usage-section";
 import {
   activeFilterCount,
   nextUsageSearch,
@@ -310,6 +312,12 @@ export function UsageDashboard(props: UsageDashboardProps) {
           your own API keys aren't charged by Opengeni; their amounts are list-price estimates.
         </p>
       </div>
+      {props.scope.kind === "workspace" ? (
+        <>
+        {query.range !== "custom" ? <SiteAiUsageSection client={client} workspaceId={props.scope.workspaceId} range={query.range} /> : null}
+        <SitePlatformUsageSection client={client} workspaceId={props.scope.workspaceId} />
+        </>
+      ) : null}
     </div>
   );
 }

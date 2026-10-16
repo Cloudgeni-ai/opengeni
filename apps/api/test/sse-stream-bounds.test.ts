@@ -56,10 +56,15 @@ function titleEvent(sequence: number, title: string): SessionEvent {
 const realDb = await import("@opengeni/db");
 const realListSessionEventPage = realDb.listSessionEventPage;
 const realListWorkspaceControlEvents = realDb.listWorkspaceControlEvents;
+const realGetWorkspaceControlEvent = realDb.getWorkspaceControlEvent;
 const realGetWorkspaceInteractionRevisionState = realDb.getWorkspaceInteractionRevisionState;
 const realReadSessionEventStorageGapEnd = realDb.readSessionEventStorageGapEnd;
 mock.module("@opengeni/db", () => ({
   ...realDb,
+  getWorkspaceControlEvent: async (db: unknown, workspaceId: string, eventId: string) => {
+    if (db !== fakeDb) return realGetWorkspaceControlEvent(db as never, workspaceId, eventId);
+    return durableControlEvents.find(event => event.id === eventId) ?? null;
+  },
   readSessionEventStorageGapEnd: async (
     db: unknown,
     workspaceId: string,

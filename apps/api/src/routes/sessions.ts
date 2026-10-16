@@ -30,7 +30,7 @@ import {
   SITE_FRAME_SESSION_CREATE_FIELDS,
   siteFrameBodyRefusal,
 } from "@opengeni/contracts/site-session-http";
-import { requireWorkspace, scheduledSessionIds } from "@opengeni/db";
+import { requireWorkspace, scheduledSessionIds, currentSiteViewerRlsContext, nestedPostgresSqlState } from "@opengeni/db";
 import {
   currentSiteSessionOrigin,
   isVerifiedDelegatedHumanAuthorization,
@@ -329,6 +329,7 @@ import {
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { SessionRetryConflictError } from "@opengeni/db";
+import { reauthorizeSiteSessionRequest } from "../site-publishing/session-request-authority";
 import {
   attachViewer,
   detachViewer,
@@ -761,7 +762,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       // nothing else: the session gets the minimal Site profile. Only the Site
       // itself, running its published agent as `site:<siteId>`, chooses tools.
       const siteOrigin = origin ?? currentSiteSessionOrigin();
-      if (siteOrigin && grant.subjectId !== `site:${siteOrigin.siteId}`) {
+      if (siteOrigin && currentSiteViewerRlsContext()?.siteId !== siteOrigin.siteId) {
         const refused = siteFrameBodyRefusal("sessions.create", "/sessions", payload);
         if (refused)
           return c.json(
@@ -778,6 +779,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           siteId: siteOrigin.siteId,
           versionId: siteOrigin.versionId ?? null,
         });
+        // Ordinary Site viewers use native Only-me ownership. An agent preview
+        // inherits its parent's native visibility; the Site audience binding
+        // additionally restricts that execution to the parent's real owner.
+        if (grant.principalKind !== "agent_attempt")
+          (payload as Record<string, unknown>).visibility = "private";
       }
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
@@ -3597,6 +3603,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         reauthorizeAfterMs:
           authorization?.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
         reauthorize: async () => {
+          await reauthorizeSiteSessionRequest(c.req.raw);
           const freshGrant = await requireFreshAccessGrant(c, deps, workspaceId, "sessions:read");
           await requireSessionAuthorization(deps, freshGrant, {
             sessionId,
@@ -5671,7 +5678,7 @@ export function sessionTenancyHttpError(error: unknown): Error {
       retryable: false,
     });
   }
-  if (error instanceof SessionTenancyNotActivatedError) {
+  if (error instanceof SessionTenancyNotActivatedError || nestedPostgresSqlState(error) === "P0793") {
     return new ApiHttpError(409, {
       code: "conflict",
       message: "Only-me chats are not enabled for this organization.",
@@ -6552,7 +6559,7 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
       403,
     );
   }
-  if (error instanceof SessionTenancyNotActivatedError) {
+  if (error instanceof SessionTenancyNotActivatedError || nestedPostgresSqlState(error) === "P0793") {
     return c.json(
       {
         code: "SESSION_TENANCY_NOT_ACTIVATED",

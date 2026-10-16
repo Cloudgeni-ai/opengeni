@@ -9,7 +9,7 @@ import {
   type SiteLimits,
   type SiteViewerCapabilities,
 } from "@opengeni/contracts";
-import { sessionUsageLimitsProducerEnabled, type ApiRouteDeps } from "@opengeni/core";
+import { sessionUsageLimitsProducerEnabled, stampSiteViewerSessionAuthorization, type ApiRouteDeps } from "@opengeni/core";
 import {
   consumeSiteRuntimeRate,
   findSiteHostname,
@@ -40,6 +40,7 @@ import {
   type SiteRuntimeReservation,
 } from "@opengeni/db";
 import type { SiteGatewayFields } from "./gateway-signature";
+import { bindSiteSessionRequestAuthority } from "./session-request-authority";
 import { effectiveSiteLimits, siteViewerLimits, sourceSiteLimitProfile } from "./limits";
 import {
   siteLimitInputs,
@@ -219,6 +220,7 @@ export async function resolveSiteRuntimeViewer(
 /** What a viewer cannot do on a Site: 403 with `details.code` `not_available_for_viewer`. */
 export type SiteViewerFeature =
   | "agent"
+  | "private_conversations"
   | "agent_model"
   | "workspace_tools"
   | "site_data"
@@ -812,14 +814,28 @@ export async function siteRuntimeSessionRequest(
     path: string;
     body?: unknown;
     extraPermissions?: readonly Permission[];
+    reauthorize: () => Promise<void>;
   },
 ): Promise<Request> {
-  return await siteServiceSessionRequest(
+  const request = await siteServiceSessionRequest(
     deps,
     host.scope,
     { id: host.site.id, versionId: host.versionId },
     { ...input, label: `${siteRuntimeViewerLabel(viewer)} on ${host.hostname}` },
   );
+  bindSiteSessionRequestAuthority(request, input.reauthorize);
+  if (viewer.kind === "member" && viewer.subjectId && viewer.sessionId) {
+    // The gateway already verified the host and opaque Site cookie. Native
+    // resolution reloads this person's live membership, roles and models.
+    // This is delegated ownership, never fabricated managed-cookie proof.
+    stampSiteViewerSessionAuthorization(request, {
+      organizationId: host.scope.accountId,
+      subjectId: viewer.subjectId,
+      permissions: [...new Set([...SITE_RUNTIME_AGENT_PERMISSIONS, ...(input.extraPermissions ?? [])])],
+      workspaceId: host.scope.workspaceId,
+    });
+  }
+  return request;
 }
 
 /** A forwarded response without cookies (site-runtime never sets any). */

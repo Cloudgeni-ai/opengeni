@@ -83,7 +83,9 @@ export async function normalizeSiteAgentSession(
     (session) => {
       if (
         session.parentSessionId ||
-        session.createdBy.subjectId !== `site:${host.site.id}` ||
+        (session.createdBy.subjectId !== `site:${host.site.id}` &&
+          !(viewer.kind === "member" && session.createdBy.kind === "subject" &&
+            session.createdBy.subjectId === viewer.subjectId)) ||
         siteSessionOriginFromMetadata(session.metadata)?.siteId !== host.site.id
       )
         throw sitePublishingError(

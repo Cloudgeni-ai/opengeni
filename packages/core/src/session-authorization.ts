@@ -14,6 +14,7 @@ import {
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   currentSessionRlsActorIdentityKey,
+  currentSiteViewerRlsContext,
   getSessionAuthorityProjection,
   getSessionAuthorizationTargetProjection,
   getSession,
@@ -237,6 +238,7 @@ export function sessionRlsActorForAuthorization(
     ? {
         subjectId: authorization.actor.subjectId,
         initiatingHumanSubjectId: authorization.actor.initiatingHumanSubjectId,
+        agentRootSessionId: authorization.actor.callerRootSessionId,
       }
     : { subjectId: authorization.actor.subjectId };
 }
@@ -310,6 +312,22 @@ export async function requireSessionAuthorization(
   // their own not-found handling.
   if (!authority && input.surface !== "core") {
     throw new SessionAuthorizationDeniedError("not_found");
+  }
+
+  // Also enforce the durable Site audience for hosts using scoped (owner-role)
+  // databases. The request-local viewer proof is never taken from Site JSON.
+  if (authority?.siteAccessRootId) {
+    const viewer = currentSiteViewerRlsContext();
+    const resolved = await resolveSessionAuthorizationActor(deps.db, grant, reads);
+    const actor = resolved.actor;
+    const allowed = actor.kind === "agent_attempt"
+      ? actor.callerRootSessionId === authority.rootSessionId &&
+        (authority.siteAccessRootId === authority.rootSessionId || authority.siteOwnerSubjectId === actor.initiatingHumanSubjectId)
+      : authority.siteOwnerSubjectId === actor.subjectId ||
+        (actor.subjectId === `site:${authority.siteId}` &&
+          viewer?.siteId === authority.siteId &&
+          viewer.principal === authority.siteViewerPrincipal);
+    if (!allowed) throw new SessionAuthorizationDeniedError("not_found");
   }
 
   // A request from a Site page (an HTTP frame request, or a tool the page

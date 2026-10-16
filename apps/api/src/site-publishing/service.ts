@@ -643,11 +643,16 @@ export async function siteServiceSessionRequest(
     "x-opengeni-site-id": site.id,
   });
   if (site.versionId) headers.set("x-opengeni-site-version", site.versionId);
-  if (input.body !== undefined) headers.set("content-type", "application/json");
+  const body = input.body === undefined ? undefined : JSON.stringify(input.body);
+  if (body !== undefined) {
+    headers.set("content-type", "application/json");
+    // Preserve the exact Request carrying verified-human dispatch proof.
+    headers.set("content-length", String(Buffer.byteLength(body)));
+  }
   return new Request(new URL(input.path, input.origin), {
     method: input.method,
     headers,
-    ...(input.body === undefined ? {} : { body: JSON.stringify(input.body) }),
+    ...(body === undefined ? {} : { body }),
   });
 }
 

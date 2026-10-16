@@ -9,7 +9,7 @@ import {
 } from "@tanstack/react-router";
 import { Toaster } from "../src/components/ui/sonner";
 import { ArtifactDetailRoute } from "../src/routes/artifacts";
-import { SitePlatformUsageSection } from "../src/components/usage/site-platform-usage-section";
+import { SitePlatformUsageSection } from "../src/components/insights/site-platform-usage-section";
 import { SectionStack } from "../src/components/ui/section";
 import { SiteAuthorizeRoute } from "../src/routes/site-auth";
 import { artifactReturnSearch } from "../src/lib/routes";

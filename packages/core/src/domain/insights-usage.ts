@@ -4,8 +4,15 @@ import type {
   InsightsUsageQuery,
   InsightsUsageRange,
   InsightsUsageResponse,
+  InsightsSiteUsageQuery,
 } from "@opengeni/contracts/insights-usage";
-import { readInsightsCalls, readInsightsUsage, type Database } from "@opengeni/db";
+import { readInsightsCalls, readInsightsUsage, readInsightsSiteUsage, type Database } from "@opengeni/db";
+
+export async function getInsightsSiteUsage(db: Database, input: {
+  accountId: string; workspaceId: string; query: InsightsSiteUsageQuery; now?: Date;
+}) {
+  return readInsightsSiteUsage(db, { ...input, now: input.now ?? new Date() });
+}
 
 export type InsightsQueryScope = {
   accountId: string;

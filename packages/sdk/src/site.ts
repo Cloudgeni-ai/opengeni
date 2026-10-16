@@ -14,6 +14,13 @@ import { OpenGeniClient } from "./client";
 import { sitePortFetch, siteSessionPath, SITE_WORKSPACE } from "./site-http";
 import { createOpenGeniSiteData, type OpenGeniSiteData, type OpenGeniSiteFiles } from "./site-data";
 import { createOpenGeniSiteSql, type OpenGeniSiteSql } from "./site-sql";
+import { createOpenGeniSiteAi, type OpenGeniSiteAi } from "./site-ai";
+export type {
+  OpenGeniSiteAi,
+  OpenGeniSiteAiRequest,
+  OpenGeniSiteAiResult,
+  OpenGeniSiteAiOptions,
+} from "./site-ai";
 export {
   OpenGeniSiteSqlError,
   type OpenGeniSiteSql,
@@ -165,6 +172,8 @@ export type OpenGeniSiteBridgeResponseMessage = {
 export type OpenGeniSiteClient = {
   /** Ordinary SDK, including React session/composer methods and SSE streams. */
   readonly client: OpenGeniClient;
+  /** Inline AI over ordinary Site sessions. No conversation component is required. */
+  readonly ai: OpenGeniSiteAi;
   /** Host-bound routing alias, not a credential or a caller-selected tenant. */
   readonly workspaceId: string;
   /** Workspace-bound typed facade. The parent host owns workspace identity and credentials. */
@@ -258,12 +267,14 @@ export function createOpenGeniSiteClient(
   );
   let viewer: Promise<OpenGeniSiteViewer | null> | null = null;
   let capabilities: Promise<OpenGeniSiteCapabilities | null> | null = null;
+  const client = new OpenGeniClient({
+    baseUrl: "https://site.opengeni.invalid",
+    toolGatewayMode: options.toolGatewayMode ?? "target",
+    fetch: (input, init) => transport.fetch(input, init),
+  });
   return {
-    client: new OpenGeniClient({
-      baseUrl: "https://site.opengeni.invalid",
-      toolGatewayMode: options.toolGatewayMode ?? "target",
-      fetch: (input, init) => transport.fetch(input, init),
-    }),
+    client,
+    ai: createOpenGeniSiteAi(client, SITE_WORKSPACE),
     workspaceId: SITE_WORKSPACE,
     tools: new OpenGeniToolsClient(transport).forWorkspace("site-host"),
     data: siteData.data,
