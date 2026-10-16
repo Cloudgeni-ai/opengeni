@@ -59,7 +59,12 @@ test("expanded Sites keep desktop navigation clear of native controls", async ()
           .evaluate((el) => el.getBoundingClientRect().height);
         expect(inlineHeight).toBe(48);
         const frame = page.frameLocator("iframe");
-        await frame.getByRole("button", { name: "Try the Site" }).click();
+        // Establish live Site state before testing the host's navigation. An
+        // early Chromium iframe pointer click can miss without dispatching the
+        // fixture handler; that is not evidence of state lost on fullscreen exit.
+        await frame.getByRole("button", { name: "Try the Site" }).press("Enter");
+        await frame.getByRole("button", { name: "Site state preserved" }).waitFor();
+        const originalIframe = await page.locator("iframe").elementHandle();
         await page.getByRole("button", { name: "Open Site full screen" }).click();
         expect(await page.locator("dialog").evaluate((el) => el.matches(":modal"))).toBe(true);
         const back = page.getByRole("button", { name: "Back", exact: true });
@@ -86,6 +91,9 @@ test("expanded Sites keep desktop navigation clear of native controls", async ()
         await back.click();
         expect(await page.locator("dialog").evaluate((el) => el.matches(":modal"))).toBe(false);
         await frame.getByRole("button", { name: "Site state preserved" }).waitFor();
+        expect(
+          await page.locator("iframe").evaluate((el, original) => el === original, originalIframe),
+        ).toBe(true);
         expect(await page.locator("[data-window-drag]").count()).toBe(0);
         await page.getByRole("button", { name: "Open Site full screen" }).click();
         await back.focus();
@@ -95,6 +103,9 @@ test("expanded Sites keep desktop navigation clear of native controls", async ()
         await page.keyboard.press("Escape");
         expect(await page.locator("dialog").evaluate((el) => el.matches(":modal"))).toBe(false);
         await frame.getByRole("button", { name: "Site state preserved" }).waitFor();
+        expect(
+          await page.locator("iframe").evaluate((el, original) => el === original, originalIframe),
+        ).toBe(true);
         expect(errors).toEqual([]);
         await page.close();
       }
