@@ -56,7 +56,7 @@ describe("error cause classification", () => {
   test("names the controller refusal underneath a route's 500 wrapper", () => {
     const refusal = new BrowserControlRequestError(503, {
       code: "resource_unavailable",
-      message: "working copy /home/someone/profile is unavailable",
+      message: "working copy /home/user/profile is unavailable",
       retryable: false,
     });
     const wrapped = new HTTPException(500, {
