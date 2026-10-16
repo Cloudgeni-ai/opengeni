@@ -256,7 +256,7 @@ impl World {
             Action::Destroy { sandbox } => assert!(!self.live.contains_key(&sandbox)),
             // Every sandbox here requests its whole size: its balloon is
             // only ever let go.
-            Action::Balloon { sandbox, bytes } => {
+            Action::Balloon { sandbox, bytes, .. } => {
                 assert_eq!(bytes, 0, "{sandbox:?} squeezed within its request");
             }
             Action::Notify { sandbox, notice } => {

@@ -43,7 +43,7 @@ pub use host::{
     Action, Capacity, DiskCapacity, DiskSpace, Failure, Host, Input, Notice, Outcome, Resource,
     SandboxView, Size,
 };
-pub use ids::{HoldId, OpId, SandboxId};
+pub use ids::{BalloonRequest, HoldId, OpId, SandboxId};
 pub use level::{Durability, Level, Priority, State, Step};
 pub use policy::{
     Admission, Backoff, DiskPolicy, HostPolicy, MemoryPolicy, PolicyError, Rule, SleepPolicy,

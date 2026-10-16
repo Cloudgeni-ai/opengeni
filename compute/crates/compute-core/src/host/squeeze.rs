@@ -6,7 +6,7 @@
 //! within its request.
 
 use super::{Action, Host, Notice, Resource, WakeRoom};
-use crate::ids::SandboxId;
+use crate::ids::{BalloonRequest, SandboxId};
 use crate::level::{Level, Priority};
 use crate::policy::MemoryPolicy;
 use crate::sandbox::{Health, Sandbox};
@@ -109,19 +109,26 @@ impl Sandbox {
     fn balloon_settled(&self) -> bool {
         self.balloon_taken == Some(self.balloon_wanted())
     }
+
+    /// Whether `request` carried the balloon setting last sent, still
+    /// waiting for its answer: an answer to any other is stale.
+    fn balloon_answers(&self, request: BalloonRequest) -> bool {
+        self.balloon_sent.is_some()
+            && self.balloon_taken.is_none()
+            && self.balloon_request == request
+    }
 }
 
 impl Host {
-    /// `id`'s VM did not take a balloon setting of `bytes`: it is asked
-    /// again after the sleep backoff, longer after each failure in a row.
-    /// What the balloon takes meanwhile is not known.
-    pub(super) fn balloon_failed(&mut self, now: At, id: SandboxId, bytes: u64) {
+    /// `id`'s VM did not take the balloon setting of `request`: it is
+    /// asked again after the sleep backoff, longer after each failure in a
+    /// row. What the balloon takes meanwhile is not known.
+    pub(super) fn balloon_failed(&mut self, now: At, id: SandboxId, request: BalloonRequest) {
         let backoff = self.policy.sleep_backoff;
         let Some(slot) = self.sandboxes.get_mut(&id) else {
             return;
         };
-        if slot.balloon_sent != Some(bytes) {
-            // An older request; a newer one stands.
+        if !slot.balloon_answers(request) {
             return;
         }
         let failures = slot.balloon_retry.map_or(0, |(_, failures)| failures) + 1;
@@ -131,18 +138,17 @@ impl Host {
         self.mark(id);
     }
 
-    /// `id`'s VM took the balloon setting of `bytes`: if that is the one
+    /// `id`'s VM took the balloon setting of `request`: if that is the one
     /// last sent, it is known to hold, and failures before it are
     /// forgotten.
-    pub(super) fn balloon_set(&mut self, id: SandboxId, bytes: u64) {
+    pub(super) fn balloon_set(&mut self, id: SandboxId, request: BalloonRequest) {
         let Some(slot) = self.sandboxes.get_mut(&id) else {
             return;
         };
-        if slot.balloon_sent != Some(bytes) {
-            // An older request; a newer one stands.
+        if !slot.balloon_answers(request) {
             return;
         }
-        slot.balloon_taken = Some(bytes);
+        slot.balloon_taken = slot.balloon_sent;
         slot.balloon_retry = None;
         self.mark(id);
     }

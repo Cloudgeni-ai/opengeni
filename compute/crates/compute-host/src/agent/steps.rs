@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use compute_core::{Action, Durability, Failure, Input, Level, Notice, OpId, Outcome, State, Step};
+use compute_core::{
+    Action, BalloonRequest, Durability, Failure, Input, Level, Notice, OpId, Outcome, State, Step,
+};
 use compute_engine::{CancellationToken, Engine, VmSpec};
 use tokio::time::{Instant, sleep};
 
@@ -96,13 +98,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             Event::TornDown { id } => self.torn_down(id),
-            Event::BalloonFailed { id, bytes } => self.input(Input::BalloonFailed {
+            Event::BalloonFailed { id, request } => self.input(Input::BalloonFailed {
                 sandbox: id.0,
-                bytes,
+                request,
             }),
-            Event::BalloonSet { id, bytes } => self.input(Input::BalloonSet {
+            Event::BalloonSet { id, request } => self.input(Input::BalloonSet {
                 sandbox: id.0,
-                bytes,
+                request,
             }),
         }
     }
@@ -150,16 +152,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             Action::Notify { sandbox, notice } => self.notify(Id(sandbox), notice),
-            Action::Balloon { sandbox, bytes } => self.set_balloon(Id(sandbox), bytes),
+            Action::Balloon {
+                sandbox,
+                bytes,
+                request,
+            } => self.set_balloon(Id(sandbox), bytes, request),
         }
     }
 
     /// Asks the guest of `id`'s running VM to give `bytes` back through its
     /// balloon, in the background: a VM that fails to keeps its memory, the
     /// host relieves pressure further if it must, and the setting is asked
-    /// again after a backoff.
-    fn set_balloon(&self, id: Id, bytes: u64) {
+    /// again after a backoff. Either answer names `request`.
+    fn set_balloon(&self, id: Id, bytes: u64, request: BalloonRequest) {
         let Some(live) = self.slots.get(&id.0).and_then(|slot| slot.vm.as_ref()) else {
+            // Not asked: no VM to ask.
+            let _ = self.events_tx.send(Event::BalloonFailed { id, request });
             return;
         };
         let set = self.engine.set_balloon(&live.vm, bytes);
@@ -168,11 +176,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             match set.await {
                 Ok(()) => {
                     tracing::info!(%id, mib = bytes >> 20, "balloon set");
-                    let _ = events.send(Event::BalloonSet { id, bytes });
+                    let _ = events.send(Event::BalloonSet { id, request });
                 }
                 Err(error) => {
-                    tracing::warn!(%id, %error, "could not set the balloon");
-                    let _ = events.send(Event::BalloonFailed { id, bytes });
+                    tracing::warn!(%id, mib = bytes >> 20, %error, "could not set the balloon");
+                    let _ = events.send(Event::BalloonFailed { id, request });
                 }
             }
         });

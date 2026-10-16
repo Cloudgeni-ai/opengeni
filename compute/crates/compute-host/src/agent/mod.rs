@@ -19,8 +19,8 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use compute_core::{
-    Action, At, HoldId, Host, HostPolicy, Input, Level, OpId, Outcome, Priority, Resource,
-    SandboxId, Size, SleepPolicy, Step,
+    Action, At, BalloonRequest, HoldId, Host, HostPolicy, Input, Level, OpId, Outcome, Priority,
+    Resource, SandboxId, Size, SleepPolicy, Step,
 };
 use compute_engine::{CancellationToken, Engine, PageSize, VmSpec};
 use tokio::sync::{mpsc, oneshot};
@@ -413,15 +413,16 @@ enum Event<V> {
     TornDown {
         id: Id,
     },
-    /// The VM of `id` did not take a balloon setting of `bytes`.
+    /// The VM of `id` did not take the balloon setting of `request`, or
+    /// was not asked.
     BalloonFailed {
         id: Id,
-        bytes: u64,
+        request: BalloonRequest,
     },
-    /// The VM of `id` took a balloon setting of `bytes`.
+    /// The VM of `id` took the balloon setting of `request`.
     BalloonSet {
         id: Id,
-        bytes: u64,
+        request: BalloonRequest,
     },
 }
 

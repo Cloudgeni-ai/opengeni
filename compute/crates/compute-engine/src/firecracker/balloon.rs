@@ -4,20 +4,33 @@
 //!
 //! The device is configured at boot with `deflate_on_oom`, so a guest that
 //! needs the memory takes pages back from the balloon rather than run out.
+//! It also has statistics, the only way its API tells how many pages the
+//! guest actually holds in it: a request to let it go resolves once that
+//! is none, not when the target is set.
 //!
 //! A request outlives nothing: once its VM is stopped or dropped, a
-//! request still on its way does nothing, so it never reaches a later VM
-//! behind the same API socket.
+//! request still on its way does nothing and fails, so it never reaches a
+//! later VM behind the same API socket, and is never taken for done.
 
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
+use tokio::time::{Instant, sleep};
 
 use super::api::Api;
 use crate::error::{EngineError, ErrorKind};
+
+/// How often a balloon let go is looked at until its guest holds nothing
+/// in it.
+const EMPTYING_POLL: Duration = Duration::from_millis(50);
+
+/// How long a guest may take to take back every page of a balloon let go
+/// before the request fails, to be asked again later.
+const EMPTYING_LIMIT: Duration = Duration::from_secs(10);
 
 /// One VM's balloon.
 #[derive(Debug)]
@@ -65,8 +78,10 @@ impl Balloon {
         }
     }
 
-    /// Sets it to take `bytes`, rounded down to MiB, unless the VM is
-    /// paused or has ended. Does not borrow the VM.
+    /// Sets it to take `bytes`, rounded down to MiB. For 0, resolves only
+    /// once the guest has taken back every page it gave. Fails if the VM
+    /// is paused or has ended, so nothing was asked. Does not borrow the
+    /// VM.
     pub(super) fn set(
         &self,
         bytes: u64,
@@ -77,13 +92,19 @@ impl Balloon {
                 return Ok(());
             };
             let mib = u32::try_from(bytes >> 20).unwrap_or(u32::MAX);
-            let mut state = inner.state.lock().await;
-            if inner.ended.load(Ordering::Acquire) || state.paused || state.mib == Some(mib) {
-                return Ok(());
+            {
+                let mut state = inner.state.lock().await;
+                inner.running(&state)?;
+                if state.mib != Some(mib) {
+                    patch(&inner.api, mib).await?;
+                    state.mib = Some(mib);
+                }
             }
-            patch(&inner.api, mib).await?;
-            state.mib = Some(mib);
-            Ok(())
+            if mib == 0 {
+                inner.emptied().await
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -140,6 +161,63 @@ impl Drop for Balloon {
     }
 }
 
+impl Inner {
+    /// Fails unless its VM runs, read under `state`.
+    fn running(&self, state: &State) -> Result<(), EngineError> {
+        if self.ended.load(Ordering::Acquire) {
+            Err(EngineError::new(
+                ErrorKind::Transient,
+                "balloon",
+                "the VM has ended",
+            ))
+        } else if state.paused {
+            Err(EngineError::new(
+                ErrorKind::Transient,
+                "balloon",
+                "the VM is paused",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Waits, within [`EMPTYING_LIMIT`], until the guest holds no page in
+    /// the balloon, as the device reports. Each look is made under `state`,
+    /// so none reaches a later VM, and fails once the VM no longer runs or
+    /// its balloon was set again.
+    async fn emptied(&self) -> Result<(), EngineError> {
+        let deadline = Instant::now() + EMPTYING_LIMIT;
+        loop {
+            let held = {
+                let state = self.state.lock().await;
+                self.running(&state)?;
+                if state.mib != Some(0) {
+                    return Err(EngineError::new(
+                        ErrorKind::Transient,
+                        "balloon",
+                        "the balloon was set again before it emptied",
+                    ));
+                }
+                held_pages(&self.api).await?
+            };
+            if held == 0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(EngineError::new(
+                    ErrorKind::Transient,
+                    "balloon",
+                    format!(
+                        "the guest still holds {held} pages in its balloon after {}s",
+                        EMPTYING_LIMIT.as_secs()
+                    ),
+                ));
+            }
+            sleep(EMPTYING_POLL).await;
+        }
+    }
+}
+
 /// Sets the balloon to take nothing unless it is known to, or forgets what
 /// it takes if that fails.
 async fn let_go(api: &Api, state: &mut State) {
@@ -155,8 +233,31 @@ async fn patch(api: &Api, mib: u32) -> Result<(), EngineError> {
         .map_err(|error| EngineError::caused_by(ErrorKind::Transient, "balloon", error))
 }
 
+/// Pages the guest holds in the balloon now, from the device's statistics.
+/// Fails for a VM booted without them.
+async fn held_pages(api: &Api) -> Result<u64, EngineError> {
+    let body = api
+        .call("GET", "/balloon/statistics", None)
+        .await
+        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, "balloon", error))?;
+    serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|stats| stats.get("actual_pages")?.as_u64())
+        .ok_or_else(|| {
+            EngineError::new(
+                ErrorKind::Transient,
+                "balloon",
+                format!(
+                    "balloon statistics without actual_pages: {}",
+                    String::from_utf8_lossy(&body)
+                ),
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::Mutex as Shared;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -164,13 +265,16 @@ mod tests {
 
     use super::*;
 
-    /// A VMM's API that answers every request and keeps their bodies.
-    fn api() -> (tempfile::TempDir, Api, Arc<Shared<Vec<String>>>) {
+    /// A VMM's API that keeps every request but those for statistics and
+    /// answers them all. Statistics report the pages in `held`, one
+    /// reading each, the last for good; none at all as when disabled.
+    fn device(held: &[u64]) -> (tempfile::TempDir, Api, Arc<Shared<Vec<String>>>) {
         let dir = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
         let socket = dir.path().join("api.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let seen = Arc::new(Shared::new(Vec::new()));
         let kept = Arc::clone(&seen);
+        let mut held: VecDeque<u64> = held.iter().copied().collect();
         tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
                 let mut request = vec![0_u8; 4096];
@@ -180,11 +284,35 @@ mod tests {
                     continue;
                 }
                 let request = String::from_utf8_lossy(&request[..read]).into_owned();
-                kept.lock().unwrap().push(request);
-                stream.write_all(b"HTTP/1.1 204 \r\n\r\n").await.unwrap();
+                if !request.starts_with("GET /balloon/statistics ") {
+                    kept.lock().unwrap().push(request);
+                    stream.write_all(b"HTTP/1.1 204 \r\n\r\n").await.unwrap();
+                    continue;
+                }
+                let pages = if held.len() > 1 {
+                    held.pop_front()
+                } else {
+                    held.front().copied()
+                };
+                let answer = pages.map_or_else(
+                    || "HTTP/1.1 400 \r\nContent-Length: 0\r\n\r\n".to_owned(),
+                    |pages| {
+                        let body = format!("{{\"target_pages\":0,\"actual_pages\":{pages}}}");
+                        format!(
+                            "HTTP/1.1 200 \r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                    },
+                );
+                stream.write_all(answer.as_bytes()).await.unwrap();
             }
         });
         (dir, Api::new(socket), seen)
+    }
+
+    /// A device whose guest holds nothing in its balloon.
+    fn api() -> (tempfile::TempDir, Api, Arc<Shared<Vec<String>>>) {
+        device(&[0])
     }
 
     #[tokio::test]
@@ -203,17 +331,56 @@ mod tests {
     async fn a_request_on_its_way_never_reaches_a_later_vm() {
         let (_dir, api, seen) = api();
         let balloon = Balloon::unknown(&api, true);
-        // Asked, then the VM is stopped before the request runs.
+        // Asked, then the VM is stopped before the request runs: it fails,
+        // as nothing was asked.
         let late = balloon.set(1 << 30);
         balloon.end().await;
-        late.await.unwrap();
-        balloon.set(1 << 30).await.unwrap();
+        late.await.unwrap_err();
+        balloon.set(1 << 30).await.unwrap_err();
         // Asked, then the VM is dropped.
         let other = Balloon::unknown(&api, true);
         let late = other.set(1 << 30);
         drop(other);
-        late.await.unwrap();
+        late.await.unwrap_err();
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_paused_vm_s_balloon_is_not_asked_and_says_so() {
+        let (_dir, api, seen) = api();
+        let balloon = Balloon::unknown(&api, true);
+        balloon.pausing(async { Ok(()) }).await.unwrap();
+        let asked = seen.lock().unwrap().len();
+        balloon.set(0).await.unwrap_err();
+        balloon.set(1 << 30).await.unwrap_err();
+        assert_eq!(seen.lock().unwrap().len(), asked);
+    }
+
+    #[tokio::test]
+    async fn a_balloon_let_go_is_done_only_once_its_guest_holds_nothing_in_it() {
+        // The guest takes its pages back over three readings.
+        let (_dir, api, _seen) = device(&[512, 256, 0]);
+        let balloon = Balloon::unknown(&api, true);
+        let started = Instant::now();
+        balloon.set(0).await.unwrap();
+        assert!(
+            started.elapsed() >= 2 * EMPTYING_POLL,
+            "{:?}",
+            started.elapsed()
+        );
+        // Known let go: it is not set again, but still looked at.
+        balloon.set(0).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_balloon_let_go_without_statistics_is_never_taken_for_done() {
+        // A VM booted without statistics cannot tell how much it holds.
+        let (_dir, api, seen) = device(&[]);
+        let balloon = Balloon::unknown(&api, true);
+        balloon.set(0).await.unwrap_err();
+        assert_eq!(seen.lock().unwrap().len(), 1, "set once");
+        // Setting it to take memory needs no statistics.
+        balloon.set(1 << 30).await.unwrap();
     }
 
     #[tokio::test]

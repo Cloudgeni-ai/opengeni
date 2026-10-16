@@ -13,3 +13,10 @@ pub struct HoldId(pub u64);
 /// [`crate::Input::Finished`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OpId(pub u64);
+
+/// One balloon setting asked of a VM. The core assigns these, unique
+/// across the host, and expects them back in [`crate::Input::BalloonSet`]
+/// or [`crate::Input::BalloonFailed`]: a reply to any other request, such
+/// as one made of an earlier VM of the same sandbox, changes nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BalloonRequest(pub u64);

@@ -123,12 +123,17 @@ fn notices(actions: &[Action], id: u128) -> Vec<Notice> {
 fn an_idle_sandbox_pauses_gets_protected_in_memory_and_leaves_disk_after_days() {
     let mut rig = Rig::new(HostPolicy::default());
     // A VM found running has its balloon let go: nothing is asked of it.
-    assert_eq!(
-        rig.add(1, State::RUNNING, recommended()),
-        [Action::Balloon {
-            sandbox: SandboxId(1),
-            bytes: 0
-        }]
+    let actions = rig.add(1, State::RUNNING, recommended());
+    assert!(
+        matches!(
+            actions[..],
+            [Action::Balloon {
+                sandbox: SandboxId(1),
+                bytes: 0,
+                ..
+            }]
+        ),
+        "{actions:?}"
     );
     let expected = [
         (Step::Pause, 10, paused(Durability::Volatile)),
@@ -207,12 +212,17 @@ fn touch_cancels_a_sleep_step_in_flight() {
     );
     // Cancelled in time: still running, nothing more to do but let the
     // balloon go, which the pause may have begun to.
-    assert_eq!(
-        rig.finish(1, op, Outcome::Cancelled),
-        [Action::Balloon {
-            sandbox: SandboxId(1),
-            bytes: 0
-        }]
+    let actions = rig.finish(1, op, Outcome::Cancelled);
+    assert!(
+        matches!(
+            actions[..],
+            [Action::Balloon {
+                sandbox: SandboxId(1),
+                bytes: 0,
+                ..
+            }]
+        ),
+        "{actions:?}"
     );
     let view = rig.host.sandbox(SandboxId(1)).unwrap();
     assert_eq!(view.state, State::RUNNING);

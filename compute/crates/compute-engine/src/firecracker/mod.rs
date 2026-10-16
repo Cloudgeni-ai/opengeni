@@ -771,12 +771,15 @@ impl Engine for Firecracker {
             }
             put("/machine-config", machine_config(spec, self.memory)).await?;
             if spec.free_page_reporting {
+                // Statistics can only be turned on at boot, and are how
+                // the API tells what the guest holds in the balloon. Their
+                // guest-side report is rare; that count is read directly.
                 put(
                     "/balloon",
                     json!({
                         "amount_mib": 0,
                         "deflate_on_oom": true,
-                        "stats_polling_interval_s": 0,
+                        "stats_polling_interval_s": 60,
                         "free_page_reporting": true,
                     }),
                 )

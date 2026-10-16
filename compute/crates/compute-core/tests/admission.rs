@@ -665,18 +665,13 @@ fn a_vm_that_runs_again_has_its_balloon_set_again() {
     // earlier agent left inflated: the host lets it go once it runs.
     let mut rig = Rig::new(4 * GIB);
     let actions = rig.add(1, State::RUNNING, Size::whole(GIB));
-    assert!(actions.contains(&Action::Balloon {
-        sandbox: SandboxId(1),
-        bytes: 0
-    }));
+    let let_go = |id| move |action: &Action| matches!(action, Action::Balloon { sandbox, bytes: 0, .. } if *sandbox == SandboxId(id));
+    assert!(actions.iter().any(let_go(1)), "{actions:?}");
     rig.add(2, saved(), Size::whole(GIB));
     let actions = rig.touch(2);
     let (_, op) = rig.drive_until(actions, 2);
     let actions = rig.finish(2, op);
-    assert!(actions.contains(&Action::Balloon {
-        sandbox: SandboxId(2),
-        bytes: 0
-    }));
+    assert!(actions.iter().any(let_go(2)), "{actions:?}");
 }
 
 // --- Randomized simulation -------------------------------------------------

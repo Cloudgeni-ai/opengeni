@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::host::{Balloon, Failure, Notice, Outcome, Size, Squeeze, WakeRoom};
-use crate::ids::{HoldId, OpId, SandboxId};
+use crate::ids::{BalloonRequest, HoldId, OpId, SandboxId};
 use crate::level::{Durability, Level, Priority, State, Step};
 use crate::policy::{Backoff, SleepPolicy};
 use crate::time::At;
@@ -79,6 +79,9 @@ pub(crate) struct Sandbox {
     /// Bytes its VM confirmed its balloon takes, for the setting last
     /// sent; `None` until it does.
     pub balloon_taken: Option<u64>,
+    /// The request that carried the setting last sent: only a reply to it
+    /// counts.
+    pub balloon_request: BalloonRequest,
     /// When a balloon setting the VM did not take is asked again, and how
     /// many in a row it did not take.
     pub balloon_retry: Option<(At, u32)>,
@@ -123,6 +126,7 @@ impl Sandbox {
             balloon: None,
             balloon_sent: None,
             balloon_taken: None,
+            balloon_request: BalloonRequest(0),
             balloon_retry: None,
             squeeze: Squeeze::None,
             in_flight: None,

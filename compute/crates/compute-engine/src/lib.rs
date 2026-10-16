@@ -196,8 +196,10 @@ pub trait Engine: Send + Sync + 'static {
     /// to the host through its balloon, or none for 0. The guest gives what
     /// it can spare, file cache first, and takes pages back from the
     /// balloon rather than run out of memory. Every pause lets the balloon
-    /// go first, and a request that comes once the VM is paused does
-    /// nothing, so a VM never sleeps with its balloon set. The future does
+    /// go first, and a request that comes once the VM is paused or ended
+    /// does nothing and fails, so a VM never sleeps with its balloon set
+    /// and a request not made is never taken for done. For 0, resolves
+    /// once the guest has taken back every page it gave. The future does
     /// not borrow the VM. Engines without balloons do nothing.
     fn set_balloon(
         &self,

@@ -4,7 +4,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 
-use crate::ids::{HoldId, OpId, SandboxId};
+use crate::ids::{BalloonRequest, HoldId, OpId, SandboxId};
 use crate::level::{Level, Priority, State, Step};
 use crate::policy::{HostPolicy, PolicyError, SleepPolicy};
 use crate::sandbox::{Health, InFlight, QueueKey, Sandbox, Wake};
@@ -105,20 +105,22 @@ pub enum Input {
         /// The sandbox.
         sandbox: SandboxId,
     },
-    /// The sandbox's VM did not take an [`Action::Balloon`] of `bytes`: what
-    /// its balloon takes is not known. It is asked again after a backoff.
+    /// The sandbox's VM did not take the [`Action::Balloon`] of `request`,
+    /// or it was not asked, as when the VM had paused or ended: what its
+    /// balloon takes is not known. It is asked again after a backoff.
     BalloonFailed {
         /// The sandbox.
         sandbox: SandboxId,
-        /// What it was asked to take.
-        bytes: u64,
+        /// The request.
+        request: BalloonRequest,
     },
-    /// The sandbox's VM took an [`Action::Balloon`] of `bytes`.
+    /// The sandbox's VM took the [`Action::Balloon`] of `request`: for a
+    /// balloon let go, its guest has taken back every page it gave.
     BalloonSet {
         /// The sandbox.
         sandbox: SandboxId,
-        /// What it was asked to take.
-        bytes: u64,
+        /// The request.
+        request: BalloonRequest,
     },
     /// The VM process ended unexpectedly. Files survive, and so do running
     /// programs if a current copy was saved.
@@ -247,12 +249,16 @@ pub enum Action {
     /// Ask the guest of the sandbox's running VM to give `bytes` of its
     /// memory back to the host through its balloon, or none for 0. Comes
     /// only while the VM runs and no step holds it; the engine lets the
-    /// balloon go before any pause, so a VM never sleeps with it set.
+    /// balloon go before any pause, so a VM never sleeps with it set. The
+    /// answer, [`Input::BalloonSet`] or [`Input::BalloonFailed`], names
+    /// `request`.
     Balloon {
         /// The sandbox.
         sandbox: SandboxId,
         /// Bytes the balloon takes.
         bytes: u64,
+        /// Which request this is.
+        request: BalloonRequest,
     },
 }
 
@@ -339,6 +345,7 @@ pub struct Host {
     orphans: HashMap<OpId, Step>,
     dirty: Vec<SandboxId>,
     next_op: u64,
+    next_balloon: u64,
     available_memory: Option<u64>,
     /// Memory expected back from pressure floors not yet reached.
     pending_relief: u64,
@@ -374,6 +381,7 @@ impl Host {
             orphans: HashMap::new(),
             dirty: Vec::new(),
             next_op: 0,
+            next_balloon: 0,
             available_memory: None,
             pending_relief: 0,
             settled_relief: 0,
@@ -545,8 +553,10 @@ impl Host {
                 outcome,
             } => self.finish(now, sandbox, op, outcome, out),
             Input::Lost { sandbox } => self.lost(sandbox, out),
-            Input::BalloonFailed { sandbox, bytes } => self.balloon_failed(now, sandbox, bytes),
-            Input::BalloonSet { sandbox, bytes } => self.balloon_set(sandbox, bytes),
+            Input::BalloonFailed { sandbox, request } => {
+                self.balloon_failed(now, sandbox, request);
+            }
+            Input::BalloonSet { sandbox, request } => self.balloon_set(sandbox, request),
             Input::Unsavable { sandbox } => {
                 if self
                     .sandboxes
@@ -864,7 +874,14 @@ impl Host {
             slot.queued = wanted;
         }
         if let Some(bytes) = slot.balloon_due(now) {
-            out.push(Action::Balloon { sandbox: id, bytes });
+            let request = BalloonRequest(self.next_balloon);
+            self.next_balloon += 1;
+            slot.balloon_request = request;
+            out.push(Action::Balloon {
+                sandbox: id,
+                bytes,
+                request,
+            });
         }
         let deadline = slot.next_deadline(now);
         if deadline != slot.timer {

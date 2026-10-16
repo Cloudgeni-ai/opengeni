@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use compute_core::{
-    Action, At, Durability, HoldId, Host, HostPolicy, Input, Level, MemoryPolicy, Notice, OpId,
-    Outcome, Priority, SandboxId, Size, SleepPolicy, SleepRules, State, Step,
+    Action, At, BalloonRequest, Durability, HoldId, Host, HostPolicy, Input, Level, MemoryPolicy,
+    Notice, OpId, Outcome, Priority, SandboxId, Size, SleepPolicy, SleepRules, State, Step,
 };
 
 const GIB: u64 = 1 << 30;
@@ -107,11 +107,16 @@ impl Rig {
 
     /// The VMs take every balloon setting asked in `actions`.
     fn confirm(&mut self, actions: &[Action]) {
-        for (id, bytes) in balloons(actions) {
-            self.send(Input::BalloonSet {
-                sandbox: SandboxId(id),
-                bytes,
-            });
+        for action in actions {
+            if let Action::Balloon {
+                sandbox, request, ..
+            } = action
+            {
+                self.send(Input::BalloonSet {
+                    sandbox: *sandbox,
+                    request: *request,
+                });
+            }
         }
     }
 }
@@ -130,12 +135,26 @@ fn balloons(actions: &[Action]) -> Vec<(u128, u64)> {
     let mut set: Vec<(u128, u64)> = actions
         .iter()
         .filter_map(|action| match action {
-            Action::Balloon { sandbox, bytes } => Some((sandbox.0, *bytes)),
+            Action::Balloon { sandbox, bytes, .. } => Some((sandbox.0, *bytes)),
             _ => None,
         })
         .collect();
     set.sort_unstable();
     set
+}
+
+/// The last balloon request `actions` make of sandbox `id`.
+fn asked(actions: &[Action], id: u128) -> BalloonRequest {
+    actions
+        .iter()
+        .rev()
+        .find_map(|action| match action {
+            Action::Balloon {
+                sandbox, request, ..
+            } if sandbox.0 == id => Some(*request),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no balloon request of {id} in {actions:?}"))
 }
 
 fn size(request: u64, limit: u64) -> Size {
@@ -344,7 +363,7 @@ fn a_balloon_let_go_and_a_wake_never_share_the_same_room() {
         // and the claim stays through the backoff.
         rig.send(Input::BalloonFailed {
             sandbox: SandboxId(1),
-            bytes: 0,
+            request: asked(&actions, 1),
         });
         assert_eq!(started(&rig.available(9 * GIB), 2), []);
         rig.now = rig.host.next_deadline().unwrap();
@@ -372,11 +391,12 @@ fn a_balloon_let_go_keeps_its_room_until_its_vm_has_let_it_go() {
     let actions = rig.available(7 * GIB);
     assert_eq!(balloons(&actions), [(1, 0)]);
     assert_eq!(started(&actions, 2), []);
+    let first = asked(&actions, 1);
     // The VM did not take it. Later readings show room for 2 only if 1's
     // guest takes nothing back, which it still may: 2 waits.
     rig.send(Input::BalloonFailed {
         sandbox: SandboxId(1),
-        bytes: 0,
+        request: first,
     });
     for _ in 0..3 {
         assert_eq!(started(&rig.available(9 * GIB), 2), []);
@@ -384,6 +404,13 @@ fn a_balloon_let_go_keeps_its_room_until_its_vm_has_let_it_go() {
     rig.now = rig.host.next_deadline().unwrap();
     let retried = rig.send(Input::Tick);
     assert_eq!(balloons(&retried), [(1, 0)]);
+    assert_eq!(started(&rig.available(9 * GIB), 2), []);
+    // A late answer to the first request, the same setting, settles
+    // nothing: only an answer to the one on its way does.
+    rig.send(Input::BalloonSet {
+        sandbox: SandboxId(1),
+        request: first,
+    });
     assert_eq!(started(&rig.available(9 * GIB), 2), []);
     // Taken: the next reading shows what 1 holds, and 2 wakes.
     rig.confirm(&retried);
@@ -402,17 +429,19 @@ fn a_balloon_the_vm_did_not_take_is_set_again_after_a_backoff() {
         size: size(GIB, 4 * GIB),
     });
     assert_eq!(balloons(&actions), [(1, 0)]);
+    let mut request = asked(&actions, 1);
+    let found = request;
     rig.send(Input::Hold {
         sandbox,
         hold: HoldId(1),
         until: None,
         priority: Priority::Interactive,
     });
-    // An older setting failing changes nothing.
+    // An answer to another request changes nothing.
     assert_eq!(
         rig.send(Input::BalloonFailed {
             sandbox,
-            bytes: GIB
+            request: BalloonRequest(request.0 + 100),
         }),
         []
     );
@@ -421,7 +450,7 @@ fn a_balloon_the_vm_did_not_take_is_set_again_after_a_backoff() {
     let mut waited = Duration::ZERO;
     let mut first = None;
     for _ in 0..3 {
-        let actions = rig.send(Input::BalloonFailed { sandbox, bytes: 0 });
+        let actions = rig.send(Input::BalloonFailed { sandbox, request });
         assert_eq!(balloons(&actions), []);
         let failed = rig.now;
         let due = rig.host.next_deadline().unwrap();
@@ -429,23 +458,35 @@ fn a_balloon_the_vm_did_not_take_is_set_again_after_a_backoff() {
         waited = due.saturating_since(failed);
         first.get_or_insert(waited);
         rig.now = due;
-        assert_eq!(balloons(&rig.send(Input::Tick)), [(1, 0)]);
+        let actions = rig.send(Input::Tick);
+        assert_eq!(balloons(&actions), [(1, 0)]);
+        assert_ne!(asked(&actions, 1), request, "a new request each time");
+        request = asked(&actions, 1);
     }
-    // A confirmation of another setting changes nothing: the next failure
-    // waits longer still.
+    // A confirmation of an earlier request, though of the same setting,
+    // changes nothing: the next failure waits longer still.
     rig.send(Input::BalloonSet {
         sandbox,
-        bytes: GIB,
+        request: found,
     });
-    rig.send(Input::BalloonFailed { sandbox, bytes: 0 });
+    rig.send(Input::BalloonFailed { sandbox, request });
     let due = rig.host.next_deadline().unwrap();
     assert!(due.saturating_since(rig.now) > waited);
     rig.now = due;
-    assert_eq!(balloons(&rig.send(Input::Tick)), [(1, 0)]);
-    // Once the VM takes it, failures before are forgotten: a failure after
-    // waits the first backoff again.
-    rig.send(Input::BalloonSet { sandbox, bytes: 0 });
-    rig.send(Input::BalloonFailed { sandbox, bytes: 0 });
+    let actions = rig.send(Input::Tick);
+    assert_eq!(balloons(&actions), [(1, 0)]);
+    // Once the VM takes it, failures before are forgotten, and a second
+    // answer to the same request changes nothing.
+    let request = asked(&actions, 1);
+    rig.send(Input::BalloonSet { sandbox, request });
+    assert_eq!(rig.send(Input::BalloonFailed { sandbox, request }), []);
+    assert_eq!(rig.host.next_deadline(), None);
+    // A failure of the next setting, a balloon for host memory, waits
+    // the first backoff again.
+    let actions = rig.available(3 * GIB);
+    assert_eq!(balloons(&actions), [(1, 3 * GIB)]);
+    let request = asked(&actions, 1);
+    rig.send(Input::BalloonFailed { sandbox, request });
     let due = rig.host.next_deadline().unwrap();
     assert_eq!(Some(due.saturating_since(rig.now)), first);
 }
