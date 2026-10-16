@@ -15,9 +15,11 @@ Each host runs one profile, chosen at start:
 
 - `bare-metal`: 4 KiB pages, KVM dirty tracking (saves write only changed
   pages), and compression of idle memory into RAM with zswap. Compressed pages
-  never go to disk.
+  never go to disk, and only a paused VM is compressed: zswap is closed for a
+  running VM's cgroup ([14](0014-requests-limits-and-admission.md)).
 - `nested`: 2 MiB pages from a reserved pool, saves of resident pages, and
-  every wake through the userfaultfd pager.
+  every wake through the userfaultfd pager. A running VM is booked whole
+  against the pool; with the pool empty a guest stalls rather than dies.
 
 Combinations that would corrupt data or defeat themselves are refused at
 start: dirty tracking with huge pages, resident saves of swappable memory,
@@ -28,4 +30,6 @@ compressing huge pages, and mapping a huge-page image from a file.
 - Bare metal packs about three to four times as many idle sandboxes into the
   same RAM, because their memory compresses.
 - Nested hosts wake fast despite nesting, but have no Compressed level.
+- Huge pages are not returned by free page reporting, so a nested guest's
+  freed memory stays with its VM until it is saved and ended.
 - Mixing profiles on one host is not supported.
