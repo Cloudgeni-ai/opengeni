@@ -56,7 +56,8 @@ describe("staging / production split workflows", () => {
     expect(source).toContain("OPENGENI_RELEASE_SOURCE_ROOT: ${{ runner.temp }}/canary-source");
     expect(source).toContain("environment: package-release");
     expect(source).not.toContain("inputs.source_sha || github.sha");
-    expect(source).toContain("bun scripts/publish-canary.ts");
+    expect(source).toContain("bun build scripts/publish-canary-node.ts --target=node");
+    expect(source).toContain("node .release/publish-canary.mjs");
     expect(source).toContain("group: publish-canary");
     expect(source).toContain("id-token: write");
     expect(source).toContain('OPENGENI_RELEASE: "1"');

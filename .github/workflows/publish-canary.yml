@@ -122,6 +122,14 @@ jobs:
         working-directory: ${{ runner.temp }}/canary-source
         run: bun install --frozen-lockfile
 
+      - name: Set up publisher Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.20.0"
+
+      - name: Build trusted publisher for Node
+        run: bun build scripts/publish-canary-node.ts --target=node --packages=external --outfile .release/publish-canary.mjs
+
       - name: Publish canary versions
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
@@ -130,7 +138,7 @@ jobs:
           OPENGENI_RELEASE: "1"
           OPENGENI_RELEASE_SOURCE_ROOT: ${{ runner.temp }}/canary-source
         # Execute the trusted controller; only admitted source supplies package builds.
-        run: bun scripts/publish-canary.ts
+        run: node .release/publish-canary.mjs
 
       - name: Retain exact Site package pins for this deployment
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -154,5 +162,14 @@ jobs:
         with:
           name: canary-source-admission-${{ inputs.source_sha }}
           path: .release/canary-source-admission.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Retain signed source provenance
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: canary-source-provenance-${{ inputs.source_sha }}
+          path: .release/canary-provenance
           if-no-files-found: warn
           retention-days: 7

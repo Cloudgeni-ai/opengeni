@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { attest } from "sigstore";
 import { verifyCanaryController } from "./canary-source-admission";
 
@@ -60,7 +60,11 @@ export function canarySourceStatement(
   };
 }
 
-export type SuppliedCanaryProvenance = { file: string; transparencyLogUrl: string };
+export type SuppliedCanaryProvenance = {
+  file: string;
+  transparencyLogUrl: string;
+  evidence?: { file: string; bytes: number; sha256: string };
+};
 
 export async function signCanarySource(
   manifest: Record<string, unknown>,
@@ -82,8 +86,17 @@ export async function signCanarySource(
     directory,
     `${createHash("sha256").update(packed).digest("hex")}.sigstore.json`,
   );
-  writeFileSync(file, JSON.stringify(bundle), { flag: "wx", mode: 0o600 });
+  const bytes = Buffer.from(JSON.stringify(bundle));
+  writeFileSync(file, bytes, { flag: "wx", mode: 0o600 });
   // libnpmpublish verifies this bundle and its exact tarball subject before PUT.
   // Unlike automatic provenance, that branch does not return a transparency URL.
-  return { file, transparencyLogUrl: `https://search.sigstore.dev/?logIndex=${index}` };
+  return {
+    file,
+    transparencyLogUrl: `https://search.sigstore.dev/?logIndex=${index}`,
+    evidence: {
+      file: basename(file),
+      bytes: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    },
+  };
 }

@@ -1941,6 +1941,11 @@ Select the source-named artifact from the successful canonical publisher run.
 Environment approval and ordinary image/CI/deployment checks remain mandatory.
 Split-source failed receipts use V2 and cannot use the existing V1 receipt-only
 reconciliation lane; stop for reviewed recovery rather than relabel or replay them.
+The publisher runs its bundled controller on pinned native Node while keeping
+package builds on Bun. Retained signed provenance and sanitized diagnostics help
+investigate failed writes but are not registry acknowledgements. Never reuse an
+unknown version; any explicitly authorized replacement must use a fresh run and
+version after diagnosis and review.
 See `CONTRIBUTING.md` for the admission and provenance contract. The runtime includes these pins beside
 the Sites skill. Never use a mutable dist-tag as the deployment pin. Production
 sandbox images do not include Site package archives; the local development
