@@ -97,6 +97,8 @@ pub(crate) struct Ran<V> {
     /// VM processes the step started, counting any it ended again before
     /// finishing, such as a restore whose resume failed.
     pub launches: u32,
+    /// What went wrong, when the step failed, for the sandbox's status.
+    pub error: Option<String>,
 }
 
 /// Which stored copy matches the local files. The record says whether an
@@ -138,8 +140,22 @@ pub(crate) struct Job<E: Engine, S> {
     pub launches: u32,
 }
 
+tokio::task_local! {
+    /// The first error a running step met, kept for its [`Ran::error`]
+    /// without threading it through every early return.
+    static FIRST_ERROR: std::cell::RefCell<Option<String>>;
+}
+
+/// Keeps `error` as the running step's error, unless it already met one.
+fn note_error(error: &dyn std::fmt::Display) {
+    let _ = FIRST_ERROR.try_with(|first| {
+        first.borrow_mut().get_or_insert_with(|| error.to_string());
+    });
+}
+
 fn failure(error: &EngineError) -> Outcome {
     tracing::warn!(%error, "step failed");
+    note_error(error);
     Outcome::Failed(match error.kind {
         ErrorKind::Transient => Failure::Transient,
         ErrorKind::MemoryLost => Failure::MemoryLost,
@@ -153,6 +169,7 @@ fn io_failure(operation: &'static str, error: io::Error) -> Outcome {
 
 /// What failing to record a step's effect means for the sandbox.
 fn state_failure(error: &StateError) -> Outcome {
+    note_error(error);
     if let StateError::Io(_) = error {
         tracing::warn!(%error, "step could not record its effect");
         Outcome::Failed(Failure::Transient)
@@ -252,7 +269,12 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// step reports, since the core may start a replacement on the same disk
     /// right after.
     pub async fn run(mut self, step: Step) -> Ran<E::Vm> {
-        let (mut outcome, mut after) = self.step(step).await;
+        let ((mut outcome, mut after), error) = FIRST_ERROR
+            .scope(std::cell::RefCell::new(None), async {
+                let ran = self.step(step).await;
+                (ran, FIRST_ERROR.with(std::cell::RefCell::take))
+            })
+            .await;
         if outcome == Outcome::Failed(Failure::MemoryLost) {
             // The memory (and any pager serving it) goes only after the
             // process.
@@ -277,6 +299,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             outcome,
             after,
             launches: self.launches,
+            error: error.filter(|_| matches!(outcome, Outcome::Failed(_))),
         }
     }
 

@@ -1,17 +1,20 @@
 //! Whether a wake fits into the memory the host lets its sandboxes take,
 //! decided by arithmetic with instant relief only; the buffer of free room
 //! kept ahead of wakes in the background, and the memory pressure relief
-//! that shares its mechanism; see [`crate::Admission`].
+//! that shares its mechanism; see [`crate::Admission`]. A wake must also
+//! fit the local disk its saves may need; see [`super::disk`].
 
 use std::time::Duration;
 
+use super::disk::{DiskRoom, Resource};
 use super::{Action, Host, Notice, Squeeze};
 use crate::ids::SandboxId;
 use crate::level::{Level, Priority, Step};
 use crate::sandbox::{QueueKey, Sandbox};
 use crate::time::At;
 
-/// What one sandbox may take of host memory, like a request and a limit.
+/// What one sandbox may take of host memory, like a request and a limit,
+/// and of local disk for a save.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Size {
     /// Bytes reserved for it while it runs: what it is guaranteed. Admission
@@ -20,15 +23,20 @@ pub struct Size {
     /// Bytes its VM can use at most: its memory size. Counted for a paused
     /// VM whose resident size has not been reported yet.
     pub limit: u64,
+    /// Bytes of local disk one save of its VM may write at most, booked
+    /// while its VM holds state not saved yet; see [`crate::DiskPolicy`].
+    pub save: u64,
 }
 
 impl Size {
-    /// A sandbox that reserves and may use `bytes`.
+    /// A sandbox that reserves and may use `bytes`, and whose saves write
+    /// at most as much.
     #[must_use]
     pub const fn whole(bytes: u64) -> Self {
         Self {
             request: bytes,
             limit: bytes,
+            save: bytes,
         }
     }
 }
@@ -80,7 +88,7 @@ pub(super) const fn needs_memory(step: Step) -> bool {
 
 impl Sandbox {
     /// Whether it is awake or waking: whether it holds its reservation.
-    fn reserves(&self) -> bool {
+    pub(super) fn reserves(&self) -> bool {
         self.state.level == Level::Running
             || self
                 .in_flight
@@ -184,25 +192,34 @@ impl Host {
             .map_or(COMPRESSED_PERCENT, |memory| memory.compressed_percent)
     }
 
-    fn busy_grace(&self) -> Duration {
+    pub(super) fn busy_grace(&self) -> Duration {
         self.policy
             .admission
             .map_or(Duration::ZERO, |admission| admission.busy_grace)
     }
 
+    /// What wakes may take in one decision, or `None` when every wake is
+    /// admitted.
+    pub(super) fn left(&self) -> Option<Left> {
+        let left = Left {
+            memory: self.capacity().map(|capacity| capacity.headroom()),
+            waiting: 0,
+            disk: self.disk_room(),
+        };
+        (left.memory.is_some() || left.disk.is_some()).then_some(left)
+    }
+
     /// Starts the queued wakes of kind `step`, which needs memory, while
-    /// its limit allows and they fit into the `headroom` left of the budget.
-    /// A wake that does not fit waits only if ending idle VM processes that
-    /// are already saved frees enough for it and every wake waiting before
-    /// it; otherwise it is refused at once. `waiting` sums what the wakes
-    /// still waiting need. Returns whether anything must be reconciled
-    /// again.
+    /// its limit allows and they fit into what is `left`. A wake the disk
+    /// cannot book is refused at once. One whose memory does not fit waits
+    /// only if ending idle VM processes that are already saved frees enough
+    /// for it and every wake waiting before it; otherwise it is refused at
+    /// once. Returns whether anything must be reconciled again.
     pub(super) fn admit_measured(
         &mut self,
         now: At,
         step: Step,
-        headroom: &mut i128,
-        waiting: &mut u64,
+        left: &mut Left,
         out: &mut Vec<Action>,
     ) -> bool {
         let index = step.index();
@@ -218,24 +235,40 @@ impl Host {
                 continue;
             };
             let need = slot.wake_need(percent);
+            let save = slot.save_need();
+            if let Some(disk) = left.disk.as_mut()
+                && let Err(short) = disk.take(save)
+            {
+                self.refuse(key, step, short.resource, short.needed, short.free, out);
+                changed = true;
+                continue;
+            }
+            let Some(headroom) = left.memory.as_mut() else {
+                self.queues[index].remove(&key);
+                self.start(step, key, out);
+                continue;
+            };
             if i128::from(need) <= *headroom {
                 *headroom -= i128::from(need);
                 self.queues[index].remove(&key);
                 self.start(step, key, out);
                 continue;
             }
-            *waiting += need;
-            let deficit = u64::try_from(i128::from(*waiting) - *headroom).unwrap_or(u64::MAX);
+            left.waiting += need;
+            let deficit = u64::try_from(i128::from(left.waiting) - *headroom).unwrap_or(u64::MAX);
             match self.drop_for(now, key.sandbox, deficit) {
                 Room::Coming => {}
                 Room::Made => changed = true,
                 Room::None => {
-                    *waiting -= need;
+                    left.waiting -= need;
+                    if let Some(disk) = left.disk.as_mut() {
+                        disk.give_back(save);
+                    }
                     // On an overdrawn budget a wake needs the overdraft
                     // freed too.
                     let free = u64::try_from(*headroom).unwrap_or(0);
                     let overdraft = u64::try_from(-*headroom).unwrap_or(0);
-                    self.refuse(key, step, need + overdraft, free, out);
+                    self.refuse(key, step, Resource::Memory, need + overdraft, free, out);
                     changed = true;
                 }
             }
@@ -244,22 +277,30 @@ impl Host {
     }
 
     /// Lets sandboxes refused earlier but still held try again once their
-    /// wake fits, counting instant relief, next to every wake already
-    /// queued for memory: a retried wake queues behind those, and
-    /// [`Self::admit_measured`] charges it their need too, so a sandbox let
-    /// through here is not refused again for the same shortfall. One paused
-    /// for host memory waits, besides, until the memory it held is free
-    /// above the high watermark. Returns whether any did.
+    /// wake fits, memory counting instant relief and disk, next to every
+    /// wake already queued for memory: a retried wake queues behind those,
+    /// and [`Self::admit_measured`] charges it their need too, so a sandbox
+    /// let through here is not refused again for the same shortfall. One
+    /// paused for host memory waits, besides, until the memory it held is
+    /// free above the high watermark. Returns whether any did.
     pub(super) fn retry_refused(&mut self, now: At) -> bool {
         let capacity = self.capacity();
         let percent = self.compressed_percent();
-        let mut wanted: u64 = Step::ALL
+        let queued: Vec<&Sandbox> = Step::ALL
             .into_iter()
             .filter(|step| needs_memory(*step))
             .flat_map(|step| self.queues[step.index()].iter())
             .filter_map(|key| self.sandboxes.get(&key.sandbox))
-            .map(|slot| slot.wake_need(percent))
-            .sum();
+            .collect();
+        let mut wanted: u64 = queued.iter().map(|slot| slot.wake_need(percent)).sum();
+        let mut disk = self.disk_room();
+        if let Some(room) = disk.as_mut() {
+            for slot in &queued {
+                // What a wake already queued cannot book does not change
+                // whether a retried one can.
+                let _ = room.take(slot.save_need());
+            }
+        }
         let mut ready = Vec::new();
         for id in &self.refused {
             let Some(slot) = self.sandboxes.get(id) else {
@@ -275,7 +316,9 @@ impl Host {
                 let (dropping, droppable) = self.instant_room(now, *id);
                 i128::from(wanted + need)
                     <= capacity.headroom() + i128::from(dropping) + i128::from(droppable)
-            });
+            }) && disk
+                .as_mut()
+                .is_none_or(|room| room.take(slot.save_need()).is_ok());
             if fits {
                 wanted += need;
                 ready.push(*id);
@@ -301,9 +344,17 @@ impl Host {
         }
     }
 
-    /// Refuses the queued wake `key`: it needs `need` bytes, only `free`
-    /// are left, and instant relief cannot free the rest.
-    fn refuse(&mut self, key: QueueKey, step: Step, need: u64, free: u64, out: &mut Vec<Action>) {
+    /// Refuses the queued wake `key`: it needs `need` of `resource`, only
+    /// `free` is left, and instant relief cannot free the rest.
+    fn refuse(
+        &mut self,
+        key: QueueKey,
+        step: Step,
+        resource: Resource,
+        need: u64,
+        free: u64,
+        out: &mut Vec<Action>,
+    ) {
         let Some(slot) = self.sandboxes.get_mut(&key.sandbox) else {
             return;
         };
@@ -314,7 +365,11 @@ impl Host {
         self.refused.insert(key.sandbox);
         out.push(Action::Notify {
             sandbox: key.sandbox,
-            notice: Notice::HostFull { needed: need, free },
+            notice: Notice::HostFull {
+                resource,
+                needed: need,
+                free,
+            },
         });
         self.mark(key.sandbox);
     }
@@ -514,6 +569,17 @@ enum Room {
     None,
 }
 
+/// What wakes may still take in one decision; see [`Host::left`].
+pub(super) struct Left {
+    /// Bytes left of the memory budget, negative when it is overdrawn;
+    /// `None` without admission.
+    memory: Option<i128>,
+    /// Bytes the wakes waiting for instant relief need.
+    waiting: u64,
+    /// Disk saves may still book; `None` without a disk policy.
+    disk: Option<DiskRoom>,
+}
+
 /// Whether ending `slot`'s VM process now frees memory instantly, without
 /// losing anything, keeping anyone waiting or ending a busy sandbox, and
 /// without waiting for a backoff to end.
@@ -526,7 +592,7 @@ fn droppable_now(slot: &Sandbox, now: At, grace: Duration) -> bool {
 
 /// Whether `slot` may be pushed deeper to free memory at `now`: nothing
 /// needs it awake, nothing is waking it, it is not busy, and it is sound.
-fn pushable(slot: &Sandbox, now: At, grace: Duration) -> bool {
+pub(super) fn pushable(slot: &Sandbox, now: At, grace: Duration) -> bool {
     !slot.is_broken()
         && !slot.wants_awake()
         && !slot.in_flight.is_some_and(|flight| flight.step.wakes())

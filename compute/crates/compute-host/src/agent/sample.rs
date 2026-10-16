@@ -1,8 +1,9 @@
-//! Periodic sampling of host memory and of VM processor use and traffic.
+//! Periodic sampling of host memory and disk, and of VM processor use and
+//! traffic.
 
 use std::time::Duration;
 
-use compute_core::{Input, Level, SandboxId};
+use compute_core::{DiskSpace, Input, Level, SandboxId};
 use compute_engine::Engine;
 use tokio::time::Instant;
 
@@ -38,6 +39,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             && let Some(available) = self.available_memory
         {
             batch.push(Input::Memory { available });
+        }
+        // The core ignores it without a disk policy.
+        if let Some(available) = read_disk(&self.root) {
+            batch.push(Input::Disk { available });
         }
         self.inputs(batch);
     }
@@ -142,4 +147,19 @@ fn read_available_memory() -> Option<u64> {
         .find(|line| line.starts_with("MemAvailable:"))?;
     let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
     Some(kib * 1024)
+}
+
+/// What the filesystem holding the state root has available to the agent.
+/// One without a fixed number of inodes, such as btrfs, reports none, and
+/// never runs out of them.
+fn read_disk(root: &std::path::Path) -> Option<DiskSpace> {
+    let stat = rustix::fs::statvfs(root).ok()?;
+    Some(DiskSpace {
+        bytes: stat.f_bavail.saturating_mul(stat.f_frsize),
+        inodes: if stat.f_files == 0 {
+            u64::MAX
+        } else {
+            stat.f_favail
+        },
+    })
 }

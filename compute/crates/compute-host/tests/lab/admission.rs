@@ -50,7 +50,7 @@ async fn refused(client: &Client, sandbox: Id) -> String {
 }
 
 /// Connects to `sandbox`: the stream, or the host-full message.
-async fn connect(
+pub(super) async fn connect(
     client: &Client,
     sandbox: Id,
 ) -> Result<tokio::io::BufReader<tokio::net::UnixStream>, String> {

@@ -19,8 +19,8 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use compute_core::{
-    Action, At, HoldId, Host, HostPolicy, Input, Level, OpId, Outcome, Priority, SandboxId, Size,
-    SleepPolicy, Step,
+    Action, At, HoldId, Host, HostPolicy, Input, Level, OpId, Outcome, Priority, Resource,
+    SandboxId, Size, SleepPolicy, Step,
 };
 use compute_engine::{CancellationToken, Engine, PageSize, VmSpec};
 use tokio::sync::{mpsc, oneshot};
@@ -56,6 +56,10 @@ const HANDOVER: Duration = Duration::from_secs(10);
 
 /// Longest pause between attempts to release what a dead VM left.
 const TEARDOWN_RETRY: Duration = Duration::from_secs(30);
+
+/// Bytes a save writes besides guest memory at most: the device state, the
+/// chunk map (32 bytes per 256 KiB) and the record, with room to spare.
+const SAVE_EXTRA: u64 = 64 << 20;
 
 /// How a host is set up.
 #[derive(Clone, Debug)]
@@ -250,18 +254,21 @@ pub enum HostError {
     /// Host storage failed.
     #[error("host I/O failed: {0}")]
     Io(String),
-    /// The host cannot take on the sandbox's memory now: even pushing every
-    /// idle sandbox deeper would not free enough. Retryable.
+    /// The host cannot take on the sandbox's memory, or the disk its next
+    /// save may need, now: even ending every idle VM already saved would
+    /// not free enough. Retryable.
     #[error(
-        "host full: sandbox {id} needs {needed} bytes of memory reserved and \
-         only {free} are free, with nothing idle left to push deeper"
+        "host full: sandbox {id} needs {needed} {what} and only {free} are free",
+        what = shortage(*.resource)
     )]
     HostFull {
         /// The sandbox.
         id: Id,
-        /// Bytes its wake needs.
+        /// What the host is short of.
+        resource: Resource,
+        /// Bytes, or inodes, its wake needs.
         needed: u64,
-        /// Bytes free when it was refused.
+        /// Bytes, or inodes, free when it was refused.
         free: u64,
     },
     /// The host agent has shut down.
@@ -289,6 +296,26 @@ impl From<StateError> for HostError {
 }
 
 type Reply<T> = oneshot::Sender<Result<T, HostError>>;
+
+/// Copies of guest memory one save may write at most on the filesystem
+/// holding `root`: one where files share extents, otherwise two, since
+/// the merged image is then a whole new copy.
+fn save_copies(root: &std::path::Path) -> Result<u64, HostError> {
+    match crate::layout::shares_extents(root) {
+        Ok(true) => Ok(1),
+        Ok(false) => Ok(2),
+        Err(error) => Err(HostError::Io(format!("probing the state root: {error}"))),
+    }
+}
+
+/// What a host-full refusal counts.
+fn shortage(resource: Resource) -> &'static str {
+    match resource {
+        Resource::Memory => "bytes of memory reserved",
+        Resource::Disk => "bytes of disk booked for its next save",
+        Resource::Inodes => "disk inodes booked for its next save",
+    }
+}
 
 #[derive(Debug)]
 enum Command {
@@ -369,6 +396,8 @@ enum Event<V> {
         after: After<V>,
         /// VM processes the step started, including ones it ended again.
         launches: u32,
+        /// What went wrong, when it failed.
+        error: Option<String>,
     },
     Exited {
         id: Id,
@@ -434,6 +463,9 @@ struct Slot<V> {
     /// The incarnation of the running VM and the pages compressed out of it
     /// when last sampled running; see [`HostAgent::check_uncompressed`].
     compressed: Option<(u64, u64)>,
+    /// The last step that failed and has not succeeded since, with its
+    /// error, such as a save that could not be written.
+    failed: Option<(Step, String)>,
 }
 
 /// A request waiting for a sandbox to run.
@@ -536,6 +568,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Whether guest memory is huge pages, which a guest never gives back:
     /// every sandbox then reserves its whole size.
     reserve_whole: bool,
+    /// Copies of guest memory a save may write at most: one where files
+    /// share extents, otherwise also the merged image.
+    save_copies: u64,
     pager: PagerConfig,
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
@@ -627,6 +662,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // Huge-page profiles cannot compress, whatever the host says.
         let can_compress = config.can_compress && engine.memory_profile().compress;
         let reserve_whole = engine.memory_profile().pages == PageSize::Huge;
+        let save_copies = save_copies(&config.root)?;
         let mut agent = Self {
             engine: Arc::new(engine),
             #[cfg(target_os = "linux")]
@@ -665,6 +701,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             busy: config.busy,
             can_compress,
             reserve_whole,
+            save_copies,
             commands_tx: commands_tx.downgrade(),
         };
         agent.recover(strays).await;
@@ -719,6 +756,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 deferred: None,
                 activity: None,
                 compressed: None,
+                failed: None,
             },
         );
     }
@@ -732,15 +770,21 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         SleepPolicy::new(rules).map_err(|error| format!("invalid sleep settings: {error}"))
     }
 
-    /// What a sandbox of `config` reserves and may use of host memory.
+    /// What a sandbox of `config` reserves and may use of host memory, and
+    /// what one save of it may write: the memory that changed, the merged
+    /// image where files cannot share extents, and its device state and
+    /// chunk map.
     fn size(&self, config: &SandboxConfig) -> Size {
         let limit = u64::from(config.memory_mib) << 20;
-        if self.reserve_whole {
-            return Size::whole(limit);
-        }
+        let request = if self.reserve_whole {
+            limit
+        } else {
+            u64::from(config.memory_request()) << 20
+        };
         Size {
-            request: u64::from(config.memory_request()) << 20,
+            request,
             limit,
+            save: limit * self.save_copies + SAVE_EXTRA,
         }
     }
 

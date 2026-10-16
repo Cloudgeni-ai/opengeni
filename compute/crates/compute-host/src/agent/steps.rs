@@ -61,7 +61,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 outcome,
                 after,
                 launches,
-            } => self.step_done(id, op, outcome, after, launches),
+                error,
+            } => self.step_done(id, op, outcome, after, launches, error),
             Event::Exited { id, incarnation } => self.exited(id, incarnation),
             Event::Destroyed {
                 id,
@@ -128,6 +129,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         outcome: Outcome::Cancelled,
                         after,
                         launches: 0,
+                        error: None,
                     });
                 }
             }
@@ -169,6 +171,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 outcome: Outcome::Failed(Failure::Fatal),
                 after: After::NoVm,
                 launches: 0,
+                error: None,
             });
             return;
         };
@@ -200,6 +203,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 outcome: Outcome::Failed(Failure::Fatal),
                 after: After::NoVm,
                 launches: 0,
+                error: None,
             });
             return;
         };
@@ -239,6 +243,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 outcome: ran.outcome,
                 after: ran.after,
                 launches: ran.launches,
+                error: ran.error,
             });
         });
     }
@@ -250,6 +255,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         outcome: Outcome,
         after: After<E::Vm>,
         launches: u32,
+        error: Option<String>,
     ) {
         let fresh = match after {
             After::New(vm, memory) => Some(self.own(id, vm, memory)),
@@ -268,9 +274,24 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 stats.max_us = stats.max_us.max(micros);
                 tracing::debug!(%id, step = ?running.step, micros, ?outcome, "step finished");
                 match outcome {
-                    Outcome::Done => stats.done += 1,
+                    Outcome::Done => {
+                        stats.done += 1;
+                        if slot
+                            .failed
+                            .as_ref()
+                            .is_some_and(|(step, _)| *step == running.step)
+                        {
+                            slot.failed = None;
+                        }
+                    }
                     Outcome::Cancelled => stats.cancelled += 1,
-                    Outcome::Failed(_) => stats.failed += 1,
+                    Outcome::Failed(_) => {
+                        stats.failed += 1;
+                        slot.failed = Some((
+                            running.step,
+                            error.unwrap_or_else(|| "no error recorded".to_owned()),
+                        ));
+                    }
                 }
             }
             match fresh {
@@ -545,15 +566,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 tracing::error!(%id, "sandbox broken on this host");
                 self.settle(id);
             }
-            Notice::HostFull { needed, free } => {
-                tracing::warn!(%id, needed, free, "wake refused: host full");
+            Notice::HostFull {
+                resource,
+                needed,
+                free,
+            } => {
+                tracing::warn!(%id, %resource, needed, free, "wake refused: host full");
                 // Those waiting give up their holds when answered, so the
                 // refusal ends unless something else keeps it held.
                 if let Some(slot) = self.slots.get_mut(&id.0) {
                     for waiter in slot.waiters.drain(..) {
-                        let _ = waiter
-                            .reply
-                            .send(Err(HostError::HostFull { id, needed, free }));
+                        let _ = waiter.reply.send(Err(HostError::HostFull {
+                            id,
+                            resource,
+                            needed,
+                            free,
+                        }));
                     }
                 }
             }

@@ -516,6 +516,19 @@ pub struct SandboxStatus {
     /// and the engine reports them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryStatus>,
+    /// The last step that failed and has not succeeded since, such as a
+    /// save that could not be written for want of disk; it is retried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_step: Option<FailedStep>,
+}
+
+/// A step that failed, with what went wrong.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedStep {
+    /// The step, such as `save`.
+    pub step: String,
+    /// What went wrong.
+    pub error: String,
 }
 
 /// A VM's zswap traffic and memory pressure. A running VM is never
@@ -589,6 +602,10 @@ pub struct HostStatus {
     /// does not limit what it takes on.
     #[serde(default)]
     pub capacity: Option<CapacityStatus>,
+    /// How much of the local disk saves have booked; `None` on a host that
+    /// does not book disk.
+    #[serde(default)]
+    pub disk: Option<DiskStatus>,
 }
 
 /// How much of a host's guest memory its sandboxes are promised, for
@@ -606,6 +623,26 @@ pub struct CapacityStatus {
     pub free: u64,
     /// Sandboxes awake or waking.
     pub awake: u32,
+}
+
+/// How much of a host's local disk the next saves of VMs not saved yet may
+/// need; a wake that would book more than is free is refused as host full.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskStatus {
+    /// Bytes available at the last reading.
+    pub available: u64,
+    /// Bytes booked for saves.
+    pub booked: u64,
+    /// Bytes never booked.
+    pub reserve: u64,
+    /// Bytes more wakes may book.
+    pub free: u64,
+    /// Inodes available at the last reading.
+    pub inodes_available: u64,
+    /// Inodes booked for saves.
+    pub inodes_booked: u64,
+    /// Inodes more wakes may book.
+    pub inodes_free: u64,
 }
 
 /// A sandbox the host cannot manage.

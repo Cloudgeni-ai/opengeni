@@ -433,6 +433,37 @@ fn copy_contents(source: &File, target: &File) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether files under `dir` can share extents: then a save's merge clones
+/// the previous image and writes only what changed; otherwise the merge
+/// writes a whole new copy as well.
+#[cfg(target_os = "linux")]
+pub(crate) fn shares_extents(dir: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::FileExt;
+
+    let probe = dir.join(".extent-probe");
+    let copy = dir.join(".extent-probe-copy");
+    let result = (|| {
+        // A clone reads its source, so the source must be open for reading.
+        let source = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&probe)?;
+        source.write_all_at(&[1; 4096], 0)?;
+        let target = File::create(&copy)?;
+        Ok(rustix::fs::ioctl_ficlone(&target, &source).is_ok())
+    })();
+    let _ = fs::remove_file(&copy);
+    let _ = fs::remove_file(&probe);
+    result
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn shares_extents(_: &Path) -> io::Result<bool> {
+    Ok(false)
+}
+
 /// Copies bytes `start..end` of `source` to the same place in `target`:
 /// inside the kernel where it can, which shares extents on XFS, otherwise
 /// through a buffer, as across filesystems or where `copy_file_range` is

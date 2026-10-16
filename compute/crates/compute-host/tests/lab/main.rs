@@ -32,6 +32,7 @@ use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep, timeout};
 
 mod admission;
+mod disk;
 mod memory;
 mod spoofing;
 mod squeeze;
@@ -73,6 +74,10 @@ struct Host {
     socket: PathBuf,
     extra: Vec<String>,
     cgroup: PathBuf,
+    /// The agent's state root.
+    state: PathBuf,
+    /// The image new sandboxes' disks are copied from.
+    base_image: PathBuf,
 }
 
 impl Host {
@@ -83,6 +88,8 @@ impl Host {
         Self {
             lab: lab.to_owned(),
             socket: root.join("agent.sock"),
+            state: root.join("state"),
+            base_image: lab.join("base.ext4"),
             root,
             extra: extra.iter().map(|&arg| arg.to_owned()).collect(),
             cgroup: PathBuf::from(CGROUP),
@@ -92,6 +99,14 @@ impl Host {
     /// Puts the agent's VMs under `cgroup` instead of [`CGROUP`].
     fn with_cgroup(mut self, cgroup: impl Into<PathBuf>) -> Self {
         self.cgroup = cgroup.into();
+        self
+    }
+
+    /// Keeps the agent's state under `state`, copying new disks from
+    /// `base_image`.
+    fn with_state(mut self, state: impl Into<PathBuf>, base_image: impl Into<PathBuf>) -> Self {
+        self.state = state.into();
+        self.base_image = base_image.into();
         self
     }
 
@@ -108,7 +123,7 @@ impl Host {
             .arg(&self.socket)
             .arg("serve")
             .arg("--root")
-            .arg(self.root.join("state"))
+            .arg(&self.state)
             .arg("--firecracker")
             .arg(lab.join("bin/firecracker"))
             .arg("--jailer")
@@ -116,7 +131,7 @@ impl Host {
             .arg("--kernel")
             .arg(lab.join("vmlinux"))
             .arg("--base-image")
-            .arg(lab.join("base.ext4"))
+            .arg(&self.base_image)
             .arg("--cgroup")
             .arg(&self.cgroup)
             .args(["--limit", "boot=32", "--limit", "restore=32"])

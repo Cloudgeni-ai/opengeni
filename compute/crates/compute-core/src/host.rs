@@ -11,9 +11,11 @@ use crate::sandbox::{Health, InFlight, QueueKey, Sandbox, Wake};
 use crate::time::At;
 
 mod admission;
+mod disk;
 mod squeeze;
 
 pub use admission::{Capacity, Size};
+pub use disk::{DiskCapacity, DiskSpace, Resource};
 pub(crate) use squeeze::{Balloon, Squeeze};
 
 /// Something that happened, fed to [`Host::handle`].
@@ -112,6 +114,12 @@ pub enum Input {
     Memory {
         /// Available bytes.
         available: u64,
+    },
+    /// What the local disk holding sandboxes' copies has available; see
+    /// [`crate::DiskPolicy`].
+    Disk {
+        /// Available bytes and inodes.
+        available: DiskSpace,
     },
     /// Bytes of host memory one sandbox currently holds.
     Resident {
@@ -252,15 +260,17 @@ pub enum Notice {
     Unsavable,
     /// The sandbox cannot be recovered on this host.
     Broken,
-    /// A wake was refused because the host cannot make room for it: it
-    /// needs `needed` bytes of the admission budget and only `free` are
-    /// left even after pushing every idle sandbox as deep as it may go.
-    /// The wake request is dropped; a new one tries again, and so does a
-    /// hold once the memory is there. See [`crate::Admission`].
+    /// A wake was refused because the host cannot make room for it at
+    /// once: it needs `needed` of `resource` and only `free` are left even
+    /// after ending every idle VM already saved. The wake request is
+    /// dropped; a new one tries again, and so does a hold once there is
+    /// room. See [`crate::Admission`] and [`crate::DiskPolicy`].
     HostFull {
-        /// Bytes the wake needs.
+        /// What the host is short of.
+        resource: Resource,
+        /// Bytes, or inodes, the wake needs.
         needed: u64,
-        /// Bytes free.
+        /// Bytes, or inodes, free.
         free: u64,
     },
 }
@@ -325,6 +335,11 @@ pub struct Host {
     refused: BTreeSet<SandboxId>,
     /// Bytes held by VMs not managed here; see [`Input::Unmanaged`].
     unmanaged: HashMap<SandboxId, u64>,
+    /// The last [`Input::Disk`] reading.
+    disk: Option<DiskSpace>,
+    /// Whether that reading was taken after local copies last went, so it
+    /// shows what they freed.
+    disk_fresh: bool,
 }
 
 impl Host {
@@ -345,6 +360,8 @@ impl Host {
             settled_relief: 0,
             refused: BTreeSet::new(),
             unmanaged: HashMap::new(),
+            disk: None,
+            disk_fresh: false,
         })
     }
 
@@ -370,7 +387,7 @@ impl Host {
         self.fire_timers(now);
         self.reconcile_dirty(now, out);
         // Room is made ahead of wakes, never inside one.
-        if self.relieve_pressure(now) | self.keep_buffer(now) {
+        if self.relieve_pressure(now) | self.keep_buffer(now) | self.keep_disk(now) {
             self.reconcile_dirty(now, out);
         }
         // Refused wakes still held try again once per decision, never inside
@@ -532,6 +549,10 @@ impl Host {
                 self.available_memory = Some(available);
                 self.settled_relief = 0;
             }
+            Input::Disk { available } => {
+                self.disk = Some(available);
+                self.disk_fresh = true;
+            }
             Input::Resident { sandbox, bytes } => {
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox)
                     && slot.state.level.has_process()
@@ -623,6 +644,8 @@ impl Host {
         };
         slot.in_flight = None;
         self.in_flight[flight.step.index()] -= 1;
+        // What deleting local files freed shows only in a later reading.
+        self.disk_fresh &= !matches!(flight.step, Step::Evict | Step::Forget);
         let before = slot.state;
         let backoff = if flight.step.wakes() {
             &self.policy.wake_backoff
@@ -838,12 +861,11 @@ impl Host {
     /// [`crate::Admission`]. Returns whether other sandboxes must be
     /// reconciled because of it.
     fn admit(&mut self, now: At, out: &mut Vec<Action>) -> bool {
-        let mut headroom = self.capacity().map(|capacity| capacity.headroom());
+        let mut left = self.left();
         let mut changed = false;
-        let mut waiting = 0;
         for step in Step::ALL {
-            if let Some(headroom) = headroom.as_mut().filter(|_| admission::needs_memory(step)) {
-                changed |= self.admit_measured(now, step, headroom, &mut waiting, out);
+            if let Some(left) = left.as_mut().filter(|_| admission::needs_memory(step)) {
+                changed |= self.admit_measured(now, step, left, out);
                 continue;
             }
             let index = step.index();

@@ -158,6 +158,17 @@ room. A sandbox within its request is never touched. The status shows
 The status reports the capacity (total, reserved, occupied, free, awake), and
 a restarted agent rebuilds it from its records.
 
+Local disk is booked like memory, since a full disk would block the saves
+that relieve memory: every VM whose state is not saved yet books its next
+save (its memory once on XFS, where the merge shares extents, otherwise
+twice, plus 64 MiB), and bookings plus `--disk-reserve-mib` and
+`--disk-reserve-inodes` (default a twentieth of the filesystem) stay within
+what is free. A wake the disk cannot book gets `host_full` naming disk or
+inodes; archived idle sandboxes give up their local copies in the background
+to make room. The status shows the disk (available, booked, reserve, free),
+and a sandbox's `failed_step` with the error while a step such as a save
+keeps failing.
+
 The request also sets the VM's guarantees in its cgroup: `memory.low` while
 it runs (zero while paused, so the kernel takes from idle VMs first; not
 `memory.min`, which would have the kernel kill processes rather than slow a
@@ -283,7 +294,9 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
   under host memory pressure (bare metal) and what a guest does when the
   huge-page pool runs out (nested); `squeeze` takes host memory away until
   a busy sandbox above its request gives way through its balloon, then is
-  paused, saved and woken again (bare metal).
+  paused, saved and woken again (bare metal); `disk` fills a small
+  filesystem until wakes are refused for disk and checks that a save it
+  cannot hold shows in the status and succeeds once there is room.
 - `smoke/` runs SPACE's E2B-style scenarios through one adapter for our API,
   plus our own: sleep levels, concurrent wakes, holds, and an agent restart
   in the middle ([smoke/README.md](smoke/README.md)).

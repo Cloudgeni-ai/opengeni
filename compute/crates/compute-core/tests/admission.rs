@@ -167,7 +167,7 @@ fn host_full(actions: &[Action], id: u128) -> Option<(u64, u64)> {
     actions.iter().find_map(|action| match action {
         Action::Notify {
             sandbox,
-            notice: Notice::HostFull { needed, free },
+            notice: Notice::HostFull { needed, free, .. },
         } if sandbox.0 == id => Some((*needed, *free)),
         _ => None,
     })
@@ -389,6 +389,7 @@ fn requests_below_the_limit_pack_more_and_bursts_count() {
     let size = Size {
         request: 512 * MIB,
         limit: GIB,
+        save: GIB,
     };
     for id in 1..=5 {
         rig.add(id, saved(), size);
@@ -665,7 +666,7 @@ impl Sim {
                 }
                 Action::Notify {
                     sandbox,
-                    notice: Notice::HostFull { needed, free },
+                    notice: Notice::HostFull { needed, free, .. },
                 } => {
                     self.refusals += 1;
                     assert!(needed > free, "{sandbox:?} refused though it fits");
@@ -726,7 +727,11 @@ impl Sim {
             0..10 if !self.sizes.contains_key(&id) => {
                 let limit = (1 + self.rng.below(4)) * GIB;
                 let request = limit / (1 + self.rng.below(4));
-                let size = Size { request, limit };
+                let size = Size {
+                    request,
+                    limit,
+                    save: limit,
+                };
                 self.sizes.insert(id, size);
                 // Saved, paused with a saved copy, or only in object
                 // storage; compressing under pressure or not.

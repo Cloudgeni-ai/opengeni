@@ -129,7 +129,11 @@ fn balloons(actions: &[Action]) -> Vec<(u128, u64)> {
 }
 
 fn size(request: u64, limit: u64) -> Size {
-    Size { request, limit }
+    Size {
+        request,
+        limit,
+        save: limit,
+    }
 }
 
 /// Two held sandboxes above their 1 GiB requests, and one held within its

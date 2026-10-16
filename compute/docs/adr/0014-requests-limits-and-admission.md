@@ -83,6 +83,20 @@ pick a VM.
   outside the agent takes from the pool.
 - Status reports capacity (total, reserved, occupied, free, awake);
   reservations are rebuilt from records after a restart.
+- Local disk is booked the same way, because a full disk blocks the very
+  saves that relieve memory. Every VM whose state is not saved yet books
+  its worst-case next save: its memory size once where files share extents
+  (XFS), twice where they do not (the merge writes a whole new image), plus
+  64 MiB and a few inodes. Bookings plus a kept-back reserve
+  (`--disk-reserve-mib`, `--disk-reserve-inodes`; by default a twentieth
+  of the filesystem, at least 1 GiB and 1024 inodes) stay within what the
+  filesystem has free, read every sample. A wake that cannot book its save
+  gets `host_full` at once, naming disk or inodes and how much. In the
+  background, while refused held sandboxes cannot book, idle sandboxes
+  that are already archived to object storage give up their local copies,
+  least recently used first. A step that fails, such as a save the disk
+  cannot hold, shows in the sandbox's status as `failed_step` until the
+  same step succeeds on a retry.
 
 ## Consequences
 
@@ -97,3 +111,6 @@ pick a VM.
   guest's freed memory stays booked until the VM is saved and ended.
 - Nested hosts hold fewer running sandboxes for the same memory, in exchange
   for cheaper wakes ([5](0005-host-memory-profiles.md)).
+- Disk bookings count saves only. A guest's own disk growth, and memory a
+  remote wake writes into its local image while it hydrates, are measured
+  in what is free but not booked ahead.

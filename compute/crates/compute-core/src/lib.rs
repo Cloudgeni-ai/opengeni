@@ -36,11 +36,14 @@ mod policy;
 mod sandbox;
 mod time;
 
-pub use host::{Action, Capacity, Failure, Host, Input, Notice, Outcome, SandboxView, Size};
+pub use host::{
+    Action, Capacity, DiskCapacity, DiskSpace, Failure, Host, Input, Notice, Outcome, Resource,
+    SandboxView, Size,
+};
 pub use ids::{HoldId, OpId, SandboxId};
 pub use level::{Durability, Level, Priority, State, Step};
 pub use policy::{
-    Admission, Backoff, HostPolicy, MemoryPolicy, PolicyError, Rule, SleepPolicy, SleepRules,
-    StepLimits,
+    Admission, Backoff, DiskPolicy, HostPolicy, MemoryPolicy, PolicyError, Rule, SleepPolicy,
+    SleepRules, StepLimits,
 };
 pub use time::At;

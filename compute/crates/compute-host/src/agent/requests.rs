@@ -4,13 +4,13 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use compute_core::{Durability, HoldId, Input, Level, Priority, Step};
+use compute_core::{Durability, HoldId, Input, Level, Priority, Resource, Step};
 use compute_engine::Engine;
 
 use crate::layout::{Images, Paths, copy_sparse, sync_parent};
 use crate::protocol::{
-    BlockedSandbox, CapacityStatus, HostStatus, Id, MemoryStatus, SandboxConfig, SandboxStatus,
-    step_name,
+    BlockedSandbox, CapacityStatus, DiskStatus, FailedStep, HostStatus, Id, MemoryStatus,
+    SandboxConfig, SandboxStatus, step_name,
 };
 use crate::state::{Record, check_generation};
 use crate::store::Store;
@@ -297,6 +297,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             if needed > capacity.budget {
                 return Err(HostError::HostFull {
                     id,
+                    resource: Resource::Memory,
                     needed,
                     free: capacity.free(),
                 });
@@ -415,6 +416,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         .as_ref()
                         .and_then(|live| self.engine.memory_stats(&live.vm).ok())
                         .map(MemoryStatus::from),
+                    failed_step: slot.failed.as_ref().map(|(step, error)| FailedStep {
+                        step: step_name(*step).to_owned(),
+                        error: error.clone(),
+                    }),
                 })
             })
             .collect();
@@ -446,6 +451,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 occupied: capacity.occupied,
                 free: capacity.free(),
                 awake: capacity.awake,
+            }),
+            disk: self.core.disk().map(|disk| {
+                let free = disk.free();
+                DiskStatus {
+                    available: disk.available.bytes,
+                    booked: disk.booked.bytes,
+                    reserve: disk.reserve.bytes,
+                    free: free.bytes,
+                    inodes_available: disk.available.inodes,
+                    inodes_booked: disk.booked.inodes,
+                    inodes_free: free.inodes,
+                }
             }),
         }
     }

@@ -404,6 +404,8 @@ pub struct HostPolicy {
     pub memory: Option<MemoryPolicy>,
     /// How much memory wakes may take; `None` admits every wake.
     pub admission: Option<Admission>,
+    /// How much local disk saves may book; `None` books none.
+    pub disk: Option<DiskPolicy>,
 }
 
 /// The memory a host lets its sandboxes take, which decides whether a wake
@@ -432,6 +434,27 @@ pub struct Admission {
     /// pressure. Readings of work of its own arrive about this often or
     /// more.
     pub busy_grace: Duration,
+}
+
+/// The local disk a host keeps for saves, which also decides whether a
+/// wake may start; see [`crate::Size::save`].
+///
+/// A full disk blocks the very saves that free memory, and a save that
+/// cannot be written leaves its sandbox unprotected. So every sandbox
+/// whose VM holds state not saved yet, or is waking into one, books the
+/// disk its next save may need at most, as a memory request is booked. A
+/// wake that would book more than the disk has left beyond the reserve is
+/// refused at once with [`crate::Notice::HostFull`]; nothing on disk is
+/// freed inside a request. In the background, while the disk is short,
+/// idle sandboxes that may live in object storage give up their local
+/// copies, least recently used first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiskPolicy {
+    /// Bytes of the disk never booked: room for records, logs and anything
+    /// else written beside the saves.
+    pub reserve: u64,
+    /// Inodes never booked.
+    pub reserve_inodes: u64,
 }
 
 impl HostPolicy {
@@ -463,6 +486,7 @@ impl Default for HostPolicy {
             },
             memory: None,
             admission: None,
+            disk: None,
         }
     }
 }

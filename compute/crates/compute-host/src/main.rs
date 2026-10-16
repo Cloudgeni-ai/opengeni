@@ -3,12 +3,12 @@
 mod bench;
 
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
-use compute_core::{Admission, HostPolicy, MemoryPolicy, Step};
+use compute_core::{Admission, DiskPolicy, HostPolicy, MemoryPolicy, Step};
 use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
@@ -166,6 +166,17 @@ struct ServeArgs {
     /// deeper in the background. Defaults to a sixteenth of the capacity.
     #[arg(long)]
     memory_buffer_mib: Option<u64>,
+    /// Local disk never booked for saves: room for records, logs and
+    /// anything else written beside them. Every VM not saved yet books
+    /// what its next save may write; a wake that would book more than is
+    /// left beyond this is refused as host full. Defaults to a twentieth
+    /// of the filesystem holding the state root, at least 1 GiB.
+    #[arg(long)]
+    disk_reserve_mib: Option<u64>,
+    /// Inodes never booked for saves. Defaults to a twentieth of the
+    /// filesystem's, at least 1024.
+    #[arg(long)]
+    disk_reserve_inodes: Option<u64>,
     /// A port guests may connect to on this host, as `PORT=HOST:PORT`, with
     /// `,wake` appended to wake a sleeping sandbox when data arrives for it.
     /// Repeatable.
@@ -468,6 +479,11 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
             balloon_grace: Duration::from_secs(3),
         });
     }
+    policy.disk = Some(disk_policy(
+        &args.root,
+        args.disk_reserve_mib,
+        args.disk_reserve_inodes,
+    )?);
     let config = HostConfig {
         root: args.root,
         kernel: args.kernel,
@@ -591,6 +607,30 @@ fn admission_budget(
     let total = meminfo_field(&meminfo, "MemTotal:") << 10;
     let headroom = headroom_mib.map_or((total / 16).max(1 << 30), |mib| mib << 20);
     Ok(total.saturating_sub(headroom))
+}
+
+/// The local disk kept back from saves on the filesystem holding `root`:
+/// as given, or a twentieth of its bytes (at least 1 GiB) and inodes (at
+/// least 1024).
+fn disk_policy(
+    root: &Path,
+    reserve_mib: Option<u64>,
+    reserve_inodes: Option<u64>,
+) -> anyhow::Result<DiskPolicy> {
+    std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
+    let stat = rustix::fs::statvfs(root)
+        .with_context(|| format!("reading the filesystem of {}", root.display()))?;
+    let size = stat.f_blocks.saturating_mul(stat.f_frsize);
+    let policy = DiskPolicy {
+        reserve: reserve_mib.map_or((size / 20).max(1 << 30), |mib| mib << 20),
+        reserve_inodes: reserve_inodes.unwrap_or((stat.f_files / 20).max(1024)),
+    };
+    tracing::info!(
+        reserve_mib = policy.reserve >> 20,
+        reserve_inodes = policy.reserve_inodes,
+        "disk kept back from saves"
+    );
+    Ok(policy)
 }
 
 /// Refuses a huge-page memory profile on a host without a reserved pool of
