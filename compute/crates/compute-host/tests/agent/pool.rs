@@ -519,11 +519,9 @@ async fn templates_outlive_the_agent_and_its_leftovers_do_not() {
     std::fs::create_dir_all(&jail).unwrap();
 
     let lab = warm_lab(root, world, Delays::default(), vec![SHAPE]).await;
-    assert_eq!(
-        template_state(&lab.status().await),
-        Some(TemplateState::Ready),
-        "ready at once"
-    );
+    // Its memory is checked again before it is trusted, then it is used
+    // as it is.
+    wait_ready(&lab).await;
     assert_eq!(templates(&lab.root), kept);
     assert!(!jail.exists(), "a dead build's jail is removed");
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1, "not rebuilt");
