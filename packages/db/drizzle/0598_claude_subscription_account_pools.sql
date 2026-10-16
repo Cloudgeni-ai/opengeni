@@ -63,6 +63,9 @@ BEGIN
     source_oid := format('%I.%I', source_schema, source_name)::regclass;
     FOR item IN SELECT conname, pg_get_constraintdef(oid) AS definition
       FROM pg_constraint WHERE conrelid = source_oid
+        -- CREATE TABLE ... LIKE already copies column NOT NULL constraints,
+        -- which PostgreSQL 18 also lists here.
+        AND contype <> 'n'
       ORDER BY CASE WHEN contype = 'f' THEN 1 ELSE 0 END, conname
     LOOP
       EXECUTE format('ALTER TABLE %I.%I ADD CONSTRAINT %I %s', source_schema, target_name,
