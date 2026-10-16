@@ -362,6 +362,13 @@ pub struct Host {
     refused: BTreeSet<SandboxId>,
     /// Bytes held by VMs not managed here; see [`Input::Unmanaged`].
     unmanaged: HashMap<SandboxId, u64>,
+    /// Room claims (see [`Squeeze::Returning`]) that ended since the last
+    /// [`Input::Memory`] reading: their guests may have taken that room
+    /// before it, which only a reading taken since shows.
+    unread_claims: u64,
+    /// Room claims of removed sandboxes whose VMs may still run, until the
+    /// host agent reports them ended.
+    removed_claims: HashMap<SandboxId, u64>,
     /// The last [`Input::Disk`] reading.
     disk: Option<DiskSpace>,
     /// Whether that reading was taken after local copies last went, so it
@@ -391,6 +398,8 @@ impl Host {
             settled_relief: 0,
             refused: BTreeSet::new(),
             unmanaged: HashMap::new(),
+            unread_claims: 0,
+            removed_claims: HashMap::new(),
             disk: None,
             disk_fresh: false,
             disk_spent: DiskSpace::default(),
@@ -517,6 +526,7 @@ impl Host {
             Input::Unmanaged { sandbox, bytes } => {
                 if bytes == 0 {
                     self.unmanaged.remove(&sandbox);
+                    self.removed_claims.remove(&sandbox);
                 } else {
                     self.unmanaged.insert(sandbox, bytes);
                 }
@@ -574,6 +584,7 @@ impl Host {
             Input::Memory { available } => {
                 self.available_memory = Some(available);
                 self.settled_relief = 0;
+                self.unread_claims = 0;
                 self.measured_returns();
             }
             Input::Disk { available } => {
@@ -657,8 +668,14 @@ impl Host {
             }
         }
         if slot.cannot_save() {
-            if slot.leaving() {
-                slot.squeeze = Squeeze::None;
+            if let Squeeze::Leaving { claim, .. } = slot.squeeze {
+                // It stays awake, and its guest may still take back what
+                // its balloon held.
+                slot.squeeze = if claim > 0 {
+                    Squeeze::Returning { bytes: claim }
+                } else {
+                    Squeeze::None
+                };
             }
             if slot.floor >= Level::Saved {
                 self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
@@ -762,8 +779,14 @@ impl Host {
         // Its VM, if any, holds its memory until the host agent has ended
         // it, after any step still running for it.
         let held = slot.occupies(percent);
+        let claim = slot.squeeze.claim();
         if held > 0 {
             *self.unmanaged.entry(id).or_default() += held;
+            if claim > 0 {
+                *self.removed_claims.entry(id).or_default() += claim;
+            }
+        } else {
+            self.unread_claims += claim;
         }
         if let Some(flight) = slot.in_flight {
             self.orphans.insert(flight.op, flight.step);

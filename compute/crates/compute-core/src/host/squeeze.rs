@@ -34,8 +34,8 @@ pub(crate) enum Squeeze {
     None,
     /// It is being paused and saved, whoever wants it awake; its VM held
     /// `bytes`. A sandbox paused while it claimed room as `Returning`
-    /// keeps that claim until its VM no longer runs: until then its guest
-    /// may still take back what its balloon held.
+    /// keeps that claim: its guest may have taken back what its balloon
+    /// held after the last reading, and pausing frees nothing.
     Leaving {
         /// Host memory its VM held.
         bytes: u64,
@@ -57,6 +57,16 @@ pub(crate) enum Squeeze {
         /// Host memory its VM held.
         bytes: u64,
     },
+}
+
+impl Squeeze {
+    /// Room above the high watermark it claims.
+    pub(crate) fn claim(self) -> u64 {
+        match self {
+            Self::Returning { bytes } | Self::Leaving { claim: bytes, .. } => bytes,
+            Self::None | Self::Waiting { .. } => 0,
+        }
+    }
 }
 
 impl Sandbox {
@@ -292,17 +302,17 @@ impl Host {
     }
 
     /// Bytes claimed by sandboxes let through to wake after waiting for
-    /// host memory, or whose balloons were let go, not yet shown by a
-    /// reading, and by such sandboxes being paused that still run.
+    /// host memory, or whose balloons were let go, and not yet shown by a
+    /// reading. A claim that ended still counts until a reading taken
+    /// since shows what its guest took, or, for a removed sandbox, until
+    /// its VM is gone.
     fn claimed_room(&self) -> u64 {
         self.sandboxes
             .values()
-            .map(|slot| match slot.squeeze {
-                Squeeze::Returning { bytes } => bytes,
-                Squeeze::Leaving { claim, .. } if slot.state.level == Level::Running => claim,
-                _ => 0,
-            })
-            .sum()
+            .map(|slot| slot.squeeze.claim())
+            .sum::<u64>()
+            + self.unread_claims
+            + self.removed_claims.values().sum::<u64>()
     }
 
     /// Ends the claims of sandboxes that run, were measured and whose VM
@@ -345,12 +355,14 @@ impl Host {
     /// Moves `id` along after a pause for host memory: once saved it
     /// waits, wanted awake, for room, and whoever waits for it hears so;
     /// once nothing wants it awake nothing waits; a wake given up frees
-    /// the room it claimed.
+    /// the room it claimed. A claim that ends here counts until the next
+    /// reading.
     pub(super) fn settle_squeeze(&mut self, id: SandboxId, now: At, out: &mut Vec<Action>) {
         let free = self.free_above_watermark();
         let Some(slot) = self.sandboxes.get_mut(&id) else {
             return;
         };
+        let claim = slot.squeeze.claim();
         if let Squeeze::Leaving { bytes, .. } = slot.squeeze
             && !slot.state.level.has_process()
             && slot.in_flight.is_none()
@@ -379,5 +391,6 @@ impl Host {
         {
             slot.squeeze = Squeeze::None;
         }
+        self.unread_claims += claim.saturating_sub(slot.squeeze.claim());
     }
 }

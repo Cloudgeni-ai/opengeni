@@ -72,9 +72,13 @@ pick a VM.
      statistics, turned on at boot, report the guest holds no page in
      the balloon (within 10 s, else it is retried). A VM restored from an
      image booted without statistics cannot confirm, so its claim lasts
-     until it next pauses. A sandbox whose let-go is unconfirmed is not
-     ballooned again, but step 3 may still pause and save it; its claim
-     then lasts until its VM has paused;
+     until it next pauses and is saved. A sandbox whose let-go is
+     unconfirmed is not ballooned again, but step 3 may still pause and
+     save it, keeping its claim, or give it back its claim if it turns
+     out unsavable and stays awake. Pausing frees nothing, so a claim
+     that ends, for whatever reason, still counts until a reading taken
+     after that shows what the guest took; a removed sandbox's claim
+     lasts until its VM is ended;
   3. if that is still not enough, the sandbox furthest above its request
      is paused and saved, held or not. It loses nothing: once its recorded
      footprint fits above the high watermark, next to the footprints of
