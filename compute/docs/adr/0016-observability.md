@@ -27,7 +27,13 @@ every sandbox's cgroup for activity ([3](0003-activity-idle-and-sleep-levels.md)
   per host, whatever the number of sandboxes.
 - **Trace ids pass through.** A request may carry a W3C `traceparent`; every
   step it causes logs that id, so a slow create in Opengeni can be followed
-  into the host. The agent exports no spans itself.
+  into the host.
+- **OpenTelemetry formats, our own small encoder.** Events, metrics and
+  trace ids follow OpenTelemetry's data model and semantic conventions and
+  can be sent as OTLP to any collector. The agent writes them with a small
+  encoder for exactly what it emits, not the OpenTelemetry Rust SDK, which
+  would add more code and dependencies than the rest of the agent's
+  telemetry.
 - **Safety counters that must stay at zero:** copies kept because the only
   good one was at stake, failed verifications, quarantines, memory lost,
   blocked and unsavable sandboxes. Any increase alerts.
