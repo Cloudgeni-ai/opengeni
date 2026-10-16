@@ -614,6 +614,7 @@ import {
   captureScheduledExternalLinkTurnAuthority,
   cloneExternalLinkTaskAuthority,
   getExternalLinkTurnAuthorization,
+  externalLinkWorkSnapshotIsLive,
 } from "./external-link-work";
 
 import {
@@ -13878,48 +13879,6 @@ export async function getSlackInteractionSessionAccess(
       )
       .limit(1);
     return row ?? null;
-  });
-}
-
-export async function getSlackInteractionSessionAccessForSession(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-  },
-): Promise<
-  | (Pick<SlackInteraction, "owningSubjectId" | "visibility"> & {
-      rootSessionId: string;
-    })
-  | null
-> {
-  return await withRlsContext(db, input, async (scopedDb) => {
-    const rows = await scopedDb.execute<{
-      rootSessionId: string;
-      owningSubjectId: string | null;
-      visibility: SlackInteraction["visibility"] | null;
-    }>(sql`
-      select
-        session.root_session_id as "rootSessionId",
-        interaction.owning_subject_id as "owningSubjectId",
-        interaction.visibility
-      from ${schema.sessions} session
-      left join ${schema.slackInteractions} interaction
-        on interaction.account_id = ${input.accountId}
-        and interaction.workspace_id = ${input.workspaceId}
-        and interaction.session_reservation_id = session.root_session_id
-      where session.account_id = ${input.accountId}
-        and session.workspace_id = ${input.workspaceId}
-        and session.id = ${input.sessionId}
-    `);
-    const root = rows[0];
-    if (!root?.owningSubjectId || !root.visibility) return null;
-    return {
-      rootSessionId: root.rootSessionId,
-      owningSubjectId: root.owningSubjectId,
-      visibility: root.visibility,
-    };
   });
 }
 
@@ -30440,26 +30399,6 @@ export async function getInitializedSessionCreateReplay(
   );
 }
 
-/** Read target identity for authorization without expanding chat content or controls. */
-export async function getSessionAuthorizationTargetProjection(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<Pick<Session, "id" | "accountId" | "rootSessionId"> | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        id: schema.sessions.id,
-        accountId: schema.sessions.accountId,
-        rootSessionId: schema.sessions.rootSessionId,
-      })
-      .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .limit(1);
-    return row ?? null;
-  });
-}
-
 export async function getSession(
   db: Database,
   workspaceId: string,
@@ -30999,6 +30938,221 @@ export async function getSessionAccessProjection(
     scopeSubjectId: authority.scopeSubjectId,
     memoryScope: authority.memoryScope,
   };
+}
+
+/** The caller session and live turn behind one agent attempt's authority. */
+export type SessionAuthorizationCallerFacts = {
+  session: {
+    accountId: string;
+    rootSessionId: string;
+    parentSessionId: string | null;
+    agentAccess: SessionAgentAccess;
+    scopeSubjectId: SessionScopeSubjectId | null;
+  } | null;
+  /**
+   * The turn this exact attempt is live on: a claimed or running attempt that
+   * is its turn's active attempt, on the session's active turn, with no
+   * pending interruption and (for a linked external turn) live link
+   * authority. The same fence as `getLiveSessionAttemptTurn`.
+   */
+  turn: {
+    id: string;
+    executionGeneration: number;
+    initiator: TurnInitiator;
+    initiatorContext: TurnInitiatorContext;
+    initiatingHumanSubjectId: string | null;
+  } | null;
+};
+
+export type SessionAuthorizationFacts = {
+  /** Null when the target does not exist or the caller's RLS context hides it. */
+  target:
+    | (SessionAuthorityProjection & {
+        accountId: string;
+        /** The Slack interaction that owns the target's root, when one does. */
+        slackAccess: { owningSubjectId: string; visibility: SlackInteraction["visibility"] } | null;
+      })
+    | null;
+  /** Present only when a caller attempt was named. */
+  caller: SessionAuthorizationCallerFacts | null;
+};
+
+/**
+ * Everything session authorization reads, in one scoped statement: the target
+ * session's authority projection and Slack ownership, and (for an agent
+ * attempt) the caller session and its live attempt turn. Authorization used to
+ * make five sequential scoped reads (plus the full caller-session projection);
+ * this is one round trip inside one RLS scope, so every fact is read under the
+ * same visibility and the same snapshot. A linked external turn additionally
+ * proves its link is still live, in the same scope.
+ */
+export async function getSessionAuthorizationFacts(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    caller?: { sessionId: string; attemptId: string } | undefined;
+  },
+): Promise<SessionAuthorizationFacts> {
+  const callerSessionId = input.caller?.sessionId ?? null;
+  const attemptId = input.caller?.attemptId ?? null;
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await rawRows<{
+      target_id: string | null;
+      target_account_id: string | null;
+      target_root_session_id: string | null;
+      target_visibility: string | null;
+      target_authority_epoch: number | null;
+      target_owner_subject_id: string | null;
+      target_site_id: string | null;
+      target_site_access_root_id: string | null;
+      target_site_viewer_principal: string | null;
+      target_site_owner_subject_id: string | null;
+      target_agent_access: string | null;
+      target_scope_subject_id: string | null;
+      target_memory_scope: string | null;
+      slack_owning_subject_id: string | null;
+      slack_visibility: SlackInteraction["visibility"] | null;
+      caller_account_id: string | null;
+      caller_root_session_id: string | null;
+      caller_parent_session_id: string | null;
+      caller_agent_access: string | null;
+      caller_scope_subject_id: string | null;
+      turn_id: string | null;
+      turn_account_id: string | null;
+      turn_execution_generation: number | null;
+      turn_initiator_kind: string | null;
+      turn_initiator_subject_id: string | null;
+      turn_initiator_context: TurnInitiatorContext | null;
+      turn_initiating_human_subject_id: string | null;
+      turn_link_snapshot: unknown;
+    }>(
+      scopedDb,
+      sql`
+        select
+          target.id as target_id,
+          target.account_id as target_account_id,
+          target.root_session_id as target_root_session_id,
+          target.visibility as target_visibility,
+          target.authority_epoch as target_authority_epoch,
+          target.owner_subject_id as target_owner_subject_id,
+          target.site_id as target_site_id,
+          target.site_access_root_id as target_site_access_root_id,
+          target.site_viewer_principal as target_site_viewer_principal,
+          target.site_owner_subject_id as target_site_owner_subject_id,
+          target.agent_access as target_agent_access,
+          target.scope_subject_id as target_scope_subject_id,
+          target.memory_scope as target_memory_scope,
+          slack.owning_subject_id as slack_owning_subject_id,
+          slack.visibility as slack_visibility,
+          caller.account_id as caller_account_id,
+          caller.root_session_id as caller_root_session_id,
+          caller.parent_session_id as caller_parent_session_id,
+          caller.agent_access as caller_agent_access,
+          caller.scope_subject_id as caller_scope_subject_id,
+          turn.id as turn_id,
+          turn.account_id as turn_account_id,
+          turn.execution_generation as turn_execution_generation,
+          turn.initiator_kind as turn_initiator_kind,
+          turn.initiator_subject_id as turn_initiator_subject_id,
+          turn.initiator_context as turn_initiator_context,
+          turn.initiating_human_subject_id as turn_initiating_human_subject_id,
+          link.canonical_snapshot as turn_link_snapshot
+        from (select 1) as anchor
+        left join ${schema.sessions} target
+          on target.workspace_id = ${input.workspaceId}
+          and target.id = ${input.sessionId}
+        left join ${schema.slackInteractions} slack
+          on slack.account_id = ${input.accountId}
+          and slack.workspace_id = ${input.workspaceId}
+          and slack.session_reservation_id = target.root_session_id
+          and target.account_id = ${input.accountId}
+        left join ${schema.sessions} caller
+          on ${callerSessionId}::uuid is not null
+          and caller.workspace_id = ${input.workspaceId}
+          and caller.id = ${callerSessionId}::uuid
+        left join ${schema.sessionTurnAttempts} attempt
+          on attempt.workspace_id = ${input.workspaceId}
+          and attempt.session_id = caller.id
+          and attempt.id = ${attemptId}::uuid
+          and attempt.state in ('claimed', 'running')
+          and not exists (
+            select 1 from ${schema.sessionAttemptInterruptions} interruption
+            where interruption.workspace_id = ${input.workspaceId}
+              and interruption.attempt_id = ${attemptId}::uuid
+              and interruption.state in ('pending', 'delivered', 'acknowledged')
+          )
+        left join ${schema.sessionTurns} turn
+          on turn.workspace_id = attempt.workspace_id
+          and turn.id = attempt.turn_id
+          and turn.active_attempt_id = attempt.id
+          and turn.id = caller.active_turn_id
+          and turn.status in ('running', 'requires_action', 'recovering', 'waiting_capacity')
+        left join external_link_turn_authorities link
+          on link.account_id = turn.account_id
+          and link.workspace_id = turn.workspace_id
+          and link.turn_id = turn.id
+      `,
+    );
+    const target: SessionAuthorizationFacts["target"] =
+      row?.target_id && row.target_account_id && row.target_root_session_id
+        ? {
+            sessionId: row.target_id,
+            accountId: row.target_account_id,
+            authorityEpoch: Number(row.target_authority_epoch),
+            rootSessionId: row.target_root_session_id,
+            visibility: row.target_visibility as SessionAuthorityProjection["visibility"],
+            ownerSubjectId: row.target_owner_subject_id ?? null,
+            siteId: row.target_site_id ?? null,
+            siteAccessRootId: row.target_site_access_root_id ?? null,
+            siteViewerPrincipal: row.target_site_viewer_principal ?? null,
+            siteOwnerSubjectId: row.target_site_owner_subject_id ?? null,
+            agentAccess: sessionAgentAccessFromRow({ agentAccess: row.target_agent_access ?? "" }),
+            scopeSubjectId: sessionEndUserFromRow({ scopeSubjectId: row.target_scope_subject_id }),
+            memoryScope: sessionMemoryScopeFromRow({ memoryScope: row.target_memory_scope ?? "" }),
+            slackAccess:
+              row.slack_owning_subject_id && row.slack_visibility
+                ? { owningSubjectId: row.slack_owning_subject_id, visibility: row.slack_visibility }
+                : null,
+          }
+        : null;
+    if (!input.caller) return { target, caller: null };
+    const session: SessionAuthorizationCallerFacts["session"] =
+      row?.caller_account_id && row.caller_root_session_id
+        ? {
+            accountId: row.caller_account_id,
+            rootSessionId: row.caller_root_session_id,
+            parentSessionId: row.caller_parent_session_id ?? null,
+            agentAccess: sessionAgentAccessFromRow({ agentAccess: row.caller_agent_access ?? "" }),
+            scopeSubjectId: sessionEndUserFromRow({ scopeSubjectId: row.caller_scope_subject_id }),
+          }
+        : null;
+    let turn: SessionAuthorizationCallerFacts["turn"] = null;
+    if (
+      row?.turn_id &&
+      row.turn_execution_generation !== null &&
+      row.turn_initiator_kind !== null &&
+      row.turn_initiator_subject_id !== null &&
+      // A linked external turn keeps its authority only while the link is live.
+      (row.turn_link_snapshot === null ||
+        (await externalLinkWorkSnapshotIsLive(scopedDb, row.turn_link_snapshot)))
+    ) {
+      const initiatorContext = row.turn_initiator_context ?? {};
+      turn = {
+        id: row.turn_id,
+        executionGeneration: Number(row.turn_execution_generation),
+        initiator: initiatorFromStorage(
+          row.turn_initiator_kind,
+          row.turn_initiator_subject_id,
+          initiatorContext,
+        ),
+        initiatorContext,
+        initiatingHumanSubjectId: row.turn_initiating_human_subject_id ?? null,
+      };
+    }
+    return { target, caller: { session, turn } };
+  });
 }
 
 /**

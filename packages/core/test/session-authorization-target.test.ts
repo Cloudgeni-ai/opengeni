@@ -1,10 +1,5 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
-import type {
-  AccessGrant,
-  Session,
-  SessionAuthorizationDecision,
-  SessionTurn,
-} from "@opengeni/contracts";
+import type { AccessGrant, SessionAuthorizationDecision } from "@opengeni/contracts";
 import * as database from "@opengeni/db";
 import {
   requireSessionAuthorization,
@@ -27,7 +22,30 @@ const grant: AccessGrant = {
   permissions: ["sessions:read"],
 };
 const input = { sessionId, operation: "session.read", surface: "http" } as const;
-let target: ReturnType<typeof spyOn<typeof database, "getSessionAuthorizationTargetProjection">>;
+
+function targetFacts(
+  overrides: Partial<NonNullable<database.SessionAuthorizationFacts["target"]>> = {},
+): NonNullable<database.SessionAuthorizationFacts["target"]> {
+  return {
+    sessionId,
+    accountId,
+    rootSessionId,
+    authorityEpoch: 1,
+    visibility: "user_private",
+    ownerSubjectId: subjectId,
+    siteId: null,
+    siteAccessRootId: null,
+    siteViewerPrincipal: null,
+    siteOwnerSubjectId: null,
+    agentAccess: "workspace",
+    scopeSubjectId: null,
+    memoryScope: "off",
+    slackAccess: null,
+    ...overrides,
+  };
+}
+
+let facts: ReturnType<typeof spyOn<typeof database, "getSessionAuthorizationFacts">>;
 let fullSession: ReturnType<typeof spyOn<typeof database, "getSession">>;
 const authorizeSession = mock(
   async (): Promise<SessionAuthorizationDecision> => ({ allowed: true }),
@@ -43,21 +61,9 @@ const deps = {
 beforeEach(() => {
   authorizeSession.mockReset();
   authorizeSession.mockResolvedValue({ allowed: true });
-  spyOn(database, "getSlackInteractionSessionAccessForSession").mockResolvedValue(null);
-  spyOn(database, "getSessionAuthorityProjection").mockResolvedValue({
-    sessionId,
-    rootSessionId,
-    authorityEpoch: 1,
-    visibility: "user_private",
-    ownerSubjectId: subjectId,
-    agentAccess: "workspace",
-    scopeSubjectId: null,
-    memoryScope: "off",
-  });
-  target = spyOn(database, "getSessionAuthorizationTargetProjection").mockResolvedValue({
-    id: sessionId,
-    accountId,
-    rootSessionId,
+  facts = spyOn(database, "getSessionAuthorizationFacts").mockResolvedValue({
+    target: targetFacts(),
+    caller: null,
   });
   fullSession = spyOn(database, "getSession").mockRejectedValue(
     new Error("Target authorization must not expand the full chat"),
@@ -71,13 +77,14 @@ test("target authorization passes durable identity to the host without expanding
   expect(authorizeSession).toHaveBeenCalledWith(
     expect.objectContaining({ accountId, workspaceId, target: { sessionId, rootSessionId } }),
   );
-  expect(target).toHaveBeenCalledWith(db, workspaceId, sessionId);
+  expect(facts).toHaveBeenCalledTimes(1);
+  expect(facts).toHaveBeenCalledWith(db, { accountId, workspaceId, sessionId, caller: undefined });
   expect(fullSession).not.toHaveBeenCalled();
 });
 
 test("a hidden target or wrong account is refused before the host is called", async () => {
-  for (const row of [null, { id: sessionId, accountId: crypto.randomUUID(), rootSessionId }]) {
-    target.mockResolvedValue(row);
+  for (const target of [null, targetFacts({ accountId: crypto.randomUUID() })]) {
+    facts.mockResolvedValue({ target, caller: null });
     await expect(requireSessionAuthorization(deps, grant, input)).rejects.toBeInstanceOf(
       SessionAuthorizationDeniedError,
     );
@@ -96,56 +103,68 @@ test("host denial and host failure still refuse the request", async () => {
   );
 });
 
-test("target visibility is read again after the awaited agent actor reads", async () => {
-  const callerId = crypto.randomUUID();
+test("an agent attempt's caller and target come from the same single read", async () => {
+  // The browser and computer routes authorize an agent acting on its own session.
+  const callerId = sessionId;
   const turnId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
-  const entered = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<Session>();
-  fullSession.mockImplementation(async () => {
-    entered.resolve();
-    return await release.promise;
-  });
-  spyOn(database, "getSessionTurnForAttempt").mockResolvedValue({
-    id: turnId,
-    executionGeneration: 1,
-    initiator: { kind: "subject", subjectId },
-    initiatorContext: {},
-    initiatingHumanSubjectId: subjectId,
-  } as SessionTurn);
-  const check = requireSessionAuthorization(
-    deps,
-    {
-      ...grant,
-      principalKind: "agent_attempt",
-      metadata: { sessionId: callerId, turnId, attemptId, executionGeneration: 1 },
+  const agentGrant: AccessGrant = {
+    ...grant,
+    principalKind: "agent_attempt",
+    metadata: { sessionId: callerId, turnId, attemptId, executionGeneration: 1 },
+  };
+  const caller: database.SessionAuthorizationFacts["caller"] = {
+    session: {
+      accountId,
+      rootSessionId,
+      parentSessionId: null,
+      agentAccess: "workspace",
+      scopeSubjectId: null,
     },
-    input,
-  );
-  await entered.promise;
-  expect(target).not.toHaveBeenCalled();
-  // The later RLS read no longer sees a target that became inaccessible.
-  target.mockResolvedValue(null);
-  release.resolve({
-    id: callerId,
+    turn: {
+      id: turnId,
+      executionGeneration: 1,
+      initiator: { kind: "subject", subjectId },
+      initiatorContext: {},
+      initiatingHumanSubjectId: subjectId,
+    },
+  };
+  facts.mockResolvedValue({ target: targetFacts(), caller });
+  const result = await requireSessionAuthorization(deps, agentGrant, input);
+  expect(result?.actor).toMatchObject({ kind: "agent_attempt", callerSessionId: callerId });
+  expect(facts).toHaveBeenCalledTimes(1);
+  expect(facts).toHaveBeenCalledWith(db, {
     accountId,
-    rootSessionId,
-    activeTurnId: turnId,
-    parentSessionId: null,
-    agentAccess: "workspace",
-    scopeSubjectId: null,
-  } as Session);
-  await expect(check).rejects.toBeInstanceOf(SessionAuthorizationDeniedError);
-  expect(target).toHaveBeenCalledTimes(1);
-  expect(authorizeSession).not.toHaveBeenCalled();
+    workspaceId,
+    sessionId,
+    caller: { sessionId: callerId, attemptId },
+  });
+
+  // A target the caller cannot see is not found, whatever the caller's state.
+  facts.mockResolvedValue({ target: null, caller });
+  await expect(requireSessionAuthorization(deps, agentGrant, input)).rejects.toMatchObject({
+    reason: "not_found",
+  });
+  // A turn that is no longer live, or a different generation, is stale.
+  for (const stale of [
+    { ...caller, turn: null },
+    { ...caller, turn: { ...caller.turn!, executionGeneration: 2 } },
+    { ...caller, session: { ...caller.session!, accountId: crypto.randomUUID() } },
+  ]) {
+    facts.mockResolvedValue({ target: targetFacts(), caller: stale });
+    await expect(requireSessionAuthorization(deps, agentGrant, input)).rejects.toMatchObject({
+      reason: "caller_stale",
+    });
+  }
+  expect(fullSession).not.toHaveBeenCalled();
 });
 
-test("target read reuse stays request-scoped and stops at the handoff", async () => {
+test("read reuse stays request-scoped and stops at the handoff", async () => {
   await withSessionAuthorizationReadReuse(async (reuse) => {
     await requireSessionAuthorization(deps, grant, input);
-    target.mockResolvedValue(null);
+    facts.mockResolvedValue({ target: null, caller: null });
     await requireSessionAuthorization(deps, grant, input);
-    expect(target).toHaveBeenCalledTimes(1);
+    expect(facts).toHaveBeenCalledTimes(1);
     reuse.handOffToToolDispatch();
     await expect(requireSessionAuthorization(deps, grant, input)).rejects.toBeInstanceOf(
       SessionAuthorizationDeniedError,
@@ -154,5 +173,5 @@ test("target read reuse stays request-scoped and stops at the handoff", async ()
   await expect(requireSessionAuthorization(deps, grant, input)).rejects.toBeInstanceOf(
     SessionAuthorizationDeniedError,
   );
-  expect(target).toHaveBeenCalledTimes(3);
+  expect(facts).toHaveBeenCalledTimes(3);
 });
