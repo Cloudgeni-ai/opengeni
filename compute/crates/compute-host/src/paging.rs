@@ -788,6 +788,7 @@ mod tests {
             .publish(crate::image::Parts::Whole {
                 state: &state,
                 memory: &memory,
+                len: 3 * 4096,
             })
             .unwrap();
         let generation = image.generation();

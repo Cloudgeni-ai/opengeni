@@ -33,7 +33,7 @@
 
 use std::fmt;
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read};
 use std::ops::Range;
 use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -62,6 +62,12 @@ const REMOTE: &str = "remote.json";
 const FILLED: &str = "filled";
 const CURRENT: &str = "current";
 const QUARANTINE: &str = "quarantine";
+/// The most saved processor and device state an image may hold. A VMM's is
+/// tens of kilobytes; one anywhere near this is not a snapshot, and is
+/// refused before it is read into memory.
+const MAX_STATE_BYTES: u64 = 64 << 20;
+/// The most an image's description may hold, for the same reason.
+const MAX_META_BYTES: u64 = 1 << 20;
 /// Quarantined generations kept per sandbox; older ones are removed so a
 /// repeatedly failing sandbox cannot fill the disk.
 const QUARANTINE_KEEP: usize = 2;
@@ -200,8 +206,14 @@ pub(crate) enum Depth {
 /// What a new generation is built from.
 #[derive(Debug)]
 pub(crate) enum Parts<'a> {
-    /// A complete memory file and its state, both moved in.
-    Whole { state: &'a Path, memory: &'a Path },
+    /// A complete memory file and its state, both moved in. `len` is the
+    /// sandbox's memory size: a memory file of any other length is refused
+    /// before anything is read from it.
+    Whole {
+        state: &'a Path,
+        memory: &'a Path,
+        len: u64,
+    },
     /// The pages that changed since `base`, merged over a copy of it; holes
     /// in `diff` are pages equal to `base`. `state` and `diff` are moved in
     /// or consumed.
@@ -302,9 +314,10 @@ impl Images {
     pub fn verify(&self, generation: Generation, depth: Depth) -> Result<Verified, Suspect> {
         let dir = self.path(generation);
         let damaged = |reason: String| Suspect::Damaged { generation, reason };
-        let meta = match fs::read(dir.join(META)) {
-            Ok(bytes) => serde_json::from_slice::<Meta>(&bytes)
+        let meta = match read_at_most(&dir.join(META), MAX_META_BYTES) {
+            Ok(Some(bytes)) => serde_json::from_slice::<Meta>(&bytes)
                 .map_err(|error| damaged(format!("{META}: {error}")))?,
+            Ok(None) => return Err(damaged(format!("{META} is too large"))),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Err(Suspect::Missing(generation));
             }
@@ -316,13 +329,15 @@ impl Images {
                 meta.version, meta.generation
             )));
         }
-        let state = fs::read(dir.join(STATE))?;
-        if state.len() as u64 != meta.state_len
-            || blake3::hash(&state).to_hex().as_str() != meta.state_hash
-        {
+        let state = read_at_most(&dir.join(STATE), meta.state_len.min(MAX_STATE_BYTES))?;
+        if state.is_none_or(|state| {
+            state.len() as u64 != meta.state_len
+                || blake3::hash(&state).to_hex().as_str() != meta.state_hash
+        }) {
             return Err(damaged("state does not match its hash".into()));
         }
-        let chunk_bytes = fs::read(dir.join(CHUNKS))?;
+        let chunk_bytes =
+            read_at_most(&dir.join(CHUNKS), chunk_map_len(meta.memory_len))?.unwrap_or_default();
         if blake3::hash(&chunk_bytes).to_hex().as_str() != meta.chunks_hash {
             return Err(damaged("chunk map does not match its hash".into()));
         }
@@ -357,7 +372,8 @@ impl Images {
 
     /// The chunk map of a verified generation.
     pub fn chunk_map(&self, image: &Verified) -> io::Result<ChunkMap> {
-        let bytes = fs::read(self.path(image.generation()).join(CHUNKS))?;
+        let path = self.path(image.generation()).join(CHUNKS);
+        let bytes = read_at_most(&path, chunk_map_len(image.meta.memory_len))?.unwrap_or_default();
         if blake3::hash(&bytes).to_hex().as_str() != image.meta.chunks_hash {
             return Err(invalid("chunk map changed after it was verified"));
         }
@@ -418,9 +434,10 @@ impl Images {
             filled,
         } = self.stage_memory(parts, &staging.join(MEMORY))?;
         move_in(state, &staging.join(STATE))?;
-        let state_bytes = fs::read(staging.join(STATE))?;
+        let state_bytes = read_at_most(&staging.join(STATE), MAX_STATE_BYTES)?
+            .ok_or_else(|| invalid("saved state is too large to be a snapshot's"))?;
         let chunk_bytes = chunks.encode();
-        if chunk_bytes.len() != chunk_count(memory_len) * 32 {
+        if chunk_bytes.len() as u64 != chunk_map_len(memory_len) {
             return Err(invalid("chunk map does not cover memory").into());
         }
         write_synced(&staging.join(CHUNKS), &chunk_bytes)?;
@@ -481,10 +498,17 @@ impl Images {
             Parts::Whole {
                 state,
                 memory: whole,
+                len: memory_len,
             } => {
                 move_in(whole, memory)?;
                 let file = File::open(memory)?;
-                let memory_len = file.metadata()?.len();
+                let found = file.metadata()?.len();
+                if found != memory_len {
+                    return Err(invalid(&format!(
+                        "memory has {found} bytes, the sandbox {memory_len}"
+                    ))
+                    .into());
+                }
                 let all: Vec<usize> = (0..chunk_count(memory_len)).collect();
                 Staged {
                     parent: None,
@@ -709,6 +733,12 @@ pub(crate) fn chunk_count(len: u64) -> usize {
     usize::try_from(len.div_ceil(CHUNK_BYTES)).unwrap_or(usize::MAX)
 }
 
+/// The length of the chunk map of an image of `len` bytes: a hash per
+/// chunk.
+fn chunk_map_len(len: u64) -> u64 {
+    len.div_ceil(CHUNK_BYTES).saturating_mul(32)
+}
+
 /// The byte range of chunk `index` in an image of `len` bytes.
 pub(crate) fn chunk_range(index: usize, len: u64) -> Range<u64> {
     let start = index as u64 * CHUNK_BYTES;
@@ -925,6 +955,17 @@ fn sync_dir(path: &Path) -> io::Result<()> {
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_owned())
+}
+
+/// The contents of the file at `path`, or `None` if it holds more than
+/// `max` bytes. Never reads more than one byte past `max`, however large
+/// the file or however it grows meanwhile.
+fn read_at_most(path: &Path, max: u64) -> io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= max).then_some(bytes))
 }
 
 /// Whether a failed read shows an image is damaged (a file is missing, or

@@ -176,6 +176,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
         };
         let images = images_of(&paths);
+        let memory_len = self.spec.memory_bytes();
         let published = blocking(move || {
             let published = match &fetched {
                 FetchedMemory::None => images.clear().map_err(Suspect::from).map(|()| None),
@@ -184,7 +185,14 @@ impl<E: Engine, S: Store> Job<E, S> {
                     memory,
                     runtime,
                 } => images
-                    .publish_made_by(Parts::Whole { state, memory }, runtime.as_deref())
+                    .publish_made_by(
+                        Parts::Whole {
+                            state,
+                            memory,
+                            len: memory_len,
+                        },
+                        runtime.as_deref(),
+                    )
                     .map(Some),
                 FetchedMemory::Remote {
                     state,

@@ -359,6 +359,7 @@ async fn an_uncertain_restore_keeps_the_image_and_the_vm() {
         .publish(Parts::Whole {
             state: &state,
             memory: &memory,
+            len: 8192,
         })
         .unwrap();
     sandbox.fail_record_writes();
@@ -465,6 +466,7 @@ async fn an_image_refused_by_another_runtime_is_given_up() {
                 Parts::Whole {
                     state: &state,
                     memory: &memory,
+                    len: 8192,
                 },
                 Some(made_under),
             )

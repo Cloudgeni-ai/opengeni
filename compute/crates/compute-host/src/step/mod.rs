@@ -565,6 +565,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         let scratch = self.paths.dir.join("saving");
         let watching = Arc::clone(&live.memory.disk);
         let runtime = self.engine.runtime().to_owned();
+        let memory_len = self.spec.memory_bytes();
         let published = blocking(move || {
             // The VMM wrote these inside its jail, where it could have put
             // links instead: they move somewhere only the host reaches and
@@ -584,6 +585,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 _ => Parts::Whole {
                     state: &files.state,
                     memory: &files.memory,
+                    len: memory_len,
                 },
             };
             let published = images.publish_made_by(parts, Some(&runtime));
