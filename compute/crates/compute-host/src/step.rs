@@ -46,6 +46,11 @@ use crate::store::{Receipt, Store};
 /// vsock transport reset that follows every restore; under a burst of
 /// restores that can take a while.
 const NOTICE_DEADLINE: Duration = Duration::from_secs(5);
+/// The same for a guest that must learn which sandbox it is. It is never
+/// used without answering, and the alternative, booting from its disk, is
+/// slower still under the same burst: a burst of 100 restores on a nested
+/// host keeps many guests from answering for well over five seconds.
+const IDENTITY_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Longest a wake waits for its learned working set before resuming the
 /// guest anyway; whatever is missing then arrives on demand.
@@ -881,7 +886,12 @@ impl<E: Engine, S: Store> Job<E, S> {
             return Ok(());
         };
         let started = Instant::now();
-        match tell_restored(&self.spec.vsock_path(), port, self.id, NOTICE_DEADLINE).await {
+        let deadline = if must {
+            IDENTITY_DEADLINE
+        } else {
+            NOTICE_DEADLINE
+        };
+        match tell_restored(&self.spec.vsock_path(), port, self.id, deadline).await {
             Ok(attempts) => tracing::debug!(
                 id = %self.id,
                 us = started.elapsed().as_micros(),

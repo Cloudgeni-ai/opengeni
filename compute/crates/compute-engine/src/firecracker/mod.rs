@@ -935,7 +935,7 @@ impl Engine for Firecracker {
         vm: &FirecrackerVm,
         file: OwnedFd,
     ) -> impl Future<Output = Result<(), EngineError>> + Send {
-        std::future::ready(holder::hold(&vm.cgroup, JAILER_PATH, file))
+        holder::hold(vm.cgroup.clone(), JAILER_PATH, file)
     }
 
     fn held(

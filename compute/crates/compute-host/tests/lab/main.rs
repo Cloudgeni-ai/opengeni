@@ -859,10 +859,11 @@ async fn only_trusted_hosts_let_guests_reach_the_local_network() {
 }
 
 /// What a sandbox's first command reports: who it is, sixteen random bytes,
-/// and how often its kernel reseeded its random numbers for a VM fork.
+/// and how often its random number generator was reseeded since boot, by
+/// its kernel for a VM fork or by the guest for a restore notice.
 const FIRST_COMMAND: &str = "cat /run/sandbox-id 2>/dev/null || echo none
 head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \\n'; echo
-dmesg | grep -c 'virtual machine fork'";
+dmesg | grep -c 'crng reseeded'";
 
 /// Shows why a guest may have missed its restore notice.
 const GUEST_NOTICE_STATUS: &str = "systemctl status lab-notice --no-pager 2>&1 | head -20

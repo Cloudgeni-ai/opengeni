@@ -27,17 +27,24 @@ log() { printf '[host-setup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 # The guest's side of the host agent's identity contract: a booted guest
 # finds its sandbox id on the kernel command line (`opengeni.sandbox=`), a
 # restored one in the restore notice on vsock port 53 (`restored <unix
-# nanoseconds> sandbox=<id>`), which also sets the clock. Either way the id
-# ends up in /run/sandbox-id. A template is snapshotted once the guest
-# accepts on vsock port 54, which opens only when systemd has finished
-# starting everything, so clones wake settled instead of mid-boot.
+# nanoseconds> sandbox=<id> seed=<hex>`), which also sets the clock.
+# Either way the id ends up in /run/sandbox-id. The notice's `seed` is
+# mixed into the guest's random number generator, which reseeds before the
+# guest answers, so no command of the new sandbox draws numbers another
+# clone of the same snapshot draws. (The kernel reseeds by itself when it
+# learns of the VM generation ID's change, but later.)
+# A template is snapshotted once the guest accepts on vsock port 54, which
+# opens only when systemd has finished starting everything, so clones wake
+# settled instead of mid-boot.
 install_guest_services() {
   local root="$1"
   # Resident, so answering a notice starts no process in a guest whose
   # memory is still being faulted in after its restore.
   sudo tee "$root/usr/local/bin/lab-notice" >/dev/null <<'SCRIPT'
 #!/usr/bin/python3
-import os, socket, time
+import fcntl, os, socket, time
+
+RNDRESEEDCRNG = 0x5207  # _IO('R', 0x07)
 
 listener = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
 listener.bind((socket.VMADDR_CID_ANY, 53))
@@ -62,6 +69,14 @@ while True:
                     with open("/run/sandbox-id.new", "w") as file:
                         file.write(value + "\n")
                     os.replace("/run/sandbox-id.new", "/run/sandbox-id")
+                elif key == "seed":
+                    # Mixed into the input pool, then the generator reseeds
+                    # from it at once.
+                    with open("/dev/urandom", "wb", buffering=0) as pool:
+                        pool.write(bytes.fromhex(value))
+                        fcntl.ioctl(pool, RNDRESEEDCRNG)
+                    with open("/dev/kmsg", "w") as log:
+                        log.write("lab-notice: crng reseeded from the restore notice\n")
             connection.sendall(b"ok\n")
         except (OSError, ValueError, EOFError):
             pass
@@ -187,7 +202,7 @@ fi
 
 if [ -f base.ext4 ] && {
   ! sudo debugfs -R "cat /etc/systemd/system/lab-identity.service" base.ext4 2>/dev/null | grep -q Before=lab-agent ||
-    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q python3 ||
+    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q RNDRESEEDCRNG ||
     ! sudo debugfs -R "stat /etc/systemd/system/lab-ready.service" base.ext4 2>/dev/null | grep -q Inode
 }; then
   log "guest services"

@@ -13,18 +13,22 @@
 //!
 //! A third thing matters for sandboxes started from a template: every one
 //! of them wakes with the template's memory, so none knows which sandbox it
-//! is. (Their kernels reseed their random number generators by themselves:
-//! the VMM changes the VM generation id on every restore.)
+//! is, and all draw the same random numbers until their kernels reseed.
+//! (The VMM changes the VM generation id on every restore and the kernel
+//! reseeds when it learns of that, but asynchronously: under a burst of
+//! restores, seconds later.)
 //!
 //! So right after a restore, before anything else may use the sandbox, the
 //! host connects to the guest's notice port and sends one line:
 //!
 //! ```text
-//! restored <unix time in nanoseconds> sandbox=<sandbox id>
+//! restored <unix time in nanoseconds> sandbox=<sandbox id> seed=<hex>
 //! ```
 //!
 //! The guest sets its clock, drops connections it opened before the
-//! restore, takes the sandbox id as its own, and answers `ok`. Later
+//! restore, takes the sandbox id as its own, mixes the seed (32 random
+//! bytes from the host, the same on every attempt of one notice) into its
+//! random number generator and reseeds it, and answers `ok`. Later
 //! `key=value` fields may follow; a guest ignores those it does not know.
 //! The host retries until the guest answers or a deadline passes, so set a
 //! notice port only for guest images that listen on it; a guest that never
@@ -43,13 +47,31 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// The line a guest sends back once it has acted on the notice.
 const ACK: &[u8; 3] = b"ok\n";
 
-/// Formats the notice to sandbox `sandbox` for the current time.
-fn notice(now: SystemTime, sandbox: impl fmt::Display) -> io::Result<String> {
-    let nanos = now
+/// Nanoseconds since the Unix epoch at `at`.
+fn unix_nanos(at: SystemTime) -> io::Result<u128> {
+    Ok(at
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?
-        .as_nanos();
-    Ok(format!("restored {nanos} sandbox={sandbox}\n"))
+        .as_nanos())
+}
+
+/// Formats the notice to sandbox `sandbox` with `seed` for the time
+/// `now`.
+fn notice(now: SystemTime, sandbox: impl fmt::Display, seed: &str) -> io::Result<String> {
+    let nanos = unix_nanos(now)?;
+    Ok(format!("restored {nanos} sandbox={sandbox} seed={seed}\n"))
+}
+
+/// 32 bytes from the host's random number generator, in hex.
+fn seed() -> io::Result<String> {
+    use std::fmt::Write as _;
+    use std::io::Read as _;
+    let mut bytes = [0_u8; 32];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    }))
 }
 
 /// Longest a single attempt waits for the guest's answer at first; each
@@ -83,6 +105,7 @@ pub async fn tell_restored(
     deadline: Duration,
 ) -> io::Result<u32> {
     let sandbox = sandbox.to_string();
+    let seed = seed()?;
     let give_up = Instant::now() + deadline;
     let mut wait = FIRST_ATTEMPT;
     let mut attempts = 0;
@@ -91,7 +114,7 @@ pub async fn tell_restored(
         let left = give_up.saturating_duration_since(Instant::now());
         let error = match tokio::time::timeout(
             wait.min(left),
-            exchange(vsock_socket, port, &sandbox),
+            exchange(vsock_socket, port, &sandbox, &seed),
         )
         .await
         {
@@ -115,10 +138,10 @@ pub async fn tell_restored(
 }
 
 /// One connection: the notice out, the guest's answer back.
-async fn exchange(vsock_socket: &Path, port: u32, sandbox: &str) -> io::Result<()> {
+async fn exchange(vsock_socket: &Path, port: u32, sandbox: &str, seed: &str) -> io::Result<()> {
     let mut stream = vsock::connect(vsock_socket, port).await?;
     stream
-        .write_all(notice(SystemTime::now(), sandbox)?.as_bytes())
+        .write_all(notice(SystemTime::now(), sandbox, seed)?.as_bytes())
         .await?;
     let mut answer = [0_u8; ACK.len()];
     stream.read_exact(&mut answer).await?;
@@ -142,8 +165,8 @@ mod tests {
     fn the_notice_carries_unix_nanoseconds() {
         let at = UNIX_EPOCH + Duration::new(1_700_000_000, 5);
         assert_eq!(
-            notice(at, "00ab").unwrap(),
-            "restored 1700000000000000005 sandbox=00ab\n"
+            notice(at, "00ab", "5eed").unwrap(),
+            "restored 1700000000000000005 sandbox=00ab seed=5eed\n"
         );
     }
 
@@ -158,6 +181,7 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         tokio::spawn(async move {
             let mut held = Vec::new();
+            let mut seeds = Vec::new();
             for answer in answers {
                 let (stream, _) = listener.accept().await.unwrap();
                 let (read, mut write) = stream.into_split();
@@ -166,7 +190,12 @@ mod tests {
                 write.write_all(b"OK 1073741824\n").await.unwrap();
                 let line = lines.next_line().await.unwrap().unwrap();
                 assert!(line.starts_with("restored "), "{line}");
-                assert!(line.ends_with(" sandbox=7"), "{line}");
+                assert!(line.contains(" sandbox=7 seed="), "{line}");
+                let seed = line.rsplit_once('=').unwrap().1.to_owned();
+                assert_eq!(seed.len(), 64, "{line}");
+                seeds.push(seed);
+                // Every attempt carries the same seed.
+                assert!(seeds.iter().all(|seed| *seed == seeds[0]), "{seeds:?}");
                 if let Some(answer) = answer {
                     write.write_all(answer).await.unwrap();
                     // Hold the connection open so a missing answer times out.

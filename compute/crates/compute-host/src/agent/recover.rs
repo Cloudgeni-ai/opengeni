@@ -23,16 +23,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             match stray.problem {
                 // Creation never finished or removal nearly had: nothing was
                 // promised, and no VM runs without a record.
+                // Its directory stays until its network is gone, so a
+                // failure leaves it found again.
                 None => {
-                    if let Err(error) = self.remove_network(stray.id).await {
-                        tracing::warn!(id = %stray.id, %error, "could not remove an unrecorded sandbox's network");
-                    }
-                    if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
-                        tracing::warn!(id = %stray.id, %error, "could not tidy an unrecorded sandbox");
-                        self.block(
-                            stray.id,
-                            format!("unrecorded directory left behind: {error}"),
-                        );
+                    let tidied = match self.remove_network(stray.id).await {
+                        Ok(()) => tokio::fs::remove_dir_all(&dir)
+                            .await
+                            .map_err(|error| format!("unrecorded directory left behind: {error}")),
+                        Err(error) => Err(format!("unrecorded network left behind: {error}")),
+                    };
+                    if let Err(reason) = tidied {
+                        tracing::warn!(id = %stray.id, %reason, "could not tidy an unrecorded sandbox");
+                        self.block(stray.id, reason);
                         // Removing the id again retries.
                         self.leftovers.insert(stray.id.0, None);
                     }
