@@ -1,7 +1,6 @@
 # 8. Wake from object storage lazily, working set first
 
-Status: Accepted, 2026-10-16. The pager process and packs are on
-`feat/compute-snapshot`, merging into lab.
+Status: Accepted, 2026-10-16. Built.
 
 ## Context
 
@@ -20,7 +19,8 @@ guest's first-touched pages are scattered across most of its chunks.
 - The disk is fetched over the host's base image, so only differing chunks
   move.
 - The pager runs as its own process per VM while memory is still loading, and
-  exits when the memory is complete.
+  exits when the memory is complete. A restarted agent reconnects to it; if
+  the pager dies, the VM is ended and the sandbox boots fresh from its disk.
 
 ## Consequences
 
@@ -28,7 +28,8 @@ guest's first-touched pages are scattered across most of its chunks.
   working set was learned (see [measurements](../measurements.md)).
 - 100 remote wakes at once took about 30 s to first response, limited by a
   shared step in fetch and publish that is being profiled.
-- The separate pager process keeps a guest running through an agent restart
-  mid-load, at the cost of a shutdown handshake with the VMM. Stopping such a
-  VM and waking it again from the same image would also meet
-  [10](0010-crash-safety-bar.md); the simpler option is being weighed.
+- The separate pager process is what lets a guest keep running through an
+  agent restart mid-load, as [10](0010-crash-safety-bar.md) requires. Its
+  costs are a reconnect protocol and a shutdown handshake with the VMM. The
+  alternative, the agent itself serving pages, would lose such a guest's
+  programs on every agent restart: its image is invalid once it has run.

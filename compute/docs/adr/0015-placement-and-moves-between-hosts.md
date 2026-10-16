@@ -14,9 +14,11 @@ that is cut off keeps its VMs running, because VMs outlive their agent.
   its latest archived generation. Ownership is a lease carrying a generation
   fence.
 - Execution fencing: a host that cannot renew its lease stops its VMs itself
-  within a fixed time. A lease is granted elsewhere only after that time plus
-  a margin. Archive writes carry the generation, and the store refuses writes
-  from an older one.
+  within a fixed time. Because VMs outlive the agent that renews the lease,
+  that stop must not depend on the agent: each VM carries its own deadline
+  that ends it unless renewed. A lease is granted elsewhere only after that
+  deadline plus a margin, or once the old host is proven down. Archive writes
+  carry the generation, and the store refuses writes from an older one.
 - Moving a sandbox: its host saves and archives it, the lease passes, and the
   new host wakes it lazily from object storage. Sleep is the natural moment to
   move; live migration of a running VM is out of scope. Open connections do

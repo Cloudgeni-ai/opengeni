@@ -20,8 +20,10 @@ Sandboxes run untrusted code next to each other and next to the host.
 - A host marked `trusted` also lets guests reach its local network.
 - The rules are enforced twice: inside the namespace, which the VMM joins
   without the privilege to change it, and again on the host.
-- After a restore, the agent tells the guest before anything else uses it:
-  the current time, and that connections it opened before are gone.
+- After a restore, when the guest runs a notice handler on the configured
+  port, the agent tries to tell it the current time and that connections it
+  opened before are gone, before anything else uses it. A failed notice is
+  logged; the guest's own clock sync is the fallback.
 
 ## Consequences
 

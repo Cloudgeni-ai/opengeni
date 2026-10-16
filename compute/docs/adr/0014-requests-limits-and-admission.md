@@ -17,14 +17,20 @@ for anyone, and the host kernel's out-of-memory killer would pick a VM.
   wake that does not fit gets a retryable "host full" at once.
 - The request becomes the VM cgroup's memory protection and processor weight.
   A running VM can never be compressed or swapped.
-- Use above the request shares whatever is free. When the host runs short,
-  background relief acts in this order, never inside a request:
+- On bare-metal hosts, use above the request shares whatever is free. When
+  the host runs short, background relief acts in this order, never inside a
+  request:
   1. idle sandboxes leave memory, least recently used first;
   2. the balloon takes file cache back from sandboxes above their request;
   3. the sandbox furthest above its request is paused and saved, and wakes
      when there is room (or on another host, once moves exist).
 - The host kernel's out-of-memory killer must not pick a VMM.
-- On huge-page hosts, admission counts against the huge-page pool.
+- On huge-page hosts (the nested profile) guest memory cannot be compressed or
+  ballooned back, and a guest that touches memory when the pool is empty
+  dies. There a sandbox's request is its limit: a running sandbox is booked
+  at its full size against the huge-page pool, a paused one at what it
+  holds. Running sandboxes are never overbooked; only idle sandboxes leaving
+  memory (step 1) makes room.
 - Status reports capacity (total, reserved, free) for a scheduler and an
   autoscaler; reservations are rebuilt from records after a restart.
 
@@ -32,5 +38,7 @@ for anyone, and the host kernel's out-of-memory killer would pick a VM.
 
 - A sandbox that stays within its request is never squeezed, paused or
   killed for memory. Above it, it may be squeezed or paused, never lose data.
-- How far a host overbooks (sum of limits against capacity) is a policy
-  setting; the worst case of a stampede is that the heaviest sandboxes pause.
+- On bare metal, how far a host overbooks (sum of limits against capacity) is
+  a policy setting; the worst case of a stampede is that the heaviest
+  sandboxes pause. Nested hosts hold fewer running sandboxes for the same
+  memory, in exchange for cheaper wakes ([5](0005-host-memory-profiles.md)).

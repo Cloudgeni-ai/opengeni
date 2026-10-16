@@ -26,8 +26,8 @@ died with it, every upgrade would interrupt every sandbox on the host.
 
 - Killed with 100 sandboxes at mixed levels, the agent served again in about
   half a second and lost none. Settling records is most of that time.
-- On lab, a VM whose memory was still loading is stopped and woken again; the
-  pager process ([8](0008-lazy-wake-with-a-working-set.md)) keeps it running.
+- A VM whose memory is still loading keeps running: the restarted agent
+  reconnects to its pager process ([8](0008-lazy-wake-with-a-working-set.md)).
 - Several small processes per VM are more to reason about than one.
 - Fences are the base for ownership across hosts
   ([15](0015-placement-and-moves-between-hosts.md)).

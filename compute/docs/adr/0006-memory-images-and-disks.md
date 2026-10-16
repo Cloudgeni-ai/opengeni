@@ -17,7 +17,8 @@ restore depend on every earlier link.
 - Every save is merged, never under a live VM, into a self-contained image: a
   reflink copy of the previous image with the changed pages laid over it.
   Publishing is write, sync, rename, verify, then move the `current` pointer.
-- Archives store memory and disk together under one generation number.
+- An archive publishes the disk's and the memory image's manifests together,
+  named by one receipt; a wake fetches the pair it names.
 - With no valid image, the sandbox boots fresh from its disk and reports that
   it did. This is what happens when a running VM's process dies.
 

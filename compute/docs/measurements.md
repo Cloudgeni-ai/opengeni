@@ -3,7 +3,9 @@
 Observations from lab runs, not bounds. Firecracker v1.17.0 under its jailer,
 one host agent per host, synthetic data only. "First response" is the time
 from the wake request until a command in the guest answers; "done" is until
-that command finishes.
+that command finishes. Each sandbox has 1 vCPU and 512 MiB. "a/b" means
+p50/p90 across the sandboxes woken together. Runs were on 2026-10-16 at the
+lab revisions of that day; the final tables name their exact revision.
 
 Workload (the "realistic" set): each sandbox copies a repository, runs its
 tests and commits; each wake reads the repository and loads it in Node.

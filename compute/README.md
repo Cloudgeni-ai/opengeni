@@ -11,8 +11,7 @@ Opengeni does not use this yet.
 
 | Piece | State |
 | --- | --- |
-| Host agent: jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, smoke suite | on `feat/compute-lab` |
-| Pager process, working-set packs, chunk checksums | reviewed, merging into lab |
+| Host agent: jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite | on `feat/compute-lab` |
 | Templates for new sandboxes | in review |
 | Ready pool, admission with requests and limits | being built |
 | Control plane (placement, moves between hosts, autoscaling), observability, Opengeni integration | planned |
@@ -24,10 +23,11 @@ below are observations from our lab runs, with workloads and hosts in
 ## What we optimize for
 
 1. **Nothing saved is lost.** Copies are deleted only after a newer one has
-   passed verification. A sleeping sandbox wakes with its programs intact. A
-   sandbox whose VM dies while running boots fresh from its disk: programs
-   are lost, files are not. [ADR 10](docs/adr/0010-crash-safety-bar.md) states
-   the exact fault model.
+   passed verification. A sandbox with a valid saved memory image wakes with
+   its programs intact. One without (it was running, or paused but not yet
+   saved, when its VM process died) boots fresh from its disk: programs are
+   lost, data the guest had written to its disk is kept.
+   [ADR 10](docs/adr/0010-crash-safety-bar.md) states the exact fault model.
 2. **Idle is nearly free, use is fast.** Idle means no work is happening, not
    that a timer ran out. Memory goes to whoever needs it.
 3. **The agent can restart at any moment** without stopping the sandboxes.
@@ -119,16 +119,18 @@ Each VM runs under Firecracker's jailer and does not depend on the agent.
 Each sandbox has one durable record, written atomically and compare-and-set
 on a generation fence; files on disk never count as evidence on their own.
 On start the agent settles every record, then takes each VM back
-([ADR 9](docs/adr/0009-vms-outlive-the-agent.md)). On lab today, a VM whose
-memory was still loading from object storage is stopped and woken again; with
-the pager process (merging) it keeps running. One agent runs per host.
+([ADR 9](docs/adr/0009-vms-outlive-the-agent.md)). A VM whose memory is still
+being paged in keeps its pager, a small process of its own, and the restarted
+agent reconnects to it. If the pager itself dies, the VM is ended and the
+sandbox boots fresh from its disk. One agent runs per host.
 
 ## Network
 
 Every guest has the same address (169.254.0.21), MAC and gateway, so a
 restored guest's network configuration is right on any host. Open connections
-do not survive a restore; the agent tells the guest so, along with the
-correct time. Each sandbox has its own namespace, NAT and firewall: the
+do not survive a restore. When the guest runs a notice handler, the agent
+tries to tell it so, along with the correct time; a failed notice is logged,
+not retried. Each sandbox has its own namespace, NAT and firewall: the
 internet is allowed; the host, private and link-local ranges (including the
 cloud metadata address) and other sandboxes are not. A host marked `trusted`
 may let guests reach its local network
@@ -185,10 +187,13 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
   sudo env COMPUTE_TEST_LAB=/lab COMPUTE_TEST_STORE=gs://bucket/prefix cargo test -p compute-host --test save_wake
   ```
 
-  `save_wake` cycles sandboxes through every level including Compressed and
-  Remote. `lab` runs the jailed, networked agent with many sandboxes
-  (`COMPUTE_TEST_SANDBOXES=100`) at Running, Paused and Saved, kills the agent
-  and checks that every sandbox survives and still wakes in time.
+  The engine's `boot_pause_compress_snapshot_restore` covers Paused,
+  Compressed and Saved for one VM. `save_wake` cycles guests through Saved and
+  Remote, restarts the agent while a guest pages its memory in, and kills a
+  pager. `lab` runs the jailed, networked agent with many sandboxes
+  (`COMPUTE_TEST_SANDBOXES=100`) at Running, Paused, Saved in place and Saved,
+  kills the agent and checks that every sandbox survives and still wakes in
+  time.
 - `smoke/` runs SPACE's E2B-style scenarios through one adapter for our API,
   plus our own: sleep levels, concurrent wakes, holds, and an agent restart
   in the middle ([smoke/README.md](smoke/README.md)).
