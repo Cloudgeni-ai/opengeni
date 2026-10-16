@@ -15,11 +15,12 @@
 //!    exists, before the VMM even starts, and the guest resumes once they
 //!    are in place.
 //! 2. **Demand.** Any other page the guest touches is fetched at once,
-//!    ahead of everything else; the fault waits only for its own chunk.
-//! 3. **Hydration.** Once nothing urgent is pending, the remaining chunks
-//!    are fetched in the background into the image's memory file, so the
-//!    image becomes a complete local copy that the next save can merge
-//!    over.
+//!    ahead of everything else, with a few chunks after it; the fault
+//!    waits only for its own chunk.
+//! 3. **Hydration.** Alongside, the remaining chunks are fetched in the
+//!    background into the image's memory file, a few at a time per VM and
+//!    a bounded number on the whole host, so the image becomes a complete
+//!    local copy that the next save can merge over.
 //!
 //! Fetched chunks land in the image's own memory file, which is also the
 //! source's cache. Every chunk read from the store is checked against its
@@ -50,11 +51,16 @@ use crate::image::{CHUNK_BYTES, Hash, ZERO, chunk_count, chunk_range};
 
 /// Chunk fetches in flight per VM for demand and prefetch.
 const FOREGROUND_PER_VM: usize = 64;
-/// Chunk fetches in flight per VM for background hydration.
-const BACKGROUND_PER_VM: usize = 4;
+/// Chunk fetches in flight per VM for background hydration. Hydration runs
+/// alongside demand: with 4 KiB pages a waking guest faults one chunk at a
+/// time, so waiting for a pause in demand would leave it fetching serially.
+const BACKGROUND_PER_VM: usize = 16;
 /// Background hydration fetches in flight on the whole host, so many VMs
 /// hydrating at once never starve a guest that is waiting on a page.
-const BACKGROUND_PER_HOST: usize = 64;
+const BACKGROUND_PER_HOST: usize = 128;
+/// Chunks after a demand-fetched one that are fetched along with it: a
+/// guest that touches one chunk usually touches its neighbours next.
+const READAHEAD_CHUNKS: usize = 4;
 /// Chunk fetches in flight on the whole host.
 const FETCHES_PER_HOST: usize = 512;
 /// Recently fetched chunks kept in memory, shared by every VM: sandboxes
@@ -71,8 +77,9 @@ const RETRY_DELAY_MAX: Duration = Duration::from_secs(2);
 const PROFILE_PAGES: usize = 1 << 16;
 /// How long a pager waits for its VMM to connect.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long the first-touch order is recorded after a wake.
-const RECORD_FOR: Duration = Duration::from_secs(3);
+/// How long the first-touch order is recorded after a wake: long enough to
+/// cover a slow first wake, whose working set the next wake prefetches.
+const RECORD_FOR: Duration = Duration::from_secs(15);
 
 type Fetched = Result<Arc<Vec<u8>>, Arc<compute_storage::Error>>;
 
@@ -378,13 +385,7 @@ async fn fill(
             inflight[index] = true;
             foreground.push(fetch_one(&fetcher, &hydration, index, false));
         }
-        // Hydrate in the background only while the guest waits on nothing.
-        while urgent.is_empty()
-            && asked.is_empty()
-            && foreground.is_empty()
-            && background.len() < BACKGROUND_PER_VM
-            && sweep < inflight.len()
-        {
+        while background.len() < BACKGROUND_PER_VM && sweep < inflight.len() {
             let index = sweep;
             sweep += 1;
             if inflight[index] || hydration.present[index].load(Ordering::Acquire) {
@@ -396,7 +397,13 @@ async fn fill(
         tokio::select! {
             biased;
             request = requests.recv(), if open => match request {
-                Some(request) if request.urgent => urgent.push_back(request),
+                Some(request) if request.urgent => {
+                    urgent.push_back(request);
+                    let last = (request.index + READAHEAD_CHUNKS).min(inflight.len().saturating_sub(1));
+                    for index in request.index + 1..=last {
+                        asked.push_back(Request { index, urgent: false });
+                    }
+                }
                 Some(request) => asked.push_back(request),
                 // The VM is gone; finish what is in flight and stop.
                 None => {
