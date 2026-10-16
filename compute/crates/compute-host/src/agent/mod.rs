@@ -741,7 +741,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     None
                 }
             };
-        let holds = holds::Holds::new(paths.holds.clone());
+        let holds = holds::Holds::new(paths.holds.clone(), self.records.ownership());
         self.slots.insert(
             id.0,
             Slot {

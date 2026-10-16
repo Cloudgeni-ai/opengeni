@@ -354,6 +354,28 @@ struct Locks {
     _host: Option<File>,
 }
 
+/// A share of the state root's ownership. Work outside the records that
+/// must not outlive their owner, such as a write of a sandbox's holds,
+/// keeps one until it lands, so a successor takes the root only after.
+#[derive(Clone, Debug)]
+pub(crate) struct Ownership {
+    _locks: Arc<Locks>,
+}
+
+#[cfg(test)]
+impl Ownership {
+    /// A share of no root's ownership, for tests of work that keeps one.
+    pub fn detached() -> Self {
+        let root = File::open("/dev/null").expect("/dev/null opens");
+        Self {
+            _locks: Arc::new(Locks {
+                _root: root,
+                _host: None,
+            }),
+        }
+    }
+}
+
 /// The lowest generation no record has used, as [`GENERATIONS`] holds it.
 #[derive(Debug)]
 struct Generations {
@@ -576,6 +598,13 @@ impl Records {
             slot.current().ok_or(StateError::NotFound(id))
         })
         .await
+    }
+
+    /// A share of the root's ownership; see [`Ownership`].
+    pub fn ownership(&self) -> Ownership {
+        Ownership {
+            _locks: Arc::clone(&self.locks),
+        }
     }
 
     /// Writes the first record of a new sandbox, which starts at a

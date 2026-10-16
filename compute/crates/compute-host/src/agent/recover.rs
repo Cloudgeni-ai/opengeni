@@ -403,11 +403,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// that cannot be read holds the sandbox awake until released; see
     /// [`Holds::load`].
     fn restore_holds(&mut self, id: Id) -> Vec<Input> {
+        let owner = self.records.ownership();
         let Some(slot) = self.slots.get_mut(&id.0) else {
             return Vec::new();
         };
         let now_ms = unix_ms_now();
-        let (holds, error) = Holds::load(slot.paths.holds.clone(), now_ms);
+        let (holds, error) = Holds::load(slot.paths.holds.clone(), now_ms, owner);
         if let Some(error) = error {
             tracing::error!(
                 %id,
