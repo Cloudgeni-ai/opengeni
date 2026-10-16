@@ -2213,7 +2213,8 @@ export function recordModelRequestPhase(
   observability: Observability,
   input: {
     provider: string;
-    phase: "headers" | "first_byte" | "terminal";
+    /** `handshake`: the time a request waited for its new WebSocket to open. */
+    phase: "handshake" | "headers" | "first_byte" | "terminal";
     outcome?: "completed" | "failed" | "timed_out";
     durationSeconds: number;
     transport?: ModelRequestTransportLabel;

@@ -62,6 +62,8 @@ function harness(options: { autoOpen?: boolean } = {}) {
         return socket;
       },
       connectTimeoutMs: 1_000,
+      // A fixed clock: a new connection's handshake reports 0 ms.
+      now: () => 1_000,
     },
   );
   return { transport, sockets, httpCalls };
@@ -128,7 +130,9 @@ test("streams a response over one reused connection as SSE with usage headers", 
   expect(response.status).toBe(200);
   expect(response.headers.get("content-type")).toBe("text/event-stream");
   expect(response.headers.get("x-request-id")).toBe("upstream-1");
-  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe("websocket; connection=new");
+  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+    "websocket; connection=new; handshake_ms=0",
+  );
   expect(parseCodexUsageHeaders(response.headers)).toMatchObject({
     primaryUsedPercent: 12,
     secondaryUsedPercent: 40,
@@ -198,7 +202,9 @@ test("a streamed request body, as the model client sends it, goes over the socke
   expect(httpBodies).toEqual([JSON.stringify(body)]);
   socket.emit({ type: "response.completed", response: { id: "r1" } });
   const response = await pending;
-  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe("websocket; connection=new");
+  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+    "websocket; connection=new; handshake_ms=0",
+  );
   await response.text();
 });
 
@@ -240,7 +246,9 @@ test("a refused request keeps the HTTP error shape and the connection", async ()
   });
   const response = await pending;
   expect(response.status).toBe(429);
-  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe("websocket; connection=new");
+  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+    "websocket; connection=new; handshake_ms=0",
+  );
   expect(await response.json()).toEqual({
     error: { type: "usage_limit_reached", message: "limit" },
   });
@@ -291,6 +299,7 @@ test("non-streaming and non-Responses requests stay on HTTP", async () => {
 test("a transport label round-trips and unknown labels are refused", () => {
   for (const transport of [
     { kind: "websocket", connection: "new" },
+    { kind: "websocket", connection: "new", handshakeMs: 240 },
     { kind: "websocket", connection: "reused" },
     { kind: "http", reason: "connection_busy" },
     { kind: "http", reason: "unavailable" },
