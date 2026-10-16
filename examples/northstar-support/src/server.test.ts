@@ -1479,6 +1479,93 @@ describe("Northstar proxied Opengeni traffic", () => {
     expect(upstream.count("POST", `${sessionId}/control`)).toBe(60);
   });
 
+  test("limits proxied reads per network across fresh cookies, first read included", async () => {
+    const clock = testClock();
+    const { handler, upstream } = demoServer({ now: clock.now, clientIpHeader: CLIENT_HEADER });
+    const from = (client: string) => ({ headers: { [CLIENT_HEADER]: client } });
+    // A cookie-less first read (the page's, or the deploy smoke's first probe)
+    // reaches Opengeni and sets the visitor cookie.
+    const first = await handler(
+      browserRequest(`${PROXY}/config/client`, null, from("198.51.100.7")),
+    );
+    expect(first.status).toBe(200);
+    expect(first.headers.get("set-cookie")).toMatch(/^__Host-northstar_visitor=/);
+    expect(((await first.json()) as { workspaceId: string }).workspaceId).toBe(WORKSPACE_ID);
+    // Every cookie-less read is a new visitor, so only the network tier stops them.
+    for (let read = 1; read < 600; read += 1) {
+      const response = await handler(browserRequest(WORKSPACE, null, from("198.51.100.7")));
+      expect(response.status).toBe(200);
+    }
+    const limited = await handler(browserRequest(WORKSPACE, null, from("198.51.100.7")));
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("60");
+    expect(await limited.json()).toEqual({
+      error: {
+        code: "rate_limited",
+        message: "Too many agent panel reads from this network. Try again in 60 seconds.",
+        retryable: true,
+      },
+    });
+    const config = await handler(
+      browserRequest(`${PROXY}/config/client`, null, from("198.51.100.7")),
+    );
+    expect(config.status).toBe(429);
+    expect(upstream.count("GET", "/v1/config/client")).toBe(1);
+    expect(upstream.count("GET", `/v1/workspaces/${WORKSPACE_ID}`)).toBe(599);
+    // Other networks keep their own allowance, and the window moves on.
+    expect((await handler(browserRequest(WORKSPACE, null, from("203.0.113.9")))).status).toBe(200);
+    clock.advance(60_000);
+    expect((await handler(browserRequest(WORKSPACE, null, from("198.51.100.7")))).status).toBe(200);
+  });
+
+  test("limits each visitor's reads, stream opens included, but not refused sessions", async () => {
+    const clock = testClock();
+    const { handler, upstream } = demoServer({ now: clock.now });
+    const owner = await newVisitor(handler);
+    const other = await newVisitor(handler);
+    const sessionId = await startedSessionId(handler, owner);
+    // Another visitor's reads of the session are refused without reaching
+    // Opengeni, so they cannot use up anyone's allowance, not even its own.
+    for (let read = 0; read < 400; read += 1) {
+      expect((await handler(browserRequest(sessionUrl(sessionId), other))).status).toBe(404);
+    }
+    expect(upstream.sessionCalls(sessionId).filter((call) => call.method === "GET")).toEqual([]);
+    expect((await handler(browserRequest(WORKSPACE, other))).status).toBe(200);
+
+    const stream = await handler(browserRequest(`${sessionUrl(sessionId)}/events/stream`, owner));
+    expect(stream.status).toBe(200);
+    await stream.body!.cancel();
+    for (let read = 1; read < 300; read += 1) {
+      expect((await handler(browserRequest(sessionUrl(sessionId), owner))).status).toBe(200);
+    }
+    const limited = await handler(browserRequest(`${sessionUrl(sessionId)}/queue`, owner));
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("60");
+    expect(await errorMessage(limited)).toBe(
+      "Too many agent panel reads from this browser. Try again in 60 seconds.",
+    );
+    // 299 reads, plus the session read the proxy makes before opening the stream.
+    expect(upstream.count("GET", sessionId)).toBe(300);
+    expect(upstream.count("GET", "/events/stream")).toBe(1);
+    expect(upstream.count("GET", "/queue")).toBe(0);
+    // A stream refused by the read limit never keeps its stream slot.
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const refused = await handler(browserRequest(`${WORKSPACE}/live-events/stream`, owner));
+      expect(refused.status).toBe(429);
+    }
+    clock.advance(60_000);
+    const open: Response[] = [];
+    try {
+      for (let slot = 0; slot < 8; slot += 1) {
+        const response = await handler(browserRequest(`${WORKSPACE}/live-events/stream`, owner));
+        expect(response.status).toBe(200);
+        open.push(response);
+      }
+    } finally {
+      await Promise.all(open.map((response) => response.body?.cancel()));
+    }
+  });
+
   test("requires a visitor cookie for the workspace live stream", async () => {
     const { handler, upstream } = demoServer();
     const response = await handler(browserRequest(`${WORKSPACE}/live-events/stream`, null));

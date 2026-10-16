@@ -89,6 +89,18 @@ const SESSION_MESSAGES: TieredRateBounds = {
   client: { limit: 40, windowMs: 10 * MINUTE },
   demo: { limit: 200, windowMs: 10 * MINUTE },
 };
+// Reads through the proxy, which forwards them to Opengeni as the demo
+// operator: the client config, workspace, and model catalog the panel loads,
+// reads of the visitor's own sessions, and each event stream it opens. Reads
+// of other sessions are refused without calling Opengeni and never count. A
+// read needs no visitor cookie (the page's first config read sets it), and a
+// cookie-less read is a new visitor every time, so the network and demo tiers
+// are what bound them.
+const PROXY_READS: TieredRateBounds = {
+  visitor: { limit: 300, windowMs: MINUTE },
+  client: { limit: 600, windowMs: MINUTE },
+  demo: { limit: 3_000, windowMs: MINUTE },
+};
 // Open Opengeni event streams; each one holds a connection to the API.
 const EVENT_STREAMS: TieredConcurrencyBounds = { visitor: 8, client: 24, demo: 200 };
 // Open product update streams (/api/demo/events): one per open demo tab.
@@ -629,6 +641,7 @@ export function createDemoServer(config: DemoServerConfig): DemoServer {
   const productWrites = limit(PRODUCT_WRITES, "ticket changes");
   const sessionWrites = limit(SESSION_WRITES, "agent session changes");
   const sessionMessages = limit(SESSION_MESSAGES, "agent messages");
+  const proxyReads = limit(PROXY_READS, "agent panel reads");
   const eventStreams = new TieredConcurrencyLimit(EVENT_STREAMS, "agent event streams");
   const productStreams = new TieredConcurrencyLimit(PRODUCT_STREAMS, "product update streams");
 
@@ -910,20 +923,32 @@ export function createDemoServer(config: DemoServerConfig): DemoServer {
       }
       return await forwardToOpenGeni(request);
     }
+    if (sessionId !== null && !owned) {
+      // The proxy refuses a session this visitor did not start without
+      // calling Opengeni, so these reads never count.
+      return await forwardToOpenGeni(request);
+    }
     if (route?.stream === "workspace" && !caller.established) {
       // The refusal sets the visitor cookie, so the stream's own retry succeeds.
       return proxyError(403, "visitor_required", "Load the demo page first.", true);
     }
-    if (route?.stream === "workspace" || (route?.stream === "session" && owned)) {
-      // Each open stream holds one connection to Opengeni.
+    if (route?.stream) {
+      // Each open stream holds one connection to Opengeni, and opening one is a read.
       const slot = eventStreams.acquire(caller.visitorId, caller.clientAddress);
       if ("refused" in slot) {
         const response = proxyError(429, "rate_limited", `${slot.refused}.`, true);
         response.headers.set("retry-after", "5");
         return response;
       }
+      const refusal = proxyReads.consume(caller.visitorId, caller.clientAddress);
+      if (refusal) {
+        slot.release();
+        return tooManyProxyRequests(refusal);
+      }
       return releaseWhenClosed(await forwardToOpenGeni(request), slot.release, request.signal);
     }
+    const refusal = proxyReads.consume(caller.visitorId, caller.clientAddress);
+    if (refusal) return tooManyProxyRequests(refusal);
     return await forwardToOpenGeni(request);
   }
 

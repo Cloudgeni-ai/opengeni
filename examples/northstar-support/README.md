@@ -170,6 +170,7 @@ each browser and its agent may use:
   | Agent runs (`POST /api/demo/sessions`)                         | 6 / 10 min  | 10 / hour          | 30 / hour    |
   | Messages (send, steer, draft submit, approval or input answer) | 20 / 10 min | 40 / 10 min        | 200 / 10 min |
   | Every forwarded session write (also draft saves and controls)  | 60 / min    | 120 / min          | 600 / min    |
+  | Proxied reads (config, workspace, own sessions, stream opens)  | 300 / min   | 600 / min          | 3,000 / min  |
   | Ticket edits, notes, and replies                               | 20 / min    | 40 / min           | 120 / min    |
   | Resets                                                         | 5 / min     | 10 / min           | 30 / min     |
   | Open agent event streams (concurrent)                          | 8           | 24                 | 200          |
@@ -177,7 +178,11 @@ each browser and its agent may use:
 
   A refusal is a 429 with `Retry-After`. Every write, the product update
   stream, and the workspace live stream need an established visitor cookie, so
-  dropping the cookie never buys a fresh per-visitor allowance. A client
+  dropping the cookie never buys a fresh per-visitor allowance. Other proxied
+  reads do not (the page's first config read sets the cookie), so a cookie-less
+  read counts as a new visitor and the per-network and demo-wide limits bound
+  it. Reads and writes of a session the visitor did not start are refused
+  without calling Opengeni and never count. A client
   network is an IPv4 address or an IPv6 /64. By default it is the socket
   peer's; behind a reverse proxy, set `OPENGENI_DEMO_CLIENT_IP_HEADER` to a
   header the proxy overwrites with the client address, or every visitor shares
