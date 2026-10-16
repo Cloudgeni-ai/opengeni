@@ -5,30 +5,32 @@ Status: Accepted, 2026-10-16. Being built.
 ## Context
 
 Host memory is used only as a guest touches it, so many sandboxes fit while
-they are quiet. When they all get busy, eviction cannot help, and without a
-limit the host would run out of memory and the kernel would kill a VM.
-Sandboxes also get no share of processor time today.
+they are quiet. That is overbooking: when they get busy together, actual use
+can exceed the host's memory. Today nothing reserves memory or processor time
+for anyone, and the host kernel's out-of-memory killer would pick a VM.
 
 ## Decision
 
-- Each sandbox has a **request**, which is guaranteed, and a **limit**, its
-  VM size. Bursting above the request up to the limit uses free memory and
-  is best effort.
-- A host admits a create or wake only if the requests of its awake sandboxes
-  still fit within its capacity minus fixed headroom. The check is arithmetic
-  on numbers held in memory. The host keeps room ahead of time by putting
-  idle, already-saved sandboxes out of memory in the background, so the
-  check rarely fails; when it does, the host answers a retryable "host full"
-  at once, saying what it would need.
-- The request sets the VM cgroup's processor weight, so contention is shared
-  by request. The vCPU count stays the ceiling.
+- Each sandbox has a **request** and a **limit** (its maximum size). The sum
+  of requests of awake sandboxes stays within the host's capacity minus fixed
+  headroom. The check is arithmetic on numbers held in memory; a create or
+  wake that does not fit gets a retryable "host full" at once.
+- The request becomes the VM cgroup's memory protection and processor weight.
+  A running VM can never be compressed or swapped.
+- Use above the request shares whatever is free. When the host runs short,
+  background relief acts in this order, never inside a request:
+  1. idle sandboxes leave memory, least recently used first;
+  2. the balloon takes file cache back from sandboxes above their request;
+  3. the sandbox furthest above its request is paused and saved, and wakes
+     when there is room (or on another host, once moves exist).
+- The host kernel's out-of-memory killer must not pick a VMM.
+- On huge-page hosts, admission counts against the huge-page pool.
 - Status reports capacity (total, reserved, free) for a scheduler and an
-  autoscaler. Reservations are rebuilt from records after a restart.
+  autoscaler; reservations are rebuilt from records after a restart.
 
 ## Consequences
 
-- A host never takes work it cannot hold.
-- Unused guest memory costs the host nothing, so limits can be generous.
-- Under pressure, a bursting sandbox is moved to another host rather than
-  killed once moves exist ([15](0015-placement-and-moves-between-hosts.md));
-  until then a host full of busy sandboxes refuses new work.
+- A sandbox that stays within its request is never squeezed, paused or
+  killed for memory. Above it, it may be squeezed or paused, never lose data.
+- How far a host overbooks (sum of limits against capacity) is a policy
+  setting; the worst case of a stampede is that the heaviest sandboxes pause.

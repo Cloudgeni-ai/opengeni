@@ -16,10 +16,11 @@ change:
 - no I/O, clocks, randomness or printing in `compute-core`;
 - `unsafe` only in a short list of files.
 
-Existing exceptions sit in `architecture-baseline.toml`, which may only
-shrink. The workspace also builds with Clippy's pedantic lints and rustfmt.
+Existing exceptions sit in `architecture-baseline.toml`. It can only shrink:
+a change may not add an exception or raise a limit. The workspace also builds
+with Clippy's pedantic lints and rustfmt.
 
 ## Consequences
 
-- New exceptions need a visible change to the baseline.
-- Large modules get split early.
+- A file that grows past a rule must be split, not excused, so modules get
+  split early.

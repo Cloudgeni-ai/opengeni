@@ -21,6 +21,7 @@ Busy sandboxes are never pushed.
 - Idle sandboxes stay in the fastest level for as long as memory allows.
 - Eviction removes the sandboxes a timer would have picked, but only as many
   as are needed.
-- Because the safety save already exists, eviction is just ending processes.
+- When the safety save already exists, eviction is just ending a process. A
+  sandbox hit by pressure before its save is saved first, which takes seconds.
 - If every sandbox is busy, eviction cannot help; admission must refuse new
   work instead ([14](0014-requests-limits-and-admission.md)).

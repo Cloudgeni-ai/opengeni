@@ -20,9 +20,11 @@ Sandboxes run untrusted code next to each other and next to the host.
 - A host marked `trusted` also lets guests reach its local network.
 - The rules are enforced twice: inside the namespace, which the VMM joins
   without the privilege to change it, and again on the host.
+- After a restore, the agent tells the guest before anything else uses it:
+  the current time, and that connections it opened before are gone.
 
 ## Consequences
 
-- A snapshot restores on any host with its network intact; nothing is
-  repaired after restore.
+- A restored guest's network configuration is right on any host; nothing is
+  repaired after restore. Open connections do not survive.
 - Setting up a namespace takes a few milliseconds at create, nothing at wake.

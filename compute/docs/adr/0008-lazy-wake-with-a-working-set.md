@@ -1,6 +1,7 @@
 # 8. Wake from object storage lazily, working set first
 
-Status: Accepted, 2026-10-16
+Status: Accepted, 2026-10-16. The pager process and packs are on
+`feat/compute-snapshot`, merging into lab.
 
 ## Context
 
@@ -23,11 +24,11 @@ guest's first-touched pages are scattered across most of its chunks.
 
 ## Consequences
 
-- One remote wake restores in well under a second, and the guest rarely
-  stalls on a missing page.
-- Many remote wakes at once are limited by network bandwidth, not by the
-  agent. Fetches run 8 at a time by default; more did not help.
+- One remote wake from same-region storage answered in about 0.9 s once a
+  working set was learned (see [measurements](../measurements.md)).
+- 100 remote wakes at once took about 30 s to first response, limited by a
+  shared step in fetch and publish that is being profiled.
 - The separate pager process keeps a guest running through an agent restart
-  mid-load, at the cost of a shutdown handshake with the VMM. A simpler rule,
-  waking such a VM again from the same save after a crash, would also meet
-  [10](0010-crash-safety-bar.md) and is being weighed.
+  mid-load, at the cost of a shutdown handshake with the VMM. Stopping such a
+  VM and waking it again from the same image would also meet
+  [10](0010-crash-safety-bar.md); the simpler option is being weighed.

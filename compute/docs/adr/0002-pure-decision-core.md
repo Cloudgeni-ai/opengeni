@@ -18,9 +18,9 @@ arch` enforces the purity.
 
 ## Consequences
 
-- Seeded simulations run thousands of random histories (delays, failures,
-  crashes, memory pressure) in seconds and check the core against an
-  independent model after every input. A failing seed replays exactly.
+- A seeded simulation runs 400 random histories of 600 events (delays,
+  failures, crashes, memory pressure) in seconds and checks the core against
+  an independent model after every input. A failing seed replays exactly.
 - Every behavior question has one place to look.
 - The host layer must report each step's real outcome, including "unknown",
   so the core never assumes success.
