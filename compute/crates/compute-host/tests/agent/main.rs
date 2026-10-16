@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::ready;
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -111,6 +112,8 @@ struct Process {
     exit: watch::Sender<bool>,
     guest: AbortHandle,
     cpu: Arc<Mutex<CpuMeter>>,
+    /// What [`Engine::hold`] keeps for it, which ends with it.
+    held: Arc<Mutex<Option<OwnedFd>>>,
 }
 
 impl World {
@@ -218,6 +221,7 @@ impl Fake {
             exit,
             guest: guest.abort_handle(),
             cpu,
+            held: Arc::default(),
         };
         self.world
             .vms
@@ -496,6 +500,30 @@ impl Engine for Fake {
             (vm, found)
         });
         ready(Ok(found))
+    }
+
+    fn hold(
+        &self,
+        vm: &FakeVm,
+        file: OwnedFd,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+        *vm.held.lock().unwrap() = Some(file);
+        ready(Ok(()))
+    }
+
+    fn held(
+        &self,
+        vm: &FakeVm,
+    ) -> impl Future<Output = Result<Option<OwnedFd>, EngineError>> + Send {
+        ready(
+            vm.held
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(OwnedFd::try_clone)
+                .transpose()
+                .map_err(|error| EngineError::io("held", error)),
+        )
     }
 
     async fn clean_up(&self, spec: &VmSpec) -> Result<(), EngineError> {

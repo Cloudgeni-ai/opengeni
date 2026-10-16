@@ -456,6 +456,13 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
             Err(error) => {
                 live.memory.base = Base::Unknown;
+                if live.memory.disk.failed() {
+                    // No snapshot of this VM can be trusted again. It keeps
+                    // running, pausing and waking from memory until a new
+                    // process replaces it.
+                    tracing::error!(id = %self.id, %error, "the VM cannot be saved");
+                    return (Outcome::Failed(Failure::Unsavable), After::Kept(live));
+                }
                 return (failure(&error), After::Kept(live));
             }
         }
@@ -519,21 +526,12 @@ impl<E: Engine, S: Store> Job<E, S> {
         let files = diff_files(&self.paths);
         // The VMM syncs the disk while it takes the snapshot, so the check
         // that vouches for the disk starts first.
-        let watch = Arc::clone(&live.memory.disk);
-        let starting = Arc::clone(&watch);
+        let starting = Arc::clone(&live.memory.disk);
+        // A failed watch is final, which the caller finds on it.
         blocking(move || starting.begin())
             .await
             .and_then(|begun| begun)
-            .map_err(|error| {
-                let kind = if watch.failed() {
-                    // No snapshot of this VM can be trusted again; it
-                    // keeps running from memory until someone removes it.
-                    ErrorKind::Fatal
-                } else {
-                    ErrorKind::Transient
-                };
-                EngineError::caused_by(kind, OP, error)
-            })?;
+            .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?;
         let started = Instant::now();
         // From here on the VM's dirty pages are being reset: any failure
         // leaves its base unknown.
@@ -541,7 +539,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         self.engine.snapshot(&live.vm, &files, kind).await?;
         let snapshot = started.elapsed();
         let scratch = self.paths.dir.join("saving");
-        let watching = Arc::clone(&watch);
+        let watching = Arc::clone(&live.memory.disk);
         let published = blocking(move || {
             // The VMM wrote these inside its jail, where it could have put
             // links instead: they move somewhere only the host reaches and
@@ -572,15 +570,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         })
         .await
         .map_err(|error| EngineError::io(OP, error))?
-        .map_err(|suspect| {
-            if watch.failed() {
-                // No snapshot of this VM can be trusted again; it keeps
-                // running from memory until someone removes it.
-                EngineError::caused_by(ErrorKind::Fatal, OP, suspect)
-            } else {
-                suspect_error(OP, suspect)
-            }
-        })?;
+        .map_err(|suspect| suspect_error(OP, suspect))?;
         tracing::debug!(
             id = %self.id,
             ?kind,
@@ -636,6 +626,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         let vm = match self.engine.restore(&self.spec, &files).await {
             Ok(vm) => {
                 self.launches += 1;
+                self.hold_watch(&vm, &live_memory.disk).await;
                 vm
             }
             Err(error) if error.kind == ErrorKind::MemoryLost => {
@@ -863,6 +854,20 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
+    /// Has the engine keep the description `watch` syncs for as long as
+    /// `vm` lives, so a later agent can still vouch for the disk; see
+    /// `DiskWatch`. Without it, a later agent never saves the VM.
+    async fn hold_watch(&self, vm: &E::Vm, watch: &DiskWatch) {
+        let held = match watch.description() {
+            Ok(Some(description)) => self.engine.hold(vm, description).await,
+            Ok(None) => return,
+            Err(error) => Err(EngineError::io("hold", error)),
+        };
+        if let Err(error) = held {
+            tracing::warn!(id = %self.id, %error, "disk watch not kept beyond this agent; a later one will not save this VM");
+        }
+    }
+
     /// Boot fresh from the disk; any old memory image is meaningless now.
     async fn boot(&mut self) -> (Outcome, After<E::Vm>) {
         let fresh = Change::new().image(false).archived(false).execution();
@@ -886,6 +891,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         match self.engine.boot(&self.spec).await {
             Ok(vm) => {
                 self.launches += 1;
+                self.hold_watch(&vm, &watch).await;
                 (Outcome::Done, After::New(vm, LiveMemory::booted(watch)))
             }
             Err(error) => (failure(&error), After::NoVm),

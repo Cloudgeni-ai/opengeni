@@ -74,6 +74,14 @@ impl Engine for Counting {
         unreachable!("no step here adopts")
     }
 
+    async fn hold(&self, (): &(), _: std::os::fd::OwnedFd) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    async fn held(&self, (): &()) -> Result<Option<std::os::fd::OwnedFd>, EngineError> {
+        Ok(None)
+    }
+
     async fn clean_up(&self, _: &VmSpec) -> Result<(), EngineError> {
         Ok(())
     }
@@ -406,7 +414,8 @@ async fn an_uncertain_eviction_keeps_the_local_copy() {
 
 /// A failed disk check, or one an agent never finished, keeps every later
 /// snapshot of the VM untrusted, even by a new agent; only a new VM starts
-/// clean.
+/// clean. A new agent watches through the description the engine kept,
+/// and through nothing else.
 #[tokio::test]
 async fn a_disk_check_that_failed_or_never_ended_outlives_the_agent() {
     let sandbox = Sandbox::new().await;
@@ -417,13 +426,24 @@ async fn a_disk_check_that_failed_or_never_ended_outlives_the_agent() {
     watch.begin().unwrap();
     watch.sync().unwrap();
     assert!(!marker.exists(), "a clean check left its marker");
-    assert!(!DiskWatch::adopt(paths).failed());
+    assert!(!DiskWatch::adopt(paths, watch.description().unwrap()).failed());
+    assert!(
+        DiskWatch::adopt(paths, None).failed(),
+        "a disk opened afresh was trusted"
+    );
+    fs::write(paths.dir.join("other"), "other").unwrap();
+    let other = fs::File::open(paths.dir.join("other")).unwrap();
+    assert!(
+        DiskWatch::adopt(paths, Some(other.into())).failed(),
+        "another file was taken for the disk"
+    );
 
     // An agent stops part way through a check.
     watch.begin().unwrap();
+    let kept = watch.description().unwrap();
     drop(watch);
     assert!(
-        DiskWatch::adopt(paths).failed(),
+        DiskWatch::adopt(paths, kept).failed(),
         "an unfinished check was forgotten"
     );
 
@@ -443,19 +463,48 @@ async fn a_disk_check_that_failed_or_never_ended_outlives_the_agent() {
     assert!(watch.begin().is_err(), "a failed watch started a check");
     assert!(watch.sync().is_err(), "a failed watch vouched for the disk");
     assert!(marker.exists());
+    let kept = watch.description().unwrap();
     drop(watch);
-    let adopted = DiskWatch::adopt(paths);
+    let adopted = DiskWatch::adopt(paths, kept);
     assert!(adopted.failed(), "the failure was lost with the agent");
     assert!(adopted.sync().is_err());
 
     // A disk the new agent cannot open is not vouched for either.
     fs::remove_file(&marker).unwrap();
+    let kept = DiskWatch::fresh(paths).unwrap().description().unwrap();
     fs::rename(&paths.disk, paths.dir.join("moved")).unwrap();
     std::os::unix::fs::symlink(paths.dir.join("moved"), &paths.disk).unwrap();
     assert!(
-        DiskWatch::adopt(paths).failed(),
+        DiskWatch::adopt(paths, kept).failed(),
         "a linked disk was watched"
     );
+}
+
+/// A VM whose disk no one can vouch for, here because an agent stopped
+/// part way through a check, is never saved, yet keeps running: the save
+/// fails as unsavable and leaves the VM and its record as they were.
+#[tokio::test]
+async fn a_vm_whose_disk_cannot_be_vouched_for_is_kept_unsaved() {
+    let sandbox = Sandbox::new().await;
+    let record = sandbox.record(Change::new()).await;
+    let mut job = sandbox.job(NoStore, record, true);
+    let kept = DiskWatch::fresh(&sandbox.paths)
+        .unwrap()
+        .description()
+        .unwrap();
+    fs::write(live::check_marker(&sandbox.paths), "").unwrap();
+    job.live.as_mut().unwrap().memory = LiveMemory::adopted(DiskWatch::adopt(&sandbox.paths, kept));
+
+    let ran = job.run(Step::Save).await;
+    assert_eq!(ran.outcome, Outcome::Failed(Failure::Unsavable));
+    assert!(matches!(ran.after, After::Kept(..)), "the VM was let go");
+    assert_eq!(Counting::count(&sandbox.engine.stops), 0);
+    assert!(
+        live::check_marker(&sandbox.paths).exists(),
+        "the marker went"
+    );
+    let durable = sandbox.records.settle(sandbox.id).await.unwrap();
+    assert!(!durable.image, "the record vouches for an image");
 }
 
 fn written(jail: &Path) -> SnapshotFiles {

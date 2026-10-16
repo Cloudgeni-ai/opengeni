@@ -462,7 +462,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let failed = |error: &dyn std::fmt::Display| HostError::Io(error.to_string());
             let result = async {
                 if let Some(net) = net {
-                    tokio::task::spawn_blocking(move || net.remove_for(id))
+                    tokio::task::spawn_blocking(move || net.remove(id, ordinal))
                         .await
                         .map_err(|error| failed(&error))?
                         .map_err(|error| failed(&error))?;
@@ -494,6 +494,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Notice::Retrying { step, failures } => {
                 tracing::warn!(%id, ?step, failures, "step failed; retrying");
             }
+            Notice::Unsavable => tracing::warn!(
+                %id,
+                "no copy of the VM can be trusted; it sleeps no deeper than compressed"
+            ),
             Notice::Broken => {
                 tracing::error!(%id, "sandbox broken on this host");
                 self.settle(id);
@@ -572,7 +576,9 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
         };
         stopped.map_err(|error| HostError::Io(error.to_string()))?;
         if let Some(net) = self.net.clone() {
-            tokio::task::spawn_blocking(move || net.remove_for(id))
+            // The record holds its ordinal until it is removed below.
+            let ordinal = record.allocation.link.map(|_| record.ordinal);
+            tokio::task::spawn_blocking(move || net.remove(id, ordinal))
                 .await
                 .map_err(|error| HostError::Io(error.to_string()))?
                 .map_err(|error| HostError::Io(error.to_string()))?;

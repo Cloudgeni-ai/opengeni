@@ -181,6 +181,20 @@ impl SleepPolicy {
         Ok(Self { rules, end_after })
     }
 
+    /// This policy for a VM process that cannot be saved: it may pause and
+    /// compress, but never save or end, since ending it would lose its
+    /// programs.
+    #[must_use]
+    pub(crate) const fn without_saving(&self) -> Self {
+        Self {
+            rules: SleepRules {
+                save_after: None,
+                ..self.rules
+            },
+            end_after: None,
+        }
+    }
+
     /// The rules this policy was built from.
     #[must_use]
     pub const fn rules(&self) -> SleepRules {

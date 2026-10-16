@@ -3,6 +3,8 @@
 
 use std::fs;
 use std::io;
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,22 +75,27 @@ impl LiveMemory {
 /// the VM can be trusted to match a disk that is durable.
 ///
 /// Firecracker logs and ignores a failed flush of a disk, so the guest's
-/// writes can be lost without the VMM reporting it. Its drives are given
-/// no cache type, so the guest is never offered a flush and the VMM syncs
-/// a disk only while it takes a snapshot, which the agent asks for. Linux
-/// keeps a writeback error until it is reported by `fsync`, and reports it
-/// through every descriptor that was open when it happened, and through a
-/// newly opened one as long as no `fsync` has reported it yet.
+/// writes can be lost without the VMM reporting it. Linux keeps a
+/// writeback error for each open file description: `fsync` through one
+/// reports every error since that description was opened, or since it
+/// last reported one, whatever other descriptions reported meanwhile. A
+/// description opened later only sees errors no `fsync` has reported yet,
+/// and the VMM syncs its own on a snapshot or whenever the guest asks
+/// (which it may, offered or not).
 ///
-/// So the watch holds a descriptor opened before the VM's VMM starts, and
-/// syncs it after each snapshot: that sees every write lost since the VM
-/// started, even one the VMM's own sync saw first. Before the VMM can sync
-/// the disk, a check marker is made durable in the host-only sandbox
-/// directory, and only a clean sync removes it. An agent that restarts
-/// beside the VM opens a new descriptor, which sees every lost write no
-/// sync reported; any sync that did report one ran under the marker, which
-/// the new agent finds. A failure is final for the VM: no snapshot of it
-/// is trusted again.
+/// So the watch holds a description opened before the VM's VMM starts,
+/// which only the watch ever syncs, after each snapshot: that sees every
+/// write lost since the VM started. The VM's engine keeps the same
+/// description for as long as the VM lives ([`Engine::hold`]), so an agent
+/// that restarts beside the VM gets it back ([`Engine::held`]) and sees
+/// all the same. Before the VMM can sync the disk, a check marker is made
+/// durable in the host-only sandbox directory, and only a clean sync
+/// removes it: a sync that reported an error to an agent that stopped
+/// before it could act ran under the marker, which the next agent finds.
+/// A failure is final for the VM: no snapshot of it is trusted again.
+///
+/// [`Engine::hold`]: compute_engine::Engine::hold
+/// [`Engine::held`]: compute_engine::Engine::held
 #[derive(Debug)]
 pub(crate) struct DiskWatch {
     disk: PathBuf,
@@ -113,12 +120,25 @@ impl DiskWatch {
         })
     }
 
-    /// The watch for a VM found running after an agent restart. It has
-    /// failed if a check was under way, since a sync may have reported a
-    /// lost write to no one, or if the disk cannot be opened: either way
-    /// lost writes could go unseen, so no snapshot is trusted.
-    pub fn adopt(paths: &Paths) -> Self {
-        let file = crate::layout::open_jailed(&paths.disk)
+    /// The watch for a VM found running after an agent restart, through
+    /// `held`, the description the VM's engine kept for it. It has failed
+    /// if a check was under way, since a sync may have reported a lost
+    /// write to no one, or if nothing was kept or what was is not the
+    /// VM's disk: either way lost writes could go unseen, so no snapshot is
+    /// trusted.
+    pub fn adopt(paths: &Paths, held: Option<OwnedFd>) -> Self {
+        let file = held
+            .ok_or_else(|| io::Error::other("no description of the disk was kept"))
+            .and_then(|held| {
+                let held = fs::File::from(held);
+                let disk = crate::layout::open_jailed(&paths.disk)?.metadata()?;
+                let kept = held.metadata()?;
+                if (kept.dev(), kept.ino()) == (disk.dev(), disk.ino()) {
+                    Ok(held)
+                } else {
+                    Err(io::Error::other("the kept description is of another file"))
+                }
+            })
             .inspect_err(|error| tracing::warn!(disk = %paths.disk.display(), %error, "no watch on an adopted VM's disk"))
             .ok();
         let marker = check_marker(paths);
@@ -135,6 +155,15 @@ impl DiskWatch {
             failed: AtomicBool::new(file.is_none() || checking),
             file,
         }
+    }
+
+    /// A new descriptor for the watch's open file description, for the
+    /// engine to keep; `None` if the watch has none.
+    pub(super) fn description(&self) -> io::Result<Option<OwnedFd>> {
+        self.file
+            .as_ref()
+            .map(|file| file.try_clone().map(OwnedFd::from))
+            .transpose()
     }
 
     /// Starts a check, before anything may sync the disk.
@@ -166,7 +195,7 @@ impl DiskWatch {
         Ok(())
     }
 
-    pub(super) fn failed(&self) -> bool {
+    pub(crate) fn failed(&self) -> bool {
         self.failed.load(Ordering::Acquire)
     }
 

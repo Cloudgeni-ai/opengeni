@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use crate::ids::{HoldId, OpId, SandboxId};
 use crate::level::{Level, Priority, State, Step};
 use crate::policy::{HostPolicy, PolicyError, SleepPolicy};
-use crate::sandbox::{InFlight, QueueKey, Sandbox, Wake};
+use crate::sandbox::{Health, InFlight, QueueKey, Sandbox, Wake};
 use crate::time::At;
 
 /// Something that happened, fed to [`Host::handle`].
@@ -72,6 +72,13 @@ pub enum Input {
         op: OpId,
         /// How it went.
         outcome: Outcome,
+    },
+    /// No copy of the sandbox's current VM process can be trusted, as with
+    /// [`Failure::Unsavable`]: found out other than by a step, such as when
+    /// the host agent takes back a running VM. Ignored without a process.
+    Unsavable {
+        /// The sandbox.
+        sandbox: SandboxId,
     },
     /// The VM process ended unexpectedly. Files survive, and so do running
     /// programs if a current copy was saved.
@@ -147,6 +154,12 @@ pub enum Failure {
     /// The host agent reports this only once the process has ended, so a
     /// replacement never runs beside it.
     MemoryLost,
+    /// For a step that saves a VM process: no copy of this process can be
+    /// trusted, such as when its disk may have lost writes nobody can now
+    /// rule out. Nothing changed and the VM still runs, resumes and pauses,
+    /// but it is never saved, so it sleeps no deeper than its process
+    /// allows until a new process replaces it. See [`Input::Unsavable`].
+    Unsavable,
     /// The sandbox cannot be recovered on this host. It is left alone until
     /// removed.
     Fatal,
@@ -201,6 +214,10 @@ pub enum Notice {
         /// Consecutive failures so far.
         failures: u32,
     },
+    /// No copy of the sandbox's VM process can be trusted: it keeps running
+    /// from memory, and sleeps no deeper than its process allows, until it
+    /// is replaced. See [`Failure::Unsavable`].
+    Unsavable,
     /// The sandbox cannot be recovered on this host.
     Broken,
 }
@@ -223,6 +240,9 @@ pub struct SandboxView {
     /// The depth asked for by [`Input::Sleep`]; [`Level::Running`] means
     /// none.
     pub requested: Level,
+    /// Whether no copy of its VM process can be trusted; see
+    /// [`Failure::Unsavable`].
+    pub unsavable: bool,
     /// Whether it is beyond recovery on this host.
     pub broken: bool,
 }
@@ -316,7 +336,8 @@ impl Host {
             last_activity: sandbox.last_activity,
             floor: sandbox.floor,
             requested: sandbox.requested,
-            broken: sandbox.broken,
+            unsavable: sandbox.health == Health::Unsavable,
+            broken: sandbox.is_broken(),
         })
     }
 
@@ -416,22 +437,14 @@ impl Host {
                 op,
                 outcome,
             } => self.finish(now, sandbox, op, outcome, out),
-            Input::Lost { sandbox } => {
-                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
-                    if slot.in_flight.is_some() {
-                        slot.process_lost = true;
-                    } else if slot.state.level.has_process() {
-                        let (state, lost) = slot.state.without_process();
-                        slot.state = state;
-                        if lost {
-                            out.push(Action::Notify {
-                                sandbox,
-                                notice: Notice::MemoryLost,
-                            });
-                        }
-                        out.push(state_notice(sandbox, slot));
-                    }
-                    self.mark(sandbox);
+            Input::Lost { sandbox } => self.lost(sandbox, out),
+            Input::Unsavable { sandbox } => {
+                if self
+                    .sandboxes
+                    .get(&sandbox)
+                    .is_some_and(|slot| slot.state.level.has_process())
+                {
+                    self.unsavable(sandbox, out);
                 }
             }
             Input::Memory { available } => {
@@ -451,6 +464,57 @@ impl Host {
             }
             Input::Tick => {}
         }
+    }
+
+    fn lost(&mut self, sandbox: SandboxId, out: &mut Vec<Action>) {
+        let Some(slot) = self.sandboxes.get_mut(&sandbox) else {
+            return;
+        };
+        if slot.in_flight.is_some() {
+            slot.process_lost = true;
+        } else if slot.state.level.has_process() {
+            let (state, lost) = slot.state.without_process();
+            slot.state = state;
+            slot.renew();
+            if lost {
+                out.push(Action::Notify {
+                    sandbox,
+                    notice: Notice::MemoryLost,
+                });
+            }
+            out.push(state_notice(sandbox, slot));
+        }
+        self.mark(sandbox);
+    }
+
+    /// Stops counting on a copy of `sandbox`'s VM process: a floor or a
+    /// request that only a saved copy could meet is given up, since its
+    /// process cannot end without losing its programs.
+    fn unsavable(&mut self, sandbox: SandboxId, out: &mut Vec<Action>) {
+        let Some(slot) = self.sandboxes.get_mut(&sandbox) else {
+            return;
+        };
+        match slot.health {
+            Health::Broken | Health::Unsavable => {}
+            Health::Sound => {
+                slot.health = Health::Unsavable;
+                out.push(Action::Notify {
+                    sandbox,
+                    notice: Notice::Unsavable,
+                });
+            }
+        }
+        if slot.cannot_save() {
+            if slot.floor >= Level::Saved {
+                self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
+                slot.floor = Level::Running;
+                slot.floor_relief = 0;
+            }
+            if slot.requested >= Level::Saved {
+                slot.requested = Level::Running;
+            }
+        }
+        self.mark(sandbox);
     }
 
     fn finish(
@@ -486,11 +550,20 @@ impl Host {
                 notice,
             });
         }
+        if outcome == Outcome::Failed(Failure::Unsavable) {
+            self.unsavable(id, out);
+        }
+        let Some(slot) = self.sandboxes.get_mut(&id) else {
+            return;
+        };
         let mut lost = settled.lost;
         if std::mem::take(&mut slot.process_lost) {
             let (state, lost_now) = slot.state.without_process();
             slot.state = state;
             lost |= lost_now;
+        }
+        if !slot.state.level.has_process() {
+            slot.renew();
         }
         if lost {
             slot.retry = None;
@@ -704,10 +777,12 @@ impl Host {
             candidates.extend(
                 self.sandboxes
                     .iter()
-                    .filter(|(_, slot)| !slot.broken && !slot.wants_awake() && slot.resident > 0)
+                    .filter(|(_, slot)| {
+                        !slot.is_broken() && !slot.wants_awake() && slot.resident > 0
+                    })
                     .filter_map(|(id, slot)| {
                         let reached = slot.state.level.max(slot.floor);
-                        let target = slot.policy.relief_target(reached)?;
+                        let target = slot.policy().relief_target(reached)?;
                         let relief =
                             slot.relief_between(reached, target, memory.compressed_percent);
                         (relief > 0).then_some((slot.last_activity, *id, target, relief))

@@ -220,7 +220,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Some(net) = self.net.clone() else {
             return Ok(());
         };
-        tokio::task::spawn_blocking(move || net.remove_for(id))
+        tokio::task::spawn_blocking(move || net.remove(id, None))
             .await
             .map_err(|error| HostError::Io(error.to_string()))?
             .map_err(|error| HostError::Io(error.to_string()))
@@ -260,9 +260,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             (self.sleeping_state(&record, &paths).await?, None)
         };
         let adopted = vm.is_some();
-        // Opened before the agent can ask the VMM to sync the disk, so it
-        // sees what the disk lost while no agent watched; see `DiskWatch`.
-        let watch = adopted.then(|| DiskWatch::adopt(&paths));
+        // Taken back before the agent can ask the VMM to sync the disk, so
+        // it sees what the disk lost while no agent watched; see
+        // `DiskWatch`.
+        let watch = match &vm {
+            Some(vm) => {
+                let held = self.engine.held(vm).await.unwrap_or_else(|error| {
+                    tracing::warn!(%id, %error, "could not take back the disk watch");
+                    None
+                });
+                Some(DiskWatch::adopt(&paths, held))
+            }
+            None => None,
+        };
+        let unsavable = watch.as_ref().is_some_and(DiskWatch::failed);
         self.insert(id, paths, spec);
         if let (Some(vm), Some(watch)) = (vm, watch) {
             // What its memory was based on is unknown, so its next save
@@ -278,6 +289,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             state,
             policy,
         });
+        if unsavable {
+            // It still runs and wakes, but is never saved.
+            self.input(Input::Unsavable { sandbox: id.0 });
+        }
         Ok(adopted)
     }
 

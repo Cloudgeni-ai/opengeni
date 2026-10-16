@@ -431,6 +431,11 @@ pub struct SandboxStatus {
     pub launches: u64,
     /// Host memory it holds, when a VM process exists.
     pub resident_bytes: Option<u64>,
+    /// Whether no copy of its VM process can be trusted, such as when its
+    /// disk may have lost writes: it keeps running and pausing, but sleeps
+    /// no deeper than compressed until its VM process is replaced.
+    #[serde(default)]
+    pub unsavable: bool,
     /// Whether it is beyond recovery on this host.
     pub broken: bool,
 }

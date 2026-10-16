@@ -17,6 +17,7 @@ mod spec;
 pub mod vsock;
 
 use std::future::Future;
+use std::os::fd::OwnedFd;
 use std::time::Duration;
 
 pub use error::{EngineError, ErrorKind};
@@ -128,6 +129,23 @@ pub trait Engine: Send + Sync + 'static {
         &self,
         spec: &VmSpec,
     ) -> impl Future<Output = Result<Option<(Self::Vm, Found)>, EngineError>> + Send;
+
+    /// Keeps `file` open, as the same open file description, for as long as
+    /// `vm`'s process lives, outliving the host agent as the VM does, so
+    /// state that belongs to the description survives an agent restart;
+    /// [`Engine::held`] gets it back. The host keeps its disk watch there.
+    fn hold(
+        &self,
+        vm: &Self::Vm,
+        file: OwnedFd,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send;
+
+    /// A new descriptor for the open file description [`Engine::hold`]
+    /// keeps for `vm`, or `None` if nothing is kept for it.
+    fn held(
+        &self,
+        vm: &Self::Vm,
+    ) -> impl Future<Output = Result<Option<OwnedFd>, EngineError>> + Send;
 
     /// Ends any VM process left behind for `spec` and releases its host
     /// resources. Succeeds when there is none.
