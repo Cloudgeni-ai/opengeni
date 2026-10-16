@@ -358,6 +358,11 @@ enum Event<V> {
         /// longer fits today's inputs.
         stale: Option<Arc<Template>>,
     },
+    /// The check of a template found on disk ended.
+    TemplateChecked {
+        shape: Shape,
+        result: Box<Result<Template, String>>,
+    },
     /// A template build ended; `ordinal` is free again if its VM is gone.
     TemplateBuilt {
         shape: Shape,
@@ -622,6 +627,8 @@ async fn prepare_network(
 #[derive(Debug)]
 struct Warm {
     pool: Pool,
+    /// Templates found on disk, until their check starts.
+    found: Vec<Template>,
     sources: Arc<Sources>,
     ready_port: u32,
     ready_timeout: Duration,
@@ -768,9 +775,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         agent.hold_builds(held);
         agent.recover(strays).await;
-        for shape in warm_shapes {
-            agent.want_template(shape);
-        }
+        agent.start_templates(warm_shapes);
         let handle = Handle {
             commands: commands_tx,
             holds: Arc::new(AtomicU64::new(1)),

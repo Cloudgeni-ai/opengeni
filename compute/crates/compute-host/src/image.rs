@@ -376,6 +376,17 @@ impl Images {
         }
     }
 
+    /// An empty staging directory for `generation`, replacing whatever an
+    /// interrupted publish left there.
+    fn fresh_staging(&self, generation: Generation) -> io::Result<PathBuf> {
+        let staging = self.dir.join(format!("{generation}.staging"));
+        if staging.exists() {
+            fs::remove_dir_all(&staging)?;
+        }
+        fs::create_dir(&staging)?;
+        Ok(staging)
+    }
+
     /// Builds, checks and publishes a new generation from `parts`, then
     /// points `current` at it. Blocking: run off the async executor.
     pub fn publish(&self, parts: Parts<'_>) -> Result<Verified, Suspect> {
@@ -383,11 +394,7 @@ impl Images {
         // itself must survive a crash too.
         crate::layout::create_dir_durably(&self.dir)?;
         let generation = self.next_generation()?;
-        let staging = self.dir.join(format!("{generation}.staging"));
-        if staging.exists() {
-            fs::remove_dir_all(&staging)?;
-        }
-        fs::create_dir(&staging)?;
+        let staging = self.fresh_staging(generation)?;
         let memory = staging.join(MEMORY);
         let (parent, state, memory_len, chunks, remote, filled) = match parts {
             Parts::Whole {

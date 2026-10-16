@@ -69,7 +69,6 @@ const PREFETCH_LIMIT: Duration = Duration::from_secs(5);
 const SETTLE_RETRY: (Duration, Duration) = (Duration::from_millis(50), Duration::from_secs(5));
 
 mod live;
-mod remote;
 
 pub(crate) use live::{Base, DiskWatch, LiveMemory, Reconnected};
 
@@ -995,10 +994,17 @@ impl<E: Engine, S: Store> Job<E, S> {
             NOTICE_DEADLINE
         };
         match tell_restored(&self.spec.vsock_path(), port, self.id, deadline).await {
-            Ok(attempts) => tracing::debug!(
+            Ok(told) if must && !told.seeded => {
+                // It took its id but draws the numbers every other clone
+                // of its snapshot draws.
+                tracing::error!(id = %self.id, "the guest did not apply the restore notice's seed; it is not used");
+                return Err(LOST);
+            }
+            Ok(told) => tracing::debug!(
                 id = %self.id,
                 us = started.elapsed().as_micros(),
-                attempts,
+                attempts = told.attempts,
+                seeded = told.seeded,
                 "guest acknowledged the restore"
             ),
             Err(error) if must => {

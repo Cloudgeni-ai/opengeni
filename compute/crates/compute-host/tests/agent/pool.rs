@@ -183,8 +183,19 @@ async fn a_clone_that_never_learns_which_sandbox_it_is_is_never_used() {
     );
     assert_eq!(lab.record(id(1))["identity"], "known", "a boot settles it");
 
-    // An acknowledged notice is recorded, so nothing after it repeats it.
+    // One that takes its id but cannot apply the seed would draw the
+    // numbers its siblings draw: it is not used either.
     lab.world.refuse_notices.store(false, Ordering::Relaxed);
+    lab.world.unseeded_notices.store(true, Ordering::Relaxed);
+    lab.create(id(3), NEVER).await;
+    let woken = lab.wake(id(3)).await;
+    assert!(matches!(woken, Reply::Woken { .. }), "{woken:?}");
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 2);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 3);
+    assert_eq!(lab.run(id(3), &["sandbox?"]).await, [""]);
+    lab.world.unseeded_notices.store(false, Ordering::Relaxed);
+
+    // An acknowledged notice is recorded, so nothing after it repeats it.
     lab.create(id(2), NEVER).await;
     assert_eq!(lab.run(id(2), &["sandbox?"]).await, [id(2).to_string()]);
     assert_eq!(lab.record(id(2))["identity"], "known");
@@ -268,6 +279,7 @@ async fn a_build_whose_vm_may_survive_keeps_its_user_taken() {
     // build takes an ordinal while it may run.
     std::fs::create_dir_all(jails.join("template-feedface/root")).unwrap();
     world.stuck_clean_ups.store(true, Ordering::Relaxed);
+    remove_templates(&root);
     let lab = warm_lab(root, world, Delays::default(), vec![SHAPE]).await;
     refuse_creates_and_builds(&lab).await;
     let (root, world) = lab.stop().await;
@@ -283,9 +295,17 @@ async fn a_build_whose_vm_may_survive_keeps_its_user_taken() {
         .join(id(3).to_string())
         .join("sandbox.json");
     std::fs::write(record, b"{").unwrap();
+    remove_templates(&root);
     let lab = warm_lab(root, world, Delays::default(), vec![SHAPE]).await;
     refuse_creates_and_builds(&lab).await;
     lab.stop().await;
+}
+
+/// Removes every finished template, so the next agent must build.
+fn remove_templates(root: &Path) {
+    for template in templates(root) {
+        std::fs::remove_dir_all(template).unwrap();
+    }
 }
 
 /// Checks that `lab`, started with an ordinal it cannot know, creates no
@@ -312,6 +332,30 @@ async fn refuse_creates_and_builds(lab: &Lab) {
         boots,
         "nothing booted"
     );
+}
+
+/// A template found on disk whose memory changed without changing its
+/// length passes the light check each clone makes. A starting agent checks
+/// every chunk once before it uses the template, and builds it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_template_corrupted_on_disk_is_rebuilt() {
+    let lab = warm_lab(Lab::root(), Arc::default(), Delays::default(), vec![SHAPE]).await;
+    wait_ready(&lab).await;
+    let (root, world) = lab.stop().await;
+    let memory = image_memory(&templates(&root)[0].join("images"));
+    let mut bytes = std::fs::read(&memory).unwrap();
+    let first = bytes.first_mut().expect("the template has memory");
+    *first ^= 0x5a;
+    std::fs::set_permissions(&memory, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+    std::fs::write(&memory, &bytes).unwrap();
+
+    let lab = warm_lab(root, world, Delays::default(), vec![SHAPE]).await;
+    wait_ready(&lab).await;
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2, "built again");
+    lab.create(id(1), NEVER).await;
+    assert!(memory_saved(&lab.status().await, id(1)), "from the new one");
+    assert_eq!(lab.run(id(1), &["sandbox?"]).await, [id(1).to_string()]);
+    lab.assert_clean();
 }
 
 /// A template a file of which is gone is not kept as ready: the sandbox

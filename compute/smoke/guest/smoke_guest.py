@@ -17,15 +17,23 @@ saving and restoring the sandbox, and are gone after a fresh boot, exactly
 like the programs themselves.
 
 With `--notice`, the service also answers the host agent's restore notice
-(`restored <unix time in nanoseconds> [key=value ...]`, answered with `ok`):
-it sets the clock, counts restores and takes the `sandbox=<id>` field as its
-own sandbox id, ignoring fields it does not know. `ping` reports both, so a
+(`restored <unix time in nanoseconds> [key=value ...]`): it sets the clock,
+counts restores, takes the `sandbox=<id>` field as its own sandbox id, mixes
+the `seed=<hex>` field into the kernel's random number generator and reseeds
+it, and ignores fields it does not know. It answers `ok seeded` when it
+applied a seed and `ok` otherwise; the host uses a clone of a template or a
+ready sandbox only after `ok seeded`, since until then it draws the same
+random numbers as every other clone of the same snapshot. `ping` reports both, so a
 scenario can tell that its sandbox was restored from a memory image, and
 which sandbox a guest started from a template believes it is. The host
 retries a notice whose answer got lost, so the count can run ahead of the
 restores. The id is kept in the state directory before the answer, so a
 restarted service still knows it; a guest booted from its disk finds its id
 on the kernel command line instead, as `opengeni.sandbox=<id>`.
+
+The service sets its own `oom_score_adj` to -1000, so when the guest runs
+out of memory the kernel kills the user's programs before it; every command
+it starts resets the inherited setting to 0 before running.
 """
 
 from __future__ import annotations
@@ -35,6 +43,7 @@ import base64
 import contextlib
 import ctypes
 import ctypes.util
+import fcntl
 import itertools
 import json
 import math
@@ -56,10 +65,38 @@ MAX_REQUEST = 64 << 20
 # Room for the time, the sandbox id and fields a later host may add.
 MAX_NOTICE = 1024
 SANDBOX_ARG = "opengeni.sandbox"
+RANDOM_DEVICE = "/dev/urandom"
+RNDRESEEDCRNG = 0x5207  # _IO('R', 0x07)
 OUTPUT_DIR = Path(os.environ.get("SMOKE_GUEST_STATE", "/run/smoke-guest"))
 # The id the latest restore notice gave, kept across restarts of the service.
 SANDBOX_FILE = OUTPUT_DIR / "sandbox"
 _OUTPUT_NAMES = itertools.count()
+OOM_SCORE_ADJ = Path("/proc/self/oom_score_adj")
+# Runs `$1` with the out-of-memory killer's default view of it, not the
+# service's; quiet where there is no such setting (outside Linux).
+_USER_COMMAND = 'echo 0 2>/dev/null > /proc/self/oom_score_adj; exec /bin/bash -c "$1" /bin/bash'
+
+
+def _user_command(command: str) -> list[str]:
+    """The program and arguments that run a user's shell `command`."""
+
+    return ["/bin/sh", "-c", _USER_COMMAND, "sh", command]
+
+
+def _oom_score_adj() -> int | None:
+    try:
+        return int(OOM_SCORE_ADJ.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _outlast_user_programs() -> None:
+    """Asks the kernel to kill anything else first when memory runs out."""
+
+    try:
+        OOM_SCORE_ADJ.write_text("-1000")
+    except OSError as error:
+        print(f"smoke guest: cannot protect itself from the OOM killer: {error}", file=sys.stderr)
 
 
 class RequestError(Exception):
@@ -107,7 +144,7 @@ class Process:
         self._stdout = (OUTPUT_DIR / f"{name}.out").open("w+b")
         self._stderr = (OUTPUT_DIR / f"{name}.err").open("w+b")
         self.popen = subprocess.Popen(
-            ["/bin/bash", "-c", command],
+            _user_command(command),
             stdin=subprocess.DEVNULL,
             stdout=self._stdout,
             stderr=self._stderr,
@@ -252,14 +289,19 @@ RESTORES = Restores(_starting_sandbox())
 
 
 def op_ping(_request: dict[str, Any]) -> dict[str, Any]:
-    return {"pid": os.getpid(), "restores": RESTORES.count(), "sandbox": RESTORES.sandbox()}
+    return {
+        "pid": os.getpid(),
+        "restores": RESTORES.count(),
+        "sandbox": RESTORES.sandbox(),
+        "oom_score_adj": _oom_score_adj(),
+    }
 
 
 def op_exec(request: dict[str, Any]) -> dict[str, Any]:
     command = _field(request, "command", str)
     timeout = _optional(request, "timeout", (int, float), None)
     process = subprocess.Popen(
-        ["/bin/bash", "-c", command],
+        _user_command(command),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -776,10 +818,32 @@ def parse_notice(line: bytes) -> tuple[int, dict[str, str]] | None:
     return int(words[1]), fields
 
 
+def reseed(seed: str, device: str = RANDOM_DEVICE) -> bool:
+    """Mixes the host's `seed` (hex) into the kernel's input pool and has the
+    random number generator reseed from it at once. Returns whether both
+    happened."""
+
+    try:
+        data = bytes.fromhex(seed)
+    except ValueError:
+        return False
+    if not data:
+        return False
+    try:
+        with open(device, "wb", buffering=0) as pool:
+            pool.write(data)
+            fcntl.ioctl(pool, RNDRESEEDCRNG)
+    except OSError as error:
+        print(f"cannot reseed: {error}", file=sys.stderr, flush=True)
+        return False
+    return True
+
+
 def serve_notice(connection: socket.socket, *, set_clock: bool) -> None:
     """Acts on one restore notice: sets the clock, counts the restore, takes
-    the sandbox id and answers `ok`. Anything else closes the connection
-    unanswered."""
+    the sandbox id, applies the seed and answers `ok seeded`, or `ok` when
+    there was no seed or it could not be applied. Anything else closes the
+    connection unanswered."""
 
     with connection, connection.makefile("rb") as reader:
         line = reader.readline(MAX_NOTICE + 1)
@@ -801,8 +865,9 @@ def serve_notice(connection: socket.socket, *, set_clock: bool) -> None:
             # keep is not taken.
             print(f"cannot keep the sandbox id: {error}", file=sys.stderr, flush=True)
             return
+        seeded = "seed" in fields and reseed(fields["seed"])
         with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-            connection.sendall(b"ok\n")
+            connection.sendall(b"ok seeded\n" if seeded else b"ok\n")
 
 
 def serve_notices(server: socket.socket, *, set_clock: bool) -> None:
@@ -831,6 +896,7 @@ def main() -> None:
         help="count restore notices without setting the clock (to test on a host)",
     )
     args = parser.parse_args()
+    _outlast_user_programs()
     if args.notice is not None:
         notices = listen(args.notice)
         threading.Thread(

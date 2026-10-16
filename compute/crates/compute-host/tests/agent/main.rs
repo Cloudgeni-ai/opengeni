@@ -95,6 +95,9 @@ struct World {
     /// While set, every guest answers a restore notice with something
     /// other than `ok` and ignores it.
     refuse_notices: AtomicBool,
+    /// While set, every guest takes a restore notice but answers that it
+    /// could not apply its seed.
+    unseeded_notices: AtomicBool,
     restoring: AtomicUsize,
     max_restoring: AtomicUsize,
     compress_cancelled: AtomicUsize,
@@ -332,7 +335,13 @@ async fn guest(
                     }
                     ("restored", fields) => {
                         *notice.lock().unwrap() = Some(fields.to_owned());
-                        "ok".into()
+                        if fields.contains(" seed=")
+                            && !world.unseeded_notices.load(Ordering::Relaxed)
+                        {
+                            "ok seeded".into()
+                        } else {
+                            "ok".into()
+                        }
                     }
                     ("told-restored?", _) => notice.lock().unwrap().is_some().to_string(),
                     // The sandbox id the last restore notice named.

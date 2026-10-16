@@ -12,8 +12,8 @@ Opengeni does not use this yet.
 | Piece | State |
 | --- | --- |
 | Host agent: jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite | on `feat/compute-lab` |
-| Templates for new sandboxes | in review |
-| Ready pool, admission with requests and limits | being built |
+| Templates and a ready pool for new sandboxes | in review |
+| Admission with requests and limits | being built |
 | Control plane (placement, moves between hosts, autoscaling), observability, Opengeni integration | planned |
 
 Decisions and their reasons are in [docs/adr](docs/adr/README.md). Numbers
@@ -143,7 +143,7 @@ may let guests reach its local network
 For each shape (processors and memory) the host keeps a template: a guest
 booted once, paused and saved. A new sandbox gets a copy-on-write copy of its
 disk and shares its memory image, so creating one is a restore, not a boot. A
-ready pool will keep clones already restored, so a create is a resume
+ready pool keeps clones already restored and paused, so a create is a resume
 ([ADR 12](docs/adr/0012-templates-and-ready-pool.md)).
 
 ## Code map

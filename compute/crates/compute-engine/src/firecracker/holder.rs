@@ -10,7 +10,7 @@
 use std::fs;
 use std::io;
 use std::os::fd::OwnedFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -43,11 +43,26 @@ pub(super) async fn hold(cgroup: Cgroup, path: &str, file: OwnedFd) -> Result<()
         .map_err(|error| EngineError::io("hold", error))
 }
 
+/// The first executable `program` in the directories of `path`.
+fn program_path(program: &str, path: &str) -> io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    path.split(':')
+        .map(|dir| Path::new(dir).join(program))
+        .find(|candidate| {
+            fs::metadata(candidate).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no {program} on {path}")))
+}
+
 /// Returns the holder's process id.
 async fn start(cgroup: &Cgroup, path: &str, file: OwnedFd) -> io::Result<u32> {
     /// How long a holder may take to join its group and start.
     const LIMIT: Duration = Duration::from_secs(5);
-    let mut child = Command::new("sh")
+    // Named by its full path, so the agent spawns it without a fork that
+    // would copy its page tables and take every allocator lock.
+    let mut child = Command::new(program_path("sh", path)?)
         .args(["-c", JOIN_THEN_HOLD, "sh"])
         .arg(cgroup.path().join("cgroup.procs"))
         .env_clear()
@@ -154,7 +169,15 @@ mod tests {
 
     use rustix::process::{Pid, Signal, kill_process};
 
-    use super::{Cgroup, hold, start};
+    use super::{Cgroup, hold, program_path, start};
+
+    #[test]
+    fn the_holder_program_is_found_by_its_full_path() {
+        let sh = program_path("sh", "/nonexistent:/usr/bin:/bin").unwrap();
+        assert!(sh.is_absolute() && sh.ends_with("sh"), "{}", sh.display());
+        let missing = program_path("no-such-program", "/usr/bin:/bin").unwrap_err();
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+    }
 
     /// Holds the write end of a pipe: the read end sees its end only once
     /// no process keeps the write end open.

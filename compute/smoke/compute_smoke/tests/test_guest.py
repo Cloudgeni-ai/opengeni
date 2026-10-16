@@ -158,6 +158,19 @@ class GuestService(unittest.TestCase):
         self.assertEqual(_unb64(reply["stdout"]), b"out")
         self.assertEqual(_unb64(reply["stderr"]), b"err-hi")
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "oom_score_adj is Linux's")
+    def test_the_service_outlasts_its_commands_when_memory_runs_out(self) -> None:
+        read = "cat /proc/self/oom_score_adj"
+        ran = self.ok({"op": "exec", "command": read})
+        self.assertEqual(_unb64(ran["stdout"]).strip(), b"0", "a command starts unprotected")
+        pid = self.ok({"op": "spawn", "command": read})["pid"]
+        spawned = self.ok({"op": "wait", "pid": pid, "timeout": 10})
+        self.assertEqual(_unb64(spawned["stdout"]).strip(), b"0", "so does a background one")
+        protected = self.ok({"op": "ping"})["oom_score_adj"]
+        if os.geteuid() != 0:
+            self.skipTest(f"only root may protect the service (it reads {protected})")
+        self.assertEqual(protected, -1000)
+
     def test_a_command_runs_in_the_requested_directory(self) -> None:
         reply = self.ok({"op": "exec", "command": "pwd -P", "cwd": str(self.scratch)})
         self.assertEqual(_unb64(reply["stdout"]).strip(), str(self.scratch.resolve()).encode())
@@ -419,6 +432,40 @@ class GuestInternals(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.scratch, True)
         self.guest = _load_guest(self.scratch / "state")
         self.now = 0.0
+
+    def test_a_seed_is_mixed_in_and_the_generator_reseeded(self) -> None:
+        pool = self.scratch / "pool"
+        pool.touch()
+        seed = "00ff" * 16
+        with mock.patch.object(self.guest.fcntl, "ioctl") as ioctl:
+            self.assertTrue(self.guest.reseed(seed, str(pool)))
+        self.assertEqual(pool.read_bytes(), bytes.fromhex(seed))
+        self.assertEqual(ioctl.call_args.args[1], self.guest.RNDRESEEDCRNG)
+        with mock.patch.object(self.guest.fcntl, "ioctl", side_effect=OSError("denied")):
+            self.assertFalse(self.guest.reseed(seed, str(pool)))
+        for bad in ("", "xyz"):
+            with self.subTest(seed=bad):
+                self.assertFalse(self.guest.reseed(bad, str(pool)))
+
+    def test_the_answer_says_whether_the_seed_was_applied(self) -> None:
+        def answer(line: bytes, applied: bool) -> tuple[bytes, list[str]]:
+            seeds: list[str] = []
+
+            def reseed(seed: str) -> bool:
+                seeds.append(seed)
+                return applied
+
+            host, guest = socket.socketpair()
+            with host, mock.patch.object(self.guest, "reseed", reseed):
+                host.sendall(line)
+                self.guest.serve_notice(guest, set_clock=False)
+                return host.recv(64), seeds
+
+        now = time.time_ns()
+        line = f"restored {now} sandbox=ab seed=5eed\n".encode()
+        self.assertEqual(answer(line, True), (b"ok seeded\n", ["5eed"]))
+        self.assertEqual(answer(line, False), (b"ok\n", ["5eed"]))
+        self.assertEqual(answer(f"restored {now}\n".encode(), True), (b"ok\n", []))
 
     def test_signalling_an_exited_process_leaves_its_old_group_alone(self) -> None:
         process = self.guest.PROCESSES.start("true", dict(os.environ), None)

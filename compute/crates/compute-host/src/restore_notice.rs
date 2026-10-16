@@ -28,7 +28,10 @@
 //! The guest sets its clock, drops connections it opened before the
 //! restore, takes the sandbox id as its own, mixes the seed (32 random
 //! bytes from the host, the same on every attempt of one notice) into its
-//! random number generator and reseeds it, and answers `ok`. Later
+//! random number generator and reseeds it, and answers `ok seeded`, or
+//! `ok` if it could not apply the seed. A clone of a template or a ready
+//! sandbox is used only after `ok seeded`: until it reseeds, it draws the
+//! numbers every other clone of the same snapshot draws. Later
 //! `key=value` fields may follow; a guest ignores those it does not know.
 //! The host retries until the guest answers or a deadline passes, so set a
 //! notice port only for guest images that listen on it; a guest that never
@@ -44,8 +47,20 @@ use std::{fmt, io};
 use compute_engine::vsock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// The line a guest sends back once it has acted on the notice.
-const ACK: &[u8; 3] = b"ok\n";
+/// The line a guest sends back once it has acted on the notice, without
+/// a newline.
+const ACK: &[u8] = b"ok";
+/// The same, from a guest that also applied the seed.
+const SEEDED: &[u8] = b"ok seeded";
+
+/// How a guest answered a notice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Told {
+    /// Connections it took, the answered one included.
+    pub attempts: u32,
+    /// Whether it applied the seed (`ok seeded`).
+    pub seeded: bool,
+}
 
 /// Nanoseconds since the Unix epoch at `at`.
 fn unix_nanos(at: SystemTime) -> io::Result<u128> {
@@ -85,8 +100,7 @@ const FIRST_ATTEMPT: Duration = Duration::from_secs(1);
 const RETRY_PAUSE: Duration = Duration::from_millis(5);
 
 /// Tells the guest of sandbox `sandbox` through the VM's vsock socket and
-/// waits for its answer, trying again until `deadline` has passed. Returns
-/// how many attempts it took.
+/// waits for its answer, trying again until `deadline` has passed.
 ///
 /// Retrying matters right after a restore: the guest kernel first handles
 /// the VMM's vsock transport reset, and a connection that arrives in that
@@ -103,7 +117,7 @@ pub async fn tell_restored(
     port: u32,
     sandbox: impl fmt::Display,
     deadline: Duration,
-) -> io::Result<u32> {
+) -> io::Result<Told> {
     let sandbox = sandbox.to_string();
     let seed = seed()?;
     let give_up = Instant::now() + deadline;
@@ -118,7 +132,7 @@ pub async fn tell_restored(
         )
         .await
         {
-            Ok(Ok(())) => return Ok(attempts),
+            Ok(Ok(seeded)) => return Ok(Told { attempts, seeded }),
             Ok(Err(error)) if error.kind() == io::ErrorKind::InvalidData => return Err(error),
             Ok(Err(error)) => error,
             Err(_) => {
@@ -137,22 +151,32 @@ pub async fn tell_restored(
     }
 }
 
-/// One connection: the notice out, the guest's answer back.
-async fn exchange(vsock_socket: &Path, port: u32, sandbox: &str, seed: &str) -> io::Result<()> {
+/// One connection: the notice out, the guest's answer back. Returns
+/// whether the guest applied the seed.
+async fn exchange(vsock_socket: &Path, port: u32, sandbox: &str, seed: &str) -> io::Result<bool> {
     let mut stream = vsock::connect(vsock_socket, port).await?;
     stream
         .write_all(notice(SystemTime::now(), sandbox, seed)?.as_bytes())
         .await?;
-    let mut answer = [0_u8; ACK.len()];
-    stream.read_exact(&mut answer).await?;
-    if &answer == ACK {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "unexpected answer to the restore notice",
-        ))
+    let mut answer = Vec::with_capacity(SEEDED.len() + 1);
+    let mut byte = [0_u8; 1];
+    while answer.len() <= SEEDED.len() {
+        stream.read_exact(&mut byte).await?;
+        if byte[0] == b'\n' {
+            if answer == ACK {
+                return Ok(false);
+            }
+            if answer == SEEDED {
+                return Ok(true);
+            }
+            break;
+        }
+        answer.push(byte[0]);
     }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "unexpected answer to the restore notice",
+    ))
 }
 
 #[cfg(test)]
@@ -208,30 +232,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_guest_that_answers_ok_is_told() {
-        let socket = guest("ok", &[Some(b"ok\n")]);
-        let attempts = tell_restored(&socket, 53, 7, Duration::from_secs(5))
-            .await
-            .unwrap();
-        assert_eq!(attempts, 1);
+    async fn a_guest_says_whether_it_applied_the_seed() {
+        for (name, answer, seeded) in [
+            ("ok", b"ok\n" as &[u8], false),
+            ("seeded", b"ok seeded\n", true),
+        ] {
+            let socket = guest(name, Box::leak(Box::new([Some(answer)])));
+            let told = tell_restored(&socket, 53, 7, Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert_eq!(
+                told,
+                Told {
+                    attempts: 1,
+                    seeded
+                }
+            );
+        }
     }
 
     #[tokio::test]
     async fn a_guest_resetting_its_transport_is_told_on_a_later_attempt() {
-        let socket = guest("reset", &[None, Some(b""), Some(b"ok\n")]);
-        let attempts = tell_restored(&socket, 53, 7, Duration::from_secs(5))
+        let socket = guest("reset", &[None, Some(b""), Some(b"ok seeded\n")]);
+        let told = tell_restored(&socket, 53, 7, Duration::from_secs(5))
             .await
             .unwrap();
-        assert_eq!(attempts, 3);
+        assert_eq!(told.attempts, 3);
     }
 
     #[tokio::test]
     async fn a_wrong_answer_is_not_retried() {
-        let socket = guest("wrong", &[Some(b"no\n"), Some(b"ok\n")]);
-        let error = tell_restored(&socket, 53, 7, Duration::from_secs(5))
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        for (name, answer) in [
+            ("wrong", b"no\n" as &[u8]),
+            ("seedy", b"ok seedy\n"),
+            ("long", b"ok seeded and more\n"),
+        ] {
+            let socket = guest(name, Box::leak(Box::new([Some(answer), Some(b"ok\n")])));
+            let error = tell_restored(&socket, 53, 7, Duration::from_secs(5))
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
+        }
     }
 
     #[tokio::test]

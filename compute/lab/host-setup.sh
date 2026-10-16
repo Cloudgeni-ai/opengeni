@@ -30,8 +30,9 @@ log() { printf '[host-setup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 # nanoseconds> sandbox=<id> seed=<hex>`), which also sets the clock.
 # Either way the id ends up in /run/sandbox-id. The notice's `seed` is
 # mixed into the guest's random number generator, which reseeds before the
-# guest answers, so no command of the new sandbox draws numbers another
-# clone of the same snapshot draws. (The kernel reseeds by itself when it
+# guest answers `ok seeded` (`ok` if it could not), so no command of the new
+# sandbox draws numbers another clone of the same snapshot draws; the host
+# uses a clone only after `ok seeded`. (The kernel reseeds by itself when it
 # learns of the VM generation ID's change, but later.)
 # A template is snapshotted once the guest accepts on vsock port 54, which
 # opens only when systemd has finished starting everything, so clones wake
@@ -63,6 +64,7 @@ while True:
             if word != "restored":
                 continue
             time.clock_settime_ns(time.CLOCK_REALTIME, int(nanos))
+            seeded = False
             for field in fields:
                 key, _, value = field.partition("=")
                 if key == "sandbox":
@@ -72,12 +74,16 @@ while True:
                 elif key == "seed":
                     # Mixed into the input pool, then the generator reseeds
                     # from it at once.
-                    with open("/dev/urandom", "wb", buffering=0) as pool:
-                        pool.write(bytes.fromhex(value))
-                        fcntl.ioctl(pool, RNDRESEEDCRNG)
+                    try:
+                        with open("/dev/urandom", "wb", buffering=0) as pool:
+                            pool.write(bytes.fromhex(value))
+                            fcntl.ioctl(pool, RNDRESEEDCRNG)
+                        seeded = True
+                    except (OSError, ValueError):
+                        continue
                     with open("/dev/kmsg", "w") as log:
                         log.write("lab-notice: crng reseeded from the restore notice\n")
-            connection.sendall(b"ok\n")
+            connection.sendall(b"ok seeded\n" if seeded else b"ok\n")
         except (OSError, ValueError, EOFError):
             pass
 SCRIPT
@@ -202,7 +208,7 @@ fi
 
 if [ -f base.ext4 ] && {
   ! sudo debugfs -R "cat /etc/systemd/system/lab-identity.service" base.ext4 2>/dev/null | grep -q Before=lab-agent ||
-    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q RNDRESEEDCRNG ||
+    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q "ok seeded" ||
     ! sudo debugfs -R "stat /etc/systemd/system/lab-ready.service" base.ext4 2>/dev/null | grep -q Inode
 }; then
   log "guest services"

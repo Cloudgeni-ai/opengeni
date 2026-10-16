@@ -63,7 +63,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep, timeout};
 
-use crate::image::{Images, Parts, Suspect};
+use crate::image::{Depth, Images, Parts, Suspect};
 use crate::layout::{
     Machine, Paths, copy_sparse, link_kernel, remove_if_present, sync_parent, templates_dir,
     write_atomic,
@@ -490,13 +490,31 @@ pub(crate) struct Pool {
 }
 
 impl Pool {
-    /// A pool holding the templates found on disk.
-    pub fn new(ready: Vec<Template>) -> Self {
+    /// A pool whose templates found on disk, of `checking` shapes, are
+    /// still being checked: each counts as being built until
+    /// [`Pool::checked`].
+    pub fn new(checking: impl IntoIterator<Item = Shape>) -> Self {
         Self {
-            entries: ready
+            entries: checking
                 .into_iter()
-                .map(|template| (template.inputs.shape, Entry::Ready(Arc::new(template))))
+                .map(|shape| (shape, Entry::Building))
                 .collect(),
+        }
+    }
+
+    /// Records how the check of `shape`'s template found on disk ended
+    /// (see [`check_found`]); true if the caller must build a new one.
+    pub fn checked(&mut self, shape: Shape, result: Result<Template, String>) -> bool {
+        match result {
+            Ok(template) => {
+                self.entries.insert(shape, Entry::Ready(Arc::new(template)));
+                false
+            }
+            Err(error) => {
+                tracing::warn!(%shape, %error, "a template found on disk failed its check; building it again");
+                self.entries.insert(shape, Entry::Building);
+                true
+            }
         }
     }
 
@@ -1021,6 +1039,32 @@ pub(crate) async fn keep_templates(root: &Path, sources: &Arc<Sources>) -> Vec<T
         })
 }
 
+/// Checks every chunk of the memory image of `template`, found on disk,
+/// against its chunk map, once, before the pool trusts it: a same-length
+/// change passes the light check each clone makes. One that fails is
+/// removed, so it can be built again. Templates this agent built are
+/// trusted as built.
+pub(crate) async fn check_found(template: Template) -> Result<Template, String> {
+    blocking(move || {
+        let images = template.images();
+        let checked = match images.current() {
+            Ok(Some(generation)) => images
+                .verify(generation, Depth::Deep)
+                .map(drop)
+                .map_err(|suspect| suspect.to_string()),
+            Ok(None) => Err("the template has no image".into()),
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(reason) = checked {
+            remove_dir(&template.dir)?;
+            return Ok(Err(reason));
+        }
+        Ok(Ok(template))
+    })
+    .await
+    .and_then(|checked| checked)
+}
+
 /// Removes every template in `dir` that is unfinished or no longer fits
 /// `sources`, and returns the rest.
 fn keep_fitting(dir: &Path, sources: &Sources) -> Vec<Template> {
@@ -1107,7 +1151,7 @@ mod tests {
     fn the_pool_builds_each_shape_once_and_retries_after_a_pause() {
         let start = Instant::now();
         let small = shape(1, 512);
-        let mut pool = Pool::new(Vec::new());
+        let mut pool = Pool::new([]);
         assert!(pool.take(small, start).1, "first use builds");
         assert!(!pool.take(small, start).1, "already building");
         assert!(!pool.want(small, start));

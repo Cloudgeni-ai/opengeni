@@ -158,7 +158,7 @@ pub(super) enum Filled<V> {
         stale: Option<Arc<Template>>,
     },
     /// It failed with a record, and a VM if one is left; it is removed.
-    Failed { vm: Option<V> },
+    Failed { vm: Option<(V, LiveMemory)> },
 }
 
 /// One fill: everything it needs away from the agent's task.
@@ -227,8 +227,8 @@ impl<E: Engine, S: Store> Fill<E, S> {
             (outcome, after) => {
                 tracing::warn!(%host, ?outcome, "a ready sandbox's restore failed");
                 let vm = match after {
-                    After::New(vm, _) => Some(vm),
-                    After::Kept(live) => Some(live.vm),
+                    After::New(vm, memory) => Some((vm, memory)),
+                    After::Kept(live) => Some((live.vm, live.memory)),
                     After::NoVm => None,
                 };
                 return Filled::Failed { vm };
@@ -241,7 +241,9 @@ impl<E: Engine, S: Store> Fill<E, S> {
         };
         if let Err(error) = paused {
             tracing::warn!(%host, %error, "a ready sandbox's guest did not get ready");
-            return Filled::Failed { vm: Some(vm) };
+            return Filled::Failed {
+                vm: Some((vm, memory)),
+            };
         }
         Filled::Ready {
             vm,
@@ -455,7 +457,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Idle { record, live, .. } = idle;
         live.stopping.store(true, Ordering::Release);
         let record = self.records.get(record.id).unwrap_or(record);
-        self.remove_recorded(&record, Some(live.vm), Vec::new());
+        self.remove_recorded(&record, Some((live.vm, live.memory)), Vec::new());
     }
 
     /// Removes the ready sandboxes of `shape` filled from any template but
@@ -632,7 +634,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 if current.id == id {
                     self.hosts.insert(host.0, id.0);
                 }
-                self.remove_recorded(&current, Some(live.vm), Vec::new());
+                self.remove_recorded(&current, Some((live.vm, live.memory)), Vec::new());
                 let _ = reply.send(Err(error));
                 return;
             }

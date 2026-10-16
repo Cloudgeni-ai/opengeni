@@ -60,10 +60,11 @@ impl Warm {
                 ready: BTreeMap::new(),
             };
         };
-        let ready = pool::keep_templates(root, &sources).await;
+        let found = pool::keep_templates(root, &sources).await;
         Started {
             warm: Some(Self {
-                pool: Pool::new(ready),
+                pool: Pool::new(found.iter().map(Template::shape)),
+                found,
                 sources,
                 ready_port: config.ready_port,
                 ready_timeout: config.ready_timeout,
@@ -76,6 +77,38 @@ impl Warm {
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
+    /// Checks the templates an earlier agent left, in the background, and
+    /// builds those of `shapes` that have none. A template being checked is
+    /// not used yet: sandboxes of its shape boot cold meanwhile.
+    pub(super) fn start_templates(&mut self, shapes: Vec<Shape>) {
+        let found = self
+            .warm
+            .as_mut()
+            .map(|warm| std::mem::take(&mut warm.found))
+            .unwrap_or_default();
+        for template in found {
+            let events = self.events_tx.clone();
+            tokio::spawn(async move {
+                let shape = template.shape();
+                let result = Box::new(pool::check_found(template).await);
+                let _ = events.send(Event::TemplateChecked { shape, result });
+            });
+        }
+        for shape in shapes {
+            self.want_template(shape);
+        }
+    }
+
+    /// Uses a checked template, or builds a new one if it failed.
+    pub(super) fn template_checked(&mut self, shape: Shape, result: Result<Template, String>) {
+        let Some(warm) = &mut self.warm else {
+            return;
+        };
+        if warm.pool.checked(shape, result) {
+            self.build_template(shape);
+        }
+    }
+
     /// Starts building `shape`'s template unless it is ready or on its way.
     pub(super) fn want_template(&mut self, shape: Shape) {
         let Some(warm) = &mut self.warm else {

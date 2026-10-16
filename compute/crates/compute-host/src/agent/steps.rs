@@ -80,6 +80,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             Event::Unthrottled { id, op } => self.input(Input::Unthrottled { sandbox: id.0, op }),
             Event::Exited { id, incarnation } => self.exited(id, incarnation),
+            Event::TemplateChecked { shape, result } => {
+                self.template_checked(shape, *result);
+                self.refill();
+            }
             Event::TemplateBuilt {
                 shape,
                 ordinal,
