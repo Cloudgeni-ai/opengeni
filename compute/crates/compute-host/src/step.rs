@@ -32,14 +32,14 @@ use compute_engine::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::image::{Generation, Images, Parts, Suspect, Verified};
+use crate::image::{Images, Parts, Suspect, Verified};
 use crate::layout::{Paths, link_kernel, remove_durably, remove_if_present, write_atomic};
 #[cfg(target_os = "linux")]
 use crate::lazy::{ChunkSource, Fetcher, Hydration, Memory, Paging, WakeProfile};
 use crate::protocol::Id;
 use crate::restore_notice::tell_restored;
-use crate::state::{Change, Disk, Record, Records, StateError};
-use crate::store::{FetchInto, FetchedMemory, Receipt, SavedFiles, SavedImage, Store};
+use crate::state::{Change, Disk, Record, Records, StateError, apply};
+use crate::store::{FetchInto, FetchedMemory, JailedFile, Receipt, SavedFiles, SavedImage, Store};
 
 /// How long a restore keeps trying to tell the guest of it. A listening
 /// guest answers in milliseconds, but only once its kernel has handled the
@@ -51,57 +51,9 @@ const NOTICE_DEADLINE: Duration = Duration::from_secs(5);
 /// guest anyway; whatever is missing then arrives on demand.
 const PREFETCH_LIMIT: Duration = Duration::from_secs(5);
 
-/// What the VM's memory equals, page for page, apart from what it changed
-/// since: what a diff snapshot is relative to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Base {
-    /// All zeros: a VM booted fresh.
-    Zero,
-    /// A published image generation.
-    Image(Generation),
-    /// Unknown, for example after a failed snapshot or merge: the next
-    /// snapshot must hold every page.
-    Unknown,
-}
+mod live;
 
-/// What backs a live VM's memory.
-#[derive(Debug)]
-pub(crate) struct LiveMemory {
-    pub base: Base,
-    /// The pager thread serving its memory, if a pager does.
-    #[cfg(target_os = "linux")]
-    pub paging: Option<Paging>,
-}
-
-impl LiveMemory {
-    pub fn booted() -> Self {
-        Self {
-            base: Base::Zero,
-            #[cfg(target_os = "linux")]
-            paging: None,
-        }
-    }
-
-    /// A VM found running after an agent restart: what its memory is based
-    /// on is unknown.
-    pub fn adopted() -> Self {
-        Self {
-            base: Base::Unknown,
-            #[cfg(target_os = "linux")]
-            paging: None,
-        }
-    }
-
-    /// Resolves if the VM's memory can no longer be served, so the VM must
-    /// be stopped.
-    pub fn failed(&self) -> impl Future<Output = ()> + Send + 'static {
-        #[cfg(target_os = "linux")]
-        if let Some(paging) = &self.paging {
-            return futures::future::Either::Left(paging.failed());
-        }
-        futures::future::Either::Right(std::future::pending())
-    }
-}
+pub(crate) use live::{Base, DiskWatch, LiveMemory};
 
 /// A VM process the host owns.
 #[derive(Debug)]
@@ -125,6 +77,16 @@ pub(crate) enum After<V> {
     Kept(Live<V>),
     /// A VM process the step started.
     New(V, LiveMemory),
+}
+
+/// How a step ended.
+#[derive(Debug)]
+pub(crate) struct Ran<V> {
+    pub outcome: Outcome,
+    pub after: After<V>,
+    /// VM processes the step started, counting any it ended again before
+    /// finishing, such as a restore whose resume failed.
+    pub launches: u32,
 }
 
 /// Which stored copy matches the local files. The record says whether an
@@ -160,6 +122,8 @@ pub(crate) struct Job<E: Engine, S> {
     /// memory as chunks.
     #[cfg(target_os = "linux")]
     pub fetcher: Option<Arc<Fetcher>>,
+    /// VM processes this job has started; zero when it is issued.
+    pub launches: u32,
 }
 
 fn failure(error: &EngineError) -> Outcome {
@@ -177,12 +141,20 @@ fn io_failure(operation: &'static str, error: io::Error) -> Outcome {
 
 /// What failing to record a step's effect means for the sandbox.
 fn state_failure(error: &StateError) -> Outcome {
-    if let StateError::Io(_) = error {
-        tracing::warn!(%error, "step could not record its effect");
-        Outcome::Failed(Failure::Transient)
-    } else {
-        tracing::error!(%error, "step refused: the sandbox's record moved on");
-        Outcome::Failed(Failure::Fatal)
+    match error {
+        StateError::Io(_) => {
+            tracing::warn!(%error, "step could not record its effect");
+            Outcome::Failed(Failure::Transient)
+        }
+        // The record may or may not vouch for the saved copies now.
+        StateError::Unsure(_) => {
+            tracing::error!(%error, "step could not settle its record");
+            Outcome::Failed(Failure::Untrusted)
+        }
+        _ => {
+            tracing::error!(%error, "step refused: the sandbox's record moved on");
+            Outcome::Failed(Failure::Fatal)
+        }
     }
 }
 
@@ -257,20 +229,27 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// lost the VM's memory leaves no VM process: it is ended before the
     /// step reports, since the core may start a replacement on the same disk
     /// right after.
-    pub async fn run(mut self, step: Step) -> (Outcome, After<E::Vm>) {
-        let (outcome, after) = self.step(step).await;
-        if outcome != Outcome::Failed(Failure::MemoryLost) {
-            return (outcome, after);
-        }
-        let vm = match after {
-            After::NoVm => return (outcome, After::NoVm),
-            After::Kept(live) => {
-                live.stopping.store(true, Ordering::Release);
-                live.vm
+    pub async fn run(mut self, step: Step) -> Ran<E::Vm> {
+        let (mut outcome, mut after) = self.step(step).await;
+        if outcome == Outcome::Failed(Failure::MemoryLost) {
+            let vm = match after {
+                After::NoVm => None,
+                After::Kept(live) => {
+                    live.stopping.store(true, Ordering::Release);
+                    Some(live.vm)
+                }
+                After::New(vm, _) => Some(vm),
+            };
+            if let Some(vm) = vm {
+                outcome = self.end(vm, outcome).await;
             }
-            After::New(vm, _) => vm,
-        };
-        (self.end(vm, outcome).await, After::NoVm)
+            after = After::NoVm;
+        }
+        Ran {
+            outcome,
+            after,
+            launches: self.launches,
+        }
     }
 
     async fn step(&mut self, step: Step) -> (Outcome, After<E::Vm>) {
@@ -279,6 +258,26 @@ impl<E: Engine, S: Store> Job<E, S> {
                 Outcome::Cancelled,
                 self.live.take().map_or(After::NoVm, After::Kept),
             );
+        }
+        // Every decision below reads the record, which must be what its
+        // file durably says: a write whose fate was unknown may have been
+        // lost, and acting on it could run or drop a VM against a record
+        // that a crash would take back.
+        match self.records.settle(self.id).await {
+            Ok(durable) if durable == self.record => {}
+            Ok(durable) => {
+                tracing::warn!(id = %self.id, issued = %self.record.fence(), durable = %durable.fence(), "record changed before the step began");
+                return (
+                    Outcome::Failed(Failure::Transient),
+                    self.live.take().map_or(After::NoVm, After::Kept),
+                );
+            }
+            Err(error) => {
+                return (
+                    state_failure(&error),
+                    self.live.take().map_or(After::NoVm, After::Kept),
+                );
+            }
         }
         match step {
             Step::Pause | Step::Resume | Step::Compress | Step::Save | Step::Drop => {
@@ -311,13 +310,30 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
     }
 
-    /// Records `change` against the version this step last saw.
+    /// Records `change` against the version this step last saw. A write
+    /// whose fate is unknown is settled before this returns: it either
+    /// landed durably, which counts as success, or durably did not, which
+    /// is a plain I/O failure that changed nothing. If neither can be
+    /// established the record is [`StateError::Unsure`].
     async fn commit(&mut self, change: Change) -> Result<(), StateError> {
-        self.record = self
-            .records
-            .commit(self.id, self.record.fence(), change)
-            .await?;
-        Ok(())
+        let before = self.record.clone();
+        let failed = match self.records.commit(self.id, before.fence(), change).await {
+            Ok(record) => {
+                self.record = record;
+                return Ok(());
+            }
+            Err(StateError::Io(error)) => error,
+            Err(error) => return Err(error),
+        };
+        let intended = apply(self.id, Some(&before), before.fence(), change);
+        match self.records.settle(self.id).await {
+            Ok(durable) if durable == before => Err(StateError::Io(failed)),
+            Ok(durable) if matches!(&intended, Ok(Some(next)) if *next == durable) => {
+                self.record = durable;
+                Ok(())
+            }
+            _ => Err(StateError::Unsure(self.id)),
+        }
     }
 
     #[allow(clippy::unused_self)]
@@ -496,14 +512,20 @@ impl<E: Engine, S: Store> Job<E, S> {
         self.engine.snapshot(&live.vm, &files, kind).await?;
         let snapshot = started.elapsed();
         let (scratch, disk) = (self.paths.dir.join("saving"), self.paths.disk.clone());
+        let watch = live.memory.disk.clone();
+        let watching = watch.clone();
         let published = blocking(move || {
             // The VMM wrote these inside its jail, where it could have put
             // links instead: they move somewhere only the host reaches and
             // must prove to be plain files before anything reads them.
             let files = take_written(&files, &scratch)?;
             // The image is only good with the disk as it was when the
-            // snapshot was taken, so the disk must be durable first.
-            sync_jailed(&disk)?;
+            // snapshot was taken, so the disk must be durable first, with
+            // nothing written since the VM started lost on the way.
+            match &watching {
+                Some(watch) => watch.sync(&disk)?,
+                None => sync_jailed(&disk)?,
+            }
             let parts = match base {
                 Base::Image(generation) if kind == SnapshotKind::Diff => Parts::Diff {
                     base: generation,
@@ -525,7 +547,15 @@ impl<E: Engine, S: Store> Job<E, S> {
         })
         .await
         .map_err(|error| EngineError::io(OP, error))?
-        .map_err(|suspect| suspect_error(OP, suspect))?;
+        .map_err(|suspect| {
+            if watch.as_ref().is_some_and(|watch| watch.failed()) {
+                // No snapshot of this VM can be trusted again; it keeps
+                // running from memory until someone removes it.
+                EngineError::caused_by(ErrorKind::Fatal, OP, suspect)
+            } else {
+                suspect_error(OP, suspect)
+            }
+        })?;
         tracing::debug!(
             id = %self.id,
             ?kind,
@@ -562,16 +592,27 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
             Err(error) => return (io_failure(OP, error), After::NoVm),
         };
-        let (memory, live_memory) = match self.memory_source(&images, &image) {
+        let (memory, mut live_memory) = match self.memory_source(&images, &image) {
             Ok(prepared) => prepared,
             Err(error) => return (failure(&error), After::NoVm),
         };
+        let disk = self.paths.disk.clone();
+        match blocking(move || DiskWatch::open(&disk))
+            .await
+            .and_then(|opened| opened)
+        {
+            Ok(watch) => live_memory.disk = Some(Arc::new(watch)),
+            Err(error) => return (io_failure(OP, error), After::NoVm),
+        }
         let files = RestoreFiles {
             state: self.paths.snapshot.state.clone(),
             memory,
         };
         let vm = match self.engine.restore(&self.spec, &files).await {
-            Ok(vm) => vm,
+            Ok(vm) => {
+                self.launches += 1;
+                vm
+            }
             Err(error) if error.kind == ErrorKind::MemoryLost => {
                 let outcome = self.rejected(&images, &image, &live_memory, &error).await;
                 return (outcome, After::NoVm);
@@ -688,6 +729,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             base: Base::Image(generation),
             #[cfg(target_os = "linux")]
             paging: None,
+            disk: None,
         };
         if !image.meta().remote && !profile.needs_pager() {
             link(&images.memory(generation), &paths.snapshot.memory).map_err(io)?;
@@ -728,10 +770,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 let source = ChunkSource::new(Arc::clone(&hydration)).map_err(io)?;
                 (Memory::Remote(source), Some(hydration))
             } else {
-                let file = fs::File::open(images.memory(generation)).map_err(io)?;
-                // SAFETY: published images are sealed read-only and never
-                // modified; a new save always writes a new generation.
-                let mapped = unsafe { compute_pager::MappedFile::new(&file) }.map_err(io)?;
+                let mapped = images.map_memory(generation).map_err(io)?;
                 (Memory::Local(mapped), None)
             };
             live.paging =
@@ -809,14 +848,21 @@ impl<E: Engine, S: Store> Job<E, S> {
         // Linked now rather than at creation, so a kernel upgrade reaches
         // every sandbox's next boot. No VMM of this sandbox runs meanwhile.
         let (kernel, paths) = (self.kernel.clone(), self.paths.clone());
-        let linked = blocking(move || link_kernel(&kernel, &paths))
-            .await
-            .and_then(|linked| linked);
-        if let Err(error) = linked {
-            return (io_failure("boot", error), After::NoVm);
-        }
+        let prepared = blocking(move || {
+            link_kernel(&kernel, &paths)?;
+            DiskWatch::open(&paths.disk)
+        })
+        .await
+        .and_then(|prepared| prepared);
+        let watch = match prepared {
+            Ok(watch) => watch,
+            Err(error) => return (io_failure("boot", error), After::NoVm),
+        };
         match self.engine.boot(&self.spec).await {
-            Ok(vm) => (Outcome::Done, After::New(vm, LiveMemory::booted())),
+            Ok(vm) => {
+                self.launches += 1;
+                (Outcome::Done, After::New(vm, LiveMemory::booted(watch)))
+            }
             Err(error) => (failure(&error), After::NoVm),
         }
     }
@@ -866,7 +912,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
         let profile = wake_profile(&self.paths);
         let files = SavedFiles {
-            disk: self.paths.disk.clone(),
+            disk: JailedFile::new(&self.paths.disk),
             memory: memory.as_ref().map(|(image, chunks)| SavedImage {
                 state: images.state(image.generation()),
                 memory: images.memory(image.generation()),
@@ -1097,23 +1143,8 @@ pub(crate) fn take_written(files: &SnapshotFiles, scratch: &Path) -> io::Result<
 /// Flushes a file in a VM's jail to disk without following a link or
 /// blocking on a pipe the VMM might have put in its place.
 pub(crate) fn sync_jailed(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::FileTypeExt;
-    use std::os::unix::fs::OpenOptionsExt;
-
     crate::layout::failpoint(path, "sync")?;
-    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(flags.bits().cast_signed())
-        .open(path)?;
-    let kind = file.metadata()?.file_type();
-    if !kind.is_file() || kind.is_fifo() {
-        return Err(io::Error::other(format!(
-            "{} is not a regular file",
-            path.display()
-        )));
-    }
-    file.sync_all()
+    crate::layout::open_jailed(path)?.sync_all()
 }
 
 /// Deletes the sandbox's local disk, memory images and snapshot files.
@@ -1142,61 +1173,4 @@ fn drop_snapshot(paths: &Paths) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn written(jail: &Path) -> SnapshotFiles {
-        SnapshotFiles {
-            state: jail.join("save.state"),
-            memory: jail.join("save.mem"),
-        }
-    }
-
-    #[test]
-    fn snapshot_outputs_must_be_plain_files_of_their_own() {
-        let dir = tempfile::tempdir().unwrap();
-        let (jail, scratch) = (dir.path().join("jail"), dir.path().join("saving"));
-        fs::create_dir(&jail).unwrap();
-        let secret = dir.path().join("secret");
-        fs::write(&secret, "host only").unwrap();
-        let files = written(&jail);
-
-        fs::write(&files.state, "state").unwrap();
-        fs::write(&files.memory, "memory").unwrap();
-        let taken = take_written(&files, &scratch).unwrap();
-        assert_eq!(fs::read_to_string(&taken.memory).unwrap(), "memory");
-        assert!(!files.memory.exists());
-
-        // A link to a host file, by name or by inode, is refused.
-        fs::write(&files.state, "state").unwrap();
-        std::os::unix::fs::symlink(&secret, &files.memory).unwrap();
-        assert!(take_written(&files, &scratch).is_err());
-        // The refused link was moved out of the jail with the rest.
-        assert!(fs::symlink_metadata(&files.memory).is_err());
-        fs::hard_link(&secret, &files.memory).unwrap();
-        fs::write(&files.state, "state").unwrap();
-        assert!(take_written(&files, &scratch).is_err());
-        assert_eq!(fs::read_to_string(&secret).unwrap(), "host only");
-    }
-
-    #[test]
-    fn syncing_a_jailed_file_follows_no_link_and_opens_no_pipe() {
-        let dir = tempfile::tempdir().unwrap();
-        let disk = dir.path().join("disk.ext4");
-        fs::write(&disk, "disk").unwrap();
-        sync_jailed(&disk).unwrap();
-
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&disk, &link).unwrap();
-        assert!(sync_jailed(&link).is_err());
-
-        let pipe = dir.path().join("pipe");
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &pipe,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
-        assert!(sync_jailed(&pipe).is_err(), "a pipe must not block or pass");
-    }
-}
+mod tests;

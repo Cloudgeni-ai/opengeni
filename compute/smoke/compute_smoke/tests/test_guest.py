@@ -464,6 +464,23 @@ class GuestInternals(unittest.TestCase):
         self.assertNotIn(root / "old", watcher.watched().values())
         self.assertIsNone(watcher.settle_seconds())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_directory_remade_where_one_moved_out_keeps_its_watch(self) -> None:
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        os.rename(root / "old", self.scratch / "elsewhere")
+        (root / "old").mkdir()
+        watcher.read_events()
+        self.assertIsNotNone(watcher.settle_seconds(), "the move away is pending")
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        watcher.read_events()
+        self.assertIsNone(watcher.settle_seconds())
+        self.assertIn(root / "old", watcher.watched().values(), "the new directory")
+        self.assertNotIn(root / "old" / "inner", watcher.watched().values())
+        (root / "old" / "file").touch()
+        names = [event["name"] for event in watcher.read_events()]
+        self.assertIn("old/file", names)
+
 
 if __name__ == "__main__":
     unittest.main()

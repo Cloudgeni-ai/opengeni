@@ -391,6 +391,8 @@ class Inotify:
 
     A move away is held for `MOVE_PAIR_SECONDS` in case its arrival in the
     tree comes in a later read; only then does it count as moved out.
+    Both outcomes act on the watches the directory had when it left, so a
+    new directory made at the old path in the meantime keeps its own.
     """
 
     def __init__(
@@ -412,8 +414,8 @@ class Inotify:
         self._clock = clock
         self._dirs: dict[int, Path] = {}
         # Directories moved away whose arrival is not seen yet: by cookie,
-        # their old path and when to give up waiting.
-        self._departed: dict[int, tuple[Path, float]] = {}
+        # their old path, when to give up waiting and the watches they took.
+        self._departed: dict[int, tuple[Path, float, list[int]]] = {}
         self._watch(root)
         if recursive:
             self._watch_below(root)
@@ -449,14 +451,16 @@ class Inotify:
             if path == top or top in path.parents
         ]
 
-    def _moved_within(self, old: Path, new: Path) -> None:
-        for descriptor, path in self._below(old):
-            self._dirs[descriptor] = new / path.relative_to(old)
+    def _moved_within(self, old: Path, new: Path, descriptors: list[int]) -> None:
+        for descriptor in descriptors:
+            path = self._dirs.get(descriptor)
+            if path is not None and (path == old or old in path.parents):
+                self._dirs[descriptor] = new / path.relative_to(old)
 
-    def _moved_out(self, top: Path) -> None:
-        for descriptor, _ in self._below(top):
-            del self._dirs[descriptor]
-            self._remove(self._fd, descriptor)
+    def _moved_out(self, descriptors: list[int]) -> None:
+        for descriptor in descriptors:
+            if self._dirs.pop(descriptor, None) is not None:
+                self._remove(self._fd, descriptor)
 
     def read_events(self) -> list[dict[str, str]]:
         """The events waiting now, possibly none. Call it again within
@@ -469,10 +473,10 @@ class Inotify:
             buffer = b""
         events = self.parse(buffer)
         now = self._clock()
-        for cookie, (path, deadline) in list(self._departed.items()):
+        for cookie, (_, deadline, descriptors) in list(self._departed.items()):
             if deadline <= now:
                 del self._departed[cookie]
-                self._moved_out(path)
+                self._moved_out(descriptors)
         return events
 
     def settle_seconds(self) -> float | None:
@@ -481,7 +485,7 @@ class Inotify:
 
         if not self._departed:
             return None
-        deadline = min(deadline for _, deadline in self._departed.values())
+        deadline = min(deadline for _, deadline, _ in self._departed.values())
         return max(0.0, deadline - self._clock())
 
     def parse(self, buffer: bytes) -> list[dict[str, str]]:
@@ -501,9 +505,11 @@ class Inotify:
             path = directory / os.fsdecode(raw) if raw else directory
             if self._recursive and mask & IN_ISDIR:
                 if mask & IN_MOVED_FROM:
-                    self._departed[cookie] = (path, self._clock() + MOVE_PAIR_SECONDS)
+                    taken = [descriptor for descriptor, _ in self._below(path)]
+                    self._departed[cookie] = (path, self._clock() + MOVE_PAIR_SECONDS, taken)
                 elif mask & IN_MOVED_TO and cookie in self._departed:
-                    self._moved_within(self._departed.pop(cookie)[0], path)
+                    old, _, taken = self._departed.pop(cookie)
+                    self._moved_within(old, path, taken)
                 elif mask & (IN_CREATE | IN_MOVED_TO):
                     # Anything inside may predate the watch: a directory
                     # moved in arrives full, and a new one fills fast.

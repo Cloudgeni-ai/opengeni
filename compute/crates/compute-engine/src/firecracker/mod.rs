@@ -29,6 +29,7 @@ use self::jail::{API_SOCKET, Jail, LAUNCH_LEFTOVERS, Launch, PID_FILE, jailer_ar
 pub use self::process::Exit;
 use self::process::{Process, in_cgroup, parse_pid};
 use crate::cgroup::Cgroup;
+use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
 use crate::spec::{MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
@@ -242,13 +243,13 @@ impl Firecracker {
     }
 
     /// Starts a jailed VMM for `spec` and waits for its API. `owned` are
-    /// files the VMM must be able to write, such as its drives; they are
-    /// handed to the VM's user first.
+    /// entries the VMM must be able to write or connect to, such as its
+    /// drives; they are handed to the VM's user first.
     async fn launch(
         &self,
         spec: &VmSpec,
         operation: &'static str,
-        owned: Vec<PathBuf>,
+        owned: Vec<(PathBuf, Owned)>,
     ) -> Result<FirecrackerVm, EngineError> {
         let jail = Jail::new(spec)
             .map_err(|error| EngineError::new(ErrorKind::Fatal, operation, error))?;
@@ -295,30 +296,36 @@ impl Firecracker {
         // namespace; Firecracker is then nobody's child but init's.
         let Ok(status) = timeout(JAILER_TIMEOUT, jailer.wait()).await else {
             let _ = jailer.kill().await;
-            let _ = self.discard(spec).await;
-            return Err(EngineError::new(
-                ErrorKind::Transient,
+            return Err(launch_failed(
                 operation,
                 format!("the jailer did not finish within {JAILER_TIMEOUT:?}"),
+                self.discard(spec).await,
             ));
         };
-        let status = status.map_err(|error| EngineError::io(operation, error))?;
+        let status = match status {
+            Ok(status) => status,
+            Err(error) => {
+                return Err(launch_failed(
+                    operation,
+                    format!("waiting for the jailer: {error}"),
+                    self.discard(spec).await,
+                ));
+            }
+        };
         if !status.success() {
-            let _ = self.discard(spec).await;
-            return Err(EngineError::new(
-                ErrorKind::Transient,
+            return Err(launch_failed(
                 operation,
                 format!(
                     "the jailer failed ({status}); see {}",
                     spec.logs.join("vmm.log").display()
                 ),
+                self.discard(spec).await,
             ));
         }
         let vm = match self.attach(spec, &jail) {
             Ok(vm) => vm,
             Err(error) => {
-                let _ = self.discard(spec).await;
-                return Err(EngineError::new(ErrorKind::Transient, operation, error));
+                return Err(launch_failed(operation, error, self.discard(spec).await));
             }
         };
         if let Err(error) = vm.wait_for_api(self.startup_timeout).await {
@@ -429,6 +436,26 @@ impl Firecracker {
     }
 }
 
+/// The error a launch ends with when it failed before the host held the
+/// VMM it may have started. Whatever it started was then discarded, with
+/// `discarded` saying how that went: only once that is proven, by the VM's
+/// cgroup being empty and gone, is the failure transient. Otherwise a VMM
+/// may still run on the sandbox's disk, and nothing may start beside it.
+fn launch_failed(
+    operation: &'static str,
+    message: String,
+    discarded: io::Result<()>,
+) -> EngineError {
+    match discarded {
+        Ok(()) => EngineError::new(ErrorKind::Transient, operation, message),
+        Err(error) => EngineError::new(
+            ErrorKind::Fatal,
+            operation,
+            format!("{message}; then what it started could not be cleaned up: {error}"),
+        ),
+    }
+}
+
 /// The cgroup v2 mount point.
 fn cgroup2_mount() -> io::Result<PathBuf> {
     fs::read_to_string("/proc/self/mounts")?
@@ -445,15 +472,15 @@ fn cgroup2_mount() -> io::Result<PathBuf> {
 fn prepare(
     jail: &Jail,
     logs: &Path,
-    owned: &[PathBuf],
+    owned: &[(PathBuf, Owned)],
     uid: u32,
     gid: u32,
 ) -> io::Result<(File, File)> {
     fs::create_dir_all(jail.root())?;
     tidy(jail)?;
     // The jail is the VMM's: an earlier one may have left links in it.
-    for path in owned {
-        crate::confined::hand_over(path, uid, gid)?;
+    for (path, kind) in owned {
+        crate::confined::hand_over(path, *kind, uid, gid)?;
     }
     fs::create_dir_all(logs)?;
     Ok((
@@ -680,7 +707,7 @@ impl Engine for Firecracker {
             .drives
             .iter()
             .filter(|drive| !drive.read_only)
-            .map(|drive| drive.path.clone())
+            .map(|drive| (drive.path.clone(), Owned::File))
             .collect();
         let vm = self.launch(spec, OP, owned).await?;
         let configure = async {
@@ -764,17 +791,17 @@ impl Engine for Firecracker {
             Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
         let body = load_request(spec, &jail, files, self.memory)
             .map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        let mut owned: Vec<PathBuf> = spec
+        let mut owned: Vec<(PathBuf, Owned)> = spec
             .drives
             .iter()
             .filter(|drive| !drive.read_only)
-            .map(|drive| drive.path.clone())
+            .map(|drive| (drive.path.clone(), Owned::File))
             .collect();
         // Saved state and memory are only read; they stay the host's, so the
         // VMM cannot change an image it restores from. A pager's socket must
         // be the VMM's to connect to.
         if let MemorySource::Pager(socket) = &files.memory {
-            owned.push(socket.clone());
+            owned.push((socket.clone(), Owned::Socket));
         }
         let vm = self.launch(spec, OP, owned).await?;
         // A rejected image means the memory state is unusable; the disk is not
@@ -935,6 +962,20 @@ mod tests {
     use crate::spec::Network;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
+
+    /// The core retries a transient failure at once, so a launch reports one
+    /// only when nothing it started can still run.
+    #[test]
+    fn a_launch_that_could_not_clean_up_is_fatal() {
+        let cleaned = launch_failed("boot", "attaching failed".into(), Ok(()));
+        assert_eq!(cleaned.kind, ErrorKind::Transient);
+        let stuck = launch_failed(
+            "boot",
+            "attaching failed".into(),
+            Err(io::Error::other("the cgroup is still populated")),
+        );
+        assert_eq!(stuck.kind, ErrorKind::Fatal);
+    }
 
     /// A VMM API that answers `PATCH /vm` with `patch` and `GET /` with
     /// `get`.

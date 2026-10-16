@@ -33,5 +33,6 @@ pub use guest_ports::{GuestPort, Route};
 pub use pool::{PoolConfig, Shape};
 pub use server::serve;
 pub use store::{
-    Directory, FetchInto, FetchedMemory, NoStore, Receipt, SavedFiles, SavedImage, Store,
+    Directory, FetchInto, FetchedMemory, JailedFile, NoStore, Receipt, SavedFiles, SavedImage,
+    Store,
 };

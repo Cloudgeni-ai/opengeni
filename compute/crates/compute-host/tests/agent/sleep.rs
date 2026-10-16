@@ -218,8 +218,14 @@ async fn a_refused_resume_keeps_the_saved_copy_for_a_crash() {
     assert!(lab.image(sandbox));
     lab.world.refuse_resumes.store(false, Ordering::SeqCst);
     assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["hello", "kept"]);
-    assert!(lab.world.restores.load(Ordering::Relaxed) >= 2);
+    let restores = lab.world.restores.load(Ordering::Relaxed);
+    assert!(restores >= 2);
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        Lab::sandbox(&lab.status().await, sandbox).launches,
+        u64::try_from(1 + restores).unwrap(),
+        "a VM ended again after its resume was refused still counts"
+    );
     lab.assert_clean();
 }
 
@@ -626,6 +632,24 @@ async fn a_wake_names_the_step_it_met_and_concurrent_wakes_share_one_restore() {
     assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
     assert_eq!(lab.run(sandbox, &["get"]).await, ["warm"]);
     lab.assert_clean();
+}
+
+/// A launch that failed and could not prove that the VMM it may have
+/// started is gone leaves the sandbox broken: nothing is launched beside a
+/// VMM that may still run on its disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_launch_that_could_not_clean_up_is_never_retried() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(31);
+    lab.create(sandbox, NEVER).await;
+    lab.world.stuck_boots.store(true, Ordering::SeqCst);
+    let reply = lab.wake(sandbox).await;
+    assert!(!matches!(reply, Reply::Woken { .. }), "{reply:?}");
+    sleep(Duration::from_millis(500)).await;
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1, "launched again");
+    assert!(lab.current(sandbox).await.broken);
+    let _ = lab.wake(sandbox).await;
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1, "launched again");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

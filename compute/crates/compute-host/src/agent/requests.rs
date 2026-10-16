@@ -27,12 +27,14 @@ fn new_files(
     // The directory must be new: one already there belongs to a sandbox
     // this agent does not know, and is left alone.
     std::fs::create_dir(&paths.dir)?;
-    std::fs::create_dir_all(&paths.jail)?;
+    std::fs::create_dir(&paths.jail)?;
     let start = first_files(paths, &images_of(paths), base, template)?;
     // The record, written next, vouches for these: their directory entries
-    // must outlast a crash first.
+    // must outlast a crash first, all the way up to the one in the
+    // sandboxes' directory.
     sync_parent(&paths.disk)?;
     sync_parent(&paths.jail)?;
+    sync_parent(&paths.dir)?;
     Ok(start)
 }
 
@@ -141,7 +143,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // removal stops whatever VM it has and retries any removal that
             // stopped part way.
             let Some(record) = self.records.get(id) else {
-                let _ = reply.send(Err(HostError::Broken(id)));
+                match self.leftovers.get(&id.0) {
+                    Some(&ordinal) => self.remove_leftovers(id, ordinal, reply),
+                    None => {
+                        let _ = reply.send(Err(HostError::Broken(id)));
+                    }
+                }
                 return;
             };
             if let Err(error) = check_generation(&record, generation) {
@@ -263,36 +270,42 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         Ok(())
     }
 
-    pub(super) fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
+    /// Why `id` cannot be created with `config` now, if it cannot.
+    fn admit(&self, id: Id, config: &SandboxConfig) -> Result<(), HostError> {
         if self.blocked.contains_key(&id.0) {
-            let _ = reply.send(Err(HostError::Broken(id)));
-            return;
+            return Err(HostError::Broken(id));
+        }
+        if let Some(unknown) = self.unknown_ordinals.first() {
+            return Err(HostError::Io(format!(
+                "sandbox {}'s record is unreadable and the user and network it holds unknown; \
+                 no sandbox is created until it is resolved",
+                Id(*unknown)
+            )));
         }
         if self.slots.contains_key(&id.0)
             || self.preparing.contains(&id.0)
             || self.destroying.contains_key(&id.0)
             || self.records.get(id).is_some()
         {
-            let _ = reply.send(Err(HostError::Exists(id)));
-            return;
+            return Err(HostError::Exists(id));
         }
         if self.tearing_down.contains_key(&id.0) {
             // An old VM of this id is still being torn down; its teardown
             // must not touch the new sandbox's files.
-            let _ = reply.send(Err(HostError::Busy(id)));
-            return;
+            return Err(HostError::Busy(id));
         }
-        let policy = match self.sleep_policy(&config) {
-            Ok(policy) => policy,
-            Err(error) => {
-                let _ = reply.send(Err(HostError::Invalid(error)));
-                return;
-            }
-        };
+        let policy = self.sleep_policy(config).map_err(HostError::Invalid)?;
         if policy.rules().archive_after.is_some() && !self.store.is_configured() {
-            let _ = reply.send(Err(HostError::Invalid(
+            return Err(HostError::Invalid(
                 "this host has no store, so sandboxes cannot be archived".into(),
-            )));
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
+        if let Err(error) = self.admit(id, &config) {
+            let _ = reply.send(Err(error));
             return;
         }
         self.preparing.insert(id.0);

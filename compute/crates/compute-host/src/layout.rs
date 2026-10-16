@@ -12,7 +12,7 @@
 //!   console.log                the guest's serial console (written by the engine)
 //!   vmm.log                    the VMM's own log (written by the engine)
 //!   root/                      the jail: "/" for the VMM
-//!     vmlinux                  guest kernel (a hard link to the host's copy)
+//!     vmlinux                  guest kernel (a clone of the host's, owned by the host)
 //!     disk.ext4                the sandbox's root disk
 //!     vm.state                 saved processor and device state
 //!     vm.mem                   saved memory image (sparse)
@@ -258,16 +258,16 @@ impl Machine<'_> {
     }
 }
 
-/// Points the jail's kernel at the host's current guest kernel: a hard link
-/// where the jail shares the kernel's filesystem, otherwise a copy.
-/// Replacing it on every boot picks up a kernel upgrade; restores do not
-/// read the kernel at all.
+/// Puts a copy of the host's current guest kernel in the jail: a clone
+/// sharing its extents where the filesystem can (XFS, btrfs), otherwise a
+/// plain copy. Never a hard link: the jail is the VMM's, and a name for the
+/// host's own kernel in it would let a compromised VMM have the host change
+/// that file's owner or read it in place of one of its own. Replacing it on
+/// every boot picks up a kernel upgrade; restores do not read the kernel.
 pub(crate) fn link_kernel(host_kernel: &Path, paths: &Paths) -> io::Result<()> {
     let staging = paths.kernel.with_extension("staging");
     remove_if_present(&staging)?;
-    if fs::hard_link(host_kernel, &staging).is_err() {
-        copy_sparse(host_kernel, &staging)?;
-    }
+    copy_sparse(host_kernel, &staging)?;
     fs::rename(&staging, &paths.kernel)
 }
 
@@ -332,19 +332,57 @@ pub(crate) fn sync_file(path: &Path) -> io::Result<()> {
 
 /// Makes the directory entry of `path` durable.
 pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
+    failpoint(path, "parent")?;
     match path.parent() {
         Some(parent) => File::open(parent)?.sync_all(),
         None => Ok(()),
     }
 }
 
+/// Creates `dir` if missing, with its entry in its parent made durable.
+/// The parent is synced even when `dir` exists already: an earlier call may
+/// have created it and then failed to sync.
+pub(crate) fn create_dir_durably(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    sync_parent(dir)
+}
+
+/// Opens a file in a VM's jail for reading. Its VMM may have put a link to
+/// a host file or a pipe in its place, so the last component is never
+/// followed, opening never blocks, and anything but a regular file with no
+/// other name is refused.
+pub(crate) fn open_jailed(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags.bits().cast_signed())
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} in a VM's jail is not a regular file of its own",
+                path.display()
+            ),
+        ));
+    }
+    Ok(file)
+}
+
 /// Copies `from` to `to` as cheaply as the filesystem allows: a shared-extent
 /// clone where supported (XFS, btrfs), otherwise only the data regions, so
 /// holes stay holes and a mostly empty 2 GiB image costs only its data.
 pub(crate) fn copy_sparse(from: &Path, to: &Path) -> io::Result<()> {
-    let source = File::open(from)?;
+    copy_file(&File::open(from)?, to)
+}
+
+/// Copies the open file `source` to a new file `to` like [`copy_sparse`].
+pub(crate) fn copy_file(source: &File, to: &Path) -> io::Result<()> {
     let target = File::create(to)?;
-    copy_contents(&source, &target)?;
+    copy_contents(source, &target)?;
     target.sync_all()
 }
 
@@ -422,6 +460,54 @@ pub(crate) mod tests {
     /// Writes that fail on purpose: a path and the point it fails at.
     pub(crate) static FAILPOINTS: std::sync::Mutex<Vec<(PathBuf, &'static str)>> =
         std::sync::Mutex::new(Vec::new());
+
+    /// A directory whose entry could not be made durable is synced again by
+    /// the next call, which must not take the directory existing as proof.
+    #[test]
+    fn a_directory_entry_that_failed_to_sync_is_synced_on_the_next_try() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dir.path().join("images");
+        FAILPOINTS.lock().unwrap().push((made.clone(), "parent"));
+        assert!(create_dir_durably(&made).is_err());
+        assert!(made.is_dir());
+        assert!(
+            create_dir_durably(&made).is_err(),
+            "an existing directory was taken as durable"
+        );
+        FAILPOINTS.lock().unwrap().retain(|(path, _)| path != &made);
+        create_dir_durably(&made).unwrap();
+    }
+
+    /// What a VMM can leave in its jail in place of a file is never read.
+    #[test]
+    fn jailed_files_are_read_only_as_plain_files_of_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = dir.path().join("host-secret");
+        fs::write(&host, b"host").unwrap();
+        let disk = dir.path().join("disk.ext4");
+        fs::write(&disk, b"disk").unwrap();
+        open_jailed(&disk).unwrap();
+        let link = dir.path().join("linked");
+        std::os::unix::fs::symlink(&host, &link).unwrap();
+        assert!(open_jailed(&link).is_err(), "followed a link");
+        let named = dir.path().join("named");
+        fs::hard_link(&host, &named).unwrap();
+        assert!(
+            open_jailed(&named).is_err(),
+            "read a file with another name"
+        );
+        let pipe = dir.path().join("pipe");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &pipe,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+        assert!(open_jailed(&pipe).is_err(), "a pipe must not block or pass");
+        let copy = dir.path().join("copy");
+        copy_file(&open_jailed(&disk).unwrap(), &copy).unwrap();
+        assert_eq!(fs::read(&copy).unwrap(), b"disk");
+    }
 
     #[test]
     fn sparse_copy_keeps_contents() {

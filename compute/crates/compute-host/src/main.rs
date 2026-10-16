@@ -1,28 +1,27 @@
 //! `compute-host`: run the host agent, or talk to one.
 
+mod bench;
+
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, bail};
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use compute_core::{HostPolicy, MemoryPolicy, SandboxId, Step};
+use clap::{Args, Parser, Subcommand};
+use compute_core::{HostPolicy, MemoryPolicy, Step};
 use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
 use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::protocol::{
-    HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
+    Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
 };
 use compute_host::{
     BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, NoStore, PoolConfig, Shape,
     Store, serve,
 };
-use serde::Serialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::task::JoinSet;
-use tokio::time::Instant;
+
+use crate::bench::{BenchArgs, bench, exec};
 
 /// How long a template's freshly booted guest may take to become ready.
 const TEMPLATE_READY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -198,62 +197,6 @@ struct ServeArgs {
     no_compress: bool,
 }
 
-#[derive(Args)]
-struct BenchArgs {
-    #[arg(long, default_value_t = 100)]
-    count: usize,
-    /// The level to wake from. After each wake the bench asks every sandbox
-    /// to sleep this deep, timing the steps that get it there.
-    #[arg(long, value_enum, default_value = "compressed")]
-    level: BenchLevel,
-    #[arg(long, default_value_t = 1)]
-    vcpus: u8,
-    #[arg(long, default_value_t = 512)]
-    memory_mib: u32,
-    #[arg(long, default_value_t = 52)]
-    port: u32,
-    /// Script each wake runs.
-    #[arg(long, default_value = "cat /proc/loadavg")]
-    script: String,
-    /// Script the first wake (the boot) runs, to give each sandbox a
-    /// realistic working set before it sleeps.
-    #[arg(long, default_value = "echo ready")]
-    warm: String,
-    /// Idle time after each wake before the sandboxes are sent to sleep.
-    #[arg(long, default_value = "1s", value_parser = parse_duration)]
-    settle: Duration,
-    /// Burst wakes to run, each after the sandboxes fall asleep again.
-    #[arg(long, default_value_t = 1)]
-    rounds: usize,
-    /// Keep the sandboxes afterwards.
-    #[arg(long)]
-    keep: bool,
-    /// Also write the results here as JSON.
-    #[arg(long)]
-    json: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum BenchLevel {
-    Paused,
-    Compressed,
-    Saved,
-    Archived,
-    Remote,
-}
-
-impl BenchLevel {
-    const fn level(self) -> LevelName {
-        match self {
-            Self::Paused => LevelName::Paused,
-            Self::Compressed => LevelName::Compressed,
-            Self::Saved => LevelName::Saved,
-            Self::Archived => LevelName::Archived,
-            Self::Remote => LevelName::Remote,
-        }
-    }
-}
-
 /// One rule of [`SleepConfig`], named as on the command line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SleepRuleName {
@@ -420,16 +363,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&reply)?);
             Ok(())
         }
-        Command::Exec { id, script, port } => {
-            let run = run_script(&client, id, port, &script, true).await?;
-            eprintln!(
-                "woke in {:?}, first byte {:?}, done {:?}",
-                Duration::from_micros(run.waited_us),
-                run.first_byte,
-                run.done
-            );
-            Ok(())
-        }
+        Command::Exec { id, script, port } => exec(&client, id, port, &script).await,
         Command::Bench(args) => bench(&client, &args).await,
     }
 }
@@ -517,363 +451,6 @@ async fn run_agent<S: Store>(
     Ok(())
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct Run {
-    waited_us: u64,
-    connect_us: u64,
-    first_byte: Duration,
-    done: Duration,
-}
-
-async fn run_script(
-    client: &Client,
-    id: Id,
-    port: u32,
-    script: &str,
-    echo: bool,
-) -> anyhow::Result<Run> {
-    let started = Instant::now();
-    let (reply, mut stream) = client.connect(id, port, PriorityName::Interactive).await?;
-    let Reply::Connected {
-        waited_us,
-        connect_us,
-    } = reply
-    else {
-        bail!("{reply:?}");
-    };
-    stream
-        .get_mut()
-        .write_all(format!("{script}\nexit\n").as_bytes())
-        .await?;
-    let mut output = vec![0_u8; 1];
-    if stream.read(&mut output).await? == 0 {
-        bail!("the guest closed the connection without output");
-    }
-    let first_byte = started.elapsed();
-    stream.read_to_end(&mut output).await?;
-    let done = started.elapsed();
-    if echo {
-        print!("{}", String::from_utf8_lossy(&output));
-    }
-    Ok(Run {
-        waited_us,
-        connect_us,
-        first_byte,
-        done,
-    })
-}
-
-#[derive(Debug, Serialize)]
-struct Burst {
-    label: String,
-    ok: usize,
-    failed: Vec<String>,
-    runs: Vec<Run>,
-    steps: Vec<(String, compute_host::protocol::StepStats)>,
-}
-
-async fn burst(client: &Client, ids: &[Id], args: &BenchArgs, script: &str, label: &str) -> Burst {
-    let before = client.call(&Request::Status).await.ok();
-    let gate = Arc::new(tokio::sync::Barrier::new(ids.len()));
-    let mut tasks = JoinSet::new();
-    for id in ids {
-        let (client, gate, id, port, script) = (
-            client.clone(),
-            Arc::clone(&gate),
-            *id,
-            args.port,
-            script.to_owned(),
-        );
-        tasks.spawn(async move {
-            gate.wait().await;
-            run_script(&client, id, port, &script, false).await
-        });
-    }
-    let mut runs = Vec::new();
-    let mut failed = Vec::new();
-    while let Some(result) = tasks.join_next().await {
-        match result {
-            Ok(Ok(run)) => runs.push(run),
-            Ok(Err(error)) => failed.push(error.to_string()),
-            Err(error) => failed.push(error.to_string()),
-        }
-    }
-    let after = client.call(&Request::Status).await.ok();
-    let steps = step_delta(before, after);
-    let burst = Burst {
-        label: label.to_owned(),
-        ok: runs.len(),
-        failed,
-        runs,
-        steps,
-    };
-    report(&burst);
-    burst
-}
-
-fn status_of(reply: Option<Reply>) -> Option<HostStatus> {
-    match reply {
-        Some(Reply::Status(status)) => Some(*status),
-        _ => None,
-    }
-}
-
-fn step_delta(
-    before: Option<Reply>,
-    after: Option<Reply>,
-) -> Vec<(String, compute_host::protocol::StepStats)> {
-    let (Some(before), Some(after)) = (status_of(before), status_of(after)) else {
-        return Vec::new();
-    };
-    after
-        .steps
-        .into_iter()
-        .zip(before.steps)
-        .filter_map(|((name, after), (_, before))| {
-            let started = after.started - before.started;
-            (started > 0).then(|| {
-                let mut delta = after;
-                delta.started = started;
-                delta.done -= before.done;
-                delta.cancelled -= before.cancelled;
-                delta.failed -= before.failed;
-                delta.total_us -= before.total_us;
-                (name, delta)
-            })
-        })
-        .collect()
-}
-
-fn percentiles(mut values: Vec<Duration>) -> String {
-    if values.is_empty() {
-        return "-".into();
-    }
-    values.sort_unstable();
-    let at = |q: f64| {
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            clippy::cast_precision_loss
-        )]
-        let index = ((values.len() - 1) as f64 * q).round() as usize;
-        values[index]
-    };
-    format!(
-        "p50 {:>9.1?}  p90 {:>9.1?}  p99 {:>9.1?}  max {:>9.1?}",
-        at(0.5),
-        at(0.9),
-        at(0.99),
-        at(1.0)
-    )
-}
-
-fn report(burst: &Burst) {
-    println!(
-        "\n{}: {} ok, {} failed",
-        burst.label,
-        burst.ok,
-        burst.failed.len()
-    );
-    for error in burst.failed.iter().take(3) {
-        println!("  error: {error}");
-    }
-    let pick = |f: fn(&Run) -> Duration| burst.runs.iter().map(f).collect::<Vec<_>>();
-    println!(
-        "  host wake    {}",
-        percentiles(pick(|run| Duration::from_micros(run.waited_us)))
-    );
-    println!(
-        "  guest port   {}",
-        percentiles(pick(|run| Duration::from_micros(run.connect_us)))
-    );
-    println!("  first byte   {}", percentiles(pick(|run| run.first_byte)));
-    println!("  done         {}", percentiles(pick(|run| run.done)));
-    report_steps(&burst.steps);
-}
-
-fn report_steps(steps: &[(String, compute_host::protocol::StepStats)]) {
-    for (name, stats) in steps {
-        let mean = stats.total_us / stats.done.max(1);
-        println!(
-            "  step {name:<9} {} started, {} done, {} cancelled, {} failed, mean {:?}, max so far {:?}",
-            stats.started,
-            stats.done,
-            stats.cancelled,
-            stats.failed,
-            Duration::from_micros(mean),
-            Duration::from_micros(stats.max_us)
-        );
-    }
-}
-
-/// Waits until every sandbox in `ids` is at `level` with no step running,
-/// and reports how long that took.
-async fn wait_for_level(client: &Client, ids: &[Id], level: LevelName) -> anyhow::Result<Duration> {
-    let started = Instant::now();
-    let mut last_report = Instant::now();
-    loop {
-        let Reply::Status(status) = client.call(&Request::Status).await? else {
-            bail!("status failed");
-        };
-        let reached = status
-            .sandboxes
-            .iter()
-            .filter(|sandbox| {
-                ids.binary_search(&sandbox.id).is_ok()
-                    && sandbox.level == level
-                    && sandbox.step.is_none()
-            })
-            .count();
-        if reached == ids.len() {
-            let elapsed = started.elapsed();
-            println!("all {} sandboxes at {level:?} after {elapsed:?}", ids.len());
-            return Ok(elapsed);
-        }
-        if last_report.elapsed() > Duration::from_secs(10) {
-            println!("  {reached}/{} at {level:?}", ids.len());
-            last_report = Instant::now();
-        }
-        if started.elapsed() > Duration::from_secs(1800) {
-            bail!("only {reached}/{} sandboxes reached {level:?}", ids.len());
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
-/// Sends every sandbox to `level` at once and reports the steps that took
-/// them there.
-async fn put_to_sleep(
-    client: &Client,
-    ids: &[Id],
-    level: LevelName,
-    label: &str,
-) -> anyhow::Result<Sleep> {
-    let before = client.call(&Request::Status).await.ok();
-    let mut requests = JoinSet::new();
-    for id in ids {
-        let (client, id) = (client.clone(), *id);
-        requests.spawn(async move {
-            client
-                .call(&Request::Sleep {
-                    id,
-                    generation: None,
-                    level,
-                })
-                .await
-        });
-    }
-    while let Some(result) = requests.join_next().await {
-        expect_done(result??)?;
-    }
-    let took = wait_for_level(client, ids, level).await?;
-    let after = client.call(&Request::Status).await.ok();
-    let sleep = Sleep {
-        label: label.to_owned(),
-        took_us: u64::try_from(took.as_micros()).unwrap_or(u64::MAX),
-        resident_bytes: status_of(after.clone()).map(|status| {
-            status
-                .sandboxes
-                .iter()
-                .filter(|sandbox| ids.binary_search(&sandbox.id).is_ok())
-                .filter_map(|sandbox| sandbox.resident_bytes)
-                .sum()
-        }),
-        steps: step_delta(before, after),
-    };
-    println!("\n{label}: {took:?}");
-    if let Some(bytes) = sleep.resident_bytes {
-        println!(
-            "  resident     {} MiB total, {} MiB per sandbox",
-            bytes >> 20,
-            (bytes / ids.len().max(1) as u64) >> 20
-        );
-    }
-    report_steps(&sleep.steps);
-    Ok(sleep)
-}
-
-#[derive(Debug, Serialize)]
-struct Sleep {
-    label: String,
-    took_us: u64,
-    resident_bytes: Option<u64>,
-    steps: Vec<(String, compute_host::protocol::StepStats)>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "phase", rename_all = "snake_case")]
-enum Phase {
-    Wake(Burst),
-    Sleep(Sleep),
-}
-
-async fn bench(client: &Client, args: &BenchArgs) -> anyhow::Result<()> {
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut ids: Vec<Id> = (0..args.count)
-        .map(|index| Id(SandboxId((seed << 32) | index as u128)))
-        .collect();
-    ids.sort_unstable();
-    // Sandboxes only sleep when the bench asks, so each phase is timed on
-    // its own; idle timers would start steps at unpredictable moments.
-    let config = SandboxConfig {
-        vcpus: args.vcpus,
-        memory_mib: args.memory_mib,
-        sleep: SleepConfig::default(),
-    };
-    let started = Instant::now();
-    let mut creates = JoinSet::new();
-    for id in &ids {
-        let (client, id, config) = (client.clone(), *id, config.clone());
-        creates.spawn(async move { client.call(&Request::Create { id, config }).await });
-    }
-    while let Some(result) = creates.join_next().await {
-        expect_done(result??)?;
-    }
-    println!("created {} sandboxes in {:?}", ids.len(), started.elapsed());
-
-    let level = args.level.level();
-    let mut phases = vec![Phase::Wake(
-        burst(client, &ids, args, &args.warm, "first wake (boot)").await,
-    )];
-    for round in 1..=args.rounds {
-        tokio::time::sleep(args.settle).await;
-        let label = format!("round {round}: sleep to {level:?}");
-        phases.push(Phase::Sleep(
-            put_to_sleep(client, &ids, level, &label).await?,
-        ));
-        let label = format!("round {round}: wake from {level:?}");
-        phases.push(Phase::Wake(
-            burst(client, &ids, args, &args.script, &label).await,
-        ));
-    }
-    if let Some(path) = &args.json {
-        std::fs::write(path, serde_json::to_vec_pretty(&phases)?)?;
-    }
-    if !args.keep {
-        let mut removes = JoinSet::new();
-        for id in &ids {
-            let (client, id) = (client.clone(), *id);
-            removes.spawn(async move {
-                client
-                    .call(&Request::Remove {
-                        id,
-                        generation: None,
-                    })
-                    .await
-            });
-        }
-        while let Some(result) = removes.join_next().await {
-            expect_done(result??)?;
-        }
-    }
-    Ok(())
-}
-
-/// Refuses a huge-page memory profile on a host without a reserved pool of
-/// 2 MiB pages: every VM's memory would fail to allocate.
 /// Lets the agent hold as many open files as the system allows it. Every VM
 /// keeps several open here (its process, pager, image files and store
 /// connections), so the usual soft limit of 1024 runs out near a hundred
@@ -896,6 +473,8 @@ fn raise_open_file_limit() {
     }
 }
 
+/// Refuses a huge-page memory profile on a host without a reserved pool of
+/// 2 MiB pages: every VM's memory would fail to allocate.
 fn check_huge_pages(profile: MemoryProfile) -> anyhow::Result<()> {
     if profile.pages != compute_engine::PageSize::Huge {
         return Ok(());

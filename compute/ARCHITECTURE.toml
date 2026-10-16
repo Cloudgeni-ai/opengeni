@@ -79,14 +79,20 @@ mode = "required"
 [rules.pattern_ratchet.pure_core.stale_entries]     # entries with fewer matches, none, or gone
 mode = "advisory"
 
-# Unsafe code lives in the modules written to hold it, where each block's
-# safety argument is reviewed together: the pager's userfaultfd and mmap
-# handling, and the storage crate's FIEMAP ioctl. Anything else is listed in
-# the baseline until it moves behind one of them.
+# Unsafe code lives in the modules written to hold it, next to the invariant
+# its safety argument rests on, where each block is reviewed: the pager's
+# userfaultfd and mmap handling, the storage crate's FIEMAP ioctl, the
+# engine's pidfd registration, and the host's mappings of sealed memory images
+# (image.rs) and of memory files filling from object storage (lazy.rs).
+# Anything else is listed in the baseline until it moves behind one of them.
 [rules.pattern_ratchet.unsafe_code]
 patterns = ['\bunsafe\b']
 allow = [
+  "crates/compute-engine/src/firecracker/process.rs",
+  "crates/compute-host/src/image.rs",
+  "crates/compute-host/src/lazy.rs",
   "crates/compute-pager/src/linux.rs",
+  "crates/compute-pager/src/source.rs",
   "crates/compute-storage/src/fiemap.rs",
 ]
 
@@ -106,11 +112,17 @@ mode = "required"
 mode = "advisory"
 
 # The engine owns every process a sandbox needs (the VMM, its jailer, the
-# pager), so their lifetimes, cgroups and cleanup live in one place. Lab
-# binaries are listed in the baseline.
+# pager), so their lifetimes, cgroups and cleanup live in one place. The
+# host's network setup (net.rs) runs `ip` and `nft` to completion: tools that
+# configure the host, not processes a sandbox keeps. Lab binaries are listed
+# in the baseline.
 [rules.pattern_ratchet.process_spawn]
 patterns = ['\bCommand::new\b']
-allow = ["crates/compute-engine/**", "crates/archcheck/**"]
+allow = [
+  "crates/archcheck/**",
+  "crates/compute-engine/**",
+  "crates/compute-host/src/net.rs",
+]
 
 [rules.pattern_ratchet.process_spawn.no_crossing]
 mode = "required"

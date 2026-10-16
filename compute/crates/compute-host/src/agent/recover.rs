@@ -11,7 +11,7 @@ use futures::StreamExt;
 use crate::layout::{Images, Paths, vm_spec};
 use crate::protocol::Id;
 use crate::state::{Change, Disk, Record, Stray};
-use crate::step::LiveMemory;
+use crate::step::{DiskWatch, LiveMemory};
 use crate::store::Store;
 
 use super::{HostAgent, HostError};
@@ -33,6 +33,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                             stray.id,
                             format!("unrecorded directory left behind: {error}"),
                         );
+                        // Removing the id again retries.
+                        self.leftovers.insert(stray.id.0, None);
                     }
                 }
                 Some(problem) => {
@@ -40,8 +42,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     // behind the host link its ordinal names: no other
                     // sandbox may get that ordinal.
                     let ordinal = self.unreadable_ordinal(stray.id).await;
-                    if let Some(ordinal) = ordinal {
-                        self.ordinals.insert(ordinal);
+                    match ordinal {
+                        Some(ordinal) => {
+                            self.ordinals.insert(ordinal);
+                        }
+                        // Any new sandbox could get it: none is created
+                        // until someone resolves this one.
+                        None => {
+                            self.unknown_ordinals.insert(stray.id.0);
+                        }
                     }
                     tracing::error!(id = %stray.id, %problem, ?ordinal, "unreadable record; blocking the id and leaving the sandbox alone");
                     self.block(stray.id, problem.to_string());
@@ -225,11 +234,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             (self.sleeping_state(&record, &paths).await?, None)
         };
         let adopted = vm.is_some();
+        // Writes the disk lost while no agent watched it go unseen; see
+        // `DiskWatch`.
+        let watch = adopted
+            .then(|| DiskWatch::open(&paths.disk))
+            .and_then(|opened| {
+                opened
+                    .inspect_err(
+                        |error| tracing::warn!(%id, %error, "no watch on an adopted VM's disk"),
+                    )
+                    .ok()
+            });
         self.insert(id, paths, spec);
         if let Some(vm) = vm {
             // What its memory was based on is unknown, so its next save
             // holds every page.
-            let live = self.own(id, vm, LiveMemory::adopted());
+            let live = self.own(id, vm, LiveMemory::adopted(watch));
             if let Some(slot) = self.slots.get_mut(&id.0) {
                 slot.incarnation = Some(live.incarnation);
                 slot.vm = Some(live);
@@ -293,8 +313,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if from_record.is_some() {
             return from_record;
         }
-        let owner = tokio::fs::metadata(&paths.disk).await.ok()?.uid();
-        owner.checked_sub(self.images.first_uid)
+        // A launch hands the disk to the VMM's user, and the jail's
+        // files are created by it.
+        for path in [&paths.disk, &paths.jail] {
+            if let Ok(metadata) = tokio::fs::symlink_metadata(path).await
+                && let Some(ordinal) = metadata.uid().checked_sub(self.images.first_uid)
+            {
+                return Some(ordinal);
+            }
+        }
+        None
     }
 
     /// Where a sandbox without a VM stands, from its record, checked

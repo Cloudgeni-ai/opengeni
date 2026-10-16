@@ -17,6 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use compute_engine::confined::Owned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixListener, UnixStream};
@@ -185,7 +186,7 @@ pub(crate) fn listen<A: Activity>(
 /// root runs VMMs as itself and has nothing to hand over. The jail is the
 /// VMM's, so a link swapped in for the socket is never followed.
 fn give_to(socket: &Path, (uid, gid): (u32, u32)) -> io::Result<()> {
-    match compute_engine::confined::hand_over(socket, uid, gid) {
+    match compute_engine::confined::hand_over(socket, Owned::Socket, uid, gid) {
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(()),
         result => result,
     }

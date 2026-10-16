@@ -11,10 +11,6 @@ MARKER_PATH = "/root/compute-smoke-restart.txt"
     sandboxes=len(LEVELS),
     sandbox=smoke.SandboxConfig(timeout=600),
     rerun_environment=("COMPUTE_SMOKE_RESTART_AGENT",),
-    quarantined=(
-        "needs VM re-adoption from feat/compute-host-robust; until it merges, "
-        "a restart ends every VM and only saved sandboxes keep their programs"
-    ),
 )
 def agent_restart_keeps_sandboxes(test: smoke.Ecw) -> None:
     """After the host agent restarts, a running, a paused and a saved sandbox
