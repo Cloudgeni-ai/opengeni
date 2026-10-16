@@ -46,6 +46,11 @@ import { Manifest } from "@openai/agents/sandbox";
 import { formatExecResponse } from "@openai/agents-core/sandbox/internal";
 import type { ExposedPortEndpoint } from "../stream-port";
 import {
+  BROWSER_CONTROL_HTTP_REPLY_GRACE_MS,
+  type BrowserControlHttpCall,
+  type BrowserControlHttpOutcome,
+} from "../browser-control-http";
+import {
   agentErrorToControlError,
   drainingExhaustedError,
   execDeadlineHint,
@@ -285,6 +290,8 @@ export interface SelfhostedBackgroundCommandAdoption {
  * every exec/Git admission; retries and already-started operations retain it. */
 export interface SelfhostedOperationAdmission {
   transactionalFsWriteSupported?: boolean;
+  /** The live runner serves in-process browser/computer controller requests. */
+  browserControlHttpSupported?: boolean;
   /** Workspace segment of the physical agent/relay route. Personal machines may
    * originate in a different same-organization workspace than the session. */
   workspaceId?: string;
@@ -309,6 +316,9 @@ export interface SelfhostedOperationAdmission {
 export interface SelfhostedSessionDeps {
   /** Exact live daemon capability; absent preserves legacy small-file writes. */
   transactionalFsWriteSupported?: boolean;
+  /** Exact live daemon capability; absent keeps controller requests on the
+   * command transport. */
+  browserControlHttpSupported?: boolean;
   /** Authorization/session workspace. */
   workspaceId: string;
   /** Physical control-plane workspace. Defaults to workspaceId for legacy and
@@ -521,6 +531,7 @@ export class SelfhostedSession {
   private readonly resourcePolicySupported: boolean;
   private readonly operationCpuQuotaSupported: boolean;
   private readonly transactionalFsWriteSupported: boolean;
+  private readonly browserControlHttpSupported: boolean;
   private readonly defaultOpStream: SelfhostedOpStreamDeps | undefined;
   private readonly connectionInstanceId: string;
   private readonly resolveOperationAdmission:
@@ -594,6 +605,7 @@ export class SelfhostedSession {
     this.resourcePolicySupported = deps.operationResourcePolicySupported === true;
     this.operationCpuQuotaSupported = deps.operationCpuQuotaSupported === true;
     this.transactionalFsWriteSupported = deps.transactionalFsWriteSupported === true;
+    this.browserControlHttpSupported = deps.browserControlHttpSupported === true;
     this.defaultOpStream = deps.opStream;
     this.connectionInstanceId = deps.connectionInstanceId;
     this.resolveOperationAdmission = deps.resolveOperationAdmission;
@@ -612,6 +624,7 @@ export class SelfhostedSession {
             resourcePolicy: this.resourcePolicy,
             opStream: deps.opStream,
             transactionalFsWriteSupported: this.transactionalFsWriteSupported,
+            browserControlHttpSupported: this.browserControlHttpSupported,
           })
         : undefined;
     // A valid Manifest whose root is the machine's actual effective root. There
@@ -680,6 +693,7 @@ export class SelfhostedSession {
 
   private async admitOperation(commandPolicy: boolean): Promise<{
     transactionalFsWriteSupported: boolean;
+    browserControlHttpSupported: boolean;
     controlWorkspaceId: string;
     connectionInstanceId: string;
     subject: string;
@@ -701,6 +715,7 @@ export class SelfhostedSession {
         resourcePolicy: commandPolicy ? this.resourcePolicy : undefined,
         opStream: this.defaultOpStream,
         transactionalFsWriteSupported: this.transactionalFsWriteSupported,
+        browserControlHttpSupported: this.browserControlHttpSupported,
       };
     }
 
@@ -736,6 +751,7 @@ export class SelfhostedSession {
       resourcePolicy: commandPolicy ? resourcePolicy : undefined,
       opStream: resolved.opStream,
       transactionalFsWriteSupported: resolved.transactionalFsWriteSupported === true,
+      browserControlHttpSupported: resolved.browserControlHttpSupported === true,
     };
   }
 
@@ -1955,6 +1971,99 @@ export class SelfhostedSession {
     return result.browserControlEnsure;
   }
 
+  /** Send one request to the agent-owned controller of an exact authority
+   * scope, served inside the runner over loopback without starting a process.
+   * `unsupported` means this connection's runner does not serve it and nothing
+   * was sent. `controller_absent` means no controller for that scope and
+   * generation accepted the request, so it was not delivered and the caller may
+   * ensure the controller and send again. A body too large for one reply is
+   * drained from the runner's spool; the request is never repeated. */
+  async browserControlHttp(request: BrowserControlHttpCall): Promise<BrowserControlHttpOutcome> {
+    const admission = await this.admitOperation(false);
+    if (!admission.browserControlHttpSupported) return { kind: "unsupported" };
+    // The runner bounds the request by timeoutMs; allow the reply to arrive.
+    const rpcTimeoutMs = request.timeoutMs + BROWSER_CONTROL_HTTP_REPLY_GRACE_MS;
+    let result: NonNullable<ControlResponse["result"]>;
+    try {
+      result = await this.call(
+        {
+          $case: "browserControlHttp",
+          browserControlHttp: {
+            scopeId: request.scopeId,
+            scopeGeneration: request.scopeGeneration,
+            method: request.method,
+            path: request.path,
+            bearerToken: request.bearerToken,
+            body: request.body ?? new Uint8Array(),
+            hasBody: request.body !== undefined,
+            timeoutMs: request.timeoutMs,
+            maxResponseBytes: String(request.maxResponseBytes),
+          },
+        },
+        rpcTimeoutMs,
+        admission,
+      );
+    } catch (error) {
+      if (
+        error instanceof SelfhostedControlError &&
+        error.code === ErrorCode.ERROR_CODE_NOT_FOUND
+      ) {
+        return { kind: "controller_absent" };
+      }
+      throw error;
+    }
+    if (result.$case !== "browserControlHttp") {
+      throw new Error(`selfhosted browserControlHttp: unexpected result ${result.$case}`);
+    }
+    const response = result.browserControlHttp;
+    const totalBytes = Number(response.totalBytes);
+    if (
+      !Number.isSafeInteger(totalBytes) ||
+      totalBytes < response.body.byteLength ||
+      totalBytes > request.maxResponseBytes
+    ) {
+      throw new Error("selfhosted browserControlHttp: response length is invalid");
+    }
+    let body = response.body;
+    if (response.spoolId) {
+      const complete = new Uint8Array(totalBytes);
+      complete.set(response.body, 0);
+      let offset = response.body.byteLength;
+      for (;;) {
+        const read = await this.call(
+          {
+            $case: "browserControlHttpRead",
+            browserControlHttpRead: { spoolId: response.spoolId, offset: String(offset) },
+          },
+          this.timeoutMs,
+          admission,
+        );
+        if (read.$case !== "browserControlHttpRead") {
+          throw new Error(`selfhosted browserControlHttpRead: unexpected result ${read.$case}`);
+        }
+        const part = read.browserControlHttpRead;
+        if (offset + part.data.byteLength > totalBytes) {
+          throw new Error("selfhosted browserControlHttpRead: response exceeds its length");
+        }
+        complete.set(part.data, offset);
+        offset += part.data.byteLength;
+        if (part.done) break;
+        if (part.data.byteLength === 0) {
+          throw new Error("selfhosted browserControlHttpRead: spool made no progress");
+        }
+      }
+      if (offset !== totalBytes) {
+        throw new Error("selfhosted browserControlHttpRead: response is incomplete");
+      }
+      body = complete;
+    } else if (response.body.byteLength !== totalBytes) {
+      throw new Error("selfhosted browserControlHttp: response is incomplete");
+    }
+    const headers = new Map<string, string>();
+    for (const header of response.headers) headers.set(header.name.toLowerCase(), header.value);
+    return { kind: "response", status: response.status, headers, body };
+  }
+
   /** Open one browser-native frame producer and return its canonical relay
    * endpoint. This does not route through `resolveExposedPort`: that legacy
    * method allocates PTY/desktop resources based on fixed ports, while this op
@@ -2145,6 +2254,7 @@ export class SelfhostedSandboxClient {
   private readonly operationResourcePolicySupported: boolean | undefined;
   private readonly operationCpuQuotaSupported: boolean | undefined;
   private readonly transactionalFsWriteSupported: boolean | undefined;
+  private readonly browserControlHttpSupported: boolean | undefined;
   private readonly resolveOperationAdmission:
     | (() => Promise<SelfhostedOperationAdmission | null>)
     | undefined;
@@ -2186,6 +2296,7 @@ export class SelfhostedSandboxClient {
     operationResourcePolicySupported?: boolean;
     operationCpuQuotaSupported?: boolean;
     transactionalFsWriteSupported?: boolean;
+    browserControlHttpSupported?: boolean;
     resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
     adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
     settleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
@@ -2218,6 +2329,7 @@ export class SelfhostedSandboxClient {
     this.operationResourcePolicySupported = opts.operationResourcePolicySupported;
     this.operationCpuQuotaSupported = opts.operationCpuQuotaSupported;
     this.transactionalFsWriteSupported = opts.transactionalFsWriteSupported;
+    this.browserControlHttpSupported = opts.browserControlHttpSupported;
     this.resolveOperationAdmission = opts.resolveOperationAdmission;
     this.adoptBackgroundCommand = opts.adoptBackgroundCommand;
     this.settleBackgroundCommand = opts.settleBackgroundCommand;
@@ -2262,6 +2374,7 @@ export class SelfhostedSandboxClient {
         ? { operationCpuQuotaSupported: this.operationCpuQuotaSupported }
         : {}),
       transactionalFsWriteSupported: this.transactionalFsWriteSupported === true,
+      browserControlHttpSupported: this.browserControlHttpSupported === true,
       ...(this.resolveOperationAdmission !== undefined
         ? { resolveOperationAdmission: this.resolveOperationAdmission }
         : {}),
@@ -2382,6 +2495,8 @@ export interface SelfhostedSessionBuild {
   /** Exact live CPU enforcement capability paired with the initial snapshot. */
   operationCpuQuotaSupported?: boolean;
   transactionalFsWriteSupported?: boolean;
+  /** Exact live runner capability for in-process controller requests. */
+  browserControlHttpSupported?: boolean;
   /** Live last-boundary operation admission resolver; see SelfhostedSessionDeps. */
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
@@ -2438,6 +2553,7 @@ export async function buildSelfhostedBackendSession(
       ? { operationCpuQuotaSupported: deps.operationCpuQuotaSupported }
       : {}),
     transactionalFsWriteSupported: deps.transactionalFsWriteSupported === true,
+    browserControlHttpSupported: deps.browserControlHttpSupported === true,
     ...(deps.resolveOperationAdmission !== undefined
       ? { resolveOperationAdmission: deps.resolveOperationAdmission }
       : {}),

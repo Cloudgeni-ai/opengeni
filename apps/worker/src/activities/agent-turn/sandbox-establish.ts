@@ -542,6 +542,8 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               liveMachineEnrollment?.agentCapabilities.operationCpuQuota === true,
             transactionalFsWriteSupported:
               liveMachineEnrollment?.agentCapabilities.transactionalFsWrite === true,
+            browserControlHttpSupported:
+              liveMachineEnrollment?.agentCapabilities.browserControlHttp === true,
             // Carried for shared machines too: the audience can narrow to Only me
             // mid-turn, and each operation then rechecks this authority.
             ...(fileAuthoritySubjectId

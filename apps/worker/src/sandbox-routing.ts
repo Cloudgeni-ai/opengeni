@@ -1542,6 +1542,7 @@ export type SelfhostedTurnSessionArgs = {
   operationCpuQuotaSupported: boolean;
   /** Feature advertisement only; refreshed by exact live admission for each operation. */
   transactionalFsWriteSupported?: boolean;
+  browserControlHttpSupported?: boolean;
   /** The active pointer's epoch — the control-op fence echoed to the agent. */
   epoch: number;
   /** The run's declared sandbox environment (the SAME object fed to buildAgent +
@@ -1618,6 +1619,7 @@ export function connectionBindingFor(
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
     operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
     transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+    browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
   };
 }
 
@@ -1693,6 +1695,7 @@ export async function establishSelfhostedTurnSession(
     operationResourcePolicySupported: args.operationResourcePolicySupported,
     operationCpuQuotaSupported: args.operationCpuQuotaSupported,
     transactionalFsWriteSupported: args.transactionalFsWriteSupported === true,
+    browserControlHttpSupported: args.browserControlHttpSupported === true,
     resolveOperationAdmission: async () => {
       // The machine's audience can change in place during a turn. Read the
       // current scope on every admitted operation: a machine that is Only me now
