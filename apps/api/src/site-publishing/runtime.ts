@@ -258,7 +258,8 @@ export function siteViewerCapabilities(
 ): SiteViewerCapabilities {
   return {
     agent: siteAgentRefusal(deps, host, viewer, limits) === null,
-    workspaceTools: viewer.kind === "member" && (host.publication.agent.tools?.length ?? 0) > 0,
+    // The route intersects this with the immutable page declarations and live grant.
+    workspaceTools: viewer.kind === "member",
     siteData: viewer.kind === "guest" ? "guest" : "viewer",
     sqlQueryAudiences: viewer.kind === "guest" ? ["everyone"] : ["everyone", "signed_in"],
     viewAs: viewer.viewAs ?? null,

@@ -41,7 +41,12 @@ import {
   throwWorkspaceToolGatewayHttpError,
   type PreparedWorkspaceToolGateway,
   type WorkspaceSiteVersionResolver,
+  type WorkspaceToolGatewayAuthorization,
 } from "./workspace-tool-gateway";
+import {
+  isPublishedSiteToolAuthorization,
+  publishedSiteToolAuthority,
+} from "./site-publishing/page-tool-authority";
 import { resolveSiteSessionOrigin } from "./site-session-origin";
 import { TargetAuthorityFence, targetFenceCaller } from "./workspace-tool-target-fence";
 
@@ -81,8 +86,10 @@ function projectedPath(identity: ToolGatewayIdentity) {
  */
 async function siteVersionReader(
   deps: ApiRouteDeps,
-  authorization: AccessGrantAuthorization,
+  authorization: WorkspaceToolGatewayAuthorization,
 ): Promise<WorkspaceSiteVersionResolver> {
+  if (isPublishedSiteToolAuthorization(authorization))
+    return publishedSiteToolAuthority(authorization).readVersion;
   const viewer = await siteViewerForGrant(deps.db, authorization.grant);
   return async (db, grant, artifactId, versionId) =>
     await getWorkspaceArtifactContentRef(db, grant.workspaceId, viewer, artifactId, versionId);
@@ -91,7 +98,7 @@ async function siteVersionReader(
 /** Site paths are matched to the stored allowlist before any provider work. */
 async function siteTarget(
   deps: ApiRouteDeps,
-  authorization: AccessGrantAuthorization,
+  authorization: WorkspaceToolGatewayAuthorization,
   request: ToolGatewayResolveRequest,
   options: TargetGatewayOptions,
 ): Promise<{
@@ -142,14 +149,16 @@ async function siteTarget(
  */
 export function createTargetFence(
   deps: ApiRouteDeps,
-  authorization: AccessGrantAuthorization,
+  authorization: WorkspaceToolGatewayAuthorization,
   options: TargetGatewayOptions,
   targeted: boolean,
 ): TargetAuthorityFence {
   const fence = new TargetAuthorityFence({
     db: deps.db,
     targeted,
-    caller: targetFenceCaller(deps, authorization, options.reauthorize),
+    caller: isPublishedSiteToolAuthorization(authorization)
+      ? { standalone: publishedSiteToolAuthority(authorization).reauthorize }
+      : targetFenceCaller(deps, authorization, options.reauthorize),
     signal: options.signal,
   });
   options.onFence?.(fence);
@@ -176,7 +185,7 @@ function resolvedTool(
 
 async function withTarget<T>(
   deps: ApiRouteDeps,
-  authorization: AccessGrantAuthorization,
+  authorization: WorkspaceToolGatewayAuthorization,
   request: ToolGatewayResolveRequest,
   options: TargetGatewayOptions,
   use: (
@@ -245,7 +254,7 @@ async function closeTargetPreparation(deps: ApiRouteDeps, prepared: PreparedWork
 
 export async function resolveWorkspaceToolTarget(
   deps: ApiRouteDeps,
-  authorization: AccessGrantAuthorization,
+  authorization: WorkspaceToolGatewayAuthorization,
   request: ToolGatewayResolveRequest,
   options: TargetGatewayOptions = {},
 ) {
@@ -300,7 +309,7 @@ function approvalError(error: unknown): never {
 
 export async function invokeWorkspaceToolTarget(
   deps: ApiRouteDeps,
-  authorization: AccessGrantAuthorization,
+  authorization: WorkspaceToolGatewayAuthorization,
   request: ToolGatewayInvokeRequest,
   options: TargetGatewayOptions = {},
 ) {
@@ -339,8 +348,9 @@ export async function invokeWorkspaceToolTarget(
     } catch (error) {
       approvalError(error);
     }
-    const origin =
-      request.siteArtifactId && request.siteVersionId
+    const origin = isPublishedSiteToolAuthorization(authorization)
+      ? publishedSiteToolAuthority(authorization).origin
+      : request.siteArtifactId && request.siteVersionId
         ? await resolveSiteSessionOrigin(
             deps.db,
             authorization.grant,
