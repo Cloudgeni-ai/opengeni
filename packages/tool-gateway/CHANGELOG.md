@@ -1,5 +1,12 @@
 # @opengeni/tool-gateway
 
+## 3.1.3
+
+### Patch Changes
+
+- @opengeni/contracts@3.1.3
+- @opengeni/observability@3.1.3
+
 ## 3.1.2
 
 ### Patch Changes

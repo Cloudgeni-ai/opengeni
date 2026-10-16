@@ -1,5 +1,14 @@
 # @opengeni/example-embedded-product
 
+## 0.0.39
+
+### Patch Changes
+
+- @opengeni/connect@3.1.3
+- @opengeni/contracts@3.1.3
+- @opengeni/react@3.1.3
+- @opengeni/sdk@3.1.3
+
 ## 0.0.38
 
 ### Patch Changes

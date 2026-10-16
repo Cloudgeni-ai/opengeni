@@ -1,5 +1,11 @@
 # @opengeni/desktop
 
+## 0.1.5
+
+### Patch Changes
+
+- @opengeni/sdk@3.1.3
+
 ## 0.1.4
 
 ### Patch Changes

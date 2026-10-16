@@ -1,5 +1,34 @@
 # @opengeni/worker-bundle
 
+## 3.1.3
+
+### Patch Changes
+
+- Updated dependencies [d5858bb]
+  - @opengeni/runtime@3.1.3
+  - @opengeni/core@3.1.3
+  - @opengeni/agent-proto@3.1.3
+  - @opengeni/capabilities@3.1.3
+  - @opengeni/codemode@3.1.3
+  - @opengeni/codex@3.1.3
+  - @opengeni/config@3.1.3
+  - @opengeni/contracts@3.1.3
+  - @opengeni/db@3.1.3
+  - @opengeni/documents@3.1.3
+  - @opengeni/events@3.1.3
+  - @opengeni/github@3.1.3
+  - @opengeni/interaction@3.1.3
+  - @opengeni/jev@3.1.3
+  - @opengeni/network@3.1.3
+  - @opengeni/observability@3.1.3
+  - @opengeni/sdk@3.1.3
+  - @opengeni/storage@3.1.3
+  - @opengeni/subscriptions@3.1.3
+  - @opengeni/tool-gateway@3.1.3
+  - @opengeni/vaults@3.1.3
+  - @opengeni/vaults-onepassword@3.1.3
+  - @opengeni/xai-subscription@3.1.3
+
 ## 3.1.2
 
 ### Patch Changes

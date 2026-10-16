@@ -1,5 +1,12 @@
 # @opengeni/browserd
 
+## 0.2.20
+
+### Patch Changes
+
+- @opengeni/contracts@3.1.3
+- @opengeni/interaction@3.1.3
+
 ## 0.2.19
 
 ### Patch Changes
