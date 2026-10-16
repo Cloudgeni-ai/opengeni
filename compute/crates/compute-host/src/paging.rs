@@ -486,12 +486,24 @@ async fn greet(link: &Link) -> Result<Connected, Refused> {
         Err(_) => return Err(Refused::Wrong("the pager did not greet".into())),
     };
     match control::parse::<ToHost>(greeting.as_bytes()) {
+        // Every message this agent sends exists in each protocol it serves.
+        Ok(ToHost::Hello { protocol, .. })
+            if !(control::OLDEST_PROTOCOL..=control::PROTOCOL).contains(&protocol) =>
+        {
+            Err(Refused::Wrong(format!(
+                "the pager speaks protocol {protocol}, which this agent does not \
+                 (it serves {} to {})",
+                control::OLDEST_PROTOCOL,
+                control::PROTOCOL
+            )))
+        }
         Ok(ToHost::Hello {
             tag,
             device,
             inode,
             missing,
             prefetched,
+            ..
         }) if tag == link.tag => {
             if link.identity != (0, 0) && (device, inode) != link.identity {
                 return Err(Refused::Wrong(
@@ -750,6 +762,7 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let (read, mut write) = stream.into_split();
             let hello = ToHost::Hello {
+                protocol: control::PROTOCOL,
                 tag,
                 device: identity.0,
                 inode: identity.1,
@@ -879,6 +892,52 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_pager_of_an_unknown_protocol_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = dir.path().join("pager.sock");
+        let link = Link {
+            control: control.clone(),
+            tag: "7".into(),
+            identity: (0, 0),
+        };
+        let listener = tokio::net::UnixListener::bind(&control).unwrap();
+        for (protocol, accepted) in [
+            (control::PROTOCOL, true),
+            (control::PROTOCOL + 1, false),
+            (control::OLDEST_PROTOCOL - 1, false),
+        ] {
+            let pager = {
+                let hello = ToHost::Hello {
+                    protocol,
+                    tag: "7".into(),
+                    device: 1,
+                    inode: 2,
+                    missing: Vec::new(),
+                    prefetched: true,
+                };
+                let accept = listener.accept();
+                async move {
+                    let (mut stream, _) = accept.await.unwrap();
+                    stream
+                        .write_all(&control::line(&hello).unwrap())
+                        .await
+                        .unwrap();
+                    stream
+                }
+            };
+            let (greeted, _stream) = tokio::join!(greet(&link), pager);
+            match greeted {
+                Ok(_) => assert!(accepted, "protocol {protocol} was accepted"),
+                Err(Refused::Wrong(why)) => {
+                    assert!(!accepted, "protocol {protocol} was refused: {why}");
+                    assert!(why.contains("protocol"), "{why}");
+                }
+                Err(Refused::Gone(error)) => panic!("the pager seemed gone: {error}"),
+            }
+        }
+    }
+
     /// A pager that greets, misses part of its image, and exits without a
     /// word when told to.
     fn exiting_pager(
@@ -893,6 +952,7 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let (_read, mut write) = stream.into_split();
             let hello = ToHost::Hello {
+                protocol: control::PROTOCOL,
                 tag,
                 device: identity.0,
                 inode: identity.1,

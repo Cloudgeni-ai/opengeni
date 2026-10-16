@@ -21,6 +21,14 @@ died with it, every upgrade would interrupt every sandbox on the host.
 - A small holder process per VM keeps a descriptor to its disk open, so a disk
   write error that happens while the agent is down is still seen.
 - One agent per host, enforced by a lock file.
+- An upgraded agent must read what the release before it left behind. Images,
+  manifests and working-set packs carry a version and are refused when
+  unknown. Records gain only optional fields, so an absent field means what
+  the older release meant. A pager greets with the protocol it speaks; the
+  agent serves every protocol from its oldest supported one to its own, and
+  sends a pager only messages that pager understands. A pager it cannot
+  serve is reported blocked, as above. Supporting the previous release is
+  the rule; a rollback across two releases is not supported.
 
 ## Consequences
 
