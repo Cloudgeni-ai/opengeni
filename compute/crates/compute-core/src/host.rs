@@ -452,7 +452,7 @@ impl Host {
             broken: sandbox.is_broken(),
             paused_for_memory: match sandbox.squeeze {
                 Squeeze::None | Squeeze::Returning { .. } => None,
-                Squeeze::Leaving { bytes } | Squeeze::Waiting { bytes } => Some(bytes),
+                Squeeze::Leaving { bytes, .. } | Squeeze::Waiting { bytes } => Some(bytes),
             },
             balloon: sandbox.balloon_sent.unwrap_or(0),
         })

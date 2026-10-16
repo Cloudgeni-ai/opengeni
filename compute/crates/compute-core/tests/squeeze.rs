@@ -418,6 +418,59 @@ fn a_balloon_let_go_keeps_its_room_until_its_vm_has_let_it_go() {
 }
 
 #[test]
+fn a_vm_that_never_confirms_its_balloon_let_go_can_still_be_paused_for_memory() {
+    let mut rig = Rig::new();
+    rig.running(1, size(GIB, 8 * GIB), 3 * GIB);
+    rig.running(2, size(GIB, 8 * GIB), 4 * GIB);
+    rig.available(0);
+    rig.at(3);
+    let actions = rig.available(3 * GIB);
+    rig.settle(2, actions);
+    assert!(rig.host.waits_for_room(SandboxId(2)));
+    // 1's balloon is let go, and its VM never confirms it, as one booted
+    // without balloon statistics.
+    rig.at(4);
+    let actions = rig.available(7 * GIB);
+    assert_eq!(balloons(&actions), [(1, 0)]);
+    rig.send(Input::BalloonFailed {
+        sandbox: SandboxId(1),
+        request: asked(&actions, 1),
+    });
+    // The host runs short again: 1, held and furthest above its request,
+    // is paused and saved all the same.
+    rig.at(5);
+    let pausing = rig.available(0);
+    assert_eq!(started(&pausing, 1)[0].0, Step::Pause, "{pausing:?}");
+    assert!(rig.paused_for_memory(1));
+    // Until its VM has paused, its guest may still take back what its
+    // balloon held: 4 GiB above the high watermark, less that claim, is
+    // no room for 2's 4 GiB.
+    let actions = rig.available(9 * GIB);
+    assert_eq!(started(&actions, 2), [], "{actions:?}");
+    // Once paused, the claim is gone: 2 wakes, after 1's pause is done.
+    let all = rig.settle(1, pausing);
+    assert_eq!(rig.level(1), Level::Saved);
+    let paused = all.iter().position(|action| {
+        matches!(action, Action::Notify { sandbox: SandboxId(1), notice: Notice::State(state) }
+            if state.level == Level::Paused)
+    });
+    let woke = all.iter().position(|action| {
+        matches!(
+            action,
+            Action::Start {
+                sandbox: SandboxId(2),
+                step: Step::Restore,
+                ..
+            }
+        )
+    });
+    assert!(
+        paused.is_some() && woke.is_some() && paused < woke,
+        "{all:?}"
+    );
+}
+
+#[test]
 fn a_balloon_the_vm_did_not_take_is_set_again_after_a_backoff() {
     let mut rig = Rig::new();
     let sandbox = SandboxId(1);

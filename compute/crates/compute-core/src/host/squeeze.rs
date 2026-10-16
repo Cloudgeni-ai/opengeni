@@ -33,10 +33,14 @@ pub(crate) enum Squeeze {
     #[default]
     None,
     /// It is being paused and saved, whoever wants it awake; its VM held
-    /// `bytes`.
+    /// `bytes`. A sandbox paused while it claimed room as `Returning`
+    /// keeps that claim until its VM no longer runs: until then its guest
+    /// may still take back what its balloon held.
     Leaving {
         /// Host memory its VM held.
         bytes: u64,
+        /// Room above the high watermark it still claims.
+        claim: u64,
     },
     /// It is saved and waits, wanted awake, until `bytes` fit above the
     /// high watermark.
@@ -73,14 +77,22 @@ impl Sandbox {
     }
 
     /// Whether it runs above its request with nothing in the way of
-    /// squeezing it, nor anything already making it sleep.
-    fn squeezable(&self) -> bool {
+    /// pausing and saving it for host memory, nor anything already making
+    /// it sleep. One whose balloon was let go may be paused even before
+    /// its VM confirms that, which a VM may never do.
+    fn pausable(&self) -> bool {
         self.state.level == Level::Running
             && self.in_flight.is_none()
             && self.health == Health::Sound
-            && self.squeeze == Squeeze::None
+            && matches!(self.squeeze, Squeeze::None | Squeeze::Returning { .. })
             && self.floor == Level::Running
             && self.above_request() > 0
+    }
+
+    /// Whether its balloon may be asked to take memory: it may be paused
+    /// and claims no room.
+    fn squeezable(&self) -> bool {
+        self.pausable() && self.squeeze == Squeeze::None
     }
 
     /// What its running VM's balloon is to be set to now, if it is not
@@ -195,7 +207,7 @@ impl Host {
             let furthest = self
                 .sandboxes
                 .iter()
-                .filter(|(_, slot)| slot.squeezable())
+                .filter(|(_, slot)| slot.pausable())
                 .map(|(id, slot)| (slot.above_request(), *id))
                 .max();
             let Some((_, id)) = furthest else {
@@ -206,7 +218,11 @@ impl Host {
             };
             let bytes = slot.resident_bytes();
             let counted = coming(slot);
-            slot.squeeze = Squeeze::Leaving { bytes };
+            let claim = match slot.squeeze {
+                Squeeze::Returning { bytes } => bytes,
+                _ => 0,
+            };
+            slot.squeeze = Squeeze::Leaving { bytes, claim };
             slot.floor = Level::Saved;
             slot.floor_relief += bytes;
             self.pending_relief += bytes;
@@ -276,12 +292,14 @@ impl Host {
     }
 
     /// Bytes claimed by sandboxes let through to wake after waiting for
-    /// host memory, not yet shown by a reading.
+    /// host memory, or whose balloons were let go, not yet shown by a
+    /// reading, and by such sandboxes being paused that still run.
     fn claimed_room(&self) -> u64 {
         self.sandboxes
             .values()
             .map(|slot| match slot.squeeze {
                 Squeeze::Returning { bytes } => bytes,
+                Squeeze::Leaving { claim, .. } if slot.state.level == Level::Running => claim,
                 _ => 0,
             })
             .sum()
@@ -333,7 +351,7 @@ impl Host {
         let Some(slot) = self.sandboxes.get_mut(&id) else {
             return;
         };
-        if let Squeeze::Leaving { bytes } = slot.squeeze
+        if let Squeeze::Leaving { bytes, .. } = slot.squeeze
             && !slot.state.level.has_process()
             && slot.in_flight.is_none()
         {
