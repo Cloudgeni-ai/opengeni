@@ -71,6 +71,39 @@ function projected(row = session(), env = context()) {
 }
 
 describe("server effectiveTools environment projection", () => {
+  test.each([true, false])("interaction entries stay upfront with lazy=%s", (lazy) => {
+    const env = context({ settings: { ...settings, lazyToolSearchEnabled: lazy } });
+    const row = session("all", {
+      firstPartyMcpTools: ["browser_open", "browser_read", "computer_open", "computer_observe"],
+      tools: [{ id: "opengeni", eager: true }],
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+    });
+    const tools = projected(row, env).effectiveTools!.tools;
+    for (const name of ["browser_open", "computer_open"]) {
+      expect(tools.find((tool) => tool.name === `interaction__${name}`)?.visibility).toBe(
+        "upfront",
+      );
+    }
+    for (const name of ["browser_read", "computer_observe"]) {
+      expect(tools.find((tool) => tool.name === `interaction__${name}`)?.visibility).toBe(
+        lazy ? "search" : "upfront",
+      );
+    }
+    const restrictedRows: Array<typeof row> = [
+      { ...row, firstPartyMcpTools: ["browser_read"] },
+      { ...row, firstPartyMcpPermissions: ["sessions:read"] },
+      { ...row, agent: session("none").agent },
+    ];
+    for (const restricted of restrictedRows) {
+      expect(
+        projected(restricted, env).effectiveTools!.tools.some(
+          (tool) =>
+            tool.name === "interaction__browser_open" || tool.name === "interaction__computer_open",
+        ),
+      ).toBe(false);
+    }
+  });
+
   test("native computer projection matches eager and deferred interaction tools", () => {
     for (const lazy of [true, false]) {
       const env = context({ settings: { ...settings, lazyToolSearchEnabled: lazy } });
