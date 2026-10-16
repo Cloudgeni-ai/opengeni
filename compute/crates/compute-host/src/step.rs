@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::io;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -31,10 +32,37 @@ struct Marks {
     archived: Option<Vec<u8>>,
 }
 
+/// The markers a step could not put back, and so the saved copies it can no
+/// longer vouch for.
+#[derive(Debug)]
+enum NotPutBack {
+    /// The archived marker is missing but the saved one is back, so only the
+    /// copy in object storage is untrusted.
+    Archived(io::Error),
+    /// The saved marker is missing, so neither copy is trusted.
+    All(io::Error),
+}
+
+impl NotPutBack {
+    fn outcome(self, id: Id) -> Outcome {
+        match self {
+            Self::Archived(error) => {
+                tracing::error!(%id, %error, "archived marker not put back; only the local copy is trusted");
+                Outcome::Failed(Failure::RemoteUntrusted)
+            }
+            Self::All(error) => {
+                tracing::error!(%id, %error, "saved-copy markers not put back");
+                Outcome::Failed(Failure::Untrusted)
+            }
+        }
+    }
+}
+
 impl Marks {
     /// Removes both markers durably, remembering them. On failure the
     /// outcome to report: a transient failure when every marker is back in
-    /// place, and otherwise [`Failure::Untrusted`].
+    /// place, and otherwise [`Failure::RemoteUntrusted`] or
+    /// [`Failure::Untrusted`], depending on which markers are back.
     fn take(paths: &Paths, id: Id, operation: &'static str) -> Result<Self, Outcome> {
         let archived = match fs::read(&paths.archived) {
             Ok(contents) => Some(contents),
@@ -52,10 +80,7 @@ impl Marks {
         if let Err(error) = removed {
             return Err(match marks.put_back(paths) {
                 Ok(()) => io_failure(operation, error),
-                Err(lost) => {
-                    tracing::error!(%id, error = %lost, "saved-copy markers not put back");
-                    Outcome::Failed(Failure::Untrusted)
-                }
+                Err(lost) => lost.outcome(id),
             });
         }
         Ok(marks)
@@ -63,33 +88,45 @@ impl Marks {
 
     /// Writes back whichever markers are missing, once it is certain the
     /// guest never ran. A marker still present was never removed and is
-    /// unchanged.
-    fn put_back(&self, paths: &Paths) -> io::Result<()> {
+    /// unchanged. The saved marker goes back first, so a failure part-way
+    /// still vouches for the local copy.
+    fn put_back(&self, paths: &Paths) -> Result<(), NotPutBack> {
+        self.put_back_with(paths, write_atomic)
+    }
+
+    fn put_back_with(
+        &self,
+        paths: &Paths,
+        mut write: impl FnMut(&Path, &[u8]) -> io::Result<()>,
+    ) -> Result<(), NotPutBack> {
         if self.saved && !paths.saved.exists() {
-            write_atomic(&paths.saved, b"")?;
+            write(&paths.saved, b"").map_err(NotPutBack::All)?;
         }
         if let Some(contents) = &self.archived
             && !paths.archived.exists()
         {
-            write_atomic(&paths.archived, contents)?;
+            write(&paths.archived, contents).map_err(|error| {
+                if self.saved {
+                    NotPutBack::Archived(error)
+                } else {
+                    NotPutBack::All(error)
+                }
+            })?;
         }
         Ok(())
     }
 
     /// The outcome of a wake refused before its guest ran: nothing changed
-    /// once the markers are back, and otherwise the copies they vouched for
-    /// are no longer trusted. Any other failure leaves them taken away, as
-    /// the guest may have run.
+    /// once the markers are back, and otherwise the copies whose markers are
+    /// missing are no longer trusted. Any other failure leaves them taken
+    /// away, as the guest may have run.
     fn after_failed_wake(&self, paths: &Paths, id: Id, error: &EngineError) -> Outcome {
         if error.kind != ErrorKind::Transient {
             return failure(error);
         }
         match self.put_back(paths) {
             Ok(()) => failure(error),
-            Err(lost) => {
-                tracing::error!(%id, error = %lost, "saved-copy markers not put back after a refused wake");
-                Outcome::Failed(Failure::Untrusted)
-            }
+            Err(lost) => lost.outcome(id),
         }
     }
 }
@@ -522,6 +559,36 @@ mod tests {
         thaw(&paths.dir);
         assert_eq!(outcome, Outcome::Failed(Failure::Untrusted));
         assert!(!paths.saved.exists());
+    }
+
+    #[test]
+    fn a_partial_put_back_still_vouches_for_the_local_copy() {
+        let (_root, paths) = marked();
+        let marks = Marks::take(&paths, ID, "restore").unwrap();
+        let archived = paths.archived.clone();
+        let lost = marks
+            .put_back_with(&paths, |path, contents| {
+                if path == archived {
+                    Err(io::Error::other("disk full"))
+                } else {
+                    write_atomic(path, contents)
+                }
+            })
+            .unwrap_err();
+        assert_eq!(lost.outcome(ID), Outcome::Failed(Failure::RemoteUntrusted));
+        assert!(paths.saved.exists(), "the local copy is still vouched for");
+        assert!(!paths.archived.exists());
+    }
+
+    #[test]
+    fn a_put_back_that_loses_the_saved_marker_trusts_no_copy() {
+        let (_root, paths) = marked();
+        let marks = Marks::take(&paths, ID, "restore").unwrap();
+        let lost = marks
+            .put_back_with(&paths, |_, _| Err(io::Error::other("disk full")))
+            .unwrap_err();
+        assert_eq!(lost.outcome(ID), Outcome::Failed(Failure::Untrusted));
+        assert!(!paths.saved.exists() && !paths.archived.exists());
     }
 
     #[test]

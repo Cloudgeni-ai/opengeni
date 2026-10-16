@@ -137,9 +137,13 @@ impl Sandbox {
                 self.retry = None;
             }
             Outcome::Cancelled => {}
-            Outcome::Failed(failure @ (Failure::Transient | Failure::Untrusted)) => {
-                if failure == Failure::Untrusted {
-                    settled.lost |= self.lose(State::without_saved_copies);
+            Outcome::Failed(
+                failure @ (Failure::Transient | Failure::Untrusted | Failure::RemoteUntrusted),
+            ) => {
+                match failure {
+                    Failure::Untrusted => settled.lost |= self.lose(State::without_saved_copies),
+                    Failure::RemoteUntrusted => self.state = self.state.without_remote_copy(),
+                    _ => {}
                 }
                 // With the programs lost there is nothing to retry: the next
                 // wake boots fresh from the files.
