@@ -125,6 +125,16 @@ pub(crate) enum After<V> {
     New(V, LiveMemory),
 }
 
+/// How a step ended.
+#[derive(Debug)]
+pub(crate) struct Ran<V> {
+    pub outcome: Outcome,
+    pub after: After<V>,
+    /// VM processes the step started, counting any it ended again before
+    /// finishing, such as a restore whose resume failed.
+    pub launches: u32,
+}
+
 /// Which stored copy matches the local files. The record says whether an
 /// archived copy exists; this names it, so eviction can check the store
 /// still holds exactly that copy.
@@ -158,6 +168,8 @@ pub(crate) struct Job<E: Engine, S> {
     /// memory as chunks.
     #[cfg(target_os = "linux")]
     pub fetcher: Option<Arc<Fetcher>>,
+    /// VM processes this job has started; zero when it is issued.
+    pub launches: u32,
 }
 
 fn failure(error: &EngineError) -> Outcome {
@@ -255,20 +267,27 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// lost the VM's memory leaves no VM process: it is ended before the
     /// step reports, since the core may start a replacement on the same disk
     /// right after.
-    pub async fn run(mut self, step: Step) -> (Outcome, After<E::Vm>) {
-        let (outcome, after) = self.step(step).await;
-        if outcome != Outcome::Failed(Failure::MemoryLost) {
-            return (outcome, after);
-        }
-        let vm = match after {
-            After::NoVm => return (outcome, After::NoVm),
-            After::Kept(live) => {
-                live.stopping.store(true, Ordering::Release);
-                live.vm
+    pub async fn run(mut self, step: Step) -> Ran<E::Vm> {
+        let (mut outcome, mut after) = self.step(step).await;
+        if outcome == Outcome::Failed(Failure::MemoryLost) {
+            let vm = match after {
+                After::NoVm => None,
+                After::Kept(live) => {
+                    live.stopping.store(true, Ordering::Release);
+                    Some(live.vm)
+                }
+                After::New(vm, _) => Some(vm),
+            };
+            if let Some(vm) = vm {
+                outcome = self.end(vm, outcome).await;
             }
-            After::New(vm, _) => vm,
-        };
-        (self.end(vm, outcome).await, After::NoVm)
+            after = After::NoVm;
+        }
+        Ran {
+            outcome,
+            after,
+            launches: self.launches,
+        }
     }
 
     async fn step(&mut self, step: Step) -> (Outcome, After<E::Vm>) {
@@ -569,7 +588,10 @@ impl<E: Engine, S: Store> Job<E, S> {
             memory,
         };
         let vm = match self.engine.restore(&self.spec, &files).await {
-            Ok(vm) => vm,
+            Ok(vm) => {
+                self.launches += 1;
+                vm
+            }
             Err(error) if error.kind == ErrorKind::MemoryLost => {
                 let outcome = self.rejected(&images, &image, &live_memory, &error).await;
                 return (outcome, After::NoVm);
@@ -813,7 +835,10 @@ impl<E: Engine, S: Store> Job<E, S> {
             return (io_failure("boot", error), After::NoVm);
         }
         match self.engine.boot(&self.spec).await {
-            Ok(vm) => (Outcome::Done, After::New(vm, LiveMemory::booted())),
+            Ok(vm) => {
+                self.launches += 1;
+                (Outcome::Done, After::New(vm, LiveMemory::booted()))
+            }
             Err(error) => (failure(&error), After::NoVm),
         }
     }

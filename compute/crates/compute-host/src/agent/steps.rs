@@ -58,7 +58,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 op,
                 outcome,
                 after,
-            } => self.step_done(id, op, outcome, after),
+                launches,
+            } => self.step_done(id, op, outcome, after, launches),
             Event::Exited { id, incarnation } => self.exited(id, incarnation),
             Event::Destroyed {
                 id,
@@ -101,6 +102,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         op,
                         outcome: Outcome::Cancelled,
                         after,
+                        launches: 0,
                     });
                 }
             }
@@ -124,6 +126,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 op,
                 outcome: Outcome::Failed(Failure::Fatal),
                 after: After::NoVm,
+                launches: 0,
             });
             return;
         };
@@ -152,6 +155,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 op,
                 outcome: Outcome::Failed(Failure::Fatal),
                 after: After::NoVm,
+                launches: 0,
             });
             return;
         };
@@ -179,21 +183,29 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             kernel: self.images.kernel.clone(),
             #[cfg(target_os = "linux")]
             fetcher: self.fetcher.clone(),
+            launches: 0,
         };
         let events = self.events_tx.clone();
         tokio::spawn(async move {
-            let (outcome, after) = job.run(step).await;
+            let ran = job.run(step).await;
             let _ = events.send(Event::StepDone {
                 id,
                 op,
-                outcome,
-                after,
+                outcome: ran.outcome,
+                after: ran.after,
+                launches: ran.launches,
             });
         });
     }
 
-    pub(super) fn step_done(&mut self, id: Id, op: OpId, outcome: Outcome, after: After<E::Vm>) {
-        let launched = matches!(after, After::New(..));
+    pub(super) fn step_done(
+        &mut self,
+        id: Id,
+        op: OpId,
+        outcome: Outcome,
+        after: After<E::Vm>,
+        launches: u32,
+    ) {
         let fresh = match after {
             After::New(vm, memory) => Some(self.own(id, vm, memory)),
             After::Kept(live) => Some(live),
@@ -202,9 +214,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut reap = None;
         let mut destroy = false;
         if let Some(slot) = self.slots.get_mut(&id.0) {
-            if launched {
-                slot.launches += 1;
-            }
+            slot.launches += u64::from(launches);
             if let Some(running) = slot.op.take().filter(|running| running.op == op) {
                 let stats = &mut self.stats[running.step.index()];
                 let micros =

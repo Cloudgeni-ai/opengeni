@@ -218,8 +218,14 @@ async fn a_refused_resume_keeps_the_saved_copy_for_a_crash() {
     assert!(lab.image(sandbox));
     lab.world.refuse_resumes.store(false, Ordering::SeqCst);
     assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["hello", "kept"]);
-    assert!(lab.world.restores.load(Ordering::Relaxed) >= 2);
+    let restores = lab.world.restores.load(Ordering::Relaxed);
+    assert!(restores >= 2);
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        Lab::sandbox(&lab.status().await, sandbox).launches,
+        u64::try_from(1 + restores).unwrap(),
+        "a VM ended again after its resume was refused still counts"
+    );
     lab.assert_clean();
 }
 

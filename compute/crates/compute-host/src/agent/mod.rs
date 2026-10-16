@@ -267,6 +267,8 @@ enum Event<V> {
         op: OpId,
         outcome: Outcome,
         after: After<V>,
+        /// VM processes the step started, including ones it ended again.
+        launches: u32,
     },
     Exited {
         id: Id,
