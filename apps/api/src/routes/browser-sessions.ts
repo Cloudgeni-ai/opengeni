@@ -353,7 +353,19 @@ export function registerBrowserSessionRoutes(
     const request = await parseJsonBody(context, CreateBrowserSessionRequest);
     const startedAtMs = performance.now();
     const stages = new InteractionRouteStages("create");
-    await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
+    // The replay lookup and the source session are read alongside the
+    // authorization check. A denial still wins, and neither read is used
+    // until the request is authorized; each failure surfaces where it did.
+    const [authorized, existingRead, sourceRead] = await Promise.allSettled([
+      authorizeSourceSession(deps, grant, request.sessionId, "session.control"),
+      findBrowserSessionControlRecordByOperation(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        operationId: request.operationId,
+      }),
+      requireSourceSession(deps, workspaceId, request.sessionId),
+    ]);
+    if (authorized.status === "rejected") throw authorized.reason;
     stages.mark("authorize");
     const origin = requestOrigin(context, deps.settings);
     const authority = browserAuthorityRoot(deps);
@@ -369,11 +381,8 @@ export function registerBrowserSessionRoutes(
         request,
         deps.settings.experimentalBrowserContextPoolEnabled,
       );
-      const existing = await findBrowserSessionControlRecordByOperation(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        operationId: request.operationId,
-      });
+      if (existingRead.status === "rejected") throw existingRead.reason;
+      const existing = existingRead.value;
       if (existing && existing.sourceSessionId !== request.sessionId) {
         throw new BrowserSessionOperationConflictError(
           "BrowserSession create operation belongs to another source session",
@@ -407,7 +416,8 @@ export function registerBrowserSessionRoutes(
         }
       }
 
-      const sourceSession = await requireSourceSession(deps, workspaceId, request.sessionId);
+      if (sourceRead.status === "rejected") throw sourceRead.reason;
+      const sourceSession = sourceRead.value;
       stages.mark("source_session");
       const response = await withBrowserPlacement(
         sourceSession,
