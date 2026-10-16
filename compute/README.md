@@ -122,7 +122,9 @@ On start the agent settles every record, then takes each VM back
 ([ADR 9](docs/adr/0009-vms-outlive-the-agent.md)). A VM whose memory is still
 being paged in keeps its pager, a small process of its own, and the restarted
 agent reconnects to it. If the pager itself dies, the VM is ended and the
-sandbox boots fresh from its disk. One agent runs per host.
+sandbox recovers as [ADR 10](docs/adr/0010-crash-safety-bar.md) says: from a
+valid saved image if one exists, else fresh from its disk. One agent runs per
+host.
 
 ## Network
 

@@ -13,7 +13,7 @@ old one; old records stay as history.
 | 5 | [One memory profile per host: bare metal or nested](0005-host-memory-profiles.md) | Accepted |
 | 6 | [A memory image is valid only with its disk; images are self-contained](0006-memory-images-and-disks.md) | Accepted |
 | 7 | [Never delete the only good copy](0007-never-delete-the-only-good-copy.md) | Accepted |
-| 8 | [Wake from object storage lazily, working set first](0008-lazy-wake-with-a-working-set.md) | Accepted, merging |
+| 8 | [Wake from object storage lazily, working set first](0008-lazy-wake-with-a-working-set.md) | Accepted |
 | 9 | [VMs outlive the agent](0009-vms-outlive-the-agent.md) | Accepted |
 | 10 | [The crash-safety bar](0010-crash-safety-bar.md) | Accepted |
 | 11 | [The same guest network everywhere, firewalled per sandbox](0011-fixed-guest-network.md) | Accepted |

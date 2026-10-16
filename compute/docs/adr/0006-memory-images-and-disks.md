@@ -26,6 +26,7 @@ restore depend on every earlier link.
 
 - Any one image restores on its own, and an older one can be dropped without
   touching the newer.
-- A crash while running loses running programs, never files.
+- A crash while running loses running programs; data already written to the
+  guest's disk is kept.
 - Reflinks make the copy nearly free on file systems that support them (XFS,
   Btrfs); elsewhere the copy costs real disk writes.

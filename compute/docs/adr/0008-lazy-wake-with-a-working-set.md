@@ -20,7 +20,8 @@ guest's first-touched pages are scattered across most of its chunks.
   move.
 - The pager runs as its own process per VM while memory is still loading, and
   exits when the memory is complete. A restarted agent reconnects to it; if
-  the pager dies, the VM is ended and the sandbox boots fresh from its disk.
+  the pager dies, the VM is ended and the sandbox recovers as
+  [10](0010-crash-safety-bar.md) says.
 
 ## Consequences
 
