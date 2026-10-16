@@ -989,7 +989,7 @@ export class BrowserControlClient {
       },
       timeoutMs: BROWSER_STATE_TRANSFER_TIMEOUT_MS,
     });
-    const adoption = parseWorkingCopyAdoption(data, reference);
+    const adoption = parseWorkingCopyAdoption(data, reference, "current");
     if (adoption.operationId !== operationId) {
       throw new BrowserControlProtocolError("browser controller returned another adoption");
     }
@@ -1014,7 +1014,7 @@ export class BrowserControlClient {
       );
     }
     const adoption =
-      data.adoption === null ? null : parseWorkingCopyAdoption(data.adoption, binding);
+      data.adoption === null ? null : parseWorkingCopyAdoption(data.adoption, binding, "recorded");
     if (adoption && adoption.operationId !== id) {
       throw new BrowserControlProtocolError("browser controller returned another adoption");
     }
@@ -1040,7 +1040,9 @@ export class BrowserControlClient {
       throw new BrowserControlProtocolError("browser controller returned malformed revert status");
     }
     const adoption =
-      data.adoption === null ? null : parseWorkingCopyAdoption(data.adoption, reference);
+      data.adoption === null
+        ? null
+        : parseWorkingCopyAdoption(data.adoption, reference, "recorded");
     if (adoption && adoption.operationId !== id) {
       throw new BrowserControlProtocolError("browser controller returned another adoption");
     }
@@ -3078,14 +3080,24 @@ function workingCopyAuthorityBody(
   };
 }
 
+/**
+ * An adoption record. `generation: "current"` (a new adoption) requires the
+ * record to belong to the requesting controller generation. `"recorded"`
+ * (status, revert, inspection) keeps the generation the adoption was recorded
+ * under: recovering an unfinished adoption after a controller restart means
+ * reading and reverting a record made by an earlier generation, under the
+ * browser's legitimate current control. The browser and operation always
+ * have to match exactly.
+ */
 function parseWorkingCopyAdoption(
   value: unknown,
   reference: PlacementBrowserSessionReference,
+  generation: "current" | "recorded",
 ): PlacementBrowserWorkingCopyAdoption {
   if (
     !isRecord(value) ||
     value.browserSessionId !== reference.browserSessionId ||
-    value.controllerGeneration !== reference.controllerGeneration ||
+    (generation === "current" && value.controllerGeneration !== reference.controllerGeneration) ||
     !BROWSER_WORKING_COPY_ADOPTION_PHASES.includes(
       value.phase as PlacementBrowserWorkingCopyAdoptionPhase,
     ) ||
@@ -3100,7 +3112,10 @@ function parseWorkingCopyAdoption(
   }
   return {
     browserSessionId: reference.browserSessionId,
-    controllerGeneration: reference.controllerGeneration,
+    controllerGeneration:
+      generation === "current"
+        ? reference.controllerGeneration
+        : requireGeneration(value.controllerGeneration),
     operationId: requireUuid(value.operationId, "working copy adoption id"),
     manifestDigest: sha256(value.manifestDigest, "working copy manifest digest"),
     phase: value.phase as PlacementBrowserWorkingCopyAdoptionPhase,
@@ -3183,7 +3198,7 @@ function parseWorkingCopyInspection(
     activeAdoption:
       value.activeAdoption === null || value.activeAdoption === undefined
         ? null
-        : parseWorkingCopyAdoption(value.activeAdoption, reference),
+        : parseWorkingCopyAdoption(value.activeAdoption, reference, "recorded"),
   };
 }
 

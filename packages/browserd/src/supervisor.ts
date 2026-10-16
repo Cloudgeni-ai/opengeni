@@ -659,7 +659,7 @@ export class BrowserSupervisor {
    * copy is kept. See revertWorkingCopyAdoption. */
   async revertWorkingCopyAdoption(
     input: BrowserWorkingCopyAuthorityInput & { operationId: string },
-  ): Promise<BrowserWorkingCopyAdoptionStatus> {
+  ): Promise<{ inFlight: false; adoption: BrowserWorkingCopyAdoptionStatus }> {
     this.assertOpen();
     const paths = adoptionPaths(this.rootDirectory, input.browserSessionId);
     if (this.adopting.has(input.browserSessionId))
@@ -667,7 +667,9 @@ export class BrowserSupervisor {
     this.assertNotRunning(input.browserSessionId);
     this.adopting.add(input.browserSessionId);
     try {
-      return await workingCopyAdoptionStatus(
+      // The same shape as workingCopyAdoptionStatus: this call held the
+      // browser's adoption claim until now, so nothing is in flight.
+      const adoption = await workingCopyAdoptionStatus(
         paths,
         await revertWorkingCopyAdoption(paths, {
           operationId: input.operationId,
@@ -675,6 +677,7 @@ export class BrowserSupervisor {
           ...(this.afterAdoptionPhase ? { afterPhase: this.afterAdoptionPhase } : {}),
         }),
       );
+      return { inFlight: false, adoption };
     } finally {
       this.adopting.delete(input.browserSessionId);
     }

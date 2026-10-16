@@ -10,6 +10,7 @@ import type {
   BrowserTarget,
 } from "@opengeni/contracts";
 import {
+  BrowserControlServer,
   BrowserSupervisor,
   SqliteBrowserOperationJournal,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
@@ -3309,6 +3310,76 @@ describe("adopting a verified copy of a preserved working directory", () => {
       await crashing.close();
     }
   }
+
+  test("over the control API, a later controller reads and reverts an earlier adoption with the status shape", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const live = await restoreAsCopy(rootDirectory, options.browserSessionId);
+      const restored = await stat(live);
+      const exact = {
+        browserSessionId: options.browserSessionId,
+        controllerGeneration: options.controllerGeneration,
+        authority: workingAuthority,
+      };
+      const operationId = "33333333-3333-4333-8333-000000000020";
+      await adoptionCutAfterReceipt(rootDirectory, socketRootDirectory, exact, operationId);
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "exited",
+        createDriver: async (context) => fakeDriver(context),
+      });
+      const adminToken = "a".repeat(43);
+      const server = BrowserControlServer.start({ supervisor, adminToken, port: 0 });
+      const base = `http://127.0.0.1:${server.port}/v1/browser-sessions/${options.browserSessionId}/working-copy/adoptions/${operationId}`;
+      const call = async (method: "GET" | "POST", path: string, body?: unknown) => {
+        const response = await fetch(`${base}${path}`, {
+          method,
+          headers: { authorization: `Bearer ${adminToken}`, "content-type": "application/json" },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+        return {
+          status: response.status,
+          body: (await response.json()) as Record<string, unknown>,
+        };
+      };
+      try {
+        const before = await call("GET", "");
+        expect(before.status).toBe(200);
+        expect(before.body.data).toMatchObject({
+          inFlight: false,
+          adoption: {
+            operationId,
+            controllerGeneration: options.controllerGeneration,
+            phase: "receipt",
+          },
+        });
+        // The browser is now under a later controller generation and new tokens.
+        const reverted = await call("POST", "/revert", {
+          controllerGeneration: `${options.controllerGeneration}-restarted`,
+          tokenGeneration: 2,
+          controlToken: "c".repeat(43),
+          viewToken: "v".repeat(43),
+        });
+        expect(reverted.status).toBe(200);
+        const after = await call("GET", "");
+        // The revert answers with the same shape as a status read of the result.
+        expect(reverted.body.data).toEqual(after.body.data);
+        expect(after.body.data).toMatchObject({
+          inFlight: false,
+          adoption: {
+            operationId,
+            controllerGeneration: options.controllerGeneration,
+            phase: "reverted",
+          },
+        });
+        // The browser's own directory is the live one again.
+        expect((await stat(live)).ino).toBe(restored.ino);
+      } finally {
+        await server.stop();
+        await supervisor.close();
+      }
+    });
+  });
 
   test("after a restart, inspection, status and end never settle an interrupted adoption", async () => {
     await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {

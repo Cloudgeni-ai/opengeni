@@ -2785,3 +2785,93 @@ test("inspects and adopts a preserved working copy with its exact authority, nev
     await server.stop(true);
   }
 });
+
+test("reads and reverts an adoption recorded by an earlier controller generation", async () => {
+  const browserSessionId = randomUUID();
+  const operationId = randomUUID();
+  const current = "synthetic-adoption-restarted";
+  const recorded = {
+    operationId,
+    browserSessionId,
+    controllerGeneration: "synthetic-adoption-before-restart",
+    manifestDigest: "d".repeat(64),
+    phase: "receipt",
+    failureCode: null,
+    retainedDirectories: [],
+    createdAt: "2026-10-16T10:00:00.000Z",
+    updatedAt: "2026-10-16T10:00:01.000Z",
+  };
+  let served: Record<string, unknown> = recorded;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path.endsWith("/revert")) {
+        return success({ inFlight: false, adoption: { ...served, phase: "reverted" } });
+      }
+      if (path.endsWith("/working-copy/adoptions")) return success(served);
+      if (path.endsWith("/working-copy/inspection")) {
+        return success({
+          browserSessionId,
+          controllerGeneration: current,
+          platformSupported: true,
+          manifest: null,
+          currentProfile: { device: 1, inode: 2 },
+          receipt: null,
+          profileIdentityMatches: true,
+          profileInUse: false,
+          activeAdoption: served,
+          refusal: "adoption_unresolved",
+        });
+      }
+      return success({ inFlight: false, adoption: served });
+    },
+  });
+  try {
+    const client = hostFetchClient(server.port);
+    const authority = {
+      browserSessionId,
+      controllerGeneration: current,
+      tokenGeneration: 4,
+      controlToken,
+      viewToken,
+    };
+    // Recovery after a restart reads the record as it was recorded.
+    expect(await client.workingCopyAdoption(authority, operationId)).toEqual({
+      inFlight: false,
+      adoption: recorded,
+    });
+    expect((await client.inspectWorkingCopy(authority)).activeAdoption).toEqual(recorded);
+    expect(await client.revertWorkingCopyAdoption({ ...authority, operationId })).toEqual({
+      inFlight: false,
+      adoption: { ...recorded, phase: "reverted" },
+    });
+    // A new adoption must still be this generation's own.
+    await expect(
+      client.adoptWorkingCopy({
+        ...authority,
+        operationId,
+        manifestDigest: recorded.manifestDigest,
+      }),
+    ).rejects.toBeInstanceOf(BrowserControlProtocolError);
+    // Another browser's or another operation's record is never accepted.
+    served = { ...recorded, browserSessionId: randomUUID() };
+    await expect(client.workingCopyAdoption(authority, operationId)).rejects.toBeInstanceOf(
+      BrowserControlProtocolError,
+    );
+    await expect(
+      client.revertWorkingCopyAdoption({ ...authority, operationId }),
+    ).rejects.toBeInstanceOf(BrowserControlProtocolError);
+    served = { ...recorded, operationId: randomUUID() };
+    await expect(client.workingCopyAdoption(authority, operationId)).rejects.toBeInstanceOf(
+      BrowserControlProtocolError,
+    );
+    served = { ...recorded, controllerGeneration: "not a generation" };
+    await expect(client.workingCopyAdoption(authority, operationId)).rejects.toBeInstanceOf(
+      BrowserControlProtocolError,
+    );
+  } finally {
+    await server.stop(true);
+  }
+});
