@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/list-row";
 import { Notice } from "@/components/ui/notice";
 import { ReasonTooltip } from "@/components/ui/disabled-reason";
-import { SECTION_TITLE_CLASS } from "@/components/ui/section";
+import { Section, SECTION_TITLE_CLASS } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SelectMenu } from "@/components/ui/select-menu";
 import { StatGroup, StatTile, type StatDelta } from "@/components/ui/stat-tile";
@@ -313,7 +313,7 @@ export function UsageDashboard(props: UsageDashboardProps) {
         </p>
       </div>
       {props.scope.kind === "workspace" ? (
-        <>
+        <Section title="Sites" contentClassName="flex flex-col gap-6">
           {query.range !== "custom" ? (
             <SiteAiUsageSection
               client={client}
@@ -322,7 +322,7 @@ export function UsageDashboard(props: UsageDashboardProps) {
             />
           ) : null}
           <SitePlatformUsageSection client={client} workspaceId={props.scope.workspaceId} />
-        </>
+        </Section>
       ) : null}
     </div>
   );

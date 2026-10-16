@@ -26,14 +26,24 @@ try {
         await page.goto(`${base}/test/insights-preview.html?page=${pageName}&theme=${theme}`);
         if (pageName === "workspace") {
           await page.getByText("Customer research", { exact: true }).waitFor();
-          await page.getByText("Site platform", { exact: true }).waitFor();
+          const sites = page
+            .locator("section")
+            .filter({ has: page.getByRole("heading", { name: "Sites", exact: true, level: 2 }) });
+          await sites
+            .getByRole("heading", { name: "Model costs", exact: true, level: 3 })
+            .waitFor();
+          await sites
+            .getByRole("heading", { name: "Platform activity", exact: true, level: 3 })
+            .waitFor();
+          if (await page.getByRole("heading", { name: "Site AI", exact: true }).count())
+            failures.push(`${name}: narrowed Site AI heading remains`);
           if (await page.locator('a[href*="/sessions/"]').count())
             failures.push(`${name}: unexpected private conversation link`);
         } else {
           await page.getByText("Workspace budget", { exact: true }).waitFor();
-          if (await page.getByText("Site platform", { exact: true }).count())
+          if (await page.getByText("Platform activity", { exact: true }).count())
             failures.push(`${name}: platform analytics remain in Usage`);
-          if (await page.getByText("Site AI", { exact: true }).count())
+          if (await page.getByText("Model costs", { exact: true }).count())
             failures.push(`${name}: AI analytics remain in Usage`);
         }
         await page.waitForTimeout(500);

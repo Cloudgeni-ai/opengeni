@@ -53,8 +53,8 @@ export function SitePlatformUsageSection({
   if (load.state === "hidden" || load.state === "loading") return null;
   if (load.state === "failed")
     return (
-      <Section title="Site platform">
-        <p className="text-sm text-fg-muted">Couldn't load Site usage.</p>
+      <Section title="Platform activity" headingLevel={3}>
+        <p className="text-sm text-fg-muted">Couldn't load Site platform activity.</p>
       </Section>
     );
   return <SitePlatformUsageView usage={load.usage} />;
@@ -68,7 +68,11 @@ export function SitePlatformUsageView({ usage }: { usage: SitePlatformUsage }) {
         ? `${formatCredits(usage.shadowMicros)} would have been charged this month`
         : null;
   return (
-    <Section title="Site platform" description={MODE_DESCRIPTION[usage.billingMode]}>
+    <Section
+      title="Platform activity"
+      headingLevel={3}
+      description={MODE_DESCRIPTION[usage.billingMode]}
+    >
       <div className="flex min-w-0 flex-col gap-4 py-1">
         {usage.brake.engaged ? (
           <Notice tone="failed" title="Sites are paused">
