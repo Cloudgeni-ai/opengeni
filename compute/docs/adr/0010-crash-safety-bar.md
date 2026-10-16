@@ -16,7 +16,8 @@ What each failure may cost:
 | --- | --- |
 | Agent crash or upgrade | nothing; running sandboxes keep running |
 | A VM process (or its pager) dies | with a valid saved memory image, the sandbox wakes from it; without one (running, or paused but not yet saved), it boots fresh from its disk: programs lost, data the guest wrote to its disk kept |
-| VMM or processor changes under a saved image (an upgrade, a move to another host) | nothing while the host keeps the Firecracker binary that made the image ([6](0006-memory-images-and-disks.md)); otherwise, if the new VMM refuses the image, the sandbox boots fresh from its disk |
+| VMM upgrade under a saved image | nothing while some Firecracker binary the host keeps reads the image's snapshot format (Firecracker reads its own major version up to its own minor one; [6](0006-memory-images-and-disks.md)); once none does, which the host can prove, the sandbox boots fresh from its disk |
+| Processor model changes under a saved image (a move to another kind of host) | not covered: a binary does not carry a processor's capabilities, so the image may be refused; it is then kept, and the sandbox reports why it cannot wake, since the image still wakes on a host like the one that made it |
 | Host lost | what changed since the sandbox's last completed archive |
 | A copy goes bad | nothing, as long as another verified copy exists |
 

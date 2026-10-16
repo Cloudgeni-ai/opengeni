@@ -1,3 +1,4 @@
+use super::runtime::{Format, cpu_model, runtime_of};
 use super::*;
 use crate::spec::Network;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -23,6 +24,79 @@ fn the_runtime_names_the_processor_model() {
     assert_eq!(cpu_model(cpuinfo), "AMD EPYC 9B14");
     assert_eq!(cpu_model("processor : 0\n"), "an unknown processor");
     assert!(runtime_of(Path::new("/nonexistent/firecracker")).is_err());
+}
+
+fn binary(runtime: &str) -> Binary {
+    Binary {
+        path: PathBuf::from("/usr/bin/firecracker"),
+        runtime: runtime.to_owned(),
+        format: Format::of_runtime(runtime),
+    }
+}
+
+/// Firecracker loads snapshots of its own major format version up to its
+/// own minor one, whatever processor the label names.
+#[test]
+fn snapshot_formats_parse_and_read_like_firecracker() {
+    let format = |text| Format::parse(text).unwrap();
+    assert_eq!(format("v8.1.0"), format("8.1.0"));
+    assert_eq!(format("v12.0.3").to_string(), "v12.0.3");
+    for bad in ["", "v8", "v8.1", "v8.1.0.1", "vx.1.0", "8.1.0-rc1"] {
+        assert_eq!(Format::parse(bad), None, "{bad:?}");
+    }
+    assert!(format("v8.2.0").reads(format("v8.1.5")));
+    assert!(format("v8.2.0").reads(format("v8.2.9")));
+    assert!(!format("v8.1.0").reads(format("v8.2.0")));
+    assert!(!format("v12.0.0").reads(format("v8.0.0")));
+    assert_eq!(
+        Format::of_runtime("Firecracker snapshot format v8.0.0 on AMD EPYC 9B14"),
+        Some(format("v8.0.0"))
+    );
+    assert_eq!(
+        Format::of_runtime("Firecracker v1.13.1 on AMD EPYC 9B14"),
+        None
+    );
+    assert_eq!(Format::of_runtime(""), None);
+}
+
+/// Only proof gives an image up: a format every kept binary names and
+/// none reads. Another processor, an unnamed format, or a binary too old
+/// to name its own leaves the question open, and an image goes to the
+/// binary that made it, else to one that reads its format.
+#[test]
+fn an_image_is_unreadable_only_when_no_binary_reads_its_format() {
+    let new = binary("Firecracker snapshot format v12.1.0 on Intel Xeon");
+    let old = binary("Firecracker snapshot format v8.0.0 on Intel Xeon");
+    let legacy = binary("Firecracker v1.13.1 on Intel Xeon");
+    let current = [&new];
+    let both = [&new, &old];
+    let with_legacy = [&new, &legacy];
+
+    assert_eq!(readable(&current, &new.runtime), Readable::Yes);
+    let elsewhere = "Firecracker snapshot format v12.0.0 on AMD EPYC";
+    assert_eq!(readable(&current, elsewhere), Readable::Yes);
+    assert_eq!(
+        chosen(&current, elsewhere).map(|binary| &binary.runtime),
+        Some(&new.runtime)
+    );
+    assert!(matches!(
+        readable(&current, &old.runtime),
+        Readable::No(why) if why.contains("v8.0.0") && why.contains("v12.1.0")
+    ));
+    assert_eq!(readable(&both, &old.runtime), Readable::Yes);
+    assert_eq!(
+        chosen(&both, &old.runtime).map(|binary| &binary.runtime),
+        Some(&old.runtime)
+    );
+    assert_eq!(
+        chosen(&both, "Firecracker snapshot format v8.0.0 on AMD EPYC")
+            .map(|binary| &binary.runtime),
+        Some(&old.runtime)
+    );
+    assert_eq!(readable(&current, &legacy.runtime), Readable::Unknown);
+    assert_eq!(readable(&current, ""), Readable::Unknown);
+    assert_eq!(readable(&with_legacy, &old.runtime), Readable::Unknown);
+    assert_eq!(chosen(&current, &legacy.runtime).map(|_| ()), None);
 }
 
 /// Only a VMM that answered, or died loading, has judged the image; a lost

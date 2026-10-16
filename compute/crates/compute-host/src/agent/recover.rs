@@ -15,7 +15,7 @@ use crate::state::{Change, Disk, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory, Reconnected};
 use crate::store::Store;
 
-use super::holds::{Holds, hold_id};
+use super::holds::{Holds, UNREADABLE, hold_id};
 use super::{HostAgent, HostError, unix_ms_now};
 
 /// A VM found still running after an agent restart, with what it is doing
@@ -92,7 +92,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             };
             if record.removing {
-                self.remove_recorded(&record, None, Vec::new());
+                self.remove_recorded(&record, None, Vec::new(), None);
                 continue;
             }
             recovering.push(record);
@@ -380,52 +380,59 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 slot.vm = Some(live);
             }
         }
-        self.input(Input::Add {
+        // The core plans once it has all of these: a sandbox added alone
+        // could start a step its holds or an unsavable VM rule out, such
+        // as forgetting the memory of one a caller holds awake.
+        let mut inputs = vec![Input::Add {
             sandbox: id.0,
             state,
             policy,
             last_activity,
-        });
+        }];
         if unsavable {
             // It still runs and wakes, but is never saved.
-            self.input(Input::Unsavable { sandbox: id.0 });
+            inputs.push(Input::Unsavable { sandbox: id.0 });
         }
-        self.restore_holds(id);
+        inputs.extend(self.restore_holds(id));
+        self.inputs(inputs);
         Ok(adopted)
     }
 
     /// Takes back the named holds sandbox `id` had, less those that lapsed
-    /// while no agent ran. One that cannot be read is reported and
-    /// dropped: holds only keep a sandbox awake, so losing one costs a
-    /// pause, never data.
-    fn restore_holds(&mut self, id: Id) {
+    /// while no agent ran, and returns them for the core. A holds file
+    /// that cannot be read holds the sandbox awake until released; see
+    /// [`Holds::load`].
+    fn restore_holds(&mut self, id: Id) -> Vec<Input> {
         let Some(slot) = self.slots.get_mut(&id.0) else {
-            return;
+            return Vec::new();
         };
         let now_ms = unix_ms_now();
-        let holds = match Holds::load(slot.paths.holds.clone(), now_ms) {
-            Ok(holds) => holds,
-            Err(error) => {
-                tracing::warn!(%id, %error, "could not read the sandbox's holds; dropping them");
-                return;
-            }
-        };
+        let (holds, error) = Holds::load(slot.paths.holds.clone(), now_ms);
+        if let Some(error) = error {
+            tracing::error!(
+                %id,
+                %error,
+                hold = UNREADABLE,
+                "could not read the sandbox's holds; it stays awake until that hold is released"
+            );
+        }
         let named: Vec<(String, Option<u64>)> = holds
             .named()
             .map(|(name, lapses)| (name.to_owned(), lapses))
             .collect();
         slot.holds = holds;
         let now = self.now();
-        for (name, lapses_ms) in named {
-            self.input(Input::Hold {
+        named
+            .into_iter()
+            .map(|(name, lapses_ms)| Input::Hold {
                 sandbox: id.0,
                 hold: hold_id(&name),
                 until: lapses_ms.map(|at| now + Duration::from_millis(at.saturating_sub(now_ms))),
                 // Nobody waits on it: the sandbox was awake when it was
                 // taken, and wakes only if it has since gone to sleep.
                 priority: Priority::Background,
-            });
-        }
+            })
+            .collect()
     }
 
     /// Where a sandbox whose VM was found still running stands. A paused

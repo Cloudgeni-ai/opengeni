@@ -19,8 +19,8 @@ struct Counting {
     stops: AtomicUsize,
     /// What [`Engine::runtime`] says.
     runtime: String,
-    /// Older runtimes it keeps, as [`Engine::runtimes`] adds them.
-    retained: Vec<String>,
+    /// What [`Engine::reads`] says of any runtime but its own.
+    reads: Option<Readable>,
     /// Whether it refuses every memory image, as a VMM refuses a snapshot
     /// format it no longer reads.
     refuses: AtomicBool,
@@ -45,11 +45,11 @@ impl Engine for Counting {
         &self.runtime
     }
 
-    fn runtimes(&self) -> Vec<&str> {
-        std::iter::once(&self.runtime)
-            .chain(&self.retained)
-            .map(String::as_str)
-            .collect()
+    fn reads(&self, made_under: &str) -> Readable {
+        if made_under == self.runtime && !made_under.is_empty() {
+            return Readable::Yes;
+        }
+        self.reads.clone().unwrap_or(Readable::Unknown)
     }
 
     async fn boot(&self, _: &VmSpec) -> Result<(), EngineError> {
@@ -444,27 +444,32 @@ async fn an_uncertain_eviction_keeps_the_local_copy() {
     assert_eq!(durable.disk, Disk::Remote);
 }
 
-/// A VMM that refuses a sound image made under its own runtime may have
-/// failed for a reason of the host's, so the image is kept for a retry.
-/// One made under a runtime the engine does not keep (an older snapshot
-/// format, another processor) will be refused every time: the sandbox
-/// gives its memory up and wakes from its disk instead of retrying
-/// forever. One whose runtime is kept, or where either runtime is unknown,
-/// proves nothing by a refusal and is kept.
+/// A refusal alone proves nothing about a sound image: the host may have
+/// run short of memory, or the VMM been killed while loading. So an image
+/// is kept for a retry when the engine reads its runtime, made it under
+/// another processor, or cannot tell (an image labelled before runtimes
+/// named their snapshot format, say). Only an image the engine proves no
+/// VMM of its reads is given up, and the sandbox wakes from its disk
+/// instead of retrying forever.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_image_refused_by_another_runtime_is_given_up() {
+async fn only_an_image_no_vmm_here_reads_is_given_up() {
     const NOW: &str = "Firecracker snapshot format v13.0.0 on a new processor";
-    const OLD: &str = "Firecracker snapshot format v12.0.0 on an old processor";
-    for (made_under, runtime, retained, kept) in [
+    const OLD: &str = "Firecracker snapshot format v12.0.0 on a new processor";
+    const ELSEWHERE: &str = "Firecracker snapshot format v13.0.0 on another processor";
+    const LEGACY: &str = "Firecracker v1.13.1 on a new processor";
+    let unreadable = || Some(Readable::No("format v12 is not read here".into()));
+    for (made_under, runtime, reads, kept) in [
         (NOW, NOW, None, true),
-        (OLD, NOW, None, false),
-        (OLD, NOW, Some(OLD), true),
+        (OLD, NOW, unreadable(), false),
+        (OLD, NOW, Some(Readable::Yes), true),
+        (ELSEWHERE, NOW, Some(Readable::Yes), true),
+        (LEGACY, NOW, Some(Readable::Unknown), true),
         (OLD, "", None, true),
     ] {
         let mut sandbox = Sandbox::new().await;
         sandbox.engine = Arc::new(Counting {
             runtime: runtime.to_owned(),
-            retained: retained.into_iter().map(str::to_owned).collect(),
+            reads,
             refuses: AtomicBool::new(true),
             ..Counting::default()
         });

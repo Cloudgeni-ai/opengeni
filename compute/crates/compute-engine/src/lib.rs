@@ -46,6 +46,18 @@ pub enum Found {
     Paused,
 }
 
+/// Whether an engine can load memory images made under some runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Readable {
+    /// One of its VMMs reads them; a refusal was for another reason.
+    Yes,
+    /// None of its VMMs ever will, and this says why. Only proof counts:
+    /// a refusal alone proves nothing.
+    No(String),
+    /// It cannot tell, for instance because a runtime is unnamed.
+    Unknown,
+}
+
 /// What the host needs from a VM program.
 ///
 /// Every method that can fail reports an [`ErrorKind`] saying what the
@@ -76,10 +88,16 @@ pub trait Engine: Send + Sync + 'static {
         self.runtime()
     }
 
-    /// Every runtime whose images this engine restores under the runtime
-    /// that made them: its own, and any older ones it keeps.
-    fn runtimes(&self) -> Vec<&str> {
-        vec![self.runtime()]
+    /// Whether any VMM this engine keeps can load an image made under
+    /// runtime `made_under`, on any processor. A runtime on another
+    /// processor is not a [`Readable::No`]: whether its saved processor
+    /// state fits this one is only known by trying.
+    fn reads(&self, made_under: &str) -> Readable {
+        if made_under == self.runtime() && !made_under.is_empty() {
+            Readable::Yes
+        } else {
+            Readable::Unknown
+        }
     }
 
     /// Boots a fresh VM from its disks.

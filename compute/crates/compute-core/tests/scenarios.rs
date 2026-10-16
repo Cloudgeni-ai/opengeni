@@ -206,6 +206,34 @@ fn a_sandbox_found_on_disk_keeps_its_idle_time() {
     );
 }
 
+/// A sandbox found on disk long past its forget time, together with a hold
+/// taken before the restart, wakes: nothing starts forgetting its memory.
+#[test]
+fn a_found_sandbox_handed_over_with_its_holds_wakes_instead_of_forgetting() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.at(secs(100 * DAY));
+    let mut out = Vec::new();
+    rig.host.handle_all(
+        rig.now,
+        [
+            Input::Add {
+                sandbox: SandboxId(1),
+                state: saved(),
+                policy: recommended(),
+                last_activity: At::from_duration(secs(DAY)),
+            },
+            Input::Hold {
+                sandbox: SandboxId(1),
+                hold: HoldId(1 << 63),
+                until: None,
+                priority: Priority::Background,
+            },
+        ],
+        &mut out,
+    );
+    assert_eq!(only_start(&out).0, Step::Restore, "{out:?}");
+}
+
 #[test]
 fn waking_a_protected_paused_sandbox_resumes_it_and_the_next_idle_period_saves_again() {
     let mut rig = Rig::new(HostPolicy::default());

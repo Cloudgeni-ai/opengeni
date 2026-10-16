@@ -27,9 +27,13 @@ restore depend on every earlier link.
   with the older one. Releases that write the same format count as one
   runtime, so most upgrades keep every image. After an upgrade that changes
   the format, the host keeps the older Firecracker binary for as long as
-  images are kept, and wakes each image under the binary that made it. Only
-  a VMM that answered and refused an image, under a runtime the host no
-  longer keeps, makes the sandbox give the image up.
+  images are kept, and wakes each image under the binary that made it, else
+  under one that reads its format (Firecracker reads its own major version
+  up to its own minor one). A refusal alone proves nothing (the host may
+  have run short of memory), so the sandbox gives an image up only when the
+  VMM refused it and no binary the host keeps reads its format. An image
+  made on another processor model is kept even when refused: it still wakes
+  on a host like the one that made it.
 
 ## Consequences
 

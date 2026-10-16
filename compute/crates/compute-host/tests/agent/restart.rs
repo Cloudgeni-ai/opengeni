@@ -688,6 +688,79 @@ async fn a_pause_records_when_the_sandbox_was_last_used() {
     lab.assert_clean();
 }
 
+/// A restarted agent hands the core a sandbox together with its holds, so
+/// a sandbox whose memory was due to be forgotten while no agent ran, but
+/// which a caller holds awake, wakes with its memory instead of losing it.
+/// A holds file that cannot be read holds it awake the same way, until
+/// that hold is released by name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn holds_taken_back_on_restart_come_before_any_forgetting() {
+    const FORGET_MS: u64 = 60_000;
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let (held, unreadable) = (id(49), id(50));
+    let config = SleepConfig {
+        forget_after_ms: Some(FORGET_MS),
+        ..SAVE_QUICKLY
+    };
+    for sandbox in [held, unreadable] {
+        lab.create(sandbox, config).await;
+        lab.run(sandbox, &["set kept"]).await;
+        lab.wait_level(sandbox, LevelName::Saved).await;
+    }
+    let dirs = [lab.sandbox_dir(held), lab.sandbox_dir(unreadable)];
+    let (root, world) = lab.stop().await;
+    let long_ago = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+        - 2 * FORGET_MS;
+    for dir in &dirs {
+        // Idle past its forget time, as if the agent had been down long.
+        let path = dir.join("sandbox.json");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record["last_used_ms"] = long_ago.into();
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+    // A hold acknowledged just before the agent stopped, its wake not yet
+    // started; and a holds file damaged meanwhile.
+    std::fs::write(dirs[0].join("holds.json"), r#"{"turn":null}"#).unwrap();
+    std::fs::write(dirs[1].join("holds.json"), "not json").unwrap();
+
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    let status = lab.status().await;
+    let forgets = status
+        .steps
+        .iter()
+        .find(|(name, _)| name == "forget")
+        .map(|(_, stats)| stats.started);
+    assert_eq!(
+        forgets,
+        Some(0),
+        "a forget started before the holds were back"
+    );
+    for sandbox in [held, unreadable] {
+        assert_eq!(lab.current(sandbox).await.holds, 1);
+        lab.wait_level(sandbox, LevelName::Running).await;
+        assert_eq!(
+            lab.run(sandbox, &["get"]).await,
+            ["kept"],
+            "its memory was forgotten"
+        );
+    }
+    let release = Request::Release {
+        id: unreadable,
+        generation: None,
+        hold: "holds-file-unreadable".into(),
+    };
+    assert_eq!(lab.client.call(&release).await.unwrap(), Reply::Done);
+    assert_eq!(lab.current(unreadable).await.holds, 0);
+    lab.assert_clean();
+}
+
 /// Creating a sandbox whose directory is already there is refused, and the
 /// directory is left as it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

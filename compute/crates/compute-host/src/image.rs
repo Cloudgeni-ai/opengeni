@@ -114,8 +114,8 @@ pub(crate) struct Meta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filled_hash: Option<String>,
     /// The runtime that made the image ([`compute_engine::Engine::runtime`]),
-    /// if known. A VMM that refuses an image made under another runtime
-    /// will go on refusing it.
+    /// if known. It picks the VMM that restores the image, and proves an
+    /// image unreadable when no VMM the host keeps reads its format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
 }

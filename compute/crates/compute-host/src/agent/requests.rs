@@ -15,20 +15,17 @@ use crate::store::Store;
 use super::holds::{Write, hold_id};
 use super::{Command, Event, HostAgent, HostError, Reply, Waiter, Woke, unix_ms_now};
 
-/// Replies to `reply` once the write in `outcome`, if any, has made a
-/// change durable, or with why the change was refused or could not be kept.
-fn answer_once_written(outcome: Result<Option<Write>, HostError>, reply: Reply<()>) {
+/// Replies to `reply` once the write in `outcome` has made a change
+/// durable, or with why the change was refused or could not be kept.
+fn answer_once_written(outcome: Result<Write, HostError>, reply: Reply<()>) {
     match outcome {
-        Ok(Some(write)) => {
+        Ok(write) => {
             tokio::spawn(async move {
                 let result = write
                     .await
                     .map_err(|error| HostError::Io(format!("keeping the holds failed: {error}")));
                 let _ = reply.send(result);
             });
-        }
-        Ok(None) => {
-            let _ = reply.send(Ok(()));
         }
         Err(error) => {
             let _ = reply.send(Err(error));
@@ -88,8 +85,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             } => {
                 let outcome = self
                     .check(id, generation)
-                    .and_then(|()| self.hold(id, name, ttl, priority))
-                    .map(Some);
+                    .and_then(|()| self.hold(id, name, ttl, priority));
                 answer_once_written(outcome, reply);
             }
             Command::Unhold {
@@ -143,7 +139,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
             self.blocked.remove(&id.0);
-            self.remove_recorded(&record, None, vec![reply]);
+            self.remove_recorded(&record, None, vec![reply], None);
             return;
         }
         if let Err(error) = self.check(id, generation) {
@@ -181,15 +177,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Ends named hold `name`, returning the write that makes its end
-    /// durable if it was held.
-    pub(super) fn unhold(&mut self, id: Id, name: &str) -> Result<Option<Write>, HostError> {
+    /// durable. If it was already gone, an earlier release may still be
+    /// on its way to disk, or have failed to get there: the write then
+    /// resolves once that release is kept.
+    pub(super) fn unhold(&mut self, id: Id, name: &str) -> Result<Write, HostError> {
         let Some(slot) = self.slots.get_mut(&id.0) else {
             return Err(HostError::NotFound(id));
         };
-        let write = slot
-            .holds
-            .remove(name)
-            .then(|| slot.holds.write(unix_ms_now()));
+        let write = if slot.holds.remove(name) {
+            slot.holds.write(unix_ms_now())
+        } else {
+            slot.holds.flush()
+        };
         self.input(Input::Release {
             sandbox: id.0,
             hold: hold_id(name),

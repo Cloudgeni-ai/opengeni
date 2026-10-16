@@ -18,6 +18,7 @@ use crate::state::{Change, Fence, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::Store;
 
+use super::holds::Closing;
 use super::{Event, HostAgent, HostError, Reply, Running, TEARDOWN_RETRY, Woke};
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
@@ -416,7 +417,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         let removers = std::mem::take(&mut slot.removers);
         if let Some(record) = self.records.get(id) {
-            self.remove_recorded(&record, live.map(|live| (live.vm, live.memory)), removers);
+            let closing = slot.holds.close();
+            self.remove_recorded(
+                &record,
+                live.map(|live| (live.vm, live.memory)),
+                removers,
+                Some(closing),
+            );
         } else {
             tracing::error!(%id, "removing a sandbox without a record");
             for remover in removers {
@@ -425,13 +432,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    /// Deletes a recorded sandbox in the background. Its ordinal and id
-    /// stay taken until nothing of it is left.
+    /// Deletes a recorded sandbox in the background, once `holds` has
+    /// closed its holds writer if it had one. Its ordinal and id stay taken
+    /// until nothing of it is left.
     pub(super) fn remove_recorded(
         &mut self,
         record: &Record,
         vm: Option<(E::Vm, LiveMemory)>,
         removers: Vec<Reply<()>>,
+        holds: Option<Closing>,
     ) {
         let id = record.id;
         self.destroying.insert(id.0, removers);
@@ -444,6 +453,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         let (ordinal, fence) = (record.ordinal, record.fence());
         tokio::spawn(async move {
+            if let Some(closing) = holds {
+                closing.await;
+            }
             let removal = Removal {
                 engine: &*engine,
                 store: &*store,

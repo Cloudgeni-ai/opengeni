@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use compute_core::{Failure, Outcome, Step};
 use compute_engine::{
     CancellationToken, Completion, Engine, EngineError, ErrorKind, MemoryProfile, MemorySource,
-    RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
+    Readable, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -783,15 +783,15 @@ impl<E: Engine, S: Store> Job<E, S> {
 
     /// Decides what the VMM refusing to load `image` means. The image is
     /// given up only when it is proven bad: a local image that fails the
-    /// deep check goes to quarantine, and a remote image whose store copy
-    /// is bad or gone is dropped. An image recorded as made under a runtime
-    /// the engine no longer keeps (an older snapshot format, another
-    /// processor model) is given up too: the engine will go on refusing
-    /// it, so the sandbox wakes from its disk instead of retrying forever.
-    /// That needs both runtimes known; an unknown one proves nothing.
-    /// Otherwise the refusal was the host's (a pager that could not start
-    /// or could not reach the store, say) and the image is kept for a
-    /// retry.
+    /// deep check goes to quarantine, a remote image whose store copy is
+    /// bad or gone is dropped, and an image in a snapshot format no VMM the
+    /// engine keeps can read is given up, since none ever will. Otherwise
+    /// the refusal may have been the host's (memory short, a pager that
+    /// could not start or reach the store, a VMM killed while loading) and
+    /// the image is kept for a retry. That includes an image made on
+    /// another processor model: whether its saved processor state fits
+    /// this one is unproven, and the image still wakes on a host like the
+    /// one that made it.
     async fn rejected(
         &mut self,
         images: &Images,
@@ -802,23 +802,32 @@ impl<E: Engine, S: Store> Job<E, S> {
         const OP: &str = "restore";
         tracing::warn!(id = %self.id, %error, "the VMM refused the memory image");
         let made_under = image.meta().runtime.as_deref().unwrap_or("");
-        let runtimes = self.engine.runtimes();
-        let known = !made_under.is_empty() && runtimes.iter().all(|runtime| !runtime.is_empty());
-        if known && !runtimes.contains(&made_under) {
-            tracing::warn!(
-                id = %self.id,
-                made_under,
-                runtime = self.engine.runtime(),
-                "the refused image was made under another runtime; waking from the disk"
-            );
-            if let Err(error) = self.commit(Change::new().image(false)).await {
-                return state_failure(&error);
+        match self.engine.reads(made_under) {
+            Readable::No(why) => {
+                tracing::warn!(
+                    id = %self.id,
+                    made_under,
+                    why,
+                    "no VMM here reads the refused image; waking from the disk"
+                );
+                if let Err(error) = self.commit(Change::new().image(false)).await {
+                    return state_failure(&error);
+                }
+                return failure(&EngineError::new(
+                    ErrorKind::MemoryLost,
+                    OP,
+                    format!("the memory image cannot be read here: {why}; {error}"),
+                ));
             }
-            return failure(&EngineError::new(
-                ErrorKind::MemoryLost,
-                OP,
-                format!("made under another runtime ({made_under:?}): {error}"),
-            ));
+            Readable::Yes | Readable::Unknown if made_under != self.engine.runtime() => {
+                tracing::warn!(
+                    id = %self.id,
+                    made_under,
+                    runtime = self.engine.runtime(),
+                    "the refused image was made under another runtime"
+                );
+            }
+            Readable::Yes | Readable::Unknown => {}
         }
         if image.meta().remote {
             #[cfg(target_os = "linux")]
