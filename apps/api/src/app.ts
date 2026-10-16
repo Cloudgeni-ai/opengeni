@@ -2200,8 +2200,20 @@ export function createAppComposition(deps: AppDependencies): {
   const interactionSecrets = createVaultInteractionSecretsPort({
     db: routeDeps.db,
     encryptionKey: environmentsEncryptionKeyBytes(routeDeps.settings) ?? null,
-    providersFor: (workspaceId, subjectId) =>
-      vaultProviderRegistryFor(routeDeps, { workspaceId, subjectId }),
+    providersFor: (workspaceId, subjectId, principal) =>
+      vaultProviderRegistryFor(routeDeps, {
+        workspaceId,
+        subjectId,
+        ...(principal
+          ? {
+              executionContext: {
+                sessionId: principal.sessionId,
+                turnId: principal.turnId,
+                attemptId: principal.attemptId,
+              },
+            }
+          : {}),
+      }),
   });
   registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
   registerComputerSessionRoutes(app, routeDeps, { interactionSecrets });

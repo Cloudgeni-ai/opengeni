@@ -12,6 +12,7 @@ import type {
 import type { Database, SessionWorkflowWakeDeliveryResult } from "@opengeni/db";
 import type { VaultConnectionCredentialsPort } from "@opengeni/vaults";
 import type { OnePasswordVaultProviderFactory } from "./domain/vaults/provider-registry";
+import type { ExternalVaultProviderFactories } from "./domain/vaults/external-provider-connections";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -214,6 +215,8 @@ export type AppDependencies = {
    * 1Password vaults report `provider_unavailable`.
    */
   onePasswordVaultProvider?: OnePasswordVaultProviderFactory | null;
+  /** Lazy native/remote vault adapters; null disables the first-wave integrations. */
+  externalVaultProviders?: ExternalVaultProviderFactories | null;
   /**
    * Optional embedding-host session ACL. Unset preserves standalone workspace
    * authorization; once bound, every session-addressed surface fails closed on

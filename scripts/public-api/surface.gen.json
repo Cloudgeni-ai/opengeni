@@ -1710,7 +1710,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -1718,6 +1721,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -1733,7 +1737,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -1741,6 +1748,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary",
         "Workspace"
       ]
@@ -1758,7 +1766,10 @@
       ],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -1766,6 +1777,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary",
         "Workspace"
       ]
@@ -3557,7 +3569,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -3565,6 +3580,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -3577,7 +3593,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -3585,6 +3604,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -3658,7 +3678,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -3666,6 +3689,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -3678,7 +3702,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -3686,6 +3713,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -3722,7 +3750,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -3730,6 +3761,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -3742,7 +3774,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -3750,6 +3785,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -3894,7 +3930,10 @@
         "ConnectionMetadata",
         "ConnectionResponse",
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -3902,6 +3941,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -8055,7 +8095,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -8063,6 +8106,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -8253,7 +8297,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -8261,6 +8308,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -9038,14 +9086,18 @@
     },
     {
       "method": "GET",
-      "path": "/v1/workspaces/:workspaceId/vaults",
+      "path": "/v1/workspaces/:workspaceId/vault-providers/connections",
       "sdk": [
+        "createSessionProxyHandler",
         "vaultsApi"
       ],
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -9053,6 +9105,128 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
+        "VaultSummary"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/vault-providers/connections",
+      "sdk": [
+        "createSessionProxyHandler",
+        "vaultsApi"
+      ],
+      "request": [],
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
+        "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultProviderConnectionSummary",
+        "VaultSummary"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/workspaces/:workspaceId/vault-providers/connections/:connectionId",
+      "sdk": [
+        "vaultsApi"
+      ],
+      "request": [],
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
+        "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultProviderConnectionSummary",
+        "VaultSummary"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/vault-providers/connections/:connectionId/credentials",
+      "sdk": [
+        "vaultsApi"
+      ],
+      "request": [],
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
+        "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultProviderConnectionSummary",
+        "VaultSummary"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/vault-providers/connections/:connectionId/verify",
+      "sdk": [
+        "vaultsApi"
+      ],
+      "request": [],
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
+        "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultProviderConnectionSummary",
+        "VaultSummary"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/vaults",
+      "sdk": [
+        "vaultsApi"
+      ],
+      "request": [],
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
+        "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -9065,7 +9239,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -9073,6 +9250,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -9085,7 +9263,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -9093,6 +9274,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -9106,7 +9288,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -9114,6 +9299,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -9127,7 +9313,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -9135,6 +9324,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -9148,7 +9338,10 @@
       "request": [],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -9156,6 +9349,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -9334,8 +9528,11 @@
       ],
       "response": [
         "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
         "EnsureWorkspaceResponse",
         "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
         "OnePasswordConnectionSummary",
         "ProviderVaultMeta",
         "RevealVaultFieldResponse",
@@ -9343,6 +9540,7 @@
         "VaultFieldVersionMeta",
         "VaultItem",
         "VaultItemSummary",
+        "VaultProviderConnectionSummary",
         "VaultSummary"
       ]
     },
@@ -9351,13 +9549,28 @@
       "path": "/v1/workspaces/external/:source/:externalId/session-imports",
       "sdk": [
         "OpenGeniClient.connectTransport",
-        "importExternalWorkspaceArchivedSession"
+        "importExternalWorkspaceArchivedSession",
+        "vaultsApi"
       ],
       "request": [
         "ImportArchivedSessionRequest"
       ],
       "response": [
-        "ImportArchivedSessionResponse"
+        "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
+        "ImportArchivedSessionResponse",
+        "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultProviderConnectionSummary",
+        "VaultSummary"
       ]
     },
     {
@@ -9386,19 +9599,75 @@
       "method": "GET",
       "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
       "sdk": [
-        "OpenGeniClient.connectTransport"
+        "OpenGeniClient.connectTransport",
+        "vaultsApi"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
+        "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultProviderConnectionSummary",
+        "VaultSummary"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/allowance",
+      "sdk": [
+        "vaultsApi"
+      ],
+      "request": [],
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
+        "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultProviderConnectionSummary",
+        "VaultSummary"
+      ]
     },
     {
       "method": "GET",
       "path": "/v1/workspaces/external/:workspaceSource/:workspaceExternalId/usage",
       "sdk": [
-        "OpenGeniClient.connectTransport"
+        "OpenGeniClient.connectTransport",
+        "vaultsApi"
       ],
       "request": [],
-      "response": []
+      "response": [
+        "DisconnectOnePasswordResponse",
+        "DisconnectVaultProviderResponse",
+        "InstallOnePasswordResponse",
+        "InstallVaultProviderResponse",
+        "ListVaultProviderConnectionsResponse",
+        "OnePasswordConnectionSummary",
+        "ProviderVaultMeta",
+        "RevealVaultFieldResponse",
+        "SessionSecretsView",
+        "VaultFieldVersionMeta",
+        "VaultItem",
+        "VaultItemSummary",
+        "VaultProviderConnectionSummary",
+        "VaultSummary"
+      ]
     }
   ],
   "ingress": [
@@ -14714,6 +14983,16 @@
         "$.unlinkedVaultIds[]": "string"
       }
     },
+    "DisconnectVaultProviderResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.unlinkedVaultIds": "array!",
+        "$.unlinkedVaultIds[]": "string"
+      }
+    },
     "DiscoverMcpCapabilitiesResponse": {
       "io": [
         "output"
@@ -15203,6 +15482,14 @@
         "$": "object",
         "$.externalId": "string!",
         "$.source": "string?"
+      }
+    },
+    "ExternalVaultProviderKind": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"bitwarden\\\"\",\"\\\"external\\\"\",\"\\\"keeper\\\"\",\"\\\"protonpass\\\"\"]"
       }
     },
     "Feedback": {
@@ -17363,6 +17650,22 @@
         "$.url": "string!"
       }
     },
+    "InstallVaultProviderResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountName": "string! null",
+        "$.connectionId": "string!",
+        "$.discoveryPending": "boolean?",
+        "$.errorCode": "string?",
+        "$.operations": "ref(VaultProviderOperations)!",
+        "$.provider": "ref(ExternalVaultProviderKind)!",
+        "$.vaults": "array!",
+        "$.vaults[]": "ref(ProviderVaultMeta)"
+      }
+    },
     "InstalledApiIntegration": {
       "io": [
         "output"
@@ -18636,6 +18939,18 @@
         "$.authorities[]": "ref(UserResourceAuthoritySummary)",
         "$.nextCursor": "string! null",
         "$.scope": "const!=[\"\\\"user\\\"\"]"
+      }
+    },
+    "ListVaultProviderConnectionsResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.connections": "array!",
+        "$.connections[]": "ref(VaultProviderConnectionSummary)",
+        "$.providers": "array?",
+        "$.providers[]": "ref(VaultProviderAvailability)"
       }
     },
     "ListWorkspaceMemberCandidatesResponse": {
@@ -21720,7 +22035,9 @@
         "$.externalVaultId": "string!",
         "$.itemCount": "integer! null",
         "$.linkedVaultId": "string! null",
-        "$.name": "string!"
+        "$.name": "string!",
+        "$.operations": "ref(VaultProviderOperations)?",
+        "$.writeAccess": "enum?=[\"\\\"read_only\\\"\",\"\\\"read_write\\\"\",\"\\\"unknown\\\"\"]"
       }
     },
     "PtyCloseRequest": {
@@ -24309,6 +24626,7 @@
         "$.reachableVaults[].canWrite": "boolean!",
         "$.reachableVaults[].createdAt": "string!",
         "$.reachableVaults[].description": "string! null",
+        "$.reachableVaults[].freshness": "ref(VaultProviderFreshness)?",
         "$.reachableVaults[].generation": "integer!",
         "$.reachableVaults[].id": "string!",
         "$.reachableVaults[].isDefault": "boolean!",
@@ -24319,6 +24637,7 @@
         "$.reachableVaults[].ownerKind": "ref(VaultOwnerKind)!",
         "$.reachableVaults[].ownerLabel": "string!",
         "$.reachableVaults[].providerConnectionId": "string! null",
+        "$.reachableVaults[].providerOperations": "ref(VaultProviderOperations)?",
         "$.reachableVaults[].rateLimitedUntil": "string! null",
         "$.reachableVaults[].rootSessionId": "string! null",
         "$.reachableVaults[].selectable": "boolean!",
@@ -27848,12 +28167,80 @@
         "$|mode=selected.vaultIds[]": "string"
       }
     },
+    "VaultProviderAvailability": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.available": "boolean!",
+        "$.provider": "enum!=[\"\\\"bitwarden\\\"\",\"\\\"external\\\"\",\"\\\"keeper\\\"\",\"\\\"onepassword\\\"\",\"\\\"protonpass\\\"\"]",
+        "$.reason": "enum! null=[\"\\\"not_enabled\\\"\"]"
+      }
+    },
+    "VaultProviderConnectionSummary": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountName": "string! null",
+        "$.available": "boolean!",
+        "$.canManage": "boolean!",
+        "$.createdAt": "string!",
+        "$.createdBySubjectId": "string! null",
+        "$.id": "string!",
+        "$.label": "string! null",
+        "$.operations": "ref(VaultProviderOperations)!",
+        "$.ownership": "ref(GoogleDriveTargetScope)!",
+        "$.planTier": "enum?=[\"\\\"business\\\"\",\"\\\"family\\\"\",\"\\\"teams\\\"\"]",
+        "$.provider": "enum!=[\"\\\"bitwarden\\\"\",\"\\\"external\\\"\",\"\\\"keeper\\\"\",\"\\\"onepassword\\\"\",\"\\\"protonpass\\\"\"]",
+        "$.verificationStatus": "enum?=[\"\\\"pending\\\"\",\"\\\"ready\\\"\"]",
+        "$.verifiedAt": "string!"
+      }
+    },
+    "VaultProviderFreshness": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.errorCode": "string! null",
+        "$.lastCheckedAt": "string! null",
+        "$.retryAt": "string! null",
+        "$.source": "enum!=[\"\\\"cache\\\"\",\"\\\"live\\\"\",\"\\\"unknown\\\"\"]",
+        "$.sourceSyncedAt": "string! null",
+        "$.state": "enum!=[\"\\\"current\\\"\",\"\\\"refreshing\\\"\",\"\\\"stale\\\"\",\"\\\"unavailable\\\"\"]"
+      }
+    },
+    "VaultProviderOperations": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.archiveItem": "boolean!",
+        "$.archiveKind": "enum!=[\"\\\"archive\\\"\",\"\\\"none\\\"\",\"\\\"trash\\\"\"]",
+        "$.createItemTypes": "array!",
+        "$.createItemTypes[]": "ref(VaultItemType)",
+        "$.createTotp": "boolean!",
+        "$.createVault": "boolean!",
+        "$.deleteItem": "const!=[\"false\"]",
+        "$.readFiles": "boolean!",
+        "$.removeField": "boolean!",
+        "$.restoreFieldHistory": "boolean!",
+        "$.restoreItem": "boolean!",
+        "$.updateItem": "boolean!",
+        "$.updateTotp": "boolean!",
+        "$.writeFiles": "boolean!"
+      }
+    },
     "VaultSource": {
       "io": [
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"host\\\"\",\"\\\"onepassword\\\"\",\"\\\"opengeni\\\"\"]"
+        "$": "enum=[\"\\\"bitwarden\\\"\",\"\\\"external\\\"\",\"\\\"host\\\"\",\"\\\"keeper\\\"\",\"\\\"onepassword\\\"\",\"\\\"opengeni\\\"\",\"\\\"protonpass\\\"\"]"
       }
     },
     "VaultSummary": {
@@ -27867,6 +28254,7 @@
         "$.canWrite": "boolean!",
         "$.createdAt": "string!",
         "$.description": "string! null",
+        "$.freshness": "ref(VaultProviderFreshness)?",
         "$.generation": "integer!",
         "$.id": "string!",
         "$.isDefault": "boolean!",
@@ -27877,6 +28265,7 @@
         "$.ownerKind": "ref(VaultOwnerKind)!",
         "$.ownerLabel": "string!",
         "$.providerConnectionId": "string! null",
+        "$.providerOperations": "ref(VaultProviderOperations)?",
         "$.rateLimitedUntil": "string! null",
         "$.rootSessionId": "string! null",
         "$.source": "ref(VaultSource)!",
@@ -30155,6 +30544,7 @@
       "DeviceEnrollmentLookupResponse": "type",
       "DisableOrganizationRecoveryPolicyRequest": "type",
       "DisconnectOnePasswordResponse": "type",
+      "DisconnectVaultProviderResponse": "type",
       "DiscoverMcpCapabilitiesResponse": "type",
       "Document": "type",
       "DocumentAuthorityKind": "type",
@@ -30202,6 +30592,7 @@
       "ExternalIdentityLink": "type",
       "ExternalIdentityLinkPage": "type",
       "ExternalIdentityLinkPreview": "type",
+      "ExternalVaultProviderKind": "type",
       "Feedback": "type",
       "FeedbackSentiment": "type",
       "FeedbackSubmissionResponse": "type",
@@ -30367,6 +30758,8 @@
       "InstallOnePasswordResponse": "type",
       "InstallPluginRequest": "type",
       "InstallSkillRequest": "type",
+      "InstallVaultProviderRequest": "type",
+      "InstallVaultProviderResponse": "type",
       "IntegrationClientMetadata": "type",
       "IntegrationDefinitionSummary": "type",
       "IntegrationEndpointTestResult": "type",
@@ -30484,6 +30877,7 @@
       "ListUserResourceAuthoritiesOptions": "type",
       "ListUserResourceAuthoritiesResponse": "type",
       "ListVaultItemsQuery": "type",
+      "ListVaultProviderConnectionsResponse": "type",
       "ListWorkspaceMemberCandidatesResponse": "type",
       "ListWorkspaceMembersResponse": "type",
       "ListWorkspaceWebhookDeliveriesResponse": "type",
@@ -30841,6 +31235,7 @@
       "ReorderChannelsRequest": "type",
       "ReplaceOnePasswordTokenRequest": "type",
       "ReplacePersonalGitHubRepositorySelectionsRequest": "type",
+      "ReplaceVaultProviderCredentialsRequest": "type",
       "ReportAuthRunRequest": "type",
       "RepositoryResourceRef": "type",
       "ResolvedAgentCapabilities": "type",
@@ -31353,6 +31748,11 @@
       "VaultMode": "type",
       "VaultOwnerKind": "type",
       "VaultPolicy": "type",
+      "VaultProviderAvailability": "type",
+      "VaultProviderConnectionSummary": "type",
+      "VaultProviderCredentials": "type",
+      "VaultProviderFreshness": "type",
+      "VaultProviderOperations": "type",
       "vaultsApi": "value",
       "VaultsApi": "type",
       "VaultSource": "type",
@@ -31929,6 +32329,48 @@
       "toExpressMiddleware": "value",
       "toNodeMiddleware": "value",
       "WebHandler": "type"
+    },
+    "@opengeni/sdk/external-vault-receiver": {
+      "createExternalVaultReceiver": "value",
+      "createInMemoryExternalVaultReceiverStore": "value",
+      "ExternalVaultAuthorizeInput": "type",
+      "ExternalVaultCallContext": "type",
+      "ExternalVaultHandlerOutput": "type",
+      "ExternalVaultInventoryContext": "type",
+      "ExternalVaultMutationClaim": "type",
+      "externalVaultMutationDigest": "value",
+      "ExternalVaultReceiver": "type",
+      "ExternalVaultReceiverConnection": "type",
+      "ExternalVaultReceiverError": "value",
+      "ExternalVaultReceiverHandlers": "type",
+      "ExternalVaultReceiverHttpRequest": "type",
+      "ExternalVaultReceiverHttpResponse": "type",
+      "ExternalVaultReceiverOptions": "type",
+      "ExternalVaultReceiverStore": "type",
+      "safeExternalVaultName": "value",
+      "uniqueExternalVaultFieldName": "value",
+      "VAULT_PROVIDER_WIRE_ERROR_CODES": "value",
+      "VAULT_PROVIDER_WIRE_LIMITS": "value",
+      "VAULT_PROVIDER_WIRE_RESPONSE_SIGNATURE_HEADER": "value",
+      "VAULT_PROVIDER_WIRE_VERSION": "value",
+      "VaultProviderWireAuthority": "type",
+      "VaultProviderWireDescribeResult": "type",
+      "VaultProviderWireErrorCode": "type",
+      "VaultProviderWireFieldMeta": "type",
+      "VaultProviderWireFieldValue": "type",
+      "VaultProviderWireFreshness": "type",
+      "VaultProviderWireItemMeta": "type",
+      "VaultProviderWireOperation": "type",
+      "VaultProviderWireOperationName": "type",
+      "VaultProviderWirePage": "type",
+      "VaultProviderWireProvider": "type",
+      "VaultProviderWireRequest": "type",
+      "VaultProviderWireResponse": "type",
+      "vaultProviderWireResponseKey": "value",
+      "VaultProviderWireResult": "type",
+      "VaultProviderWireVault": "type",
+      "VaultProviderWireWriteField": "type",
+      "VaultProviderWireWriteItem": "type"
     },
     "@opengeni/sdk/gateway-realtime-transport": {
       "createGatewayRealtimeTransportStarter": "value",
@@ -34769,6 +35211,11 @@
       "code",
       "outcomeUnknown",
       "retryable"
+    ],
+    "ExternalVaultReceiverError": [
+      "code",
+      "freshness",
+      "retryAfterMs"
     ],
     "IndexedDbEditableArtifactStorage": [
       "appendCommitted",
@@ -48827,6 +49274,17 @@
       ],
       "saveReplica": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditableArtifactStorageScope\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditableArtifactStoredReplica\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"EditableArtifactExpectedStoredHead\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ]
+    },
+    "@opengeni/sdk/external-vault-receiver:ExternalVaultReceiverError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"VaultProviderWireErrorCode\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "freshness": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"VaultProviderWireFreshness\",\"optional\":false,\"type\":\"Identifier\"}}]}}"
+      ],
+      "retryAfterMs": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSNumberKeyword\"}]}}"
       ]
     },
     "@opengeni/sdk/interaction:AttachedBrowserDeviceCollection": {

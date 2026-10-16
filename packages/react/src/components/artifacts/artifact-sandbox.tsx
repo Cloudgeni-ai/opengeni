@@ -73,6 +73,7 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
       ref={frameRef}
       open
       aria-label={props.title}
+      data-artifact-fullscreen={focused || undefined}
       onCancel={(event) => {
         event.preventDefault();
         setFocused(false);
@@ -85,7 +86,10 @@ export function ArtifactSandbox(props: ArtifactSandboxProps) {
           "fixed inset-0 z-50 flex h-dvh w-dvw flex-col rounded-none border-0 bg-surface shadow-none",
       )}
     >
-      <div className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/95 px-3 sm:px-4">
+      <div
+        data-window-drag={focused || undefined}
+        className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/95 px-3 sm:px-4"
+      >
         <div className="flex min-w-0 items-center gap-2.5">
           {focused ? (
             <ArtifactButton

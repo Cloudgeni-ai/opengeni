@@ -1669,6 +1669,13 @@ keeps three amounts separate for every authoritative model call:
 - Opengeni credit price is the actual credits-path price and remains zero for
   externally billed calls.
 
+`OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE` optionally replaces the margin for every
+provider-rate model credit calculation, including explicit
+`OPENGENI_MODEL_PRICING_JSON` and registry rates that declare their own
+`marginBps`. Those rates remain provider costs, not fixed customer tariffs.
+Unset preserves existing per-price behavior; direct fixed credit prices are
+not margin-derived and are unchanged.
+
 GPT-5.6 Sol uses OpenAI's current promotional list price ($4 input, $0.40
 cached input, $5 cache write, and $20 output per million tokens), guaranteed
 through at least 2026-11-21. Its >272K-input tier applies OpenAI's 2x input and

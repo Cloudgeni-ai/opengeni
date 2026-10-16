@@ -20,6 +20,8 @@ import {
   configuredAllowedReasoningEfforts,
   environmentsEncryptionKeyBytes,
   getSettings,
+  calculateVoiceInputCost,
+  defaultVoiceInputPricing,
   parseStaticEntitlementsJson,
   parseStaticUsageLimitsJson,
   parseMcpServers,
@@ -115,6 +117,52 @@ describe("optional resource credits and verified signup trial", () => {
         getSettings(),
       ),
     ).toThrow("paid rates must be safe integers");
+  });
+});
+
+describe("deployment credit margin override", () => {
+  test("is unset by default and accepts the inclusive basis-point range", () => {
+    expect(withEnv({}, () => getSettings()).creditMarginBpsOverride).toBeUndefined();
+    expect(
+      withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "0" }, () => getSettings())
+        .creditMarginBpsOverride,
+    ).toBe(0);
+    expect(
+      withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "10000" }, () => getSettings())
+        .creditMarginBpsOverride,
+    ).toBe(10_000);
+  });
+
+  test("rejects non-integer and out-of-range margins", () => {
+    for (const value of ["-1", "10001", "1.5", "not-a-number"]) {
+      expect(() =>
+        withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: value }, () => getSettings()),
+      ).toThrow();
+    }
+  });
+
+  test("overrides transcription list margins while preserving provider cost", () => {
+    const pricing = defaultVoiceInputPricing["gpt-transcribe"]!;
+    const usage = { kind: "duration" as const, seconds: 60 };
+    const unset = withEnv({}, () => getSettings());
+    const zero = withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "0" }, () => getSettings());
+    const nonDefault = withEnv({ OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "1000" }, () =>
+      getSettings(),
+    );
+
+    expect(calculateVoiceInputCost(pricing, usage)).toEqual({
+      providerCostMicros: 4_500,
+      creditCostMicros: 4_725,
+    });
+    expect(calculateVoiceInputCost(pricing, usage, zero.creditMarginBpsOverride)).toEqual({
+      providerCostMicros: 4_500,
+      creditCostMicros: 4_500,
+    });
+    expect(calculateVoiceInputCost(pricing, usage, nonDefault.creditMarginBpsOverride)).toEqual({
+      providerCostMicros: 4_500,
+      creditCostMicros: 4_950,
+    });
+    expect(unset.creditMarginBpsOverride).toBeUndefined();
   });
 });
 

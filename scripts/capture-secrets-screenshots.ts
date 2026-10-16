@@ -91,7 +91,29 @@ const ROLE_EMAIL: Record<string, string> = {
 const seedCredentials = readEnvFile(join(LS, "seed-credentials"));
 const states = new Map<string, string>();
 
+// One sign-in at a time, retried with backoff: the stack rate-limits bursts of sign-ins.
+let signInChain: Promise<unknown> = Promise.resolve();
+
 async function storageStateFor(browser: Browser, user: string): Promise<string> {
+  const cached = states.get(user);
+  if (cached) return cached;
+  const run = signInChain.then(async () => {
+    let failure: unknown;
+    for (const delay of [0, 20_000, 45_000]) {
+      if (delay) await new Promise((done) => setTimeout(done, delay));
+      try {
+        return await signIn(browser, user);
+      } catch (error) {
+        failure = error;
+      }
+    }
+    throw failure;
+  });
+  signInChain = run.catch(() => undefined);
+  return run;
+}
+
+async function signIn(browser: Browser, user: string): Promise<string> {
   const cached = states.get(user);
   if (cached) return cached;
   const harnessState = flags.stack ? join(LS, "run", `auth-${flags.stack}-${user}.json`) : "";
@@ -108,14 +130,17 @@ async function storageStateFor(browser: Browser, user: string): Promise<string> 
   const path = join(OUT, ".auth", `${user.replace(/[^a-z0-9]/giu, "_")}.json`);
   mkdirSync(join(OUT, ".auth"), { recursive: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-  const page = await context.newPage();
-  await page.goto(WEB);
-  await page.locator("input[type=email]").first().fill(email);
-  await page.locator("input[type=password]").first().fill(password);
-  await page.locator("button[type=submit]").first().click();
-  await page.waitForURL(/\/workspaces\//u, { timeout: 30_000 });
-  await context.storageState({ path });
-  await context.close();
+  try {
+    const page = await context.newPage();
+    await page.goto(WEB);
+    await page.locator("input[type=email]").first().fill(email);
+    await page.locator("input[type=password]").first().fill(password);
+    await page.locator("button[type=submit]").first().click();
+    await page.waitForURL(/\/workspaces\//u, { timeout: 30_000 });
+    await context.storageState({ path });
+  } finally {
+    await context.close();
+  }
   states.set(user, path);
   return path;
 }
@@ -132,6 +157,8 @@ type Ids = {
   sessions: Record<string, string>;
   schedules: Record<string, string>;
   variableSets: Record<string, string>;
+  /** Mock connections by provider (1Password: the workspace one). */
+  connections: Record<string, string>;
 };
 
 // Mock roles: the in-page mock decides what each person may do.
@@ -237,6 +264,11 @@ async function resolveIds(browser: Browser): Promise<Ids> {
         { vault: row.vaultId, item: row.id },
       ]),
     ),
+    connections: Object.fromEntries(
+      [...mock.connections]
+        .reverse()
+        .map((row: { id: string; provider: string }) => [row.provider, row.id]),
+    ),
     // The panel's data is mocked per session, so any real session hosts it.
     sessions: anySession
       ? {
@@ -331,6 +363,873 @@ function s(
 ): CaptureState {
   return { screen, state, description, requires: "vaults", path, ...extra };
 }
+
+// --- other password managers (S17-S24, external vaults first wave) ---------------
+
+/** A row of a list (rows are buttons named by their title). */
+const openRow = (name: RegExp) => async (page: Page) => {
+  await page.getByRole("button", { name }).first().click();
+  await page.waitForTimeout(600);
+};
+const connection = (ids: Ids, provider: string, view?: string) =>
+  ids.connections?.[provider]
+    ? secrets(ids, `?connection=${ids.connections[provider]}${view ? `&view=${view}` : ""}`)
+    : null;
+const connectPage = (provider: string) => (ids: Ids) => secrets(ids, `?view=connect-${provider}`);
+/** Fills a credential field by its form name: secret, endpoint or label. */
+const fill = (name: "secret" | "endpoint" | "label", value: string) => async (page: Page) => {
+  await page.locator(`input[name="${name}"]`).first().fill(value);
+};
+/** Sets one chooser row's access: "Read-only" or "Read & write". */
+const access = (vaultName: string, mode: RegExp) => async (page: Page) => {
+  await page
+    .getByRole("combobox", { name: `Access to ${vaultName}` })
+    .or(page.getByRole("button", { name: `Access to ${vaultName}` }))
+    .first()
+    .click();
+  await page.getByRole("option", { name: mode }).first().click();
+  await page.waitForTimeout(300);
+};
+const submit = (name: RegExp) => async (page: Page) => {
+  await page.getByRole("button", { name }).last().click();
+  await page.waitForTimeout(900);
+};
+const steps =
+  (...each: ((page: Page) => Promise<void>)[]) =>
+  async (page: Page) => {
+    for (const step of each) await step(page);
+  };
+/** Presses keys in order, as a person would. */
+const keys =
+  (...pressed: string[]) =>
+  async (page: Page) => {
+    for (const key of pressed) {
+      await page.keyboard.press(key);
+      await page.waitForTimeout(150);
+    }
+    await page.waitForTimeout(300);
+  };
+const wait = (ms: number) => async (page: Page) => {
+  await page.waitForTimeout(ms);
+};
+/**
+ * Focuses a control the way a keyboard does (Tab away and back), so the
+ * screenshot shows its focus-visible ring.
+ */
+const focusRole = (role: "button" | "combobox" | "link", name: RegExp) => async (page: Page) => {
+  await page.getByRole(role, { name }).first().focus();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Shift+Tab");
+  await page.waitForTimeout(250);
+};
+const SECRET_32 = "f598-mock-signing-secret-0123456789abcdef";
+/** In the open Move or Copy dialog: a vault that takes the item (else the first), then submit. */
+const moveTo = (target?: RegExp) => async (page: Page) => {
+  const dialog = page.getByRole("dialog").last();
+  await dialog.getByRole("combobox").first().click();
+  const named = target ? page.getByRole("option", { name: target }).first() : null;
+  if (named && (await named.isVisible().catch(() => false))) await named.click();
+  else await page.getByRole("option").first().click();
+  await page.waitForTimeout(300);
+  await dialog
+    .getByRole("button", { name: /^(Move|Copy) item$/u })
+    .last()
+    .click();
+  await page.waitForTimeout(1500);
+};
+const moveToFirst = moveTo();
+/** The item page's ⋯ menu, then one of its entries. */
+const itemMenu = (entry?: RegExp) => async (page: Page) => {
+  await page
+    .getByRole("button", { name: /^More actions for /u })
+    .first()
+    .click();
+  await page.waitForTimeout(400);
+  if (entry) {
+    await page.getByRole("menuitem", { name: entry }).first().click();
+    await page.waitForTimeout(600);
+  }
+};
+
+const PROVIDER_STATES: CaptureState[] = [
+  // S17 the picker
+  s("S17", "picker", "Connect a password manager: five providers", (ids) =>
+    secrets(ids, "?view=connect"),
+  ),
+  s("S17", "picker-from-list", "Vault list header action opens the picker", (ids) => secrets(ids), {
+    steps: action(/Connect password manager/u),
+  }),
+  s(
+    "S17",
+    "picker-unavailable",
+    "Keeper not enabled on this server: row disabled with reason",
+    (ids) => secrets(ids, "?view=connect"),
+    { mock: { scenario: "adapter-unavailable" } },
+  ),
+  s(
+    "S17",
+    "picker-fresh-server",
+    "Fresh server, no connections yet: its catalog disables Proton Pass and Keeper",
+    (ids) => secrets(ids, "?view=connect"),
+    { mock: { scenario: "fresh-server" } },
+  ),
+  s(
+    "S17",
+    "picker-old-server",
+    "Older server without a catalog: every provider offered, Keeper hint from its connection",
+    (ids) => secrets(ids, "?view=connect"),
+    { mock: { scenario: "no-catalog,adapter-unavailable" } },
+  ),
+  s(
+    "S17",
+    "setup-link-disabled",
+    "A setup link for a provider this server can't connect opens the picker",
+    connectPage("protonpass"),
+    { mock: { scenario: "fresh-server" } },
+  ),
+  s(
+    "S17",
+    "list-fresh-server",
+    "Fresh server vault list: no connections, Connect password manager",
+    (ids) => secrets(ids),
+    { mock: { scenario: "empty,fresh-server" } },
+  ),
+  // S18 setup forms
+  s(
+    "S18",
+    "proton-empty",
+    "Connect Proton Pass: owner + personal access token",
+    connectPage("protonpass"),
+  ),
+  s("S18", "proton-validation", "Proton Pass submitted empty", connectPage("protonpass"), {
+    steps: submit(/^Connect$/u),
+  }),
+  s(
+    "S18",
+    "proton-invalid",
+    "Proton Pass rejects the token (field error)",
+    connectPage("protonpass"),
+    {
+      steps: steps(fill("secret", "pst_invalid_0123456789"), submit(/^Connect$/u)),
+    },
+  ),
+  s("S18", "proton-expired", "Proton Pass token expired (field error)", connectPage("protonpass"), {
+    steps: steps(fill("secret", "pst_expired_0123456789"), submit(/^Connect$/u)),
+  }),
+  s(
+    "S18",
+    "keeper-empty",
+    "Connect Keeper: one-time token, region, IP-lock note",
+    connectPage("keeper"),
+  ),
+  s("S18", "keeper-used", "Keeper one-time token already used", connectPage("keeper"), {
+    steps: steps(fill("secret", "US:used-0123456789"), submit(/^Connect$/u)),
+  }),
+  s(
+    "S18",
+    "keeper-member",
+    "Connect Keeper as a member: no Organization owner",
+    connectPage("keeper"),
+    {
+      user: "member",
+    },
+  ),
+  s(
+    "S18",
+    "bitwarden-empty",
+    "Connect Bitwarden: bridge address + signing secret, no master password",
+    connectPage("bitwarden"),
+  ),
+  s(
+    "S18",
+    "bitwarden-validation",
+    "Bitwarden bridge: bad address and short secret",
+    connectPage("bitwarden"),
+    {
+      steps: steps(fill("endpoint", "bridge.local"), fill("secret", "short"), submit(/^Connect$/u)),
+    },
+  ),
+  s(
+    "S18",
+    "bitwarden-offline",
+    "Bitwarden bridge unreachable (address error)",
+    connectPage("bitwarden"),
+    {
+      steps: steps(
+        fill("endpoint", "https://offline.bridge.example"),
+        fill("secret", SECRET_32),
+        submit(/^Connect$/u),
+      ),
+    },
+  ),
+  s(
+    "S18",
+    "bitwarden-locked",
+    "Bitwarden locked on the bridge (form error)",
+    connectPage("bitwarden"),
+    {
+      steps: steps(
+        fill("endpoint", "https://bridge.example"),
+        fill("secret", `locked-${SECRET_32}`),
+        submit(/^Connect$/u),
+      ),
+    },
+  ),
+  s(
+    "S18",
+    "external-empty",
+    "Connect your vault service: name, address, signing secret",
+    connectPage("external"),
+  ),
+  s(
+    "S18",
+    "proton-locked",
+    "Proton Pass session locked during setup (Proton's words, not Bitwarden's)",
+    connectPage("protonpass"),
+    { steps: steps(fill("secret", "pst_locked_0123456789"), submit(/^Connect$/u)) },
+  ),
+  s(
+    "S18",
+    "external-locked",
+    "Your vault service reports its vault locked during setup",
+    connectPage("external"),
+    {
+      steps: steps(
+        fill("endpoint", "https://vault.example"),
+        fill("secret", `locked-${SECRET_32}`),
+        submit(/^Connect$/u),
+      ),
+    },
+  ),
+  // S19 choose what to link, after connecting
+  s(
+    "S19",
+    "proton-chooser",
+    "Proton Pass connected: one writable vault, one read-only",
+    connectPage("protonpass"),
+    {
+      steps: steps(fill("secret", "pst_ok_0123456789"), submit(/^Connect$/u)),
+    },
+  ),
+  s(
+    "S19",
+    "keeper-chooser",
+    "Keeper connected: shared folders with unknown edit rights",
+    connectPage("keeper"),
+    {
+      steps: steps(fill("secret", "US:ok-0123456789"), submit(/^Connect$/u)),
+    },
+  ),
+  s(
+    "S19",
+    "keeper-partial",
+    "Keeper: one folder links, one fails (partial failure)",
+    connectPage("keeper"),
+    {
+      steps: steps(
+        fill("secret", "US:ok-0123456789"),
+        submit(/^Connect$/u),
+        access("Production", /^Read-only/u),
+        access("Staging", /^Read-only/u),
+        submit(/^(Done|Link \d)/u),
+      ),
+    },
+  ),
+  s("S19", "bitwarden-done", "Bitwarden connected and a vault linked", connectPage("bitwarden"), {
+    steps: steps(
+      fill("endpoint", "https://bridge.example"),
+      fill("secret", SECRET_32),
+      submit(/^Connect$/u),
+      access("Operations", /^Read & write/u),
+      submit(/^(Done|Link \d)/u),
+    ),
+  }),
+  // S20 connections
+  s(
+    "S19",
+    "keeper-access-menu",
+    "Keeper chooser access menu: edit rights checked by Keeper when agents save",
+    connectPage("keeper"),
+    {
+      steps: steps(fill("secret", "US:ok-0123456789"), submit(/^Connect$/u), async (page) => {
+        await page
+          .getByRole("combobox", { name: "Access to Production" })
+          .or(page.getByRole("button", { name: "Access to Production" }))
+          .first()
+          .click();
+        await page.waitForTimeout(400);
+      }),
+    },
+  ),
+  s(
+    "S19",
+    "keeper-pending",
+    "Keeper accepted the one-time token but listing failed: Finish connecting, no token again",
+    connectPage("keeper"),
+    { steps: steps(fill("secret", "US:pending-0123456789"), submit(/^Connect$/u)) },
+  ),
+  s(
+    "S19",
+    "keeper-pending-retry-fails",
+    "Finish connecting fails again: safe message, action stays",
+    connectPage("keeper"),
+    {
+      mock: { scenario: "verify-fails" },
+      steps: steps(
+        fill("secret", "US:pending-0123456789"),
+        submit(/^Connect$/u),
+        submit(/^Finish connecting$/u),
+      ),
+    },
+  ),
+  s(
+    "S19",
+    "keeper-pending-finished",
+    "Finish connecting succeeds: on to choosing shared folders",
+    connectPage("keeper"),
+    {
+      steps: steps(
+        fill("secret", "US:pending-0123456789"),
+        submit(/^Connect$/u),
+        submit(/^Finish connecting$/u),
+      ),
+    },
+  ),
+  s(
+    "S19",
+    "keeper-pending-setup-refused",
+    "Setup: the saved Keeper device is refused, so the action is Reconnect",
+    connectPage("keeper"),
+    {
+      mock: { scenario: "verify-refused" },
+      steps: steps(
+        fill("secret", "US:pending-0123456789"),
+        submit(/^Connect$/u),
+        submit(/^Finish connecting$/u),
+      ),
+    },
+  ),
+  s(
+    "S19",
+    "keeper-pending-setup-reconnect",
+    "Setup Reconnect opens new access for the same connection (no second setup)",
+    connectPage("keeper"),
+    {
+      mock: { scenario: "verify-refused" },
+      steps: steps(
+        fill("secret", "US:pending-0123456789"),
+        submit(/^Connect$/u),
+        submit(/^Finish connecting$/u),
+        submit(/^Reconnect$/u),
+      ),
+    },
+  ),
+  s(
+    "S20",
+    "list-pending",
+    "Connections list with a Keeper connection not finished",
+    (ids) => secrets(ids),
+    {
+      mock: { scenario: "keeper-pending" },
+      steps: async (page) => {
+        await page
+          .getByRole("heading", { name: /^Connections/u })
+          .first()
+          .scrollIntoViewIfNeeded()
+          .catch(() => undefined);
+        await page.waitForTimeout(300);
+      },
+    },
+  ),
+  s(
+    "S20",
+    "keeper-pending",
+    "Keeper connection not finished: one Finish connecting action",
+    (ids) => secrets(ids),
+    {
+      mock: { scenario: "keeper-pending" },
+      steps: openRow(/^Staging agents/u),
+    },
+  ),
+  s(
+    "S20",
+    "keeper-pending-refused",
+    "Saved Keeper device refused: Reconnect instead",
+    (ids) => secrets(ids),
+    {
+      mock: { scenario: "keeper-pending,verify-refused" },
+      steps: steps(openRow(/^Staging agents/u), submit(/^Finish connecting$/u)),
+    },
+  ),
+  s(
+    "S20",
+    "keeper-pending-viewer",
+    "Keeper connection not finished, as a viewer",
+    (ids) => secrets(ids),
+    {
+      user: "tom",
+      mock: { scenario: "keeper-pending" },
+      steps: openRow(/^Staging agents/u),
+    },
+  ),
+  s(
+    "S20",
+    "list-attention",
+    "Connections list: locked, token expired and offline rows",
+    (ids) => secrets(ids),
+    {
+      mock: { scenario: "provider-locked,provider-expired,provider-offline" },
+      steps: async (page) => {
+        await page
+          .getByRole("heading", { name: /^Connections/u })
+          .first()
+          .scrollIntoViewIfNeeded()
+          .catch(() => undefined);
+        await page.waitForTimeout(300);
+      },
+    },
+  ),
+  s("S20", "onepassword", "1Password connection page (unchanged baseline)", (ids) =>
+    connection(ids, "onepassword"),
+  ),
+  s("S20", "protonpass", "Proton Pass connection page", (ids) => connection(ids, "protonpass")),
+  s("S20", "keeper", "Keeper connection page (organization)", (ids) => connection(ids, "keeper")),
+  s("S20", "bitwarden", "Bitwarden bridge connection page (Only me, label)", (ids) =>
+    connection(ids, "bitwarden"),
+  ),
+  s("S20", "external", "Your vault service connection page", (ids) => connection(ids, "external")),
+  s(
+    "S20",
+    "proton-expired",
+    "Proton Pass token expired: renew action",
+    (ids) => connection(ids, "protonpass"),
+    {
+      mock: { scenario: "provider-expired" },
+    },
+  ),
+  s(
+    "S20",
+    "bitwarden-locked",
+    "Bitwarden locked on the bridge",
+    (ids) => connection(ids, "bitwarden"),
+    {
+      mock: { scenario: "provider-locked" },
+    },
+  ),
+  s("S20", "external-offline", "Your vault service offline", (ids) => connection(ids, "external"), {
+    mock: { scenario: "provider-offline" },
+  }),
+  s(
+    "S20",
+    "keeper-unavailable-here",
+    "Keeper not enabled on this server",
+    (ids) => connection(ids, "keeper"),
+    {
+      mock: { scenario: "adapter-unavailable" },
+    },
+  ),
+  s(
+    "S20",
+    "keeper-viewer",
+    "Keeper connection as a viewer (no manage actions)",
+    (ids) => connection(ids, "keeper"),
+    {
+      user: "tom",
+    },
+  ),
+  s("S20", "keeper-long", "Keeper connection with long names", (ids) => connection(ids, "keeper"), {
+    mock: { scenario: "long-names" },
+  }),
+  s("S20", "proton-renew", "Replace the Proton Pass token", (ids) =>
+    connection(ids, "protonpass", "replace-token"),
+  ),
+  s("S20", "keeper-renew", "Reconnect Keeper with a new one-time token", (ids) =>
+    connection(ids, "keeper", "replace-token"),
+  ),
+  s("S20", "bitwarden-renew", "Update the Bitwarden bridge", (ids) =>
+    connection(ids, "bitwarden", "replace-token"),
+  ),
+  s(
+    "S20",
+    "keeper-renew-pending",
+    "Reconnect saved the new device but couldn't check it: warning, then Finish connecting",
+    (ids) => connection(ids, "keeper", "replace-token"),
+    {
+      mock: { scenario: "renew-pending" },
+      steps: steps(fill("secret", "US:ok-0123456789"), submit(/^Reconnect$/u)),
+    },
+  ),
+  s("S20", "keeper-choose", "Keeper: choose shared folders for an existing connection", (ids) =>
+    connection(ids, "keeper", "choose-vaults"),
+  ),
+  s("S20", "keeper-disconnect", "Disconnect Keeper confirm", (ids) => connection(ids, "keeper"), {
+    steps: itemMenu(/^Disconnect/u),
+  }),
+  // S21 provider vault states
+  s("S21", "proton-healthy", "Proton Ops: new items yes, edits in Proton Pass", (ids) =>
+    vault(ids, "Proton Ops"),
+  ),
+  s("S21", "proton-expired", "Proton Ops: token expired", (ids) => vault(ids, "Proton Ops"), {
+    mock: { scenario: "provider-expired" },
+  }),
+  s(
+    "S21",
+    "proton-incomplete",
+    "Proton Ops: listing incomplete",
+    (ids) => vault(ids, "Proton Ops"),
+    {
+      mock: { scenario: "incomplete" },
+    },
+  ),
+  s("S21", "proton-syncing", "Proton Ops: syncing", (ids) => vault(ids, "Proton Ops"), {
+    mock: { scenario: "syncing" },
+  }),
+  s("S21", "keeper-healthy", "Keeper Production (organization, editable)", (ids) =>
+    vault(ids, "Keeper Production"),
+  ),
+  s(
+    "S21",
+    "keeper-stale",
+    "Keeper Production: last checked 3 hours ago",
+    (ids) => vault(ids, "Keeper Production"),
+    {
+      mock: { scenario: "stale" },
+    },
+  ),
+  s(
+    "S21",
+    "keeper-never-synced",
+    "Keeper Production: never listed and unreachable (not empty)",
+    (ids) => vault(ids, "Keeper Production"),
+    {
+      mock: { scenario: "never-synced" },
+    },
+  ),
+  s(
+    "S21",
+    "keeper-rate-limited",
+    "Keeper Production: rate limited until hh:mm",
+    (ids) => vault(ids, "Keeper Production"),
+    {
+      mock: { scenario: "provider-rate-limited" },
+    },
+  ),
+  s("S21", "bitwarden-healthy", "Bitwarden Personal: bridge cache synced time", (ids) =>
+    vault(ids, "Bitwarden Personal"),
+  ),
+  s(
+    "S21",
+    "bitwarden-locked",
+    "Bitwarden Personal: locked, showing last sync",
+    (ids) => vault(ids, "Bitwarden Personal"),
+    {
+      mock: { scenario: "provider-locked" },
+    },
+  ),
+  s(
+    "S21",
+    "bitwarden-offline",
+    "Bitwarden Personal: bridge offline",
+    (ids) => vault(ids, "Bitwarden Personal"),
+    {
+      mock: { scenario: "provider-offline" },
+    },
+  ),
+  s("S21", "external-read-only", "Service credentials: read-only from your service", (ids) =>
+    vault(ids, "Service credentials"),
+  ),
+  s(
+    "S21",
+    "keeper-member",
+    "Keeper Production as a member (organization vault, can't add)",
+    (ids) => vault(ids, "Keeper Production"),
+    {
+      user: "member",
+    },
+  ),
+  s(
+    "S21",
+    "keeper-unlink",
+    "Unlink Keeper Production confirm",
+    (ids) => vault(ids, "Keeper Production"),
+    {
+      steps: itemMenu(/^Unlink/u),
+    },
+  ),
+  // S22 provider items
+  s("S22", "proton-item", "Grafana in Proton Pass: no Edit, reason visible", (ids) =>
+    item(ids, "Proton Ops/Grafana"),
+  ),
+  s(
+    "S22",
+    "proton-item-menu",
+    "Grafana menu: Copy reference, Move or copy, Move to trash in Proton Pass",
+    (ids) => item(ids, "Proton Ops/Grafana"),
+    {
+      steps: itemMenu(),
+    },
+  ),
+  s(
+    "S22",
+    "proton-trash-confirm",
+    "Move Grafana to trash in Proton Pass? (no Undo)",
+    (ids) => item(ids, "Proton Ops/Grafana"),
+    {
+      steps: itemMenu(/trash/iu),
+    },
+  ),
+  s(
+    "S22",
+    "proton-copy",
+    "Copy or move dialog from Proton Pass (targets that accept a TOTP login)",
+    (ids) => item(ids, "Proton Ops/Grafana"),
+    {
+      steps: itemMenu(/^(Move or copy|Copy to another)/u),
+    },
+  ),
+  s(
+    "S22",
+    "proton-new-item",
+    "New item in Proton Ops: Login and Note only",
+    (ids) => vault(ids, "Proton Ops"),
+    {
+      steps: click("New item"),
+    },
+  ),
+  s("S22", "keeper-item", "Signing certificate in Keeper: editable, no archive", (ids) =>
+    item(ids, "Keeper Production/Signing certificate"),
+  ),
+  s(
+    "S22",
+    "keeper-item-menu",
+    "Keeper item menu: no archive entry",
+    (ids) => item(ids, "Keeper Production/Signing certificate"),
+    {
+      steps: itemMenu(),
+    },
+  ),
+  s(
+    "S22",
+    "keeper-edit",
+    "Edit Signing certificate: file field changes in Keeper",
+    (ids) => item(ids, "Keeper Production/Signing certificate"),
+    {
+      steps: click("Edit"),
+    },
+  ),
+  s(
+    "S22",
+    "keeper-copy-only",
+    "Copy Postgres primary from Keeper (copy only)",
+    (ids) => item(ids, "Keeper Production/Postgres primary"),
+    {
+      steps: itemMenu(/^(Move or copy|Copy to another)/u),
+    },
+  ),
+  s(
+    "S22",
+    "onepassword-archive-confirm",
+    "Archive Figma in 1Password? (confirm, no Undo)",
+    (ids) => item(ids, "1P Shared/Figma"),
+    {
+      steps: itemMenu(/^Archive/u),
+    },
+  ),
+  s("S22", "external-item", "Billing API from your read-only service", (ids) =>
+    item(ids, "Service credentials/Billing API"),
+  ),
+  // A move that saved its copy but not the rest: closed, refreshed, never offered again.
+  ...(
+    [
+      ["move-saved", "Move saved the copy; trashing the original didn't finish"],
+      ["move-changed", "Move saved the copy; the original changed in Proton Pass, kept"],
+      ["move-missing", "Move saved the copy; the original is no longer listed"],
+      ["move-unlisted", "Moved, copy not listed yet: on to the target vault"],
+      ["move-fails", "Ordinary move failure: dialog stays open to try again"],
+    ] as const
+  ).map(([scenario, description]) =>
+    s("S22", `proton-${scenario}`, description, (ids) => item(ids, "Proton Ops/Grafana"), {
+      mock: { scenario },
+      // Only a password manager confirms a write it can't list yet: move into 1Password there.
+      steps: steps(
+        itemMenu(/^(Move or copy|Copy to another)/u),
+        scenario === "move-unlisted" ? moveTo(/^1P Shared$/u) : moveToFirst,
+      ),
+    }),
+  ),
+  s(
+    "S22",
+    "proton-move-saved-open-copy",
+    "Open copy from the warning: the saved copy in its vault",
+    (ids) => item(ids, "Proton Ops/Grafana"),
+    {
+      mock: { scenario: "move-saved" },
+      steps: steps(itemMenu(/^(Move or copy|Copy to another)/u), moveToFirst, click("Open copy")),
+    },
+  ),
+  s(
+    "S22",
+    "onepassword-move-saved",
+    "1Password move saved the copy; archiving the original didn't finish",
+    (ids) => item(ids, "1P Shared/Figma"),
+    {
+      mock: { scenario: "move-saved" },
+      steps: steps(itemMenu(/^(Move or copy|Copy to another)/u), moveToFirst),
+    },
+  ),
+  s(
+    "S22",
+    "proton-item-viewer",
+    "Proton Pass item as a viewer: no values, no actions",
+    (ids) => item(ids, "Proton Ops/Grafana"),
+    {
+      user: "tom",
+    },
+  ),
+  // S23 the vault list with every provider
+  s(
+    "S23",
+    "list-all-providers",
+    "Vault list with every provider and the Connections section",
+    (ids) => secrets(ids),
+    {
+      steps: async (page) => {
+        await page.mouse.wheel(0, 1600);
+        await page.waitForTimeout(400);
+      },
+    },
+  ),
+  s("S23", "list-long-names", "Vault list with long provider names", (ids) => secrets(ids), {
+    mock: { scenario: "long-names" },
+  }),
+  s(
+    "S23",
+    "keeper-vault-long",
+    "Keeper vault page with a long vault, connection and item name",
+    (ids) => vault(ids, "Keeper Production"),
+    { mock: { scenario: "long-names" } },
+  ),
+  s(
+    "S23",
+    "keeper-item-long",
+    "Keeper item page with a long item name",
+    (ids) => item(ids, "Keeper Production/Twilio"),
+    { mock: { scenario: "long-names" } },
+  ),
+  s(
+    "S23",
+    "keeper-choose-long",
+    "Choose shared folders with a long folder name and access menus",
+    (ids) => connection(ids, "keeper", "choose-vaults"),
+    { mock: { scenario: "long-names" } },
+  ),
+  s(
+    "S23",
+    "bitwarden-connection-long",
+    "Bitwarden bridge connection with a long label",
+    (ids) => connection(ids, "bitwarden"),
+    { mock: { scenario: "long-names" } },
+  ),
+  s(
+    "S23",
+    "keeper-move-long",
+    "Copy a long-named Keeper item: dialog title and targets",
+    (ids) => item(ids, "Keeper Production/Twilio"),
+    {
+      mock: { scenario: "long-names" },
+      steps: itemMenu(/^(Move or copy|Copy to another)/u),
+    },
+  ),
+  // S24 keyboard: every flow above works without a pointer, with a visible focus ring
+  s(
+    "S24",
+    "picker-tab",
+    "Picker by keyboard: Tab moves between provider rows",
+    (ids) => secrets(ids, "?view=connect"),
+    {
+      steps: steps(focusRole("button", /^Proton Pass/u), keys("Tab")),
+    },
+  ),
+  s(
+    "S24",
+    "picker-enter",
+    "Picker by keyboard: Enter on Proton Pass opens its setup",
+    (ids) => secrets(ids, "?view=connect"),
+    {
+      steps: steps(focusRole("button", /^Proton Pass/u), keys("Enter")),
+    },
+  ),
+  s(
+    "S24",
+    "proton-form-errors",
+    "Proton Pass submitted empty by Enter: focus moves to the first error",
+    connectPage("protonpass"),
+    {
+      steps: steps(focusRole("button", /^Connect$/u), keys("Enter"), wait(500)),
+    },
+  ),
+  s(
+    "S24",
+    "chooser-access-keys",
+    "Keeper chooser: access menu opened and moved by arrow keys",
+    connectPage("keeper"),
+    {
+      steps: steps(
+        fill("secret", "US:ok-0123456789"),
+        submit(/^Connect$/u),
+        focusRole("combobox", /^Access to Production/u),
+        keys("Enter", "ArrowDown"),
+      ),
+    },
+  ),
+  s(
+    "S24",
+    "connection-menu-keys",
+    "Keeper connection: More menu opened by keyboard",
+    (ids) => connection(ids, "keeper"),
+    {
+      steps: steps(focusRole("button", /^More actions for /u), keys("Enter")),
+    },
+  ),
+  s(
+    "S24",
+    "disconnect-escape",
+    "Disconnect confirm closed by Escape: focus returns to the menu button",
+    (ids) => connection(ids, "keeper"),
+    {
+      steps: steps(itemMenu(/^Disconnect/u), keys("Escape"), wait(400)),
+    },
+  ),
+  s(
+    "S24",
+    "trash-confirm-focus",
+    "Move to trash in Proton Pass by keyboard: confirm dialog focus starts on Cancel",
+    (ids) => item(ids, "Proton Ops/Grafana"),
+    {
+      steps: steps(focusRole("button", /^More actions for /u), keys("Enter"), keys("End", "Enter")),
+    },
+  ),
+  s(
+    "S24",
+    "pending-finish-focus",
+    "Keeper not finished: Finish connecting reached by Tab",
+    (ids) => secrets(ids),
+    {
+      mock: { scenario: "keeper-pending" },
+      steps: steps(openRow(/^Staging agents/u), focusRole("button", /^Finish connecting$/u)),
+    },
+  ),
+  s(
+    "S24",
+    "stale-sync-focus",
+    "Keeper stale: Sync now focused from the notice",
+    (ids) => vault(ids, "Keeper Production"),
+    {
+      mock: { scenario: "stale" },
+      steps: focusRole("button", /^Sync now$/u),
+    },
+  ),
+];
 
 export const CAPTURE_STATES: CaptureState[] = [
   // S1 Settings › Secrets
@@ -466,9 +1365,19 @@ export const CAPTURE_STATES: CaptureState[] = [
       await page.waitForTimeout(400);
     },
   }),
-  s("S7", "step-1-empty", "Connect 1Password, token step", (ids) => secrets(ids), {
-    steps: action(/Connect 1Password/u),
-  }),
+  s(
+    "S7",
+    "step-1-empty",
+    "Connect 1Password through the picker, token step",
+    (ids) => secrets(ids),
+    {
+      steps: async (page) => {
+        await action(/Connect password manager/u)(page);
+        await openRow(/^1Password/u)(page);
+      },
+    },
+  ),
+  ...PROVIDER_STATES,
   // S8 provider status: covered by S1 sync-error-row and S2 sync-error / rate-limited.
   // S9 ask card: needs a seeded pending secret question (W2/W3 seed).
   s("S9", "current-password", "Ask card secret field (current-password)", (ids) =>
@@ -651,6 +1560,32 @@ type ShotRecord = {
   };
 };
 
+const SIGNED_OUT = "signed out (stale session)";
+class SignedOutError extends Error {}
+/** The stack's sign-in page instead of the app: a session revoked by a concurrent refresh. */
+async function signedOut(page: Page): Promise<boolean> {
+  return (
+    (await page.locator("input[type=email]").count()) > 0 &&
+    (await page.getByText(/^Create an account$/u).count()) > 0
+  );
+}
+
+/** Captures once more with a fresh sign-in when the saved session was revoked. */
+async function captureWithRetry(
+  browser: Browser,
+  ids: Ids,
+  state: CaptureState,
+  width: number,
+  height: number,
+  theme: "light" | "dark",
+): Promise<ShotRecord> {
+  const record = await capture(browser, ids, state, width, height, theme);
+  if (record.reason !== SIGNED_OUT) return record;
+  const user = state.user ?? flags.user!;
+  states.delete(user === "tom" ? "viewer" : user);
+  return capture(browser, ids, state, width, height, theme);
+}
+
 async function capture(
   browser: Browser,
   ids: Ids,
@@ -678,8 +1613,18 @@ async function capture(
   const path = state.path(ids, theme);
   if (!path)
     return { ...base, reason: "pending seed (W6): the seeded record for this state was not found" };
+  let storageState: string;
+  try {
+    storageState = await storageStateFor(browser, user === "tom" ? "viewer" : user);
+  } catch (error) {
+    return {
+      ...base,
+      status: "failed",
+      reason: `sign-in: ${(error as Error).message.split("\n")[0]}`,
+    };
+  }
   const context = await browser.newContext({
-    storageState: await storageStateFor(browser, user === "tom" ? "viewer" : user),
+    storageState,
     viewport: { width, height },
     colorScheme: theme,
     deviceScaleFactor: 1,
@@ -709,9 +1654,13 @@ async function capture(
       )
       .catch(() => {});
     await page.waitForTimeout(1_500);
+    if (await signedOut(page)) throw new SignedOutError();
     await state.steps?.(page, ids);
     const file = join(OUT, name);
     await page.screenshot({ path: file });
+    // Keep the newest tokens, so the next context doesn't replay a rotated refresh token.
+    if (storageState.startsWith(OUT))
+      await context.storageState({ path: storageState }).catch(() => {});
     const minTarget = width < 600 ? 44 : 40;
     const layout = await page.evaluate((min) => {
       const overflowPx = Math.max(0, document.documentElement.scrollWidth - window.innerWidth);
@@ -760,6 +1709,7 @@ async function capture(
       checks: { ...layout, axe, ...(expectation ? { expect: expectation } : {}) },
     };
   } catch (error) {
+    if (error instanceof SignedOutError) return { ...base, status: "failed", reason: SIGNED_OUT };
     await page.screenshot({ path: join(OUT, name) }).catch(() => {});
     return { ...base, status: "failed", reason: (error as Error).message.split("\n")[0] };
   } finally {
@@ -787,7 +1737,7 @@ try {
     for (const [width, height] of VIEWPORTS) {
       for (const theme of THEMES) {
         jobs.push(async () => {
-          const record = await capture(browser, ids, state, width, height, theme);
+          const record = await captureWithRetry(browser, ids, state, width, height, theme);
           records.push(record);
           const issues = record.checks
             ? [

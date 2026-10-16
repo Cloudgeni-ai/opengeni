@@ -50,9 +50,15 @@ if (process.env.OPENGENI_VERIFY_SERVER_RUNTIME === "1") {
           // build machine's path instead.
           const onePassword = runtimeRequire('@1password/sdk');
           if (typeof onePassword.createClient !== 'function') throw new Error('missing 1Password SDK');
+          // Connected Keeper vaults: the adapter reads and hash-checks the
+          // installed SDK build at run time, so it must travel as a package.
+          if (!existsSync(runtimeRequire.resolve('@keeper-security/secrets-manager-core'))) throw new Error('missing Keeper SDK');
           for (const name of readdirSync('./apps/${role}/dist/process', { recursive: true })) {
             if (String(name).endsWith('.js') && readFileSync(join('./apps/${role}/dist/process', String(name)), 'utf8').includes('core_bg.wasm')) {
               throw new Error('the 1Password SDK core was bundled into ' + name);
+            }
+            if (String(name).endsWith('.js') && readFileSync(join('./apps/${role}/dist/process', String(name)), 'utf8').includes('fetchAndDecryptSecrets')) {
+              throw new Error('the Keeper SDK was bundled into ' + name);
             }
           }
           if (${JSON.stringify(role)} === 'worker') {

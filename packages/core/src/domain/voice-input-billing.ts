@@ -201,7 +201,11 @@ export function createVoiceInputBilling(deps: {
         usage: input.usage,
         trustedDurationSeconds: input.billing.trustedDurationSeconds,
       });
-      const cost = calculateVoiceInputCost(input.pricing, usage);
+      const cost = calculateVoiceInputCost(
+        input.pricing,
+        usage,
+        deps.settings.creditMarginBpsOverride,
+      );
       return await settleVoiceInputUsage(deps.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,

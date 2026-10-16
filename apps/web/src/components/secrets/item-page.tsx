@@ -34,6 +34,7 @@ import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@/components/ui/flush-form-page";
+import { MetaChip } from "@/components/ui/meta-chip";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
@@ -48,6 +49,7 @@ import {
 import { formatTotpCode, TotpRing, useTotp } from "./totp-code";
 import { hostOf, ITEM_TYPE_LABEL, vaultErrorText } from "./vault-model";
 import { ExpiryBadge, ItemTile } from "./vault-parts";
+import { removalLabel, sourceHome, vaultOperations, writesPausedReason } from "./vault-providers";
 
 /* ----------------------------------------------------------------------------
    An item's page (S3). Concealed values show as dots; Reveal and Copy read
@@ -93,6 +95,9 @@ function ReferenceLine({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** What Move or copy can do from this item: both, only copy, or nothing. */
+export type ItemTransfer = "move" | "copy" | null;
+
 export interface ItemPageActions {
   back: () => void;
   edit: () => void;
@@ -112,11 +117,14 @@ function FieldValue({
   canUse,
   revealed,
   onRevealed,
+  home,
 }: {
   item: VaultItem;
   field: VaultItemField;
   api: VaultsApi;
   canUse: boolean;
+  /** Where the value lives, so its errors name it ("Proton Pass is locked."). */
+  home: string;
   revealed: string | undefined;
   onRevealed: (value: string | undefined) => void;
 }) {
@@ -144,7 +152,7 @@ function FieldValue({
     try {
       onRevealed(await reveal());
     } catch (error) {
-      toast.error(vaultErrorText(error, `Couldn't reveal ${label}.`));
+      toast.error(vaultErrorText(error, `Couldn't reveal ${label}.`, home));
     } finally {
       setPending(false);
     }
@@ -187,7 +195,7 @@ function FieldValue({
                 link.click();
                 setTimeout(() => URL.revokeObjectURL(url), 1_000);
               } catch (error) {
-                toast.error(vaultErrorText(error, "Couldn't download the file."));
+                toast.error(vaultErrorText(error, "Couldn't download the file.", home));
               }
             }}
           >
@@ -270,19 +278,20 @@ function FieldValue({
 
 /* ------------------------------------------------------------- history */
 
-const CREATED_BY: Record<VaultFieldVersionMeta["createdByKind"], string> = {
+const CREATED_BY: Record<Exclude<VaultFieldVersionMeta["createdByKind"], "provider">, string> = {
   human: "by a person",
   agent: "by an agent",
   api_key: "by an API key",
   migration: "from a variable set",
-  provider: "in 1Password",
   system: "by Opengeni",
 };
 
 function createdByText(
   version: VaultFieldVersionMeta,
   personName: ((subjectId: string) => string | null) | undefined,
+  home: string,
 ): string {
+  if (version.createdByKind === "provider") return `in ${home}`;
   if (version.createdByKind === "human" && version.createdBySubjectId && personName) {
     const name = personName(version.createdBySubjectId);
     if (name) return `by ${name}`;
@@ -294,13 +303,17 @@ function FieldHistory({
   item,
   field,
   canWrite,
+  home,
   onRestored,
   api,
   personName,
 }: {
   item: VaultItem;
   field: VaultItemField;
+  /** Restore an older version (hosted vaults only). */
   canWrite: boolean;
+  /** Where provider versions were made, for "in 1Password". */
+  home: string;
   onRestored: () => Promise<void>;
   api: VaultsApi;
   personName?: ((subjectId: string) => string | null) | undefined;
@@ -319,7 +332,7 @@ function FieldHistory({
       loading={open && history.loading && !history.versions}
     >
       {history.error ? (
-        <p className="m-0 text-sm text-danger">{vaultErrorText(history.error)}</p>
+        <p className="m-0 text-sm text-danger">{vaultErrorText(history.error, undefined, home)}</p>
       ) : (
         <ol className="m-0 flex list-none flex-col p-0">
           {versions.map((version) => (
@@ -331,7 +344,7 @@ function FieldHistory({
                 <span className="font-medium text-fg">Version {version.version}</span>
                 <span className="text-fg-muted">
                   {" · "}
-                  {createdByText(version, personName)}{" "}
+                  {createdByText(version, personName, home)}{" "}
                   <RelativeTime date={version.createdAt} inSentence />
                 </span>
                 {version.current ? <span className="text-fg-muted"> · current</span> : null}
@@ -391,6 +404,7 @@ export function ItemPage({
   canUse,
   actions,
   personName,
+  transfer,
 }: {
   item: VaultItem;
   vault: VaultSummary;
@@ -398,6 +412,11 @@ export function ItemPage({
   /** Reveal and copy values ("use = reveal"). Viewers can't. */
   canUse: boolean;
   actions: ItemPageActions;
+  /**
+   * Whether another vault can take this item: "move" when this vault can also
+   * let it go. Decided by the route, which knows the other vaults.
+   */
+  transfer?: ItemTransfer;
   /** Names version authors: "you", a member's name, or null when unknown. */
   personName?: ((subjectId: string) => string | null) | undefined;
 }) {
@@ -415,29 +434,32 @@ export function ItemPage({
 
   const archived = item.archivedAt !== null;
   const readOnly = vault.mode === "read_only";
-  const canWrite = vault.canWrite && !archived;
+  const isProvider = vault.source !== "opengeni";
+  const operations = vaultOperations(vault);
+  const home = sourceHome(vault);
+  const paused = isProvider && !archived && !readOnly ? writesPausedReason(vault) : null;
+  const canWrite = vault.canWrite && !archived && !paused;
+  const canEdit = canWrite && operations.updateItem;
   const fields = [...item.fields].sort((a, b) => a.position - b.position);
   const primaryReference = item.references.primary;
+  // Said where Edit would be, so the reason is visible without hovering.
+  const editElsewhere =
+    paused && vault.canWrite
+      ? paused
+      : isProvider && !archived && (readOnly || (vault.canWrite && !operations.updateItem))
+        ? readOnly
+          ? `Read-only: edit this item in ${home}.`
+          : `Edit this item in ${home}. Opengeni can save new items here, not change them.`
+        : null;
 
-  const editButton = readOnly ? (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span tabIndex={0} className="inline-flex rounded-[10px]">
-          <RowButton disabled className="pointer-events-none">
-            <PencilIcon aria-hidden="true" />
-            Edit
-          </RowButton>
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>Read-only: edit this item in 1Password.</TooltipContent>
-    </Tooltip>
-  ) : canWrite ? (
+  const editButton = canEdit ? (
     <Button type="button" size="sm" onClick={actions.edit} className="pointer-coarse:h-11">
       <PencilIcon aria-hidden="true" />
       Edit
     </Button>
   ) : null;
 
+  const moves = transfer === undefined ? (canWrite && !readOnly ? "move" : null) : transfer;
   const menu: ReactNode[] = [];
   if (primaryReference)
     menu.push(
@@ -448,19 +470,23 @@ export function ItemPage({
         Copy reference
       </DropdownMenuItem>,
     );
-  if (canWrite && !readOnly)
+  if (canWrite && moves)
     menu.push(
       <DropdownMenuItem key="move" onSelect={actions.move}>
         <FolderInputIcon aria-hidden="true" />
-        Move or copy…
+        {moves === "move" ? "Move or copy…" : "Copy to another vault…"}
       </DropdownMenuItem>,
     );
-  if (canWrite && !readOnly) {
+  if (canWrite && operations.archiveItem && operations.archiveKind !== "none") {
     menu.push(<DropdownMenuSeparator key="sep" />);
     menu.push(
       <DropdownMenuItem key="archive" onSelect={() => void actions.archive()}>
-        <ArchiveIcon aria-hidden="true" />
-        Archive
+        {operations.archiveKind === "trash" ? (
+          <Trash2Icon aria-hidden="true" />
+        ) : (
+          <ArchiveIcon aria-hidden="true" />
+        )}
+        {removalLabel(vault, operations.archiveKind)}
       </DropdownMenuItem>,
     );
   }
@@ -504,7 +530,7 @@ export function ItemPage({
         title={item.name}
         chips={
           <>
-            {readOnly ? <span className="text-xs font-medium text-fg-muted">Read-only</span> : null}
+            {readOnly ? <MetaChip>Read-only</MetaChip> : null}
             <ExpiryBadge expiresAt={item.expiresAt} variant="outline" />
           </>
         }
@@ -533,33 +559,40 @@ export function ItemPage({
           icon={<ArchiveIcon aria-hidden="true" className="size-4" />}
           actionLayout="responsive"
           action={
-            vault.canWrite ? (
+            vault.canWrite && (operations.restoreItem || !isProvider) ? (
               <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => void actions.restore()}
-                >
-                  <ArchiveRestoreIcon aria-hidden="true" />
-                  Restore
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={actions.deletePermanently}
-                  className="text-danger hover:bg-danger/10 hover:text-danger"
-                >
-                  <Trash2Icon aria-hidden="true" />
-                  Delete permanently
-                </Button>
+                {operations.restoreItem ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void actions.restore()}
+                  >
+                    <ArchiveRestoreIcon aria-hidden="true" />
+                    Restore
+                  </Button>
+                ) : null}
+                {!isProvider ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={actions.deletePermanently}
+                    className="text-danger hover:bg-danger/10 hover:text-danger"
+                  >
+                    <Trash2Icon aria-hidden="true" />
+                    Delete permanently
+                  </Button>
+                ) : null}
               </div>
             ) : undefined
           }
         >
           Archived <RelativeTime date={item.archivedAt!} inSentence />. Agents can't use it.
+          {isProvider && !operations.restoreItem ? ` Restore it in ${home}.` : null}
         </Notice>
+      ) : editElsewhere ? (
+        <p className="mt-6 mb-0 text-sm leading-5 text-fg-muted">{editElsewhere}</p>
       ) : null}
       <DetailPageBody aside={aside}>
         <div className="min-w-0">
@@ -610,6 +643,7 @@ export function ItemPage({
                       {fieldLabel(field.name)}
                     </span>
                     <FieldValue
+                      home={home}
                       item={item}
                       field={field}
                       api={api}
@@ -664,7 +698,8 @@ export function ItemPage({
                       key={field.id}
                       item={item}
                       field={field}
-                      canWrite={canWrite && !readOnly}
+                      canWrite={canWrite && operations.restoreFieldHistory}
+                      home={home}
                       api={api}
                       personName={personName}
                       onRestored={actions.refresh}

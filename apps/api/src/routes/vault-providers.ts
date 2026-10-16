@@ -1,5 +1,7 @@
 import type { Context, Hono } from "hono";
+import { isDeepStrictEqual } from "node:util";
 import { HTTPException } from "hono/http-exception";
+import { createNativeExternalVaultFactories } from "../integrations/external-vault-providers";
 import {
   CreateManagedProviderVaultRequest,
   DisconnectOnePasswordResponse,
@@ -10,17 +12,28 @@ import {
   OnePasswordConnectionSummary,
   ProviderVaultMeta,
   ReplaceOnePasswordTokenRequest,
+  InstallVaultProviderRequest,
+  InstallVaultProviderResponse,
+  ListVaultProviderConnectionsResponse,
+  ReplaceVaultProviderCredentialsRequest,
+  DisconnectVaultProviderResponse,
   VAULT_ERROR_HTTP_STATUS,
   type VaultApiError,
   type VaultSummary,
+  type ExternalVaultProviderKind,
+  type VaultProviderCredentials,
+  type VaultProviderConnectionSummary,
+  type ConnectionMetadata,
 } from "@opengeni/contracts";
 import {
   ONEPASSWORD_CREDENTIAL_ROLE,
   ONEPASSWORD_PROVIDER_DOMAIN,
   createWorkspaceVaultProviderRegistry,
+  createRemoteExternalVaultFactories,
   externalActorContinuationForAuthorization,
   hasPermission,
   isVaultError,
+  VaultError,
   providerSecretName,
   requirePermission,
   syncLinkedProviderVault,
@@ -37,6 +50,16 @@ import {
   type ApiRouteDeps,
   type OnePasswordConnectionMetadata,
   type OnePasswordVaultProviderFactory,
+  externalVaultConnectionDetails,
+  externalVaultConnectionMetadata,
+  externalVaultProviderDomain,
+  externalVaultProviderForConnection,
+  isExternalVaultConnection,
+  StoredVaultProviderCredentials,
+  type ExternalVaultConnectionDetails,
+  type ExternalVaultProviderFactories,
+  loadExternalVaultConnection,
+  pendingVaultCredentialBundle,
 } from "@opengeni/core";
 import {
   createConnection,
@@ -45,6 +68,7 @@ import {
   getConnectionMetadata,
   getVault,
   linkProviderVault,
+  preflightProviderVaultLink,
   listConnectionsMetadata,
   listVaultsForSubject,
   revokeConnection,
@@ -59,6 +83,10 @@ import {
   type VaultProvider,
   type VaultProviderContext,
   type VaultProviderRegistry,
+  type VaultProviderAuthority,
+  createProviderCallBudget,
+  listProviderVaults,
+  providerOperations,
 } from "@opengeni/vaults";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 import { parseRequestJson } from "../http/request-body";
@@ -132,7 +160,14 @@ export async function onePasswordProviderForConnection(
  */
 export function vaultProviderRegistryFor(
   deps: ApiRouteDeps,
-  input: { workspaceId: string; subjectId: string | null },
+  input: {
+    workspaceId: string;
+    subjectId: string | null;
+    executionContext?: Pick<
+      VaultProviderAuthority,
+      "sessionId" | "turnId" | "attemptId" | "siteId"
+    >;
+  },
 ): VaultProviderRegistry {
   return createWorkspaceVaultProviderRegistry({
     db: deps.db,
@@ -142,7 +177,60 @@ export function vaultProviderRegistryFor(
     hostVaultProvider: deps.connectionCredentials?.vaultProvider ?? null,
     onePasswordVaultProvider:
       deps.onePasswordVaultProvider === null ? null : onePasswordFactoryFor(deps),
+    externalVaultProviders: externalVaultFactoriesFor(deps),
+    ...(input.executionContext ? { executionContext: input.executionContext } : {}),
   });
+}
+
+const defaultExternalVaultFactories = new WeakMap<ApiRouteDeps, ExternalVaultProviderFactories>();
+
+export function externalVaultFactoriesFor(deps: ApiRouteDeps): ExternalVaultProviderFactories {
+  if (deps.externalVaultProviders !== undefined) return deps.externalVaultProviders ?? {};
+  let factories = defaultExternalVaultFactories.get(deps);
+  if (!factories) {
+    factories = {
+      ...createRemoteExternalVaultFactories(deps.settings),
+      ...createNativeExternalVaultFactories(deps.settings),
+    };
+    defaultExternalVaultFactories.set(deps, factories);
+  }
+  return factories;
+}
+
+/** Both native 1Password and the generic connection lifecycle use this catalog. */
+async function providerForConnection(
+  deps: ApiRouteDeps,
+  input: { workspaceId: string; connectionId: string; subjectId: string | null },
+): Promise<{ provider: VaultProvider; source: "onepassword" | ExternalVaultProviderKind }> {
+  const connection = await getConnectionMetadata(
+    deps.db,
+    input.workspaceId,
+    input.connectionId,
+    input.subjectId,
+  );
+  if (connection && isOnePasswordConnection(connection)) {
+    return { ...(await onePasswordProviderForConnection(deps, input)), source: "onepassword" };
+  }
+  if (!connection || !isExternalVaultConnection(connection) || connection.status === "revoked") {
+    throw new HTTPException(404, { message: "Vault connection not found" });
+  }
+  const details = externalVaultConnectionDetails(connection.metadata)!;
+  const factory = externalVaultFactoriesFor(deps)[details.provider];
+  if (!factory)
+    throw new VaultProviderError(
+      "provider_unavailable",
+      "This vault provider is not available in this deployment.",
+    );
+  return {
+    source: details.provider,
+    provider: await externalVaultProviderForConnection({
+      ...input,
+      db: deps.db,
+      settings: deps.settings,
+      provider: details.provider,
+      factory,
+    }),
+  };
 }
 
 function vaultContextFor(
@@ -286,7 +374,7 @@ export function registerVaultProviderRoutes(
         rows
           .filter(
             (row) =>
-              row.source === "onepassword" &&
+              row.source !== "opengeni" &&
               row.providerConnectionId === connectionId &&
               row.providerVaultRef,
           )
@@ -332,7 +420,7 @@ export function registerVaultProviderRoutes(
         planTier: payload.planTier,
         allowFakeTokens: settings.onePasswordFakeTokens,
       });
-      vaults = await provider.listVaults(routeProviderContext(null));
+      vaults = await listProviderVaults(provider, routeProviderContext(null));
     } catch (error) {
       return providerErrorResponse(c, error);
     }
@@ -398,13 +486,13 @@ export function registerVaultProviderRoutes(
     );
     const { grant } = authorization;
     try {
-      const { provider } = await onePasswordProviderForConnection(deps, {
+      const { provider } = await providerForConnection(deps, {
         workspaceId,
         connectionId,
         subjectId: grant.subjectId,
       });
       const [vaults, linked] = await Promise.all([
-        provider.listVaults(routeProviderContext(connectionId)),
+        listProviderVaults(provider, routeProviderContext(connectionId)),
         linkedVaults({
           workspaceId,
           connectionId,
@@ -418,6 +506,8 @@ export function registerVaultProviderRoutes(
             name: vault.name,
             itemCount: vault.itemCount,
             linkedVaultId: linked.get(vault.externalVaultId) ?? null,
+            writeAccess: vault.writeAccess ?? "unknown",
+            operations: providerOperations(provider.capabilities(), vault),
           }),
         ),
       });
@@ -441,15 +531,20 @@ export function registerVaultProviderRoutes(
     const context = vaultContextFor(authorization, workspaceId);
     try {
       let provider: VaultProvider;
-      if (payload.provider === "onepassword") {
+      if (payload.provider !== "host") {
         if (!payload.connectionId) {
-          throw new HTTPException(422, { message: "connectionId is required for 1Password" });
+          throw new HTTPException(422, {
+            message: "connectionId is required for a connected provider",
+          });
         }
-        ({ provider } = await onePasswordProviderForConnection(deps, {
+        const resolved = await providerForConnection(deps, {
           workspaceId,
           connectionId: payload.connectionId,
           subjectId: authorization.grant.subjectId,
-        }));
+        });
+        if (resolved.source !== payload.provider)
+          throw new HTTPException(422, { message: "Connection provider does not match" });
+        provider = resolved.provider;
       } else {
         const host = deps.connectionCredentials?.vaultProvider;
         if (!host) {
@@ -460,14 +555,14 @@ export function registerVaultProviderRoutes(
         }
         provider = host;
       }
-      const connectionId = payload.provider === "onepassword" ? payload.connectionId! : null;
+      const connectionId = payload.provider !== "host" ? payload.connectionId! : null;
       const providerVault = findProviderVault(
-        await provider.listVaults(routeProviderContext(connectionId)),
+        await listProviderVaults(provider, routeProviderContext(connectionId)),
         payload.externalVaultId,
       );
       const row = await linkProviderVault(db, context, {
         ownerKind: payload.ownerKind,
-        name: payload.name ?? providerSecretName(providerVault.name, "1Password vault"),
+        name: payload.name ?? providerSecretName(providerVault.name, "Connected vault"),
         source: payload.provider,
         providerConnectionId: connectionId,
         providerVaultRef: providerVault.externalVaultId,
@@ -509,6 +604,7 @@ export function registerVaultProviderRoutes(
           workspaceId,
           subjectId: authorization.grant.subjectId,
         }),
+        force: true,
       });
       const rateLimitedUntil =
         result.status === "skipped_rate_limited" ||
@@ -541,7 +637,40 @@ export function registerVaultProviderRoutes(
       throw new HTTPException(403, { message: "missing permission: account:admin" });
     }
     const context = vaultContextFor(authorization, workspaceId);
+    let created: ProviderVault | undefined;
+    let linked: VaultRow | undefined;
+    let sharingFailure: VaultProviderError | undefined;
     try {
+      // Match link_provider_vault's ownership gate before making a remote
+      // vault. A refused local link must not leave a newly created vault behind.
+      const { connection, metadata } = await requireOnePasswordConnection(
+        deps,
+        authorization,
+        workspaceId,
+        connectionId,
+      );
+      const ownership = connection.subjectId !== null ? "user" : metadata.ownership;
+      if (
+        ownership !== payload.ownerKind ||
+        (ownership === "user" && connection.subjectId !== authorization.grant.subjectId)
+      ) {
+        throw new VaultError(
+          "vault_permission_denied",
+          `A ${ownership} 1Password connection backs only ${ownership} vaults`,
+          { connectionId, connectionOwnership: ownership, ownerKind: payload.ownerKind },
+        );
+      }
+      const link = {
+        ownerKind: payload.ownerKind,
+        name: payload.name,
+        source: "onepassword" as const,
+        providerConnectionId: connectionId,
+        mode: "read_write" as const,
+        allowOrganization: isAccountAdmin(authorization),
+      };
+      // Exact SQL policy, including names, quotas and personal authority; all
+      // effects roll back. This is not a reservation over the provider call.
+      await preflightProviderVaultLink(db, context, link);
       const { provider } = await onePasswordProviderForConnection(deps, {
         workspaceId,
         connectionId,
@@ -553,33 +682,70 @@ export function registerVaultProviderRoutes(
           "this 1Password connection cannot create vaults",
         );
       }
-      const created = await provider.createVault(routeProviderContext(connectionId), {
-        name: payload.name,
-        description: "Managed by Opengeni",
-        allowAdminsAccess: true,
-        ...(payload.groupId ? { groupId: payload.groupId } : {}),
-      });
-      const row = await linkProviderVault(db, context, {
-        ownerKind: payload.ownerKind,
-        name: payload.name,
-        source: "onepassword",
-        providerConnectionId: connectionId,
+      const { OnePasswordVaultCreatedError } = await loadOnePasswordModule();
+      try {
+        created = await provider.createVault(routeProviderContext(connectionId), {
+          name: payload.name,
+          description: "Managed by Opengeni",
+          allowAdminsAccess: true,
+          ...(payload.groupId ? { groupId: payload.groupId } : {}),
+        });
+      } catch (error) {
+        if (error instanceof OnePasswordVaultCreatedError) {
+          created = error.createdVault;
+          sharingFailure = error;
+        } else if (isVaultProviderError(error)) {
+          throw error;
+        } else {
+          throw new VaultProviderError(
+            "provider_outcome_unknown",
+            "1Password did not confirm vault creation; it may have been applied. Check the connection's vault list before creating again.",
+          );
+        }
+      }
+      linked = await linkProviderVault(db, context, {
+        ...link,
         providerVaultRef: created.externalVaultId,
-        mode: "read_write",
-        allowOrganization: isAccountAdmin(authorization),
       });
       await syncLinkedProviderVault({
         db,
         context,
-        vaultId: row.id,
+        vaultId: linked.id,
         providers: vaultProviderRegistryFor(deps, {
           workspaceId,
           subjectId: authorization.grant.subjectId,
         }),
         force: true,
       });
-      return c.json(await vaultSummaryFor(deps, authorization, workspaceId, row.id), 201);
+      if (sharingFailure) throw sharingFailure;
+      return c.json(await vaultSummaryFor(deps, authorization, workspaceId, linked.id), 201);
     } catch (error) {
+      if (created) {
+        const local = isVaultError(error) ? error : vaultErrorFromDatabase(error);
+        const code =
+          local?.code ??
+          (isVaultProviderError(error)
+            ? vaultErrorCodeForProvider(error.code, "write")
+            : "provider_unavailable");
+        const message = linked
+          ? sharingFailure
+            ? "The vault was created and linked, but its group access could not be confirmed. Check sharing in 1Password. Do not create it again."
+            : "The vault was created and linked, but its refresh could not be confirmed. Refresh the linked vault. Do not create it again."
+          : "The vault was created in 1Password, but its local link could not be confirmed. Use Link on the existing provider vault after resolving the local refusal. Do not create it again.";
+        return vaultRouteError(
+          c,
+          new VaultError(code, message, {
+            created: true,
+            // A lost DB acknowledgement is not proof that the link rolled back.
+            linked: linked ? true : local ? false : null,
+            connectionId,
+            externalVaultId: created.externalVaultId,
+            ...(linked ? { vaultId: linked.id } : {}),
+            ...(sharingFailure ? { groupGrantConfirmed: false } : {}),
+          }),
+          true,
+        );
+      }
       return vaultRouteError(c, error, true);
     }
   });
@@ -653,7 +819,7 @@ export function registerVaultProviderRoutes(
         planTier,
         allowFakeTokens: settings.onePasswordFakeTokens,
       });
-      vaults = await provider.listVaults(routeProviderContext(connectionId));
+      vaults = await listProviderVaults(provider, routeProviderContext(connectionId));
     } catch (error) {
       return providerErrorResponse(c, error);
     }
@@ -766,6 +932,599 @@ export function registerVaultProviderRoutes(
     return c.json(DisconnectOnePasswordResponse.parse({ unlinkedVaultIds }));
   });
 
+  /** Metadata-only unified catalog; listing never decrypts a provider token. */
+  app.get("/v1/workspaces/:workspaceId/vault-providers/connections", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "secrets:list",
+    );
+    const factories = externalVaultFactoriesFor(deps);
+    const rows = await listConnectionsMetadata(db, workspaceId, authorization.grant.subjectId);
+    const connections = rows
+      .filter((row) => row.status !== "revoked")
+      .flatMap<VaultProviderConnectionSummary>((row) => {
+        if (isOnePasswordConnection(row)) {
+          return [
+            {
+              ...onePasswordConnectionSummary(authorization, row),
+              provider: "onepassword" as const,
+              // The published legacy 1Password port has no granular override.
+              operations: providerOperations({
+                write: true,
+                createVault: true,
+                totp: true,
+                files: false,
+                groupGrants: true,
+                passkeys: false,
+              }),
+              available: deps.onePasswordVaultProvider !== null,
+            },
+          ];
+        }
+        if (!isExternalVaultConnection(row)) return [];
+        const details = externalVaultConnectionDetails(row.metadata)!;
+        return [
+          {
+            id: row.id,
+            provider: details.provider,
+            ownership: details.ownership,
+            accountName: details.accountName,
+            label: details.label,
+            verifiedAt: details.verifiedAt,
+            createdAt: row.createdAt,
+            createdBySubjectId: row.createdBySubjectId,
+            canManage: canManageExternal(authorization, row, details),
+            operations: details.operations,
+            available: Boolean(factories[details.provider]),
+            verificationStatus: details.verificationStatus ?? "ready",
+          },
+        ];
+      });
+    const providers = (
+      ["onepassword", "external", "protonpass", "keeper", "bitwarden"] as const
+    ).map((provider) => {
+      const available =
+        provider === "onepassword"
+          ? deps.onePasswordVaultProvider !== null
+          : Boolean(factories[provider]);
+      return { provider, available, reason: available ? null : ("not_enabled" as const) };
+    });
+    return c.json(ListVaultProviderConnectionsResponse.parse({ connections, providers }));
+  });
+
+  app.post("/v1/workspaces/:workspaceId/vault-providers/connections", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireSetupAuthority(c, workspaceId);
+    const { grant } = authorization;
+    const payload = await parseRequestJson(c, InstallVaultProviderRequest);
+    requireOwnership(authorization, payload.ownership);
+    const key = requireEnvironmentEncryption(settings);
+    if (!externalVaultFactoriesFor(deps)[payload.credentials.provider]) {
+      return vaultRouteError(
+        c,
+        new VaultProviderError(
+          "provider_unavailable",
+          "This vault provider is not available in this deployment.",
+        ),
+      );
+    }
+    const details: ExternalVaultConnectionDetails = {
+      version: 1,
+      provider: payload.credentials.provider,
+      ownership: payload.ownership,
+      accountId: null,
+      accountName: null,
+      label: payload.label ?? null,
+      verifiedAt: new Date().toISOString(),
+      verificationStatus: "pending",
+      operations: providerOperations({
+        write: false,
+        createVault: false,
+        totp: false,
+        files: false,
+        groupGrants: false,
+        passkeys: false,
+      }),
+    };
+    const continuation = externalActorContinuationForAuthorization(authorization);
+    // Reserve identity before a remote call or one-time-token binding. No
+    // usable credential (in particular no bootstrap token) is stored here.
+    const connection = await db.transaction(async (tx) => {
+      await requireConnectOwnerAuthority(tx, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        personalOwnerVerified: isPersonalConnectionOwnerPrincipal(authorization),
+        ...(continuation ? { externalContinuation: continuation } : {}),
+      });
+      return createConnection(tx, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: payload.ownership === "user" ? grant.subjectId : null,
+        providerDomain: externalVaultProviderDomain(details.provider),
+        kind: "api_key",
+        status: "needs_reauth",
+        credentialEncrypted: encryptEnvironmentValue(key, "{}"),
+        grantedScopes: [],
+        expiresAt: null,
+        metadata: externalVaultConnectionMetadata(details),
+        createdBySubjectId: grant.subjectId,
+      });
+    });
+    try {
+      const result = await finishExternalSetup({
+        authorization,
+        workspaceId,
+        connection,
+        credentials: payload.credentials,
+        currentCredentials: null,
+        isNew: true,
+      });
+      return c.json(result.body, result.status);
+    } catch (error) {
+      return vaultRouteError(c, error);
+    }
+  });
+
+  app.put(
+    "/v1/workspaces/:workspaceId/vault-providers/connections/:connectionId/credentials",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const connectionId = c.req.param("connectionId");
+      const authorization = await requireSetupAuthority(c, workspaceId);
+      const { grant } = authorization;
+      const connection = await getConnectionMetadata(
+        db,
+        workspaceId,
+        connectionId,
+        grant.subjectId,
+      );
+      if (
+        !connection ||
+        !isExternalVaultConnection(connection) ||
+        connection.status === "revoked"
+      ) {
+        throw new HTTPException(404, { message: "Vault connection not found" });
+      }
+      const details = externalVaultConnectionDetails(connection.metadata)!;
+      if (!canManageExternal(authorization, connection, details))
+        throw new HTTPException(403, { message: "You cannot change this vault connection" });
+      requireOwnership(authorization, details.ownership);
+      const payload = await parseRequestJson(c, ReplaceVaultProviderCredentialsRequest);
+      if (payload.credentials.provider !== details.provider)
+        throw new HTTPException(422, { message: "Connection provider does not match" });
+      try {
+        const loaded = await loadExternalVaultConnection(db, settings, {
+          workspaceId,
+          connectionId,
+          subjectId: grant.subjectId,
+          provider: details.provider,
+          allowPendingVerification: true,
+        });
+        const result = await finishExternalSetup({
+          authorization,
+          workspaceId,
+          connection: loaded.connection,
+          credentials: payload.credentials,
+          currentCredentials: loaded.currentCredentials,
+          pendingCredentials: loaded.pendingCredentials,
+          isNew: false,
+        });
+        return c.json(result.body, result.status);
+      } catch (error) {
+        return vaultRouteError(c, error);
+      }
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/vault-providers/connections/:connectionId/verify",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const connectionId = c.req.param("connectionId");
+      const authorization = await requireSetupAuthority(c, workspaceId);
+      const connection = await getConnectionMetadata(
+        db,
+        workspaceId,
+        connectionId,
+        authorization.grant.subjectId,
+      );
+      if (!connection || !isExternalVaultConnection(connection) || connection.status === "revoked")
+        throw new HTTPException(404, { message: "Vault connection not found" });
+      const details = externalVaultConnectionDetails(connection.metadata)!;
+      if (!canManageExternal(authorization, connection, details))
+        throw new HTTPException(403, { message: "You cannot verify this vault connection" });
+      requireOwnership(authorization, details.ownership);
+      try {
+        const loaded = await loadExternalVaultConnection(db, settings, {
+          workspaceId,
+          connectionId,
+          subjectId: authorization.grant.subjectId,
+          provider: details.provider,
+          allowPendingVerification: true,
+        });
+        const result = await finishExternalSetup({
+          authorization,
+          workspaceId,
+          connection: loaded.connection,
+          credentials: loaded.credentials,
+          currentCredentials: loaded.currentCredentials,
+          pendingCredentials: loaded.pendingCredentials,
+          isNew: false,
+        });
+        return c.json(result.body, result.status);
+      } catch (error) {
+        return vaultRouteError(c, error);
+      }
+    },
+  );
+
+  app.delete("/v1/workspaces/:workspaceId/vault-providers/connections/:connectionId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const connectionId = c.req.param("connectionId");
+    const authorization = await requireSetupAuthority(c, workspaceId);
+    const { grant } = authorization;
+    const connection = await getConnectionMetadata(db, workspaceId, connectionId, grant.subjectId);
+    if (!connection || connection.status === "revoked")
+      throw new HTTPException(404, { message: "Vault connection not found" });
+    if (isOnePasswordConnection(connection)) {
+      requireManageOnePasswordConnection(
+        authorization,
+        connection,
+        onePasswordConnectionMetadata(connection.metadata)!,
+      );
+    } else {
+      const details = externalVaultConnectionDetails(connection.metadata);
+      if (!details || !isExternalVaultConnection(connection))
+        throw new HTTPException(404, { message: "Vault connection not found" });
+      if (!canManageExternal(authorization, connection, details))
+        throw new HTTPException(403, { message: "You cannot disconnect this vault connection" });
+    }
+    try {
+      // Local unlink and credential revocation commit together; no vendor mutation.
+      const unlinkedVaultIds = await db.transaction(async (tx) => {
+        const context = vaultContextFor(authorization, workspaceId);
+        const rows = await listVaultsForSubject(tx, context, { workspaceId });
+        const unlinked: string[] = [];
+        for (const row of rows.filter(
+          (candidate) => candidate.providerConnectionId === connectionId,
+        )) {
+          await deleteVault(tx, context, {
+            vaultId: row.id,
+            confirmName: row.name,
+            allowOrganization: isAccountAdmin(authorization),
+          });
+          unlinked.push(row.id);
+        }
+        const revoked = await revokeConnection(
+          tx,
+          workspaceId,
+          connectionId,
+          grant.subjectId,
+          connection.version,
+        );
+        if (!revoked)
+          throw new HTTPException(409, {
+            message: "This vault connection changed. Reload it before disconnecting.",
+          });
+        return unlinked;
+      });
+      return c.json(DisconnectVaultProviderResponse.parse({ unlinkedVaultIds }));
+    } catch (error) {
+      return vaultRouteError(c, error);
+    }
+  });
+
+  async function requireSetupAuthority(
+    c: Context,
+    workspaceId: string,
+  ): Promise<AccessGrantAuthorization> {
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "connections:write",
+    );
+    requirePermission(authorization.grant, "secrets:write");
+    return authorization;
+  }
+
+  function requireOwnership(
+    authorization: AccessGrantAuthorization,
+    ownership: "user" | "workspace" | "organization",
+  ): void {
+    if (ownership === "organization" && !isAccountAdmin(authorization))
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    if (ownership === "user" && !isPersonalConnectionOwnerPrincipal(authorization))
+      throw new HTTPException(403, {
+        message: "Only a signed-in person can manage a personal vault connection",
+      });
+  }
+
+  function canManageExternal(
+    authorization: AccessGrantAuthorization,
+    connection: OnePasswordConnectionRow,
+    details: ExternalVaultConnectionDetails,
+  ): boolean {
+    const grant = authorization.grant;
+    return (
+      hasPermission(grant.permissions, "connections:write", grant.permissionMode) &&
+      hasPermission(grant.permissions, "secrets:write", grant.permissionMode) &&
+      (connection.subjectId !== null
+        ? connection.subjectId === grant.subjectId &&
+          isPersonalConnectionOwnerPrincipal(authorization)
+        : details.ownership !== "organization" || isAccountAdmin(authorization))
+    );
+  }
+
+  function catalogVault(
+    provider: VaultProvider,
+    vault: ProviderVault,
+    linkedVaultId: string | null,
+  ): ProviderVaultMeta {
+    return {
+      externalVaultId: vault.externalVaultId,
+      name: vault.name,
+      itemCount: vault.itemCount,
+      linkedVaultId,
+      writeAccess: vault.writeAccess ?? "unknown",
+      operations: providerOperations(provider.capabilities(), vault),
+    };
+  }
+
+  async function finishExternalSetup(input: {
+    authorization: AccessGrantAuthorization;
+    workspaceId: string;
+    connection: ConnectionMetadata;
+    credentials: VaultProviderCredentials | StoredVaultProviderCredentials;
+    currentCredentials: StoredVaultProviderCredentials | null;
+    pendingCredentials?: StoredVaultProviderCredentials | null;
+    isNew: boolean;
+  }): Promise<{ body: InstallVaultProviderResponse; status: 200 | 201 | 202 }> {
+    const { authorization, workspaceId } = input;
+    const { grant } = authorization;
+    const key = requireEnvironmentEncryption(settings);
+    const details = externalVaultConnectionDetails(input.connection.metadata)!;
+    const context = vaultContextFor(authorization, workspaceId);
+    const linked = await linkedVaultRows(context, workspaceId, input.connection.id);
+    let connection = input.connection;
+    let saved = false;
+    let hasPending = Boolean(input.pendingCredentials);
+    let rejectedAccount: VaultProviderError | undefined;
+    let storedBundle: unknown = input.pendingCredentials
+      ? pendingVaultCredentialBundle(input.currentCredentials, input.pendingCredentials)
+      : (input.currentCredentials ?? {});
+    const continuation = externalActorContinuationForAuthorization(authorization);
+    const persist = async (
+      credentials: StoredVaultProviderCredentials,
+      ready?: ExternalVaultConnectionDetails,
+    ) => {
+      const unchangedCurrent =
+        input.currentCredentials !== null &&
+        isDeepStrictEqual(credentials, input.currentCredentials);
+      const pending = !ready && !unchangedCurrent;
+      const nextMetadata = ready ?? {
+        ...details,
+        verificationStatus: pending ? ("pending" as const) : ("ready" as const),
+      };
+      const nextBundle = pending
+        ? pendingVaultCredentialBundle(input.currentCredentials, credentials)
+        : credentials;
+      const nextStatus = pending ? connection.status : ("active" as const);
+      const previousDetails = externalVaultConnectionDetails(connection.metadata);
+      // A read-only verification must not invalidate in-flight provider calls.
+      // Actual credential, status or capability changes still advance the fence.
+      const generationChanged =
+        !isDeepStrictEqual(nextBundle, storedBundle) ||
+        nextStatus !== connection.status ||
+        !isDeepStrictEqual(previousDetails?.operations, nextMetadata.operations);
+      if (!generationChanged && isDeepStrictEqual(previousDetails, nextMetadata)) {
+        saved = true;
+        hasPending = pending;
+        return;
+      }
+      const updated = await db.transaction(async (tx) => {
+        await requireConnectOwnerAuthority(tx, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          personalOwnerVerified: isPersonalConnectionOwnerPrincipal(authorization),
+          ...(continuation ? { externalContinuation: continuation } : {}),
+        });
+        return updateConnection(tx, {
+          workspaceId,
+          connectionId: connection.id,
+          visibleToSubjectId: grant.subjectId,
+          expectedVersion: connection.version,
+          status: nextStatus,
+          ...(generationChanged
+            ? { credentialEncrypted: encryptEnvironmentValue(key, JSON.stringify(nextBundle)) }
+            : {}),
+          metadata: { ...connection.metadata, ...externalVaultConnectionMetadata(nextMetadata) },
+          updatedBySubjectId: grant.subjectId,
+        });
+      });
+      if (!updated)
+        throw new HTTPException(409, {
+          message: "This vault connection changed. Reload it before continuing setup.",
+        });
+      connection = updated;
+      saved = true;
+      hasPending = pending;
+      storedBundle = nextBundle;
+    };
+    try {
+      const checked = await prepareExternal(
+        input.credentials,
+        authorization,
+        workspaceId,
+        connection.id,
+        persist,
+      );
+      const sameAccount =
+        details.accountId !== null
+          ? checked.accountId === details.accountId
+          : linked.length === 0 ||
+            linked.every((row) =>
+              checked.vaults.some((vault) => vault.externalVaultId === row.providerVaultRef),
+            );
+      if (!sameAccount) {
+        rejectedAccount = new VaultProviderError(
+          "provider_conflict",
+          "These credentials do not reach the same account and linked vaults. Connect them separately instead.",
+        );
+        throw rejectedAccount;
+      }
+      const ready: ExternalVaultConnectionDetails = {
+        ...details,
+        accountId: checked.accountId ?? details.accountId,
+        accountName: checked.accountName,
+        operations: checked.operations,
+        verifiedAt: new Date().toISOString(),
+        verificationStatus: "ready",
+      };
+      await persist(checked.credentials, ready);
+      const providers = vaultProviderRegistryFor(deps, { workspaceId, subjectId: grant.subjectId });
+      for (const row of linked) {
+        await syncLinkedProviderVault({
+          db,
+          context,
+          vaultId: row.id,
+          providers,
+          force: true,
+        }).catch(() => undefined);
+      }
+      const linkedIds = new Map(linked.map((row) => [row.providerVaultRef, row.id]));
+      return {
+        status: input.isNew ? 201 : 200,
+        body: InstallVaultProviderResponse.parse({
+          connectionId: connection.id,
+          provider: details.provider,
+          accountName: ready.accountName,
+          operations: ready.operations,
+          vaults: checked.vaults.map((vault) =>
+            catalogVault(checked.provider, vault, linkedIds.get(vault.externalVaultId) ?? null),
+          ),
+        }),
+      };
+    } catch (error) {
+      // Only our explicit identity rejection discards the candidate. An
+      // adapter conflict during discovery can happen after a one-time bind;
+      // preserve that bound key so verification can finish without rebinding.
+      if (rejectedAccount && error === rejectedAccount && hasPending) {
+        if (input.currentCredentials) {
+          // Reject the candidate, not the working connection. CAS prevents this
+          // rollback from overwriting a concurrent reconnect or disconnect.
+          await persist(input.currentCredentials, { ...details, verificationStatus: "ready" });
+        } else {
+          await revokeConnection(
+            db,
+            workspaceId,
+            connection.id,
+            grant.subjectId,
+            connection.version,
+          );
+        }
+        throw error;
+      }
+      // A bound key is durable even if later discovery fails. Never tell the
+      // person to repeat a consumed bootstrap token or overwrite working keys.
+      if (saved && hasPending && isVaultProviderError(error)) {
+        return {
+          status: 202,
+          body: InstallVaultProviderResponse.parse({
+            connectionId: connection.id,
+            provider: details.provider,
+            accountName: details.accountName,
+            operations: details.operations,
+            vaults: [],
+            discoveryPending: true,
+            errorCode: error.code,
+          }),
+        };
+      }
+      if (!saved && input.isNew) {
+        await revokeConnection(db, workspaceId, connection.id, grant.subjectId, connection.version);
+      }
+      throw error;
+    }
+  }
+
+  async function prepareExternal(
+    credentials: VaultProviderCredentials | StoredVaultProviderCredentials,
+    authorization: AccessGrantAuthorization,
+    workspaceId: string,
+    connectionId: string | null,
+    persistCredentials: (credentials: StoredVaultProviderCredentials) => Promise<void>,
+  ) {
+    const factory = externalVaultFactoriesFor(deps)[credentials.provider];
+    if (!factory)
+      throw new VaultProviderError(
+        "provider_unavailable",
+        "This vault provider is not available in this deployment.",
+      );
+    let rotated: StoredVaultProviderCredentials | undefined;
+    const signal = AbortSignal.timeout(30_000);
+    const prepared = await factory({
+      credentials,
+      ...(connectionId ? { connectionId } : {}),
+      signal,
+      persistCredentials: async (next) => {
+        const parsed = StoredVaultProviderCredentials.safeParse(next);
+        if (!parsed.success || parsed.data.provider !== credentials.provider)
+          throw new VaultProviderError(
+            "provider_unavailable",
+            "The provider returned invalid connection state.",
+          );
+        rotated = parsed.data;
+        await persistCredentials(parsed.data);
+      },
+    });
+    if (prepared.provider.id !== credentials.provider)
+      throw new VaultProviderError(
+        "provider_unavailable",
+        "The configured adapter does not match this connection.",
+      );
+    const preparedCredentials = StoredVaultProviderCredentials.safeParse(prepared.credentials);
+    if (!preparedCredentials.success || preparedCredentials.data.provider !== credentials.provider)
+      throw new VaultProviderError(
+        "provider_unavailable",
+        "The provider returned invalid connection state.",
+      );
+    if (!rotated) await persistCredentials(preparedCredentials.data);
+    const ctx: VaultProviderContext = {
+      connectionId,
+      budget: createProviderCallBudget(50),
+      signal,
+      forceRefresh: true,
+      authority: {
+        accountId: authorization.grant.accountId,
+        workspaceId,
+        connectionWorkspaceId: workspaceId,
+        subjectId: authorization.grant.subjectId,
+      },
+    };
+    const validated = await prepared.provider.validate(ctx);
+    const vaults = await listProviderVaults(prepared.provider, ctx);
+    const stored = StoredVaultProviderCredentials.safeParse(rotated ?? prepared.credentials);
+    if (!stored.success || stored.data.provider !== credentials.provider)
+      throw new VaultProviderError(
+        "provider_unavailable",
+        "The provider returned invalid connection state.",
+      );
+    return {
+      provider: prepared.provider,
+      credentials: stored.data,
+      vaults,
+      accountId: validated.accountId ?? null,
+      accountName: validated.accountName,
+      operations: providerOperations(prepared.provider.capabilities()),
+    };
+  }
+
   async function linkedVaultRows(
     context: VaultDbContext,
     workspaceId: string,
@@ -774,7 +1533,7 @@ export function registerVaultProviderRoutes(
     const rows = await listVaultsForSubject(db, context, { workspaceId });
     return rows.filter(
       (row): row is VaultRow & { providerVaultRef: string } =>
-        row.source === "onepassword" &&
+        row.source !== "opengeni" &&
         row.providerConnectionId === connectionId &&
         row.providerVaultRef !== null,
     );
