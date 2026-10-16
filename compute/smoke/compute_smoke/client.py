@@ -293,6 +293,7 @@ class EntryInfo:
 class ProcessInfo:
     pid: int
     command: str
+    running: bool = True
 
     @property
     def process_id(self) -> str:
@@ -448,18 +449,34 @@ class Sandbox:
 
         return int(self._guest.call("ping", io_timeout=timeout)["pid"])
 
+    def restore_count(self, *, timeout: float = DEFAULT_TIMEOUT) -> int:
+        """How many restore notices the guest service has acknowledged since
+        it started: how often this sandbox was restored from a memory image.
+        Waking it to ask does not restore it."""
+
+        return int(self._guest.call("ping", io_timeout=timeout)["restores"])
+
     def start_background(self, command: str, *, timeout: float = 60) -> ProcessHandle:
         pid = int(self._guest.call("spawn", command=command)["pid"])
         return ProcessHandle(self._guest, pid, timeout=timeout)
 
     def connect_process(self, pid: int, *, timeout: float = 60) -> ProcessHandle:
-        if not any(process.pid == pid for process in self.list_processes()):
-            raise SandboxUnavailable(f"process {pid} is not running")
+        """Follows a background command again, running or ended, as long as
+        no one has collected its result yet."""
+
+        if not any(process.pid == pid for process in self.list_processes(include_ended=True)):
+            raise SandboxUnavailable(f"process {pid} is unknown or its result was collected")
         return ProcessHandle(self._guest, pid, timeout=timeout)
 
-    def list_processes(self) -> tuple[ProcessInfo, ...]:
-        processes = self._guest.call("processes")["processes"]
-        return tuple(ProcessInfo(int(p["pid"]), str(p["command"])) for p in processes)
+    def list_processes(self, *, include_ended: bool = False) -> tuple[ProcessInfo, ...]:
+        """Running background commands; with `include_ended`, also those that
+        ended but whose result is not collected yet."""
+
+        processes = self._guest.call("processes", all=include_ended)["processes"]
+        return tuple(
+            ProcessInfo(int(p["pid"]), str(p["command"]), bool(p.get("running", True)))
+            for p in processes
+        )
 
     def get_process(self, process_id: str) -> ProcessInfo | None:
         return next((p for p in self.list_processes() if p.process_id == process_id), None)
@@ -485,9 +502,11 @@ class Sandbox:
         return info
 
     def connect(self, *, timeout: float | None = None) -> None:
-        """Wakes the sandbox and returns once it runs."""
+        """Wakes the sandbox and returns once the host agent reports it woken."""
 
-        self.host.wake(self.sandbox_id, timeout=timeout)
+        reply = self.host.wake(self.sandbox_id, timeout=timeout)
+        if reply.get("result") != "woken":
+            raise SandboxUnavailable(f"waking {self.sandbox_id} answered {reply!r}")
 
     def set_timeout(self, seconds: float) -> None:
         """Keeps the sandbox awake for `seconds`; afterwards it pauses once

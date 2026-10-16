@@ -15,6 +15,11 @@ Standard library only, so it runs on any guest with Python 3.10 or later.
 Background processes live in this process's memory: they survive pausing,
 saving and restoring the sandbox, and are gone after a fresh boot, exactly
 like the programs themselves.
+
+With `--notice`, the service also answers the host agent's restore notice
+(`restored <unix time in nanoseconds>`, answered with `ok`): it sets the
+clock and counts restores, which `ping` reports, so a scenario can tell how
+many times its own sandbox was restored from a memory image.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import ctypes.util
 import itertools
 import json
 import os
+import select
 import shutil
 import signal
 import socket
@@ -34,11 +40,13 @@ import struct
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Iterator
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, BinaryIO
 
 MAX_REQUEST = 64 << 20
+MAX_NOTICE = 64
 OUTPUT_DIR = Path(os.environ.get("SMOKE_GUEST_STATE", "/run/smoke-guest"))
 _OUTPUT_NAMES = itertools.count()
 
@@ -150,6 +158,12 @@ class Processes:
         with self._lock:
             return [p for p in self._by_pid.values() if not p.exited.is_set()]
 
+    def unwaited(self) -> list[Process]:
+        """Every process not yet collected by `wait`, running or not."""
+
+        with self._lock:
+            return list(self._by_pid.values())
+
     def forget(self, pid: int) -> None:
         with self._lock:
             process = self._by_pid.pop(pid, None)
@@ -160,8 +174,27 @@ class Processes:
 PROCESSES = Processes()
 
 
+class Restores:
+    """How many restore notices this service has acknowledged."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def record(self) -> None:
+        with self._lock:
+            self._count += 1
+
+    def count(self) -> int:
+        with self._lock:
+            return self._count
+
+
+RESTORES = Restores()
+
+
 def op_ping(_request: dict[str, Any]) -> dict[str, Any]:
-    return {"pid": os.getpid()}
+    return {"pid": os.getpid(), "restores": RESTORES.count()}
 
 
 def op_exec(request: dict[str, Any]) -> dict[str, Any]:
@@ -198,25 +231,41 @@ def op_spawn(request: dict[str, Any]) -> dict[str, Any]:
     return {"pid": process.pid}
 
 
-def op_processes(_request: dict[str, Any]) -> dict[str, Any]:
+def op_processes(request: dict[str, Any]) -> dict[str, Any]:
+    """Running background commands; with `all`, also those that ended but
+    whose result no `wait` has collected yet."""
+
+    every = request.get("all", False)
+    if not isinstance(every, bool):
+        raise RequestError("field 'all' must be bool")
+    processes = PROCESSES.unwaited() if every else PROCESSES.running()
     return {
         "processes": [
-            {"pid": process.pid, "command": process.command} for process in PROCESSES.running()
+            {
+                "pid": process.pid,
+                "command": process.command,
+                "running": not process.exited.is_set(),
+            }
+            for process in processes
         ]
     }
 
 
 def op_signal(request: dict[str, Any]) -> dict[str, Any]:
+    """Signals a background command's whole process group, so children it
+    started do not outlive a kill. Reports whether the command itself was
+    still running to receive it."""
+
     pid = _field(request, "pid", int)
     number = _field(request, "signal", int)
     process = PROCESSES.get(pid)
-    if process.exited.is_set():
-        return {"delivered": False}
+    running = not process.exited.is_set()
     try:
-        os.kill(pid, number)
+        # The command was started in a new session, so its pid is the group.
+        os.killpg(pid, number)
     except ProcessLookupError:
         return {"delivered": False}
-    return {"delivered": True}
+    return {"delivered": running}
 
 
 def op_wait(request: dict[str, Any]) -> dict[str, Any]:
@@ -326,13 +375,21 @@ def _event_type(mask: int) -> str:
 
 
 class Inotify:
-    """A minimal recursive inotify watcher over ctypes."""
+    """A minimal recursive inotify watcher over ctypes.
+
+    A directory keeps its watch when it moves, so the watcher tracks moves:
+    a directory moved within the tree has its descendants' paths rewritten,
+    one moved out has its watches removed, and one moved in or created is
+    watched together with everything already inside it.
+    """
 
     def __init__(self, root: Path, recursive: bool) -> None:
         libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
         self._add = libc.inotify_add_watch
         self._add.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
-        self._fd = libc.inotify_init1(os.O_CLOEXEC)
+        self._remove = libc.inotify_rm_watch
+        self._remove.argtypes = [ctypes.c_int, ctypes.c_int]
+        self._fd = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
         if self._fd < 0:
             raise OSError(ctypes.get_errno(), "inotify_init1 failed")
         self._root = root
@@ -340,9 +397,10 @@ class Inotify:
         self._dirs: dict[int, Path] = {}
         self._watch(root)
         if recursive:
-            for directory, subdirs, _ in os.walk(root):
-                for name in subdirs:
-                    self._watch(Path(directory) / name)
+            self._watch_below(root)
+
+    def fileno(self) -> int:
+        return self._fd
 
     def _watch(self, directory: Path) -> None:
         descriptor = self._add(self._fd, os.fsencode(directory), WATCHED)
@@ -351,41 +409,104 @@ class Inotify:
             raise OSError(error, f"cannot watch {directory}: {os.strerror(error)}")
         self._dirs[descriptor] = directory
 
-    def events(self) -> Iterator[dict[str, str]]:
-        while True:
+    def _watch_below(self, top: Path) -> None:
+        """Watches every directory below `top`. One that vanishes on the way
+        is skipped: its removal is reported anyway."""
+
+        for directory, subdirs, _ in os.walk(top):
+            for name in subdirs:
+                with contextlib.suppress(OSError):
+                    self._watch(Path(directory) / name)
+
+    def _below(self, top: Path) -> list[tuple[int, Path]]:
+        return [
+            (descriptor, path)
+            for descriptor, path in self._dirs.items()
+            if path == top or top in path.parents
+        ]
+
+    def _moved_within(self, old: Path, new: Path) -> None:
+        for descriptor, path in self._below(old):
+            self._dirs[descriptor] = new / path.relative_to(old)
+
+    def _moved_out(self, top: Path) -> None:
+        for descriptor, _ in self._below(top):
+            del self._dirs[descriptor]
+            self._remove(self._fd, descriptor)
+
+    def read_events(self) -> list[dict[str, str]]:
+        """The events waiting now, possibly none."""
+
+        try:
             buffer = os.read(self._fd, 64 * 1024)
-            offset = 0
-            while offset < len(buffer):
-                descriptor, mask, _cookie, length = EVENT_HEADER.unpack_from(buffer, offset)
-                offset += EVENT_HEADER.size
-                raw = buffer[offset : offset + length].rstrip(b"\0")
-                offset += length
-                directory = self._dirs.get(descriptor)
-                if mask & IN_IGNORED or directory is None:
-                    self._dirs.pop(descriptor, None)
-                    continue
-                path = directory / os.fsdecode(raw) if raw else directory
-                if self._recursive and mask & IN_ISDIR and mask & (IN_CREATE | IN_MOVED_TO):
+        except BlockingIOError:
+            return []
+        events = []
+        # Directories moved away in this batch, by cookie, until their
+        # arrival is seen. The kernel queues both halves of a move together.
+        departed: dict[int, Path] = {}
+        offset = 0
+        while offset < len(buffer):
+            descriptor, mask, cookie, length = EVENT_HEADER.unpack_from(buffer, offset)
+            offset += EVENT_HEADER.size
+            raw = buffer[offset : offset + length].rstrip(b"\0")
+            offset += length
+            directory = self._dirs.get(descriptor)
+            if mask & IN_IGNORED or directory is None:
+                self._dirs.pop(descriptor, None)
+                continue
+            path = directory / os.fsdecode(raw) if raw else directory
+            if self._recursive and mask & IN_ISDIR:
+                if mask & IN_MOVED_FROM:
+                    departed[cookie] = path
+                elif mask & IN_MOVED_TO and cookie in departed:
+                    self._moved_within(departed.pop(cookie), path)
+                elif mask & (IN_CREATE | IN_MOVED_TO):
+                    # Anything inside may predate the watch: a directory
+                    # moved in arrives full, and a new one fills fast.
                     with contextlib.suppress(OSError):
                         self._watch(path)
-                yield {
+                    self._watch_below(path)
+            events.append(
+                {
                     "name": path.relative_to(self._root).as_posix(),
                     "type": _event_type(mask),
                 }
+            )
+        for path in departed.values():
+            self._moved_out(path)
+        return events
 
     def close(self) -> None:
         os.close(self._fd)
 
 
-def stream_watch(request: dict[str, Any], send: Callable[[dict[str, Any]], None]) -> None:
+def stream_watch(
+    request: dict[str, Any],
+    connection: socket.socket,
+    send: Callable[[dict[str, Any]], None],
+) -> None:
+    """Streams events until the client closes the connection. Waiting on the
+    connection as well as the watcher ends the stream as soon as the client
+    goes, rather than at the next filesystem event."""
+
     root = Path(_field(request, "path", str))
     if not root.is_dir():
         raise RequestError(f"not a directory: {root}")
     watcher = Inotify(root, bool(request.get("recursive", False)))
     try:
         send({"ok": True})
-        for event in watcher.events():
-            send(event)
+        poll = select.poll()
+        poll.register(watcher, select.POLLIN)
+        poll.register(connection, select.POLLIN | select.POLLRDHUP)
+        while True:
+            for descriptor, _ in poll.poll():
+                if descriptor == connection.fileno():
+                    # The client sends nothing after its request, so input
+                    # here means it closed its side.
+                    return
+                for event in watcher.read_events():
+                    send(event)
     finally:
         watcher.close()
 
@@ -426,7 +547,7 @@ def serve_connection(connection: socket.socket) -> None:
                 raise RequestError("request must be a JSON object")
             op = request.get("op")
             if op == "watch":
-                stream_watch(request, send)
+                stream_watch(request, connection, send)
                 return
             handler = OPERATIONS.get(op) if isinstance(op, str) else None
             if handler is None:
@@ -465,10 +586,63 @@ def serve(server: socket.socket) -> None:
         ).start()
 
 
+def serve_notice(connection: socket.socket, *, set_clock: bool) -> None:
+    """Acts on one restore notice: sets the clock, counts the restore and
+    answers `ok`. Anything else closes the connection unanswered."""
+
+    with connection, connection.makefile("rb") as reader:
+        line = reader.readline(MAX_NOTICE + 1)
+        word, _, nanos = line.decode("ascii", errors="replace").strip().partition(" ")
+        if word != "restored" or not nanos.isdigit():
+            print(f"ignored restore notice {line[:MAX_NOTICE]!r}", file=sys.stderr, flush=True)
+            return
+        if set_clock:
+            try:
+                time.clock_settime_ns(time.CLOCK_REALTIME, int(nanos))
+            except OSError as error:
+                # A guest that cannot set its clock still counts the restore.
+                print(f"cannot set the clock: {error}", file=sys.stderr, flush=True)
+        RESTORES.record()
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            connection.sendall(b"ok\n")
+
+
+def serve_notices(server: socket.socket, *, set_clock: bool) -> None:
+    while True:
+        connection, _ = server.accept()
+        threading.Thread(
+            target=serve_notice,
+            args=(connection,),
+            kwargs={"set_clock": set_clock},
+            name="notice",
+            daemon=True,
+        ).start()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--listen", default="vsock:53")
+    parser.add_argument(
+        "--notice",
+        default=None,
+        help="address for the host agent's restore notices, such as vsock:54",
+    )
+    parser.add_argument(
+        "--keep-clock",
+        action="store_true",
+        help="count restore notices without setting the clock (to test on a host)",
+    )
     args = parser.parse_args()
+    if args.notice is not None:
+        notices = listen(args.notice)
+        threading.Thread(
+            target=serve_notices,
+            args=(notices,),
+            kwargs={"set_clock": not args.keep_clock},
+            name="notices",
+            daemon=True,
+        ).start()
+        print(f"smoke guest taking restore notices on {args.notice}", file=sys.stderr, flush=True)
     print(f"smoke guest serving on {args.listen}", file=sys.stderr, flush=True)
     serve(listen(args.listen))
 

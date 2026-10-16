@@ -136,6 +136,43 @@ fn a_rule_without_instances_or_a_table() {
     assert_eq!(written.table("hits"), None);
 }
 
+/// A refresh lowers a cap to a shrunken count but never raises one: growth
+/// stays a finding, listed for a deliberate raise by hand.
+#[test]
+fn a_refresh_lowers_caps_and_never_raises_them() {
+    let mut listed = Baseline::default();
+    listed.insert_table(
+        "hits".to_owned(),
+        BTreeMap::from([("grew.rs".to_owned(), 1), ("shrank.rs".to_owned(), 3)]),
+    );
+    let ctx = context(
+        listed.clone(),
+        &[("grew.rs", "hit\nhit\nhit\n"), ("shrank.rs", "hit\nhit\n")],
+    );
+    let mut written = listed;
+    let not_raised: Vec<(String, usize, String)> = Rule::update_baseline(&Hits, &ctx, &mut written)
+        .into_iter()
+        .map(|entry| (entry.path, entry.count, entry.line))
+        .collect();
+    assert_eq!(
+        written.table("hits"),
+        Some(&BTreeMap::from([
+            ("grew.rs".to_owned(), 1),
+            ("shrank.rs".to_owned(), 2),
+        ]))
+    );
+    assert_eq!(
+        not_raised,
+        [(
+            "grew.rs".to_owned(),
+            3,
+            "not raised: grew.rs (3 hits, cap 1); remove them, or raise the cap by hand if this \
+             is a deliberate exception"
+                .to_owned()
+        )]
+    );
+}
+
 /// An entry the loaded file has no line for, such as one set in memory, is
 /// shown on the baseline's line 1.
 #[test]

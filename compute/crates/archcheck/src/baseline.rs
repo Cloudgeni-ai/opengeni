@@ -135,7 +135,10 @@ impl BaseSkip<'_> {
     /// `file_size.no_new_entries and file_size.no_raised_caps skipped`.
     pub fn message(&self, behaviours: &str) -> String {
         match self {
-            Self::NotGiven => format!("{behaviours} (no --base-baseline given)"),
+            Self::NotGiven => format!(
+                "{behaviours} (--no-base given, or no [base] branch in ARCHITECTURE.toml and no \
+                 --base-baseline)"
+            ),
             Self::NotRead => {
                 format!("{behaviours} (archcheck does not read these tables from a base baseline)")
             }
@@ -251,20 +254,26 @@ impl Baseline {
     /// read is an error.
     pub fn load_base(path: &Path) -> Result<BaseBaseline, LoadError> {
         let text = read(path)?;
+        Self::parse_base(&text, path)
+    }
+
+    /// [`Self::load_base`] for a copy already read; `path` names where it
+    /// came from in messages.
+    pub fn parse_base(text: &str, path: &Path) -> Result<BaseBaseline, LoadError> {
         let unusable = |error: toml::de::Error| {
             Box::new(UnusableBase {
                 path: path.to_path_buf(),
-                line: error.span().map(|span| line_of(&text, span.start)),
+                line: error.span().map(|span| line_of(text, span.start)),
                 error,
             })
         };
-        let document = match DeTable::parse(&text) {
+        let document = match DeTable::parse(text) {
             Ok(document) => document.into_inner(),
             Err(error) => return Ok(BaseBaseline::Unusable(*unusable(error))),
         };
         let mut tables = BTreeMap::new();
         let mut read = BTreeMap::new();
-        let file_size = toml::from_str::<BaseBaselineFile>(&text)
+        let file_size = toml::from_str::<BaseBaselineFile>(text)
             .map(|file| file.file_size)
             .map_err(unusable);
         tables.insert(FileSize::NAME.to_owned(), file_size);

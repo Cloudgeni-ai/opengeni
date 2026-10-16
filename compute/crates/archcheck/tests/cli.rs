@@ -36,7 +36,7 @@ const ADVISORY: [&str; 5] = ["advisory"; 5];
 
 /// The summary's line when no base baseline is given.
 const SKIPPED: &str = "archcheck: file_size.no_new_entries and file_size.no_raised_caps skipped \
-                       (no --base-baseline given)\n";
+                       (--no-base given, or no [base] branch in ARCHITECTURE.toml and no --base-baseline)\n";
 
 /// `modes` of no_crossing, no_new_entries, no_raised_caps, listed_no_growth
 /// and stale_entries.
@@ -257,8 +257,9 @@ fn behaviours() {
             &[(NEW, LIMIT + 1)],
             &[(
                 "no_crossing",
-                "crates/b/src/new.rs: 6 code lines, over the 5-line limit (comments and blank \
-                 lines are not counted). Split it into submodules by responsibility.",
+                "crates/b/src/new.rs: 6 code lines, over the 5-line limit (blank lines and // \
+                 comments are not counted; block comments and inline test modules are). Split it \
+                 into submodules by responsibility.",
             )],
         ),
         ("a new file at the limit", None, &[], &[(NEW, LIMIT)], &[]),
@@ -641,8 +642,9 @@ fn human_report() {
     assert_eq!(
         run.stdout,
         "file_size.no_crossing (advisory):\n  \
-         crates/b/src/new.rs: 6 code lines, over the 5-line limit (comments and blank lines are \
-         not counted). Split it into submodules by responsibility.\n\
+         crates/b/src/new.rs: 6 code lines, over the 5-line limit (blank lines and // comments \
+         are not counted; block comments and inline test modules are). Split it into submodules \
+         by responsibility.\n\
          file_size.listed_no_growth (advisory):\n  \
          crates/a/src/grew.rs grew from 6 to 7 code lines. Once this rule is required, split \
          the file before adding to it.\n\
@@ -674,8 +676,9 @@ fn messages_group_the_limit() {
         [
             (
                 "no_crossing",
-                "crates/b/src/new.rs: 1001 code lines, over the 1,000-line limit (comments and \
-                 blank lines are not counted). Split it into submodules by responsibility."
+                "crates/b/src/new.rs: 1001 code lines, over the 1,000-line limit (blank lines \
+                 and // comments are not counted; block comments and inline test modules are). \
+                 Split it into submodules by responsibility."
                     .to_owned()
             ),
             (
@@ -995,9 +998,9 @@ fn a_rust_file_name_that_is_not_utf8_exits_2() {
     );
 }
 
-/// `--write-baseline` keeps the entries still over the limit at their
-/// current size and removes the rest; a file without an entry is listed, not
-/// added.
+/// `--write-baseline` lowers the entries still over the limit to their
+/// current size and removes the rest; a file without an entry, or one that
+/// grew past its cap, is listed, not added or raised.
 #[test]
 fn write_baseline_output() {
     type Sizes<'a> = &'a [(&'a str, usize)];
@@ -1007,7 +1010,16 @@ fn write_baseline_output() {
              is a deliberate exception"
         )
     };
-    let cases: &[(Sizes, Sizes, &str, Vec<String>)] = &[
+    let not_raised = |path: &str, lines: usize, cap: usize| {
+        format!(
+            "not raised: {path} ({lines} code lines, cap {cap}); split it, or raise the cap by \
+             hand if this is a deliberate exception"
+        )
+    };
+    // Each case: entries, files, the baseline written, the lines listed, and
+    // the behaviours still reporting afterwards.
+    type Case<'a> = (Sizes<'a>, Sizes<'a>, &'a str, Vec<String>, Vec<&'a str>);
+    let cases: &[Case] = &[
         (
             &[
                 ("crates/a/src/grew.rs", LIMIT + 1),
@@ -1026,18 +1038,23 @@ fn write_baseline_output() {
                 ("crates/a/src/ok.rs", LIMIT),
                 ("crates/a/src/tests.rs", LIMIT + 9),
             ],
-            "[file_size]\n\"crates/a/src/grew.rs\" = 8\n\"crates/a/src/same.rs\" = 7\n\
+            "[file_size]\n\"crates/a/src/grew.rs\" = 6\n\"crates/a/src/same.rs\" = 7\n\
              \"crates/a/src/shrank.rs\" = 6\n",
-            vec![not_added("crates/b/src/new.rs", 12)],
+            vec![
+                not_raised("crates/a/src/grew.rs", 8, 6),
+                not_added("crates/b/src/new.rs", 12),
+            ],
+            vec!["no_crossing", "listed_no_growth"],
         ),
         (
             &[],
             &[("crates/a/src/ok.rs", LIMIT)],
             "[file_size]\n",
             vec![],
+            vec![],
         ),
     ];
-    for (entries, sizes, expected, expected_not_added) in cases {
+    for (entries, sizes, expected, expected_not_added, expected_left) in cases {
         let mut files: Vec<(&str, String)> = sizes
             .iter()
             .map(|(path, lines)| (*path, code(*lines)))
@@ -1060,8 +1077,7 @@ fn write_baseline_output() {
             .into_iter()
             .map(|(behaviour, _)| behaviour)
             .collect();
-        let expected_left = vec!["no_crossing"; expected_not_added.len()];
-        assert_eq!(left, expected_left);
+        assert_eq!(left, *expected_left);
     }
 
     // The old baseline is read, so one that does not parse is left alone.
@@ -1081,12 +1097,25 @@ fn write_baseline_output() {
     ]);
     let run = run(ws.path(), &["--write-baseline"]);
     assert_eq!(run.code, 0, "{}", run.stderr);
-    let (listed, wrote) = run.stdout.split_once('\n').unwrap();
-    assert_eq!(listed, not_added("crates/a/src/big.rs", 6));
+    let mut lines = run.stdout.lines();
+    let listed: Vec<&str> = lines.by_ref().take(2).collect();
+    assert_eq!(
+        listed,
+        [
+            not_added("crates/a/src/big.rs", 6),
+            not_raised("crates/a/src/listed.rs", 7, 6),
+        ]
+    );
+    let wrote = lines.next().unwrap();
     assert!(
         wrote.starts_with("archcheck: wrote 1 file_size entries to "),
         "{}",
         run.stdout
+    );
+    let written = fs::read_to_string(ws.path().join("architecture-baseline.toml")).unwrap();
+    assert!(
+        written.contains("\"crates/a/src/listed.rs\" = 6"),
+        "the cap is not raised: {written}"
     );
 }
 
@@ -1192,8 +1221,9 @@ fn rdjson_document() {
             "source": {"name": "archcheck"},
             "diagnostics": [
                 diagnostic(
-                    "crates/b/src/new.rs: 6 code lines, over the 5-line limit (comments and blank \
-                     lines are not counted). Split it into submodules by responsibility.",
+                    "crates/b/src/new.rs: 6 code lines, over the 5-line limit (blank lines and // \
+                     comments are not counted; block comments and inline test modules are). Split it \
+                     into submodules by responsibility.",
                     "crates/b/src/new.rs", 1, "ERROR", "no_crossing",
                 ),
                 diagnostic(
@@ -1336,7 +1366,7 @@ fn arguments() {
         if matches!(args[0], "-h" | "--help") {
             assert!(
                 run.stdout.starts_with("usage: archcheck [--root <path>]")
-                    && run.stdout.ends_with("never adds one\n"),
+                    && run.stdout.ends_with("would add by hand\n"),
                 "{args:?}: {}",
                 run.stdout
             );
@@ -1504,8 +1534,8 @@ fn write_output(stdout: &str) -> WriteOutput<'_> {
         Some(heading) => {
             assert_eq!(
                 heading,
-                "archcheck: the entries not added, for a deliberate exception added by hand \
-                 (no_new_entries reports it):"
+                "archcheck: the entries not added or not raised, for a deliberate exception made \
+                 by hand (no_new_entries or no_raised_caps reports it):"
             );
             lines.map(|line| format!("{line}\n")).collect()
         }
@@ -2006,7 +2036,11 @@ fn pattern_ratchet_base_baseline() {
             match base {
                 None => assert_eq!(
                     *line,
-                    format!("{} (no --base-baseline given)", both(code)),
+                    format!(
+                        "{} (--no-base given, or no [base] branch in ARCHITECTURE.toml and no \
+                         --base-baseline)",
+                        both(code)
+                    ),
                     "{name}"
                 ),
                 Some(_) => assert!(
@@ -2293,9 +2327,9 @@ fn pattern_ratchet_instances_are_independent() {
 }
 
 /// `--write-baseline` updates every existing table of both rules, empty or
-/// not: an entry still matching gets its current count, an entry at zero,
-/// now allowed or whose file is gone is removed, and a matching file without
-/// an entry is listed, not added.
+/// not: an entry still matching is lowered to its current count, an entry
+/// at zero, now allowed or whose file is gone is removed, and a matching
+/// file without an entry is listed, not added.
 #[test]
 fn pattern_ratchet_write_baseline() {
     let ws = workspace(&[
@@ -2309,8 +2343,8 @@ fn pattern_ratchet_write_baseline() {
         ),
         (
             "architecture-baseline.toml",
-            "[file_size]\n\"crates/b/src/sub/big.rs\" = 6\n\
-             [pattern_ratchet.old]\n\"crates/a/src/z.rs\" = 1\n\"crates/a/src/one.rs\" = 3\n\
+            "[file_size]\n\"crates/b/src/sub/big.rs\" = 8\n\
+             [pattern_ratchet.old]\n\"crates/a/src/z.rs\" = 3\n\"crates/a/src/one.rs\" = 3\n\
              \"crates/a/src/none.rs\" = 1\n\"crates/a/src/allowed.rs\" = 1\n\
              \"crates/a/src/gone.rs\" = 1\n\"crates/b/src/sub/big.rs\" = 2\n\
              [pattern_ratchet.unused]\n"
@@ -2671,8 +2705,10 @@ fn pattern_ratchet_scoped_write_baseline() {
     assert_eq!(
         output.not_added,
         [
+            "not raised: crates/a/src/big.rs (8 code lines, cap 6); split it, or raise the cap by \
+             hand if this is a deliberate exception",
             "not added: crates/a/src/huge.rs (7 code lines); split it, or add an entry by hand if \
-          this is a deliberate exception"
+             this is a deliberate exception"
         ]
     );
     assert!(
@@ -2684,12 +2720,16 @@ fn pattern_ratchet_scoped_write_baseline() {
     );
     assert_eq!(
         output.entries,
-        format!("{}\"crates/a/src/huge.rs\" = 7\n", inside("file_size"))
+        format!(
+            "{}\"crates/a/src/big.rs\" = 8\n\"crates/a/src/huge.rs\" = 7\n",
+            inside("file_size")
+        )
     );
     let after_file_size = fs::read_to_string(ws.path().join(BASELINE)).unwrap();
     assert_eq!(
         table_section(&after_file_size, "file_size"),
-        "[file_size]\n\"crates/a/src/big.rs\" = 8\n\n"
+        "[file_size]\n\"crates/a/src/big.rs\" = 6\n\n",
+        "a refresh never raises a cap"
     );
     for kept in ["pattern_ratchet.old", "pattern_ratchet.other"] {
         assert_eq!(
@@ -2701,6 +2741,7 @@ fn pattern_ratchet_scoped_write_baseline() {
         codes(ws.path()),
         [
             "file_size.no_crossing",
+            "file_size.listed_no_growth",
             "pattern_ratchet.old.no_crossing",
             "pattern_ratchet.old.listed_no_growth",
             "pattern_ratchet.other.listed_no_growth"

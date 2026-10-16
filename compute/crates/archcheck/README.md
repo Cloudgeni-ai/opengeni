@@ -13,10 +13,11 @@ expanded to the directories in `<dir>` instead of rejected. See
 [`NOTICE`](../../NOTICE).
 
 ```sh
-cargo arch                           # human-readable report
+cargo arch                           # human-readable report, compared with the [base] branch
 cargo arch --format rdjson           # reviewdog Diagnostic Format, for CI
-cargo arch --base-baseline <path>    # also compare with the base branch's baseline
-cargo arch --write-baseline          # update the baseline's entries; never adds one
+cargo arch --base-baseline <path>    # compare with this copy of the base branch's baseline
+cargo arch --no-base                 # skip that comparison, as when the baseline is new
+cargo arch --write-baseline          # lower or remove the baseline's entries; never adds or raises one
 cargo arch --write-baseline=<table>  # update one table's entries, keeping the others
 cargo arch --root <path>             # check another checkout
 ```
@@ -56,8 +57,13 @@ behaviours:
   production file).
 
 `no_new_entries` and `no_raised_caps` compare with the base branch's copy of
-the baseline, given with `--base-baseline <path>`, so that the baseline is no
-way around the limit.
+the baseline, so that the baseline is no way around the limit. By default
+archcheck reads that copy with git: the `[base] branch` in
+`ARCHITECTURE.toml`, at its merge base with `HEAD`, so a cap the base branch
+lowered after this branch forked is not taken for one this branch raised. A
+base without a baseline file tolerates nothing. A branch that cannot be
+resolved exits 2, saying to fetch it, give `--base-baseline <path>`, or skip
+the comparison with `--no-base`.
 Lowered caps and removed entries are silent. Only that copy's `[file_size]`
 table is read here, and other tables and keys are ignored, so a pull request
 can change the baseline's schema. If the copy can't be read, archcheck exits 2.
@@ -118,8 +124,8 @@ new. If the instance's table, or `pattern_ratchet` itself, isn't a table of
 integers, that instance's two behaviours are skipped with a warning, and the
 other tables are still compared. If the copy isn't TOML at all, one warning
 line names every comparison skipped, `file_size`'s and each instance's.
-Without `--base-baseline`, they are skipped, one line per instance after the
-summary line. Loosening an instance in
+With `--no-base`, or without a `[base]` branch or `--base-baseline`, they are
+skipped, one line per instance after the summary line. Loosening an instance in
 `ARCHITECTURE.toml`, by widening `allow` or narrowing `patterns`, is not
 reported by any behaviour: review such changes.
 
@@ -159,22 +165,23 @@ matching lines. Entries should only be removed or lowered.
 
 `cargo arch --write-baseline` rewrites `architecture-baseline.toml` from its
 entries and the tree. An entry still in violation gets its current count as
-its cap: under `[file_size]`, a file still over the limit; under
+its cap when that is lower, and keeps its cap otherwise: under `[file_size]`,
+a file still over the limit; under
 `[pattern_ratchet.<instance>]`, a file outside the allowed paths that still has
 a matching line. The other entries are removed. It never adds an entry, or a
 `[pattern_ratchet.<instance>]` table the file lacks (`[file_size]` is always
 written, empty if the file had none). It prints `not added: <path> (N code lines); …` for each
 file over the limit without an entry instead, and `not added: <path> (N code
 lines matching the <instance> patterns); …` for each matching file without
-one, then, after its summary line, the entries they would need, as TOML, one
+one, and `not raised: <path> (…, cap N); …` for each listed file that grew
+past its cap, then, after its summary line, the entries they would need, as TOML, one
 block per table, each after a comment saying where it goes. For a table the
 file has, the block has no header and its comment says to add the entries
 inside that table, below its header: pasted at the end of the file, they would
 land in whichever table comes last. For a table the file lacks, the block
 starts with the table's header and goes at the end of the file. Fix the file,
-or, for a deliberate exception, add the entry by hand, inside its table, which
-`no_new_entries` then reports. Raised
-caps are written too, and `no_raised_caps` reports each of them. It reads the
+or, for a deliberate exception, add the entry or raise the cap by hand, inside
+its table, which `no_new_entries` or `no_raised_caps` then reports. It reads the
 existing file with the strict parser, so a missing or invalid baseline exits 2:
 it can't create one from scratch.
 
@@ -200,13 +207,9 @@ counted too: check `git status` before `--write-baseline`.
 ## Before merging
 
 `cargo test -p compute-archcheck` runs `tests/repository.rs`, which fails on
-any required finding anywhere in the tree. To also see what a branch adds to
-the baseline or raises in it, compare with the base branch's copy:
-
-```sh
-git show origin/feat/compute-lab:compute/architecture-baseline.toml > /tmp/base-baseline.toml
-cargo arch --base-baseline /tmp/base-baseline.toml
-```
+any required finding anywhere in the tree that needs no base. `cargo arch`
+also fails on what a branch adds to the baseline or raises in it, compared
+with the `[base]` branch; fetch that branch first.
 
 `--format rdjson` gives the findings in reviewdog's format for CI annotations.
 Each finding is a diagnostic with code `<rule>.<behaviour>`, or

@@ -12,12 +12,15 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from compute_smoke.model import Verdict
 from compute_smoke.registry import Scenario
 
 ProcessRunner = Callable[..., subprocess.CompletedProcess[str]]
 LineSink = Callable[[str], None]
 ScenarioStarted = Callable[[str], None]
 RESULT_PREFIX = "RESULT: "
+# Any outcome the suite cannot vouch for counts as an infrastructure error.
+INFRA_EXIT_CODE = Verdict.INFRA_ERROR.exit_code
 
 
 @dataclass(frozen=True)
@@ -30,7 +33,23 @@ class ScenarioProcessResult:
 
     @property
     def exit_code(self) -> int:
-        return self.returncode if self.returncode in {0, 1, 2, 42} else 2
+        """The scenario's exit status, trusted only when its process printed
+        a RESULT line for this scenario whose verdict that status reports.
+
+        Anything else is an infrastructure error: a crash, a scenario that
+        called `sys.exit(0)` before its verdict, a report for another
+        scenario, or a status that contradicts the reported verdict.
+        """
+
+        if self.report is None or self.report.get("scenario_id") != self.scenario_id:
+            return INFRA_EXIT_CODE
+        try:
+            verdict = Verdict(self.report.get("verdict"))
+        except ValueError:
+            return INFRA_EXIT_CODE
+        if verdict.exit_code != self.returncode:
+            return INFRA_EXIT_CODE
+        return self.returncode
 
 
 def run_scenarios(

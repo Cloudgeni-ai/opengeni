@@ -23,7 +23,11 @@ from typing import Any
 
 from compute_smoke.client import HostAgent
 from compute_smoke.registry import Scenario
-from compute_smoke.runtime import SmokeConfigurationError, execute_scenario
+from compute_smoke.runtime import (
+    ScenarioTerminated,
+    SmokeConfigurationError,
+    execute_scenario,
+)
 from compute_smoke.scenarios import REGISTRY
 from compute_smoke.services import MissingToolError, SmokeServices
 from compute_smoke.sharding import select_shard
@@ -40,6 +44,8 @@ RESTART_ENV = "COMPUTE_SMOKE_RESTART_AGENT"
 DEFAULT_SOCKET = "/run/compute-host.sock"
 DEFAULT_GUEST_PORT = 53
 API_SURFACE = "ecw"
+# The conventional status of a process ended by SIGTERM.
+TERMINATED_EXIT_CODE = 128 + 15
 
 
 def services_from_environment(required_tools: Iterable[str] = ()) -> SmokeServices:
@@ -92,11 +98,16 @@ def _run(scenario_id: str) -> int:
     except SmokeConfigurationError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
-    result = execute_scenario(
-        title=scenario.title,
-        body=lambda context: scenario.run(context, services),
-        timeout_seconds=scenario.timeout_minutes * 60,
-    )
+    try:
+        result = execute_scenario(
+            title=scenario.title,
+            body=lambda context: scenario.run(context, services),
+            timeout_seconds=scenario.timeout_minutes * 60,
+        )
+    except ScenarioTerminated:
+        # Cleanup already ran; there is no verdict to report.
+        print(f"TERMINATED: {scenario_id} stopped by SIGTERM after cleanup", flush=True)
+        return TERMINATED_EXIT_CODE
     print(f"{result.verdict.value.upper()}: {result.summary}", flush=True)
     for diagnostic in result.diagnostics:
         print("TRACEBACK:", file=sys.stderr, flush=True)

@@ -25,6 +25,7 @@ pub mod baseline;
 pub mod config;
 pub mod context;
 pub mod finding;
+pub mod git_base;
 pub mod report;
 pub mod rules;
 
@@ -32,6 +33,7 @@ pub use baseline::{BASELINE_FILE, BaseBaseline, Baseline, WriteBaselineError};
 pub use config::{ArchitectureConfig, CONFIG_FILE, Mode};
 pub use context::{Context, LoadError, ProductionFile};
 pub use finding::{Finding, Location};
+pub use git_base::{GitBaseError, base_baseline_from_git};
 
 use std::{collections::BTreeMap, path::Path};
 

@@ -3,6 +3,10 @@ suite exit codes and sharding."""
 
 from __future__ import annotations
 
+import json
+import os
+import signal
+import subprocess
 import time
 import unittest
 
@@ -13,11 +17,17 @@ from compute_smoke.runtime import (
     InvariantViolation,
     QuarantinedSmoke,
     ScenarioContext,
+    ScenarioTerminated,
     execute_scenario,
 )
 from compute_smoke.scenarios import REGISTRY
 from compute_smoke.sharding import select_shard
-from compute_smoke.suite import ScenarioProcessResult, suite_exit_code
+from compute_smoke.suite import (
+    RESULT_PREFIX,
+    ScenarioProcessResult,
+    run_scenarios,
+    suite_exit_code,
+)
 
 
 def _declare(scenario_id: str, **options: object) -> smoke.Scenario:
@@ -141,11 +151,67 @@ class Verdicts(unittest.TestCase):
         self.run_body(body)
         self.assertEqual(ran, [])
 
+    def test_cleanup_runs_before_an_interruption_continues(self) -> None:
+        def interrupted(error: BaseException):
+            def run(context: ScenarioContext) -> None:
+                context.scope.defer("delete", lambda: cleaned.append(type(error).__name__))
+                raise error
+
+            return run
+
+        for error in (KeyboardInterrupt(), SystemExit(0)):
+            cleaned: list[str] = []
+            with self.subTest(error=type(error).__name__), self.assertRaises(type(error)):
+                self.run_body(interrupted(error))
+            self.assertEqual(cleaned, [type(error).__name__])
+
+    def test_sigterm_unwinds_through_cleanup_and_restores_the_handler(self) -> None:
+        cleaned: list[str] = []
+        before = signal.getsignal(signal.SIGTERM)
+
+        def body(context: ScenarioContext) -> None:
+            context.scope.defer("delete", lambda: cleaned.append("delete"))
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(5)
+            cleaned.append("body went on")
+
+        started = time.monotonic()
+        with self.assertRaises(ScenarioTerminated):
+            self.run_body(body)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(cleaned, ["delete"])
+        self.assertEqual(signal.getsignal(signal.SIGTERM), before)
+
+    def test_sigterm_during_cleanup_lets_cleanup_finish_first(self) -> None:
+        cleaned: list[str] = []
+
+        def body(context: ScenarioContext) -> None:
+            context.scope.defer("second", lambda: cleaned.append("second"))
+            context.scope.defer("first", lambda: os.kill(os.getpid(), signal.SIGTERM))
+
+        with self.assertRaises(ScenarioTerminated):
+            self.run_body(body)
+        self.assertEqual(cleaned, ["second"])
+
 
 class SuiteExitCode(unittest.TestCase):
     @staticmethod
-    def results(*codes: int) -> list[ScenarioProcessResult]:
-        return [ScenarioProcessResult(f"ecw.s{i}", code, "", "") for i, code in enumerate(codes)]
+    def reported(
+        scenario_id: str, returncode: int, verdict: str | None, *, reported_id: str | None = None
+    ) -> ScenarioProcessResult:
+        report = (
+            None
+            if verdict is None
+            else {"scenario_id": reported_id or scenario_id, "verdict": verdict}
+        )
+        return ScenarioProcessResult(scenario_id, returncode, "", "", report)
+
+    @classmethod
+    def results(cls, *codes: int) -> list[ScenarioProcessResult]:
+        """Results whose reports agree with their codes."""
+
+        verdicts = {0: "pass", 42: "warn", 1: "fail", 2: "infra_error"}
+        return [cls.reported(f"ecw.s{i}", code, verdicts.get(code)) for i, code in enumerate(codes)]
 
     def test_the_worst_outcome_decides(self) -> None:
         self.assertEqual(suite_exit_code(self.results()), 0)
@@ -155,6 +221,39 @@ class SuiteExitCode(unittest.TestCase):
         self.assertEqual(suite_exit_code(self.results(2, 1)), 1)
         # A crash with an unknown status counts as an infrastructure error.
         self.assertEqual(suite_exit_code(self.results(0, -9)), 2)
+
+    def test_an_exit_status_counts_only_with_a_matching_verdict(self) -> None:
+        self.assertEqual(self.reported("ecw.a", 0, "pass").exit_code, 0)
+        self.assertEqual(self.reported("ecw.a", 1, "fail").exit_code, 1)
+        self.assertEqual(self.reported("ecw.a", 42, "warn").exit_code, 42)
+        self.assertEqual(self.reported("ecw.a", 2, "inconclusive").exit_code, 2)
+        untrusted = {
+            "no report, as after sys.exit(0)": self.reported("ecw.a", 0, None),
+            "a report for another scenario": self.reported("ecw.a", 0, "pass", reported_id="ecw.b"),
+            "a status that contradicts the verdict": self.reported("ecw.a", 0, "fail"),
+            "an unknown verdict": self.reported("ecw.a", 0, "great"),
+            "a terminated scenario": self.reported("ecw.a", 143, None),
+        }
+        for case, result in untrusted.items():
+            with self.subTest(case=case):
+                self.assertEqual(result.exit_code, 2)
+
+    def test_a_process_that_exits_zero_without_a_verdict_does_not_pass(self) -> None:
+        def runner(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            scenario_id = command[-1]
+            stdout = "--- set up\n"
+            if scenario_id == "ecw.reports":
+                report = {"scenario_id": scenario_id, "verdict": "pass"}
+                stdout += RESULT_PREFIX + json.dumps(report) + "\n"
+            return subprocess.CompletedProcess(command, 0, stdout, "")
+
+        reports, exits_early = (
+            _declare("ecw.reports"),
+            _declare("ecw.exits_early"),
+        )
+        results = run_scenarios([reports, exits_early], environment={}, process_runner=runner)
+        self.assertEqual([result.exit_code for result in results], [0, 2])
+        self.assertEqual(suite_exit_code(results), 2)
 
 
 class Sharding(unittest.TestCase):

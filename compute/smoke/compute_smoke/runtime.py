@@ -41,6 +41,15 @@ class ScenarioTimedOut(RuntimeError):
     """The scenario exceeded its declared wall-clock budget."""
 
 
+class ScenarioTerminated(BaseException):
+    """The process was asked to stop (SIGTERM) while a scenario ran.
+
+    A `BaseException`, like `KeyboardInterrupt`, so no scenario's `except
+    Exception` swallows it: it unwinds the scenario, its cleanup runs, and
+    it ends the process.
+    """
+
+
 @dataclass(frozen=True)
 class CommandResult:
     command: tuple[str, ...]
@@ -328,12 +337,55 @@ def _scenario_deadline(
         signal.signal(signal.SIGALRM, previous_handler)
 
 
+class _Termination:
+    """One scenario's SIGTERM handler. A stop request while the body runs
+    raises `ScenarioTerminated`, which unwinds through cleanup instead of
+    ending the process with the scenario's sandboxes still allocated. Once
+    cleanup has begun, requests are only noted, so cleanup is never cut
+    short; the caller raises afterwards."""
+
+    def __init__(self) -> None:
+        self.requested = False
+        self.cleaning = False
+
+    def __call__(self, _signal_number: int, _frame: FrameType | None) -> None:
+        if self.requested:
+            return
+        self.requested = True
+        if not self.cleaning:
+            self.cleaning = True
+            raise ScenarioTerminated("terminated by SIGTERM")
+
+
+@contextmanager
+def _handling_sigterm(handler: _Termination) -> Iterator[None]:
+    """Installs `handler` for SIGTERM. Only the main thread can handle
+    signals; elsewhere this does nothing."""
+
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous_handler = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
+
+
 def execute_scenario(
     *,
     title: str,
     body: Body,
     timeout_seconds: float | None = None,
 ) -> ScenarioResult:
+    """Runs one scenario body to a verdict, then its cleanup.
+
+    Cleanup also runs when the body is interrupted by `KeyboardInterrupt`,
+    `SystemExit` or SIGTERM; the interruption then continues once cleanup is
+    done, so the process ends without a verdict.
+    """
+
     scope = ResourceScope()
     context = ScenarioContext(scope, {})
     cleanup_timeout = min(120.0, timeout_seconds * 0.1) if timeout_seconds is not None else None
@@ -342,27 +394,18 @@ def execute_scenario(
         if timeout_seconds is not None and cleanup_timeout is not None
         else None
     )
-    try:
-        with _scenario_deadline(execution_timeout, label="scenario execution"):
-            body(context)
-        result = ScenarioResult(Verdict.PASS, f"{title} passed", dict(context.evidence))
-    except InvariantViolation as error:
-        result = ScenarioResult(Verdict.FAIL, str(error), dict(context.evidence))
-    except QuarantinedSmoke as error:
-        result = ScenarioResult(Verdict.WARN, str(error), dict(context.evidence))
-    except ScenarioTimedOut as error:
-        result = ScenarioResult(Verdict.INFRA_ERROR, str(error), dict(context.evidence))
-    except (InconclusiveSmoke, SmokeConfigurationError) as error:
-        result = ScenarioResult(Verdict.INCONCLUSIVE, str(error), dict(context.evidence))
-    except Exception as error:  # noqa: BLE001 - scenario boundary classifies infra
-        result = ScenarioResult(
-            Verdict.INFRA_ERROR,
-            f"{type(error).__name__}: {error}",
-            dict(context.evidence),
-            diagnostics=(traceback.format_exc(),),
-        )
-
-    cleanup_failures = scope.close(timeout_seconds=cleanup_timeout)
+    termination = _Termination()
+    with _handling_sigterm(termination):
+        try:
+            result = _run_body(title, body, context, execution_timeout)
+            termination.cleaning = True
+        except BaseException:
+            termination.cleaning = True
+            scope.close(timeout_seconds=cleanup_timeout)
+            raise
+        cleanup_failures = scope.close(timeout_seconds=cleanup_timeout)
+    if termination.requested:
+        raise ScenarioTerminated("terminated by SIGTERM during cleanup")
     if not cleanup_failures:
         return result
 
@@ -386,3 +429,32 @@ def execute_scenario(
         details,
         result.diagnostics,
     )
+
+
+def _run_body(
+    title: str,
+    body: Body,
+    context: ScenarioContext,
+    execution_timeout: float | None,
+) -> ScenarioResult:
+    """The body's verdict; interruptions that are not `Exception`s propagate."""
+
+    try:
+        with _scenario_deadline(execution_timeout, label="scenario execution"):
+            body(context)
+        return ScenarioResult(Verdict.PASS, f"{title} passed", dict(context.evidence))
+    except InvariantViolation as error:
+        return ScenarioResult(Verdict.FAIL, str(error), dict(context.evidence))
+    except QuarantinedSmoke as error:
+        return ScenarioResult(Verdict.WARN, str(error), dict(context.evidence))
+    except ScenarioTimedOut as error:
+        return ScenarioResult(Verdict.INFRA_ERROR, str(error), dict(context.evidence))
+    except (InconclusiveSmoke, SmokeConfigurationError) as error:
+        return ScenarioResult(Verdict.INCONCLUSIVE, str(error), dict(context.evidence))
+    except Exception as error:  # noqa: BLE001 - scenario boundary classifies infra
+        return ScenarioResult(
+            Verdict.INFRA_ERROR,
+            f"{type(error).__name__}: {error}",
+            dict(context.evidence),
+            diagnostics=(traceback.format_exc(),),
+        )

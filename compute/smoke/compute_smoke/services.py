@@ -55,12 +55,18 @@ class SmokeServices:
         sandboxes: list[Sandbox] = []
         for _ in range(sandbox_count):
             sandbox_id = uuid4().hex
-            self.host.create(sandbox_id, sandbox.host_config())
+            # The id is ours, so removal is registered before the request: a
+            # create whose reply is lost may still have made the sandbox.
+            # Removing one that was never made is a no-op.
             context.scope.defer(
                 f"remove sandbox {sandbox_id}",
                 lambda sandbox_id=sandbox_id: self._remove(sandbox_id),
                 critical=True,
             )
+            context.record(
+                "sandbox_ids", [handle.sandbox_id for handle in sandboxes] + [sandbox_id]
+            )
+            self.host.create(sandbox_id, sandbox.host_config())
             sandboxes.append(
                 Sandbox(
                     self.host,
@@ -69,7 +75,6 @@ class SmokeServices:
                     timeout=sandbox.timeout,
                 )
             )
-        context.record("sandbox_ids", [handle.sandbox_id for handle in sandboxes])
         started = time.monotonic()
         for handle in sandboxes:
             handle.ping(timeout=READY_TIMEOUT_SECONDS)

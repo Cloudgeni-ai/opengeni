@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Installs the reference guest service into an ext4 root disk image, started
-# by systemd on vsock port 53 at every boot.
+# by systemd at every boot. It serves requests on vsock port 53 and takes the
+# host agent's restore notices on vsock port 54; start the host agent with
+# `--restore-notice-port 54` to match.
 #
-# Usage: sudo guest/install.sh IMAGE [PORT]
+# Usage: sudo guest/install.sh IMAGE [PORT [NOTICE_PORT]]
 #
 # The image needs systemd and Python 3.10 or later. Run it on a copy: the
 # image is changed in place.
 set -euo pipefail
 
-image="${1:?usage: install.sh IMAGE [PORT]}"
+image="${1:?usage: install.sh IMAGE [PORT [NOTICE_PORT]]}"
 port="${2:-53}"
+notice_port="${3:-54}"
 here="$(cd "$(dirname "$0")" && pwd)"
 
 if [[ "$(id -u)" != 0 ]]; then
@@ -32,7 +35,25 @@ if [[ ! -x "$mount_point/usr/bin/python3" ]]; then
   exit 1
 fi
 
+# The image's contents are not trusted: a symlink such as etc/systemd/system
+# pointing at an absolute path would send root's writes to the host. Refuse
+# to write through any symlink on the way to a destination.
+refuse_symlinks() {
+  local relative="$1" path="$mount_point" part
+  local -a parts
+  IFS=/ read -r -a parts <<<"$relative"
+  for part in "${parts[@]}"; do
+    path="$path/$part"
+    if [[ -L "$path" ]]; then
+      echo "install.sh: refusing to write through the symlink at /${path#"$mount_point"/} in $image" >&2
+      exit 1
+    fi
+  done
+}
+
+refuse_symlinks opt/smoke/smoke_guest.py
 install -D -m 0755 "$here/smoke_guest.py" "$mount_point/opt/smoke/smoke_guest.py"
+refuse_symlinks etc/systemd/system/smoke-guest.service
 unit="$mount_point/etc/systemd/system/smoke-guest.service"
 cat >"$unit" <<EOF
 [Unit]
@@ -40,14 +61,16 @@ Description=Compute smoke-suite guest service on vsock port $port
 After=local-fs.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/smoke/smoke_guest.py --listen vsock:$port
+ExecStart=/usr/bin/python3 /opt/smoke/smoke_guest.py --listen vsock:$port --notice vsock:$notice_port
 Restart=always
 RestartSec=0
 
 [Install]
 WantedBy=multi-user.target
 EOF
+refuse_symlinks etc/systemd/system/multi-user.target.wants
 wants="$mount_point/etc/systemd/system/multi-user.target.wants"
 mkdir -p "$wants"
-ln -sf /etc/systemd/system/smoke-guest.service "$wants/smoke-guest.service"
-echo "installed the smoke guest service on vsock port $port in $image"
+# -n replaces an existing link itself rather than following it.
+ln -sfn /etc/systemd/system/smoke-guest.service "$wants/smoke-guest.service"
+echo "installed the smoke guest service on vsock ports $port and $notice_port in $image"

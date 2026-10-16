@@ -22,7 +22,8 @@ use std::{
 };
 
 use compute_archcheck::{
-    BASELINE_FILE, Baseline, Context, LoadError, WriteBaselineError, check,
+    BASELINE_FILE, BaseBaseline, Baseline, Context, GitBaseError, LoadError, WriteBaselineError,
+    base_baseline_from_git, check,
     context::find_workspace_root,
     report::{Format, UnknownFormatError, render, summary},
     skipped, write_baseline, write_baseline_table,
@@ -31,7 +32,7 @@ use thiserror::Error;
 
 const USAGE: &str = "\
 usage: archcheck [--root <path>] [--format human|rdjson]
-                 [--base-baseline <path>]
+                 [--base-baseline <path> | --no-base]
        archcheck [--root <path>] --write-baseline[=<table>]
 
   --root <path>       repository root (default: the Cargo workspace containing
@@ -41,13 +42,16 @@ usage: archcheck [--root <path>] [--format human|rdjson]
   --base-baseline <path>
                       the base branch's architecture-baseline.toml, which the
                       no_new_entries and no_raised_caps behaviours compare
-                      with (skipped without it)
+                      with. By default it is read with git from the [base]
+                      branch in ARCHITECTURE.toml, at its merge base with HEAD
+  --no-base           skip those comparisons, as when the baseline is new
   --write-baseline[=<table>]
                       update or remove the entries of architecture-baseline.toml
                       to match the current tree, or with =<table> (file_size or
                       pattern_ratchet.<instance>) only that table's, keeping
-                      the others. It lists each violation without an entry,
-                      with the entries to add by hand, and never adds one";
+                      the others. It lowers caps but never raises one or adds
+                      an entry: it lists those violations instead, with the
+                      entries a deliberate exception would add by hand";
 
 const EXIT_REQUIRED_FINDINGS: u8 = 1;
 const EXIT_ERROR: u8 = 2;
@@ -65,6 +69,8 @@ enum UsageError {
     WriteBaselineTable(String),
     #[error("--base-baseline cannot be combined with --write-baseline")]
     BaseBaselineWithWriteBaseline,
+    #[error("--no-base cannot be combined with --base-baseline or --write-baseline")]
+    NoBaseWithBase,
     #[error(transparent)]
     Format(#[from] UnknownFormatError),
 }
@@ -75,6 +81,8 @@ enum RunError {
     CurrentDir(#[source] io::Error),
     #[error(transparent)]
     Load(#[from] LoadError),
+    #[error(transparent)]
+    GitBase(#[from] GitBaseError),
     #[error(transparent)]
     WriteBaseline(#[from] WriteBaselineError),
     #[error("could not list the entries not added: {0}")]
@@ -87,6 +95,7 @@ struct Options {
     root: Option<PathBuf>,
     format: Format,
     base_baseline: Option<PathBuf>,
+    no_base: bool,
     write_baseline: Option<WriteBaseline>,
 }
 
@@ -158,13 +167,13 @@ fn run(options: Options) -> Result<ExitCode, RunError> {
             ),
         };
         // Pasted inside its table, an entry is a deliberate exception, which
-        // no_new_entries reports on the pull request.
+        // no_new_entries or no_raised_caps reports against the base branch.
         let entries = if written.not_added_entries.is_empty() {
             String::new()
         } else {
             format!(
-                "archcheck: the entries not added, for a deliberate exception added by hand \
-                 (no_new_entries reports it):\n{}",
+                "archcheck: the entries not added or not raised, for a deliberate exception made \
+                 by hand (no_new_entries or no_raised_caps reports it):\n{}",
                 written.not_added_toml()?
             )
         };
@@ -173,9 +182,12 @@ fn run(options: Options) -> Result<ExitCode, RunError> {
     }
 
     let mut ctx = Context::load(&root)?;
-    if let Some(path) = &options.base_baseline {
-        ctx.base_baseline = Baseline::load_base(path)?;
-    }
+    ctx.base_baseline = match (&options.base_baseline, &ctx.config.base) {
+        (Some(path), _) => Baseline::load_base(path)?,
+        _ if options.no_base => BaseBaseline::NotGiven,
+        (None, Some(base)) => base_baseline_from_git(&root, &base.branch)?,
+        (None, None) => BaseBaseline::NotGiven,
+    };
     let findings = check(&ctx);
     let report = render(options.format, &findings, ctx.files.len());
     // A line per skip, or warning about a skip, after the summary line.
@@ -218,6 +230,7 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Result<Option<Options>, U
         root: None,
         format: Format::Human,
         base_baseline: None,
+        no_base: false,
         write_baseline: None,
     };
     let mut args = args
@@ -240,6 +253,7 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Result<Option<Options>, U
             "--root" => options.root = Some(PathBuf::from(value()?)),
             "--format" => options.format = value()?.parse()?,
             "--base-baseline" => options.base_baseline = Some(PathBuf::from(value()?)),
+            "--no-base" if inline_value.is_none() => options.no_base = true,
             // A table is only ever given after `=`, so a following argument
             // is never taken as one; after a bare `--write-baseline`, the
             // error says how to name it.
@@ -258,6 +272,9 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Result<Option<Options>, U
     }
     if options.write_baseline.is_some() && options.base_baseline.is_some() {
         return Err(UsageError::BaseBaselineWithWriteBaseline);
+    }
+    if options.no_base && (options.write_baseline.is_some() || options.base_baseline.is_some()) {
+        return Err(UsageError::NoBaseWithBase);
     }
     Ok(Some(options))
 }

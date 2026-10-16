@@ -348,8 +348,24 @@ fn update_baseline(
         let Some(Count { count, .. }) = ratchet.measure(file) else {
             continue;
         };
-        if listed.is_some_and(|listed| listed.contains_key(&file.path)) {
-            caps.insert(file.path.clone(), count);
+        if let Some(&cap) = listed.and_then(|listed| listed.get(&file.path)) {
+            // A refresh only ever lowers a cap: growth past it stays a
+            // finding until the file shrinks or the cap is raised by hand.
+            caps.insert(file.path.clone(), count.min(cap));
+            if count > cap {
+                not_added.push(NotAdded {
+                    table: table.clone(),
+                    path: file.path.clone(),
+                    count,
+                    line: format!(
+                        "not raised: {} ({}, cap {cap}); {}, or raise the cap by hand if this \
+                         is a deliberate exception",
+                        file.path,
+                        ratchet.counted(count),
+                        ratchet.wording().not_added_fix
+                    ),
+                });
+            }
         } else {
             not_added.push(NotAdded {
                 table: table.clone(),

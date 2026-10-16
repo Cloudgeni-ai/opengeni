@@ -15,7 +15,8 @@ import compute_smoke as smoke
 MARKER = "space-smoke-timeout-update-ok"
 INITIAL_TIMEOUT_SECONDS = 10
 EXTENDED_TIMEOUT_SECONDS = 30
-WAIT_SECONDS = 12
+# Well past the original deadline, and short of the extension's.
+WAIT_SECONDS = 15
 RENEWED_TIMEOUT_SECONDS = 60
 WAIT_AFTER_RENEWAL_SECONDS = INITIAL_TIMEOUT_SECONDS * 3 + 2
 
@@ -34,6 +35,19 @@ def timeout_update(test: smoke.Ecw) -> None:
 
     with test.phase("wait beyond original sandbox deadline"):
         test.wait(WAIT_SECONDS)
+
+    with test.phase("observe it still running without touching it"):
+        # Any guest command would wake a sandbox that slept, so the state is
+        # read from the host agent before the first command.
+        observed = test.sandbox.try_get_info()
+        test.verify(
+            observed is not None and observed.state is smoke.SandboxState.RUNNING,
+            "an extended timeout did not keep the sandbox awake past its original deadline",
+            initial_timeout_seconds=INITIAL_TIMEOUT_SECONDS,
+            extended_timeout_seconds=EXTENDED_TIMEOUT_SECONDS,
+            waited_seconds=WAIT_SECONDS,
+            observed_level=None if observed is None else observed.level,
+        )
 
     with test.phase("verify sandbox remains usable past original deadline"):
         result = test.sandbox.run(f"printf %s {MARKER}")

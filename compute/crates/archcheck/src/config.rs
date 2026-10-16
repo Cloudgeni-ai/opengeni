@@ -18,7 +18,20 @@ pub const CONFIG_FILE: &str = "ARCHITECTURE.toml";
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArchitectureConfig {
+    /// The branch this workspace's changes merge into. `archcheck` compares
+    /// the baseline with that branch's copy at the merge base, so a branch
+    /// cannot add an entry or raise a cap unnoticed. Without it, those
+    /// comparisons need `--base-baseline`.
+    #[serde(default)]
+    pub base: Option<BaseConfig>,
     pub rules: RulesConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BaseConfig {
+    /// A git revision naming the branch, such as `origin/main`.
+    pub branch: String,
 }
 
 /// One field per rule, named by the rule's id.

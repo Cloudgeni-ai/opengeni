@@ -17,6 +17,18 @@ class Verdict(str, Enum):
     INCONCLUSIVE = "inconclusive"
     INFRA_ERROR = "infra_error"
 
+    @property
+    def exit_code(self) -> int:
+        """The process exit status that reports this verdict."""
+
+        if self is Verdict.PASS:
+            return 0
+        if self is Verdict.WARN:
+            return 42
+        if self is Verdict.FAIL:
+            return 1
+        return 2
+
 
 @dataclass(frozen=True)
 class ScenarioResult:
@@ -28,10 +40,4 @@ class ScenarioResult:
 
     @property
     def exit_code(self) -> int:
-        if self.verdict == Verdict.PASS:
-            return 0
-        if self.verdict == Verdict.WARN:
-            return 42
-        if self.verdict == Verdict.FAIL:
-            return 1
-        return 2
+        return self.verdict.exit_code

@@ -58,8 +58,9 @@ impl CountRatchet for Limit<'_> {
 
     fn crossing(&self, count: Count) -> String {
         format!(
-            ": {} code lines, over the {}-line limit (comments and blank lines are not counted). \
-             Split it into submodules by responsibility.",
+            ": {} code lines, over the {}-line limit (blank lines and // comments are not \
+             counted; block comments and inline test modules are). Split it into submodules by \
+             responsibility.",
             count.count,
             thousands(self.0.limit),
         )

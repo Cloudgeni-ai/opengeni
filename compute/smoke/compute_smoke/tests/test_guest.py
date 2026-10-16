@@ -34,8 +34,17 @@ class GuestService(unittest.TestCase):
         # Short path: Unix socket addresses are limited to about 100 bytes.
         cls.scratch = Path(tempfile.mkdtemp(prefix="smoke-guest-", dir="/tmp"))
         cls.address = str(cls.scratch / "guest.sock")
+        cls.notice_address = str(cls.scratch / "notice.sock")
         cls.service = subprocess.Popen(
-            [sys.executable, str(GUEST), "--listen", f"unix:{cls.address}"],
+            [
+                sys.executable,
+                str(GUEST),
+                "--listen",
+                f"unix:{cls.address}",
+                "--notice",
+                f"unix:{cls.notice_address}",
+                "--keep-clock",
+            ],
             env={**os.environ, "SMOKE_GUEST_STATE": str(cls.scratch / "state")},
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -96,6 +105,32 @@ class GuestService(unittest.TestCase):
     def test_ping_names_the_serving_process(self) -> None:
         self.assertEqual(self.ok({"op": "ping"})["pid"], self.service.pid)
 
+    def notice(self, line: bytes) -> bytes:
+        """Sends one restore notice and returns everything the guest answers."""
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(10)
+            connection.connect(self.notice_address)
+            connection.sendall(line)
+            connection.shutdown(socket.SHUT_WR)
+            answer = b""
+            while chunk := connection.recv(64):
+                answer += chunk
+            return answer
+
+    def test_restore_notices_are_acknowledged_and_counted(self) -> None:
+        before = self.ok({"op": "ping"})["restores"]
+        self.assertEqual(self.notice(f"restored {time.time_ns()}\n".encode()), b"ok\n")
+        self.assertEqual(self.notice(f"restored {time.time_ns()}\n".encode()), b"ok\n")
+        self.assertEqual(self.ok({"op": "ping"})["restores"], before + 2)
+
+    def test_a_malformed_restore_notice_is_neither_answered_nor_counted(self) -> None:
+        before = self.ok({"op": "ping"})["restores"]
+        for line in (b"restored\n", b"restored soon\n", b"hello 1\n", b""):
+            with self.subTest(line=line):
+                self.assertEqual(self.notice(line), b"")
+        self.assertEqual(self.ok({"op": "ping"})["restores"], before)
+
     def test_a_command_returns_its_status_and_both_streams(self) -> None:
         reply = self.ok(
             {
@@ -149,6 +184,25 @@ class GuestService(unittest.TestCase):
         # Waiting forgets the process unless asked to keep it.
         self.assertIn("no process", self.refused({"op": "wait", "pid": pid}))
 
+    def test_an_ended_process_stays_listed_until_its_result_is_collected(self) -> None:
+        pid = self.ok({"op": "spawn", "command": "printf finished"})["pid"]
+        deadline = time.monotonic() + 10
+        while True:
+            every = {p["pid"]: p for p in self.ok({"op": "processes", "all": True})["processes"]}
+            self.assertIn(pid, every)
+            if not every[pid]["running"] or time.monotonic() > deadline:
+                break
+            time.sleep(0.02)
+        self.assertEqual(every[pid]["running"], False)
+        self.assertNotIn(pid, [p["pid"] for p in self.ok({"op": "processes"})["processes"]])
+        result = self.ok({"op": "wait", "pid": pid, "timeout": 10})
+        self.assertEqual(_unb64(result["stdout"]), b"finished")
+        self.assertNotIn(
+            pid,
+            [p["pid"] for p in self.ok({"op": "processes", "all": True})["processes"]],
+        )
+        self.assertIn("must be bool", self.refused({"op": "processes", "all": 1}))
+
     def test_waiting_on_a_running_process_times_out_without_forgetting_it(self) -> None:
         pid = self.ok({"op": "spawn", "command": "sleep 30"})["pid"]
         self.assertIn("still running", self.refused({"op": "wait", "pid": pid, "timeout": 0.1}))
@@ -167,6 +221,18 @@ class GuestService(unittest.TestCase):
             {"delivered": False},
         )
         self.ok({"op": "wait", "pid": pid})
+
+    def test_killing_a_background_command_kills_its_children(self) -> None:
+        marker = Path(self.path("late"))
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        pid = self.ok({"op": "spawn", "command": f"(sleep 1; touch {marker}) & wait"})["pid"]
+        self.assertEqual(
+            self.ok({"op": "signal", "pid": pid, "signal": signal.SIGKILL}),
+            {"delivered": True},
+        )
+        self.assertEqual(self.ok({"op": "wait", "pid": pid, "timeout": 10})["exit_code"], -9)
+        time.sleep(1.5)
+        self.assertFalse(marker.exists(), "a child of the killed command survived")
 
     def test_binary_files_round_trip_byte_for_byte(self) -> None:
         data = bytes(range(256)) * 1024 + b"\0\n\r"
@@ -238,6 +304,85 @@ class GuestService(unittest.TestCase):
                 event = json.loads(reader.readline())
                 events.add((event["name"], event["type"]))
             self.assertIn(("sub/file", "create"), events)
+
+    def watch(self, root: Path) -> tuple[socket.socket, Any]:
+        connection = self.connect()
+        reader = connection.makefile("rb")
+        connection.sendall(
+            json.dumps({"op": "watch", "path": str(root), "recursive": True}).encode() + b"\n"
+        )
+        self.assertEqual(json.loads(reader.readline()), {"ok": True})
+        return connection, reader
+
+    @staticmethod
+    def events_until(reader: Any, name: str) -> list[tuple[str, str]]:
+        """Reads events up to and including the first one about `name`."""
+
+        events = []
+        while True:
+            event = json.loads(reader.readline())
+            events.append((event["name"], event["type"]))
+            if event["name"] == name:
+                return events
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_watch_ends_when_the_client_closes_without_further_changes(self) -> None:
+        root = Path(self.path("watched"))
+        root.mkdir(parents=True)
+        connection, reader = self.watch(root)
+        with connection, reader:
+            # What the host agent's proxy does when the client goes away.
+            connection.shutdown(socket.SHUT_WR)
+            connection.settimeout(5)
+            self.assertEqual(reader.read(), b"", "the guest closes its side at once")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_populated_directory_moved_in_is_watched_all_the_way_down(self) -> None:
+        root = Path(self.path("watched"))
+        root.mkdir(parents=True)
+        outside = Path(self.path("outside"))
+        (outside / "inner" / "deep").mkdir(parents=True)
+        connection, reader = self.watch(root)
+        with connection, reader:
+            os.rename(outside, root / "arrived")
+            self.events_until(reader, "arrived")
+            time.sleep(0.2)
+            (root / "arrived" / "inner" / "deep" / "file").write_bytes(b"x")
+            events = self.events_until(reader, "arrived/inner/deep/file")
+            self.assertIn(("arrived/inner/deep/file", "create"), events)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_directory_renamed_inside_the_tree_reports_its_new_paths(self) -> None:
+        root = Path(self.path("watched"))
+        (root / "old" / "inner").mkdir(parents=True)
+        connection, reader = self.watch(root)
+        with connection, reader:
+            os.rename(root / "old", root / "new")
+            self.events_until(reader, "new")
+            (root / "new" / "inner" / "file").write_bytes(b"x")
+            events = self.events_until(reader, "new/inner/file")
+            self.assertNotIn("old/inner/file", [name for name, _ in events])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_directory_moved_out_of_the_tree_is_no_longer_reported(self) -> None:
+        root = Path(self.path("watched"))
+        (root / "leaving" / "inner").mkdir(parents=True)
+        outside = Path(self.path("outside"))
+        outside.mkdir(parents=True)
+        connection, reader = self.watch(root)
+        with connection, reader:
+            os.rename(root / "leaving", outside / "left")
+            self.events_until(reader, "leaving")
+            time.sleep(0.2)
+            (outside / "left" / "inner" / "file").write_bytes(b"x")
+            # A change in the tree marks the end of anything the move left.
+            (root / "fence").write_bytes(b"x")
+            events = self.events_until(reader, "fence")
+            self.assertEqual(
+                [name for name, _ in events if name.startswith("leaving")],
+                [],
+                "a directory moved away is still reported under its old path",
+            )
 
 
 if __name__ == "__main__":

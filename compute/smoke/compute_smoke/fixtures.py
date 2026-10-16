@@ -49,6 +49,9 @@ SIGKILL = 9
 ASLEEP_LEVELS = tuple(level for level in LEVELS if level != "running")
 # Where a copy of an asleep sandbox's state survives its VM process ending.
 DURABLE = ("local", "remote")
+# How long a woken sandbox may take to show as running with no step in the
+# host agent's status, observed without touching it.
+WOKEN_SETTLE_SECONDS = 5
 
 
 def levels_from(level: str) -> tuple[str, ...]:
@@ -296,7 +299,8 @@ class CommandSandboxFixture:
         self.sleep_to("saved")
 
     def wake_from_durable_suspend(self) -> None:
-        """Wake the sandbox through the host agent and wait until it runs."""
+        """Wake the sandbox through the host agent, then observe it running
+        without touching it again."""
 
         try:
             self.sandbox.connect(timeout=self.lifecycle_transition_timeout)
@@ -310,6 +314,17 @@ class CommandSandboxFixture:
                 wake_error_type=type(error).__name__,
                 wake_error=str(error),
             )
+        self.wait_until_woken()
+
+    def wait_until_woken(self, *, sandbox: Sandbox | None = None) -> SandboxInfo:
+        """Passively wait until a sandbox the host agent reported woken shows
+        as running with no step in progress."""
+
+        return self.wait_until_level(
+            ("running",),
+            sandbox=sandbox,
+            timeout=min(WOKEN_SETTLE_SECONDS, self.lifecycle_transition_timeout),
+        )
 
     # Opengeni compute: its sleep levels, by name.
 
@@ -582,6 +597,7 @@ class Ecw(CommandSandboxFixture):
                 connect_error_type=type(error).__name__,
                 connect_error=str(error),
             )
+        self.wait_until_woken()
 
     def wait_until_paused(self) -> None:
         """Wait until the sandbox is asleep at any level."""
