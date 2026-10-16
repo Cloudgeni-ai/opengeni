@@ -143,19 +143,16 @@ export async function recordCoreCodexRefusal(input: {
   const now = input.now ?? new Date();
   const generation = input.credentialVersion ?? input.core.placedRefreshGeneration;
   if (input.failure.origin) {
-    const unknown = input.failure.origin === "usage_verification_policy";
     const until = now.getTime() + Math.max(60, input.failure.cooldownSeconds ?? 60) * 1000;
     const health = await recordSubscriptionCoreCodexQuotaObservation(
       input.db,
       input.core.identity,
       ref,
       {
-        windows: unknown
-          ? []
-          : [{ id: "included_usage", usedPercent: 100, resetsAt: until, status: "exhausted" }],
+        windows: [{ id: "included_usage", usedPercent: 100, resetsAt: until, status: "exhausted" }],
         modelCooldowns: {},
-        exhaustedUntil: unknown ? until : null,
-        exhaustedKind: unknown ? "rate_limit" : null,
+        exhaustedUntil: null,
+        exhaustedKind: null,
         revision: 0,
         observedAt: now.getTime(),
         observedRefreshGeneration: generation,

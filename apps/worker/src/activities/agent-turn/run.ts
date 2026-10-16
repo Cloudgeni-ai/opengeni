@@ -106,11 +106,7 @@ import {
   assertCoreCodexSourceConnected,
   buildCoreCodexRequestTokenResolver,
 } from "./codex-core-capacity";
-import {
-  buildCoreCodexUsageReader,
-  createCoreCodexRequests,
-  providerRequestIdPrefix,
-} from "./codex-core-requests";
+import { createCoreCodexRequests, providerRequestIdPrefix } from "./codex-core-requests";
 import { observeCodexResponseCompletion } from "./codex-core-settlement";
 import { prepareGovernanceAndModel } from "./governance-model";
 import { prepareCompaction, runPostAgentCompaction } from "./compaction-prep";
@@ -760,7 +756,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ? ((): CodexRequestContext => {
                   const coreCodex = providerTurn.codexSubscriptionCore;
                   if (!coreCodex) throw new Error("Codex core placement is required for dispatch");
-                  let coreUsageReader: ReturnType<typeof buildCoreCodexUsageReader> | undefined;
                   if (coreCodex) {
                     const ref = {
                       connectionId: coreCodex.connectionId,
@@ -785,12 +780,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     };
                     coreCodex.requests = createCoreCodexRequests(requestDeps);
                     coreCodex.titleRequests = createCoreCodexRequests(requestDeps);
-                    coreUsageReader = buildCoreCodexUsageReader(
-                      db,
-                      coreCodex.identity,
-                      ref,
-                      execution,
-                    );
                   }
                   const resolver = buildCoreCodexRequestTokenResolver(
                     db,
@@ -801,15 +790,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       signalCodexCapacityWorkflow,
                     },
                   );
-                  let resolvedToken: Awaited<ReturnType<typeof resolver.getToken>> | null = null;
                   const trackToken = (token: Awaited<ReturnType<typeof resolver.getToken>>) => {
                     providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
-                    resolvedToken = token;
                     return token;
                   };
                   const codexRequestTransports = new Map<string, ModelRequestTransportLabel>();
                   const creditGuard = createCodexCreditGuard({
-                    ...(coreUsageReader ? { fetchUsage: coreUsageReader } : {}),
                     canSpendCredits: async () => {
                       if (!leases.codex.holderId || leases.codex.generation === null) return false;
                       return await canSpendSubscriptionCoreCodexExtraCredits(db, {
@@ -823,21 +809,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         leaseTtlMs: 60_000,
                       });
                     },
-                    refreshToken: async () => trackToken(await resolver.refresh()),
-                    onUsage: (snapshot) => {
-                      providerTurn.latestCodexUsage = snapshot;
-                    },
                   });
                   const resolveTrackedToken = async (
                     resolve: () => ReturnType<typeof resolver.getToken>,
                   ) => {
                     const token = trackToken(await resolve());
-                    creditGuard.setToken(token);
                     await leases.codex.assertCurrentForDispatch();
-                    await creditGuard.assertCanDispatch();
-                    // Usage may have refreshed an unexpectedly rejected bearer.
-                    // Return it before the transport constructs auth headers.
-                    return resolvedToken!;
+                    return token;
                   };
                   return {
                     clientVersion: CODEX_CLIENT_VERSION,
@@ -858,7 +836,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     beforeProviderDispatch: async (request) => {
                       if (coreCodex) await assertCoreCodexSourceConnected(db, coreCodex);
                       await assertCodexDispatchAdmission(
-                        creditGuard.assertObservedUsageAllowsDispatch,
+                        creditGuard.assertKnownUsageAllowsDispatch,
                         () => leases.codex.assertCurrentForDispatch(),
                       );
                       if (coreCodex && request) await coreCodex.requests!.reserve(request);

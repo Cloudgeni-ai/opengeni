@@ -9,10 +9,7 @@ import {
   type ImageGenerationOperationPorts,
 } from "../src/activities/image-generation-operation";
 import { executeCodexImageGeneration } from "../src/activities/codex-image-generation";
-import {
-  CodexIncludedUsageExhaustedError,
-  CodexIncludedUsageUnknownError,
-} from "../src/activities/agent-turn/codex-credit-policy";
+import { CodexIncludedUsageExhaustedError } from "../src/activities/agent-turn/codex-credit-policy";
 import type { GeneratedImageReceipt } from "../src/activities/generated-images";
 
 const base = {
@@ -441,10 +438,7 @@ describe("image generation paid-operation fence", () => {
 });
 
 test("a Codex credit-policy refusal before image dispatch leaves the operation retryable", async () => {
-  for (const failure of [
-    new CodexIncludedUsageExhaustedError(60),
-    new CodexIncludedUsageUnknownError(),
-  ]) {
+  for (const failure of [new CodexIncludedUsageExhaustedError(60)]) {
     let resets = 0;
     let unknown = 0;
     const baseInput = executionInput({ count: 0 });
