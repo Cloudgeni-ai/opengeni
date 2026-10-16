@@ -91,6 +91,11 @@ export interface ThisComputerDeps {
   openSystemSettings(url: string): void;
   /** Moves a file or folder to the Trash. */
   trash(path: string): Promise<void>;
+  /**
+   * The separate Mac agent app, which held the screen-control permissions,
+   * was handed over: the person has to allow them again for this app.
+   */
+  onScreenControlHandedOver?(): void;
   onChange(): void;
 }
 
@@ -501,7 +506,9 @@ export class ThisComputer {
   /**
    * Hands a separately installed agent over to the app, once: its background
    * service is removed (its connections stay), and on a Mac the separate agent
-   * app goes to the Trash with its entries in Privacy & Security.
+   * app goes to the Trash with its entries in Privacy & Security. That app was
+   * how agents used the screen, so screen control carries over and its
+   * permissions become part of setting up this app.
    */
   private async adoptStandalone(): Promise<string | null> {
     const macApp = this.deps.platform === "darwin" ? standaloneMacAgentApp(this.deps.home) : null;
@@ -520,12 +527,14 @@ export class ThisComputer {
         );
       }
     }
-    if (macApp && existsSync(macApp)) {
+    const handsOverScreen = macApp !== null && existsSync(macApp);
+    if (macApp && handsOverScreen) {
       if (isSymlink(this.hostedPath)) unlinkSync(this.hostedPath);
       await this.deps.trash(macApp);
       execFile("/usr/bin/tccutil", ["reset", "All", "ai.opengeni.agent"], () => undefined);
     }
-    this.saveState({ adopted: true });
+    this.saveState({ adopted: true, ...(handsOverScreen ? { screenControl: true } : {}) });
+    if (handsOverScreen) this.deps.onScreenControlHandedOver?.();
     return server;
   }
 

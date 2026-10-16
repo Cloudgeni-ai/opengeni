@@ -188,6 +188,12 @@ export class DesktopShell {
       },
       openSystemSettings: (url) => void shell.openExternal(url),
       trash: (path) => shell.trashItem(path),
+      onScreenControlHandedOver: () =>
+        showSimpleNotification(
+          `Allow ${config.productName} to use your screen`,
+          `Agents used your screen through the separate agent app, which ${config.productName} replaces. Allow Screen Recording and Accessibility to keep that working.`,
+          () => void this.allowNextPermission(),
+        ),
       onChange: () => {
         this.broadcast(DESKTOP_IPC.computerChanged);
         void this.refreshTray();
@@ -387,6 +393,12 @@ export class DesktopShell {
   reveal(): void {
     if (!this.window) this.openWindow();
     this.window?.reveal();
+  }
+
+  /** Asks for the first screen-control permission still missing, as the menu bar item does. */
+  private async allowNextPermission(): Promise<void> {
+    const next = (await this.computer.summary()).missingPermissions[0];
+    if (next) await this.computer.requestPermission(next).catch(() => undefined);
   }
 
   // --- Window -------------------------------------------------------------------------------------
