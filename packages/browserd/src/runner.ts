@@ -1470,6 +1470,14 @@ export function browserLaunchArguments(
     // browser or changing the shared desktop's active tab.
     platform === "linux" && headed ? "--enable-features=CDPScreenshotNewSurface" : null,
     platform === "linux" ? "--test-type" : null,
+    // Linux machines that run managed browsers rarely have a GPU, and Chromium
+    // turns WebGL off entirely on software rendering. Sites that need WebGL
+    // (maps, editors, many bot challenges) then break, and a browser with no
+    // WebGL context is itself a strong bot signal. Allow the host's software
+    // OpenGL (Mesa llvmpipe) when the display provides GLX, and otherwise fall
+    // back to Chromium's bundled SwiftShader. A real GPU is still preferred.
+    platform === "linux" ? "--ignore-gpu-blocklist" : null,
+    platform === "linux" ? "--enable-unsafe-swiftshader" : null,
     profileCryptoArgument,
     ...validatedAdditional,
   ]
