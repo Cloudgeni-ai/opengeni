@@ -107,9 +107,8 @@ fn prune_generations_except(current: &Path) -> usize {
 
 /// Generation directories are the first 24 hex digits of the runtime digest.
 fn is_generation_name(name: &std::ffi::OsStr) -> bool {
-    name.to_str().is_some_and(|name| {
-        name.len() == 24 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
+    name.to_str()
+        .is_some_and(|name| name.len() == 24 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 #[cfg(opengeni_embedded_runtime)]
