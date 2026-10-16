@@ -23,6 +23,18 @@ use compute_host::{
 
 use crate::bench::{BenchArgs, bench, exec};
 
+/// The agent's memory comes and goes in bursts: transfer buffers and
+/// compression contexts while sandboxes archive and wake, on hundreds of
+/// blocking threads at once. glibc keeps what each thread freed in that
+/// thread's arena; measured, an agent that had archived ten sandboxes kept
+/// about 750 MB it no longer used. jemalloc hands freed memory back after
+/// a short decay, from background threads while the agent is idle. It
+/// replaces `malloc` itself, so the C libraries linked in (zstd) use it
+/// too. Pagers run from this binary and use it as well.
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Parser)]
 #[command(about = "Run an Opengeni compute host agent, or talk to one")]
 struct Cli {
