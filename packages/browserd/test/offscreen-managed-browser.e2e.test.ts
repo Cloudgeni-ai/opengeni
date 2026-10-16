@@ -56,9 +56,9 @@ e2e(
       const profileDirectory = join(root, "sessions", reference.browserSessionId, "profile");
       const [pid] = profileBrowserPids(profileDirectory);
       expect(pid).toBeGreaterThan(0);
-      // A process LaunchServices does not know is not an application: it has
-      // no Dock icon, no menu bar and no windows the person can see.
-      expect(output("/usr/bin/lsappinfo", ["info", "-only", "name", `${pid}`])).toBe("");
+      // A background-only application has no Dock icon, no menu bar and no
+      // windows the person can see, and it can never become frontmost.
+      expect(output("/usr/bin/lsappinfo", ["info", `${pid}`])).toContain('type="BackgroundOnly"');
       expect(frontmostApplication()).toBe(frontBefore);
 
       const [port, path] = (await readFile(join(profileDirectory, "DevToolsActivePort"), "utf8"))
