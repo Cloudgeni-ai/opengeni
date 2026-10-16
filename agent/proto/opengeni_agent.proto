@@ -205,6 +205,11 @@ message Capabilities {
   // macOS desktop permissions (TCC), read without prompting. Present only on Mac
   // builds with desktop support; absence means unknown, never denied.
   MacDesktopPermissions mac_permissions = 16;
+  // The runner serves BrowserControlHttpRequest / BrowserControlHttpReadRequest:
+  // one in-process loopback request to the agent-owned browser/computer
+  // controller of an exact authority scope. Absent/false runners keep the legacy
+  // path (a shell + curl command per controller request).
+  bool browser_control_http = 17;
 }
 
 // The three macOS Privacy & Security grants desktop capture and input need.
@@ -722,6 +727,60 @@ message BrowserControlEnsureRequest {
 message BrowserControlEnsureResponse {
   uint32 port = 1;
   string sidecar_generation = 2;
+}
+
+// Send one HTTP request to the agent-owned browser/computer controller that
+// serves exactly `scope_id` at `scope_generation`, over loopback, inside the
+// runner process. The runner resolves the port itself; the control plane never
+// names an arbitrary local port. The bearer is the controller's own scoped
+// authority and is forwarded only to that controller.
+message BrowserControlHttpRequest {
+  string scope_id = 1;
+  string scope_generation = 2;
+  // GET, POST, PUT or DELETE.
+  string method = 3;
+  // Absolute controller path with optional query, beginning with "/".
+  string path = 4;
+  // Bearer token value, without the "Bearer " prefix.
+  string bearer_token = 5;
+  // JSON request body. Sent only when has_body is set.
+  bytes body = 6;
+  bool has_body = 7;
+  // Whole-request deadline in milliseconds.
+  uint32 timeout_ms = 8;
+  // Largest response body the caller accepts. Larger bodies fail the request.
+  uint64 max_response_bytes = 9;
+}
+
+message BrowserControlHttpHeader {
+  // Lowercase header name.
+  string name = 1;
+  string value = 2;
+}
+
+message BrowserControlHttpResponse {
+  uint32 status = 1;
+  repeated BrowserControlHttpHeader headers = 2;
+  // The whole body, or its first part when spool_id is set.
+  bytes body = 3;
+  // Exact length of the complete body.
+  uint64 total_bytes = 4;
+  // Set when the complete body does not fit one reply. The remainder stays in a
+  // short-lived runner spool; read it with BrowserControlHttpReadRequest from
+  // offset len(body). The controller request itself is never repeated.
+  string spool_id = 5;
+}
+
+// Read the next part of a spooled controller response. Reading the final part
+// releases the spool entry; unread entries expire after a short bound.
+message BrowserControlHttpReadRequest {
+  string spool_id = 1;
+  uint64 offset = 2;
+}
+
+message BrowserControlHttpReadResponse {
+  bytes data = 1;
+  bool done = 2;
 }
 
 // Open one browserd frame subscription and relay its canonical binary browser
@@ -1328,6 +1387,8 @@ message ControlRequest {
     ComputerFramesOpenRequest computer_frames_open = 38;
     AgentUpdateApplyRequest agent_update_apply = 39;
     CredentialRenewRequest credential_renew = 40;
+    BrowserControlHttpRequest browser_control_http = 41;
+    BrowserControlHttpReadRequest browser_control_http_read = 42;
   }
 }
 
@@ -1369,6 +1430,8 @@ message ControlResponse {
     ComputerFramesOpenResponse computer_frames_open = 38;
     AgentUpdateApplyResponse agent_update_apply = 39;
     CredentialRenewResponse credential_renew = 40;
+    BrowserControlHttpResponse browser_control_http = 41;
+    BrowserControlHttpReadResponse browser_control_http_read = 42;
   }
 }
 

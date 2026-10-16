@@ -116,6 +116,7 @@ pub fn canonical_hello() -> v1::Hello {
             transactional_fs_write: false,
             credential_renew: false,
             mac_permissions: None,
+            browser_control_http: false,
         }),
         update_channel: "stable".to_string(),
         resume_token: "resume-token-1".to_string(),

@@ -17,3 +17,12 @@ test("Hello capability projection preserves true and resets on false or missing"
   }
   expect(helloRuntimeCapabilities(Hello.fromPartial({}))).toEqual({});
 });
+
+test("Hello projects the in-process controller transport capability exactly", () => {
+  for (const browserControlHttp of [true, false, undefined]) {
+    const hello = Hello.decode(
+      Hello.encode(Hello.fromPartial({ capabilities: { browserControlHttp } })).finish(),
+    );
+    expect(helloRuntimeCapabilities(hello).browserControlHttp).toBe(browserControlHttp === true);
+  }
+});

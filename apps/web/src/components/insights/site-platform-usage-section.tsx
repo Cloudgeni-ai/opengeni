@@ -22,9 +22,8 @@ const MODE_DESCRIPTION: Record<SitePlatformUsage["billingMode"], string> = {
 };
 
 /**
- * Workspace settings > Usage: this month's Site platform usage (requests,
- * Site SQL rows, storage) against the monthly allowance, separate from agent
- * spend. Hidden where the deployment doesn't publish Sites.
+ * Insights: this month's Site platform metrics, separate from model charges
+ * and the dashboard's selected model-usage window. Hidden without publishing.
  */
 export function SitePlatformUsageSection({
   client,
@@ -54,7 +53,7 @@ export function SitePlatformUsageSection({
   if (load.state === "hidden" || load.state === "loading") return null;
   if (load.state === "failed")
     return (
-      <Section title="Published Sites">
+      <Section title="Site platform">
         <p className="text-sm text-fg-muted">Couldn't load Site usage.</p>
       </Section>
     );
@@ -69,7 +68,7 @@ export function SitePlatformUsageView({ usage }: { usage: SitePlatformUsage }) {
         ? `${formatCredits(usage.shadowMicros)} would have been charged this month`
         : null;
   return (
-    <Section title="Published Sites" description={MODE_DESCRIPTION[usage.billingMode]}>
+    <Section title="Site platform" description={MODE_DESCRIPTION[usage.billingMode]}>
       <div className="flex min-w-0 flex-col gap-4 py-1">
         {usage.brake.engaged ? (
           <Notice tone="failed" title="Sites are paused">
