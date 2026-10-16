@@ -72,6 +72,12 @@ export type AgentBrowserRunnerOptions = {
   downloadDirectory: string;
   screenshotDirectory: string;
   headed: boolean;
+  /** Run a headed managed browser without any native window. On a person's
+   * own desktop a windowed managed browser shows up in front of them, takes
+   * focus and joins the Dock; an offscreen browser is the same real browser
+   * and profile in Chrome's new headless mode, presenting the host display's
+   * geometry and an ordinary User-Agent. Supported on macOS. */
+  offscreen?: boolean;
   browserExecutablePath?: string;
   /** macOS lifecycle-preserving background launcher. Defaults to the packaged
    * native helper discovered by browserd's parent agent. */
@@ -174,7 +180,7 @@ export class AgentBrowserJsonRunner {
     this.chromeStderrDrainPaths = browserLaunch?.cleanupPaths ?? [];
     this.browserScope = browserLaunch?.scope ?? null;
     this.recoveredProcess = options.recoverOwnedProcess ?? null;
-    this.headlessManaged = !options.headed && !options.provider;
+    this.headlessManaged = !windowedBrowser(options) && !options.provider;
     this.daemonRunDirectory = dirname(this.daemonPidFile);
   }
 
@@ -694,12 +700,22 @@ async function managedBrowserLaunch(
   if (process.platform === "linux" && !options.provider) {
     const executable = configured ?? (await linuxChromeExecutable());
     if (executable) {
-      return await linuxChromeStderrDrainWrapper(
+      return await chromeStderrDrainWrapper(
         options.profileDirectory,
         executable,
         options.systemdScope === false ? null : await linuxUserScopeLauncher(),
       );
     }
+  }
+  if (process.platform === "darwin" && options.offscreen === true && !options.provider) {
+    const executable = configured ?? (await firstExecutable(MACOS_BROWSER_EXECUTABLES));
+    if (!executable) return undefined;
+    return await chromeStderrDrainWrapper(
+      options.profileDirectory,
+      executable,
+      null,
+      await macosOffscreenChromeArguments(executable),
+    );
   }
   if (process.platform !== "darwin" || !options.headed || options.provider) {
     return configured ? { executablePath: configured } : undefined;
@@ -729,14 +745,18 @@ async function managedBrowserLaunch(
  * Keep Chrome's PID/process group unchanged with shell exec, while a private
  * reader consumes stderr and retains only the last bounded diagnostic bytes.
  *
+ * Fixed Chrome arguments that agent-browser cannot carry (its argument list
+ * is comma-separated, and a User-Agent contains commas) are added here too.
+ *
  * With a reachable systemd user manager the wrapper first re-executes itself
  * through `systemd-run --scope`, which execs in place: the PID agent-browser
  * spawned stays Chrome's PID, and the stderr reader plus every Chrome child
  * start inside the browser's own scope. */
-async function linuxChromeStderrDrainWrapper(
+async function chromeStderrDrainWrapper(
   profileDirectory: string,
   executable: string,
   scopeLauncher: LinuxUserScopeLauncher | null,
+  fixedArguments: readonly string[] = [],
 ): Promise<ManagedBrowserLaunch> {
   await access(executable, constants.X_OK);
   const actualExecutablePath = (await isScriptExecutable(executable)) ? null : executable;
@@ -746,7 +766,7 @@ async function linuxChromeStderrDrainWrapper(
   const tail =
     (await firstExecutableInPath(["tail"])) ??
     (await firstExecutable(["/usr/bin/tail", "/bin/tail"]));
-  if (!mkfifo || !tail) throw new Error("managed Linux Chrome requires mkfifo and tail");
+  if (!mkfifo || !tail) throw new Error("managed Chrome requires mkfifo and tail");
   const directory = join(dirname(resolve(profileDirectory)), "chrome-launch");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
@@ -761,11 +781,12 @@ async function linuxChromeStderrDrainWrapper(
     scope && scopeLauncher
       ? `if [ "\${${BROWSER_SCOPE_MARKER}:-}" != ${shellQuote(scope.unit)} ]; then\n  ${BROWSER_SCOPE_MARKER}=${shellQuote(scope.unit)} exec ${shellQuote(scopeLauncher.systemdRun)} --user --scope --quiet --collect --property=Delegate=yes --slice=${BROWSER_SCOPE_SLICE} --unit=${shellQuote(scope.unit)} -- ${shellQuote(wrapper)} "$@"\nfi\nunset ${BROWSER_SCOPE_MARKER}\n`
       : "";
+  const fixed = fixedArguments.map((argument) => ` ${shellQuote(argument)}`).join("");
   try {
     await runProcess(mkfifo, ["-m", "600", fifo]);
     await writeFile(
       wrapper,
-      `#!/bin/sh\numask 077\n${scopeEntry}${shellQuote(tail)} -c ${CHROME_STDERR_DIAGNOSTIC_BYTES} ${shellQuote(fifo)} > ${shellQuote(log)} 2>/dev/null &\nexec ${shellQuote(executable)} "$@" 2>${shellQuote(fifo)}\n`,
+      `#!/bin/sh\numask 077\n${scopeEntry}${shellQuote(tail)} -c ${CHROME_STDERR_DIAGNOSTIC_BYTES} ${shellQuote(fifo)} > ${shellQuote(log)} 2>/dev/null &\nexec ${shellQuote(executable)}${fixed} "$@" 2>${shellQuote(fifo)}\n`,
       { mode: 0o700, flag: "wx" },
     );
     await chmod(wrapper, 0o700);
@@ -779,6 +800,126 @@ async function linuxChromeStderrDrainWrapper(
     await Promise.allSettled([rm(wrapper, { force: true }), rm(fifo, { force: true })]);
     throw error;
   }
+}
+
+/** Arguments that make an offscreen (new headless) real Chrome on macOS
+ * present like the person's ordinary windowed Chrome. Headless Chrome names
+ * itself HeadlessChrome in every User-Agent, including workers', and reports
+ * an 800x600 screen with no work area; sites treat both as bot signals. The
+ * User-Agent switch keeps Chrome's own brand list and Client Hints intact,
+ * unlike CDP overrides, which also miss service workers. */
+export async function macosOffscreenChromeArguments(
+  executable: string,
+  probes: {
+    chromeMajorVersion?: (executable: string) => Promise<number>;
+    mainDisplay?: () => Promise<MacosDisplayGeometry>;
+  } = {},
+): Promise<string[]> {
+  const [major, display] = await Promise.all([
+    (probes.chromeMajorVersion ?? chromeMajorVersion)(executable),
+    (probes.mainDisplay ?? macosMainDisplay)(),
+  ]);
+  return [
+    `--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
+    `--screen-info={${display.width}x${display.height} devicePixelRatio=${display.scale} workAreaLeft=${display.insets.left} workAreaRight=${display.insets.right} workAreaTop=${display.insets.top} workAreaBottom=${display.insets.bottom}}`,
+  ];
+}
+
+export type MacosDisplayGeometry = {
+  width: number;
+  height: number;
+  scale: number;
+  insets: { left: number; right: number; top: number; bottom: number };
+};
+
+/** A common built-in MacBook display, used only when the window server
+ * cannot be queried (for example, no logged-in GUI session). */
+const FALLBACK_MACOS_DISPLAY: MacosDisplayGeometry = {
+  width: 1512,
+  height: 982,
+  scale: 2,
+  insets: { left: 0, right: 0, top: 38, bottom: 0 },
+};
+
+const MACOS_DISPLAY_SCRIPT =
+  "ObjC.import('AppKit');var s=$.NSScreen.screens.objectAtIndex(0);var f=s.frame;var v=s.visibleFrame;" +
+  "JSON.stringify({w:f.size.width,h:f.size.height,x:v.origin.x-f.origin.x,y:v.origin.y-f.origin.y," +
+  "vw:v.size.width,vh:v.size.height,scale:s.backingScaleFactor})";
+
+/** The primary display (the one with the menu bar) in points, with its Dock
+ * and menu-bar insets. Cocoa's visible frame is measured from the bottom. */
+async function macosMainDisplay(): Promise<MacosDisplayGeometry> {
+  const output = await boundedProcessOutput("/usr/bin/osascript", [
+    "-l",
+    "JavaScript",
+    "-e",
+    MACOS_DISPLAY_SCRIPT,
+  ]);
+  return parseMacosDisplayGeometry(output) ?? FALLBACK_MACOS_DISPLAY;
+}
+
+export function parseMacosDisplayGeometry(output: string): MacosDisplayGeometry | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(output.trim());
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const number = (key: string) => {
+    const entry = record[key];
+    return typeof entry === "number" && Number.isFinite(entry) ? Math.round(entry) : null;
+  };
+  const width = number("w");
+  const height = number("h");
+  const x = number("x");
+  const y = number("y");
+  const visibleWidth = number("vw");
+  const visibleHeight = number("vh");
+  const scale = record.scale;
+  if (
+    width === null ||
+    height === null ||
+    x === null ||
+    y === null ||
+    visibleWidth === null ||
+    visibleHeight === null ||
+    typeof scale !== "number" ||
+    !(scale >= 1 && scale <= 4) ||
+    width < 320 ||
+    height < 240 ||
+    width > 16_384 ||
+    height > 16_384
+  )
+    return null;
+  const insets = {
+    left: x,
+    right: width - x - visibleWidth,
+    top: height - y - visibleHeight,
+    bottom: y,
+  };
+  if (Object.values(insets).some((inset) => inset < 0 || inset > Math.min(width, height) / 2))
+    return null;
+  return { width, height, scale, insets };
+}
+
+async function chromeMajorVersion(executable: string): Promise<number> {
+  // An application bundle records its version without starting the browser.
+  const bundleInfo = join(dirname(dirname(executable)), "Info.plist");
+  try {
+    const match = /<key>CFBundleShortVersionString<\/key>\s*<string>(\d+)\./u.exec(
+      await readFile(bundleInfo, "utf8"),
+    );
+    if (match) return Number(match[1]);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const match = /(?:^|\s)(\d+)\.\d+\.\d+\.\d+/u.exec(
+    await boundedProcessOutput(executable, ["--version"]),
+  );
+  if (!match) throw new Error("managed browser version is unavailable");
+  return Number(match[1]);
 }
 
 type LinuxUserScopeLauncher = { systemdRun: string; busctl: string };
@@ -1266,6 +1407,11 @@ async function boundedProcessOutput(command: string, args: readonly string[]): P
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** Whether this managed browser opens a native window. */
+function windowedBrowser(options: AgentBrowserRunnerOptions): boolean {
+  return options.headed && options.offscreen !== true;
+}
+
 function isolatedEnvironment(
   options: AgentBrowserRunnerOptions,
   proxy: PrivateProxyAuthority | null,
@@ -1297,11 +1443,11 @@ function isolatedEnvironment(
     AGENT_BROWSER_DOWNLOAD_PATH: resolve(options.downloadDirectory),
     AGENT_BROWSER_SCREENSHOT_DIR: resolve(options.screenshotDirectory),
     AGENT_BROWSER_IDLE_TIMEOUT_MS: "0",
-    AGENT_BROWSER_HEADED: options.headed ? "1" : "0",
+    AGENT_BROWSER_HEADED: windowedBrowser(options) ? "1" : "0",
     AGENT_BROWSER_ARGS: browserLaunchArguments(
       process.platform,
       options.launchArguments,
-      options.headed,
+      windowedBrowser(options),
     ),
     NO_COLOR: "1",
   });
