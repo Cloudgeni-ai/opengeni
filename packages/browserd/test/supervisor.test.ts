@@ -25,6 +25,7 @@ import {
   type BrowserWorkingRuntimeReceipt,
 } from "../src/working-runtime-journal";
 import type { SqliteInteractionOperationJournal } from "../src/operation-journal";
+import { workingCopyManifest } from "../src/working-copy-adoption";
 import { UnsettledCleanupError } from "../src/cleanup-error";
 
 describe("BrowserSupervisor", () => {
@@ -3037,6 +3038,46 @@ describe("adopting a verified copy of a preserved working directory", () => {
           process: { pid: 3001 },
           adoption: { operationId: "33333333-3333-4333-8333-000000000003" },
         });
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("a launched adopted copy ends like any running browser while the preserved original stays", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const live = await restoreAsCopy(rootDirectory, options.browserSessionId);
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "exited",
+        createDriver: async (context) => ({
+          ...fakeDriver(context),
+          ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+        }),
+      });
+      try {
+        const exact = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+          authority: workingAuthority,
+        };
+        const approved = (await supervisor.inspectWorkingCopy(exact)).manifest!.digest;
+        const operationId = "33333333-3333-4333-8333-000000000009";
+        await supervisor.adoptWorkingCopy({ ...exact, operationId, manifestDigest: approved });
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        // Once launched, the adopted copy is the browser's working state: the
+        // control plane removes it only after capturing a newer checkpoint or
+        // on an explicit end, as for any running browser.
+        await supervisor.endSession(exact, { removeState: true });
+        expect(await exists(live)).toBe(false);
+        // The bytes it was adopted from are never removed automatically.
+        const preserved = join(
+          rootDirectory,
+          "sessions",
+          `${options.browserSessionId}.preserved-${operationId}`,
+        );
+        expect((await workingCopyManifest(preserved)).digest).toBe(approved);
       } finally {
         await supervisor.close();
       }

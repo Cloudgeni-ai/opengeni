@@ -688,10 +688,16 @@ export class BrowserSupervisor {
       };
     }
     if (!record) return { inFlight: false, adoption: null };
-    return {
-      inFlight: false,
-      adoption: await workingCopyAdoptionStatus(paths, await reconcileAdoption(paths, record)),
-    };
+    let reconciled: typeof record;
+    try {
+      reconciled = await reconcileAdoption(paths, record);
+    } catch (error) {
+      // Still running in another controller process: report it unreconciled.
+      if (!(error instanceof WorkingCopyAdoptionError && error.reason === "adoption_in_progress"))
+        throw error;
+      return { inFlight: true, adoption: await workingCopyAdoptionStatus(paths, record) };
+    }
+    return { inFlight: false, adoption: await workingCopyAdoptionStatus(paths, reconciled) };
   }
 
   /** The adoption that still owns a browser's directory: one running here, or

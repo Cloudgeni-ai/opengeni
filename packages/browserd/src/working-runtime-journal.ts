@@ -215,15 +215,18 @@ export class SqliteBrowserWorkingRuntimeJournal {
 
   /** After a launch from an adopted copy definitively failed (its driver
    * closed), make the adopted copy the latest receipt again so the copy stays
-   * adoptable instead of falling back to any older state. */
-  readopt(adopted: BrowserWorkingRuntimeReceipt, failedLaunch: BrowserWorkingRuntimeReceipt) {
-    if (adopted.intent !== "adopt" || adopted.state !== "completed" || !adopted.adoption)
-      throw unavailable("receipt_not_adoptable");
+   * launchable instead of falling back to any older state. `base` is the
+   * newest completed receipt of that copy: its adopt receipt or a later
+   * completed launch from it. */
+  readopt(base: BrowserWorkingRuntimeReceipt, failedLaunch: BrowserWorkingRuntimeReceipt) {
+    if (!adoptedCopyBase(base, failedLaunch)) throw unavailable("receipt_not_adoptable");
     const readoptDigest = createHash("sha256")
       .update(`working-copy-readopt:${failedLaunch.operationId}`)
       .digest("hex");
+    const { failureCode: _failureCode, ...adopted } = base;
     const receipt: BrowserWorkingRuntimeReceipt = {
       ...adopted,
+      intent: "adopt",
       operationId: `${readoptDigest.slice(0, 8)}-${readoptDigest.slice(8, 12)}-4${readoptDigest.slice(13, 16)}-8${readoptDigest.slice(17, 20)}-${readoptDigest.slice(20, 32)}`,
       launchAttemptId: randomUUID(),
       state: "prepared",
@@ -250,18 +253,14 @@ export class SqliteBrowserWorkingRuntimeJournal {
       this.write(completed);
       return completed;
     }
-    const adopted = this.journal.read(latest.adoption!.operationId)?.receipt ?? null;
-    if (
-      !adopted ||
-      adopted.intent !== "adopt" ||
-      adopted.state !== "completed" ||
-      adopted.adoption?.operationId !== latest.adoption!.operationId ||
-      adopted.profile.device !== latest.profile.device ||
-      adopted.profile.inode !== latest.profile.inode
-    )
-      throw unavailable("receipt_not_adoptable");
+    // The newest completed receipt of the same adopted copy, not the adopt
+    // receipt itself: the journal is bounded, and after many launches the
+    // adopt receipt may have been evicted. Every launch from the copy that
+    // completed, and every re-adoption, is an equally exact base.
+    const base = this.journal.findLatest((receipt) => adoptedCopyBase(receipt, latest))?.receipt;
+    if (!base) throw unavailable("receipt_not_adoptable");
     const failed = latest.state === "failed" ? latest : this.fail(latest, "launch_interrupted");
-    return this.readopt(adopted, failed);
+    return this.readopt(base, failed);
   }
 
   close() {
@@ -345,6 +344,23 @@ export function adoptedCopyNeedsResettle(
     receipt.intent === "adopt" &&
     (receipt.state === "prepared" || receipt.state === "dispatched") &&
     receipt.operationId !== receipt.adoption.operationId
+  );
+}
+
+/** A completed receipt that exactly describes the same adopted copy as
+ * `launch`: same adoption and the same profile directory, with a recorded
+ * process and directory launch allowed. */
+function adoptedCopyBase(
+  receipt: BrowserWorkingRuntimeReceipt,
+  launch: BrowserWorkingRuntimeReceipt,
+): boolean {
+  return (
+    adoptableSourceReceipt(receipt) &&
+    receipt.adoption !== undefined &&
+    receipt.adoption.operationId === launch.adoption?.operationId &&
+    receipt.adoption.manifestDigest === launch.adoption.manifestDigest &&
+    receipt.profile.device === launch.profile.device &&
+    receipt.profile.inode === launch.profile.inode
   );
 }
 

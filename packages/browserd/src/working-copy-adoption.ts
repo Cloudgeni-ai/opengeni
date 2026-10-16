@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   chmod,
+  type FileHandle,
   link,
   lstat,
   mkdir,
@@ -14,7 +15,6 @@ import {
   rename,
   symlink,
   unlink,
-  utimes,
   writeFile,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -33,12 +33,19 @@ import type {
  *
  * - an approved manifest digest names the exact bytes to adopt;
  * - a durable intent record is written before any side effect;
- * - the copy is made, without following links, into a fresh staging
- *   directory and verified against that digest;
- * - an adopt receipt with the staged profile's own identity is appended;
+ * - the copy is made through held directory descriptors, never following
+ *   links, into a fresh staging directory and verified against that digest,
+ *   and the original must still hold those bytes once the copy is complete;
+ * - an adopt receipt with the staged profile's own identity is appended, and
+ *   the staged copy is measured again; a restart makes it live only if it
+ *   still holds exactly those bytes;
  * - the original directory is preserved under a new name and the staged copy
  *   takes its place, with every step journaled so a crash at any boundary is
  *   reconciled forward or reported, never guessed.
+ *
+ * Adoption and reconciliation for one browser run under one exclusive,
+ * kernel-held lock, so a second controller can never act on an adoption that
+ * is still running.
  *
  * Nothing here deletes bytes. Retained staging and preserved directories are
  * reported by status and removed only by a separately authorized cleanup.
@@ -72,6 +79,10 @@ export type WorkingCopyAdoptionRecord = {
   stagingName: string;
   preservedName: string;
   staging: { session: DirectoryIdentity; profile: DirectoryIdentity } | null;
+  /** Digest of the staged copy right after its adopt receipt was appended
+   * (the receipt itself changes the copy's journal). Set with phase
+   * "receipt"; a restart checks the copy against it before it goes live. */
+  receiptDigest: string | null;
   phase: WorkingCopyAdoptionPhase;
   failureCode: string | null;
   createdAt: string;
@@ -160,47 +171,72 @@ export async function directoryIdentity(path: string): Promise<DirectoryIdentity
 
 type Visit =
   | { kind: "directory"; relativePath: string; mode: number }
-  | { kind: "file"; relativePath: string; mode: number; size: number; sha256: string }
+  | { kind: "file"; relativePath: string; mode: number; atime: Date; mtime: Date }
   | { kind: "symlink"; relativePath: string; target: string };
 
-/** Walk one directory tree without following links or leaving it. Each
- * directory is checked to be the same directory before and after it is
- * listed and to resolve inside the root; each file is opened with O_NOFOLLOW
- * and must be the inode that was listed. Anything else is refused. */
+/** Path of an open descriptor, or of a name inside an open directory, through
+ * Linux's per-process descriptor links. Resolving a name this way is the same
+ * as openat(2) on the held directory: renaming or replacing any ancestor path
+ * cannot redirect it. */
+function descriptorPath(handle: FileHandle, name?: string): string {
+  return name === undefined ? `/proc/self/fd/${handle.fd}` : `/proc/self/fd/${handle.fd}/${name}`;
+}
+
+async function openDirectoryNoFollow(path: string, relativePath: string): Promise<FileHandle> {
+  try {
+    return await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ELOOP" || code === "ENOTDIR" || code === "ENOENT") throw changed(relativePath);
+    throw error;
+  }
+}
+
+function sameStatus(
+  left: { dev: number; ino: number; mtimeMs: number; ctimeMs: number; size: number },
+  right: { dev: number; ino: number; mtimeMs: number; ctimeMs: number; size: number },
+): boolean {
+  return (
+    sameIdentity(left, right) &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs &&
+    left.size === right.size
+  );
+}
+
+/** Walk one directory tree without following links or leaving it.
+ *
+ * The root is opened once and every later name is resolved relative to an
+ * already open directory, never through a path string, so a concurrent swap
+ * of any directory for a link cannot make the walk read outside the tree.
+ * Each directory must be unchanged (same identity, times and size) after its
+ * entries were visited, and each file must be the inode that was listed and
+ * unchanged after it was read. Anything else is refused. Linux only: it
+ * relies on the kernel's descriptor links. */
 async function walk(
   root: string,
-  onEntry: (visit: Visit, absolutePath: string, chunk?: AsyncIterable<Buffer>) => Promise<void>,
+  onEntry: (visit: Visit, content?: AsyncIterable<Buffer>) => Promise<void>,
 ): Promise<WorkingCopyManifest> {
+  if (process.platform !== "linux") {
+    throw new WorkingCopyAdoptionError(
+      "unsupported_platform",
+      "working copy adoption is supported only on Linux controllers",
+    );
+  }
   const resolvedRoot = await realpath(root);
   if (resolvedRoot !== resolve(root)) {
     throw new WorkingCopyAdoptionError("unsupported_entry", "working copy root is not canonical");
   }
   const lines: ManifestLine[] = [];
   let bytes = 0;
-  const pending: string[] = [""];
-  while (pending.length > 0) {
-    const relativeDirectory = pending.pop()!;
-    const absoluteDirectory = relativeDirectory
-      ? join(resolvedRoot, relativeDirectory)
-      : resolvedRoot;
-    const before = await lstat(absoluteDirectory);
-    if (!before.isDirectory() || before.isSymbolicLink()) throw changed(relativeDirectory || ".");
-    if ((await realpath(absoluteDirectory)) !== absoluteDirectory) {
-      throw new WorkingCopyAdoptionError(
-        "unsupported_entry",
-        `working copy directory leaves its root (${relativeDirectory})`,
-      );
-    }
-    const names = (await readdir(absoluteDirectory)).sort();
-    const after = await lstat(absoluteDirectory);
-    if (!sameIdentity(before, after) || !after.isDirectory())
-      throw changed(relativeDirectory || ".");
+
+  async function visitDirectory(handle: FileHandle, relativeDirectory: string): Promise<void> {
     const directoryPath = relativeDirectory || ".";
+    const before = await handle.stat();
+    if (!before.isDirectory()) throw changed(directoryPath);
+    const names = (await readdir(descriptorPath(handle))).sort();
     lines.push([directoryPath, "directory", before.mode & 0o7777, 0, ""]);
-    await onEntry(
-      { kind: "directory", relativePath: directoryPath, mode: before.mode & 0o7777 },
-      absoluteDirectory,
-    );
+    await onEntry({ kind: "directory", relativePath: directoryPath, mode: before.mode & 0o7777 });
     for (const name of names) {
       if (name === "." || name === ".." || name.includes("/") || name.includes("\0")) {
         throw new WorkingCopyAdoptionError(
@@ -216,27 +252,46 @@ async function walk(
           "working copy has too many entries",
         );
       }
-      const absolutePath = join(absoluteDirectory, name);
-      const metadata = await lstat(absolutePath);
+      const entryPath = descriptorPath(handle, name);
+      let metadata: Awaited<ReturnType<typeof lstat>>;
+      try {
+        metadata = await lstat(entryPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") throw changed(relativePath);
+        throw error;
+      }
       if (metadata.isSymbolicLink()) {
-        const target = await readlink(absolutePath);
-        const again = await lstat(absolutePath);
-        if (!again.isSymbolicLink() || !sameIdentity(metadata, again)) throw changed(relativePath);
+        const target = await readlink(entryPath);
+        const again = await lstat(entryPath);
+        if (!again.isSymbolicLink() || !sameStatus(metadata, again)) throw changed(relativePath);
         lines.push([relativePath, "symlink", 0, 0, target]);
-        await onEntry({ kind: "symlink", relativePath, target }, absolutePath);
+        await onEntry({ kind: "symlink", relativePath, target });
       } else if (metadata.isDirectory()) {
-        pending.push(relativePath);
-      } else if (metadata.isFile()) {
-        const handle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        const child = await openDirectoryNoFollow(entryPath, relativePath);
         try {
-          const opened = await handle.stat();
+          if (!sameIdentity(metadata, await child.stat())) throw changed(relativePath);
+          await visitDirectory(child, relativePath);
+        } finally {
+          await child.close();
+        }
+      } else if (metadata.isFile()) {
+        let file: FileHandle;
+        try {
+          file = await open(entryPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code === "ELOOP" || code === "ENOENT") throw changed(relativePath);
+          throw error;
+        }
+        try {
+          const opened = await file.stat();
           if (!opened.isFile() || !sameIdentity(metadata, opened)) throw changed(relativePath);
           const hash = createHash("sha256");
           let size = 0;
           const chunks = (async function* () {
             const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
             for (;;) {
-              const { bytesRead } = await handle.read(buffer, 0, buffer.length, size);
+              const { bytesRead } = await file.read(buffer, 0, buffer.length, size);
               if (bytesRead === 0) return;
               const chunk = buffer.subarray(0, bytesRead);
               hash.update(chunk);
@@ -246,8 +301,13 @@ async function walk(
           })();
           let consumed = false;
           await onEntry(
-            { kind: "file", relativePath, mode: metadata.mode & 0o7777, size: 0, sha256: "" },
-            absolutePath,
+            {
+              kind: "file",
+              relativePath,
+              mode: opened.mode & 0o7777,
+              atime: opened.atime,
+              mtime: opened.mtime,
+            },
             {
               [Symbol.asyncIterator]: () => {
                 consumed = true;
@@ -256,13 +316,12 @@ async function walk(
             },
           );
           if (!consumed) for await (const _chunk of chunks);
-          const closing = await handle.stat();
-          if (closing.size !== size || closing.mtimeMs !== opened.mtimeMs)
-            throw changed(relativePath);
+          const closing = await file.stat();
+          if (closing.size !== size || !sameStatus(opened, closing)) throw changed(relativePath);
           bytes += size;
-          lines.push([relativePath, "file", metadata.mode & 0o7777, size, hash.digest("hex")]);
+          lines.push([relativePath, "file", opened.mode & 0o7777, size, hash.digest("hex")]);
         } finally {
-          await handle.close();
+          await file.close();
         }
       } else {
         throw new WorkingCopyAdoptionError(
@@ -271,6 +330,17 @@ async function walk(
         );
       }
     }
+    // An entry added, removed or renamed here while it was walked changes
+    // this directory's times; the listing would no longer be exact.
+    if (!sameStatus(before, await handle.stat())) throw changed(directoryPath);
+  }
+
+  const rootHandle = await openDirectoryNoFollow(resolvedRoot, ".");
+  try {
+    if ((await readlink(descriptorPath(rootHandle))) !== resolvedRoot) throw changed(".");
+    await visitDirectory(rootHandle, "");
+  } finally {
+    await rootHandle.close();
   }
   return { digest: manifestDigest(lines), entries: lines.length, bytes };
 }
@@ -297,7 +367,7 @@ export async function copyWorkingCopy(
 ): Promise<WorkingCopyManifest> {
   const destinationRoot = resolve(destinationDirectory);
   const createdDirectories: Array<{ path: string; mode: number }> = [];
-  const manifest = await walk(sourceDirectory, async (visit, absolutePath, content) => {
+  const manifest = await walk(sourceDirectory, async (visit, content) => {
     const target =
       visit.relativePath === "." ? destinationRoot : join(destinationRoot, visit.relativePath);
     if (visit.kind === "directory") {
@@ -309,7 +379,6 @@ export async function copyWorkingCopy(
       await symlink(visit.target, target);
       return;
     }
-    const source = await lstat(absolutePath);
     const handle = await open(
       target,
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
@@ -317,12 +386,12 @@ export async function copyWorkingCopy(
     );
     try {
       for await (const chunk of content!) await handle.write(chunk);
+      await handle.chmod(visit.mode);
+      await handle.utimes(visit.atime, visit.mtime);
       await handle.sync();
     } finally {
       await handle.close();
     }
-    await chmod(target, visit.mode);
-    await utimes(target, source.atime, source.mtime);
   });
   for (const directory of createdDirectories.reverse()) {
     await chmod(directory.path, directory.mode);
@@ -461,19 +530,94 @@ async function advance(
   });
 }
 
+/** Returned when another holder (an adoption running in this or another
+ * controller process) has a browser's adoption lock. */
+export const ADOPTION_IN_FLIGHT = "in_flight" as const;
+
+function lockBusy(error: unknown): boolean {
+  const code = (error as { code?: unknown }).code;
+  return (
+    code === "SQLITE_BUSY" ||
+    code === "SQLITE_LOCKED" ||
+    /database is locked/iu.test(String((error as Error).message))
+  );
+}
+
+/** Run `body` while holding one browser's adoption lock: an exclusive SQLite
+ * transaction on a per-browser lock file. The kernel holds the underlying
+ * lock and releases it if the process dies, so a crashed adoption never
+ * leaves a stale lock, and two controllers (or two calls in one process) can
+ * never both act on the same adoption. Never waits: a held lock is reported
+ * as {@link ADOPTION_IN_FLIGHT}. */
+async function withAdoptionLock<T>(
+  paths: AdoptionPaths,
+  body: () => Promise<T>,
+): Promise<T | typeof ADOPTION_IN_FLIGHT> {
+  await mkdir(paths.recordsDirectory, { recursive: true, mode: 0o700 });
+  const database = new Database(join(paths.recordsDirectory, "lock.sqlite"), {
+    create: true,
+    readwrite: true,
+  });
+  try {
+    database.exec("PRAGMA busy_timeout = 0");
+    try {
+      database.exec("BEGIN EXCLUSIVE");
+    } catch (error) {
+      if (lockBusy(error)) return ADOPTION_IN_FLIGHT;
+      throw error;
+    }
+    try {
+      return await body();
+    } finally {
+      database.exec("ROLLBACK");
+    }
+  } finally {
+    database.close();
+  }
+}
+
+function adoptionRunning(): WorkingCopyAdoptionError {
+  return new WorkingCopyAdoptionError(
+    "adoption_in_progress",
+    "a working copy adoption for this browser is running",
+  );
+}
+
+/** True when the directory holds exactly the bytes of `digest`. A tree that
+ * cannot be read as a working copy, or is missing, does not. */
+async function holdsDigest(path: string, digest: string | null): Promise<boolean> {
+  if (digest === null) return false;
+  try {
+    return (await workingCopyManifest(path)).digest === digest;
+  } catch (error) {
+    if (error instanceof WorkingCopyAdoptionError) return false;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 /** Bring one record to a terminal phase where the filesystem proves it, and
  * otherwise to an explicit blocked phase. It never deletes anything and never
- * classifies an unknown state as absent. Idempotent across restarts. */
-export async function reconcileAdoption(
+ * classifies an unknown state as absent. Idempotent across restarts. The
+ * caller holds the adoption lock. `stagingVerified` is set only by the
+ * adoption that just measured the staged copy under that same lock. */
+async function reconcileLocked(
   paths: AdoptionPaths,
   record: WorkingCopyAdoptionRecord,
+  stagingVerified = false,
 ): Promise<WorkingCopyAdoptionRecord> {
   const staging = join(paths.sessionsDirectory, record.stagingName);
   const preserved = join(paths.sessionsDirectory, record.preservedName);
   let current = record;
+  let verified = stagingVerified;
+  // The staged copy may become live only while it still holds exactly the
+  // bytes measured when its receipt was appended. Anything else (edited,
+  // replaced or unreadable) blocks with every directory kept.
+  const copyIntact = async (path: string) =>
+    verified || (verified = await holdsDigest(path, current.receiptDigest));
   if (current.phase === "intent" || current.phase === "copied") {
-    // No receipt was written: the decision to adopt never became durable. The
-    // original is still live if its identity is; any staging copy is kept.
+    // No receipt was recorded: the decision to adopt never became durable.
+    // The original is still live if its identity is; any staging copy is kept.
     const live = await identityOrNull(paths.live);
     current = equalIdentity(live, current.source.session)
       ? await advance(paths, current, "interrupted", { failureCode: "adoption_interrupted" })
@@ -481,6 +625,14 @@ export async function reconcileAdoption(
   }
   if (current.phase === "receipt") {
     const live = await identityOrNull(paths.live);
+    const stagedLive = current.staging !== null && equalIdentity(live, current.staging.session);
+    if (
+      !current.staging ||
+      (!stagedLive && !equalIdentity(await identityOrNull(staging), current.staging.session)) ||
+      !(await copyIntact(stagedLive ? paths.live : staging))
+    ) {
+      return await advance(paths, current, "collision", { failureCode: "staged_copy_changed" });
+    }
     if (equalIdentity(live, current.source.session)) {
       if (await identityOrNull(preserved)) {
         return await advance(paths, current, "collision", {
@@ -495,7 +647,7 @@ export async function reconcileAdoption(
       equalIdentity(await identityOrNull(preserved), current.source.session)
     ) {
       current = await advance(paths, current, "source_preserved");
-    } else if (current.staging && equalIdentity(live, current.staging.session)) {
+    } else if (stagedLive) {
       current = await advance(paths, current, "source_preserved");
     } else {
       return await advance(paths, current, "collision", { failureCode: "live_directory_changed" });
@@ -504,12 +656,16 @@ export async function reconcileAdoption(
   if (current.phase === "source_preserved") {
     const live = await identityOrNull(paths.live);
     if (current.staging && equalIdentity(live, current.staging.session)) {
+      if (!(await copyIntact(paths.live)))
+        return await advance(paths, current, "collision", { failureCode: "staged_copy_changed" });
       current = await advance(paths, current, "adopted");
     } else if (
       live === null &&
       current.staging &&
       equalIdentity(await identityOrNull(staging), current.staging.session)
     ) {
+      if (!(await copyIntact(staging)))
+        return await advance(paths, current, "collision", { failureCode: "staged_copy_changed" });
       await rename(staging, paths.live);
       await syncDirectory(paths.sessionsDirectory);
       current = await advance(paths, current, "adopted");
@@ -523,23 +679,42 @@ export async function reconcileAdoption(
   return current;
 }
 
-/** Reconcile the active adoption for a browser, if any. Returns the record
- * that still blocks ordinary launches, or null when none does. */
-export async function settleActiveAdoption(
+/** Reconcile one recorded adoption from its latest durable record. Throws
+ * `adoption_in_progress` while that adoption is still running anywhere. */
+export async function reconcileAdoption(
   paths: AdoptionPaths,
-): Promise<WorkingCopyAdoptionRecord | null> {
+  record: WorkingCopyAdoptionRecord,
+): Promise<WorkingCopyAdoptionRecord> {
+  const result = await withAdoptionLock(paths, async () =>
+    reconcileLocked(paths, (await readAdoptionRecord(paths, record.operationId)) ?? record),
+  );
+  if (result === ADOPTION_IN_FLIGHT) throw adoptionRunning();
+  return result;
+}
+
+async function settleLocked(paths: AdoptionPaths): Promise<WorkingCopyAdoptionRecord | null> {
   const operationId = await readActiveAdoption(paths);
   if (!operationId) return null;
   const record = await readAdoptionRecord(paths, operationId);
   if (!record) {
-    // The claim precedes the record only within one adoption call; a claim
-    // with no record therefore made no change. Leave it visible as blocking
-    // only if the record cannot be read for another reason.
+    // The claim precedes the record within one locked adoption, and the
+    // record precedes every side effect. Holding the lock proves that
+    // adoption is no longer running, so a claim without a record changed
+    // nothing.
     await releaseActiveAdoption(paths, operationId);
     return null;
   }
-  const settled = await reconcileAdoption(paths, record);
+  const settled = await reconcileLocked(paths, record);
   return TERMINAL_ADOPTION_PHASES.has(settled.phase) ? null : settled;
+}
+
+/** Reconcile the active adoption for a browser, if any. Returns the record
+ * that still blocks ordinary launches, {@link ADOPTION_IN_FLIGHT} while an
+ * adoption is running, or null when nothing blocks. */
+export async function settleActiveAdoption(
+  paths: AdoptionPaths,
+): Promise<WorkingCopyAdoptionRecord | typeof ADOPTION_IN_FLIGHT | null> {
+  return await withAdoptionLock(paths, async () => await settleLocked(paths));
 }
 
 export type AdoptWorkingCopyInput = {
@@ -564,6 +739,15 @@ export async function adoptWorkingCopy(
       "working copy adoption is supported only on Linux controllers",
     );
   }
+  const result = await withAdoptionLock(paths, async () => await adoptLocked(paths, input));
+  if (result === ADOPTION_IN_FLIGHT) throw adoptionRunning();
+  return result;
+}
+
+async function adoptLocked(
+  paths: AdoptionPaths,
+  input: AdoptWorkingCopyInput,
+): Promise<WorkingCopyAdoptionRecord> {
   const existing = await readAdoptionRecord(paths, input.operationId);
   if (existing) {
     if (
@@ -577,9 +761,9 @@ export async function adoptWorkingCopy(
       );
     }
     // A retry never repeats a side effect; it only reconciles what exists.
-    return await reconcileAdoption(paths, existing);
+    return await reconcileLocked(paths, existing);
   }
-  const blocking = await settleActiveAdoption(paths);
+  const blocking = await settleLocked(paths);
   if (blocking) {
     throw new WorkingCopyAdoptionError(
       blocking.phase === "collision" ? "adoption_collision" : "adoption_in_progress",
@@ -602,6 +786,7 @@ export async function adoptWorkingCopy(
     stagingName: `${input.browserSessionId}.adopt-${input.operationId}`,
     preservedName: `${input.browserSessionId}.preserved-${input.operationId}`,
     staging: null,
+    receiptDigest: null,
     phase: "intent",
     failureCode: null,
     createdAt: now,
@@ -609,32 +794,48 @@ export async function adoptWorkingCopy(
   });
   await input.afterPhase?.("intent");
   const staging = join(paths.sessionsDirectory, record.stagingName);
+  const refuse = async (failureCode: string, error: WorkingCopyAdoptionError): Promise<never> => {
+    // A definite refusal: the original was only read and any partial
+    // staging copy is kept for inspection.
+    record = await advance(paths, record, "failed", { failureCode });
+    await releaseActiveAdoption(paths, input.operationId);
+    throw error;
+  };
   let read: WorkingCopyManifest;
   try {
     read = await copyWorkingCopy(paths.live, staging);
   } catch (error) {
     if (!(error instanceof WorkingCopyAdoptionError)) throw error;
-    // A definite refusal while reading: the original was only read and the
-    // partial staging copy is kept for inspection.
-    record = await advance(paths, record, "failed", { failureCode: error.reason });
-    await releaseActiveAdoption(paths, input.operationId);
-    throw error;
+    return await refuse(error.reason, error);
   }
   if (read.digest !== input.manifestDigest) {
-    record = await advance(paths, record, "failed", { failureCode: "digest_mismatch" });
-    await releaseActiveAdoption(paths, input.operationId);
-    throw new WorkingCopyAdoptionError(
+    return await refuse(
       "digest_mismatch",
-      "the working copy no longer matches the approved manifest; nothing was adopted",
+      new WorkingCopyAdoptionError(
+        "digest_mismatch",
+        "the working copy no longer matches the approved manifest; nothing was adopted",
+      ),
     );
   }
-  const written = await workingCopyManifest(staging);
-  if (written.digest !== input.manifestDigest) {
-    record = await advance(paths, record, "failed", { failureCode: "copy_verification_failed" });
-    await releaseActiveAdoption(paths, input.operationId);
-    throw new WorkingCopyAdoptionError(
-      "digest_mismatch",
-      "the staged copy does not match the approved manifest; nothing was adopted",
+  if (!(await holdsDigest(staging, input.manifestDigest))) {
+    return await refuse(
+      "copy_verification_failed",
+      new WorkingCopyAdoptionError(
+        "digest_mismatch",
+        "the staged copy does not match the approved manifest; nothing was adopted",
+      ),
+    );
+  }
+  // Every file was checked while it was read, but one read early could have
+  // changed before the copy finished. The original must still hold exactly
+  // the approved bytes once the copy is complete.
+  if (!(await holdsDigest(paths.live, input.manifestDigest))) {
+    return await refuse(
+      "working_copy_changed",
+      new WorkingCopyAdoptionError(
+        "working_copy_changed",
+        "the working copy changed while it was copied; nothing was adopted",
+      ),
     );
   }
   if (!equalIdentity(await identityOrNull(paths.live), sessionIdentity)) {
@@ -652,10 +853,11 @@ export async function adoptWorkingCopy(
   });
   await input.afterPhase?.("copied");
   await input.appendReceipt(staging);
-  record = await advance(paths, record, "receipt");
+  record = await advance(paths, record, "receipt", {
+    receiptDigest: (await workingCopyManifest(staging)).digest,
+  });
   await input.afterPhase?.("receipt");
-  record = await reconcileAdoption(paths, record);
-  return record;
+  return await reconcileLocked(paths, record, true);
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -857,6 +1059,10 @@ function parseAdoptionRecord(value: unknown): WorkingCopyAdoptionRecord {
     record.stagingName !== `${record.browserSessionId}.adopt-${record.operationId}` ||
     record.preservedName !== `${record.browserSessionId}.preserved-${record.operationId}` ||
     !PHASES.includes(record.phase as WorkingCopyAdoptionPhase) ||
+    !(
+      record.receiptDigest === null ||
+      (typeof record.receiptDigest === "string" && /^[0-9a-f]{64}$/u.test(record.receiptDigest))
+    ) ||
     !(record.failureCode === null || typeof record.failureCode === "string") ||
     typeof record.createdAt !== "string" ||
     typeof record.updatedAt !== "string"
@@ -872,6 +1078,7 @@ function parseAdoptionRecord(value: unknown): WorkingCopyAdoptionRecord {
     stagingName: record.stagingName,
     preservedName: record.preservedName as string,
     staging: record.staging === null ? null : parsePair(record.staging),
+    receiptDigest: record.receiptDigest as string | null,
     phase: record.phase as WorkingCopyAdoptionPhase,
     failureCode: record.failureCode as string | null,
     createdAt: record.createdAt,
