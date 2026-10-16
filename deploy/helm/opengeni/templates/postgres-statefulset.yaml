@@ -1,5 +1,18 @@
 {{- if .Values.postgres.enabled }}
 {{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.postgres.priorityClassName "tier" "durable") }}
+{{- $upgrade := .Values.postgres.majorUpgrade }}
+{{- $image := printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "opengeni.fullname" . }}-postgres-upgrade
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+data:
+  postgres-major-upgrade.sh: |-
+    {{- .Files.Get "files/postgres-major-upgrade.sh" | nindent 4 }}
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -19,15 +32,69 @@ spec:
       labels:
         {{- include "opengeni.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: postgres
+      annotations:
+        checksum/postgres-upgrade: {{ .Files.Get "files/postgres-major-upgrade.sh" | sha256sum | quote }}
     spec:
       {{- if $priorityClassName }}
       priorityClassName: {{ $priorityClassName | quote }}
       {{- end }}
       securityContext:
         {{- toYaml .Values.postgres.podSecurityContext | nindent 8 }}
+      initContainers:
+        {{- if $upgrade.enabled }}
+        # Copies the older server's binaries and extension files so the
+        # upgrade step can run pg_upgrade. Copies only when the data directory
+        # was written by this image's major version.
+        - name: postgres-old-binaries
+          image: {{ printf "%s:%s" $upgrade.fromImage.repository $upgrade.fromImage.tag | quote }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              if [ "$(cat "$PGDATA/PG_VERSION" 2>/dev/null)" = "${PG_MAJOR%%.*}" ]; then
+                major="${PG_MAJOR%%.*}"
+                mkdir -p /opengeni-postgres-old/usr/lib/postgresql /opengeni-postgres-old/usr/share/postgresql
+                cp -a "/usr/lib/postgresql/$major" /opengeni-postgres-old/usr/lib/postgresql/
+                cp -a "/usr/share/postgresql/$major" /opengeni-postgres-old/usr/share/postgresql/
+              fi
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              readOnly: true
+            - name: postgres-old
+              mountPath: /opengeni-postgres-old
+        {{- end }}
+        # Refuses to start a newer server on an older data directory, and
+        # upgrades it in place when postgres.majorUpgrade.enabled is set.
+        - name: postgres-data-version
+          image: {{ $image | quote }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          command: ["/bin/bash", "/opengeni-postgres-upgrade/postgres-major-upgrade.sh"]
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.auth.username | quote }}
+            - name: OPENGENI_POSTGRES_MAJOR_UPGRADE
+              value: {{ ternary "true" "false" (eq $upgrade.enabled true) | quote }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: postgres-upgrade-script
+              mountPath: /opengeni-postgres-upgrade
+              readOnly: true
+            {{- if $upgrade.enabled }}
+            - name: postgres-old
+              mountPath: /opengeni-postgres-old
+              readOnly: true
+            {{- end }}
       containers:
         - name: postgres
-          image: {{ printf "%s:%s" .Values.postgres.image.repository .Values.postgres.image.tag | quote }}
+          image: {{ $image | quote }}
           imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.postgres.securityContext | nindent 12 }}
@@ -79,6 +146,18 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: postgres-upgrade-script
+          configMap:
+            name: {{ include "opengeni.fullname" . }}-postgres-upgrade
+        {{- if $upgrade.enabled }}
+        - name: postgres-old
+          emptyDir: {}
+        {{- end }}
+        {{- if not .Values.postgres.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
   {{- if .Values.postgres.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:
@@ -91,9 +170,5 @@ spec:
         resources:
           requests:
             storage: {{ .Values.postgres.persistence.size | quote }}
-  {{- else }}
-      volumes:
-        - name: data
-          emptyDir: {}
   {{- end }}
 {{- end }}

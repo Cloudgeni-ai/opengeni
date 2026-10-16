@@ -13,7 +13,8 @@ Install Bun (the repository's `.bun-version`), PostgreSQL clients compatible wit
 your server, `age`, `rclone` and `flock`. The independent container image includes
 them; build `docker/backup.Dockerfile` or pin a digest from the **Backup image**
 workflow's `backup-image-receipt`. Published images currently target Linux amd64
-and PostgreSQL 17; other PostgreSQL majors require a compatible build using
+and PostgreSQL 18 clients, which also dump and restore PostgreSQL 17 and older
+servers; a newer server major requires a compatible build using
 `--build-arg POSTGRES_MAJOR=<major>`. Do not guess a tag from the application chart
 version: the operator image publishes independently.
 
