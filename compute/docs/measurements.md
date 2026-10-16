@@ -2,14 +2,18 @@
 
 Observations from lab runs, not bounds. Firecracker v1.17.0 under its jailer,
 one host agent per host, synthetic data only. Measured on 2026-10-16 at
-revision `282fea09e` of this directory; later changes before the lab
-branch's head touch only how template builds book disk, and tests.
+revision `282fea09e` with the smoke guest's port change (`69e0ed5c9`)
+applied; the run records name that build `44b0b6d8c`. Changes after it on
+this branch: template builds book every input they copy on disk, a zero
+`MemAvailable` reading stays zero, the agent refuses a state filesystem
+whose allocation it cannot bound, and tests.
 
-Each sandbox has 1 vCPU and 512 MiB. "First response" is the time from the
-wake request until a command in the guest answers; "done" is until that
-command finishes. "a/b" means p50/p90 across the sandboxes woken together.
-Each run puts the sandboxes to sleep and wakes them twice; the numbers are
-from the second round, after the working set was learned once.
+Each sandbox has 1 vCPU and 512 MiB, except in the memory-pressure test.
+"First response" is the time from the wake request until a command in the
+guest answers; "done" is until that command finishes. "a/b" means p50/p90
+across the sandboxes woken together. Each run puts the sandboxes to sleep
+and wakes them twice; the numbers are from the second round, after the
+working set was learned once. MiB and GiB are binary units.
 
 Workload (the "realistic" set): each sandbox copies a repository, runs its
 tests and commits; each wake reads the repository and loads it in Node.
@@ -36,13 +40,15 @@ huge pages cannot be compressed.
 
 - Saved and Archived wake from the local disk, usually from the host's file
   cache.
-- Remote first fetches the sandbox's working-set pack (128 MiB here), then
-  the pager serves the rest as the guest touches it. One fetch took 1.06 s on
-  bare metal and 0.54 s on the nested host. With 100 at once the fetches
-  share the host's network and fetch slots: a fetch took 2.6 s on average on
-  bare metal and 5.7 s on the nested host, and wakes queued for them. A few
-  uploads met GCS 429 and 503 answers and were retried; every sandbox
-  completed.
+- Remote first runs a fetch step: it downloads the sandbox's disk and
+  device state and its working-set pack (the first 128 MiB of memory the
+  guest touched, counted before compression) and prepares them; then the
+  pager serves the rest of memory as the guest touches it. One fetch step
+  took 1.06 s on bare metal and 0.54 s on the nested host. With 100 at once
+  the fetches share the host's network and fetch slots: a fetch step took
+  2.6 s on average on bare metal and 5.7 s on the nested host, and wakes
+  queued for them. A few uploads met GCS 429 and 503 answers and were
+  retried; every sandbox completed.
 - Compressed with 100 at once is slow on the nested host because 4 KiB page
   faults are expensive under nesting; such hosts run the nested profile.
 
@@ -73,10 +79,14 @@ place (paused in RAM with a saved copy) and Saved:
 | --- | --- | --- |
 | Serving again after | 347 ms | 325 ms |
 | Sandboxes lost | none | none |
-| Wake after restart: Running | 0.5/0.8 ms | 0.6/1.1 ms |
+| Host wake wait after restart: Running | 0.5/0.8 ms | 0.6/1.1 ms |
 | Paused | 73/87 ms | 45/99 ms |
 | Saved in place | 96/127 ms | 76/90 ms |
 | Saved | 191/200 ms | 174/214 ms |
+
+The wake rows are the agent's own wait until the sandbox runs again, as
+its connect reply reports it. They leave out the guest answering a
+command, so they are not comparable with the first-response times above.
 
 With 100 Remote sandboxes, a restart was serving after 478 ms on the nested
 host and 643 ms on bare metal, and had settled every record after 510 and
@@ -99,10 +109,14 @@ host. A template was ready 4.0 to 4.6 s after it was asked for.
 
 ## Memory pressure
 
-On bare metal, with other processes taking the host's memory away until it
-was short, a busy sandbox above its request gave its cache back through its
-balloon in 1.1 s; an idle one was paused and saved in 0.7 s, and a sandbox
-waiting for room woke 105 ms after the room came back.
+On bare metal, two held sandboxes run: one with 2 GiB and a 256 MiB
+request, filled well above that request, and one within its request.
+Other processes then take the host's memory until it is short. The first
+sandbox gave its file cache back through its balloon in 1.1 s and kept
+running. When the host was made shorter than its balloon could cover, it
+was paused and saved in 0.7 s although it was held, and it woke by itself
+105 ms after the room came back, with its programs. The sandbox within its
+request was never touched.
 
 ## Network
 
@@ -114,40 +128,54 @@ connection took 17/18 ms on bare metal and 25/56 ms on the nested host.
 
 ## Agent memory
 
-Proportional set size of the agent:
+Proportional set size of the agent, in MiB:
 
 | State | Bare metal | Nested |
 | --- | --- | --- |
-| No sandboxes | 38 MB | 15 MB |
-| 100 sandboxes running | 154 MB | 59 MB |
-| 100 Remote sandboxes, settled | 141 MB | 112 MB |
-| After a restart with 100 Remote sandboxes | 104 MB | 51 MB |
-| After removing all 100 | 97 MB | 47 MB |
+| No sandboxes | 37 | 15 |
+| 100 sandboxes running | 151 | 57 |
+| 100 Remote sandboxes, 100 s after they got there | 138 | 109 |
+| Right after a restart with 100 Remote sandboxes | 101 | 50 |
+| 2 s after removing all 100 | 384 | 302 |
+| 100 s after removing all 100 | 95 | 46 |
 
 The bare-metal host has 192 processors, and the agent keeps a worker and
 some buffers per processor. With 100 Remote sandboxes most of the rest is
-pooled connections to object storage, which close within minutes.
+pooled connections to object storage, which close within minutes. Removing
+them deletes their objects in storage, which briefly takes more.
 
-Two changes got it here. With glibc's allocator the agent held about 750 MB
-after archiving 100 sandboxes on bare metal, although only about 35 MB was
-live: freed memory stayed in per-thread arenas made by hundreds of blocking
-threads. jemalloc, also used for the C code the agent links, brought that to
-126 MB. And chunks fetched for remote wakes stayed in a cache for the agent's
-lifetime (about 250 MB); they now expire 60 s after arrival, which took the
-agent's memory after removal from 286 MB to 55 MB.
+Two changes got it here, both found with 10 sandboxes on bare metal. With
+glibc's allocator the agent held about 730 MiB after waking them from Saved
+and archiving them. heaptrack, attached after the first wake, found only
+about 35 MB of what it tracked still allocated (178 MB at its peak): most
+of the 730 MiB was freed memory kept in per-thread arenas, made by hundreds
+of blocking threads that hash and compress chunks. jemalloc, also used for
+the C code the agent links, brought the same run to 123 MiB. And chunks
+fetched for remote wakes stayed in a cache (capped at 1 GiB) for the
+agent's lifetime; they now expire 60 s after arrival, which took the
+agent's memory 100 s after removal from 279 MiB to 54 MiB.
 
 ## Cost per sleeping sandbox
 
-Priced at GCP us-central1 on-demand list prices: memory $0.004237 per
-GiB-hour (N2, about $3.09 per GiB-month), local SSD about $0.08 per GB-month,
-GCS standard storage about $0.020 per GB-month. A sleeping sandbox uses no
-processor time.
+Illustrative estimates of the main resources a sleeping sandbox holds,
+priced at GCP us-central1 on-demand list prices for a 730-hour month:
+memory $0.004237 per GiB-hour (N2, about $3.09 per GiB-month), local SSD
+about $0.08 per GiB-month, GCS standard storage about $0.020 per
+GiB-month. A sleeping sandbox runs no guest code; the host's own work for
+it (sampling, saves, uploads) is small and not priced here.
+
+Sizes come from the bare-metal run's manifests. The memory image is
+512 MiB, of which 231 MiB is not zero; stored compressed it is 59 MiB. The
+base disk is 324 MiB stored and shared by every sandbox of the store; in a
+sample of ten, each sandbox's own disk changes were 23 to 36 MiB, 1.2 to
+3.3 MiB stored. The working-set pack holds at most 128 MiB of memory
+before compression; at the image's ratio that is about 33 MiB stored.
 
 | Level | What it holds | About per month |
 | --- | --- | --- |
 | Paused | 0.26 to 0.30 GiB of RAM | $0.81 to $0.92 |
 | Compressed | 0.11 GiB of RAM | $0.34 |
-| Saved | its memory image (0.33 GB here) and what it wrote to its disk, on local SSD; the base disk is shared | $0.03 plus its writes |
-| Remote | its compressed memory image (90 MB here) and its disk's changes; chunks of the base disk are shared | under $0.01 |
+| Saved | its memory image (0.23 GiB not zero) and what it wrote to its disk, on local SSD; the base disk is shared | $0.02 plus its writes |
+| Remote | its compressed memory image, working-set pack and own disk changes (about 0.1 GiB together), plus older copies until they are collected | under $0.01 |
 
 A running sandbox costs what its memory and processors use.
