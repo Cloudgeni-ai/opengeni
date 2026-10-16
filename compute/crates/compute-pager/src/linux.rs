@@ -40,6 +40,11 @@ pub const MAX_BATCH: u64 = 2 << 20;
 /// Prefetch runs waiting on the source at once. Each one asks the source
 /// for its bytes, so this is how far ahead of the copies fetching runs.
 const LOOKAHEAD: usize = 256;
+/// How long the guest must touch no new page before what it touched so far
+/// is reported, while the recording window is open.
+const REPORT_WHEN_QUIET_FOR: Duration = Duration::from_millis(250);
+/// The least time between two reports of an open recording window.
+const REPORT_AT_MOST_EVERY: Duration = Duration::from_secs(1);
 
 #[repr(C)]
 #[derive(Default, Debug)]
@@ -166,8 +171,13 @@ pub enum Progress<'a> {
     /// discarded). Pages queued with [`Pager::queue_background`] may still
     /// be arriving.
     Prefetched,
-    /// The first-touch recording window closed; these are the image offsets
-    /// the guest touched first, in order.
+    /// The image offsets the guest touched first, in order, so far. Reported
+    /// whenever the guest has gone quiet after touching new pages (at most
+    /// once a second), and once more when the recording window closes or the
+    /// VMM goes. Each report holds everything recorded until then. Reporting
+    /// is best effort: a VM paused and archived within about a second of its
+    /// wake may be archived before its first report, and then wakes without
+    /// a working set, which is slower but still correct.
     Recorded(&'a [u64]),
     /// Every page is in place and the guest's memory is no longer
     /// registered with the UFFD (see [`Pager::finish_when_complete`]): the
@@ -262,6 +272,11 @@ pub struct Pager<S> {
     started: Instant,
     record_for: Duration,
     recorded: bool,
+    /// How much of `trace` was last reported, when, and when the guest
+    /// last touched a page for the first time.
+    reported: usize,
+    last_report: Instant,
+    last_touch: Instant,
     prefetch_started: Option<Instant>,
     /// Whether to settle every page once the source is complete.
     finish: bool,
@@ -300,6 +315,9 @@ impl<S: Source> Pager<S> {
             started: Instant::now(),
             record_for,
             recorded: false,
+            reported: 0,
+            last_report: Instant::now(),
+            last_touch: Instant::now(),
             prefetch_started: None,
             finish: false,
             completing: false,
@@ -524,6 +542,7 @@ impl<S: Source> Pager<S> {
             if self.started.elapsed() <= self.record_for && self.state[page.index] & RECORDED == 0 {
                 self.trace.push(page.offset);
                 self.state[page.index] |= RECORDED;
+                self.last_touch = Instant::now();
             }
             match self.copy(
                 Run {
@@ -737,9 +756,18 @@ impl<S: Source> Pager<S> {
             if self.prefetch_started.is_some() && self.prefetched() {
                 self.finish_prefetch();
             }
-            if !self.recorded && self.started.elapsed() > self.record_for {
-                self.recorded = true;
-                progress(Progress::Recorded(&self.trace));
+            if !self.recorded {
+                if self.started.elapsed() > self.record_for {
+                    self.recorded = true;
+                    progress(Progress::Recorded(&self.trace));
+                } else if self.trace.len() > self.reported
+                    && self.last_touch.elapsed() >= REPORT_WHEN_QUIET_FOR
+                    && self.last_report.elapsed() >= REPORT_AT_MOST_EVERY
+                {
+                    self.reported = self.trace.len();
+                    self.last_report = Instant::now();
+                    progress(Progress::Recorded(&self.trace));
+                }
             }
             if self.finish && self.recorded {
                 if !self.completing && self.source.complete() {
