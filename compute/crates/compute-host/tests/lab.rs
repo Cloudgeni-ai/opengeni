@@ -10,7 +10,9 @@
 //! ```
 //!
 //! `COMPUTE_TEST_SANDBOXES` sets how many sandboxes each test uses
-//! (default 12) and `COMPUTE_TEST_RESULTS` a directory for JSON results.
+//! (default 12), `COMPUTE_TEST_RESULTS` a directory for JSON results and
+//! `COMPUTE_TEST_PROFILE` the agent's memory profile (the agent's default,
+//! `bare-metal`, when unset; `nested` needs a reserved 2 MiB page pool).
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, TcpListener};
@@ -40,6 +42,14 @@ fn count() -> usize {
         .ok()
         .and_then(|count| count.parse().ok())
         .unwrap_or(12)
+}
+
+/// The agent's `--memory-profile` arguments, if `COMPUTE_TEST_PROFILE`
+/// names one.
+fn profile() -> Vec<String> {
+    std::env::var("COMPUTE_TEST_PROFILE")
+        .map(|name| vec!["--memory-profile".to_owned(), name])
+        .unwrap_or_default()
 }
 
 fn id(n: usize) -> Id {
@@ -97,6 +107,7 @@ impl Host {
             .arg("--cgroup")
             .arg(CGROUP)
             .args(["--limit", "boot=32", "--limit", "restore=32"])
+            .args(profile())
             .args(&self.extra)
             .env(
                 "RUST_LOG",
