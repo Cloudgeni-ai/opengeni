@@ -827,6 +827,8 @@ import {
   type WorkspaceArchiveObjectRef,
   stableJson,
   MODEL_ATTACHMENT_REFS_FIELD,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
   TimelineAnnotations,
   renderUserMessageContentForModel,
@@ -8013,7 +8015,12 @@ export function durableUserHistoryItem(
       sentAt,
       sender,
     ),
-    ...(attachmentRefs.length > 0 ? { [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs } : {}),
+    ...(attachmentRefs.length > 0
+      ? {
+          [MODEL_ATTACHMENT_REFS_FIELD]: attachmentRefs,
+          [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION,
+        }
+      : {}),
     ...(annotations.length > 0
       ? {
           [MODEL_TIMELINE_ANNOTATIONS_FIELD]: TimelineAnnotations.parse(annotations),

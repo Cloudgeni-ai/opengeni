@@ -2,6 +2,7 @@ import {
   MODEL_ATTACHMENT_REFS_FIELD,
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   FileResourceRef,
   resourceMountPath,
   readTurnExecutionPolicyV1,
@@ -21,6 +22,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
+  createModelImageSizer,
   projectHistoryForProvider,
   projectRejectedProviderArtifactsFromSerializedRunState,
   projectRejectedReasoningArtifact,
@@ -418,10 +420,64 @@ function unavailableAttachmentReceiptText(ref: FileResourceRef): string {
   return requesterUnavailableReceiptText(`Attachment: fileId=${ref.fileId}`, "file");
 }
 
+/** The image bound stamped on a message when it was accepted, if any. */
+function attachmentImageBound(item: Record<string, unknown>): number | undefined {
+  const raw = item[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD];
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 64 && raw <= 8192
+    ? raw
+    : undefined;
+}
+
+// Process-wide, so a long conversation does not re-encode the same photos on
+// every turn. The projection depends only on the image bytes and the bound.
+const boundedImageSizers = new Map<number, ReturnType<typeof createModelImageSizer>>();
+
+type BoundedAttachmentImage = { image: string; note: string };
+
+/**
+ * The model-facing rendition of one image under the bound its message was
+ * stamped with. Smaller images keep their original bytes. The file in the
+ * sandbox and in storage stays at full resolution.
+ */
+async function boundedAttachmentImage(
+  attachment: ModelAttachmentContent,
+  bound: number,
+): Promise<BoundedAttachmentImage> {
+  const original = { image: attachment.dataUrl, note: "" };
+  const comma = attachment.dataUrl.indexOf(",");
+  if (comma < 0) return original;
+  const data = attachment.dataUrl.slice(comma + 1);
+  let sizer = boundedImageSizers.get(bound);
+  if (!sizer) {
+    sizer = createModelImageSizer(bound, 10 * 1024 * 1024, { jpegQuality: 85 });
+    boundedImageSizers.set(bound, sizer);
+  }
+  try {
+    const sized = await sizer(data, attachment.contentType);
+    if (sized.data === data && sized.mediaType === attachment.contentType) return original;
+    return {
+      image: `data:${sized.mediaType};base64,${sized.data}`,
+      note:
+        ` Shown to you downscaled to ${sized.width}x${sized.height} from ` +
+        `${sized.originalWidth}x${sized.originalHeight}; the file itself is full resolution.`,
+    };
+  } catch (error) {
+    // Decoding is deterministic: an image that cannot be resized here keeps
+    // the original projection on every turn rather than being dropped.
+    console.error("model attachment image could not be resized; sending original", {
+      fileId: attachment.fileId,
+      errorType: safeErrorType(error),
+    });
+    return original;
+  }
+}
+
 /**
  * Build one turn-scoped durable-attachment projector. Resolve active refs under
  * current file authority and memoize metadata/bytes for retries and compaction.
  * A turn boundary never changes an authorized attachment's representation.
+ * Images of a message stamped with an image bound are shown downscaled to fit
+ * it; unstamped (older) messages keep their full-resolution projection.
  */
 export function createModelHistoryAttachmentProjector(
   policy: ModelAttachmentInputPolicy,
@@ -433,6 +489,7 @@ export function createModelHistoryAttachmentProjector(
   const fileById = new Map<string, FileAsset>();
   const resolvedFileIds = new Set<string>();
   const retainedByteSizes = new Map<string, number>();
+  const boundedById = new Map<string, BoundedAttachmentImage>();
 
   return async (items, options = {}) => {
     for (const file of options.inlineFiles ?? []) {
@@ -526,6 +583,19 @@ export function createModelHistoryAttachmentProjector(
       for (const attachment of content) contentById.set(attachment.fileId, attachment);
     }
 
+    for (const [index, refs] of refsByIndex) {
+      const item = items[index]!;
+      if (item[MODEL_ATTACHMENT_CATALOG_MARKER] === true) continue;
+      const bound = attachmentImageBound(item);
+      if (bound === undefined) continue;
+      for (const ref of refs) {
+        const attachment = fileById.has(ref.fileId) ? contentById.get(ref.fileId) : undefined;
+        const key = `${bound}:${ref.fileId}`;
+        if (!attachment || attachment.kind !== "image" || boundedById.has(key)) continue;
+        boundedById.set(key, await boundedAttachmentImage(attachment, bound));
+      }
+    }
+
     const projected = [...items];
     for (const [index, refs] of refsByIndex) {
       const original = items[index]!;
@@ -551,14 +621,20 @@ export function createModelHistoryAttachmentProjector(
           resolvedFileIds.has(ref.fileId) &&
           currentFile === undefined;
         const attachment = currentFile ? contentById.get(ref.fileId) : undefined;
-        const receipt = {
-          type: "input_text",
-          text: excluded ? unavailableAttachmentReceiptText(ref) : attachmentReceiptText(ref),
-        };
         if (!attachment || attachment.kind !== "image") {
-          return [receipt];
+          return [
+            {
+              type: "input_text",
+              text: excluded ? unavailableAttachmentReceiptText(ref) : attachmentReceiptText(ref),
+            },
+          ];
         }
-        return [receipt, { type: "input_image", image: attachment.dataUrl }];
+        const bound = attachmentImageBound(original);
+        const bounded = bound === undefined ? undefined : boundedById.get(`${bound}:${ref.fileId}`);
+        return [
+          { type: "input_text", text: attachmentReceiptText(ref) + (bounded?.note ?? "") },
+          { type: "input_image", image: bounded?.image ?? attachment.dataUrl },
+        ];
       });
       const clone: Record<string, unknown> = {
         ...original,

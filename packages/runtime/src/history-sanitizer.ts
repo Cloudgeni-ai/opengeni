@@ -35,6 +35,7 @@ import {
 import {
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
 } from "@opengeni/contracts";
@@ -340,6 +341,7 @@ export function stripInternalModelMetadata<T extends HistoryItem>(item: T): T {
   if (
     !(MODEL_ATTACHMENT_CATALOG_MARKER in withoutResume) &&
     !(MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD in withoutResume) &&
+    !(MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD in withoutResume) &&
     !(MODEL_ATTACHMENT_REFS_FIELD in withoutResume) &&
     !(MODEL_TIMELINE_ANNOTATIONS_FIELD in withoutResume)
   ) {
@@ -348,6 +350,7 @@ export function stripInternalModelMetadata<T extends HistoryItem>(item: T): T {
   const clone = { ...withoutResume } as Record<string, unknown>;
   delete clone[MODEL_ATTACHMENT_CATALOG_MARKER];
   delete clone[MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD];
+  delete clone[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD];
   delete clone[MODEL_ATTACHMENT_REFS_FIELD];
   delete clone[MODEL_TIMELINE_ANNOTATIONS_FIELD];
   return clone as T;
