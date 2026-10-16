@@ -83,7 +83,8 @@ pub trait Engine: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), EngineError>> + Send;
 
     /// Ends the VM process and releases its host resources. Its disks and
-    /// any snapshot stay on disk.
+    /// any snapshot stay on disk. Resolves only once the process has ended,
+    /// so that nothing is still using the disks when a replacement starts.
     fn stop(&self, vm: Self::Vm) -> impl Future<Output = Result<(), EngineError>> + Send;
 
     /// Ends any VM process an earlier run of the host agent left behind for
