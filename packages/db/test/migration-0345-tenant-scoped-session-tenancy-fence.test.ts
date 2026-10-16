@@ -269,7 +269,23 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
     const tenancy = await readFile(new URL("../src/session-tenancy.ts", import.meta.url), "utf8");
     const agents = await readFile(new URL("../../../AGENTS.md", import.meta.url), "utf8");
     expect(database).toContain("pg_advisory_xact_lock_shared");
-    expect(database).toContain("session-tenancy:${context.workspaceId}");
+    expect(database).toMatch(
+      /function sessionTenancyLock\(workspaceId: string\)[^{]*\{\s*return \{ key: `session-tenancy:\$\{workspaceId\}`, mode: "shared", hash: "extended" \}/u,
+    );
+    const activityScope = database.slice(
+      database.indexOf("async function withSessionActivityRlsScope<T>"),
+      database.indexOf("export async function withWorkspaceSessionActivityRls<T>"),
+    );
+    expect(activityScope).toMatch(
+      /accountPrefix: "organization-membership:"[\s\S]*fenceMode === "shared" \? \[sessionTenancyLock\(scope.workspaceId\)\][\s\S]*return await withRlsScope\([\s\S]*locks,[\s\S]*await beginSessionActivityGate/u,
+    );
+    const rlsScope = database.slice(
+      database.indexOf("async function withRlsScope<T>"),
+      database.indexOf("export async function withWorkspaceRls<T>"),
+    );
+    expect(rlsScope).toMatch(
+      /await applyRlsScope\(scoped,[\s\S]*await fn\(scoped, applied.context\)/u,
+    );
     expect(tenancy).toMatch(/transitionSessionVisibility[\s\S]*?undefined,\s*"none"/u);
     expect(agents).toContain("never restart a pre-0345 image");
   });
