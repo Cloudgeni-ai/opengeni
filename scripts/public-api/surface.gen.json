@@ -22564,6 +22564,7 @@
         "$.action|kind=knowledge_source_sync": "ref(KnowledgeSourceSyncAction)",
         "$.agentConfig": "ref(ScheduledTaskAgentConfig)!",
         "$.authorityRevision": "integer!",
+        "$.blocker": "ref(ScheduledTaskBlocker)?",
         "$.createdAt": "string!",
         "$.createdBy": "object!",
         "$.createdBy.kind": "enum!=[\"\\\"service\\\"\",\"\\\"subject\\\"\"]",
@@ -22753,6 +22754,19 @@
         "$.toolPolicy": "ref(ScheduledTaskToolPolicy)?",
         "$.tools": "array?",
         "$.tools[]": "ref(ToolRef)"
+      }
+    },
+    "ScheduledTaskBlocker": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.message": "string!",
+        "$.reason": "string!",
+        "$.runId": "string!",
+        "$.since": "string!",
+        "$.state": "enum!=[\"\\\"notified\\\"\",\"\\\"paused\\\"\"]"
       }
     },
     "ScheduledTaskDegradedAccount": {
