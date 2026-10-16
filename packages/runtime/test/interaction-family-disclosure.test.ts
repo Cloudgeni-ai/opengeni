@@ -19,6 +19,7 @@ import {
   installLazyToolRuntime,
   restoreGenericDispatchHistoryItems,
 } from "../src/lazy-tool-transport";
+import { anthropicMessages } from "../src/anthropic-messages";
 import { baseModelInputFilterForSettings } from "../src/model-input";
 import { interactionToolInputJsonSchema } from "../src/interaction-tool-json-schema";
 
@@ -225,6 +226,43 @@ describe("interaction family disclosure", () => {
       JSON.stringify(expanded),
     );
     expect(JSON.stringify(restoreGenericDispatchHistoryItems(expanded))).not.toContain(MARKER);
+  });
+
+  test("a generic disclosure continues on Claude with valid, paired tool IDs", () => {
+    const marker = {
+      version: 1,
+      format: "generic",
+      tools: [{ type: "function", name: OBSERVE, description: "", parameters: {} }],
+    };
+    const history = [
+      { type: "message", role: "user", content: "open the page" },
+      {
+        type: "function_call",
+        callId: "toolu_01Open",
+        name: OPEN,
+        arguments: "{}",
+        providerData: { [MARKER]: marker },
+      },
+      { type: "function_call_result", callId: "toolu_01Open", name: OPEN, output: "{}" },
+    ];
+    const expanded = restoreGenericDispatchHistoryItems(
+      expandInteractionFamilyDisclosures(history),
+    ) as ModelRequest["input"];
+    const messages = anthropicMessages(expanded);
+    const ids = messages.flatMap((message) =>
+      message.content.flatMap((block) => {
+        const record = block as Record<string, unknown>;
+        if (record.type === "tool_use") return [String(record.id)];
+        if (record.type === "tool_result") return [String(record.tool_use_id)];
+        return [];
+      }),
+    );
+    expect(ids.length).toBe(4);
+    for (const id of ids) expect(id).toMatch(/^[a-zA-Z0-9_-]+$/);
+    expect(ids[0]).toBe("toolu_01Open");
+    expect(ids[1]).toBe("toolu_01Open");
+    expect(ids[2]).toBe(ids[3]);
+    expect(ids[2]).not.toBe("toolu_01Open");
   });
 
   test("a tagged union with two members for one tag shows one entry", () => {
