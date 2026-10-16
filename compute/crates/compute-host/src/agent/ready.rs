@@ -92,8 +92,9 @@ pub(super) struct Ready<V> {
     freeing: HashMap<SandboxId, u64>,
     /// Memory a fill leaves free besides its own.
     reserve: u64,
-    /// Memory of fills that finished since available memory was last
-    /// read, which that reading does not show yet.
+    /// Memory of fills that ended with a VM (ready, or failed and being
+    /// torn down) since available memory was last read, which that
+    /// reading does not show yet.
     unsampled: u64,
     /// Ready sandboxes a create is claiming, by host name, with whether
     /// their VM ended meanwhile.
@@ -151,6 +152,28 @@ impl<V> Ready<V> {
     /// Available memory was read afresh: it shows every finished fill.
     pub fn sampled(&mut self) {
         self.unsampled = 0;
+    }
+
+    /// Memory that available memory does not show yet: every fill under
+    /// way at its own size, and every fill that ended with a VM since
+    /// memory was last read.
+    fn pending(&self) -> u64 {
+        self.filling
+            .values()
+            .map(|filling| filling.bytes())
+            .fold(self.unsampled, u64::saturating_add)
+    }
+
+    /// A fill ended, returning its shape. One that may have left a VM
+    /// (`left`), ready or failed and still being torn down, keeps its
+    /// charge until memory is read again; that reading shows the VM or
+    /// its teardown.
+    fn finished(&mut self, host: SandboxId, left: bool) -> Option<Shape> {
+        let shape = self.filling.remove(&host)?;
+        if left {
+            self.unsampled = self.unsampled.saturating_add(shape.bytes());
+        }
+        Some(shape)
     }
 }
 
@@ -360,13 +383,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Some(available) = self.available_memory else {
             return true;
         };
-        let pending = self
-            .ready
-            .filling
-            .values()
-            .map(|filling| filling.bytes())
-            .fold(self.ready.unsampled, u64::saturating_add);
-        fits(available, self.ready.reserve, pending, shape.bytes())
+        fits(
+            available,
+            self.ready.reserve,
+            self.ready.pending(),
+            shape.bytes(),
+        )
     }
 
     /// Starts filling one ready sandbox of `shape` from `template`.
@@ -436,7 +458,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Takes in a finished fill.
     pub(super) fn filled(&mut self, host: Id, filled: Filled<E::Vm>) {
-        let Some(shape) = self.ready.filling.remove(&host.0) else {
+        // Only a fill that failed before its record never started a VM.
+        let left = !matches!(filled, Filled::Unrecorded { .. });
+        let Some(shape) = self.ready.finished(host.0, left) else {
             return;
         };
         match filled {
@@ -446,7 +470,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 template,
             } => {
                 self.ready.retry.remove(&shape);
-                self.ready.unsampled = self.ready.unsampled.saturating_add(shape.bytes());
                 let live = self.own(host, vm, memory);
                 let Some(record) = self.records.get(host) else {
                     tracing::error!(%host, "a ready sandbox lost its record");
@@ -783,6 +806,38 @@ mod tests {
         // memory was read) leave no room for a small one.
         assert!(!fits(available, reserve, 2 * big, small));
         assert!(!fits(0, reserve, 0, small));
+    }
+
+    #[test]
+    fn a_failed_fill_keeps_its_memory_until_memory_is_read_again() {
+        let (reserve, big) = (1024 * MIB, 2048 * MIB);
+        let available = reserve + 2 * big;
+        let (a, b) = (
+            Shape {
+                vcpus: 2,
+                memory_mib: 2048,
+            },
+            Shape {
+                vcpus: 4,
+                memory_mib: 2048,
+            },
+        );
+        let mut ready = Ready::<()>::new(BTreeMap::from([(a, 1), (b, 1)]), None);
+        ready.filling.insert(SandboxId(1), a);
+        ready.filling.insert(SandboxId(2), b);
+        assert!(!fits(available, reserve, ready.pending(), b.bytes()));
+        // A's pause failed: its VM is still there, torn down in the
+        // background, and the last reading did not show it.
+        assert_eq!(ready.finished(SandboxId(1), true), Some(a));
+        assert!(!fits(available, reserve, ready.pending(), b.bytes()));
+        // B failed before its record: nothing of it holds memory.
+        assert_eq!(ready.finished(SandboxId(2), false), Some(b));
+        assert_eq!(ready.pending(), big);
+        assert!(fits(available, reserve, ready.pending(), b.bytes()));
+        // A fresh reading shows A's VM, or its teardown.
+        ready.sampled();
+        assert_eq!(ready.pending(), 0);
+        assert_eq!(ready.finished(SandboxId(1), true), None, "once");
     }
 
     #[test]

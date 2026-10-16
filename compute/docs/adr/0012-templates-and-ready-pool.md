@@ -55,10 +55,10 @@ sandboxes created at once all pay it at the same time.
   goes stale, when memory runs low (before any sandbox is evicted), and when
   the agent starts. Being the cheapest memory to give back, they go first,
   ahead of any idle sandbox. They fill a few at a time, only while memory
-  stays above a reserve after every fill under way at its full size, and
-  stop when sandbox users run out. The agent knows their count and resident
-  memory per shape (huge pages included; also in status), for the admission
-  budget to count.
+  stays above a reserve after every fill under way, or ended since memory
+  was last read, at its full size, and stop when sandbox users run out. The
+  agent knows their count and resident memory per shape (huge pages
+  included; also in status), for the admission budget to count.
 - A shape with no create for a while (`--template-unused-secs`, a week by
   default) retires: its template and ready clones go, and nothing is built
   or filled for it until its next create, which boots cold. The last use is
