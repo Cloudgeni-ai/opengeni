@@ -35,6 +35,7 @@ import {
   estimateItemTokens,
   estimateOpaqueEncryptedTokens,
   estimateNativeImageTokens,
+  MAX_NATIVE_IMAGE_TOKENS,
   estimateSerializedValueTokens,
   estimateTextTokens,
   estimateTokens,
@@ -63,6 +64,7 @@ import { sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
 import {
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
 } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
@@ -470,6 +472,26 @@ describe("complete outgoing model-input accounting", () => {
     });
   });
 
+  // Regression: a phone photo sent at full resolution was estimated at 765
+  // tokens (the old 512 px tile model) while current models charge about
+  // 14k, so photo-heavy chats overflowed right after compacting.
+  test("prices a photo by the patches it covers at its sent resolution", () => {
+    const phone = estimateNativeImageTokens({
+      source: pngDataUrl(pngIhdrPrefix(4032, 3024)),
+      detail: "auto",
+    });
+    expect(phone.tokens).toBe(144 * 108);
+    const bounded = estimateNativeImageTokens({
+      source: pngDataUrl(pngIhdrPrefix(2000, 1500)),
+      detail: "auto",
+    });
+    expect(bounded.tokens).toBe(72 * 54);
+    expect(
+      estimateNativeImageTokens({ source: pngDataUrl(pngIhdrPrefix(12_000, 9_000)) }).tokens,
+    ).toBe(MAX_NATIVE_IMAGE_TOKENS);
+    expect(MAX_NATIVE_IMAGE_TOKENS).toBe(36_000);
+  });
+
   test("base64 length does not linearly change an image estimate with identical geometry/detail", () => {
     const short = pngDataUrl(pngIhdrPrefix(1280, 800));
     const long = pngDataUrl(pngIhdrPrefix(1280, 800, 700_000));
@@ -810,6 +832,67 @@ describe("codex-parity rebuild", () => {
       const catalog = wire[0]!;
       expect(Object.keys(catalog).sort()).toEqual(["content", "role", "type"]);
       expect(typeof catalog.content).toBe("string");
+    });
+  });
+
+  // Regression: every retained message replayed its photos after compaction,
+  // so a chat with many photos was over the threshold again right away.
+  describe("only the newest photos stay inline after compaction", () => {
+    const olderId = "00000000-0000-4000-8000-000000000093";
+    const newerId = "00000000-0000-4000-8000-000000000094";
+    const history = (): CompactionItem[] => [
+      {
+        ...user("first photo"),
+        [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: olderId }],
+        [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+      },
+      assistant("looked at it"),
+      {
+        ...user("second photo"),
+        [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: newerId }],
+        [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+      },
+      user("what changed between them?"),
+    ];
+    const rebuilds = (): Array<[string, CompactionItem[]]> => [
+      ["portable", buildCompactionReplacementHistory(history(), "summary")],
+      [
+        "remote v2",
+        buildRemoteV2ReplacementHistory(history(), { type: "compaction", encrypted_content: "b" }),
+      ],
+    ];
+
+    for (const [mode, rebuilt] of rebuilds()) {
+      test(`${mode}: older photo moves to the catalog, newest stays on its message`, () => {
+        const first = rebuilt.find((item) => item.content === "first photo")!;
+        const second = rebuilt.find((item) => item.content === "second photo")!;
+        expect(first).toEqual(user("first photo"));
+        expect(second[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([{ kind: "file", fileId: newerId }]);
+        expect(second[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]).toBe(2000);
+        const catalog = rebuilt.find((item) => item[MODEL_ATTACHMENT_CATALOG_MARKER] === true)!;
+        expect(catalog[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([{ kind: "file", fileId: olderId }]);
+        expect(rebuilt.indexOf(catalog)).toBeLessThan(rebuilt.indexOf(first));
+      });
+    }
+
+    test("an older message is charged for its text, not its photos", () => {
+      const items = history();
+      const charges = new Map<CompactionItem, number>([
+        [items[0]!, 15_000],
+        [items[2]!, 3_000],
+      ]);
+      const rebuilt = buildCompactionReplacementHistory(
+        items,
+        "summary",
+        (item) => charges.get(item) ?? estimateTokens([item]),
+        10_000,
+      );
+      expect(rebuilt.some((item) => item.content === "first photo")).toBe(true);
+    });
+
+    test("the image bound never reaches the provider", () => {
+      const wire = sanitizeHistoryItemsForModel(history()) as CompactionItem[];
+      expect(JSON.stringify(wire)).not.toContain(MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD);
     });
   });
 
