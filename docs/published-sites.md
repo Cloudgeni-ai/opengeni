@@ -166,7 +166,26 @@ model instead, and when the workspace has none they are refused
 existing conversation holds a subscription model. The publication's
 `outsideAgentModel` names the model they get.
 
-Workspace tools (MCP connections) act with the workspace's shared
+Direct page tools (`site.tools`) work for signed-in workspace members on the
+published host, including pages with older bundled SDKs. Catalog, declarations
+and calls, plus targeted resolve/invoke, use the same gateway as the console.
+Only exact tools in the current immutable Site version's `requestedTools` are
+available, intersected with the viewer's live permissions and connections.
+Account-qualified identities remain exact: a personal account is available only
+to its owner, and a shared account only within that workspace. The publisher's
+credentials are never borrowed. This is independent of `agent.enabled` and
+`agent.tools`; the `workspaceTools` viewer capability describes the page, not
+the assistant. A Site cookie grants no access to general console routes.
+
+The API rechecks the served host, version, Site session and live workspace and
+organization authority before preparation and at provider-request boundaries.
+Guests, invited people and other nonmembers cannot call workspace tools. Normal
+Allow/Ask/Block policy applies: an Ask call without a valid, single-use approval
+returns `tool_gateway_approval_required`, never an automatic approval. The
+published shell does not currently present an approval dialog. Gateway schema,
+stale-catalog and provider errors retain their normal semantics.
+
+The assistant's workspace tools (MCP connections) act with the workspace's shared
 connections, so only a workspace admin can give them to a Site's agent, and
 only workspace members who may use connections (`mcp_servers:attach` or
 admins) get them. People outside the workspace (invited people, signed-in
@@ -209,7 +228,7 @@ or a named query's audience. Members-only Sites have no warnings.
 
 | Warning                            | Means                                                                 |
 | ---------------------------------- | --------------------------------------------------------------------- |
-| `workspace_tools_members_only`     | The page calls workspace tools, which work only inside Opengeni       |
+| `workspace_tools_members_only`     | The page calls workspace tools, which require workspace membership   |
 | `agent_tools_members_only`         | The agent's workspace tools are for members who may use connections  |
 | `site_data_guest_read` / `_write`  | Guests can't read, add or change a collection the page uses (fixable) |
 | `site_data_members_write`          | A `shared_read` collection the page writes; only managers write it    |

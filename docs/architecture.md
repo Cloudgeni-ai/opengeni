@@ -47,6 +47,12 @@ Published-host continuation normalizes legacy tool-less chats through
 `apps/api/src/site-publishing/agent-session.ts` before admission: the locked
 session update installs only viewer-bound Site data tools, matching permissions
 and no sandbox, without restoring workspace defaults or rewriting accepted work.
+Published page connector tools use `site-publishing/page-tool-authority.ts`:
+the signed gateway's opaque Site session resolves its live workspace member,
+never a fabricated console authorization. Its request-local capability admits
+only current-version declared identities through the ordinary tool gateway,
+including account selection, approval and targeted live fences. This page
+authority is independent of the embedded agent's settings; outsiders receive none.
 Published-host Site funding retains a pending-admission token through dispatch.
 Its trusted async context locks the conversation before the session writer prefix;
 recovery revokes that token and checks the locked canonical queue before refunding,
