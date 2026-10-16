@@ -1,5 +1,20 @@
 # @opengeni/documents
 
+## 3.2.2
+
+### Patch Changes
+
+- Updated dependencies [5af5889]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [7e50b4a]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+- Updated dependencies [a0c35a1]
+  - @opengeni/db@3.2.0
+  - @opengeni/config@3.2.0
+  - @opengeni/contracts@3.2.0
+  - @opengeni/storage@3.2.0
+
 ## 3.1.2
 
 ### Patch Changes

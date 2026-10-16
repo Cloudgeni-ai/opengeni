@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/network",
-  "version": "3.1.2",
+  "version": "3.2.2",
   "description": "DNS-pinned outbound HTTP transport and shared MCP OAuth discovery primitives.",
   "license": "Apache-2.0",
   "repository": {
