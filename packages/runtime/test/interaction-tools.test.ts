@@ -25,6 +25,7 @@ import { OpenGeniApiError, type InteractionTransport } from "@opengeni/sdk";
 import {
   INTERACTION_ATTEMPT_TOOL_NAMES,
   createInteractionAttemptToolDefinitions,
+  nativeCuaSchema,
 } from "../src/interaction-tools";
 
 const accountId = randomUUID();
@@ -37,6 +38,58 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test("every native CUA tool exposes one top-level object schema", () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({ callNativeComputerTool: async () => ({}) as never }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:control"],
+    }).filter((tool) => tool.modelName.startsWith("interaction__cua_"));
+    expect(definitions.length).toBe(CUA_DESKTOP_TOOLS.length);
+    for (const tool of definitions) {
+      expect(tool.inputSchema.type).toBe("object");
+      expect(tool.inputSchema.anyOf).toBeUndefined();
+      expect(tool.inputSchema.oneOf).toBeUndefined();
+      expect(tool.inputSchema.required).toContain("computerSessionId");
+      expect((tool.inputSchema.properties as Record<string, unknown>).session).toBeUndefined();
+    }
+  });
+  test("platform CUA schemas merge by property and keep real constraint differences", () => {
+    const merged = nativeCuaSchema([
+      {
+        type: "object",
+        additionalProperties: false,
+        required: ["pid", "x"],
+        properties: {
+          pid: { type: "integer", description: "macOS pid" },
+          x: { type: "number" },
+          action: { type: "string" },
+        },
+      },
+      {
+        type: "object",
+        additionalProperties: false,
+        required: ["pid"],
+        properties: {
+          pid: { type: "integer", description: "Linux pid" },
+          x: { type: "integer", minimum: 0 },
+          coordinate_frame: { enum: ["window", "desktop"], type: "string" },
+        },
+      },
+    ]);
+    expect(merged).toEqual({
+      type: "object",
+      additionalProperties: false,
+      required: ["pid"],
+      properties: {
+        pid: { type: "integer", description: "macOS pid" },
+        x: { anyOf: [{ type: "number" }, { type: "integer", minimum: 0 }] },
+        action: { type: "string" },
+        coordinate_frame: { enum: ["window", "desktop"], type: "string" },
+      },
+    });
+  });
   test.each(["browser_read", "browser_act"] as const)(
     "%s preserves the definite tab diagnosis at the model boundary",
     async (tool) => {
