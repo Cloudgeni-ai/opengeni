@@ -235,6 +235,12 @@ export type CreateDbOptions = {
    */
   bootConnectGraceMs?: number;
   /**
+   * Use named prepared statements. Unset → {@link defaultDatabasePreparedStatements}:
+   * on for a direct connection, off behind PgBouncer's port. Pass `false` for any
+   * other transaction-pooling proxy.
+   */
+  preparedStatements?: boolean;
+  /**
    * Connection-local default transaction isolation sent in the postgres-js
    * startup parameters. This is intentionally not a role/database default:
    * tests and embedded callers can exercise a different ambient isolation
@@ -393,19 +399,67 @@ export function databaseReconnectBackoffSeconds(retries: number): number {
   return (0.5 + Math.random() / 2) * Math.min(3 ** retries / 100, 2);
 }
 
+/** PgBouncer's port, which Azure Flexible Server's built-in pooler always uses. */
+const PGBOUNCER_PORT = "6432";
+
+/**
+ * Whether a pool should use named prepared statements when the operator has not
+ * said. A direct Postgres connection should: postgres-js otherwise sends every
+ * parameterized statement unnamed and must wait for a Describe reply before it
+ * can Bind, so each such statement costs two round trips instead of one, and the
+ * server re-parses and re-plans it every time. A transaction-pooling PgBouncer
+ * must not: named statements live on one backend, the pooler hands the next
+ * transaction a different one, and execution intermittently fails with
+ * `prepared statement "s_N" does not exist`. Port 6432 is the only signal the URL
+ * carries; other poolers need `preparedStatements: false` explicitly.
+ */
+export function defaultDatabasePreparedStatements(databaseUrl: string): boolean {
+  const authority = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/?#]*@)?([^/?#]*)/i.exec(databaseUrl)?.[1] ?? "";
+  return !authority.split(",").some((host) => host.endsWith(`:${PGBOUNCER_PORT}`));
+}
+
+type PostgresSql = postgres.Sql | postgres.TransactionSql;
+
+/**
+ * Drizzle sends every query through `sql.unsafe(text, params)`, and postgres-js
+ * never prepares `unsafe` queries unless asked per call, whatever the pool's
+ * `prepare` option says. Ask on every call, including inside transactions and
+ * savepoints, which hand Drizzle a fresh transaction-scoped `sql`. Queries without
+ * parameters keep postgres-js's one-message simple protocol.
+ */
+function preparingUnsafe<T extends PostgresSql>(target: T): T {
+  const wrapScoped = (args: unknown[]) =>
+    args.map((arg) =>
+      typeof arg === "function"
+        ? (scoped: postgres.TransactionSql) =>
+            (arg as (scoped: postgres.TransactionSql) => unknown)(preparingUnsafe(scoped))
+        : arg,
+    );
+  return new Proxy(target, {
+    get(base, property) {
+      if (property === "unsafe") {
+        return (query: string, parameters?: unknown[], options?: postgres.UnsafeQueryOptions) =>
+          base.unsafe(query, parameters as never, { prepare: true, ...options });
+      }
+      if (property === "begin" || property === "savepoint") {
+        const method = Reflect.get(base, property) as unknown;
+        if (typeof method !== "function") return method;
+        return (...args: unknown[]) => method.apply(base, wrapScoped(args));
+      }
+      return Reflect.get(base, property);
+    },
+  });
+}
+
 export function createDb(databaseUrl: string, options: CreateDbOptions = {}): DbClient {
-  // `prepare: false` is REQUIRED for Azure Database for PostgreSQL Flexible
-  // Server's transaction-pooling PgBouncer: postgres-js's default named prepared
-  // statements (`s_N`) are bound to one backend, but a transaction pooler hands
-  // each transaction a different backend, so a later `execute` intermittently
-  // throws `prepared statement "s_N" does not exist`. Every RLS read in this
-  // module (set_config + SELECT inside one db.transaction) rides on this pool, so
-  // the failure surfaces as a "worked, then didn't" credential/permission read.
+  const preparedStatements =
+    options.preparedStatements ?? defaultDatabasePreparedStatements(databaseUrl);
   // idle_timeout + max_lifetime recycle connections so a pooler-recycled backend
-  // is never reused indefinitely; application_name aids server-side diagnostics.
+  // is never reused indefinitely, and bound each connection's prepared-statement
+  // cache; application_name aids server-side diagnostics.
   const client = postgres(databaseUrl, {
     max: options.max ?? 10,
-    prepare: false,
+    prepare: preparedStatements,
     idle_timeout: 30,
     max_lifetime: 1800,
     // postgres.js grows one pool-wide reconnect delay after every refused or
@@ -429,9 +483,16 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
       application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
       ...(options.searchPath ? { search_path: options.searchPath } : {}),
       ...(options.isolationLevel ? { default_transaction_isolation: options.isolationLevel } : {}),
+      // Prepared statements are for skipping the Describe round trip and the
+      // re-parse. Keep planning per execution: a cached generic plan cannot see
+      // bound values, so it cannot choose a partial index whose predicate names a
+      // parameterized value, nor the selectivity of one workspace or subject.
+      // Only direct connections prepare, so this startup parameter never reaches
+      // a transaction pooler.
+      ...(preparedStatements ? { plan_cache_mode: "force_custom_plan" } : {}),
     },
   });
-  const db = drizzle(client, { schema });
+  const db = drizzle(preparedStatements ? preparingUnsafe(client) : client, { schema });
   dbBindings.set(db as unknown as object, {
     rlsStrategy: options.rlsStrategy ?? "force",
     ...(options.userLookup ? { userLookup: options.userLookup } : {}),
