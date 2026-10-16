@@ -3037,6 +3037,23 @@ export async function getWorkspace(db: Database, workspaceId: string): Promise<W
     : null;
 }
 
+/**
+ * Only a workspace's settings, as {@link getWorkspace} maps them: one read
+ * instead of its three, for callers that need nothing else. Null when the
+ * workspace is absent or not visible.
+ */
+export async function getWorkspaceSettings(
+  db: Database,
+  workspaceId: string,
+): Promise<Record<string, unknown> | null> {
+  const [row] = await db
+    .select({ settings: schema.workspaces.settings })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .limit(1);
+  return row ? ((row.settings ?? {}) as Record<string, unknown>) : null;
+}
+
 export async function getManagedAccount(
   db: Database,
   accountId: string,

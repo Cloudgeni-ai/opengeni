@@ -5,6 +5,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   signDelegatedAccessToken,
   type AccessGrant,
+  type SessionAuthorizationPort,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import {
@@ -52,7 +53,11 @@ const listTools = { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} };
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
 let traced: ReturnType<typeof postgres>;
+let pooled: ReturnType<typeof postgres>;
 const statements: string[] = [];
+// Transactions open at once on the pooled client, and the most seen together.
+let openTransactions = 0;
+let mostOpenTransactions = 0;
 
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("first-party-mcp-handshake");
@@ -67,10 +72,25 @@ beforeAll(async () => {
     },
   });
   await traced`select 1`;
+  pooled = postgres(shared.appUrl, {
+    max: 8,
+    prepare: false,
+    debug: (_connection, query) => {
+      const statement = query.trim().split(/\s+/).slice(0, 2).join(" ").toLowerCase();
+      statements.push(statement);
+      if (statement === "begin") {
+        openTransactions += 1;
+        mostOpenTransactions = Math.max(mostOpenTransactions, openTransactions);
+      }
+      if (statement === "commit" || statement === "rollback") openTransactions -= 1;
+    },
+  });
+  await pooled`select 1`;
 }, 180_000);
 
 afterAll(async () => {
   await traced?.end();
+  await pooled?.end();
   await client?.close();
   await shared?.release();
 }, 60_000);
@@ -87,7 +107,9 @@ function mcpRequest(url: string, body: unknown, authorization?: string): Request
   });
 }
 
-async function fixture() {
+async function fixture(
+  options: { pooled?: boolean; sessionAuthorization?: SessionAuthorizationPort } = {},
+) {
   const settings = testSettings({
     productAccessMode: "managed",
     delegationSecret: SECRET,
@@ -168,22 +190,26 @@ async function fixture() {
   };
   const app = createApp({
     settings,
-    db: drizzle(traced, { schema }) as unknown as Database,
+    db: drizzle(options.pooled ? pooled : traced, { schema }) as unknown as Database,
     bus: new MemoryEventBus(),
     workflowClient: {} as SessionWorkflowClient,
+    sessionAuthorization: options.sessionAuthorization ?? null,
   });
   const url = `http://127.0.0.1:8000/v1/workspaces/${owner.workspaceId}/mcp`;
   const post = async (body: unknown, authorization: string) => {
     statements.length = 0;
+    openTransactions = 0;
+    mostOpenTransactions = 0;
     const response = await app.request(mcpRequest(url, body, authorization));
     const text = await response.text();
     return {
       status: response.status,
       body: text ? (JSON.parse(text) as Record<string, unknown>) : null,
       statements: [...statements],
+      mostOpenTransactions,
     };
   };
-  return { settings, grant, bearer, post };
+  return { settings, grant, bearer, post, sessionId: session.id };
 }
 
 describe("first-party MCP handshakes", () => {
@@ -256,6 +282,46 @@ describe("first-party MCP handshakes", () => {
 
     const notified = await post(initialized, stale);
     expect(notified.status).toBe(403);
+  });
+});
+
+describe("first-party MCP tool listing", () => {
+  test("tools/list reads its tool surface together, alongside the bound-session check", async () => {
+    const { bearer, post } = await fixture({ pooled: true });
+    const authorization = await bearer();
+    await post(listTools, authorization);
+
+    const listed = await post(listTools, authorization);
+    expect(listed.status).toBe(200);
+    const tools = (listed.body!.result as { tools: Array<{ name: string }> }).tools;
+    expect(tools.length).toBeGreaterThan(10);
+    // The liveness check and the learning policy are read together, then the
+    // bound-session check, workspace settings, model catalog, Memory selector
+    // and admin access. They used to be read one after another (42
+    // statements); the workspace's control state and kind are no longer read.
+    expect(listed.mostOpenTransactions).toBeGreaterThanOrEqual(5);
+    expect(listed.statements.length).toBeLessThanOrEqual(34);
+  });
+
+  test("a refused bound-session check still refuses tools/list after the surface reads", async () => {
+    const decisions: string[] = [];
+    // The attempt is live, so only the bound-session check (here, the host's
+    // own decision) can refuse it.
+    const { bearer, post } = await fixture({
+      pooled: true,
+      sessionAuthorization: {
+        authorizeSession: async (input) => {
+          decisions.push(input.operation);
+          return { allowed: false, reason: "forbidden" };
+        },
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+    });
+
+    const listed = await post(listTools, await bearer());
+    expect(decisions).toEqual(["session.first_party_mcp.call"]);
+    expect(listed.status).toBe(404);
+    expect(JSON.stringify(listed.body)).not.toContain('"tools"');
   });
 });
 
