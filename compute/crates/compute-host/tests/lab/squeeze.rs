@@ -4,18 +4,26 @@
 
 use super::memory::{hold_running, nested};
 use super::*;
+use std::io::{BufRead, BufReader};
 
 const MIB: u64 = 1 << 20;
 
-/// Takes `mib` MiB of host memory outside any VM until killed.
+/// Takes `mib` MiB of host memory outside any VM until killed, returning
+/// once it is taken.
 fn hog(mib: u64) -> Child {
-    Command::new("python3")
+    let mut child = Command::new("python3")
         .arg("-c")
         .arg(format!(
-            "import time; b = bytearray(b'x') * ({mib} << 20); time.sleep(600)"
+            "import time; b = bytearray(b'x') * ({mib} << 20); print(flush=True); time.sleep(600)"
         ))
+        .stdout(Stdio::piped())
         .spawn()
-        .unwrap()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.as_mut().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    child
 }
 
 /// MiB of memory available for new guests, read as the agent reads it.
@@ -39,10 +47,32 @@ async fn settle() {
     }
 }
 
-/// Takes host memory until available memory is `mib` MiB below `low`,
-/// whatever else the host freed or took since the agent started.
-fn short_by(low: u64, mib: u64) -> Child {
-    hog(available_mib().saturating_sub(low) + mib)
+/// Keeps available memory `mib` MiB below `low` until the agent has
+/// `reacted`, taking more whenever the host frees memory by itself (an
+/// earlier test's VMs still going away), so the shortage lasts until the
+/// agent sees it. Returns the hogs and when the last of them was in place.
+async fn short_until(
+    agent: &Agent,
+    low: u64,
+    mib: u64,
+    what: &str,
+    reacted: impl Fn(&HostStatus) -> bool,
+) -> (Vec<Child>, Instant) {
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let mut hogs = Vec::new();
+    let mut short_since = Instant::now();
+    loop {
+        if reacted(&agent.status().await) {
+            return (hogs, short_since);
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        let available = available_mib();
+        if available + mib / 2 > low {
+            hogs.push(hog(available.saturating_sub(low) + mib));
+            short_since = Instant::now();
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
 }
 
 fn find(status: &HostStatus, sandbox: Id) -> &SandboxStatus {
@@ -77,7 +107,12 @@ fn untouched(status: &HostStatus, light: Id) {
 /// With `heavy` filled, takes memory away until the host is short: its
 /// guest gives its file cache back through its balloon, and it keeps
 /// running. Returns how long that took.
-async fn balloon_gives_way(agent: &Agent, low: u64, heavy: Id, light: Id) -> (Duration, Child) {
+async fn balloon_gives_way(
+    agent: &Agent,
+    low: u64,
+    heavy: Id,
+    light: Id,
+) -> (Duration, Vec<Child>) {
     agent
         .wait_until("the sampler to see the guest's memory", |status| {
             find(status, heavy)
@@ -87,8 +122,10 @@ async fn balloon_gives_way(agent: &Agent, low: u64, heavy: Id, light: Id) -> (Du
         .await;
     let before = find(&agent.status().await, heavy).resident_bytes.unwrap();
     // Short by less than the cache it can give back.
-    let first = short_by(low, 128);
-    let begin = Instant::now();
+    let (hogs, begin) = short_until(agent, low, 128, "the balloon to inflate", |status| {
+        find(status, heavy).balloon_bytes.is_some()
+    })
+    .await;
     agent
         .wait_until("the guest to give its cache back", |status| {
             let found = find(status, heavy);
@@ -106,7 +143,7 @@ async fn balloon_gives_way(agent: &Agent, low: u64, heavy: Id, light: Id) -> (Du
     assert_eq!(found.level, LevelName::Running);
     assert_eq!(found.paused_for_memory, None);
     untouched(&status, light);
-    (gave, first)
+    (gave, hogs)
 }
 
 /// When the host runs short with no idle sandbox to push, a sandbox in use
@@ -169,11 +206,14 @@ async fn busy_sandboxes_above_their_request_give_way_when_the_host_runs_short() 
     .await;
     let (uptime, kept) = uptime_and_kept(&agent, heavy).await;
     assert_eq!(kept, (512 * MIB).to_string());
-    let (gave, first) = balloon_gives_way(&agent, low, heavy, light).await;
+    let (gave, mut hogs) = balloon_gives_way(&agent, low, heavy, light).await;
     // Short by more than its balloon can give: it is paused and saved,
     // though held.
-    let mut hogs = [first, short_by(low, 1024)];
-    let begin = Instant::now();
+    let (more, begin) = short_until(&agent, low, 1024, "it to be paused for memory", |status| {
+        find(status, heavy).paused_for_memory.is_some()
+    })
+    .await;
+    hogs.extend(more);
     agent
         .wait_until("it to be saved for memory", |status| {
             let found = find(status, heavy);
