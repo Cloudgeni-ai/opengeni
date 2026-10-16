@@ -173,6 +173,10 @@ struct ServeArgs {
     /// only claims one. Repeatable. Needs `--template-ready-port`.
     #[arg(long = "template", requires = "template_ready_port")]
     templates: Vec<Keep>,
+    /// How long a shape may go unused (no create) before its template and
+    /// ready sandboxes are given up, until its next create.
+    #[arg(long, default_value_t = PoolConfig::UNUSED_AFTER.as_secs())]
+    template_unused_secs: u64,
     /// How guest memory is backed and saved: `bare-metal` (4 KiB pages,
     /// dirty-page tracking, compression allowed) or `nested` (2 MiB pages
     /// from the host's reserved huge-page pool, resident-page saves, no
@@ -468,6 +472,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
                 .filter(|keep| keep.ready > 0)
                 .map(|keep| (keep.shape, keep.ready))
                 .collect(),
+            unused_after: Duration::from_secs(args.template_unused_secs),
         }),
         network: args.network.then_some(NetworkConfig {
             pool: args.network_pool,

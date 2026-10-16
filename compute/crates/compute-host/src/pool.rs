@@ -39,12 +39,20 @@
 //!   <shape>-<key>.building/        a template being put together
 //!   vm/firecracker/template-<key>/ the VM building it: its jail, and
 //!     ordinal                      the ordinal whose user its VMM runs as
+//!   used/<shape>                   when the shape was last used (see uses)
 //! ```
 //!
 //! Anything a build left when the agent stopped is removed on start, its VM
 //! ended first, whether or not the agent keeps templates now. A build's
 //! ordinal stays taken until its VM is proven gone, so no sandbox ever
 //! shares a user with a VMM that may still run.
+//!
+//! A shape unused for a while (see [`uses`]) retires: its template is
+//! removed and no ready sandboxes are kept of it until its next create.
+
+mod uses;
+
+pub(crate) use uses::{Uses, write_use};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -192,6 +200,14 @@ pub struct PoolConfig {
     /// of that shape only claims one. Each shape here also gets its
     /// template at start.
     pub ready: BTreeMap<Shape, u32>,
+    /// How long a shape may go unused before its template and ready
+    /// sandboxes are given up, until its next create.
+    pub unused_after: Duration,
+}
+
+impl PoolConfig {
+    /// How long a shape may go unused by default: a week.
+    pub const UNUSED_AFTER: Duration = Duration::from_secs(7 * 86_400);
 }
 
 /// Where today's templates come from. Fixed for the agent's life; the
@@ -480,6 +496,14 @@ enum Entry {
     Failed {
         retry: Instant,
     },
+    /// Unused for long enough to give up; the next create builds it again.
+    Retired,
+}
+
+/// A shape [`Pool::retire`] gave up.
+pub(crate) struct Retired {
+    /// Its template, whose files are to be removed, if it had one.
+    pub template: Option<Arc<Template>>,
 }
 
 /// The host's templates, one per shape. Pure: the agent carries out the
@@ -524,7 +548,7 @@ impl Pool {
         let build = match self.entries.get(&shape) {
             None => true,
             Some(Entry::Failed { retry }) => now >= *retry,
-            Some(Entry::Ready(_) | Entry::Building) => false,
+            Some(Entry::Ready(_) | Entry::Building | Entry::Retired) => false,
         };
         if build {
             self.entries.insert(shape, Entry::Building);
@@ -544,10 +568,30 @@ impl Pool {
     /// otherwise asks for it as [`Pool::want`] does. The second value says
     /// whether the caller must build it.
     pub fn take(&mut self, shape: Shape, now: Instant) -> (Option<Arc<Template>>, bool) {
-        if let Some(Entry::Ready(template)) = self.entries.get(&shape) {
-            return (Some(Arc::clone(template)), false);
+        match self.entries.get(&shape) {
+            Some(Entry::Ready(template)) => return (Some(Arc::clone(template)), false),
+            Some(Entry::Retired) => {
+                self.entries.remove(&shape);
+            }
+            _ => {}
         }
         (None, self.want(shape, now))
+    }
+
+    /// Gives up `shape`'s template, which went unused, until its next
+    /// [`Pool::take`]. Returns nothing if it is being built (it retires
+    /// once built) or already retired.
+    pub fn retire(&mut self, shape: Shape) -> Option<Retired> {
+        let entry = self.entries.get(&shape);
+        if matches!(entry, Some(Entry::Building | Entry::Retired)) {
+            return None;
+        }
+        let template = match self.entries.insert(shape, Entry::Retired) {
+            Some(Entry::Ready(template)) => Some(template),
+            _ => None,
+        };
+        tracing::info!(%shape, "template unused for long; retired");
+        Some(Retired { template })
     }
 
     /// Records how a build of `shape` ended.
@@ -589,6 +633,7 @@ impl Pool {
                     Entry::Ready(_) => TemplateState::Ready,
                     Entry::Building => TemplateState::Building,
                     Entry::Failed { .. } => TemplateState::Failed,
+                    Entry::Retired => TemplateState::Retired,
                 },
                 ready: 0,
                 ready_resident_bytes: 0,
@@ -941,6 +986,15 @@ fn seal(path: &Path) -> io::Result<()> {
 
 /// Removes the directory `dir` and everything in it; succeeds if there is
 /// none.
+/// Removes the files of a retired `template`. Sandboxes started from it
+/// keep theirs: their memory images are their own links to the file.
+pub(crate) async fn remove(template: Arc<Template>) {
+    let dir = template.dir.clone();
+    if let Err(error) = blocking(move || remove_dir(&dir)).await {
+        tracing::warn!(%error, dir = %template.dir.display(), "could not remove a retired template");
+    }
+}
+
 fn remove_dir(dir: &Path) -> io::Result<()> {
     match fs::remove_dir_all(dir) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
@@ -1076,7 +1130,7 @@ fn keep_fitting(dir: &Path, sources: &Sources) -> Vec<Template> {
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         let name = entry.file_name();
-        if name == "vm" {
+        if name == "vm" || name == uses::USED {
             continue;
         }
         let fitting = read_inputs(&path)

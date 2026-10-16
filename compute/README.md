@@ -146,7 +146,10 @@ For each shape (processors and memory) the host keeps a template: a guest
 booted once, paused and saved. A new sandbox gets a copy-on-write copy of its
 disk and shares its memory image, so creating one is a restore, not a boot. A
 ready pool keeps clones already restored and paused, so a create is a resume
-([ADR 12](docs/adr/0012-templates-and-ready-pool.md)).
+([ADR 12](docs/adr/0012-templates-and-ready-pool.md)). A clone is used only
+once its guest has taken its own id, random seed, machine id and hostname. A
+shape unused for a week gives up its template and ready clones until its
+next create.
 
 ## Code map
 

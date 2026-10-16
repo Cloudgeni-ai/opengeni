@@ -48,6 +48,10 @@ sandboxes created at once all pay it at the same time.
   ahead of any idle sandbox. They fill a few at a time, only while memory
   stays above a reserve. The agent knows their count and resident memory per
   shape (also in status), for the admission budget to count.
+- A shape with no create for a while (`--template-unused-secs`, a week by
+  default) retires: its template and ready clones go, and nothing is built
+  or filled for it until its next create, which boots cold. The last use is
+  kept on disk, so a restart neither revives nor retires a shape early.
 
 ## Consequences
 

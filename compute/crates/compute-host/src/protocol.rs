@@ -519,6 +519,10 @@ pub enum TemplateState {
     /// The last build failed; new sandboxes boot cold, and a later one
     /// tries again.
     Failed,
+    /// Unused for long enough that the host gave it and its ready
+    /// sandboxes up; the next create of the shape boots cold and builds it
+    /// again.
+    Retired,
 }
 
 /// A sandbox the host cannot manage.

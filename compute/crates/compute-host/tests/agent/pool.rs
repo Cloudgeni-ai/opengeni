@@ -28,6 +28,7 @@ fn warm(shapes: Vec<Shape>) -> impl FnOnce(&mut HostConfig) {
             depends_on: Vec::new(),
             ready_timeout: Duration::from_secs(5),
             ready: std::collections::BTreeMap::new(),
+            unused_after: PoolConfig::UNUSED_AFTER,
         });
     }
 }
@@ -57,7 +58,7 @@ fn templates(root: &Path) -> Vec<PathBuf> {
         .unwrap()
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.file_name().unwrap() != "vm")
+        .filter(|path| !["vm", "used"].contains(&path.file_name().unwrap().to_str().unwrap()))
         .collect();
     found.sort();
     found

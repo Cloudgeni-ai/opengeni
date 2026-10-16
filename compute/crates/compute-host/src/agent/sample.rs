@@ -52,6 +52,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             });
         }
         self.inputs(batch);
+        self.retire_unused();
         self.refill();
     }
 

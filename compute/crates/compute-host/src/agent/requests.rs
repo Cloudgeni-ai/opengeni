@@ -314,6 +314,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(error));
             return;
         }
+        self.template_used(Shape::of(&config));
         let Some((config, reply)) = self.claim(id, config, reply) else {
             return;
         };

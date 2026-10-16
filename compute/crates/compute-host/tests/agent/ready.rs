@@ -8,7 +8,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use compute_core::HostPolicy;
-use compute_host::protocol::{HostStatus, Id, LevelName, Reply, Request, SandboxConfig};
+use compute_host::protocol::{
+    HostStatus, Id, LevelName, Reply, Request, SandboxConfig, TemplateState,
+};
 use compute_host::{HostConfig, PoolConfig, Shape};
 
 use super::{Delays, Lab, NEVER, World, id};
@@ -20,6 +22,11 @@ const SHAPE: Shape = Shape {
 };
 
 fn keeping(ready: u32) -> impl FnOnce(&mut HostConfig) {
+    keeping_for(ready, PoolConfig::UNUSED_AFTER)
+}
+
+/// [`keeping`], giving the shape up after `unused_after` without a create.
+fn keeping_for(ready: u32, unused_after: Duration) -> impl FnOnce(&mut HostConfig) {
     move |config| {
         config.restore_notice_port = Some(53);
         config.pool = Some(PoolConfig {
@@ -28,6 +35,7 @@ fn keeping(ready: u32) -> impl FnOnce(&mut HostConfig) {
             depends_on: Vec::new(),
             ready_timeout: Duration::from_secs(5),
             ready: BTreeMap::from([(SHAPE, ready)]),
+            unused_after,
         });
     }
 }
@@ -278,4 +286,79 @@ async fn a_ready_sandbox_whose_vm_dies_is_replaced() {
 /// [`ready_dirs`], for use in a status predicate.
 fn directories_of(_: &HostStatus, lab: &Lab) -> Vec<String> {
     ready_dirs(lab)
+}
+
+/// [`SHAPE`]'s template state.
+fn template_state(status: &HostStatus) -> Option<TemplateState> {
+    status
+        .templates
+        .iter()
+        .find(|template| (template.vcpus, template.memory_mib) == (SHAPE.vcpus, SHAPE.memory_mib))
+        .map(|template| template.state)
+}
+
+/// The template directories on disk.
+fn template_dirs(lab: &Lab) -> Vec<String> {
+    std::fs::read_dir(lab.root.join("state/templates"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name != "used" && name != "vm")
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unused_shape_gives_up_its_template_and_ready_sandboxes_until_its_next_create() {
+    const UNUSED: Duration = Duration::from_secs(2);
+    let start = |root, world| {
+        Lab::start_configured(
+            root,
+            world,
+            Delays::default(),
+            HostPolicy::default(),
+            keeping_for(2, UNUSED),
+        )
+    };
+    let lab = start(Lab::root(), Arc::default()).await;
+    wait_filled(&lab, 2).await;
+    let filled = ready_dirs(&lab);
+    assert_eq!(template_dirs(&lab).len(), 1);
+
+    // No create for the whole period: the template and the ready
+    // sandboxes go, and nothing fills again.
+    lab.wait_until("the shape retired", |status| {
+        template_state(status) == Some(TemplateState::Retired) && pool(status) == (0, 0, 2)
+    })
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !ready_dirs(&lab).is_empty() || !template_dirs(&lab).is_empty() {
+        assert!(tokio::time::Instant::now() < deadline, "retired files left");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    for dir in &filled {
+        assert!(!lab.world.live.lock().unwrap().contains(dir), "{dir} ended");
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(pool(&lab.status().await), (0, 0, 2), "no refill");
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1, "no rebuild");
+
+    // A restart remembers when the shape was last used: still retired.
+    let (root, world) = lab.stop().await;
+    let lab = start(root, world).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let status = lab.status().await;
+    assert_eq!(template_state(&status), Some(TemplateState::Retired));
+    assert_eq!(pool(&status), (0, 0, 2));
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1, "no rebuild");
+
+    // Its next create starts without the template, which comes back with
+    // its ready sandboxes.
+    lab.create(id(1), NEVER).await;
+    wait_filled(&lab, 2).await;
+    assert_eq!(
+        template_state(&lab.status().await),
+        Some(TemplateState::Ready)
+    );
+    assert_eq!(lab.run(id(1), &["disk"]).await, ["base"]);
+    lab.assert_clean();
 }

@@ -4,12 +4,13 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use compute_engine::Engine;
 use tokio::time::Instant;
 
-use crate::layout::Images;
-use crate::pool::{self, Build, Built, Held, Pool, PoolConfig, Shape, Sources, Template};
+use crate::layout::{Images, templates_dir};
+use crate::pool::{self, Build, Built, Held, Pool, PoolConfig, Shape, Sources, Template, Uses};
 use crate::store::Store;
 
 use super::{Event, HostAgent, Warm};
@@ -29,7 +30,8 @@ pub(super) struct Started {
 impl Warm {
     /// Sets up the templates of a starting agent: ends the VMs of builds an
     /// earlier agent left (whether or not this one keeps templates), and,
-    /// if it keeps any, keeps the templates that still fit today's inputs.
+    /// if it keeps any, keeps the templates that still fit today's inputs
+    /// and whose shapes have been used lately; the others retire.
     pub(super) async fn start<E: Engine>(
         config: Option<PoolConfig>,
         engine: &E,
@@ -61,15 +63,42 @@ impl Warm {
             };
         };
         let found = pool::keep_templates(root, &sources).await;
+        let now = SystemTime::now();
+        let uses = Uses::load(
+            &templates_dir(root),
+            config.unused_after,
+            config
+                .shapes
+                .iter()
+                .copied()
+                .chain(found.iter().map(Template::shape)),
+            now,
+        );
+        let unused = uses.unused(now);
+        let (found, retiring): (Vec<_>, Vec<_>) = found
+            .into_iter()
+            .partition(|template| !unused.contains(&template.shape()));
+        for template in retiring {
+            tokio::spawn(pool::remove(Arc::new(template)));
+        }
+        let mut pool = Pool::new(found.iter().map(Template::shape));
+        for shape in &unused {
+            pool.retire(*shape);
+        }
         Started {
             warm: Some(Self {
-                pool: Pool::new(found.iter().map(Template::shape)),
+                pool,
                 found,
                 sources,
                 ready_port: config.ready_port,
                 ready_timeout: config.ready_timeout,
+                uses,
             }),
-            shapes: config.shapes,
+            shapes: config
+                .shapes
+                .into_iter()
+                .filter(|shape| !unused.contains(shape))
+                .collect(),
             held,
             ready: config.ready,
         }
@@ -129,6 +158,37 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.build_template(shape);
         }
         template
+    }
+
+    /// Records a create of `shape`, which keeps its template from retiring.
+    pub(super) fn template_used(&mut self, shape: Shape) {
+        let Some(warm) = &mut self.warm else {
+            return;
+        };
+        let now = SystemTime::now();
+        if let Some(mark) = warm.uses.used(shape, now) {
+            tokio::task::spawn_blocking(move || pool::write_use(mark, now));
+        }
+    }
+
+    /// Retires the templates of shapes unused for long, with their ready
+    /// sandboxes. A template being built retires once built.
+    pub(super) fn retire_unused(&mut self) {
+        let Some(warm) = &mut self.warm else {
+            return;
+        };
+        let mut retired = Vec::new();
+        for shape in warm.uses.unused(SystemTime::now()) {
+            if let Some(gone) = warm.pool.retire(shape) {
+                retired.push(shape);
+                if let Some(template) = gone.template {
+                    tokio::spawn(pool::remove(template));
+                }
+            }
+        }
+        for shape in retired {
+            self.discard_stale_ready(shape);
+        }
     }
 
     /// Forgets `template`, which no longer fits today's inputs, and builds

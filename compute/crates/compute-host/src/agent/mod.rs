@@ -30,7 +30,7 @@ use tokio::time::{Instant, sleep_until};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
-use crate::pool::{Built, Lender, Loaning, Pool, PoolConfig, Shape, Sources, Template};
+use crate::pool::{Built, Lender, Loaning, Pool, PoolConfig, Shape, Sources, Template, Uses};
 
 use crate::protocol::{HostStatus, Id, SandboxConfig, StepStats};
 use crate::state::{Record, Records, StateError, claim_host};
@@ -649,6 +649,8 @@ struct Warm {
     sources: Arc<Sources>,
     ready_port: u32,
     ready_timeout: Duration,
+    /// When each shape was last used.
+    uses: Uses,
 }
 
 /// Wakes a sandbox when data arrives for it on a guest port.
