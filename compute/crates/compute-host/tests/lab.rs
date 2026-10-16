@@ -23,7 +23,7 @@ use compute_core::SandboxId;
 use compute_host::client::Client;
 use compute_host::protocol::{
     DurabilityName, HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
-    SandboxStatus, SleepConfig,
+    SandboxStatus, SleepConfig, TemplateState,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
@@ -223,16 +223,32 @@ async fn exec(client: &Client, sandbox: Id, script: &str) -> (String, Duration) 
     let Reply::Connected { waited_us, .. } = reply else {
         panic!("{sandbox}: {reply:?}");
     };
-    let mut input = script.to_owned();
-    input.push_str("\nexit\n");
+    let input = format!("{script}\necho {DONE}\nexit\n");
     stream.get_mut().write_all(input.as_bytes()).await.unwrap();
-    let mut output = String::new();
-    timeout(Duration::from_secs(120), stream.read_to_string(&mut output))
+    // The script is done when its marker arrives; the guest's exec agent
+    // lingers before closing the connection, which is not the guest's time.
+    let end = format!("{DONE}\n");
+    let mut output = Vec::new();
+    let read = async {
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let n = stream.read(&mut chunk).await.unwrap();
+            output.extend_from_slice(&chunk[..n]);
+            if n == 0 || output.ends_with(end.as_bytes()) {
+                break;
+            }
+        }
+    };
+    timeout(Duration::from_secs(120), read)
         .await
-        .unwrap_or_else(|_| panic!("{sandbox}: script timed out after {:?}", started.elapsed()))
-        .unwrap();
+        .unwrap_or_else(|_| panic!("{sandbox}: script timed out after {:?}", started.elapsed()));
+    let output = String::from_utf8_lossy(&output);
+    let output = output.strip_suffix(&end).unwrap_or(&output).to_owned();
     (output, Duration::from_micros(waited_us))
 }
+
+/// The line `exec` appends to a script to see it finish.
+const DONE: &str = "--lab-script-done--";
 
 fn percentile(values: &mut [f64], percent: f64) -> f64 {
     values.sort_by(f64::total_cmp);
@@ -724,4 +740,193 @@ async fn only_trusted_hosts_let_guests_reach_the_local_network() {
         agent.kill();
         host.finish(&format!("lan-trusted-{trusted}"));
     }
+}
+
+/// What a sandbox's first command reports: who it is, sixteen random bytes,
+/// and how often its kernel reseeded its random numbers for a VM fork.
+const FIRST_COMMAND: &str = "cat /run/sandbox-id 2>/dev/null || echo none
+head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \\n'; echo
+dmesg | grep -c 'virtual machine fork'";
+
+/// Shows why a guest may have missed its restore notice.
+const GUEST_NOTICE_STATUS: &str = "systemctl status lab-notice --no-pager 2>&1 | head -20
+journalctl -b -u lab-notice --no-pager 2>&1 | tail -20
+ss -lx --vsock 2>&1 | head";
+
+/// One sandbox's start: created, then its first command run to the end.
+struct Started {
+    sandbox: Id,
+    /// From the create request to the first command's last output.
+    total_ms: f64,
+    create_ms: f64,
+    /// The same command run again at once: the guest's steady pace, without
+    /// its first touches of memory.
+    again_ms: f64,
+    output: Vec<String>,
+}
+
+/// Creates `sandbox` and runs [`FIRST_COMMAND`] in it.
+async fn start_one(client: Client, sandbox: Id) -> Started {
+    let started = Instant::now();
+    create(&client, sandbox, NEVER).await;
+    let create_ms = started.elapsed().as_secs_f64() * 1e3;
+    let (output, _) = exec(&client, sandbox, FIRST_COMMAND).await;
+    let total_ms = started.elapsed().as_secs_f64() * 1e3;
+    let again = Instant::now();
+    exec(&client, sandbox, FIRST_COMMAND).await;
+    Started {
+        sandbox,
+        total_ms,
+        create_ms,
+        again_ms: again.elapsed().as_secs_f64() * 1e3,
+        output: output.lines().map(str::to_owned).collect(),
+    }
+}
+
+/// Starts one sandbox, then `count` at once, and checks each knows its own
+/// id. Returns the single start, the concurrent ones and how long the
+/// concurrent batch took.
+async fn start_batch(agent: &Agent, count: usize) -> (Started, Vec<Started>, f64) {
+    let single = start_one(agent.client.clone(), id(0)).await;
+    let began = Instant::now();
+    let mut starts = JoinSet::new();
+    for n in 1..=count {
+        starts.spawn(start_one(agent.client.clone(), id(n)));
+    }
+    let mut all = Vec::new();
+    while let Some(started) = starts.join_next().await {
+        all.push(started.unwrap());
+    }
+    let wall_s = began.elapsed().as_secs_f64();
+    for started in all.iter().chain([&single]) {
+        if started.output.first() != Some(&started.sandbox.to_string()) {
+            let (diagnosis, _) = exec(&agent.client, started.sandbox, GUEST_NOTICE_STATUS).await;
+            eprintln!(
+                "{}: notice listener in the guest:\n{diagnosis}",
+                started.sandbox
+            );
+        }
+        assert_eq!(
+            started.output.first().map(String::as_str),
+            Some(started.sandbox.to_string().as_str()),
+            "{}: the guest does not know who it is: {:?}",
+            started.sandbox,
+            started.output
+        );
+    }
+    (single, all, wall_s)
+}
+
+fn totals(all: &[Started]) -> Vec<f64> {
+    all.iter().map(|started| started.total_ms).collect()
+}
+
+fn agains(all: &[Started]) -> Vec<f64> {
+    all.iter().map(|started| started.again_ms).collect()
+}
+
+/// Sandboxes started from a warm template run their first command within a
+/// restore's time of being created, each knowing its own id and drawing its
+/// own random numbers; compared with cold boots on the same host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn warm_templates_start_sandboxes_fast_and_each_its_own() {
+    let Some(lab) = lab() else {
+        eprintln!("skipped: set COMPUTE_TEST_LAB");
+        return;
+    };
+    let count = count();
+    let notice = ["--network", "--restore-notice-port", "53"];
+    let warm = Host::new(
+        &lab,
+        "warm",
+        &[
+            &notice[..],
+            &["--template-ready-port", "54", "--template", "1x512"],
+        ]
+        .concat(),
+    );
+    let agent = warm.start().await;
+    let began = Instant::now();
+    agent
+        .wait_until("a ready template", |status| {
+            status
+                .templates
+                .iter()
+                .any(|template| template.state == TemplateState::Ready)
+        })
+        .await;
+    let template_s = began.elapsed().as_secs_f64();
+    assert_eq!(firecrackers(), 0, "the template's VM has ended");
+    let (single, all, wall_s) = start_batch(&agent, count).await;
+    let random: std::collections::BTreeSet<&str> = all
+        .iter()
+        .chain([&single])
+        .map(|started| started.output.get(1).map_or("", String::as_str))
+        .collect();
+    assert_eq!(
+        random.len(),
+        count + 1,
+        "every clone draws its own random bytes"
+    );
+    for started in all.iter().chain([&single]) {
+        let reseeds: u32 = started
+            .output
+            .get(2)
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        assert!(
+            reseeds >= 1,
+            "{}: no reseed on restore: {:?}",
+            started.sandbox,
+            started.output
+        );
+    }
+    let creates: Vec<f64> = all.iter().map(|started| started.create_ms).collect();
+    let status = agent.status().await;
+    let boots = status
+        .steps
+        .iter()
+        .find(|(name, _)| name == "boot")
+        .map(|(_, stats)| stats.done);
+    let restores = status
+        .steps
+        .iter()
+        .find(|(name, _)| name == "restore")
+        .map(|(_, stats)| stats.done);
+    agent.remove_all().await;
+    agent.kill();
+    warm.finish(&format!("warm-pool-{count}"));
+
+    let cold = Host::new(&lab, "cold", &notice);
+    let agent = cold.start().await;
+    let (cold_single, cold_all, cold_wall_s) = start_batch(&agent, count).await;
+    agent.remove_all().await;
+    agent.kill();
+    cold.finish(&format!("cold-start-{count}"));
+
+    save_results(
+        &format!("warm-pool-{count}"),
+        &serde_json::json!({
+            "sandboxes": count,
+            "template_ready_s": template_s,
+            "warm": {
+                "single_create_to_first_command_ms": single.total_ms,
+                "single_second_command_ms": single.again_ms,
+                "concurrent_create_to_first_command_ms": summary(&totals(&all)),
+                "concurrent_second_command_ms": summary(&agains(&all)),
+                "concurrent_create_ms": summary(&creates),
+                "concurrent_wall_s": wall_s,
+                "boot_steps": boots,
+                "restore_steps": restores,
+            },
+            "cold": {
+                "single_create_to_first_command_ms": cold_single.total_ms,
+                "single_second_command_ms": cold_single.again_ms,
+                "concurrent_create_to_first_command_ms": summary(&totals(&cold_all)),
+                "concurrent_second_command_ms": summary(&agains(&cold_all)),
+                "concurrent_wall_s": cold_wall_s,
+            },
+        }),
+    );
+    assert_eq!(boots, Some(0), "every warm sandbox restored");
 }

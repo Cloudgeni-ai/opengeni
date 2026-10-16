@@ -8,8 +8,9 @@
 # Produces under $LAB_DIR (default /lab):
 #   bin/firecracker         pinned Firecracker release
 #   vmlinux                 guest kernel from Firecracker CI artifacts
-#   base.ext4               guest root filesystem with node, git, python and a
-#                           small exec agent listening on vsock port 52
+#   base.ext4               guest root filesystem with node, git, python, a
+#                           small exec agent listening on vsock port 52 and
+#                           the guest services below
 #   swapfile                backing swap so zswap can be measured
 set -euo pipefail
 
@@ -22,6 +23,100 @@ ARCH="$(uname -m)"
 export DEBIAN_FRONTEND=noninteractive
 
 log() { printf '[host-setup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+
+# The guest's side of the host agent's identity contract: a booted guest
+# finds its sandbox id on the kernel command line (`opengeni.sandbox=`), a
+# restored one in the restore notice on vsock port 53 (`restored <unix
+# nanoseconds> sandbox=<id>`), which also sets the clock. Either way the id
+# ends up in /run/sandbox-id. A template is snapshotted once the guest
+# accepts on vsock port 54, which opens only when systemd has finished
+# starting everything, so clones wake settled instead of mid-boot.
+install_guest_services() {
+  local root="$1"
+  # Resident, so answering a notice starts no process in a guest whose
+  # memory is still being faulted in after its restore.
+  sudo tee "$root/usr/local/bin/lab-notice" >/dev/null <<'SCRIPT'
+#!/usr/bin/python3
+import os, socket, time
+
+listener = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+listener.bind((socket.VMADDR_CID_ANY, 53))
+listener.listen(64)
+while True:
+    connection, _ = listener.accept()
+    with connection:
+        try:
+            line = b""
+            while not line.endswith(b"\n"):
+                chunk = connection.recv(256)
+                if not chunk:
+                    raise EOFError
+                line += chunk
+            word, nanos, *fields = line.decode().split()
+            if word != "restored":
+                continue
+            time.clock_settime_ns(time.CLOCK_REALTIME, int(nanos))
+            for field in fields:
+                key, _, value = field.partition("=")
+                if key == "sandbox":
+                    with open("/run/sandbox-id.new", "w") as file:
+                        file.write(value + "\n")
+                    os.replace("/run/sandbox-id.new", "/run/sandbox-id")
+            connection.sendall(b"ok\n")
+        except (OSError, ValueError, EOFError):
+            pass
+SCRIPT
+  sudo tee "$root/usr/local/bin/lab-identity" >/dev/null <<'SCRIPT'
+#!/bin/bash
+for arg in $(cat /proc/cmdline); do
+  case "$arg" in
+    opengeni.sandbox=*) printf '%s\n' "${arg#opengeni.sandbox=}" >/run/sandbox-id ;;
+  esac
+done
+SCRIPT
+  sudo chmod 755 "$root/usr/local/bin/lab-notice" "$root/usr/local/bin/lab-identity"
+  sudo tee "$root/etc/systemd/system/lab-notice.service" >/dev/null <<'UNIT'
+[Unit]
+Description=Restore notices from the host agent on vsock port 53
+After=local-fs.target
+
+[Service]
+ExecStart=/usr/local/bin/lab-notice
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo tee "$root/etc/systemd/system/lab-identity.service" >/dev/null <<'UNIT'
+[Unit]
+Description=The sandbox id from the kernel command line
+After=local-fs.target
+# Commands arrive through lab-agent; none may run before the id is known.
+Before=lab-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/lab-identity
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  sudo tee "$root/etc/systemd/system/lab-ready.service" >/dev/null <<'UNIT'
+[Unit]
+Description=Tells a template builder on vsock port 54 that startup has finished
+After=multi-user.target
+
+[Service]
+ExecStart=/bin/sh -c 'systemctl is-system-running --wait >/dev/null; exec /usr/bin/socat VSOCK-LISTEN:54,reuseaddr,fork SYSTEM:true'
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  for unit in lab-notice lab-identity lab-ready; do
+    sudo ln -sf "/etc/systemd/system/$unit.service" "$root/etc/systemd/system/multi-user.target.wants/$unit.service"
+  done
+}
 
 log "packages"
 sudo apt-get update -qq
@@ -90,6 +185,18 @@ if [ ! -f vmlinux ] || [ ! -f ubuntu.squashfs ]; then
   curl -fsSL -o vmlinux.config "$S3/${kernel_key}.config" 2>/dev/null || true
 fi
 
+if [ -f base.ext4 ] && {
+  ! sudo debugfs -R "cat /etc/systemd/system/lab-identity.service" base.ext4 2>/dev/null | grep -q Before=lab-agent ||
+    ! sudo debugfs -R "cat /usr/local/bin/lab-notice" base.ext4 2>/dev/null | grep -q python3 ||
+    ! sudo debugfs -R "stat /etc/systemd/system/lab-ready.service" base.ext4 2>/dev/null | grep -q Inode
+}; then
+  log "guest services"
+  sudo mkdir -p /mnt/lab-base
+  sudo mount -o loop base.ext4 /mnt/lab-base
+  install_guest_services /mnt/lab-base
+  sudo umount /mnt/lab-base
+fi
+
 if [ ! -f base.ext4 ]; then
   log "guest root filesystem"
   sudo rm -rf rootfs
@@ -133,6 +240,7 @@ Restart=always
 WantedBy=multi-user.target
 UNIT
   sudo ln -sf /etc/systemd/system/lab-agent.service rootfs/etc/systemd/system/multi-user.target.wants/lab-agent.service
+  install_guest_services rootfs
   for m in proc sys dev; do sudo umount -l "rootfs/$m"; done
   trap - EXIT
   # Name servers come from the kernel's `ip=` boot argument, which the
