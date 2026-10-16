@@ -75,6 +75,9 @@ struct World {
     adopted: AtomicUsize,
     /// While set, every resume is refused before the guest runs.
     refuse_resumes: AtomicBool,
+    /// While set, every boot fails as a launch does that could not prove
+    /// the VMM it may have started is gone.
+    stuck_boots: AtomicBool,
     /// While set, a refused resume also makes the sandbox's directory
     /// read-only, as a failing disk would.
     freeze_on_refusal: AtomicBool,
@@ -326,6 +329,13 @@ impl Engine for Fake {
     async fn boot(&self, spec: &VmSpec) -> Result<FakeVm, EngineError> {
         sleep(self.delays.boot).await;
         self.world.boots.fetch_add(1, Ordering::Relaxed);
+        if self.world.stuck_boots.load(Ordering::SeqCst) {
+            return Err(EngineError::new(
+                ErrorKind::Fatal,
+                "boot",
+                "attaching failed; then what it started could not be cleaned up",
+            ));
+        }
         Ok(self.launch(spec, String::new()))
     }
 
