@@ -5,9 +5,9 @@
 //! in the background, never inside a request, and never touches a sandbox
 //! within its request.
 
-use super::Host;
+use super::{Action, Host, Notice, Resource, WakeRoom};
 use crate::ids::SandboxId;
-use crate::level::Level;
+use crate::level::{Level, Priority};
 use crate::policy::MemoryPolicy;
 use crate::sandbox::{Health, Sandbox};
 use crate::time::At;
@@ -41,6 +41,12 @@ pub(crate) enum Squeeze {
     /// It is saved and waits, wanted awake, until `bytes` fit above the
     /// high watermark.
     Waiting {
+        /// Host memory its VM held.
+        bytes: u64,
+    },
+    /// It was let through to wake and claims `bytes` of the room above the
+    /// high watermark until a reading taken while it runs shows them.
+    Returning {
         /// Host memory its VM held.
         bytes: u64,
     },
@@ -149,7 +155,9 @@ impl Host {
         memory: MemoryPolicy,
         available: u64,
     ) -> bool {
-        let mut room = available.saturating_sub(memory.high_watermark);
+        let mut room = available
+            .saturating_sub(memory.high_watermark)
+            .saturating_sub(self.claimed_room());
         let mut set: Vec<(At, SandboxId, u64)> = self
             .sandboxes
             .iter()
@@ -174,13 +182,108 @@ impl Host {
     }
 
     /// Whether a sandbox that held `bytes` when it was paused for host
-    /// memory may wake: they fit with the high watermark still free.
+    /// memory may wake: they fit with the high watermark still free, next
+    /// to what sandboxes let through before claim.
     pub(super) fn room_returned(&self, bytes: u64) -> bool {
+        self.policy.memory.is_none()
+            || self.available_memory.is_none()
+            || bytes <= self.free_above_watermark()
+    }
+
+    /// Bytes available above the high watermark that no sandbox let
+    /// through to wake claims; 0 without a reading.
+    pub(super) fn free_above_watermark(&self) -> u64 {
         match (self.policy.memory, self.available_memory) {
-            (Some(memory), Some(available)) => {
-                available.saturating_sub(bytes) >= memory.high_watermark
+            (Some(memory), Some(available)) => available
+                .saturating_sub(memory.high_watermark)
+                .saturating_sub(self.claimed_room()),
+            _ => 0,
+        }
+    }
+
+    /// Bytes claimed by sandboxes let through to wake after waiting for
+    /// host memory, not yet shown by a reading.
+    fn claimed_room(&self) -> u64 {
+        self.sandboxes
+            .values()
+            .map(|slot| match slot.squeeze {
+                Squeeze::Returning { bytes } => bytes,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Ends the claims of sandboxes that run and were measured: a reading
+    /// of available memory taken now shows what they hold.
+    pub(super) fn measured_returns(&mut self) {
+        for slot in self.sandboxes.values_mut() {
+            if matches!(slot.squeeze, Squeeze::Returning { .. })
+                && slot.state.level == Level::Running
+                && slot.in_flight.is_none()
+                && slot.resident.is_some()
+            {
+                slot.squeeze = Squeeze::None;
             }
-            _ => true,
+        }
+    }
+
+    /// `sandbox` is asked for awake by a touch or a hold. A wake refused
+    /// before tries again, but one paused for host memory still waits for
+    /// room and is told so at once.
+    pub(super) fn ask_awake(&mut self, sandbox: SandboxId, out: &mut Vec<Action>) {
+        let Some(slot) = self.sandboxes.get(&sandbox) else {
+            return;
+        };
+        if let Squeeze::Waiting { bytes } = slot.squeeze {
+            out.push(Action::Notify {
+                sandbox,
+                notice: Notice::HostFull {
+                    resource: Resource::Memory,
+                    needed: bytes,
+                    free: self.free_above_watermark(),
+                },
+            });
+        } else {
+            self.unrefuse(sandbox);
+        }
+    }
+
+    /// Moves `id` along after a pause for host memory: once saved it
+    /// waits, wanted awake, for room, and whoever waits for it hears so;
+    /// once nothing wants it awake nothing waits; a wake given up frees
+    /// the room it claimed.
+    pub(super) fn settle_squeeze(&mut self, id: SandboxId, now: At, out: &mut Vec<Action>) {
+        let free = self.free_above_watermark();
+        let Some(slot) = self.sandboxes.get_mut(&id) else {
+            return;
+        };
+        if let Squeeze::Leaving { bytes } = slot.squeeze
+            && !slot.state.level.has_process()
+            && slot.in_flight.is_none()
+        {
+            slot.squeeze = Squeeze::Waiting { bytes };
+            slot.request_wake(Priority::Background, now);
+            slot.room = WakeRoom::Refused;
+            self.refused.insert(id);
+            out.push(Action::Notify {
+                sandbox: id,
+                notice: Notice::HostFull {
+                    resource: Resource::Memory,
+                    needed: bytes,
+                    free,
+                },
+            });
+        }
+        if slot.room == WakeRoom::Refused && !slot.wants_awake() {
+            slot.room = WakeRoom::Open;
+            slot.squeeze = Squeeze::None;
+            self.refused.remove(&id);
+        }
+        if matches!(slot.squeeze, Squeeze::Returning { .. })
+            && slot.state.level != Level::Running
+            && !slot.waking()
+        {
+            slot.squeeze = Squeeze::None;
         }
     }
 }

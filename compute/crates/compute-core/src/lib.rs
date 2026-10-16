@@ -23,6 +23,9 @@
 //! let mut actions = Vec::new();
 //! let size = Size::whole(1 << 30);
 //! host.handle(At::ZERO, Input::Add { sandbox, state: State::RUNNING, policy, size }, &mut actions);
+//! // A VM found running has its balloon let go at once.
+//! assert!(matches!(actions[..], [Action::Balloon { bytes: 0, .. }]));
+//! actions.clear();
 //! // Ten idle seconds later, it pauses.
 //! assert_eq!(host.next_deadline(), Some(At::from_millis(10_000)));
 //! host.handle(At::from_millis(10_000), Input::Tick, &mut actions);

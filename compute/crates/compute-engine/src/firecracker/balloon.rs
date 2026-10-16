@@ -4,9 +4,14 @@
 //!
 //! The device is configured at boot with `deflate_on_oom`, so a guest that
 //! needs the memory takes pages back from the balloon rather than run out.
+//!
+//! A request outlives nothing: once its VM is stopped or dropped, a
+//! request still on its way does nothing, so it never reaches a later VM
+//! behind the same API socket.
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -27,6 +32,8 @@ struct Inner {
     /// Held while the balloon or the run state changes, so a request to
     /// set it never lands between letting it go and pausing.
     state: Mutex<State>,
+    /// Set once its VM is stopped or dropped; read under `state`.
+    ended: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -39,30 +46,27 @@ struct State {
 }
 
 impl Balloon {
-    /// The balloon of a VM booted or restored with `device`: set to
-    /// nothing, since no VM pauses with it set.
-    pub(super) fn new(api: &Api, device: bool) -> Self {
-        Self::with(api, device, Some(0))
-    }
-
-    /// The balloon of a VM an earlier agent ran, set to who knows what.
+    /// The balloon of a VM with `device`, set to what is not known: a VM
+    /// restored from an image whose balloon could not be let go before
+    /// its pause, or one an earlier agent ran, keeps that balloon. The
+    /// first request sets it either way.
     pub(super) fn unknown(api: &Api, device: bool) -> Self {
-        Self::with(api, device, None)
-    }
-
-    fn with(api: &Api, device: bool, mib: Option<u32>) -> Self {
         Self {
             inner: device.then(|| {
                 Arc::new(Inner {
                     api: api.clone(),
-                    state: Mutex::new(State { mib, paused: false }),
+                    state: Mutex::new(State {
+                        mib: None,
+                        paused: false,
+                    }),
+                    ended: AtomicBool::new(false),
                 })
             }),
         }
     }
 
     /// Sets it to take `bytes`, rounded down to MiB, unless the VM is
-    /// paused. Does not borrow the VM.
+    /// paused or has ended. Does not borrow the VM.
     pub(super) fn set(
         &self,
         bytes: u64,
@@ -74,12 +78,21 @@ impl Balloon {
             };
             let mib = u32::try_from(bytes >> 20).unwrap_or(u32::MAX);
             let mut state = inner.state.lock().await;
-            if state.paused || state.mib == Some(mib) {
+            if inner.ended.load(Ordering::Acquire) || state.paused || state.mib == Some(mib) {
                 return Ok(());
             }
             patch(&inner.api, mib).await?;
             state.mib = Some(mib);
             Ok(())
+        }
+    }
+
+    /// Ends it before its VM is stopped: waits for a request on its way,
+    /// and no later one reaches the API socket.
+    pub(super) async fn end(&self) {
+        if let Some(inner) = &self.inner {
+            let _state = inner.state.lock().await;
+            inner.ended.store(true, Ordering::Release);
         }
     }
 
@@ -118,6 +131,15 @@ impl Balloon {
     }
 }
 
+impl Drop for Balloon {
+    /// A request not yet on its way does nothing once its VM is gone.
+    fn drop(&mut self) {
+        if let Some(inner) = &self.inner {
+            inner.ended.store(true, Ordering::Release);
+        }
+    }
+}
+
 /// Sets the balloon to take nothing unless it is known to, or forgets what
 /// it takes if that fails.
 async fn let_go(api: &Api, state: &mut State) {
@@ -131,4 +153,62 @@ async fn patch(api: &Api, mib: u32) -> Result<(), EngineError> {
         .await
         .map(drop)
         .map_err(|error| EngineError::caused_by(ErrorKind::Transient, "balloon", error))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex as Shared;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixListener;
+
+    use super::*;
+
+    /// A VMM's API that answers every request and keeps their bodies.
+    fn api() -> (tempfile::TempDir, Api, Arc<Shared<Vec<String>>>) {
+        let dir = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        let socket = dir.path().join("api.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let seen = Arc::new(Shared::new(Vec::new()));
+        let kept = Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = vec![0_u8; 4096];
+                let read = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                kept.lock().unwrap().push(request);
+                stream.write_all(b"HTTP/1.1 204 \r\n\r\n").await.unwrap();
+            }
+        });
+        (dir, Api::new(socket), seen)
+    }
+
+    #[tokio::test]
+    async fn a_new_vm_s_balloon_is_let_go_even_if_asked_for_nothing() {
+        // A restored image may carry a balloon its pause could not let go.
+        let (_dir, api, seen) = api();
+        let balloon = Balloon::unknown(&api, true);
+        balloon.set(0).await.unwrap();
+        balloon.set(0).await.unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(seen[0].contains("\"amount_mib\":0"), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_request_on_its_way_never_reaches_a_later_vm() {
+        let (_dir, api, seen) = api();
+        let balloon = Balloon::unknown(&api, true);
+        // Asked, then the VM is stopped before the request runs.
+        let late = balloon.set(1 << 30);
+        balloon.end().await;
+        late.await.unwrap();
+        balloon.set(1 << 30).await.unwrap();
+        // Asked, then the VM is dropped.
+        let other = Balloon::unknown(&api, true);
+        let late = other.set(1 << 30);
+        drop(other);
+        late.await.unwrap();
+        assert!(seen.lock().unwrap().is_empty());
+    }
 }

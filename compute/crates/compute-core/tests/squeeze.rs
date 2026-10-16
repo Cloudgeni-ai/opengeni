@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use compute_core::{
-    Action, At, Durability, HoldId, Host, HostPolicy, Input, Level, MemoryPolicy, OpId, Outcome,
-    Priority, SandboxId, Size, SleepPolicy, SleepRules, State, Step,
+    Action, At, Durability, HoldId, Host, HostPolicy, Input, Level, MemoryPolicy, Notice, OpId,
+    Outcome, Priority, SandboxId, Size, SleepPolicy, SleepRules, State, Step,
 };
 
 const GIB: u64 = 1 << 30;
@@ -245,4 +245,56 @@ fn idle_sandboxes_go_before_busy_ones_are_squeezed() {
     assert_eq!(started(&actions, 4)[0].0, Step::Drop);
     assert!(balloons(&actions).is_empty(), "{actions:?}");
     assert!(!rig.paused_for_memory(1) && !rig.paused_for_memory(2));
+}
+
+fn host_full(actions: &[Action], id: u128) -> bool {
+    actions.iter().any(|action| {
+        matches!(action, Action::Notify { sandbox, notice: Notice::HostFull { .. } }
+            if sandbox.0 == id)
+    })
+}
+
+#[test]
+fn sandboxes_paused_for_memory_wake_one_at_a_time_as_room_returns() {
+    let mut rig = Rig::new();
+    rig.running(1, size(GIB, 8 * GIB), 3 * GIB);
+    rig.running(2, size(GIB, 8 * GIB), 3 * GIB);
+    // Nothing free: both balloons, and one is paused; once the grace is
+    // over and the guests gave nothing, the other too.
+    let actions = rig.available(0);
+    assert_eq!(started(&actions, 2)[0].0, Step::Pause);
+    rig.settle(2, actions);
+    rig.at(3);
+    let actions = rig.available(0);
+    assert_eq!(started(&actions, 1)[0].0, Step::Pause);
+    rig.settle(1, actions);
+    assert_eq!((rig.level(1), rig.level(2)), (Level::Saved, Level::Saved));
+    // Asking for one while the host is short tells at once that it waits.
+    let touched = rig.send(Input::Touch {
+        sandbox: SandboxId(1),
+        priority: Priority::Interactive,
+    });
+    assert!(host_full(&touched, 1), "{touched:?}");
+    assert_eq!(started(&touched, 1), []);
+    assert!(rig.paused_for_memory(1));
+    // Room for one of the two 3 GiB VMs above the high watermark: only one
+    // wakes, and the other waits until a reading shows it.
+    rig.at(4);
+    let actions = rig.available(8 * GIB);
+    let waking: Vec<u128> = [1, 2]
+        .into_iter()
+        .filter(|id| !started(&actions, *id).is_empty())
+        .collect();
+    let [first] = waking[..] else {
+        panic!("{actions:?}");
+    };
+    let second = 3 - first;
+    rig.settle(first, actions);
+    assert_eq!(rig.level(first), Level::Running);
+    let actions = rig.available(8 * GIB);
+    assert!(started(&actions, second).is_empty(), "{actions:?}");
+    // Measured running, the first's memory shows in readings.
+    rig.resident(first, 3 * GIB);
+    let actions = rig.available(8 * GIB);
+    assert_eq!(started(&actions, second)[0].0, Step::Restore);
 }

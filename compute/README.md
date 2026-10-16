@@ -156,9 +156,12 @@ back from their guests, and if the host is still short one is paused and
 saved, held or not, and wakes by itself with its programs once there is
 room. A sandbox within its request is never touched. The status shows
 `balloon_bytes` and `paused_for_memory` for such sandboxes, and
-`waiting_for_room` while one waits.
+`waiting_for_room` while one waits; asking for it meanwhile gets
+`host_full` at once.
 The status reports the capacity (total, reserved, occupied, free, awake), and
-a restarted agent rebuilds it from its records.
+a restarted agent rebuilds it from its records, counting every VM it takes
+back at its full size until it is measured, and any it cannot take back at
+its full size until it is removed.
 
 Local disk is booked like memory, since a full disk would block the saves
 that relieve memory: every VM whose state is not saved yet books its next

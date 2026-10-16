@@ -254,9 +254,10 @@ impl World {
                 }
             }
             Action::Destroy { sandbox } => assert!(!self.live.contains_key(&sandbox)),
-            // Every sandbox here requests its whole size.
-            Action::Balloon { sandbox, .. } => {
-                panic!("{sandbox:?} squeezed within its request");
+            // Every sandbox here requests its whole size: its balloon is
+            // only ever let go.
+            Action::Balloon { sandbox, bytes } => {
+                assert_eq!(bytes, 0, "{sandbox:?} squeezed within its request");
             }
             Action::Notify { sandbox, notice } => {
                 let Some(truth) = self.live.get_mut(&sandbox) else {
@@ -431,7 +432,8 @@ impl World {
                 woke: false,
                 requested: None,
                 unreported_losses: 0,
-                resident: 0,
+                // A VM found running counts whole until it is measured.
+                resident: if state.level.has_process() { GIB } else { 0 },
             },
         );
         self.send(Input::Add {

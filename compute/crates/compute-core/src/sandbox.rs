@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::host::{Balloon, Failure, Notice, Outcome, Size, Squeeze};
+use crate::host::{Balloon, Failure, Notice, Outcome, Size, Squeeze, WakeRoom};
 use crate::ids::{HoldId, OpId, SandboxId};
 use crate::level::{Durability, Level, Priority, State, Step};
 use crate::policy::{Backoff, SleepPolicy};
@@ -63,17 +63,19 @@ pub(crate) struct Sandbox {
     /// means none.
     pub requested: Level,
     /// Latest reported resident memory in bytes of the current VM process;
-    /// `None` until one is reported.
+    /// `None` until one is reported, except for a VM found running, which
+    /// counts at its full size until then.
     pub resident: Option<u64>,
     /// What it may take of host memory.
     pub size: Size,
-    /// A wake for it was refused for want of memory, and is not tried again
-    /// until asked anew or its memory fits; see [`crate::Notice::HostFull`].
-    pub refused: bool,
+    /// Where its wake stands with admission.
+    pub room: WakeRoom,
     /// What the host asks of its running VM's balloon, if anything.
     pub balloon: Option<Balloon>,
-    /// Bytes its VM's balloon was last set to take.
-    pub balloon_sent: u64,
+    /// Bytes its VM's balloon was last set to take; `None` when not known,
+    /// as after a step that may have left the balloon as it was, or for a
+    /// VM found running: it is then set once the VM runs again.
+    pub balloon_sent: Option<u64>,
     /// Whether it was paused for host memory while in use.
     pub squeeze: Squeeze,
     pub in_flight: Option<InFlight>,
@@ -108,11 +110,12 @@ impl Sandbox {
             floor: Level::Running,
             floor_relief: 0,
             requested: Level::Running,
-            resident: None,
+            // Until it is measured, a VM found running may hold all of it.
+            resident: state.level.has_process().then_some(size.limit),
             size,
-            refused: false,
+            room: WakeRoom::Open,
             balloon: None,
-            balloon_sent: 0,
+            balloon_sent: None,
             squeeze: Squeeze::None,
             in_flight: None,
             process_lost: false,
@@ -263,7 +266,7 @@ impl Sandbox {
         }
         self.resident = None;
         self.balloon = None;
-        self.balloon_sent = 0;
+        self.balloon_sent = None;
     }
 
     /// Latest reported resident memory in bytes, 0 if none was.
@@ -336,7 +339,7 @@ impl Sandbox {
         }
         // Pausing and saving it for host memory goes on whoever wants it.
         if self.wants_awake() && !self.leaving() {
-            if self.refused {
+            if self.room == WakeRoom::Refused {
                 return None;
             }
             return match self.state.level {

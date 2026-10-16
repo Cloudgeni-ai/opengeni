@@ -76,6 +76,22 @@ impl Capacity {
 /// policy says: typical of zswap on guest memory.
 const COMPRESSED_PERCENT: u8 = 25;
 
+/// Where a sandbox's wake stands with admission.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum WakeRoom {
+    /// Its wake, if any, has not been admitted yet.
+    #[default]
+    Open,
+    /// Its wake was admitted and owns its room until the sandbox runs or
+    /// nothing wants it awake any more, across every step it takes: a wake
+    /// from object storage fetches first and restores after, and the room
+    /// booked for the fetch is the restore's.
+    Admitted,
+    /// Its wake was refused for want of room, and is not tried again until
+    /// asked anew or it fits; see [`crate::Notice::HostFull`].
+    Refused,
+}
+
 /// Whether `step` wakes a sandbox into memory: it creates or resumes a VM
 /// process, or fetches a sandbox only to restore it, so it is admitted
 /// before any download starts and holds the room meanwhile.
@@ -90,9 +106,24 @@ impl Sandbox {
     /// Whether it is awake or waking: whether it holds its reservation.
     pub(super) fn reserves(&self) -> bool {
         self.state.level == Level::Running
+            || self.room == WakeRoom::Admitted
             || self
                 .in_flight
                 .is_some_and(|flight| needs_memory(flight.step))
+    }
+
+    /// Ends the room its wake owned once it runs, or once nothing waits
+    /// for it and no step is waking it.
+    pub(super) fn settle_room(&mut self) {
+        let waking = self
+            .in_flight
+            .is_some_and(|flight| needs_memory(flight.step));
+        let running = self.state.level == Level::Running && self.in_flight.is_none();
+        if self.room == WakeRoom::Admitted
+            && (running || self.is_broken() || (!self.wants_awake() && !waking))
+        {
+            self.room = WakeRoom::Open;
+        }
     }
 
     /// Bytes of the budget it takes now.
@@ -234,6 +265,13 @@ impl Host {
             let Some(slot) = self.sandboxes.get(&key.sandbox) else {
                 continue;
             };
+            if slot.room == WakeRoom::Admitted {
+                // Its room and its save are booked already: a fetched
+                // sandbox restores into the room its fetch was given.
+                self.queues[index].remove(&key);
+                self.start(step, key, out);
+                continue;
+            }
             let need = slot.wake_need(percent);
             let save = slot.save_need();
             if let Some(disk) = left.disk.as_mut()
@@ -282,7 +320,9 @@ impl Host {
     /// and [`Self::admit_measured`] charges it their need too, so a sandbox
     /// let through here is not refused again for the same shortfall. One
     /// paused for host memory waits, besides, until the memory it held is
-    /// free above the high watermark. Returns whether any did.
+    /// free above the high watermark, next to what others let through
+    /// before it claim; see [`Host::room_returned`]. Returns whether any
+    /// did.
     pub(super) fn retry_refused(&mut self, now: At) -> bool {
         let capacity = self.capacity();
         let percent = self.compressed_percent();
@@ -302,16 +342,17 @@ impl Host {
             }
         }
         let mut ready = Vec::new();
+        let mut claimed = 0;
         for id in &self.refused {
             let Some(slot) = self.sandboxes.get(id) else {
                 continue;
             };
             let need = slot.wake_need(percent);
-            if let Squeeze::Waiting { bytes } = slot.squeeze
-                && !self.room_returned(bytes)
-            {
-                continue;
-            }
+            let returning = match slot.squeeze {
+                Squeeze::Waiting { bytes } if !self.room_returned(claimed + bytes) => continue,
+                Squeeze::Waiting { bytes } => bytes,
+                _ => 0,
+            };
             let fits = capacity.is_none_or(|capacity| {
                 let (dropping, droppable) = self.instant_room(now, *id);
                 i128::from(wanted + need)
@@ -321,12 +362,16 @@ impl Host {
                 .is_none_or(|room| room.take(slot.save_need()).is_ok());
             if fits {
                 wanted += need;
+                claimed += returning;
                 ready.push(*id);
             }
         }
         for id in &ready {
             self.unrefuse(*id);
             if let Some(slot) = self.sandboxes.get_mut(id) {
+                if let Squeeze::Waiting { bytes } = slot.squeeze {
+                    slot.squeeze = Squeeze::Returning { bytes };
+                }
                 slot.request_wake(Priority::Interactive, now);
             }
             self.mark(*id);
@@ -334,13 +379,13 @@ impl Host {
         !ready.is_empty()
     }
 
-    /// Forgets that `id`'s wake was refused.
+    /// Forgets that `id`'s wake was refused. One paused for host memory
+    /// still waits for room; see [`Squeeze::Waiting`].
     pub(super) fn unrefuse(&mut self, id: SandboxId) {
         if self.refused.remove(&id)
             && let Some(slot) = self.sandboxes.get_mut(&id)
         {
-            slot.refused = false;
-            slot.squeeze = Squeeze::None;
+            slot.room = WakeRoom::Open;
         }
     }
 
@@ -361,7 +406,7 @@ impl Host {
         self.queues[step.index()].remove(&key);
         slot.queued = None;
         slot.wake = None;
-        slot.refused = true;
+        slot.room = WakeRoom::Refused;
         self.refused.insert(key.sandbox);
         out.push(Action::Notify {
             sandbox: key.sandbox,

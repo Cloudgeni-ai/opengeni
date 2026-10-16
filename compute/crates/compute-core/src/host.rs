@@ -14,6 +14,7 @@ mod admission;
 mod disk;
 mod squeeze;
 
+pub(crate) use admission::WakeRoom;
 pub use admission::{Capacity, Size};
 pub use disk::{DiskCapacity, DiskSpace, Resource};
 pub(crate) use squeeze::{Balloon, Squeeze};
@@ -423,10 +424,10 @@ impl Host {
             unsavable: sandbox.health == Health::Unsavable,
             broken: sandbox.is_broken(),
             paused_for_memory: match sandbox.squeeze {
-                Squeeze::None => None,
+                Squeeze::None | Squeeze::Returning { .. } => None,
                 Squeeze::Leaving { bytes } | Squeeze::Waiting { bytes } => Some(bytes),
             },
-            balloon: sandbox.balloon_sent,
+            balloon: sandbox.balloon_sent.unwrap_or(0),
         })
     }
 
@@ -489,7 +490,7 @@ impl Host {
                 }
             }
             Input::Touch { sandbox, priority } => {
-                self.unrefuse(sandbox);
+                self.ask_awake(sandbox, out);
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
                     slot.touch(now);
                     slot.requested = Level::Running;
@@ -502,18 +503,7 @@ impl Host {
                 hold,
                 until,
                 priority,
-            } => {
-                self.unrefuse(sandbox);
-                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
-                    slot.holds.insert(hold, until);
-                    slot.touch(now);
-                    slot.requested = Level::Running;
-                    if slot.state.level != Level::Running || slot.in_flight.is_some() {
-                        slot.request_wake(priority, now);
-                    }
-                    self.mark(sandbox);
-                }
-            }
+            } => self.hold(now, sandbox, (hold, until), priority, out),
             Input::Release { sandbox, hold } => {
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
                     slot.holds.remove(&hold);
@@ -548,6 +538,7 @@ impl Host {
             Input::Memory { available } => {
                 self.available_memory = Some(available);
                 self.settled_relief = 0;
+                self.measured_returns();
             }
             Input::Disk { available } => {
                 self.disk = Some(available);
@@ -567,6 +558,26 @@ impl Host {
                 }
             }
             Input::Tick => {}
+        }
+    }
+
+    fn hold(
+        &mut self,
+        now: At,
+        sandbox: SandboxId,
+        (hold, until): (HoldId, Option<At>),
+        priority: Priority,
+        out: &mut Vec<Action>,
+    ) {
+        self.ask_awake(sandbox, out);
+        if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
+            slot.holds.insert(hold, until);
+            slot.touch(now);
+            slot.requested = Level::Running;
+            if slot.state.level != Level::Running || slot.in_flight.is_some() {
+                slot.request_wake(priority, now);
+            }
+            self.mark(sandbox);
         }
     }
 
@@ -771,25 +782,14 @@ impl Host {
         };
         slot.dirty = false;
         slot.expire_holds(now);
-        if let Squeeze::Leaving { bytes } = slot.squeeze
-            && !slot.state.level.has_process()
-            && slot.in_flight.is_none()
-        {
-            // Saved for host memory: it waits, wanted awake, for room.
-            slot.squeeze = Squeeze::Waiting { bytes };
-            slot.request_wake(Priority::Background, now);
-            slot.refused = true;
-            self.refused.insert(id);
-        }
-        if slot.refused && !slot.wants_awake() {
-            // Nothing wants it awake any more, so nothing waits for room.
-            slot.refused = false;
-            slot.squeeze = Squeeze::None;
-            self.refused.remove(&id);
-        }
+        self.settle_squeeze(id, now, out);
+        let Some(slot) = self.sandboxes.get_mut(&id) else {
+            return;
+        };
+        slot.settle_room();
         if slot.state.level == Level::Running && slot.in_flight.is_none() {
             slot.wake = None;
-        } else if slot.wake.is_none() && !slot.holds.is_empty() && !slot.refused {
+        } else if slot.wake.is_none() && !slot.holds.is_empty() && slot.room != WakeRoom::Refused {
             slot.wake = Some(Wake {
                 priority: Priority::Interactive,
                 since: now,
@@ -839,8 +839,10 @@ impl Host {
         }
         if slot.state.level == Level::Running && slot.in_flight.is_none() {
             let bytes = slot.balloon.map_or(0, |balloon| balloon.bytes);
-            if bytes != slot.balloon_sent {
-                slot.balloon_sent = bytes;
+            // A balloon not known to be as asked is set again, deflated
+            // when nothing is asked of it.
+            if slot.balloon_sent != Some(bytes) {
+                slot.balloon_sent = Some(bytes);
                 out.push(Action::Balloon { sandbox: id, bytes });
             }
         }
@@ -887,9 +889,14 @@ impl Host {
         };
         debug_assert_eq!(slot.queued, Some((step, key)));
         slot.queued = None;
-        // The engine lets the balloon go before the VM pauses.
+        // The engine lets the balloon go before the VM pauses, but may not
+        // manage to, and a restored VM has the balloon its image had: it
+        // is set again once the VM runs.
         slot.balloon = None;
-        slot.balloon_sent = 0;
+        slot.balloon_sent = None;
+        if admission::needs_memory(step) {
+            slot.room = WakeRoom::Admitted;
+        }
         let op = OpId(self.next_op);
         self.next_op += 1;
         slot.in_flight = Some(InFlight {

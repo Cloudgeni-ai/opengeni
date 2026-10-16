@@ -375,7 +375,7 @@ impl Firecracker {
         Ok(FirecrackerVm {
             name: spec.name.clone(),
             process,
-            balloon: Balloon::new(&api, spec.free_page_reporting),
+            balloon: Balloon::unknown(&api, spec.free_page_reporting),
             api,
             cgroup: self.cgroup_of(spec),
             jail: jail.clone(),
@@ -389,6 +389,9 @@ impl Firecracker {
     /// signalled, and after it exited if releasing fails.
     async fn kill(&self, vm: &FirecrackerVm) -> Result<(), EngineError> {
         const OP: &str = "stop";
+        // No balloon request reaches whatever runs behind its API socket
+        // next.
+        vm.balloon.end().await;
         // A pidfd only ever signals its own process, even if it is gone.
         vm.process
             .kill()
@@ -1031,10 +1034,7 @@ impl Firecracker {
         let jail =
             Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
         match self.attach(spec, &jail) {
-            Ok(mut vm) => {
-                vm.balloon = Balloon::unknown(&vm.api, spec.free_page_reporting);
-                Ok(Some(vm))
-            }
+            Ok(vm) => Ok(Some(vm)),
             Err(error) => {
                 // The VM's own helpers, its pager and the engine's
                 // holders, may outlive its VMM; anything else may be it.

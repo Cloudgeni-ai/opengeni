@@ -9,7 +9,7 @@ use compute_engine::{Engine, EngineError, ErrorKind, Found, VmSpec};
 use futures::StreamExt;
 
 use crate::layout::{Images, Paths, vm_spec};
-use crate::protocol::{Id, SandboxConfig};
+use crate::protocol::{Id, MAX_MEMORY_MIB, SandboxConfig};
 use crate::state::{Change, Disk, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory, Reconnected};
 use crate::store::Store;
@@ -31,6 +31,43 @@ fn keep_serving<E: Engine>(found: Result<Option<FoundVm<E>>, HostError>) {
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) async fn recover(&mut self, strays: Vec<Stray>) {
+        self.recover_strays(strays).await;
+        let mut recovering = Vec::new();
+        for (record, settled) in self.settle_records().await {
+            let id = record.id;
+            if !self.ordinals.insert(record.ordinal) {
+                tracing::error!(%id, ordinal = record.ordinal, "ordinal taken twice; leaving the sandbox on disk");
+                self.block(id, format!("ordinal {} is taken twice", record.ordinal));
+                // Its VM may still run.
+                self.unmanaged(id, &record.config);
+                continue;
+            }
+            // Nothing is done for a sandbox, not even looking at its VM,
+            // before its record is known to be durable: a crash could
+            // still bring back an older one. Its VM may still run.
+            let record = match settled {
+                Ok(record) => record,
+                Err(error) => {
+                    tracing::error!(%id, %error, "record not known to be durable; blocking the sandbox and leaving it alone");
+                    self.block(id, format!("record not known to be durable: {error}"));
+                    self.unmanaged(id, &record.config);
+                    continue;
+                }
+            };
+            if record.removing {
+                // Its VM may still run until the removal ends it.
+                self.unmanaged(id, &record.config);
+                self.remove_recorded(&record, None, Vec::new());
+                continue;
+            }
+            recovering.push(record);
+        }
+        self.recover_recorded(recovering).await;
+    }
+
+    /// Tidies the sandboxes whose records are missing, and blocks those
+    /// whose records cannot be read.
+    async fn recover_strays(&mut self, strays: Vec<Stray>) {
         for stray in strays {
             let dir = Paths::new(&self.root, stray.id).dir;
             match stray.problem {
@@ -53,8 +90,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Some(problem) => {
                     // Its VM may still run as the user its ordinal names,
                     // behind the host link its ordinal names: no other
-                    // sandbox may get that ordinal.
-                    let ordinal = self.unreadable_ordinal(stray.id).await;
+                    // sandbox may get that ordinal, and it may hold as much
+                    // memory as its record still tells, or any sandbox can.
+                    let loose = self.loose_record(stray.id).await;
+                    let ordinal = self.unreadable_ordinal(stray.id, loose.as_ref()).await;
                     match ordinal {
                         Some(ordinal) => {
                             self.ordinals.insert(ordinal);
@@ -67,36 +106,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     }
                     tracing::error!(id = %stray.id, %problem, ?ordinal, "unreadable record; blocking the id and leaving the sandbox alone");
                     self.block(stray.id, problem.to_string());
+                    let mib = loose
+                        .as_ref()
+                        .and_then(|record| record.get("config")?.get("memory_mib")?.as_u64())
+                        .map_or(MAX_MEMORY_MIB, |mib| {
+                            u32::try_from(mib).map_or(MAX_MEMORY_MIB, |mib| mib.min(MAX_MEMORY_MIB))
+                        });
+                    self.input(Input::Unmanaged {
+                        sandbox: stray.id.0,
+                        bytes: u64::from(mib) << 20,
+                    });
                 }
             }
         }
-        let mut recovering = Vec::new();
-        for (record, settled) in self.settle_records().await {
-            let id = record.id;
-            if !self.ordinals.insert(record.ordinal) {
-                tracing::error!(%id, ordinal = record.ordinal, "ordinal taken twice; leaving the sandbox on disk");
-                self.block(id, format!("ordinal {} is taken twice", record.ordinal));
-                continue;
-            }
-            // Nothing is done for a sandbox, not even looking at its VM,
-            // before its record is known to be durable: a crash could
-            // still bring back an older one.
-            let record = match settled {
-                Ok(record) => record,
-                Err(error) => {
-                    tracing::error!(%id, %error, "record not known to be durable; blocking the sandbox and leaving it alone");
-                    self.block(id, format!("record not known to be durable: {error}"));
-                    continue;
-                }
-            };
-            if record.removing {
-                // Its VM may still run until the removal ends it.
-                self.unmanaged(id, &record.config);
-                self.remove_recorded(&record, None, Vec::new());
-                continue;
-            }
-            recovering.push(record);
-        }
+    }
+
+    /// Takes back or blocks every sandbox whose record is durable.
+    async fn recover_recorded(&mut self, recovering: Vec<Record>) {
         // Finding VMs and checking networks touch only their own sandbox,
         // so they run for every sandbox at once; the results are taken in
         // one by one.
@@ -439,18 +465,27 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         })
     }
 
+    /// What still parses as JSON of sandbox `id`'s unreadable record.
+    async fn loose_record(&self, id: Id) -> Option<serde_json::Value> {
+        let bytes = tokio::fs::read(&Paths::new(&self.root, id).record)
+            .await
+            .ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
     /// The ordinal a sandbox with an unreadable record was given, from
-    /// what is left: the record's `ordinal` field if the file still parses
-    /// as JSON, else the owner of its disk, which every launch hands to
-    /// the VM's user. `None` if it never launched, when no VM or user can
-    /// clash with a newcomer's.
-    pub(super) async fn unreadable_ordinal(&self, id: Id) -> Option<u32> {
+    /// what is left: the `ordinal` field of what of the record still
+    /// parses, `loose`, else the owner of its disk, which every launch
+    /// hands to the VM's user. `None` if it never launched, when no VM or
+    /// user can clash with a newcomer's.
+    pub(super) async fn unreadable_ordinal(
+        &self,
+        id: Id,
+        loose: Option<&serde_json::Value>,
+    ) -> Option<u32> {
         use std::os::unix::fs::MetadataExt;
         let paths = Paths::new(&self.root, id);
-        let from_record = tokio::fs::read(&paths.record)
-            .await
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        let from_record = loose
             .and_then(|record| record.get("ordinal")?.as_u64())
             .and_then(|ordinal| u32::try_from(ordinal).ok());
         if from_record.is_some() {

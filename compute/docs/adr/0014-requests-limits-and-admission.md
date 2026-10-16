@@ -17,10 +17,13 @@ pick a VM.
   and any use above a request, stay within the host's capacity (the
   huge-page pool, or memory less fixed headroom). So do VMs the agent does
   not manage: those of removed sandboxes until they have ended, and those
-  it found but could not take back, at full size. A wake from object
-  storage is admitted before it downloads anything and holds its room
-  meanwhile. On an overdrawn budget (after a restart with less) nothing
-  more wakes, not even a resume that takes nothing more.
+  it found but could not take back, at full size (the most any sandbox may
+  have when not even the size can be read from its record). A VM taken back
+  after a restart counts at its full size until it is first measured. A
+  wake is admitted once and owns its room until the sandbox runs: one from
+  object storage before it downloads anything, through its restore. On an
+  overdrawn budget (after a restart with less) nothing more wakes, not even
+  a resume that takes nothing more.
 - Admission in create, wake and connect is arithmetic on numbers held in
   memory (microseconds). Inside a request the only relief is instant: ending
   idle VMs that already have a valid saved copy (milliseconds, no I/O). If
@@ -64,9 +67,14 @@ pick a VM.
      high watermark;
   3. if that is still not enough, the sandbox furthest above its request
      is paused and saved, held or not. It loses nothing: once its recorded
-     footprint fits above the high watermark it wakes by itself with its
-     programs.
+     footprint fits above the high watermark, next to the footprints of
+     those let through before it until a reading shows them, it wakes by
+     itself with its programs. Asking for it meanwhile gets `host_full`.
   Sandboxes within their request are never touched by any of these.
+  A VM's balloon is let go again once it runs after any step and after
+  adoption, since a restored image or an earlier agent may have left it
+  set, and no balloon request reaches a VM after the one it was meant for
+  has been stopped.
 - Congestion is visible: the status shows `balloon_bytes` for a sandbox
   whose balloon is out and `paused_for_memory` (the bytes it held) for one
   saved for host memory, with `waiting_for_room` while it waits; refused

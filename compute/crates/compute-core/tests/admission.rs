@@ -593,6 +593,92 @@ fn compressing_that_frees_nothing_goes_deeper_for_the_buffer() {
     );
 }
 
+#[test]
+fn a_vm_found_running_counts_its_whole_size_until_measured() {
+    // As after a restart: a VM of 4 GiB that reserves 1 GiB may hold all
+    // of its 4 GiB, so nothing more fits until it is measured.
+    let mut rig = Rig::new(4 * GIB);
+    let size = Size {
+        request: GIB,
+        limit: 4 * GIB,
+        save: 4 * GIB,
+    };
+    rig.add(1, State::RUNNING, size);
+    rig.hold(1);
+    rig.add(2, saved(), Size::whole(3 * GIB));
+    let actions = rig.touch(2);
+    assert_eq!(host_full(&actions, 2), Some((3 * GIB, 0)));
+    // Measured at 1 GiB, it leaves room.
+    rig.resident(1, GIB);
+    let actions = rig.touch(2);
+    assert!(
+        matches!(started(&actions)[..], [(2, Step::Restore, _)]),
+        "{actions:?}"
+    );
+}
+
+#[test]
+fn a_remote_wake_keeps_its_room_from_download_to_restore() {
+    let remote = State::new(Level::Remote, Durability::Remote, true);
+    let mut rig = Rig {
+        host: Host::new(HostPolicy {
+            limits: StepLimits::default().with(Step::Restore, 1),
+            ..policy(2 * GIB, 0)
+        })
+        .unwrap(),
+        now: At::ZERO,
+    };
+    rig.add(1, saved(), Size::whole(GIB));
+    rig.add(2, remote, Size::whole(GIB));
+    // One whose memory was not saved boots, in a slot of its own.
+    rig.add(
+        3,
+        State::new(Level::Saved, Durability::Local, false),
+        Size::whole(GIB),
+    );
+    let actions = rig.touch(1);
+    let [(1, Step::Restore, restore)] = started(&actions)[..] else {
+        panic!("{actions:?}");
+    };
+    let actions = rig.touch(2);
+    let [(2, Step::Fetch, fetch)] = started(&actions)[..] else {
+        panic!("{actions:?}");
+    };
+    // Downloaded, it waits for the only restore slot, and keeps its room.
+    let actions = rig.finish(2, fetch);
+    assert_eq!(started(&actions), []);
+    assert_eq!(rig.capacity().reserved, 2 * GIB);
+    let actions = rig.touch(3);
+    assert_eq!(started(&actions), []);
+    assert_eq!(host_full(&actions, 3), Some((GIB, 0)));
+    let actions = rig.finish(1, restore);
+    assert!(
+        matches!(started(&actions)[..], [(2, Step::Restore, _)]),
+        "{actions:?}"
+    );
+    assert_eq!(host_full(&actions, 2), None);
+}
+
+#[test]
+fn a_vm_that_runs_again_has_its_balloon_set_again() {
+    // A restored or adopted VM may have kept a balloon its image or an
+    // earlier agent left inflated: the host lets it go once it runs.
+    let mut rig = Rig::new(4 * GIB);
+    let actions = rig.add(1, State::RUNNING, Size::whole(GIB));
+    assert!(actions.contains(&Action::Balloon {
+        sandbox: SandboxId(1),
+        bytes: 0
+    }));
+    rig.add(2, saved(), Size::whole(GIB));
+    let actions = rig.touch(2);
+    let (_, op) = rig.drive_until(actions, 2);
+    let actions = rig.finish(2, op);
+    assert!(actions.contains(&Action::Balloon {
+        sandbox: SandboxId(2),
+        bytes: 0
+    }));
+}
+
 // --- Randomized simulation -------------------------------------------------
 
 /// `SplitMix64`.
