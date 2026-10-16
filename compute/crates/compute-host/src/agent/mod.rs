@@ -806,6 +806,11 @@ impl Activity for Toucher {
 /// Why `config` cannot run an agent, if it cannot.
 fn check_config(config: &HostConfig) -> Result<(), String> {
     check_root(&config.root)?;
+    // Only reads: a state root on a filesystem the agent cannot book saves
+    // on is refused before it takes a lock, makes a directory or writes
+    // anything.
+    crate::layout::check_filesystem(&config.root)
+        .map_err(|error| format!("state root {}: {error}", config.root.display()))?;
     if config.first_uid == 0 {
         return Err("first_uid must not be 0: VMMs run as unprivileged users".into());
     }
@@ -850,8 +855,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // Huge-page profiles cannot compress, whatever the host says.
         let can_compress = config.can_compress && engine.memory_profile().compress;
         let reserve_whole = engine.memory_profile().pages == PageSize::Huge;
-        // Refuses a state root on a filesystem it cannot book saves on
-        // before writing anything there.
         let allocation_unit = allocation_unit(&config.root)?;
         let save_copies = save_copies(&config.root)?;
         // Template VMs an earlier agent left are ended before any sandbox

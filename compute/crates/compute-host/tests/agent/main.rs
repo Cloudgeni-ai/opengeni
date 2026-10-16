@@ -772,14 +772,9 @@ impl Lab {
         Self::start_configured(root, world, delays, policy, |_| {}).await
     }
 
-    async fn start_configured(
-        root: PathBuf,
-        world: Arc<World>,
-        delays: Delays,
-        policy: HostPolicy,
-        configure: impl FnOnce(&mut HostConfig),
-    ) -> Self {
-        let mut config = HostConfig {
+    /// The configuration of an agent on the lab at `root`.
+    fn config(root: &std::path::Path, policy: HostPolicy) -> HostConfig {
+        HostConfig {
             root: root.join("state"),
             kernel: root.join("vmlinux"),
             boot_args: String::new(),
@@ -802,7 +797,17 @@ impl Lab {
             // Fake VMs never start one.
             pager: PagerConfig::new(root.join("no-pager")),
             about: compute_host::protocol::About::default(),
-        };
+        }
+    }
+
+    async fn start_configured(
+        root: PathBuf,
+        world: Arc<World>,
+        delays: Delays,
+        policy: HostPolicy,
+        configure: impl FnOnce(&mut HostConfig),
+    ) -> Self {
+        let mut config = Self::config(&root, policy);
         configure(&mut config);
         let engine = Fake {
             world: Arc::clone(&world),
@@ -1022,4 +1027,40 @@ fn freeze(dir: &std::path::Path) -> bool {
 fn thaw(dir: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// An agent refuses a state root on a filesystem it cannot book saves on,
+/// tmpfs here, naming those it can, before it takes its lock, makes a
+/// directory or writes anything there.
+#[tokio::test]
+async fn a_state_root_it_cannot_book_saves_on_is_refused_untouched() {
+    const TMPFS: u64 = 0x0102_1994;
+    let shm = std::path::Path::new("/dev/shm");
+    if !rustix::fs::statfs(shm).is_ok_and(|fs| u64::try_from(fs.f_type) == Ok(TMPFS)) {
+        eprintln!("skipped: /dev/shm is not tmpfs");
+        return;
+    }
+    // Short: sandbox socket paths under it must fit.
+    let root = shm.join(format!("chr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let mut config = Lab::config(&root, HostPolicy::default());
+    config.host_lock = Some(root.join("host.lock"));
+    let world = Arc::default();
+    let engine = Fake {
+        world: Arc::clone(&world),
+        delays: Delays::default(),
+    };
+    let refused = HostAgent::start(config, engine, NoStore).await.err();
+    let left: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    std::fs::remove_dir_all(&root).unwrap();
+    let refused = refused.expect("an agent started on tmpfs").to_string();
+    assert!(refused.contains("ext4, XFS, btrfs"), "{refused}");
+    assert!(
+        left.is_empty(),
+        "the refused state root was written to: {left:?}"
+    );
 }

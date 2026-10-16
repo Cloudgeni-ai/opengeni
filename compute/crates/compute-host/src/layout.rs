@@ -544,6 +544,25 @@ pub(crate) fn supported_filesystem(kind: u64) -> io::Result<()> {
     ))
 }
 
+/// Refuses `root` unless the filesystem it is on, or will be made on (that
+/// of its nearest existing ancestor), is one of [`SUPPORTED_FILESYSTEMS`].
+/// Only reads: an unsupported filesystem is never written to.
+#[cfg(target_os = "linux")]
+pub(crate) fn check_filesystem(root: &Path) -> io::Result<()> {
+    let existing = root
+        .ancestors()
+        .find(|dir| dir.exists())
+        .unwrap_or_else(|| Path::new("/"));
+    let kind = rustix::fs::statfs(existing)?.f_type;
+    supported_filesystem(u64::try_from(kind).unwrap_or(u64::MAX))
+}
+
+/// [`check_filesystem`] where filesystem types cannot be read: any.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn check_filesystem(_: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 /// The bytes the filesystem holding `dir` allocates for the smallest write,
 /// learned by writing one: 4 KiB that do not compress, made durable, then
 /// what the file takes; no less than the block size it reports, as some
@@ -554,11 +573,7 @@ pub(crate) fn supported_filesystem(kind: u64) -> io::Result<()> {
 pub(crate) fn allocation_unit(dir: &Path) -> io::Result<u64> {
     use std::os::unix::fs::MetadataExt;
 
-    #[cfg(target_os = "linux")]
-    {
-        let kind = rustix::fs::statfs(dir)?.f_type;
-        supported_filesystem(u64::try_from(kind).unwrap_or(u64::MAX))?;
-    }
+    check_filesystem(dir)?;
     let probe = dir.join(".allocation-probe");
     let result = (|| {
         let mut file = File::create(&probe)?;
