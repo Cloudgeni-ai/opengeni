@@ -505,12 +505,16 @@ echo later=$(cat /dev/shm/later)";
 /// Waits until VM `id` runs without a pager, its memory no longer
 /// registered with a fault handler.
 async fn vmm_unpaged(id: Id) {
-    let group = PathBuf::from("/sys/fs/cgroup/compute-host-test").join(id.to_string());
     let started = Instant::now();
     loop {
-        let procs = std::fs::read_to_string(group.join("cgroup.procs")).unwrap_or_default();
-        let pids: Vec<u32> = procs.lines().filter_map(|line| line.parse().ok()).collect();
-        if let [vmm] = pids[..] {
+        let pids = group_processes(id);
+        let vmm = pids.iter().copied().find(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .is_ok_and(|comm| comm.trim() == "firecracker")
+        });
+        if let Some(vmm) = vmm
+            && pagers(id).is_empty()
+        {
             let maps = std::fs::read_to_string(format!("/proc/{vmm}/smaps")).unwrap_or_default();
             let registered = maps
                 .lines()
@@ -557,17 +561,25 @@ fn paged_wake(prefix: &str) -> Option<(LevelName, Option<String>)> {
     Some((LevelName::Remote, Some(url)))
 }
 
-/// The processes of VM `id`'s cgroup other than its VMM: its pager, while
-/// it has one.
-fn pagers(id: Id) -> Vec<u32> {
+/// The processes in VM `id`'s cgroup: its VMM, its pager while it has one,
+/// and the engine's holder.
+fn group_processes(id: Id) -> Vec<u32> {
     let group = PathBuf::from("/sys/fs/cgroup/compute-host-test").join(id.to_string());
     std::fs::read_to_string(group.join("cgroup.procs"))
         .unwrap_or_default()
         .lines()
         .filter_map(|line| line.parse().ok())
+        .collect()
+}
+
+/// VM `id`'s pager, while it has one: the agent's binary run with `pager`
+/// as its first argument.
+fn pagers(id: Id) -> Vec<u32> {
+    group_processes(id)
+        .into_iter()
         .filter(|pid| {
-            std::fs::read_to_string(format!("/proc/{pid}/comm"))
-                .is_ok_and(|comm| comm.trim() != "firecracker")
+            std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|cmdline| cmdline.split(|&byte| byte == 0).nth(1) == Some(&b"pager"[..]))
         })
         .collect()
 }
