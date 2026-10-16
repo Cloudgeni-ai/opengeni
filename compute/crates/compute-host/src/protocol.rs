@@ -324,10 +324,11 @@ pub enum Request {
         level: LevelName,
     },
     /// Keep a sandbox awake for a named reason, such as an agent turn in
-    /// progress, waking it if it sleeps. Replies at once. Holding again
-    /// under the same name refreshes the hold, and with `ttl_ms` it lapses
-    /// on its own unless refreshed in time, so a caller that disappears
-    /// cannot keep a sandbox awake forever.
+    /// progress, waking it if it sleeps. Replies once the hold is on disk,
+    /// without waiting for the wake: it outlasts a restart of the host
+    /// agent. Holding again under the same name refreshes the hold, and
+    /// with `ttl_ms` it lapses on its own unless refreshed in time, so a
+    /// caller that disappears cannot keep a sandbox awake forever.
     Hold {
         /// Its id.
         id: Id,
@@ -519,6 +520,28 @@ pub struct HostStatus {
     /// above zero means the host's sensing is failing.
     #[serde(default)]
     pub unseen_activity: usize,
+    /// What the host runs.
+    #[serde(default)]
+    pub about: About,
+}
+
+/// What a host agent runs, so a measurement can say what it measured.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct About {
+    /// The agent's build: the start of a hash of its executable.
+    #[serde(default)]
+    pub build: String,
+    /// What memory images made here depend on, such as the VMM's version
+    /// and the processor.
+    #[serde(default)]
+    pub runtime: String,
+    /// How guest memory is backed.
+    #[serde(default)]
+    pub memory_profile: String,
+    /// The disk image new sandboxes start from: its path, size and last
+    /// change.
+    #[serde(default)]
+    pub base_image: String,
 }
 
 /// A sandbox the host cannot manage.

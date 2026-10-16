@@ -3,8 +3,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
-use compute_core::{Durability, Input, Level, SandboxId, State};
+use compute_core::{Durability, Input, Level, Priority, SandboxId, State};
 use compute_engine::{Engine, EngineError, ErrorKind, Found, VmSpec};
 use futures::StreamExt;
 
@@ -14,7 +15,8 @@ use crate::state::{Change, Disk, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory, Reconnected};
 use crate::store::Store;
 
-use super::{HostAgent, HostError};
+use super::holds::{Holds, hold_id};
+use super::{HostAgent, HostError, unix_ms_now};
 
 /// A VM found still running after an agent restart, with what it is doing
 /// and, if its memory is paged, the agent's side of its pager.
@@ -388,7 +390,42 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // It still runs and wakes, but is never saved.
             self.input(Input::Unsavable { sandbox: id.0 });
         }
+        self.restore_holds(id);
         Ok(adopted)
+    }
+
+    /// Takes back the named holds sandbox `id` had, less those that lapsed
+    /// while no agent ran. One that cannot be read is reported and
+    /// dropped: holds only keep a sandbox awake, so losing one costs a
+    /// pause, never data.
+    fn restore_holds(&mut self, id: Id) {
+        let Some(slot) = self.slots.get_mut(&id.0) else {
+            return;
+        };
+        let now_ms = unix_ms_now();
+        let holds = match Holds::load(slot.paths.holds.clone(), now_ms) {
+            Ok(holds) => holds,
+            Err(error) => {
+                tracing::warn!(%id, %error, "could not read the sandbox's holds; dropping them");
+                return;
+            }
+        };
+        let named: Vec<(String, Option<u64>)> = holds
+            .named()
+            .map(|(name, lapses)| (name.to_owned(), lapses))
+            .collect();
+        slot.holds = holds;
+        let now = self.now();
+        for (name, lapses_ms) in named {
+            self.input(Input::Hold {
+                sandbox: id.0,
+                hold: hold_id(&name),
+                until: lapses_ms.map(|at| now + Duration::from_millis(at.saturating_sub(now_ms))),
+                // Nobody waits on it: the sandbox was awake when it was
+                // taken, and wakes only if it has since gone to sleep.
+                priority: Priority::Background,
+            });
+        }
     }
 
     /// Where a sandbox whose VM was found still running stands. A paused

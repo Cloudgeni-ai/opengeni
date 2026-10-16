@@ -14,7 +14,7 @@ use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
 use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::protocol::{
-    Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
+    About, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
 };
 use compute_host::{
     BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, NoStore, PagerConfig, Store,
@@ -403,6 +403,39 @@ fn expect_done(reply: Reply) -> anyhow::Result<()> {
     }
 }
 
+/// What this agent runs, as status reports it, so a measurement can say
+/// what it measured. The engine adds its runtime.
+fn describe(memory_profile: MemoryProfile, base_image: &std::path::Path) -> About {
+    let build = std::fs::File::open("/proc/self/exe")
+        .and_then(|exe| {
+            let mut hasher = blake3::Hasher::new();
+            std::io::copy(&mut std::io::BufReader::new(exe), &mut hasher)?;
+            Ok(hasher.finalize().to_hex()[..16].to_owned())
+        })
+        .unwrap_or_else(|error| format!("unknown ({error})"));
+    let base_image = match std::fs::metadata(base_image) {
+        Ok(found) => {
+            let changed = found
+                .modified()
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |since| since.as_secs());
+            format!(
+                "{} ({} bytes, changed at {changed} s past the epoch)",
+                base_image.display(),
+                found.len()
+            )
+        }
+        Err(error) => format!("{} ({error})", base_image.display()),
+    };
+    About {
+        build,
+        runtime: String::new(),
+        memory_profile: memory_profile.to_string(),
+        base_image,
+    }
+}
+
 async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     let memory_profile = if let Some(profile) = args.memory_profile {
         profile
@@ -433,6 +466,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
             compressed_percent: 25,
         });
     }
+    let about = describe(memory_profile, &args.base_image);
     let config = HostConfig {
         root: args.root,
         kernel: args.kernel,
@@ -464,6 +498,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
                 .unwrap_or_else(|| PathBuf::from("/proc/self/exe")),
             record_for: Duration::from_millis(args.pager_record_ms),
         },
+        about,
     };
     let Some(store) = args.store else {
         return run_agent(config, engine, NoStore, socket).await;

@@ -30,12 +30,13 @@ use tokio::time::{Instant, sleep_until};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
-use crate::protocol::{HostStatus, Id, SandboxConfig, StepStats};
+use crate::protocol::{About, HostStatus, Id, SandboxConfig, StepStats};
 use crate::state::{Record, Records, StateError, claim_host};
 use crate::step::{After, Live};
 use crate::store::Store;
 
 mod handle;
+mod holds;
 mod recover;
 mod requests;
 mod sample;
@@ -68,6 +69,39 @@ fn unix_ms_now() -> u64 {
         .map_or(0, |since| {
             u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+/// Refuses settings no host can run with.
+fn check_config(config: &HostConfig) -> Result<(), HostError> {
+    check_root(&config.root).map_err(HostError::Invalid)?;
+    if config.first_uid == 0 {
+        return Err(HostError::Invalid(
+            "first_uid must not be 0: VMMs run as unprivileged users".into(),
+        ));
+    }
+    if let Some(network) = &config.network {
+        network.check().map_err(HostError::Invalid)?;
+    }
+    Ok(())
+}
+
+/// Refuses settings that do not fit the sandboxes already recorded: a
+/// sandbox keeps the user and addresses it was given, while new ones are
+/// handed out by today's settings, which therefore must agree.
+fn check_fit(images: &Images, records: &Records) -> Result<(), HostError> {
+    let misfits: Vec<String> = records
+        .all()
+        .iter()
+        .filter_map(|record| images.check(record).err())
+        .collect();
+    if misfits.is_empty() {
+        Ok(())
+    } else {
+        Err(HostError::Invalid(format!(
+            "this host's settings do not fit its sandboxes: {}",
+            misfits.join("; ")
+        )))
+    }
 }
 
 /// How a host is set up.
@@ -116,6 +150,9 @@ pub struct HostConfig {
     pub host_lock: Option<PathBuf>,
     /// How VMs whose memory needs a fault handler get one.
     pub pager: PagerConfig,
+    /// What the host runs, as status reports it. The runtime is the
+    /// engine's; whatever is set here is replaced.
+    pub about: About,
 }
 
 /// How VMs whose memory needs a fault handler get one: a pager process of
@@ -328,7 +365,7 @@ enum Command {
     Hold {
         id: Id,
         generation: Option<u64>,
-        hold: HoldId,
+        name: String,
         ttl: Option<Duration>,
         priority: Priority,
         reply: Reply<()>,
@@ -337,7 +374,7 @@ enum Command {
     Unhold {
         id: Id,
         generation: Option<u64>,
-        hold: HoldId,
+        name: String,
         reply: Reply<()>,
     },
     Acquire {
@@ -442,6 +479,8 @@ struct Slot<V> {
     deferred: Option<Step>,
     /// Processor use and traffic measured so far, while the VM runs.
     activity: Option<ActivityWindow>,
+    /// Its named holds, kept on disk.
+    holds: holds::Holds,
 }
 
 /// A request waiting for a sandbox to run.
@@ -550,6 +589,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     busy: Option<BusyRule>,
     can_compress: bool,
     pager: PagerConfig,
+    /// What the host runs, as status reports it.
+    about: About,
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
     commands_tx: mpsc::WeakUnboundedSender<Command>,
@@ -590,15 +631,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     ) -> Result<(Handle, JoinHandle<()>), HostError> {
         let core =
             Host::new(config.policy).map_err(|error| HostError::Invalid(format!("{error:?}")))?;
-        check_root(&config.root).map_err(HostError::Invalid)?;
-        if config.first_uid == 0 {
-            return Err(HostError::Invalid(
-                "first_uid must not be 0: VMMs run as unprivileged users".into(),
-            ));
-        }
-        if let Some(network) = &config.network {
-            network.check().map_err(HostError::Invalid)?;
-        }
+        check_config(&config)?;
         let host_lock = match config.host_lock.clone() {
             Some(path) => Some(claim(path, config.root.clone()).await?),
             None => None,
@@ -613,19 +646,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             first_uid: config.first_uid,
             network: config.network.clone(),
         };
-        // A sandbox keeps the user and addresses it was given; new ones
-        // are handed out by today's settings, which therefore must agree.
-        let misfits: Vec<String> = records
-            .all()
-            .iter()
-            .filter_map(|record| images.check(record).err())
-            .collect();
-        if !misfits.is_empty() {
-            return Err(HostError::Invalid(format!(
-                "this host's settings do not fit its sandboxes: {}",
-                misfits.join("; ")
-            )));
-        }
+        check_fit(&images, &records)?;
         let net = match config.network.clone() {
             Some(network) => Some(Arc::new(
                 tokio::task::spawn_blocking(move || Networks::prepare(&network))
@@ -639,6 +660,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let (events_tx, events) = mpsc::unbounded_channel();
         // Huge-page profiles cannot compress, whatever the host says.
         let can_compress = config.can_compress && engine.memory_profile().compress;
+        let about = About {
+            runtime: engine.runtime().to_owned(),
+            ..config.about
+        };
         let mut agent = Self {
             engine: Arc::new(engine),
             #[cfg(target_os = "linux")]
@@ -678,6 +703,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             restore_notice_port: config.restore_notice_port,
             busy: config.busy,
             can_compress,
+            about,
             commands_tx: commands_tx.downgrade(),
         };
         agent.recover(strays).await;
@@ -715,6 +741,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     None
                 }
             };
+        let holds = holds::Holds::new(paths.holds.clone());
         self.slots.insert(
             id.0,
             Slot {
@@ -731,6 +758,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 waiters: Vec::new(),
                 deferred: None,
                 activity: None,
+                holds,
             },
         );
     }

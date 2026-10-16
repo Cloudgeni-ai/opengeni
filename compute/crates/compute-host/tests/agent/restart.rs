@@ -152,6 +152,57 @@ async fn requests_for_a_replaced_execution_are_refused() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn named_holds_outlast_a_restart_unless_they_lapse_meanwhile() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(17);
+    lab.create(sandbox, PAUSE_SOON).await;
+    let hold = |name: &str, ttl_ms| Request::Hold {
+        id: sandbox,
+        generation: None,
+        hold: name.into(),
+        ttl_ms,
+        priority: PriorityName::Interactive,
+    };
+    assert_eq!(
+        lab.client.call(&hold("turn", None)).await.unwrap(),
+        Reply::Done
+    );
+    assert_eq!(
+        lab.client.call(&hold("brief", Some(300))).await.unwrap(),
+        Reply::Done
+    );
+    lab.wait_level(sandbox, LevelName::Running).await;
+    let (root, world) = lab.stop().await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // The open-ended hold is back; the brief one lapsed while no agent ran.
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    assert_eq!(lab.current(sandbox).await.holds, 1);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let status = lab.status().await;
+    assert_eq!(Lab::sandbox(&status, sandbox).level, LevelName::Running);
+    assert_eq!(
+        lab.world.boots.load(Ordering::Relaxed),
+        1,
+        "it kept running"
+    );
+
+    // Released, it is forgotten for good: idle, it pauses, and stays
+    // unheld across another restart.
+    let release = Request::Release {
+        id: sandbox,
+        generation: None,
+        hold: "turn".into(),
+    };
+    assert_eq!(lab.client.call(&release).await.unwrap(), Reply::Done);
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    let (root, world) = lab.stop().await;
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    assert_eq!(lab.current(sandbox).await.holds, 0);
+    lab.assert_clean();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replies_name_the_execution_they_reached() {
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
     let sandbox = id(16);

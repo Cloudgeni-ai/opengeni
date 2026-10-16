@@ -150,11 +150,10 @@ impl Handle {
         ttl: Option<Duration>,
         priority: Priority,
     ) -> Result<(), HostError> {
-        let hold = named_hold(name);
         self.ask(|reply| Command::Hold {
             id,
             generation,
-            hold,
+            name: name.to_owned(),
             ttl,
             priority,
             reply,
@@ -170,24 +169,14 @@ impl Handle {
         generation: Option<u64>,
         name: &str,
     ) -> Result<(), HostError> {
-        let hold = named_hold(name);
         self.ask(|reply| Command::Unhold {
             id,
             generation,
-            hold,
+            name: name.to_owned(),
             reply,
         })
         .await?
     }
-}
-
-/// The hold id for a hold named through the API. Leases count up from one,
-/// so named holds take the upper half of the id space.
-fn named_hold(name: &str) -> HoldId {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    name.hash(&mut hasher);
-    HoldId(hasher.finish() | 1 << 63)
 }
 
 impl Lease {

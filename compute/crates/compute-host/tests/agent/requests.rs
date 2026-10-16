@@ -23,6 +23,12 @@ fn request_line(request: &Request) -> Vec<u8> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_says_what_the_host_runs() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    assert_eq!(lab.status().await.about.runtime, "fake");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_wake_its_caller_gave_up_on_lets_go_of_the_sandbox() {
     let delays = Delays {
         boot: Duration::from_secs(5),

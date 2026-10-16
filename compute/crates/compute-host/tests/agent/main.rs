@@ -676,6 +676,7 @@ impl Lab {
             host_lock: None,
             // Fake VMs never start one.
             pager: PagerConfig::new(root.join("no-pager")),
+            about: compute_host::protocol::About::default(),
         };
         configure(&mut config);
         let engine = Fake {

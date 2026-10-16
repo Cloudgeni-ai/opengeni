@@ -23,8 +23,8 @@ use clap::{Args, ValueEnum};
 use compute_core::SandboxId;
 use compute_host::client::Client;
 use compute_host::protocol::{
-    ErrorCode, HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
-    StepStats,
+    About, ErrorCode, HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig,
+    SleepConfig, StepStats,
 };
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -699,6 +699,10 @@ enum Phase {
 
 #[derive(Debug, Serialize)]
 struct Results {
+    /// What the host ran, as its status said when the bench started.
+    host: Option<About>,
+    /// When the bench started, in milliseconds since the Unix epoch.
+    started_unix_ms: u64,
     count: usize,
     vcpus: u8,
     memory_mib: u32,
@@ -713,15 +717,21 @@ struct Results {
 }
 
 pub(crate) async fn bench(client: &Client, args: &BenchArgs) -> anyhow::Result<()> {
-    let seed = SystemTime::now()
+    let since_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+        .unwrap_or_default();
+    let seed = since_epoch.as_nanos();
     let mut ids: Vec<Id> = (0..args.count)
         .map(|index| Id(SandboxId((seed << 32) | index as u128)))
         .collect();
     ids.sort_unstable();
+    let host = match client.call(&Request::Status).await? {
+        Reply::Status(status) => Some(status.about),
+        _ => None,
+    };
     let mut results = Results {
+        host,
+        started_unix_ms: u64::try_from(since_epoch.as_millis()).unwrap_or(u64::MAX),
         count: args.count,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,

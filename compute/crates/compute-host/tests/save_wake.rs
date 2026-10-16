@@ -125,6 +125,7 @@ async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> 
             program: env!("CARGO_BIN_EXE_compute-host").into(),
             record_for: RECORD_FOR,
         },
+        about: compute_host::protocol::About::default(),
     };
     let socket = root.join("agent.sock");
     let _ = std::fs::remove_file(&socket);

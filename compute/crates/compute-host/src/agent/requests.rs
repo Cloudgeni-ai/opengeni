@@ -12,7 +12,29 @@ use crate::protocol::{BlockedSandbox, HostStatus, Id, SandboxConfig, SandboxStat
 use crate::state::{Record, check_generation};
 use crate::store::Store;
 
-use super::{Command, Event, HostAgent, HostError, Reply, Waiter, Woke};
+use super::holds::{Write, hold_id};
+use super::{Command, Event, HostAgent, HostError, Reply, Waiter, Woke, unix_ms_now};
+
+/// Replies to `reply` once the write in `outcome`, if any, has made a
+/// change durable, or with why the change was refused or could not be kept.
+fn answer_once_written(outcome: Result<Option<Write>, HostError>, reply: Reply<()>) {
+    match outcome {
+        Ok(Some(write)) => {
+            tokio::spawn(async move {
+                let result = write
+                    .await
+                    .map_err(|error| HostError::Io(format!("keeping the holds failed: {error}")));
+                let _ = reply.send(result);
+            });
+        }
+        Ok(None) => {
+            let _ = reply.send(Ok(()));
+        }
+        Err(error) => {
+            let _ = reply.send(Err(error));
+        }
+    }
+}
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn on_command(&mut self, command: Command) {
@@ -29,19 +51,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 priority,
                 reply,
             } => {
-                let result = self.check(id, generation).and_then(|()| {
-                    if self.slots.contains_key(&id.0) {
-                        Ok(())
-                    } else {
-                        Err(HostError::NotFound(id))
-                    }
-                });
-                if result.is_ok() {
-                    self.input(Input::Touch {
-                        sandbox: id.0,
-                        priority,
-                    });
-                }
+                let result = self.touch(id, generation, priority);
                 if let Some(reply) = reply {
                     let _ = reply.send(result);
                 }
@@ -71,26 +81,27 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Command::Hold {
                 id,
                 generation,
-                hold,
+                name,
                 ttl,
                 priority,
                 reply,
             } => {
-                let result = self
+                let outcome = self
                     .check(id, generation)
-                    .and_then(|()| self.hold(id, hold, ttl, priority));
-                let _ = reply.send(result);
+                    .and_then(|()| self.hold(id, name, ttl, priority))
+                    .map(Some);
+                answer_once_written(outcome, reply);
             }
             Command::Unhold {
                 id,
                 generation,
-                hold,
+                name,
                 reply,
             } => {
-                let result = self
+                let outcome = self
                     .check(id, generation)
-                    .and_then(|()| self.unhold(id, hold));
-                let _ = reply.send(result);
+                    .and_then(|()| self.unhold(id, &name));
+                answer_once_written(outcome, reply);
             }
             Command::Acquire {
                 id,
@@ -151,15 +162,39 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
     }
 
-    pub(super) fn unhold(&mut self, id: Id, hold: HoldId) -> Result<(), HostError> {
+    /// Marks sandbox `id` used now, if it exists at `generation`.
+    fn touch(
+        &mut self,
+        id: Id,
+        generation: Option<u64>,
+        priority: Priority,
+    ) -> Result<(), HostError> {
+        self.check(id, generation)?;
         if !self.slots.contains_key(&id.0) {
             return Err(HostError::NotFound(id));
         }
-        self.input(Input::Release {
+        self.input(Input::Touch {
             sandbox: id.0,
-            hold,
+            priority,
         });
         Ok(())
+    }
+
+    /// Ends named hold `name`, returning the write that makes its end
+    /// durable if it was held.
+    pub(super) fn unhold(&mut self, id: Id, name: &str) -> Result<Option<Write>, HostError> {
+        let Some(slot) = self.slots.get_mut(&id.0) else {
+            return Err(HostError::NotFound(id));
+        };
+        let write = slot
+            .holds
+            .remove(name)
+            .then(|| slot.holds.write(unix_ms_now()));
+        self.input(Input::Release {
+            sandbox: id.0,
+            hold: hold_id(name),
+        });
+        Ok(write)
     }
 
     pub(super) fn acquire(
@@ -237,24 +272,31 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         Ok(())
     }
 
+    /// Holds sandbox `id` awake for `name`, returning the write that makes
+    /// the hold durable.
     pub(super) fn hold(
         &mut self,
         id: Id,
-        hold: HoldId,
+        name: String,
         ttl: Option<Duration>,
         priority: Priority,
-    ) -> Result<(), HostError> {
+    ) -> Result<Write, HostError> {
         if self.slots.get(&id.0).is_none_or(|slot| slot.destroy) {
             return Err(HostError::NotFound(id));
         }
         let until = ttl.map(|ttl| self.now() + ttl);
         self.input(Input::Hold {
             sandbox: id.0,
-            hold,
+            hold: hold_id(&name),
             until,
             priority,
         });
-        Ok(())
+        let now_ms = unix_ms_now();
+        let lapses_ms = ttl
+            .map(|ttl| now_ms.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)));
+        let slot = self.slots.get_mut(&id.0).ok_or(HostError::NotFound(id))?;
+        slot.holds.set(name, lapses_ms);
+        Ok(slot.holds.write(now_ms))
     }
 
     /// The refusal of a request for blocked sandbox `id`.
@@ -456,6 +498,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .collect(),
             store_stalled_ms,
             unseen_activity: self.unseen_activity,
+            about: self.about.clone(),
         }
     }
 }
