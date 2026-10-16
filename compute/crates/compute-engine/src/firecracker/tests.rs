@@ -25,6 +25,79 @@ fn the_runtime_names_the_processor_model() {
     assert!(runtime_of(Path::new("/nonexistent/firecracker")).is_err());
 }
 
+/// Only a VMM that answered, or died loading, has judged the image; a lost
+/// or late request has not, and must not cost the sandbox its memory.
+#[test]
+fn only_a_refusal_or_an_exit_while_loading_counts_against_an_image() {
+    let refused = || ApiError::Status {
+        method: "PUT",
+        path: "/snapshot/load".into(),
+        status: 400,
+        body: "unsupported snapshot version".into(),
+    };
+    assert_eq!(load_failure(refused(), true).kind, ErrorKind::MemoryLost);
+    assert_eq!(load_failure(refused(), false).kind, ErrorKind::MemoryLost);
+    let lost = [
+        ApiError::Connect(io::ErrorKind::ConnectionRefused.into()),
+        ApiError::Io(io::ErrorKind::BrokenPipe.into()),
+        ApiError::Timeout(Duration::from_secs(1)),
+        ApiError::Malformed("no status line"),
+    ];
+    for error in lost {
+        assert_eq!(load_failure(error, true).kind, ErrorKind::Transient);
+    }
+    let died = ApiError::Io(io::ErrorKind::BrokenPipe.into());
+    assert_eq!(load_failure(died, false).kind, ErrorKind::MemoryLost);
+}
+
+/// A launch records its runtime beside the jail, so an agent that takes
+/// the VMM back later knows which runtime its snapshots belong to.
+#[test]
+fn a_launch_leaves_its_runtime_for_a_later_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("vm/firecracker/a/root");
+    std::fs::create_dir_all(&root).unwrap();
+    let spec = VmSpec {
+        dir: root.clone(),
+        logs: root.parent().unwrap().to_owned(),
+        ..spec()
+    };
+    let jail = Jail::new(&spec).unwrap();
+    assert_eq!(recorded_runtime(&jail), "", "unknown before any launch");
+    record_runtime(&jail, "Firecracker snapshot format v12.0.0 on a").unwrap();
+    record_runtime(&jail, "Firecracker snapshot format v13.0.0 on a").unwrap();
+    assert_eq!(
+        recorded_runtime(&jail),
+        "Firecracker snapshot format v13.0.0 on a"
+    );
+    assert!(
+        !root.join("vmm.runtime").exists(),
+        "the VMM could change it"
+    );
+}
+
+/// A trim that measured the previous launch's log and punches it out late
+/// reaches only that file, never what the next launch has begun to write.
+#[test]
+fn a_late_trim_of_the_last_log_spares_the_new_one() {
+    use std::io::Write;
+    use std::os::unix::fs::FileExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vmm.log");
+    fs::write(&path, vec![b'o'; 64 << 10]).unwrap();
+    // The trimmer opens and measures the old log...
+    let trimming = File::options().write(true).open(&path).unwrap();
+    let measured = trimming.metadata().unwrap().len();
+    // ...a new launch starts its log meanwhile...
+    let mut fresh = fresh_log(&path).unwrap();
+    fresh.write_all(b"new launch\n").unwrap();
+    // ...and the trim lands on what it measured.
+    let zeros = vec![0; usize::try_from(measured).unwrap()];
+    trimming.write_all_at(&zeros, 0).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"new launch\n");
+}
+
 /// A VMM API that answers `PATCH /vm` with `patch` and `GET /` with
 /// `get`.
 fn vmm(patch: Answer, get: Answer) -> (Socket, Api) {
@@ -161,6 +234,7 @@ fn restore_takes_host_paths_from_the_spec_not_the_snapshot() {
     let files = RestoreFiles {
         state: format!("{jail_dir}/vm.state").into(),
         memory: MemorySource::File(format!("{jail_dir}/vm.mem").into()),
+        made_under: None,
     };
     let jail = Jail::new(&spec).unwrap();
     let bare = MemoryProfile::bare_metal();
@@ -186,6 +260,7 @@ fn restore_takes_host_paths_from_the_spec_not_the_snapshot() {
     let outside = RestoreFiles {
         state: "/elsewhere/vm.state".into(),
         memory: MemorySource::File(format!("{jail_dir}/vm.mem").into()),
+        made_under: None,
     };
     assert!(load_request(&spec, &jail, &outside, bare).is_err());
 }
@@ -220,6 +295,7 @@ fn the_profile_decides_page_size_and_dirty_tracking() {
     let paged = RestoreFiles {
         state: "/lab/vm/firecracker/a/root/vm.state".into(),
         memory: paged_source(),
+        made_under: None,
     };
     let body = load_request(&spec(), &jail, &paged, MemoryProfile::nested()).unwrap();
     assert_eq!(body["mem_backend"]["backend_type"], "Uffd");

@@ -244,17 +244,23 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// image that is gone.
     pub(super) async fn forget(&mut self) -> Outcome {
         const OP: &str = "forget";
+        // The image a paused VM's pager reads stays until the pager holds
+        // all of it. That wait comes first, so a forget cancelled during it
+        // has changed nothing.
+        if let Some(live) = self.live.as_ref() {
+            match self.settled(live, OP).await {
+                None => return Outcome::Cancelled,
+                Some(Err(error)) => return failure(&error),
+                Some(Ok(())) => {}
+            }
+        }
         if self.record.image
             && let Err(error) = self.commit(Change::new().image(false)).await
         {
             return state_failure(&error);
         }
-        // A paused VM loses the base its next diff would be merged over;
-        // the image its pager reads stays until the pager holds all of it.
+        // A paused VM loses the base its next diff would be merged over.
         if let Some(live) = self.live.as_mut() {
-            if let Err(error) = live.memory.settled(OP).await {
-                return failure(&error);
-            }
             live.memory.base = Base::Unknown;
         }
         let paths = self.paths.clone();

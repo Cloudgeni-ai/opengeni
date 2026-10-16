@@ -182,6 +182,7 @@ fn jailed_spec(lab: &Path, name: &str, uid: u32) -> VmSpec {
 fn engine(lab: &Path) -> Firecracker {
     Firecracker::new(FirecrackerConfig {
         firecracker: lab.join("bin/firecracker"),
+        retained: Vec::new(),
         jailer: lab.join("bin/jailer"),
         cgroup_parent: "/sys/fs/cgroup/compute-test".into(),
     })
@@ -286,6 +287,7 @@ async fn boot_pause_compress_snapshot_restore() {
     let restore_files = RestoreFiles {
         state: files.state.clone(),
         memory: MemorySource::File(files.memory.clone()),
+        made_under: None,
     };
     let vm = engine.restore(&spec, &restore_files).await.unwrap();
     engine.resume(&vm).await.unwrap();
@@ -403,6 +405,7 @@ async fn only_a_vmm_seen_running_counts_as_a_launch() {
     let spec = jailed_spec(&lab, &name, 3_900_003);
     let failing = Firecracker::new(FirecrackerConfig {
         firecracker: lab.join("bin/firecracker"),
+        retained: Vec::new(),
         jailer: "/bin/false".into(),
         cgroup_parent: "/sys/fs/cgroup/compute-test".into(),
     })
@@ -417,6 +420,7 @@ async fn only_a_vmm_seen_running_counts_as_a_launch() {
     let files = RestoreFiles {
         state,
         memory: MemorySource::File(memory),
+        made_under: None,
     };
     let error = engine(&lab).restore(&spec, &files).await.unwrap_err();
     assert!(

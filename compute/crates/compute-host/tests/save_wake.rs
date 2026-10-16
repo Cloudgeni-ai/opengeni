@@ -99,6 +99,7 @@ async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> 
     let root = lab.join("ht").join(name);
     let engine = Firecracker::new(FirecrackerConfig {
         firecracker: lab.join("bin/firecracker"),
+        retained: Vec::new(),
         jailer: lab.join("bin/jailer"),
         cgroup_parent: "/sys/fs/cgroup/compute-host-test".into(),
     })

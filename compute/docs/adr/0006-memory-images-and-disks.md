@@ -21,6 +21,15 @@ restore depend on every earlier link.
   named by one receipt; a wake fetches the pair it names.
 - With no valid image, the sandbox boots fresh from its disk and reports that
   it did. This is what happens when a running VM's process dies.
+- Each image records the runtime that made it: the snapshot format of the
+  VMM that wrote it and the processor model. A VMM records its runtime when
+  it launches, so a VM started before an upgrade still labels its images
+  with the older one. Releases that write the same format count as one
+  runtime, so most upgrades keep every image. After an upgrade that changes
+  the format, the host keeps the older Firecracker binary for as long as
+  images are kept, and wakes each image under the binary that made it. Only
+  a VMM that answered and refused an image, under a runtime the host no
+  longer keeps, makes the sandbox give the image up.
 
 ## Consequences
 

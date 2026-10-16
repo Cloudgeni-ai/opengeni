@@ -64,8 +64,23 @@ pub trait Engine: Send + Sync + 'static {
 
     /// What restoring a memory image depends on besides the image, such as
     /// the VMM's version and the processor: an image made under another
-    /// runtime may be refused. Empty when unknown.
+    /// runtime may be refused. New VMs run under this one. Empty when
+    /// unknown.
     fn runtime(&self) -> &str;
+
+    /// The runtime `vm` runs under, which its snapshots belong to. A VM an
+    /// earlier agent started before an upgrade may run under an older one
+    /// than [`Engine::runtime`]. Empty when unknown.
+    fn vm_runtime<'a>(&'a self, vm: &'a Self::Vm) -> &'a str {
+        let _ = vm;
+        self.runtime()
+    }
+
+    /// Every runtime whose images this engine restores under the runtime
+    /// that made them: its own, and any older ones it keeps.
+    fn runtimes(&self) -> Vec<&str> {
+        vec![self.runtime()]
+    }
 
     /// Boots a fresh VM from its disks.
     fn boot(&self, spec: &VmSpec) -> impl Future<Output = Result<Self::Vm, EngineError>> + Send;

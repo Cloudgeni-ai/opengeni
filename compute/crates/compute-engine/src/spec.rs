@@ -137,4 +137,8 @@ pub struct RestoreFiles {
     pub state: PathBuf,
     /// Guest memory.
     pub memory: MemorySource,
+    /// The runtime the image was made under, if known; see
+    /// [`crate::Engine::runtime`]. An engine that keeps that runtime
+    /// restores the image under it.
+    pub made_under: Option<String>,
 }

@@ -19,6 +19,8 @@ struct Counting {
     stops: AtomicUsize,
     /// What [`Engine::runtime`] says.
     runtime: String,
+    /// Older runtimes it keeps, as [`Engine::runtimes`] adds them.
+    retained: Vec<String>,
     /// Whether it refuses every memory image, as a VMM refuses a snapshot
     /// format it no longer reads.
     refuses: AtomicBool,
@@ -41,6 +43,13 @@ impl Engine for Counting {
 
     fn runtime(&self) -> &str {
         &self.runtime
+    }
+
+    fn runtimes(&self) -> Vec<&str> {
+        std::iter::once(&self.runtime)
+            .chain(&self.retained)
+            .map(String::as_str)
+            .collect()
     }
 
     async fn boot(&self, _: &VmSpec) -> Result<(), EngineError> {
@@ -437,19 +446,25 @@ async fn an_uncertain_eviction_keeps_the_local_copy() {
 
 /// A VMM that refuses a sound image made under its own runtime may have
 /// failed for a reason of the host's, so the image is kept for a retry.
-/// One made under another runtime (an older VMM, another processor) will
-/// be refused every time: the sandbox gives its memory up and wakes from
-/// its disk instead of retrying forever.
+/// One made under a runtime the engine does not keep (an older snapshot
+/// format, another processor) will be refused every time: the sandbox
+/// gives its memory up and wakes from its disk instead of retrying
+/// forever. One whose runtime is kept, or where either runtime is unknown,
+/// proves nothing by a refusal and is kept.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_image_refused_by_another_runtime_is_given_up() {
-    const NOW: &str = "Firecracker v2.0.0 on a new processor";
-    for (made_under, kept) in [
-        (NOW, true),
-        ("Firecracker v1.0.0 on an old processor", false),
+    const NOW: &str = "Firecracker snapshot format v13.0.0 on a new processor";
+    const OLD: &str = "Firecracker snapshot format v12.0.0 on an old processor";
+    for (made_under, runtime, retained, kept) in [
+        (NOW, NOW, None, true),
+        (OLD, NOW, None, false),
+        (OLD, NOW, Some(OLD), true),
+        (OLD, "", None, true),
     ] {
         let mut sandbox = Sandbox::new().await;
         sandbox.engine = Arc::new(Counting {
-            runtime: NOW.to_owned(),
+            runtime: runtime.to_owned(),
+            retained: retained.into_iter().map(str::to_owned).collect(),
             refuses: AtomicBool::new(true),
             ..Counting::default()
         });
@@ -483,6 +498,38 @@ async fn an_image_refused_by_another_runtime_is_given_up() {
             assert!(!durable.image, "the sandbox would retry the image forever");
         }
     }
+}
+
+/// A save of a VM whose memory is still arriving waits for it, but a wake
+/// or a removal meanwhile does not have to: cancelling the save ends it at
+/// once with nothing changed, however long the memory takes.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_save_waiting_for_memory_that_does_not_arrive_can_be_cancelled() {
+    let sandbox = Sandbox::new().await;
+    let record = sandbox.record(Change::new()).await;
+    let mut job = sandbox.job(NoStore, record, true);
+    // A pager that never listens: the memory it serves never completes.
+    let paging = Paging::start(
+        sandbox.root.path().join("silent-pager.sock"),
+        "1".into(),
+        (0, 0),
+        None,
+        Vec::new(),
+    );
+    job.live.as_mut().unwrap().memory.paging = Some(paging);
+    let cancel = job.cancel.clone();
+    let save = tokio::spawn(async move { job.run(Step::Save).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!save.is_finished(), "the save did not wait for the memory");
+    cancel.cancel();
+    let ran = tokio::time::timeout(Duration::from_secs(5), save)
+        .await
+        .expect("the cancelled save ends")
+        .unwrap();
+    assert_eq!(ran.outcome, Outcome::Cancelled);
+    let durable = sandbox.records.settle(sandbox.id).await.unwrap();
+    assert!(!durable.image);
 }
 
 /// A failed disk check, or one an agent never finished, keeps every later

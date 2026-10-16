@@ -162,6 +162,11 @@ pub struct FirecrackerConfig {
     /// The Firecracker binary. Its file name, once every symbolic link is
     /// resolved, must be [`BINARY_NAME`].
     pub firecracker: PathBuf,
+    /// Older Firecracker binaries kept after an upgrade, each named like
+    /// `firecracker`, so that memory images made under them can still be
+    /// restored. New VMs always start under `firecracker`; a binary can go
+    /// once no image is older than the image retention period.
+    pub retained: Vec<PathBuf>,
     /// The jailer binary from the same Firecracker release.
     pub jailer: PathBuf,
     /// Parent of every VM's own cgroup. It must sit inside the cgroup v2
@@ -172,15 +177,49 @@ pub struct FirecrackerConfig {
 /// Runs VMs with Firecracker, each under its jailer.
 #[derive(Clone, Debug)]
 pub struct Firecracker {
-    binary: PathBuf,
+    /// What new VMs start under.
+    binary: Binary,
+    /// Kept only to restore images made under them.
+    retained: Vec<Binary>,
     jailer: PathBuf,
     cgroups: Cgroup,
     /// `cgroups` relative to the cgroup v2 mount, as the jailer names it.
     cgroup_relative: PathBuf,
     startup_timeout: Duration,
     memory: MemoryProfile,
-    /// See [`Engine::runtime`]: the VMM's version and the processor.
+}
+
+/// A Firecracker binary and the runtime the images it makes belong to.
+#[derive(Clone, Debug)]
+struct Binary {
+    path: PathBuf,
+    /// See [`Engine::runtime`].
     runtime: String,
+}
+
+impl Binary {
+    /// Checks `path`'s name, which the jailer names every jail after, and
+    /// asks the binary what its images depend on.
+    fn new(path: &Path) -> io::Result<Self> {
+        // The jailer resolves links in the binary's path and names every
+        // jail after the file it finds, so the name is checked there.
+        let binary = fs::canonicalize(path)?;
+        if binary.file_name().is_none_or(|name| name != BINARY_NAME) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "a Firecracker binary must be named {BINARY_NAME}, not {} (from {})",
+                    binary.display(),
+                    path.display()
+                ),
+            ));
+        }
+        let runtime = runtime_of(&binary)?;
+        Ok(Self {
+            path: binary,
+            runtime,
+        })
+    }
 }
 
 impl Firecracker {
@@ -188,18 +227,16 @@ impl Firecracker {
     /// VMs use the bare-metal memory profile unless
     /// [`Firecracker::with_memory_profile`] says otherwise.
     pub fn new(config: FirecrackerConfig) -> io::Result<Self> {
-        // The jailer resolves links in the binary's path and names every
-        // jail after the file it finds, so the name is checked there.
-        let binary = fs::canonicalize(&config.firecracker)?;
-        if binary.file_name().is_none_or(|name| name != BINARY_NAME) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "the Firecracker binary must be named {BINARY_NAME}, not {} (from {})",
-                    binary.display(),
-                    config.firecracker.display()
-                ),
-            ));
+        let binary = Binary::new(&config.firecracker)?;
+        let mut retained: Vec<Binary> = Vec::new();
+        for path in &config.retained {
+            let older = Binary::new(path)?;
+            // One whose images the current binary makes alike adds nothing.
+            if older.runtime != binary.runtime
+                && retained.iter().all(|kept| kept.runtime != older.runtime)
+            {
+                retained.push(older);
+            }
         }
         let mount = cgroup2_mount()?;
         let cgroup_relative = config
@@ -222,15 +259,14 @@ impl Firecracker {
                 "VMs need a parent cgroup below the cgroup v2 root",
             ));
         }
-        let runtime = runtime_of(&binary)?;
         Ok(Self {
             binary,
+            retained,
             jailer: config.jailer,
             cgroups: Cgroup::create_parent(config.cgroup_parent)?,
             cgroup_relative,
             startup_timeout: Duration::from_secs(5),
             memory: MemoryProfile::bare_metal(),
-            runtime,
         })
     }
 
@@ -263,6 +299,7 @@ impl Firecracker {
         spec: &VmSpec,
         operation: &'static str,
         owned: Vec<(PathBuf, Owned)>,
+        binary: &Binary,
     ) -> Result<FirecrackerVm, EngineError> {
         let jail = Jail::new(spec)
             .map_err(|error| EngineError::new(ErrorKind::Fatal, operation, error))?;
@@ -274,17 +311,22 @@ impl Firecracker {
             spec,
             &jail,
             &Launch {
-                binary: &self.binary,
+                binary: &binary.path,
                 cgroup_parent: &self.cgroup_relative,
                 netns: netns.as_deref(),
             },
         );
         let (console, log) = {
             let (jail, logs, uid, gid) = (jail.clone(), spec.logs.clone(), spec.uid, spec.gid);
-            tokio::task::spawn_blocking(move || prepare(&jail, &logs, &owned, uid, gid))
-                .await
-                .map_err(|error| EngineError::caused_by(ErrorKind::Transient, operation, error))?
-                .map_err(|error| EngineError::io(operation, error))?
+            let runtime = binary.runtime.clone();
+            tokio::task::spawn_blocking(move || {
+                let opened = prepare(&jail, &logs, &owned, uid, gid)?;
+                record_runtime(&jail, &runtime)?;
+                Ok::<_, io::Error>(opened)
+            })
+            .await
+            .map_err(|error| EngineError::caused_by(ErrorKind::Transient, operation, error))?
+            .map_err(|error| EngineError::io(operation, error))?
         };
         let mut command = Command::new(&self.jailer);
         command
@@ -346,7 +388,8 @@ impl Firecracker {
     }
 
     /// Pins the VMM the jailer started for `spec`: the process named by the
-    /// jail's pid file, if it lives in the VM's own cgroup.
+    /// jail's pid file, if it lives in the VM's own cgroup. Its runtime is
+    /// what its launch recorded, unknown if the launch recorded none.
     fn attach(&self, spec: &VmSpec, jail: &Jail) -> Result<FirecrackerVm, String> {
         let pid_file = jail.root().join(PID_FILE);
         let text = fs::read_to_string(&pid_file)
@@ -370,6 +413,7 @@ impl Firecracker {
             api: Api::new(spec.api_socket()),
             cgroup: self.cgroup_of(spec),
             jail: jail.clone(),
+            runtime: recorded_runtime(jail),
         })
     }
 
@@ -438,6 +482,25 @@ impl Firecracker {
     }
 }
 
+/// What a failed `/snapshot/load` means for the image. A VMM that answered
+/// and refused it, or exited while loading it, cannot use it as it is. A
+/// request lost or late on the way says nothing about the image, so it is
+/// a transient failure and the image is tried again.
+fn load_failure(error: ApiError, running: bool) -> EngineError {
+    const OP: &str = "restore";
+    match error {
+        _ if !running => EngineError::new(
+            ErrorKind::MemoryLost,
+            OP,
+            "the VMM exited while loading the image",
+        ),
+        refused @ ApiError::Status { .. } => {
+            EngineError::caused_by(ErrorKind::MemoryLost, OP, refused)
+        }
+        lost => EngineError::caused_by(ErrorKind::Transient, OP, lost),
+    }
+}
+
 /// The error a launch ends with when it failed before the host held the
 /// VMM it may have started. Whatever it started was then discarded, with
 /// `discarded` saying how that went: only once that is proven, by the VM's
@@ -470,27 +533,68 @@ fn cgroup2_mount() -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no cgroup v2 hierarchy mounted"))
 }
 
-/// What a memory image made here depends on: the version `binary` reports
-/// and the processor model. Firecracker refuses snapshots of versions it no
-/// longer reads, and a guest's saved processor state belongs to its model.
+/// What a memory image made here depends on: the snapshot format `binary`
+/// writes and the processor model. Firecracker refuses snapshots in formats
+/// it no longer reads, and a guest's saved processor state belongs to its
+/// model. Releases that write the same format make interchangeable images,
+/// so an upgrade that keeps the format keeps every image. A binary too old
+/// to name its format is known by its release.
 fn runtime_of(binary: &Path) -> io::Result<String> {
+    let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let processor = cpu_model(&cpuinfo);
+    if let Some(format) = first_line(binary, "--snapshot-version")? {
+        return Ok(format!(
+            "Firecracker snapshot format {format} on {processor}"
+        ));
+    }
+    match first_line(binary, "--version")? {
+        Some(release) => Ok(format!("{release} on {processor}")),
+        None => Err(io::Error::other(format!(
+            "{} --version reported no version",
+            binary.display()
+        ))),
+    }
+}
+
+/// The first line `binary` prints when run with `flag`, if it succeeds.
+fn first_line(binary: &Path, flag: &str) -> io::Result<Option<String>> {
     let output = std::process::Command::new(binary)
-        .arg("--version")
+        .arg(flag)
         .stdin(Stdio::null())
+        .stderr(Stdio::null())
         .output()?;
     let reported = String::from_utf8_lossy(&output.stdout);
-    let version = reported
+    let line = reported
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty());
-    let Some(version) = version.filter(|_| output.status.success()) else {
-        return Err(io::Error::other(format!(
-            "{} --version reported no version",
-            binary.display()
-        )));
-    };
-    let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
-    Ok(format!("{version} on {}", cpu_model(&cpuinfo)))
+    Ok(line.filter(|_| output.status.success()).map(str::to_owned))
+}
+
+/// Where a launch records the runtime its VMM runs under: beside the jail,
+/// where only the host reaches.
+fn runtime_record(jail: &Jail) -> PathBuf {
+    jail.root()
+        .parent()
+        .unwrap_or_else(|| jail.root())
+        .join("vmm.runtime")
+}
+
+/// Records `runtime` for the VMM about to launch in `jail`, replacing what
+/// an earlier launch recorded. The VMM outlives the agent, so this is how
+/// a later agent learns which runtime its snapshots belong to.
+fn record_runtime(jail: &Jail, runtime: &str) -> io::Result<()> {
+    let path = runtime_record(jail);
+    let staged = path.with_extension("runtime.new");
+    fs::write(&staged, runtime)?;
+    fs::rename(&staged, &path)
+}
+
+/// The runtime recorded for `jail`'s VMM, or empty if none was.
+fn recorded_runtime(jail: &Jail) -> String {
+    fs::read_to_string(runtime_record(jail))
+        .map(|runtime| runtime.trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// The processor's model name as `/proc/cpuinfo` gives it.
@@ -520,9 +624,21 @@ fn prepare(
     }
     fs::create_dir_all(logs)?;
     Ok((
-        File::create(logs.join("console.log"))?,
-        File::create(logs.join("vmm.log"))?,
+        fresh_log(&logs.join("console.log"))?,
+        fresh_log(&logs.join("vmm.log"))?,
     ))
+}
+
+/// A new, empty file at `path` for a launch's log. A new file rather than
+/// the old one emptied: the host trims long logs from their start while
+/// VMs run, and a trim measured on the old file must never punch out what
+/// the new launch writes into the same file.
+fn fresh_log(path: &Path) -> io::Result<File> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    File::options().write(true).create_new(true).open(path)
 }
 
 /// Removes what one launch leaves in the jail: the jailer's copy of the
@@ -553,6 +669,8 @@ pub struct FirecrackerVm {
     api: Api,
     cgroup: Cgroup,
     jail: Jail,
+    /// See [`Engine::vm_runtime`].
+    runtime: String,
 }
 
 impl FirecrackerVm {
@@ -738,7 +856,18 @@ impl Engine for Firecracker {
     }
 
     fn runtime(&self) -> &str {
-        &self.runtime
+        &self.binary.runtime
+    }
+
+    fn vm_runtime<'a>(&'a self, vm: &'a FirecrackerVm) -> &'a str {
+        &vm.runtime
+    }
+
+    fn runtimes(&self) -> Vec<&str> {
+        std::iter::once(&self.binary)
+            .chain(&self.retained)
+            .map(|binary| binary.runtime.as_str())
+            .collect()
     }
 
     async fn boot(&self, spec: &VmSpec) -> Result<FirecrackerVm, EngineError> {
@@ -749,7 +878,7 @@ impl Engine for Firecracker {
             .filter(|drive| !drive.read_only)
             .map(|drive| (drive.path.clone(), Owned::File))
             .collect();
-        let vm = self.launch(spec, OP, owned).await?;
+        let vm = self.launch(spec, OP, owned, &self.binary).await?;
         let configure = async {
             // A rejected configuration will not fix itself: fatal.
             let put = |path: &'static str, body: Value| {
@@ -843,7 +972,14 @@ impl Engine for Firecracker {
             .collect();
         // Saved state and memory are only read; they stay the host's, so the
         // VMM cannot change an image it restores from.
-        let vm = self.launch(spec, OP, owned).await?;
+        // An image goes back to the binary that made it, if it is kept;
+        // otherwise the current one tries it.
+        let binary = self
+            .retained
+            .iter()
+            .find(|kept| files.made_under.as_deref() == Some(kept.runtime.as_str()))
+            .unwrap_or(&self.binary);
+        let vm = self.launch(spec, OP, owned, binary).await?;
         if let MemorySource::Pager(pager) = &files.memory {
             // The host's own failure: the image is not in question.
             let started = async {
@@ -853,9 +989,12 @@ impl Engine for Firecracker {
             };
             self.or_kill(&vm, started).await?;
         }
-        // A rejected image means the memory state is unusable; the disk is not
-        // involved.
-        let load = vm.call(OP, ErrorKind::MemoryLost, "PUT", "/snapshot/load", &body);
+        let load = async {
+            let answer = vm.api.call("PUT", "/snapshot/load", Some(&body)).await;
+            answer
+                .map(drop)
+                .map_err(|error| load_failure(error, vm.is_running()))
+        };
         self.or_kill(&vm, load).await?;
         Ok(vm)
     }

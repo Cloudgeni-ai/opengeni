@@ -658,6 +658,36 @@ async fn a_restart_keeps_how_long_a_sandbox_has_been_idle() {
     lab.assert_clean();
 }
 
+/// A pause records the sandbox's last activity, so an agent restarted
+/// before the save counts its idle time from then, not from its boot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pause_records_when_the_sandbox_was_last_used() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(48);
+    let unix_ms = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    };
+    lab.create(sandbox, PAUSE_SOON).await;
+    lab.run(sandbox, &["set x"]).await;
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let used = unix_ms();
+    lab.run(sandbox, &["get"]).await;
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    let recorded = lab.record(sandbox)["last_used_ms"].as_u64().unwrap();
+    assert!(
+        (used..=unix_ms()).contains(&recorded),
+        "the pause recorded the last activity: {recorded} not after {used}"
+    );
+    lab.assert_clean();
+}
+
 /// Creating a sandbox whose directory is already there is refused, and the
 /// directory is left as it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

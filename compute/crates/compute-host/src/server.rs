@@ -2,10 +2,11 @@
 
 use std::future::Future;
 use std::io;
+use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, Interest};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::time::Instant;
 
@@ -17,9 +18,6 @@ const MAX_REQUEST: u64 = 64 << 10;
 /// How long a client may take to send its request once connected. Without
 /// a bound, clients that connect and say nothing would pile up.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// The most a connecting client may send for the guest before its
-/// connection is ready; it is passed on once it is.
-const MAX_EARLY: usize = 64 << 10;
 
 /// How long a guest port may take to accept after the sandbox runs. Only a
 /// fresh boot needs more than a few milliseconds.
@@ -126,9 +124,8 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
             id,
             generation,
             priority,
-        } => match unless_abandoned(
-            &mut client,
-            &mut Vec::new(),
+        } => match unless_hung_up(
+            client.get_ref(),
             handle.acquire(id, generation, priority.into()),
         )
         .await
@@ -152,21 +149,22 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
 /// Answers a connect request: waits for `acquire` to wake the sandbox,
 /// reaches `port` in it, then joins the client and the guest until either
 /// side closes, keeping the sandbox awake meanwhile.
+///
+/// Whatever the client sends before the reply stays in the socket, or in
+/// `client`'s buffer, and reaches the guest once the two are joined.
 async fn serve_connect(
     mut client: BufReader<UnixStream>,
     acquire: impl Future<Output = Result<Lease, HostError>>,
     port: u32,
 ) -> io::Result<()> {
-    // Bytes the client sends ahead of its reply, meant for the guest.
-    let mut early = Vec::new();
-    let mut lease = match unless_abandoned(&mut client, &mut early, acquire).await {
+    let mut lease = match unless_hung_up(client.get_ref(), acquire).await {
         Some(Ok(lease)) => lease,
         Some(Err(error)) => return write_reply(&mut client, &error_reply(&error)).await,
         None => return Ok(()),
     };
     let started = Instant::now();
     let connect = lease.connect(port, CONNECT_TIMEOUT);
-    let mut guest = match unless_abandoned(&mut client, &mut early, connect).await {
+    let mut guest = match unless_hung_up(client.get_ref(), connect).await {
         Some(Ok(guest)) => guest,
         Some(Err(error)) => return write_reply(&mut client, &error_reply(&error)).await,
         None => return Ok(()),
@@ -180,7 +178,6 @@ async fn serve_connect(
         },
     )
     .await?;
-    guest.write_all(&early).await?;
     tokio::io::copy_bidirectional(&mut client, &mut guest).await?;
     drop(lease);
     Ok(())
@@ -190,27 +187,48 @@ fn done(result: Result<(), HostError>) -> Reply {
     result.map_or_else(|error| error_reply(&error), |()| Reply::Done)
 }
 
-/// Runs `work` unless the client hangs up first, closing its connection or
-/// its sending side: then `work` is dropped, which gives up what it waited
-/// for (a wake's hold on the sandbox), and the result is `None`. What the
-/// client sends meanwhile is kept in `early`, up to [`MAX_EARLY`] bytes;
-/// past that, the client is no longer watched.
-async fn unless_abandoned<T>(
-    client: &mut BufReader<UnixStream>,
-    early: &mut Vec<u8>,
-    work: impl Future<Output = T>,
-) -> Option<T> {
-    tokio::pin!(work);
-    let mut buffer = [0_u8; 4096];
+/// Runs `work` unless the client hangs up first, so that it could no
+/// longer read an answer: then `work` is dropped, which gives up what it
+/// waited for (a wake's hold on the sandbox), and the result is `None`.
+///
+/// A client that only closes its sending side has not hung up: it may send
+/// everything first and then wait for the answer. Nothing the client sends
+/// is read meanwhile, so however much it sends, it stays watched.
+async fn unless_hung_up<T>(client: &UnixStream, work: impl Future<Output = T>) -> Option<T> {
+    tokio::select! {
+        biased;
+        output = work => Some(output),
+        () = hung_up(client) => None,
+    }
+}
+
+/// Resolves once `client` has closed both directions.
+async fn hung_up(client: &UnixStream) {
+    // Watched through a second descriptor of the same socket, with its own
+    // readiness: what the watch clears must not leave the connection's own
+    // reads and writes waiting for an event that never comes. Without one,
+    // the work simply goes on.
+    let watch = client.as_fd().try_clone_to_owned().and_then(|fd| {
+        let watch = std::os::unix::net::UnixStream::from(fd);
+        watch.set_nonblocking(true)?;
+        UnixStream::from_std(watch)
+    });
+    let Ok(watch) = watch else {
+        return std::future::pending().await;
+    };
     loop {
-        tokio::select! {
-            biased;
-            output = &mut work => return Some(output),
-            read = client.read(&mut buffer), if early.len() < MAX_EARLY => match read {
-                Ok(0) | Err(_) => return None,
-                Ok(read) => early.extend_from_slice(&buffer[..read]),
-            },
+        let Ok(seen) = watch.ready(Interest::WRITABLE).await else {
+            return std::future::pending().await;
+        };
+        // A Unix socket shows its peer's full close as a hang-up.
+        if seen.is_write_closed() {
+            return;
         }
+        // Writable is the usual state: forget it, so the next wait lasts
+        // until the socket's state changes.
+        let _ = watch.try_io(Interest::WRITABLE, || {
+            Err::<(), _>(io::ErrorKind::WouldBlock.into())
+        });
     }
 }
 
@@ -241,4 +259,38 @@ async fn write_reply(stream: &mut (impl AsyncWrite + Unpin), reply: &Reply) -> i
     line.push(b'\n');
     stream.write_all(&line).await?;
     stream.flush().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SOON: Duration = Duration::from_millis(200);
+
+    async fn resolves(client: &UnixStream) -> bool {
+        tokio::time::timeout(SOON, hung_up(client)).await.is_ok()
+    }
+
+    /// Sending, and then closing only the sending side, is not hanging up;
+    /// closing the connection is, however much was sent and left unread.
+    /// Watching never holds up the connection's own replies.
+    #[tokio::test]
+    async fn only_a_closed_connection_is_a_hang_up() {
+        let (mut caller, mut server) = UnixStream::pair().unwrap();
+        assert!(!resolves(&server).await, "an open connection hung up");
+        tokio::time::timeout(SOON, server.write_all(b"reply\n"))
+            .await
+            .expect("watching held up a reply")
+            .unwrap();
+        caller.write_all(&vec![b'x'; 64 << 10]).await.unwrap();
+        assert!(!resolves(&server).await, "sending is not hanging up");
+        caller.shutdown().await.unwrap();
+        assert!(!resolves(&server).await, "a closed sending side hung up");
+        tokio::time::timeout(SOON, server.write_all(b"reply\n"))
+            .await
+            .expect("watching held up a reply")
+            .unwrap();
+        drop(caller);
+        assert!(resolves(&server).await, "a closed connection went unseen");
+    }
 }

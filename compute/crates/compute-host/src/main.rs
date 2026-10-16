@@ -96,6 +96,11 @@ struct ServeArgs {
     root: PathBuf,
     #[arg(long)]
     firecracker: PathBuf,
+    /// An older Firecracker binary kept after an upgrade, so that memory
+    /// images it made still wake with their programs. Repeatable; each
+    /// file must be named `firecracker`.
+    #[arg(long = "retained-firecracker")]
+    retained_firecracker: Vec<PathBuf>,
     /// Firecracker's jailer, from the same release.
     #[arg(long)]
     jailer: PathBuf,
@@ -447,6 +452,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     };
     let engine = Firecracker::new(FirecrackerConfig {
         firecracker: args.firecracker,
+        retained: args.retained_firecracker,
         jailer: args.jailer,
         cgroup_parent: args.cgroup.clone(),
     })
