@@ -571,6 +571,36 @@ describe("organization directory", () => {
     expect(first.initialWorkspaceIds).toEqual(["ws-platform"]);
     await view.unmount();
   });
+
+  test("seat refusal survives directory error projection alongside partial invite success", async () => {
+    const create = mock(async (_org: string, request: { email: string }) => {
+      if (request.email === "full@example.test")
+        throw Object.assign(new Error("Your plan has no seats left"), {
+          status: 402,
+          body: JSON.stringify({ error: "seat_limit_reached" }),
+        });
+      return { ...invitation("member"), id: "new-seat", targetEmail: request.email };
+    });
+    const client = makeClient({ createOrganizationInvitation: create });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <Capture />
+      </Provider>,
+    );
+    await flush();
+    let result!: Awaited<ReturnType<NonNullable<typeof captured>["invite"]>>;
+    await act(async () => {
+      result = await captured!.invite({
+        emails: ["fits@example.test", "full@example.test"],
+        role: "member",
+        workspaceIds: [],
+      });
+    });
+    expect(result.sent.map((item) => item.targetEmail)).toEqual(["fits@example.test"]);
+    expect(result.failed[0]).toMatchObject({ email: "full@example.test", seatLimitReached: true });
+    await view.unmount();
+  });
 });
 
 describe("People page", () => {
