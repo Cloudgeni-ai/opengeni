@@ -1,5 +1,28 @@
 # @opengeni/core
 
+## 3.3.0
+
+### Patch Changes
+
+- 38ac98e: Run Site AI privately per viewer through native sessions, with optional headless
+  inline results and app-defined prompts. Keep app work out of ordinary workspace
+  discovery, preserve native permissions and accounting, and expose private-safe
+  per-Site AI costs and separate platform metrics in Insights. Usage retains limits.
+- Updated dependencies [190a322]
+- Updated dependencies [38ac98e]
+  - @opengeni/runtime@3.3.0
+  - @opengeni/contracts@3.3.0
+  - @opengeni/db@3.3.0
+  - @opengeni/capabilities@3.3.0
+  - @opengeni/codex@3.3.0
+  - @opengeni/config@3.3.0
+  - @opengeni/documents@3.3.0
+  - @opengeni/events@3.3.0
+  - @opengeni/observability@3.3.0
+  - @opengeni/storage@3.3.0
+  - @opengeni/vaults@3.3.0
+  - @opengeni/network@3.3.0
+
 ## 3.2.2
 
 ### Minor Changes
