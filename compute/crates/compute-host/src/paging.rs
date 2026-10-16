@@ -365,6 +365,10 @@ impl Paging {
         let mut complete = self.complete.clone();
         let mut failing = self.failed.clone();
         let failed = || *self.failed.borrow();
+        // A conversation that ended closes both channels at once. A closed
+        // `failed` without failure must then never win the race, or the
+        // completion beside it would go unseen: it waits forever inside its
+        // own future, and the other arm decides.
         tokio::select! {
             reached = async { complete.wait_for(|complete| *complete).await.is_ok() } => {
                 // Without it the conversation ended: it failed, or the
@@ -377,13 +381,11 @@ impl Paging {
                     Err(Incomplete::Stopped)
                 }
             }
-            gave_up = async { failing.wait_for(|failed| *failed).await.is_ok() } => {
-                if gave_up {
-                    Err(Incomplete::Failed)
-                } else {
-                    std::future::pending().await
+            () = async {
+                if failing.wait_for(|failed| *failed).await.is_err() {
+                    std::future::pending::<()>().await;
                 }
-            }
+            } => Err(Incomplete::Failed),
         }
     }
 
@@ -710,13 +712,14 @@ mod tests {
     }
 
     /// A pager on `control` that greets with `missing` and passes on what
-    /// the agent first tells it, then says the file is complete and stays
-    /// connected until the agent goes.
+    /// the agent first tells it, then says the file is complete and, if
+    /// `done`, that it is done; it stays connected until the agent goes.
     fn fake_pager(
         control: &Path,
         tag: String,
         identity: (u64, u64),
         missing: Vec<(u64, u64)>,
+        done: bool,
     ) -> tokio::sync::oneshot::Receiver<ToPager> {
         let listener = tokio::net::UnixListener::bind(control).unwrap();
         let (pass, told) = tokio::sync::oneshot::channel();
@@ -741,6 +744,12 @@ mod tests {
                 .write_all(&control::line(&ToHost::Complete).unwrap())
                 .await
                 .unwrap();
+            if done {
+                write
+                    .write_all(&control::line(&ToHost::Done).unwrap())
+                    .await
+                    .unwrap();
+            }
             while let Ok(Some(_)) = lines.next_line().await {}
         });
         told
@@ -772,7 +781,7 @@ mod tests {
         let identity = identity(&images.memory(generation)).unwrap();
         // The last fill was written but never acknowledged before the
         // agent died, and the image has since become local.
-        let pager = fake_pager(&control, tag, identity, vec![(4096, 3 * 4096)]);
+        let pager = fake_pager(&control, tag, identity, vec![(4096, 3 * 4096)], false);
         let paging = Paging::reconnect(&marker, &control, images, None)
             .await
             .unwrap()
@@ -791,6 +800,39 @@ mod tests {
             .await
             .expect("the pager says it is complete")
             .unwrap();
+        paging.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_conversation_that_ended_still_reads_as_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let (images, generation, marker, control, tag) = local_image(dir.path());
+        let identity = identity(&images.memory(generation)).unwrap();
+        let pager = fake_pager(&control, tag, identity, vec![(4096, 3 * 4096)], true);
+        let paging = Paging::reconnect(&marker, &control, images, None)
+            .await
+            .unwrap()
+            .expect("the pager runs");
+        timeout(Duration::from_secs(5), pager)
+            .await
+            .expect("the pager is told")
+            .unwrap();
+        // Once the conversation has ended, both channels are closed and
+        // either may look ready to a waiter.
+        let (mut complete, mut failed) = (paging.complete.clone(), paging.failed.clone());
+        timeout(Duration::from_secs(5), async {
+            while complete.changed().await.is_ok() {}
+            while failed.changed().await.is_ok() {}
+        })
+        .await
+        .expect("the conversation ends");
+        assert!(*complete.borrow() && !*failed.borrow());
+        for _ in 0..200 {
+            timeout(Duration::from_secs(1), paging.complete())
+                .await
+                .expect("completion is seen, whichever channel is polled first")
+                .unwrap();
+        }
         paging.close().await;
     }
 
