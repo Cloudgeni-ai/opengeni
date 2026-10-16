@@ -95,6 +95,13 @@ import {
   interactionToolInputJsonSchema,
 } from "./interaction-tool-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
+import {
+  browserActionText,
+  browserObservationText,
+  browserOpenText,
+  browserReadText,
+  browserTabsText,
+} from "./browser-model-text";
 
 export const INTERACTION_ATTEMPT_TOOL_NAMES = FIRST_PARTY_IN_PROCESS_TOOL_NAMES;
 
@@ -772,6 +779,9 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: boolean;
     idempotent: boolean;
     approval?: "none" | "human" | "policy";
+    /** The model's text view of a successful result. The complete typed value
+     * stays in structuredContent; without this the text is that value as JSON. */
+    modelText?: (output: z.output<TOutput>) => string;
     execute: (
       value: z.output<TInput>,
       context: AttemptToolExecutionContext,
@@ -808,6 +818,7 @@ export function createInteractionAttemptToolDefinitions(
           context,
           options.execute,
           options.readOnly,
+          options.modelText,
         ),
     });
   };
@@ -885,11 +896,12 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns exact session and tab state, plus observation: a compact snapshot of the opened (or selected) tab when one is available. With initialUrl, targets holds only the opened tab and otherTabCount counts the rest (browser_tabs list shows them). Reuse its refs and generations for the first action instead of observing again. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the Opengeni Browser extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, explain that the Chrome extension must be connected instead of silently creating a blank managed browser (it needs a Connected Machine, then the Opengeni Browser extension: ${OPENGENI_BROWSER_EXTENSION_URL}). BrowserSessions persist across tool calls; shell-launched browser daemons do not survive remote-command cleanup. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. A new attached session opens a dedicated tab. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Default private_profile storage is unchanged. Returns the session, its tabs and an outline of the opened (or selected) tab when one is available, in the browser_observe format. With initialUrl, only the opened tab is listed and the others are counted (browser_tabs list shows them). Act on the outline's elements directly instead of observing again. Call it first for any browser task; browser_observe, browser_act, browser_screenshot and browser_tabs then work on the session it returns.`,
     input: BrowserOpenInput,
     output: BrowserOpenOutput,
     readOnly: false,
     idempotent: true,
+    modelText: browserOpenText,
     execute: async (value, context) =>
       await openBrowser(input.transport, input.workspaceId, input.sessionId, value, context),
   });
@@ -899,11 +911,12 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "tabs"],
     title: "Manage browser tabs",
     description:
-      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation. Open/select also return mutationObservation, the operation's compact page snapshot. Reuse its refs and generations for immediate actions; refresh after later page changes.",
+      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation. Open/select also return the page outline. Act on its elements directly; observe again after later page changes.",
     input: BrowserTabsInput,
     output: BrowserTabsOutput,
     readOnly: false,
     idempotent: false,
+    modelText: browserTabsText,
     execute: async (value) => {
       let mutationObservation: z.infer<typeof BrowserObservation> | undefined;
       if (value.operation === "open") {
@@ -945,11 +958,12 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "observe"],
     title: "Observe browser tab",
     description:
-      "Read one tab's URL, title, viewport, causal generations, and a bounded accessibility view. Compact view is the default: agentView lists selected refs, and omittedNodeCount or clippedFieldCount appear only when something was left out; it is not a complete page tree. Empty and default fields are omitted. Set view=full for the complete accessibility snapshot. Set includeScreenshot=true to add a current still image as tool image content; browser_screenshot is faster when only pixels are needed.",
+      "Read one tab's URL, title, viewport and accessibility outline: one line per element, role \"name\" [ref] value and states, indented by nesting. Locate an element by role and name, or by ref ({kind:'ref',ref}); refs are listed on controls and other actionable elements, not on text and layout lines. The default view is selective and says how many elements it left out; it is not a complete page tree. Set view=full for every element with its ref. Set includeScreenshot=true to add a current still image as tool image content; browser_screenshot is faster when only pixels are needed.",
     input: BrowserObserveInput,
     output: BrowserAgentObservation,
     readOnly: true,
     idempotent: true,
+    modelText: agentObservationText,
     execute: async (value) => {
       const observationRequest = input.transport.observeBrowserTarget(
         input.workspaceId,
@@ -1007,6 +1021,8 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserReadToolOutput,
     readOnly: true,
     idempotent: true,
+    modelText: (output) =>
+      output.source === "accessibility" ? browserReadText(output) : JSON.stringify(output),
     execute: async (value) => {
       if (value.mode === "dom") {
         const state =
@@ -1118,11 +1134,12 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from browser_open, tab open/select or a prior action; observe only when none is present or it lacks needed content. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. A press key is one character or a key name (Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24), optionally prefixed by Ctrl+, Alt+, Shift+, Meta+ or Mod+. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. The default receipt includes the page outline after the action, in the browser_observe format; set view=full for every element, or view=none when no post-action outline is needed. An upload action takes workspace File IDs; the artifact.artifactId returned by sandbox_file_publish is one. Text in fill, type and clipboard write may contain {{secret:…}} references; the value (or the current TOTP code for /otp) is typed at dispatch and never shown to you. Use type with mode:'keys' for split one-time-code boxes or inputs that ignore pasted text.",
     input: BrowserActInput,
     output: BrowserAgentActionReceipt,
     readOnly: false,
     idempotent: true,
+    modelText: agentActionText,
     execute: async (value, context) => {
       // Omitted fences are resolved by the API from the live target in the same
       // request, so acting on the current document costs one round trip.
@@ -2580,6 +2597,79 @@ function readBrowserObservation(
   };
 }
 
+/** A tool's model text, or its JSON when it has none. Rendering is a pure view
+ * of a value that already passed its output schema; should it ever fail, the
+ * model still gets the complete value rather than an error for a call that
+ * succeeded. */
+function resultModelText<T>(output: T, modelText: ((output: T) => string) | undefined): string {
+  if (modelText) {
+    try {
+      return modelText(output);
+    } catch {
+      // Fall through to the complete value.
+    }
+  }
+  return JSON.stringify(output);
+}
+
+/** The text view of a complete observation (view=full): every node, every ref. */
+function fullObservationText(observation: z.infer<typeof BrowserObservation>): string {
+  const semantic = observation.semantic;
+  const roots =
+    semantic?.kind === "snapshot"
+      ? semantic.roots
+      : semantic?.kind === "diff"
+        ? semantic.changed
+        : [];
+  return browserObservationText(
+    {
+      target: observation.target,
+      viewport: observation.viewport,
+      focusedRef: observation.focusedRef,
+      changedRegions: observation.changedRegions,
+      diagnostics: observation.diagnostics,
+      dialog: observation.dialog,
+      screenshot: observation.screenshot ?? undefined,
+      agentView: {
+        sourceKind: semantic?.kind ?? "none",
+        nodes: flattenBrowserNodes(roots).map(({ node, depth }) => ({
+          ref: node.ref,
+          role: node.role,
+          depth,
+          ...(node.name !== undefined ? { name: node.name } : {}),
+          ...(node.description !== undefined ? { description: node.description } : {}),
+          ...(node.value !== undefined ? { value: node.value } : {}),
+          states: node.states,
+          actions: node.actions,
+        })),
+        ...(semantic?.kind === "diff" && semantic.removedRefs.length > 0
+          ? { removedRefCount: semantic.removedRefs.length }
+          : {}),
+      },
+    },
+    { allRefs: true },
+  );
+}
+
+function agentObservationText(observation: z.infer<typeof BrowserAgentObservation>): string {
+  return "agentView" in observation
+    ? browserObservationText(observation)
+    : fullObservationText(observation);
+}
+
+function agentActionText(receipt: z.infer<typeof BrowserAgentActionReceipt>): string {
+  if ("protocolVersion" in receipt) {
+    const text = browserActionText({
+      targetId: receipt.targetId,
+      state: receipt.state,
+      error: receipt.error,
+      ...(receipt.targets ? { targets: receipt.targets } : {}),
+    });
+    return receipt.observation ? `${text}\n${fullObservationText(receipt.observation)}` : text;
+  }
+  return browserActionText(receipt);
+}
+
 async function safeInteractionExecution<TInput extends z.ZodType, TOutput extends z.ZodType>(
   inputSchema: TInput,
   outputSchema: TOutput,
@@ -2590,6 +2680,7 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     context: AttemptToolExecutionContext,
   ) => Promise<z.input<TOutput> | InteractionExecutionResult<z.input<TOutput>>>,
   readOnly: boolean,
+  modelText?: (output: z.output<TOutput>) => string,
 ): Promise<AttemptToolResultValue> {
   try {
     const value = inputSchema.parse(raw);
@@ -2599,7 +2690,7 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     );
     const result = {
       content: [
-        { type: "text" as const, text: JSON.stringify(structuredContent) },
+        { type: "text" as const, text: resultModelText(structuredContent, modelText) },
         ...(executed instanceof InteractionExecutionResult ? executed.additionalContent : []),
       ],
       structuredContent: structuredContent as NonNullable<

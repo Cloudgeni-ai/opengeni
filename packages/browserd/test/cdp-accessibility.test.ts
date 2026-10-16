@@ -5,6 +5,34 @@ import {
   normalizeCdpAccessibilityTree,
   type CdpAxNode,
 } from "../src";
+import { semanticRef } from "../src/cdp-accessibility";
+
+describe("semanticRef", () => {
+  const identity = {
+    controllerGeneration: "controller-1",
+    targetId: "target-1",
+    documentGeneration: "document-1",
+    frameId: null,
+    nodeId: "7",
+    backendDOMNodeId: 9,
+  };
+
+  test("is short, kind-prefixed and scoped to the exact document", () => {
+    const ref = semanticRef(identity, new Set());
+    expect(ref).toMatch(/^e[0-9a-f]{8}$/);
+    expect(semanticRef({ ...identity, backendDOMNodeId: null }, new Set())).toMatch(
+      /^a[0-9a-f]{8}$/,
+    );
+    expect(semanticRef({ ...identity, documentGeneration: "document-2" }, new Set())).not.toBe(ref);
+  });
+
+  test("falls back to the full digest when the short form is taken in the snapshot", () => {
+    const short = semanticRef(identity, new Set());
+    const long = semanticRef(identity, new Set([short]));
+    expect(long).toMatch(/^e[0-9a-f]{16}$/);
+    expect(long.startsWith(short)).toBe(true);
+  });
+});
 
 describe("normalizeCdpAccessibilityTree", () => {
   test("offers fill on native date and time inputs, not on their part spin buttons", () => {
@@ -83,7 +111,7 @@ describe("normalizeCdpAccessibilityTree", () => {
       name: "Important static text",
       actions: [],
     });
-    expect(snapshot.focusedRef).toStartWith("element-");
+    expect(snapshot.focusedRef).toMatch(/^e[0-9a-f]{8}$/);
     expect(snapshot.entriesByRef.get(snapshot.focusedRef!)?.backendDOMNodeId).toBe(9);
     expect(JSON.stringify(snapshot.roots)).not.toContain("backendDOMNodeId");
   });

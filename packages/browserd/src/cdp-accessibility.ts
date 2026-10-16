@@ -83,20 +83,25 @@ export function normalizeCdpAccessibilityTree(options: {
     if (typeof node.nodeId === "string") rawById.set(node.nodeId, node);
   }
   const entriesByNodeId = new Map<string, CdpAccessibilityEntry>();
+  const usedRefs = new Set<string>();
   for (const [nodeId, node] of rawById) {
     if (node.ignored === true || roleValue(node) === "InlineTextBox") continue;
     const role = normalizedRole(roleValue(node));
     const name = accessibleStringValue(node.name) || null;
     const states = propertyStates(node.properties);
     const backendDOMNodeId = finitePositiveInteger(node.backendDOMNodeId);
-    const ref = semanticRef({
-      controllerGeneration: options.controllerGeneration,
-      targetId: options.targetId,
-      documentGeneration: options.documentGeneration,
-      frameId: typeof node.frameId === "string" ? node.frameId : null,
-      nodeId,
-      backendDOMNodeId,
-    });
+    const ref = semanticRef(
+      {
+        controllerGeneration: options.controllerGeneration,
+        targetId: options.targetId,
+        documentGeneration: options.documentGeneration,
+        frameId: typeof node.frameId === "string" ? node.frameId : null,
+        nodeId,
+        backendDOMNodeId,
+      },
+      usedRefs,
+    );
+    usedRefs.add(ref);
     entriesByNodeId.set(nodeId, {
       ref,
       nodeId,
@@ -258,15 +263,26 @@ function isEditableControlRole(role: string): boolean {
 /** Chromium's roles for native date, time, month, week and datetime-local inputs. */
 const NATIVE_DATE_TIME_ROLES: ReadonlySet<string> = new Set(["Date", "DateTime", "InputTime"]);
 
-function semanticRef(options: {
-  controllerGeneration: string;
-  targetId: string;
-  documentGeneration: string;
-  frameId: string | null;
-  nodeId: string;
-  backendDOMNodeId: number | null;
-}): string {
-  const kind = options.backendDOMNodeId === null ? "ax" : "element";
+/**
+ * A node's ref: `e` (DOM-backed element) or `a` (accessibility-only node)
+ * plus 8 hex digits of a digest scoped to the exact controller, tab, document
+ * and frame, so a ref from another document is never reused. Refs are what
+ * the model reads on every observed line, so they stay short. Should two
+ * nodes of one snapshot share the short form, the later one keeps the full
+ * 16-digit digest instead.
+ */
+export function semanticRef(
+  options: {
+    controllerGeneration: string;
+    targetId: string;
+    documentGeneration: string;
+    frameId: string | null;
+    nodeId: string;
+    backendDOMNodeId: number | null;
+  },
+  usedRefs: ReadonlySet<string>,
+): string {
+  const kind = options.backendDOMNodeId === null ? "a" : "e";
   const digest = createHash("sha256")
     .update(
       [
@@ -279,10 +295,9 @@ function semanticRef(options: {
       ].join("\0"),
     )
     .digest("hex")
-    // 64 bits is ample within one document (refs are scoped by generation)
-    // and keeps every node the model reads short.
     .slice(0, 16);
-  return `${kind}-${digest}`;
+  const short = `${kind}${digest.slice(0, 8)}`;
+  return usedRefs.has(short) ? `${kind}${digest}` : short;
 }
 
 function propertyStates(properties: unknown): string[] {
