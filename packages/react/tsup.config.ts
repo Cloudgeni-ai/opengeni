@@ -47,6 +47,7 @@ export default defineConfig({
     "src/session-agents-model.ts",
     "src/session-realtime.ts",
     "src/new-session-draft.ts",
+    "src/scrollbars.ts",
     "src/session-list-model.ts",
     "src/session-feedback-model.ts",
     "src/session-attention-model.ts",
