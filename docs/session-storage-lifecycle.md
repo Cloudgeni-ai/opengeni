@@ -192,13 +192,18 @@ worker removes them, so a deleted session never leaves its bundle behind.
 
 A model answer or reasoning stream arrives as many small provider fragments.
 The turn writer flushes them at most one window apart (100 ms; the first
-fragment after a flush or a silence goes at once, so time to first token is
-unchanged) and stores each flush's adjacent `agent.message.delta` or
+fragment of a turn, after a structural event such as a tool call or a
+completed message, or after a silence of one window goes at once, so time to
+first token is unchanged) and stores each flush's adjacent `agent.message.delta` or
 `agent.reasoning.delta` fragments (one message and phase, plain
 `text`/`messageId`/`phase` payloads, at most 48 KiB of text) as one row. Live
 subscribers receive exactly the stored rows. The text and the order of every
 other event are unchanged; only the provider's fragment boundaries are not
-kept. On staging traffic this stores about a fifth of the fragments, with no
+kept. Reasoning fragments are joined with the separator every reader uses
+(`reasoningDeltaSeparator` in `@opengeni/events`: a part that opens bold right
+after one that closed bold starts a new paragraph), so reasoning renders the
+same from fragments, merged rows or the read-side coalescer. On staging
+traffic this stores about a fifth of the fragments, with no
 deletes afterwards and so no table or index churn.
 
 ### Rows folded by earlier versions

@@ -1,13 +1,18 @@
 import type { SessionEventType } from "@opengeni/contracts";
 import { TURN_ACTIVITY_CANCELLATION_HEARTBEAT_INTERVAL_MS } from "@opengeni/core";
 import type { AppendEventInput } from "@opengeni/db";
-import { SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES } from "@opengeni/events";
+import {
+  SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES,
+  reasoningDeltaSeparator,
+} from "@opengeni/events";
 import { Context } from "@temporalio/activity";
 
 // Trailing-flush window. A burst of coalesced deltas followed by model silence
 // must not sit in `pending` unbounded — without a timer, flush fires only on
-// the NEXT push. The first fragment after a flush or a silence is sent at once
-// (time to first token is unchanged); later fragments wait at most one window.
+// the NEXT push. The first fragment of a turn, after a structural event (a
+// tool call, a completed message) or after a silence of one window is sent at
+// once, so time to first token is unchanged; later fragments wait at most one
+// window.
 // Each flush stores adjacent text fragments as one row, so the window sets how
 // many delta rows a stream writes: on staging traffic, 100ms stores about a
 // fifth of the provider fragments.
@@ -48,25 +53,28 @@ function plainTextDelta(event: AppendEventInput): PlainTextDelta | null {
  * Stores adjacent text fragments of one stream as one delta: same type,
  * message and phase, at most the live stream's 48 KiB bound. The text and the
  * order of every other event are unchanged; only the provider's fragment
- * boundaries are dropped.
+ * boundaries are dropped. Reasoning fragments are joined with the same
+ * separator readers use ({@link reasoningDeltaSeparator}), so the rendered
+ * reasoning is identical whether a reader sees the fragments or the merge.
  */
 export function mergeAdjacentTextDeltas(events: AppendEventInput[]): AppendEventInput[] {
   const merged: AppendEventInput[] = [];
   let run: {
     first: AppendEventInput;
     head: PlainTextDelta;
-    parts: string[];
+    text: string;
+    count: number;
     bytes: number;
   } | null = null;
   const flushRun = () => {
     if (!run) return;
     merged.push(
-      run.parts.length === 1
+      run.count === 1
         ? run.first
         : {
             type: run.first.type,
             payload: {
-              text: run.parts.join(""),
+              text: run.text,
               ...(run.head.messageId !== undefined ? { messageId: run.head.messageId } : {}),
               ...(run.head.phase !== undefined ? { phase: run.head.phase } : {}),
             },
@@ -81,20 +89,32 @@ export function mergeAdjacentTextDeltas(events: AppendEventInput[]): AppendEvent
       merged.push(event);
       continue;
     }
-    const bytes = textEncoder.encode(delta.text).byteLength;
     if (
       run &&
       run.first.type === event.type &&
       run.head.messageId === delta.messageId &&
-      run.head.phase === delta.phase &&
-      run.bytes + bytes <= SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES
+      run.head.phase === delta.phase
     ) {
-      run.parts.push(delta.text);
-      run.bytes += bytes;
-      continue;
+      const piece =
+        (event.type === "agent.reasoning.delta"
+          ? reasoningDeltaSeparator(run.text, delta.text)
+          : "") + delta.text;
+      const pieceBytes = textEncoder.encode(piece).byteLength;
+      if (run.bytes + pieceBytes <= SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES) {
+        run.text += piece;
+        run.count += 1;
+        run.bytes += pieceBytes;
+        continue;
+      }
     }
     flushRun();
-    run = { first: event, head: delta, parts: [delta.text], bytes };
+    run = {
+      first: event,
+      head: delta,
+      text: delta.text,
+      count: 1,
+      bytes: textEncoder.encode(delta.text).byteLength,
+    };
   }
   flushRun();
   return merged;
@@ -116,7 +136,8 @@ export function createRuntimeBatcher(
 ) {
   const now = options.now ?? (() => performance.now());
   let pending: AppendEventInput[] = [];
-  let lastFlush = Date.now();
+  // Leading edge: no window is open yet, so the first content goes out at once.
+  let lastFlush = Number.NEGATIVE_INFINITY;
   let trailingTimer: ReturnType<typeof setTimeout> | null = null;
   let activeBatchSize = 0;
   // One drain loop owns `flushEvents`, so DB-assigned sequence order always
@@ -156,6 +177,9 @@ export function createRuntimeBatcher(
       const elapsed = Date.now() - lastFlush;
       if (structural.has(event.type)) {
         await flush();
+        // A structural event closes the window: the next fragment (the start
+        // of the next message or reasoning item) is sent at once.
+        lastFlush = Number.NEGATIVE_INFINITY;
         return;
       }
       if (pending.length >= MAX_BATCH_EVENTS || elapsed >= TRAILING_FLUSH_MS) {
