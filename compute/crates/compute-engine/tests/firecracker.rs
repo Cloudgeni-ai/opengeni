@@ -153,6 +153,8 @@ fn jailed_spec(lab: &Path, name: &str, uid: u32) -> VmSpec {
         gid: uid,
         vcpus: 2,
         memory_mib: 2048,
+        memory_request_mib: 2048,
+        cpu_weight: 200,
         kernel,
         boot_args:
             "console=ttyS0 reboot=k panic=1 quiet loglevel=1 page_reporting.page_reporting_order=0"

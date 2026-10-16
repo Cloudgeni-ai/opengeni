@@ -208,12 +208,53 @@ pub struct SandboxConfig {
     pub vcpus: u8,
     /// Guest memory in MiB.
     pub memory_mib: u32,
+    /// Guest memory in MiB the sandbox is guaranteed while it runs: what the
+    /// host reserves for it when it wakes. Above this it may use free memory
+    /// up to `memory_mib`, best effort. Omitted, it is `memory_mib`. Hosts
+    /// that back guest memory with huge pages cannot take memory back from a
+    /// guest, so they reserve `memory_mib` whatever this says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_request_mib: Option<u32>,
+    /// Processor time the sandbox is guaranteed when processors are
+    /// contended, in thousandths of a processor; shares of contended time
+    /// follow it. `vcpus` stays the ceiling. Omitted, it is `vcpus` whole
+    /// processors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_request_millis: Option<u32>,
     /// How it sleeps; omitted, it never sleeps.
     #[serde(default)]
     pub sleep: SleepConfig,
 }
 
 impl SandboxConfig {
+    /// A sandbox of `vcpus` processors and `memory_mib` of memory, all of
+    /// it guaranteed, sleeping as `sleep` says.
+    #[must_use]
+    pub fn new(vcpus: u8, memory_mib: u32, sleep: SleepConfig) -> Self {
+        Self {
+            vcpus,
+            memory_mib,
+            memory_request_mib: None,
+            cpu_request_millis: None,
+            sleep,
+        }
+    }
+
+    /// Guest memory in MiB it is guaranteed.
+    #[must_use]
+    pub fn memory_request(&self) -> u32 {
+        self.memory_request_mib.unwrap_or(self.memory_mib)
+    }
+
+    /// Its `cpu.weight`: 100 per processor requested.
+    #[must_use]
+    pub fn cpu_weight(&self) -> u16 {
+        let millis = self
+            .cpu_request_millis
+            .unwrap_or(u32::from(self.vcpus) * 1000);
+        u16::try_from((millis / 10).clamp(1, 10_000)).unwrap_or(10_000)
+    }
+
     /// The sleep settings as a validated core policy.
     pub fn sleep_policy(&self) -> Result<SleepPolicy, String> {
         SleepPolicy::new(self.sleep.rules())
@@ -227,6 +268,16 @@ impl SandboxConfig {
         }
         if !(128..=65_536).contains(&self.memory_mib) {
             return Err("memory_mib must be between 128 and 65536".into());
+        }
+        if let Some(request) = self.memory_request_mib
+            && !(64..=self.memory_mib).contains(&request)
+        {
+            return Err("memory_request_mib must be between 64 and memory_mib".into());
+        }
+        if let Some(millis) = self.cpu_request_millis
+            && !(10..=u32::from(self.vcpus) * 1000).contains(&millis)
+        {
+            return Err("cpu_request_millis must be between 10 and vcpus * 1000".into());
         }
         self.sleep_policy()
     }
@@ -400,6 +451,10 @@ pub enum ErrorCode {
     Stale,
     /// A guest port did not answer.
     Unreachable,
+    /// The host cannot take on the sandbox's memory now, even after pushing
+    /// its idle sandboxes deeper: every other sandbox is busy or held. Retry
+    /// later or on another host; the message says how much was needed.
+    HostFull,
     /// The host failed; the request may succeed if retried.
     #[default]
     Internal,
@@ -439,6 +494,11 @@ pub struct SandboxStatus {
     pub unsavable: bool,
     /// Whether it is beyond recovery on this host.
     pub broken: bool,
+    /// Bytes of memory it waits for while held awake with its wake refused
+    /// because the host is full ([`ErrorCode::HostFull`]); it wakes by
+    /// itself once room can be made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for_room: Option<u64>,
 }
 
 /// Counters for one kind of step.
@@ -479,6 +539,27 @@ pub struct HostStatus {
     /// when its record is readable.
     #[serde(default)]
     pub blocked: Vec<BlockedSandbox>,
+    /// How much memory is promised to sandboxes; `None` on a host that
+    /// does not limit what it takes on.
+    #[serde(default)]
+    pub capacity: Option<CapacityStatus>,
+}
+
+/// How much of a host's guest memory its sandboxes are promised, for
+/// placing sandboxes and watching a buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapacityStatus {
+    /// Bytes of guest memory the host lets its sandboxes take at once.
+    pub total: u64,
+    /// Bytes guaranteed to sandboxes awake or waking: their requests.
+    pub reserved: u64,
+    /// Bytes taken: the requests of awake sandboxes or what they use beyond
+    /// them, and what paused ones still hold.
+    pub occupied: u64,
+    /// Bytes a wake can take without pushing anything deeper first.
+    pub free: u64,
+    /// Sandboxes awake or waking.
+    pub awake: u32,
 }
 
 /// A sandbox the host cannot manage.
@@ -541,6 +622,8 @@ mod tests {
         let mut config = SandboxConfig {
             vcpus: 2,
             memory_mib: 1024,
+            memory_request_mib: None,
+            cpu_request_millis: None,
             sleep: SleepConfig::RECOMMENDED,
         };
         assert!(config.validate().is_ok());

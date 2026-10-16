@@ -149,6 +149,7 @@ fn error_reply(error: &HostError) -> Reply {
             HostError::Invalid(_) => ErrorCode::Invalid,
             HostError::Stale { .. } => ErrorCode::Stale,
             HostError::Unreachable { .. } => ErrorCode::Unreachable,
+            HostError::HostFull { .. } => ErrorCode::HostFull,
             HostError::Io(_) | HostError::Stopped => ErrorCode::Internal,
         },
     }

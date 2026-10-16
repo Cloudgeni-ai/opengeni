@@ -43,6 +43,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 };
                 let paths = Paths::new(&self.root, id);
                 let spec = vm_spec(&record, &paths, &self.images);
+                let size = self.size(&record.config);
                 self.insert(id, paths, spec);
                 // A new sandbox is a disk without a memory image: its first
                 // wake boots it, under the same admission limits as any wake.
@@ -50,6 +51,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     sandbox: id.0,
                     state: State::new(Level::Saved, Durability::Local, false),
                     policy,
+                    size,
                 });
                 let _ = reply.send(Ok(()));
             }
@@ -510,6 +512,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Notice::Broken => {
                 tracing::error!(%id, "sandbox broken on this host");
                 self.settle(id);
+            }
+            Notice::HostFull { needed, free } => {
+                tracing::warn!(%id, needed, free, "wake refused: host full");
+                // Those waiting give up their holds when answered, so the
+                // refusal ends unless something else keeps it held.
+                if let Some(slot) = self.slots.get_mut(&id.0) {
+                    for waiter in slot.waiters.drain(..) {
+                        let _ = waiter
+                            .reply
+                            .send(Err(HostError::HostFull { id, needed, free }));
+                    }
+                }
             }
         }
     }

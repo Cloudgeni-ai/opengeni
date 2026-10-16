@@ -149,6 +149,16 @@ pub fn jailer_args(spec: &VmSpec, jail: &Jail, launch: &Launch<'_>) -> Vec<OsStr
     // parent. This one also keeps the VM's memory out of swap devices:
     // compressed pages stay in RAM, and nothing of the guest reaches disk.
     push("--cgroup", "memory.zswap.writeback=0".into());
+    // What the VM is guaranteed: its requested memory is kept from reclaim
+    // for others (reclaim the agent asks of this group itself, to compress
+    // it, is not held back), and contended processors are shared by
+    // request.
+    let low = u64::from(spec.memory_request_mib) << 20;
+    push("--cgroup", format!("memory.low={low}").into());
+    push(
+        "--cgroup",
+        format!("cpu.weight={}", spec.cpu_weight.clamp(1, 10_000)).into(),
+    );
     if let Some(netns) = launch.netns {
         push("--netns", netns.into());
     }
@@ -186,6 +196,8 @@ mod tests {
             gid: 4_000_001,
             vcpus: 1,
             memory_mib: 256,
+            memory_request_mib: 256,
+            cpu_weight: 100,
             kernel: format!("{dir}/vmlinux").into(),
             boot_args: String::new(),
             drives: Vec::new(),
@@ -250,7 +262,9 @@ mod tests {
 
     #[test]
     fn the_jailer_gets_its_own_user_cgroup_and_pid_namespace() {
-        let spec = spec("/srv/vm/firecracker/abc/root", "abc");
+        let mut spec = spec("/srv/vm/firecracker/abc/root", "abc");
+        spec.memory_request_mib = 128;
+        spec.cpu_weight = 50;
         let jail = Jail::new(&spec).unwrap();
         let args = jailer_args(
             &spec,
@@ -269,7 +283,8 @@ mod tests {
             text.join(" "),
             "--id abc --exec-file /opt/bin/firecracker --uid 4000001 --gid 4000001 \
              --chroot-base-dir /srv/vm --cgroup-version 2 --parent-cgroup compute \
-             --cgroup memory.zswap.writeback=0 --netns /run/netns/ogc-abc --new-pid-ns \
+             --cgroup memory.zswap.writeback=0 --cgroup memory.low=134217728 \
+             --cgroup cpu.weight=50 --netns /run/netns/ogc-abc --new-pid-ns \
              -- --api-sock /api.sock"
         );
     }

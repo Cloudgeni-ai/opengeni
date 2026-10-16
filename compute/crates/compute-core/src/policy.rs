@@ -395,6 +395,27 @@ pub struct HostPolicy {
     pub sleep_backoff: Backoff,
     /// Memory-pressure handling; `None` disables it.
     pub memory: Option<MemoryPolicy>,
+    /// How much memory wakes may take; `None` admits every wake.
+    pub admission: Option<Admission>,
+}
+
+/// The memory a host lets its sandboxes take, which decides whether a wake
+/// may start; see [`crate::Size`].
+///
+/// A wake that creates or resumes a VM process starts only if what the
+/// sandbox then occupies fits into what is left of the budget. Otherwise
+/// idle sandboxes are pushed deeper, least recently used first, and the
+/// wake waits for them; if even that cannot make room, the wake is refused
+/// with [`crate::Notice::HostFull`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Admission {
+    /// Bytes of guest memory the host can hold at once: its capacity for
+    /// guests, less a headroom for everything else.
+    pub budget: u64,
+    /// A sandbox active this recently counts as busy and is never pushed
+    /// deeper to make room, neither for a wake nor under memory pressure.
+    /// Readings of work of its own arrive about this often or more.
+    pub busy_grace: Duration,
 }
 
 impl HostPolicy {
@@ -425,6 +446,7 @@ impl Default for HostPolicy {
                 max: Duration::from_secs(600),
             },
             memory: None,
+            admission: None,
         }
     }
 }

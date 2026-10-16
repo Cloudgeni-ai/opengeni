@@ -39,6 +39,8 @@ async fn bad_requests_are_refused() {
     let config = SandboxConfig {
         vcpus: 1,
         memory_mib: 256,
+        memory_request_mib: None,
+        cpu_request_millis: None,
         sleep: SleepConfig {
             archive_after_ms: Some(90),
             ..SAVE_IN_PLACE
@@ -63,6 +65,8 @@ async fn bad_requests_are_refused() {
             config: SandboxConfig {
                 vcpus: 1,
                 memory_mib: 256,
+                memory_request_mib: None,
+                cpu_request_millis: None,
                 sleep: SleepConfig {
                     save_after_ms: Some(10),
                     ..NEVER
@@ -83,6 +87,8 @@ async fn bad_requests_are_refused() {
             config: SandboxConfig {
                 vcpus: 1,
                 memory_mib: 256,
+                memory_request_mib: None,
+                cpu_request_millis: None,
                 sleep: NEVER,
             },
         })

@@ -27,6 +27,7 @@ use tokio::sync::watch;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep};
 
+mod admission;
 mod requests;
 mod restart;
 mod sleep;
@@ -697,6 +698,8 @@ impl Lab {
         let config = SandboxConfig {
             vcpus: 1,
             memory_mib: 256,
+            memory_request_mib: None,
+            cpu_request_millis: None,
             sleep,
         };
         let reply = self

@@ -320,6 +320,8 @@ async fn cycle(agent: &Agent, id: &str, deepest: LevelName, cycles: u32) {
     let config = SandboxConfig {
         vcpus: 2,
         memory_mib: 512,
+        memory_request_mib: None,
+        cpu_request_millis: None,
         sleep: ladder(deepest),
     };
     let created = agent
@@ -432,6 +434,8 @@ async fn survive_restart(lab: &Path, name: &str, deepest: LevelName, store: Opti
     let config = SandboxConfig {
         vcpus: 2,
         memory_mib: 512,
+        memory_request_mib: None,
+        cpu_request_millis: None,
         sleep: ladder(deepest),
     };
     let created = agent
@@ -604,6 +608,8 @@ async fn a_guest_whose_pager_died_boots_afresh() {
     let config = SandboxConfig {
         vcpus: 2,
         memory_mib: 512,
+        memory_request_mib: None,
+        cpu_request_millis: None,
         sleep: ladder(deepest),
     };
     let created = agent

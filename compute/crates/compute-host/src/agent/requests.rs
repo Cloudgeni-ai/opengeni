@@ -8,7 +8,9 @@ use compute_core::{Durability, HoldId, Input, Level, Priority, Step};
 use compute_engine::Engine;
 
 use crate::layout::{Images, Paths, copy_sparse, sync_parent};
-use crate::protocol::{BlockedSandbox, HostStatus, Id, SandboxConfig, SandboxStatus, step_name};
+use crate::protocol::{
+    BlockedSandbox, CapacityStatus, HostStatus, Id, SandboxConfig, SandboxStatus, step_name,
+};
 use crate::state::{Record, check_generation};
 use crate::store::Store;
 
@@ -257,44 +259,54 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         Ok(())
     }
 
-    pub(super) fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
+    /// Refuses a sandbox `id` of `config` that cannot be created now.
+    fn can_create(&self, id: Id, config: &SandboxConfig) -> Result<(), HostError> {
         if self.blocked.contains_key(&id.0) {
-            let _ = reply.send(Err(HostError::Broken(id)));
-            return;
+            return Err(HostError::Broken(id));
         }
         if let Some(unknown) = self.unknown_ordinals.first() {
-            let _ = reply.send(Err(HostError::Io(format!(
+            return Err(HostError::Io(format!(
                 "sandbox {}'s record is unreadable and the user and network it holds unknown; \
                  no sandbox is created until it is resolved",
                 Id(*unknown)
-            ))));
-            return;
+            )));
         }
         if self.slots.contains_key(&id.0)
             || self.preparing.contains(&id.0)
             || self.destroying.contains_key(&id.0)
             || self.records.get(id).is_some()
         {
-            let _ = reply.send(Err(HostError::Exists(id)));
-            return;
+            return Err(HostError::Exists(id));
         }
         if self.tearing_down.contains_key(&id.0) {
             // An old VM of this id is still being torn down; its teardown
             // must not touch the new sandbox's files.
-            let _ = reply.send(Err(HostError::Busy(id)));
-            return;
+            return Err(HostError::Busy(id));
         }
-        let policy = match self.sleep_policy(&config) {
-            Ok(policy) => policy,
-            Err(error) => {
-                let _ = reply.send(Err(HostError::Invalid(error)));
-                return;
-            }
-        };
+        let policy = self.sleep_policy(config).map_err(HostError::Invalid)?;
         if policy.rules().archive_after.is_some() && !self.store.is_configured() {
-            let _ = reply.send(Err(HostError::Invalid(
+            return Err(HostError::Invalid(
                 "this host has no store, so sandboxes cannot be archived".into(),
-            )));
+            ));
+        }
+        // One that could never run here is refused at once, so it can be
+        // placed elsewhere.
+        if let Some(capacity) = self.core.capacity() {
+            let needed = self.size(config).request;
+            if needed > capacity.budget {
+                return Err(HostError::HostFull {
+                    id,
+                    needed,
+                    free: capacity.free(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
+        if let Err(error) = self.can_create(id, &config) {
+            let _ = reply.send(Err(error));
             return;
         }
         self.preparing.insert(id.0);
@@ -394,6 +406,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         .and_then(|live| self.engine.resident_bytes(&live.vm).ok()),
                     unsavable: view.unsavable,
                     broken: view.broken,
+                    waiting_for_room: self.core.room_needed(*id),
                 })
             })
             .collect();
@@ -419,6 +432,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     problem: problem.clone(),
                 })
                 .collect(),
+            capacity: self.core.capacity().map(|capacity| CapacityStatus {
+                total: capacity.budget,
+                reserved: capacity.reserved,
+                occupied: capacity.occupied,
+                free: capacity.free(),
+                awake: capacity.awake,
+            }),
         }
     }
 }

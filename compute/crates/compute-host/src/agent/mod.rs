@@ -19,10 +19,10 @@ use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use compute_core::{
-    Action, At, HoldId, Host, HostPolicy, Input, Level, OpId, Outcome, Priority, SandboxId,
+    Action, At, HoldId, Host, HostPolicy, Input, Level, OpId, Outcome, Priority, SandboxId, Size,
     SleepPolicy, Step,
 };
-use compute_engine::{CancellationToken, Engine, VmSpec};
+use compute_engine::{CancellationToken, Engine, PageSize, VmSpec};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
@@ -250,6 +250,20 @@ pub enum HostError {
     /// Host storage failed.
     #[error("host I/O failed: {0}")]
     Io(String),
+    /// The host cannot take on the sandbox's memory now: even pushing every
+    /// idle sandbox deeper would not free enough. Retryable.
+    #[error(
+        "host full: sandbox {id} needs {needed} bytes of memory reserved and \
+         only {free} are free, with nothing idle left to push deeper"
+    )]
+    HostFull {
+        /// The sandbox.
+        id: Id,
+        /// Bytes its wake needs.
+        needed: u64,
+        /// Bytes free when it was refused.
+        free: u64,
+    },
     /// The host agent has shut down.
     #[error("the host agent stopped")]
     Stopped,
@@ -516,6 +530,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     fetcher: Option<Arc<crate::lazy::Fetcher>>,
     busy: Option<BusyRule>,
     can_compress: bool,
+    /// Whether guest memory is huge pages, which a guest never gives back:
+    /// every sandbox then reserves its whole size.
+    reserve_whole: bool,
     pager: PagerConfig,
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
@@ -606,6 +623,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let (events_tx, events) = mpsc::unbounded_channel();
         // Huge-page profiles cannot compress, whatever the host says.
         let can_compress = config.can_compress && engine.memory_profile().compress;
+        let reserve_whole = engine.memory_profile().pages == PageSize::Huge;
         let mut agent = Self {
             engine: Arc::new(engine),
             #[cfg(target_os = "linux")]
@@ -643,6 +661,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             restore_notice_port: config.restore_notice_port,
             busy: config.busy,
             can_compress,
+            reserve_whole,
             commands_tx: commands_tx.downgrade(),
         };
         agent.recover(strays).await;
@@ -707,6 +726,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut rules = config.sleep.rules();
         rules.compress_under_pressure &= self.can_compress;
         SleepPolicy::new(rules).map_err(|error| format!("invalid sleep settings: {error}"))
+    }
+
+    /// What a sandbox of `config` reserves and may use of host memory.
+    fn size(&self, config: &SandboxConfig) -> Size {
+        let limit = u64::from(config.memory_mib) << 20;
+        if self.reserve_whole {
+            return Size::whole(limit);
+        }
+        Size {
+            request: u64::from(config.memory_request()) << 20,
+            limit,
+        }
     }
 
     async fn run(mut self) {

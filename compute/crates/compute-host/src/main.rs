@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
-use compute_core::{HostPolicy, MemoryPolicy, Step};
+use compute_core::{Admission, HostPolicy, MemoryPolicy, Step};
 use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
@@ -44,6 +44,13 @@ enum Command {
         vcpus: u8,
         #[arg(long, default_value_t = 1024)]
         memory_mib: u32,
+        /// Memory it is guaranteed while it runs; defaults to all of it.
+        #[arg(long)]
+        memory_request_mib: Option<u32>,
+        /// Processor time it is guaranteed under contention, in thousandths
+        /// of a processor; defaults to all its processors.
+        #[arg(long)]
+        cpu_request_millis: Option<u32>,
         /// Start from the recommended sleep settings instead of never
         /// sleeping.
         #[arg(long)]
@@ -143,6 +150,17 @@ struct ServeArgs {
     /// ...until expected available memory reaches this.
     #[arg(long)]
     memory_high_mib: Option<u64>,
+    /// Guest memory this host promises its sandboxes at once: wakes beyond
+    /// it first push idle sandboxes deeper, then are refused as host full.
+    /// Defaults to the huge-page pool with huge pages, otherwise to the
+    /// host's memory less `--memory-headroom-mib`.
+    #[arg(long)]
+    memory_capacity_mib: Option<u64>,
+    /// Host memory kept back from sandboxes for the agent, VMMs, pagers and
+    /// the page cache when the capacity comes from the host's memory.
+    /// Defaults to a sixteenth of it, at least 1 GiB.
+    #[arg(long)]
+    memory_headroom_mib: Option<u64>,
     /// A port guests may connect to on this host, as `PORT=HOST:PORT`, with
     /// `,wake` appended to wake a sleeping sandbox when data arrives for it.
     /// Repeatable.
@@ -325,6 +343,8 @@ async fn agent_main() -> anyhow::Result<()> {
             id,
             vcpus,
             memory_mib,
+            memory_request_mib,
+            cpu_request_millis,
             recommended,
             sleep,
             compress,
@@ -343,6 +363,8 @@ async fn agent_main() -> anyhow::Result<()> {
             let config = SandboxConfig {
                 vcpus,
                 memory_mib,
+                memory_request_mib,
+                cpu_request_millis,
                 sleep: settings,
             };
             expect_done(client.call(&Request::Create { id, config }).await?)
@@ -416,6 +438,19 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     for (step, limit) in args.limits {
         policy.limits = policy.limits.with(step, limit);
     }
+    let sample_every = Duration::from_secs(1);
+    let budget = admission_budget(
+        args.memory_profile,
+        args.memory_capacity_mib,
+        args.memory_headroom_mib,
+    )?;
+    tracing::info!(capacity_mib = budget >> 20, "guest memory capacity");
+    policy.admission = Some(Admission {
+        budget,
+        // Work seen in the last two samples keeps a sandbox from being
+        // pushed deeper to make room.
+        busy_grace: 2 * sample_every,
+    });
     if let (Some(low), Some(high)) = (args.memory_low_mib, args.memory_high_mib) {
         policy.memory = Some(MemoryPolicy {
             low_watermark: low << 20,
@@ -429,7 +464,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         boot_args: args.boot_args,
         base_image: args.base_image,
         policy,
-        sample_every: Duration::from_secs(1),
+        sample_every,
         guest_ports: args.guest_ports,
         restore_notice_port: args.restore_notice_port,
         first_uid: args.first_uid,
@@ -501,6 +536,39 @@ fn raise_open_file_limit() {
     }
 }
 
+/// One number from `/proc/meminfo`, such as `MemTotal:` (in KiB) or
+/// `HugePages_Total:`; 0 when missing.
+fn meminfo_field(meminfo: &str, name: &str) -> u64 {
+    meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix(name))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Bytes of guest memory the host promises its sandboxes at once:
+/// `capacity_mib` if given, else the huge-page pool where guest memory
+/// lives in it (nothing else on the host uses it), else the host's memory
+/// less `headroom_mib` (default a sixteenth, at least 1 GiB).
+fn admission_budget(
+    profile: MemoryProfile,
+    capacity_mib: Option<u64>,
+    headroom_mib: Option<u64>,
+) -> anyhow::Result<u64> {
+    if let Some(capacity) = capacity_mib {
+        return Ok(capacity << 20);
+    }
+    let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
+    if profile.pages == compute_engine::PageSize::Huge {
+        let pages = meminfo_field(&meminfo, "HugePages_Total:");
+        return Ok(pages * (meminfo_field(&meminfo, "Hugepagesize:") << 10));
+    }
+    let total = meminfo_field(&meminfo, "MemTotal:") << 10;
+    let headroom = headroom_mib.map_or((total / 16).max(1 << 30), |mib| mib << 20);
+    Ok(total.saturating_sub(headroom))
+}
+
 /// Refuses a huge-page memory profile on a host without a reserved pool of
 /// 2 MiB pages: every VM's memory would fail to allocate.
 fn check_huge_pages(profile: MemoryProfile) -> anyhow::Result<()> {
@@ -508,14 +576,7 @@ fn check_huge_pages(profile: MemoryProfile) -> anyhow::Result<()> {
         return Ok(());
     }
     let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
-    let field = |name: &str| {
-        meminfo
-            .lines()
-            .find_map(|line| line.strip_prefix(name))
-            .and_then(|rest| rest.split_whitespace().next())
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(0)
-    };
+    let field = |name: &str| meminfo_field(&meminfo, name);
     if field("Hugepagesize:") != 2048 {
         bail!("the {profile} memory profile needs 2 MiB default huge pages");
     }

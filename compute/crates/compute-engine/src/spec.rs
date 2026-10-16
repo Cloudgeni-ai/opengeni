@@ -50,6 +50,14 @@ pub struct VmSpec {
     pub vcpus: u8,
     /// Guest memory in MiB.
     pub memory_mib: u32,
+    /// Guest memory in MiB the VM is guaranteed: the host keeps at least
+    /// this much of its memory from being reclaimed for others (the VM
+    /// cgroup's `memory.low`). At most `memory_mib`.
+    pub memory_request_mib: u32,
+    /// The VM's share of processor time when processors are contended,
+    /// relative to other VMs: its cgroup's `cpu.weight`, 1 to 10000, where
+    /// 100 is one processor's worth. `vcpus` stays the ceiling.
+    pub cpu_weight: u16,
     /// Uncompressed guest kernel.
     pub kernel: PathBuf,
     /// Kernel command line.

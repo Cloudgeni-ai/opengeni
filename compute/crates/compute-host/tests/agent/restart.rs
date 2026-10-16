@@ -220,6 +220,8 @@ async fn an_unreadable_record_blocks_its_id() {
             config: SandboxConfig {
                 vcpus: 1,
                 memory_mib: 256,
+                memory_request_mib: None,
+                cpu_request_millis: None,
                 sleep: NEVER,
             },
         },
@@ -316,6 +318,8 @@ fn create_request(id: Id) -> Request {
         config: SandboxConfig {
             vcpus: 1,
             memory_mib: 256,
+            memory_request_mib: None,
+            cpu_request_millis: None,
             sleep: NEVER,
         },
     }
@@ -508,6 +512,8 @@ async fn create_refuses_an_existing_directory() {
             config: SandboxConfig {
                 vcpus: 1,
                 memory_mib: 256,
+                memory_request_mib: None,
+                cpu_request_millis: None,
                 sleep: NEVER,
             },
         })

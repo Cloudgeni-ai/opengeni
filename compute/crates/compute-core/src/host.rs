@@ -10,6 +10,10 @@ use crate::policy::{HostPolicy, PolicyError, SleepPolicy};
 use crate::sandbox::{Health, InFlight, QueueKey, Sandbox, Wake};
 use crate::time::At;
 
+mod admission;
+
+pub use admission::{Capacity, Size};
+
 /// Something that happened, fed to [`Host::handle`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Input {
@@ -23,6 +27,8 @@ pub enum Input {
         state: State,
         /// When it sleeps deeper.
         policy: SleepPolicy,
+        /// What it may take of host memory.
+        size: Size,
     },
     /// Stop managing a sandbox and delete it.
     Remove {
@@ -220,6 +226,17 @@ pub enum Notice {
     Unsavable,
     /// The sandbox cannot be recovered on this host.
     Broken,
+    /// A wake was refused because the host cannot make room for it: it
+    /// needs `needed` bytes of the admission budget and only `free` are
+    /// left even after pushing every idle sandbox as deep as it may go.
+    /// The wake request is dropped; a new one tries again, and so does a
+    /// hold once the memory is there. See [`crate::Admission`].
+    HostFull {
+        /// Bytes the wake needs.
+        needed: u64,
+        /// Bytes free.
+        free: u64,
+    },
 }
 
 /// A read-only snapshot of one sandbox's state.
@@ -271,6 +288,9 @@ pub struct Host {
     /// [`Input::Memory`] reading, which may not show it yet. Counting it
     /// prevents freeing the same shortfall twice.
     settled_relief: u64,
+    /// Sandboxes whose wake was refused for want of memory and that are
+    /// still held awake.
+    refused: BTreeSet<SandboxId>,
 }
 
 impl Host {
@@ -289,6 +309,7 @@ impl Host {
             available_memory: None,
             pending_relief: 0,
             settled_relief: 0,
+            refused: BTreeSet::new(),
         })
     }
 
@@ -313,10 +334,20 @@ impl Host {
         }
         self.fire_timers(now);
         self.reconcile_dirty(now, out);
-        if self.relieve_pressure() {
+        if self.relieve_pressure(now) {
             self.reconcile_dirty(now, out);
         }
-        self.admit(out);
+        // Refused wakes still held try again once per decision, never inside
+        // the loop below, so a retry and a refusal cannot alternate.
+        if self.retry_refused(now) {
+            self.reconcile_dirty(now, out);
+        }
+        // Making room for a wake or refusing it changes other sandboxes'
+        // next steps; each round only deepens floors or refuses wakes, so
+        // it settles.
+        while self.admit(now, out) {
+            self.reconcile_dirty(now, out);
+        }
     }
 
     /// When to call [`Host::handle`] with [`Input::Tick`] next.
@@ -350,7 +381,7 @@ impl Host {
         self.sandboxes
             .values()
             .filter(|sandbox| sandbox.reclaimable())
-            .map(|sandbox| sandbox.resident)
+            .map(Sandbox::resident_bytes)
             .sum()
     }
 
@@ -384,14 +415,16 @@ impl Host {
                 sandbox,
                 state,
                 policy,
+                size,
             } => {
                 if let Entry::Vacant(entry) = self.sandboxes.entry(sandbox) {
-                    entry.insert(Sandbox::new(now, state, policy));
+                    entry.insert(Sandbox::new(now, state, policy, size));
                     self.mark(sandbox);
                 }
             }
             Input::Remove { sandbox } => self.remove(sandbox, out),
             Input::Touch { sandbox, priority } => {
+                self.unrefuse(sandbox);
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
                     slot.touch(now);
                     slot.requested = Level::Running;
@@ -405,6 +438,7 @@ impl Host {
                 until,
                 priority,
             } => {
+                self.unrefuse(sandbox);
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
                     slot.holds.insert(hold, until);
                     slot.touch(now);
@@ -452,8 +486,10 @@ impl Host {
                 self.settled_relief = 0;
             }
             Input::Resident { sandbox, bytes } => {
-                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
-                    slot.resident = bytes;
+                if let Some(slot) = self.sandboxes.get_mut(&sandbox)
+                    && slot.state.level.has_process()
+                {
+                    slot.resident = Some(bytes);
                 }
             }
             Input::Sleep { sandbox, level } => {
@@ -612,6 +648,7 @@ impl Host {
         if let Some(at) = slot.timer {
             self.timers.remove(&(at, id));
         }
+        self.refused.remove(&id);
         self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
         out.push(Action::Destroy { sandbox: id });
     }
@@ -654,9 +691,14 @@ impl Host {
         };
         slot.dirty = false;
         slot.expire_holds(now);
+        if slot.refused && !slot.wants_awake() {
+            // Nothing wants it awake any more, so nothing waits for room.
+            slot.refused = false;
+            self.refused.remove(&id);
+        }
         if slot.state.level == Level::Running && slot.in_flight.is_none() {
             slot.wake = None;
-        } else if slot.wake.is_none() && !slot.holds.is_empty() {
+        } else if slot.wake.is_none() && !slot.holds.is_empty() && !slot.refused {
             slot.wake = Some(Wake {
                 priority: Priority::Interactive,
                 since: now,
@@ -716,98 +758,51 @@ impl Host {
         }
     }
 
-    /// Starts queued steps while their limits allow, wake steps first.
-    fn admit(&mut self, out: &mut Vec<Action>) {
+    /// Starts queued steps while their limits allow, wake steps first,
+    /// and wakes that need memory only while it fits; see
+    /// [`crate::Admission`]. Returns whether other sandboxes must be
+    /// reconciled because of it.
+    fn admit(&mut self, now: At, out: &mut Vec<Action>) -> bool {
+        let mut free = self.capacity().map(|capacity| capacity.free());
+        let mut changed = false;
+        let mut waiting = 0;
         for step in Step::ALL {
+            if let Some(free) = free.as_mut().filter(|_| admission::needs_memory(step)) {
+                changed |= self.admit_measured(now, step, free, &mut waiting, out);
+                continue;
+            }
             let index = step.index();
             let limit = self.policy.limits.get(step);
             while self.in_flight[index] < limit {
                 let Some(key) = self.queues[index].pop_first() else {
                     break;
                 };
-                let Some(slot) = self.sandboxes.get_mut(&key.sandbox) else {
-                    continue;
-                };
-                debug_assert_eq!(slot.queued, Some((step, key)));
-                slot.queued = None;
-                let op = OpId(self.next_op);
-                self.next_op += 1;
-                slot.in_flight = Some(InFlight {
-                    op,
-                    step,
-                    cancel_sent: false,
-                });
-                self.in_flight[index] += 1;
-                out.push(Action::Start {
-                    sandbox: key.sandbox,
-                    op,
-                    step,
-                });
-            }
-        }
-    }
-
-    /// When available memory drops below the low watermark, pushes the least
-    /// recently used idle sandboxes deeper until the expected available
-    /// memory reaches the high watermark. Returns whether any floor changed.
-    ///
-    /// Each pass moves every candidate at most one level deeper, oldest
-    /// first. When even that is not enough, the next pass goes deeper, so
-    /// a large shortfall ends processes directly instead of compressing
-    /// memory that is about to be freed anyway.
-    fn relieve_pressure(&mut self) -> bool {
-        let (Some(memory), Some(available)) = (self.policy.memory, self.available_memory) else {
-            return false;
-        };
-        if available >= memory.low_watermark {
-            return false;
-        }
-        let mut needed = memory
-            .high_watermark
-            .saturating_sub(available)
-            .saturating_sub(self.pending_relief)
-            .saturating_sub(self.settled_relief);
-        if needed == 0 {
-            return false;
-        }
-        let mut changed = false;
-        let mut candidates: Vec<(At, SandboxId, Level, u64)> = Vec::new();
-        while needed > 0 {
-            candidates.clear();
-            candidates.extend(
-                self.sandboxes
-                    .iter()
-                    .filter(|(_, slot)| {
-                        !slot.is_broken() && !slot.wants_awake() && slot.resident > 0
-                    })
-                    .filter_map(|(id, slot)| {
-                        let reached = slot.state.level.max(slot.floor);
-                        let target = slot.policy().relief_target(reached)?;
-                        let relief =
-                            slot.relief_between(reached, target, memory.compressed_percent);
-                        (relief > 0).then_some((slot.last_activity, *id, target, relief))
-                    }),
-            );
-            if candidates.is_empty() {
-                break;
-            }
-            candidates.sort_unstable();
-            for &(_, id, target, relief) in &candidates {
-                if needed == 0 {
-                    break;
-                }
-                let Some(slot) = self.sandboxes.get_mut(&id) else {
-                    continue;
-                };
-                slot.floor = target;
-                slot.floor_relief += relief;
-                self.pending_relief += relief;
-                needed = needed.saturating_sub(relief);
-                changed = true;
-                self.mark(id);
+                self.start(step, key, out);
             }
         }
         changed
+    }
+
+    /// Starts `step` for the sandbox of `key`, already taken off its queue.
+    fn start(&mut self, step: Step, key: QueueKey, out: &mut Vec<Action>) {
+        let Some(slot) = self.sandboxes.get_mut(&key.sandbox) else {
+            return;
+        };
+        debug_assert_eq!(slot.queued, Some((step, key)));
+        slot.queued = None;
+        let op = OpId(self.next_op);
+        self.next_op += 1;
+        slot.in_flight = Some(InFlight {
+            op,
+            step,
+            cancel_sent: false,
+        });
+        self.in_flight[step.index()] += 1;
+        out.push(Action::Start {
+            sandbox: key.sandbox,
+            op,
+            step,
+        });
     }
 }
 

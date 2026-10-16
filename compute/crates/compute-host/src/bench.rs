@@ -768,6 +768,8 @@ async fn run(
     let config = SandboxConfig {
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,
+        memory_request_mib: None,
+        cpu_request_millis: None,
         sleep: SleepConfig::default(),
     };
     let started = Instant::now();

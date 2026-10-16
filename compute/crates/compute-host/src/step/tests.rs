@@ -136,6 +136,8 @@ impl Sandbox {
         let config = SandboxConfig {
             vcpus: 1,
             memory_mib: 256,
+            memory_request_mib: None,
+            cpu_request_millis: None,
             sleep: SleepConfig::default(),
         };
         let allocation = Allocation {

@@ -68,3 +68,23 @@ quarantined) rather than shared into other sandboxes. A wake from object
 storage fetches the disk over the host's base image (downloading only chunks
 that differ) and pages memory in through the pager as the guest touches it,
 prefetching the pages earlier wakes of that sandbox touched first.
+
+## Host capacity
+
+A host takes on only the memory it can hold. Each sandbox has a memory
+request, what it is guaranteed while awake (`memory_request_mib`, all of
+`memory_mib` unless set lower), and a limit, its VM size; on huge-page hosts
+the request is always the whole VM, since a guest never gives huge pages
+back. The requests of awake and waking sandboxes, together with what paused
+ones still hold and any use above a request, stay within the host's
+capacity (`--memory-capacity-mib`; by default the huge-page pool, or the
+host's memory less `--memory-headroom-mib`). A wake that does not fit first
+pushes idle sandboxes deeper, least recently used first; sandboxes that are
+held or recently busy are never touched. If even that cannot make room the
+request fails with the retryable `host_full` error, saying how much it
+needed, and a sandbox still held wakes by itself once room appears. The
+status reports the capacity (total, reserved, occupied, free, awake), and a
+restarted agent rebuilds it from its records. The request also sets the VM's
+guarantees in its cgroup: `memory.low`, and `cpu.weight` from
+`cpu_request_millis` (all its processors unless set lower), so contended
+processors are shared by request while `vcpus` stays the ceiling.

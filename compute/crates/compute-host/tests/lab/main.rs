@@ -31,6 +31,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep, timeout};
 
+mod admission;
 mod spoofing;
 
 const PORT: u32 = 52;
@@ -213,6 +214,8 @@ async fn create(client: &Client, sandbox: Id, sleep: SleepConfig) {
     let config = SandboxConfig {
         vcpus: 1,
         memory_mib: 512,
+        memory_request_mib: None,
+        cpu_request_millis: None,
         sleep,
     };
     let reply = client

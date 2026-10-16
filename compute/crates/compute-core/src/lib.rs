@@ -14,14 +14,15 @@
 //!
 //! ```
 //! use compute_core::{
-//!     Action, At, Host, HostPolicy, Input, SandboxId, SleepPolicy, SleepRules, State, Step,
+//!     Action, At, Host, HostPolicy, Input, SandboxId, Size, SleepPolicy, SleepRules, State, Step,
 //! };
 //!
 //! let mut host = Host::new(HostPolicy::default()).unwrap();
 //! let policy = SleepPolicy::new(SleepRules::RECOMMENDED).unwrap();
 //! let sandbox = SandboxId(1);
 //! let mut actions = Vec::new();
-//! host.handle(At::ZERO, Input::Add { sandbox, state: State::RUNNING, policy }, &mut actions);
+//! let size = Size::whole(1 << 30);
+//! host.handle(At::ZERO, Input::Add { sandbox, state: State::RUNNING, policy, size }, &mut actions);
 //! // Ten idle seconds later, it pauses.
 //! assert_eq!(host.next_deadline(), Some(At::from_millis(10_000)));
 //! host.handle(At::from_millis(10_000), Input::Tick, &mut actions);
@@ -35,10 +36,11 @@ mod policy;
 mod sandbox;
 mod time;
 
-pub use host::{Action, Failure, Host, Input, Notice, Outcome, SandboxView};
+pub use host::{Action, Capacity, Failure, Host, Input, Notice, Outcome, SandboxView, Size};
 pub use ids::{HoldId, OpId, SandboxId};
 pub use level::{Durability, Level, Priority, State, Step};
 pub use policy::{
-    Backoff, HostPolicy, MemoryPolicy, PolicyError, Rule, SleepPolicy, SleepRules, StepLimits,
+    Admission, Backoff, HostPolicy, MemoryPolicy, PolicyError, Rule, SleepPolicy, SleepRules,
+    StepLimits,
 };
 pub use time::At;

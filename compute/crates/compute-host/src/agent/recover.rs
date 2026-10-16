@@ -308,6 +308,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let policy = self
             .sleep_policy(&record.config)
             .map_err(HostError::Invalid)?;
+        let size = self.size(&record.config);
         let paths = Paths::new(&self.root, id);
         let spec = vm_spec(&record, &paths, &self.images);
         let (state, vm) = if let Some((vm, found, memory)) = found? {
@@ -351,6 +352,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sandbox: id.0,
             state,
             policy,
+            size,
         });
         if unsavable {
             // It still runs and wakes, but is never saved.

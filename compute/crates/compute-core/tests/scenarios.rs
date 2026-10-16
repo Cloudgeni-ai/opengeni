@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use compute_core::{
     Action, At, Durability, Failure, HoldId, Host, HostPolicy, Input, Level, MemoryPolicy, Notice,
-    OpId, Outcome, Priority, SandboxId, SleepPolicy, SleepRules, State, Step, StepLimits,
+    OpId, Outcome, Priority, SandboxId, Size, SleepPolicy, SleepRules, State, Step, StepLimits,
 };
 
 const GIB: u64 = 1 << 30;
@@ -59,6 +59,7 @@ impl Rig {
             sandbox: SandboxId(id),
             state,
             policy,
+            size: Size::whole(GIB),
         })
     }
 

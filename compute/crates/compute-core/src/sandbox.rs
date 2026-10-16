@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::host::{Failure, Notice, Outcome};
+use crate::host::{Failure, Notice, Outcome, Size};
 use crate::ids::{HoldId, OpId, SandboxId};
 use crate::level::{Durability, Level, Priority, State, Step};
 use crate::policy::{Backoff, SleepPolicy};
@@ -62,8 +62,14 @@ pub(crate) struct Sandbox {
     /// Minimum depth asked for by [`crate::Input::Sleep`]. [`Level::Running`]
     /// means none.
     pub requested: Level,
-    /// Latest reported resident memory in bytes.
-    pub resident: u64,
+    /// Latest reported resident memory in bytes of the current VM process;
+    /// `None` until one is reported.
+    pub resident: Option<u64>,
+    /// What it may take of host memory.
+    pub size: Size,
+    /// A wake for it was refused for want of memory, and is not tried again
+    /// until asked anew or its memory fits; see [`crate::Notice::HostFull`].
+    pub refused: bool,
     pub in_flight: Option<InFlight>,
     /// The VM process died while a step was in flight.
     pub process_lost: bool,
@@ -86,7 +92,7 @@ pub(crate) enum Health {
 }
 
 impl Sandbox {
-    pub fn new(now: At, state: State, policy: SleepPolicy) -> Self {
+    pub fn new(now: At, state: State, policy: SleepPolicy, size: Size) -> Self {
         Self {
             state: State::new(state.level, state.durability, state.memory_saved),
             policy,
@@ -96,7 +102,9 @@ impl Sandbox {
             floor: Level::Running,
             floor_relief: 0,
             requested: Level::Running,
-            resident: 0,
+            resident: None,
+            size,
+            refused: false,
             in_flight: None,
             process_lost: false,
             retry: None,
@@ -244,6 +252,12 @@ impl Sandbox {
         if self.health == Health::Unsavable {
             self.health = Health::Sound;
         }
+        self.resident = None;
+    }
+
+    /// Latest reported resident memory in bytes, 0 if none was.
+    pub fn resident_bytes(&self) -> u64 {
+        self.resident.unwrap_or(0)
     }
 
     pub fn is_broken(&self) -> bool {
@@ -304,6 +318,9 @@ impl Sandbox {
             return None;
         }
         if self.wants_awake() {
+            if self.refused {
+                return None;
+            }
             return match self.state.level {
                 Level::Running => None,
                 Level::Paused | Level::Compressed => Some(Step::Resume),
@@ -366,9 +383,9 @@ impl Sandbox {
             if at >= Level::Saved {
                 0
             } else if at == Level::Compressed && self.state.level < Level::Compressed {
-                self.resident / 100 * u64::from(compressed_percent)
+                self.resident_bytes() / 100 * u64::from(compressed_percent)
             } else {
-                self.resident
+                self.resident_bytes()
             }
         };
         remaining(from).saturating_sub(remaining(to))

@@ -198,6 +198,8 @@ pub(crate) fn vm_spec(record: &Record, paths: &Paths, images: &Images) -> VmSpec
         gid: record.allocation.gid,
         vcpus: record.config.vcpus,
         memory_mib: record.config.memory_mib,
+        memory_request_mib: record.config.memory_request(),
+        cpu_weight: record.config.cpu_weight(),
         kernel: paths.kernel.clone(),
         boot_args: images.boot_args.clone(),
         drives: vec![Drive {
