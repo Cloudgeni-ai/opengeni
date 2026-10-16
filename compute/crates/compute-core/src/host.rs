@@ -134,6 +134,12 @@ pub enum Failure {
     /// one, the files on local disk remain. See
     /// [`State::without_saved_copies`](crate::State::without_saved_copies).
     Untrusted,
+    /// Like [`Failure::Untrusted`], except that the host did put back the
+    /// record vouching for the copy on local disk, so only the copy in
+    /// object storage is no longer trusted. Nothing is lost and the step can
+    /// be retried from the local copy. See
+    /// [`State::without_remote_copy`](crate::State::without_remote_copy).
+    RemoteUntrusted,
     /// For a step on a VM process: the process is gone. A current saved
     /// copy takes its place; without one, only the files survive. For any
     /// other step: the memory image is unusable but the files are intact,

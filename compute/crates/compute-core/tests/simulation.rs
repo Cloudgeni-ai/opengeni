@@ -285,7 +285,8 @@ impl World {
             match self.rng.below(1000) {
                 0..900 => Outcome::Done,
                 900..945 => Outcome::Failed(Failure::Transient),
-                945..960 => Outcome::Failed(Failure::Untrusted),
+                945..953 => Outcome::Failed(Failure::Untrusted),
+                953..960 => Outcome::Failed(Failure::RemoteUntrusted),
                 960..995 => Outcome::Failed(Failure::MemoryLost),
                 _ => Outcome::Failed(Failure::Fatal),
             }
@@ -310,6 +311,9 @@ impl World {
                 Outcome::Cancelled | Outcome::Failed(Failure::Transient) => {}
                 Outcome::Failed(Failure::Untrusted) => {
                     truth.settle(truth.state.without_saved_copies());
+                }
+                Outcome::Failed(Failure::RemoteUntrusted) => {
+                    truth.settle((truth.state.without_remote_copy(), false));
                 }
                 Outcome::Failed(Failure::MemoryLost) => {
                     truth.settle(truth.state.without_memory_image());
