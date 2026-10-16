@@ -4,10 +4,17 @@ import compute_smoke as smoke
 from compute_smoke.client import HostAgentError
 
 LEVELS = ("paused", "compressed", "saved", "archived", "remote")
+# Every host offers these, so they must be exercised.
+REQUIRED = ("paused", "saved")
 # Levels without a VM process, where running programs live in a memory image.
 IMAGE_LEVELS = ("saved", "archived", "remote")
-# How a host says it cannot offer a level: no memory compression, or no store.
-UNSUPPORTED = ("cannot compress", "no store")
+# How a host says it cannot offer a level, for the levels that need
+# something a host may lack: memory compression, or a store.
+UNSUPPORTED = {
+    "compressed": "cannot compress",
+    "archived": "no store",
+    "remote": "no store",
+}
 MARKER_PATH = "/root/compute-smoke-levels.txt"
 
 
@@ -16,7 +23,8 @@ def round_trip_at_every_level(test: smoke.Ecw) -> None:
     """A sandbox put to sleep at each level reaches exactly that level, and
     woken again still has its files and the same running programs: its guest
     service keeps its process and a background command keeps running. A level
-    the host cannot offer is recorded as unsupported, not counted as covered.
+    the host cannot offer is recorded as unsupported, not counted as covered;
+    paused and saved are always offered and must be covered.
     """
 
     with test.phase("start a background program"):
@@ -32,7 +40,8 @@ def round_trip_at_every_level(test: smoke.Ecw) -> None:
             try:
                 test.sandbox.sleep(level)
             except HostAgentError as error:
-                if not any(reason in str(error) for reason in UNSUPPORTED):
+                reason = UNSUPPORTED.get(level)
+                if reason is None or reason not in str(error):
                     raise
                 unsupported.append(level)
                 test.record(f"{level}_unsupported", str(error))
@@ -66,3 +75,9 @@ def round_trip_at_every_level(test: smoke.Ecw) -> None:
 
     test.record("levels_exercised", exercised)
     test.record("levels_unsupported", unsupported)
+    test.verify(
+        set(REQUIRED) <= set(exercised),
+        "a level every host offers was not exercised",
+        required=list(REQUIRED),
+        exercised=exercised,
+    )

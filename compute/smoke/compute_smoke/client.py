@@ -266,6 +266,9 @@ class SandboxInfo:
     step: str | None
     holds: int
     broken: bool
+    # VM processes the host agent started for the sandbox, boots and
+    # restores alike, since the agent started.
+    launches: int = 0
 
     @classmethod
     def from_status(cls, sandbox_id: str, entry: Mapping[str, Any]) -> SandboxInfo:
@@ -279,6 +282,7 @@ class SandboxInfo:
             step=entry.get("step"),
             holds=int(entry.get("holds", 0)),
             broken=bool(entry.get("broken")),
+            launches=int(entry.get("launches", 0)),
         )
 
 
@@ -501,12 +505,15 @@ class Sandbox:
             raise SandboxUnavailable(f"sandbox {self.sandbox_id} does not exist")
         return info
 
-    def connect(self, *, timeout: float | None = None) -> None:
-        """Wakes the sandbox and returns once the host agent reports it woken."""
+    def connect(self, *, timeout: float | None = None) -> str | None:
+        """Wakes the sandbox and returns once the host agent reports it
+        woken, with the step that was under way when the wake arrived."""
 
         reply = self.host.wake(self.sandbox_id, timeout=timeout)
         if reply.get("result") != "woken":
             raise SandboxUnavailable(f"waking {self.sandbox_id} answered {reply!r}")
+        during = reply.get("during")
+        return None if during is None else str(during)
 
     def set_timeout(self, seconds: float) -> None:
         """Keeps the sandbox awake for `seconds`; afterwards it pauses once

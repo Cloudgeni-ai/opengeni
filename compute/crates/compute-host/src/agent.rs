@@ -159,7 +159,7 @@ enum Command {
         id: Id,
         hold: HoldId,
         priority: Priority,
-        reply: Reply<PathBuf>,
+        reply: Reply<Woke>,
     },
     Release {
         id: Id,
@@ -218,6 +218,9 @@ struct Slot<V> {
     vm: Option<Live<V>>,
     /// Incarnation of the VM that exists, wherever it is.
     incarnation: Option<u64>,
+    /// VM processes started for it (boots and restores) since the agent
+    /// started.
+    launches: u64,
     /// A VM that died while a step held it.
     dead: Option<u64>,
     /// Listeners for connections the guest opens to the host.
@@ -225,9 +228,24 @@ struct Slot<V> {
     op: Option<Running>,
     destroy: bool,
     removers: Vec<Reply<()>>,
-    waiters: Vec<Reply<PathBuf>>,
+    waiters: Vec<Waiter>,
     /// Processor use measured so far, while the VM runs.
     cpu: Option<CpuWindow>,
+}
+
+/// Someone waiting for a sandbox to run.
+#[derive(Debug)]
+struct Waiter {
+    /// The step under way when the wake arrived.
+    during: Option<Step>,
+    reply: Reply<Woke>,
+}
+
+/// A sandbox that runs, as a waiter learns of it.
+#[derive(Debug)]
+struct Woke {
+    vsock: PathBuf,
+    during: Option<Step>,
 }
 
 /// Talks to a running host agent. Cheap to clone.
@@ -245,6 +263,7 @@ pub struct Lease {
     hold: HoldId,
     vsock: PathBuf,
     waited: Duration,
+    during: Option<Step>,
     commands: mpsc::UnboundedSender<Command>,
 }
 
@@ -308,7 +327,7 @@ impl Handle {
             commands: self.commands.clone(),
             armed: true,
         };
-        let vsock = self
+        let woke = self
             .ask(|reply| Command::Acquire {
                 id,
                 hold,
@@ -320,8 +339,9 @@ impl Handle {
         Ok(Lease {
             id,
             hold,
-            vsock,
+            vsock: woke.vsock,
             waited: started.elapsed(),
+            during: woke.during,
             commands: self.commands.clone(),
         })
     }
@@ -383,6 +403,13 @@ impl Lease {
     #[must_use]
     pub fn waited(&self) -> Duration {
         self.waited
+    }
+
+    /// The step under way when the wake arrived, if any: a wake during a
+    /// sleep step cancels it or waits for it to finish.
+    #[must_use]
+    pub fn during(&self) -> Option<Step> {
+        self.during
     }
 
     /// Host side of the sandbox's vsock device.
@@ -608,6 +635,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 spec: Arc::new(spec),
                 vm: None,
                 incarnation: None,
+                launches: 0,
                 dead: None,
                 _ports: ports,
                 op: None,
@@ -723,11 +751,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 priority,
                 reply,
             } => {
+                let during = self.core.sandbox(id.0).and_then(|view| view.step);
                 let Some(slot) = self.slots.get_mut(&id.0).filter(|slot| !slot.destroy) else {
                     let _ = reply.send(Err(HostError::NotFound(id)));
                     return;
                 };
-                slot.waiters.push(reply);
+                slot.waiters.push(Waiter { during, reply });
                 self.input(Input::Hold {
                     sandbox: id.0,
                     hold,
@@ -953,6 +982,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     fn step_done(&mut self, id: Id, op: OpId, outcome: Outcome, after: After<E::Vm>) {
+        let launched = matches!(after, After::New(_));
         let fresh = match after {
             After::New(vm) => Some(self.adopt(id, vm)),
             After::Kept(live) => Some(live),
@@ -961,6 +991,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut reap = None;
         let mut destroy = false;
         if let Some(slot) = self.slots.get_mut(&id.0) {
+            if launched {
+                slot.launches += 1;
+            }
             if let Some(running) = slot.op.take().filter(|running| running.op == op) {
                 let stats = &mut self.stats[running.step.index()];
                 let micros =
@@ -1066,7 +1099,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         };
         for waiter in slot.waiters.drain(..) {
-            let _ = waiter.send(Err(HostError::Removed(id)));
+            let _ = waiter.reply.send(Err(HostError::Removed(id)));
         }
         self.destroying
             .insert(id.0, std::mem::take(&mut slot.removers));
@@ -1135,7 +1168,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         };
         for waiter in slot.waiters.drain(..) {
-            let _ = waiter.send(result.clone());
+            let woke = result.clone().map(|vsock| Woke {
+                vsock,
+                during: waiter.during,
+            });
+            let _ = waiter.reply.send(woke);
         }
     }
 
@@ -1222,6 +1259,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     memory_saved: view.state.keeps_programs(),
                     step: view.step.map(|step| step_name(step).to_owned()),
                     holds: view.holds,
+                    launches: slot.launches,
                     resident_bytes: slot
                         .vm
                         .as_ref()

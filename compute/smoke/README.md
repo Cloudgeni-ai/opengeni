@@ -24,12 +24,15 @@ Python 3.10 or later, standard library only.
    ```
 
 2. Start a host agent that creates sandboxes from that image. A `--store`
-   enables the archived and remote levels:
+   enables the archived and remote levels, and `--restore-notice-port` must
+   match the guest's restore listener (54 by default) so restored guests are
+   told, as the concurrent-wake scenario checks:
 
    ```sh
    sudo compute-host --socket /run/compute-smoke.sock serve \
      --root /var/lib/compute-smoke --firecracker /usr/local/bin/firecracker \
-     --kernel vmlinux --base-image smoke.ext4 --store /var/lib/compute-smoke-store
+     --kernel vmlinux --base-image smoke.ext4 --store /var/lib/compute-smoke-store \
+     --restore-notice-port 54
    ```
 
 3. Run the suite from this directory:

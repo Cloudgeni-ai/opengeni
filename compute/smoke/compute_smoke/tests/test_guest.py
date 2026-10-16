@@ -4,6 +4,7 @@ the host instead of vsock inside a VM."""
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import os
 import shutil
@@ -16,6 +17,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 GUEST = Path(__file__).resolve().parents[2] / "guest" / "smoke_guest.py"
 
@@ -383,6 +385,84 @@ class GuestService(unittest.TestCase):
                 [],
                 "a directory moved away is still reported under its old path",
             )
+
+
+def _load_guest(state: Path) -> Any:
+    """Imports the guest service as a module, keeping its files in `state`."""
+
+    with mock.patch.dict(os.environ, {"SMOKE_GUEST_STATE": str(state)}):
+        spec = importlib.util.spec_from_file_location("smoke_guest_under_test", GUEST)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    return module
+
+
+class GuestInternals(unittest.TestCase):
+    """Cases a running service cannot be steered into, driven in-process."""
+
+    def setUp(self) -> None:
+        self.scratch = Path(tempfile.mkdtemp(prefix="smoke-guest-in-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, self.scratch, True)
+        self.guest = _load_guest(self.scratch / "state")
+        self.now = 0.0
+
+    def test_signalling_an_exited_process_leaves_its_old_group_alone(self) -> None:
+        process = self.guest.PROCESSES.start("true", dict(os.environ), None)
+        self.addCleanup(self.guest.PROCESSES.forget, process.pid)
+        self.assertTrue(process.exited.wait(10))
+        with mock.patch.object(self.guest.os, "killpg") as killpg:
+            reply = self.guest.op_signal({"pid": process.pid, "signal": signal.SIGTERM})
+        self.assertEqual(reply, {"delivered": False})
+        killpg.assert_not_called()
+
+    def watcher(self) -> Any:
+        """A recursive watcher on a tree with `old/inner`, on a fake clock."""
+
+        root = self.scratch / "root"
+        (root / "old" / "inner").mkdir(parents=True)
+        watcher = self.guest.Inotify(root, True, clock=lambda: self.now)
+        self.addCleanup(watcher.close)
+        return watcher
+
+    def event(self, watcher: Any, directory: Path, mask: int, cookie: int, name: str) -> bytes:
+        """One raw inotify event, as the kernel lays it out."""
+
+        descriptor = next(d for d, path in watcher.watched().items() if path == directory)
+        raw = name.encode() + b"\0" * (16 - len(name) % 16)
+        return self.guest.EVENT_HEADER.pack(descriptor, mask, cookie, len(raw)) + raw
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_rename_split_across_reads_keeps_the_directory_watched(self) -> None:
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        isdir = self.guest.IN_ISDIR
+        away = self.event(watcher, root, self.guest.IN_MOVED_FROM | isdir, 7, "old")
+        back = self.event(watcher, root, self.guest.IN_MOVED_TO | isdir, 7, "new")
+        self.assertEqual(watcher.parse(away), [{"name": "old", "type": "rename"}])
+        self.assertIsNotNone(watcher.settle_seconds())
+        self.now += self.guest.MOVE_PAIR_SECONDS / 2
+        self.assertEqual(watcher.parse(back), [{"name": "new", "type": "rename"}])
+        self.assertIsNone(watcher.settle_seconds())
+        self.now += 1
+        self.assertEqual(watcher.read_events(), [])
+        self.assertIn(root / "new" / "inner", watcher.watched().values())
+        self.assertNotIn(root / "old" / "inner", watcher.watched().values())
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the watcher uses inotify")
+    def test_a_move_away_never_answered_ends_the_watch_after_a_grace(self) -> None:
+        watcher = self.watcher()
+        root = self.scratch / "root"
+        away = self.event(watcher, root, self.guest.IN_MOVED_FROM | self.guest.IN_ISDIR, 9, "old")
+        watcher.parse(away)
+        self.assertEqual(watcher.read_events(), [])
+        self.assertIn(root / "old" / "inner", watcher.watched().values(), "too early")
+        self.now += self.guest.MOVE_PAIR_SECONDS
+        self.assertEqual(watcher.settle_seconds(), 0.0)
+        watcher.read_events()
+        self.assertNotIn(root / "old" / "inner", watcher.watched().values())
+        self.assertNotIn(root / "old", watcher.watched().values())
+        self.assertIsNone(watcher.settle_seconds())
 
 
 if __name__ == "__main__":

@@ -575,8 +575,9 @@ class Ecw(CommandSandboxFixture):
             file_path=path,
         )
 
-    def reconnect_by_id(self, *, timeout: int | None = None) -> None:
-        """Wake the sandbox by its id and wait until it runs."""
+    def reconnect_by_id(self, *, timeout: int | None = None) -> str | None:
+        """Wake the sandbox by its id and wait until it runs. Returns the
+        step the host agent was taking when the wake arrived, if any."""
 
         if timeout is not None and timeout <= 0:
             raise ValueError("reconnect timeout must be positive")
@@ -585,8 +586,9 @@ class Ecw(CommandSandboxFixture):
             if timeout is not None
             else max(self._sandbox_timeout, self.lifecycle_transition_timeout)
         )
+        during = None
         try:
-            self.sandbox.connect(timeout=reconnect_timeout)
+            during = self.sandbox.connect(timeout=reconnect_timeout)
         except (ScenarioTimedOut, SmokeConfigurationError):
             raise
         except Exception as error:  # noqa: BLE001 - client outcome is the invariant
@@ -598,6 +600,7 @@ class Ecw(CommandSandboxFixture):
                 connect_error=str(error),
             )
         self.wait_until_woken()
+        return during
 
     def wait_until_paused(self) -> None:
         """Wait until the sandbox is asleep at any level."""

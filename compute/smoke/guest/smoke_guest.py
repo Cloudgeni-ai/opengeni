@@ -31,6 +31,7 @@ import ctypes
 import ctypes.util
 import itertools
 import json
+import math
 import os
 import select
 import shutil
@@ -259,13 +260,15 @@ def op_signal(request: dict[str, Any]) -> dict[str, Any]:
     pid = _field(request, "pid", int)
     number = _field(request, "signal", int)
     process = PROCESSES.get(pid)
-    running = not process.exited.is_set()
+    if process.exited.is_set():
+        # Reaped already, so its group id may belong to someone else now.
+        return {"delivered": False}
     try:
         # The command was started in a new session, so its pid is the group.
         os.killpg(pid, number)
     except ProcessLookupError:
         return {"delivered": False}
-    return {"delivered": running}
+    return {"delivered": True}
 
 
 def op_wait(request: dict[str, Any]) -> dict[str, Any]:
@@ -359,6 +362,10 @@ WATCHED = (
     | IN_DELETE_SELF
 )
 EVENT_HEADER = struct.Struct("iIII")
+# How long a directory moved away waits for the other half of its move. The
+# kernel queues both halves back to back, so only a read that lands between
+# them, or a full buffer, splits a pair; the other half follows at once.
+MOVE_PAIR_SECONDS = 0.05
 
 
 def _event_type(mask: int) -> str:
@@ -381,9 +388,17 @@ class Inotify:
     a directory moved within the tree has its descendants' paths rewritten,
     one moved out has its watches removed, and one moved in or created is
     watched together with everything already inside it.
+
+    A move away is held for `MOVE_PAIR_SECONDS` in case its arrival in the
+    tree comes in a later read; only then does it count as moved out.
     """
 
-    def __init__(self, root: Path, recursive: bool) -> None:
+    def __init__(
+        self,
+        root: Path,
+        recursive: bool,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
         self._add = libc.inotify_add_watch
         self._add.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
@@ -394,13 +409,22 @@ class Inotify:
             raise OSError(ctypes.get_errno(), "inotify_init1 failed")
         self._root = root
         self._recursive = recursive
+        self._clock = clock
         self._dirs: dict[int, Path] = {}
+        # Directories moved away whose arrival is not seen yet: by cookie,
+        # their old path and when to give up waiting.
+        self._departed: dict[int, tuple[Path, float]] = {}
         self._watch(root)
         if recursive:
             self._watch_below(root)
 
     def fileno(self) -> int:
         return self._fd
+
+    def watched(self) -> dict[int, Path]:
+        """The directories watched now, by watch descriptor."""
+
+        return dict(self._dirs)
 
     def _watch(self, directory: Path) -> None:
         descriptor = self._add(self._fd, os.fsencode(directory), WATCHED)
@@ -435,16 +459,35 @@ class Inotify:
             self._remove(self._fd, descriptor)
 
     def read_events(self) -> list[dict[str, str]]:
-        """The events waiting now, possibly none."""
+        """The events waiting now, possibly none. Call it again within
+        `settle_seconds` even without new events, so a directory moved out
+        of the tree stops being watched."""
 
         try:
             buffer = os.read(self._fd, 64 * 1024)
         except BlockingIOError:
-            return []
+            buffer = b""
+        events = self.parse(buffer)
+        now = self._clock()
+        for cookie, (path, deadline) in list(self._departed.items()):
+            if deadline <= now:
+                del self._departed[cookie]
+                self._moved_out(path)
+        return events
+
+    def settle_seconds(self) -> float | None:
+        """How soon `read_events` must run again to settle a pending move,
+        or None when none is pending."""
+
+        if not self._departed:
+            return None
+        deadline = min(deadline for _, deadline in self._departed.values())
+        return max(0.0, deadline - self._clock())
+
+    def parse(self, buffer: bytes) -> list[dict[str, str]]:
+        """The events in one read from the inotify descriptor."""
+
         events = []
-        # Directories moved away in this batch, by cookie, until their
-        # arrival is seen. The kernel queues both halves of a move together.
-        departed: dict[int, Path] = {}
         offset = 0
         while offset < len(buffer):
             descriptor, mask, cookie, length = EVENT_HEADER.unpack_from(buffer, offset)
@@ -458,9 +501,9 @@ class Inotify:
             path = directory / os.fsdecode(raw) if raw else directory
             if self._recursive and mask & IN_ISDIR:
                 if mask & IN_MOVED_FROM:
-                    departed[cookie] = path
-                elif mask & IN_MOVED_TO and cookie in departed:
-                    self._moved_within(departed.pop(cookie), path)
+                    self._departed[cookie] = (path, self._clock() + MOVE_PAIR_SECONDS)
+                elif mask & IN_MOVED_TO and cookie in self._departed:
+                    self._moved_within(self._departed.pop(cookie)[0], path)
                 elif mask & (IN_CREATE | IN_MOVED_TO):
                     # Anything inside may predate the watch: a directory
                     # moved in arrives full, and a new one fills fast.
@@ -473,8 +516,6 @@ class Inotify:
                     "type": _event_type(mask),
                 }
             )
-        for path in departed.values():
-            self._moved_out(path)
         return events
 
     def close(self) -> None:
@@ -500,13 +541,14 @@ def stream_watch(
         poll.register(watcher, select.POLLIN)
         poll.register(connection, select.POLLIN | select.POLLRDHUP)
         while True:
-            for descriptor, _ in poll.poll():
-                if descriptor == connection.fileno():
-                    # The client sends nothing after its request, so input
-                    # here means it closed its side.
-                    return
-                for event in watcher.read_events():
-                    send(event)
+            settle = watcher.settle_seconds()
+            ready = poll.poll(None if settle is None else math.ceil(settle * 1000))
+            if any(descriptor == connection.fileno() for descriptor, _ in ready):
+                # The client sends nothing after its request, so input here
+                # means it closed its side.
+                return
+            for event in watcher.read_events():
+                send(event)
     finally:
         watcher.close()
 

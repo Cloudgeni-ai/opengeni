@@ -15,10 +15,13 @@ MARKER_PATH = "/root/compute-smoke-concurrent.txt"
 def concurrent_wakes_converge(test: smoke.Ecw) -> None:
     """Sixteen commands sent at the same moment to a sandbox saved to disk
     are all in flight together, all succeed, see the same files and the same
-    guest process, and the sandbox is restored exactly once.
+    guest process, and the host agent starts exactly one VM for them.
 
-    The restore count is the guest's own: it acknowledges each restore
-    notice from the host agent, so other sandboxes on the host do not count.
+    The VM count is the host agent's own, kept per sandbox outside the
+    memory image: a count inside the guest could not tell one restore from
+    several, since each restored copy starts from the same saved count. The
+    guest's count still shows that the restored guest was told of its
+    restore.
     """
 
     marker = f"{test.sandbox.sandbox_id}:concurrent"
@@ -27,6 +30,7 @@ def concurrent_wakes_converge(test: smoke.Ecw) -> None:
         service_pid = test.sandbox.ping()
         restores_before = test.sandbox.restore_count()
         test.suspend_durably()
+        launches_before = test.sandbox.get_info().launches
 
     barrier = threading.Barrier(CLIENTS)
 
@@ -41,6 +45,8 @@ def concurrent_wakes_converge(test: smoke.Ecw) -> None:
         ThreadPoolExecutor(CLIENTS) as pool,
     ):
         calls = list(pool.map(wake_with_command, range(CLIENTS)))
+    # Read at once, before anything else could put it to sleep and wake it.
+    launches = test.sandbox.get_info().launches - launches_before
 
     with test.phase("verify one VM served them all"):
         starts = [started for started, _, _ in calls]
@@ -63,7 +69,12 @@ def concurrent_wakes_converge(test: smoke.Ecw) -> None:
             message="the woken sandbox runs a different guest process",
         )
         test.verify_equal(
+            actual=launches,
+            expected=1,
+            message="concurrent wakes did not share exactly one restored VM",
+        )
+        test.verify_equal(
             actual=test.sandbox.restore_count() - restores_before,
             expected=1,
-            message="concurrent wakes did not share exactly one restore",
+            message="the restored guest was not told of its restore",
         )
