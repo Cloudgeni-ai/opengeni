@@ -56383,8 +56383,10 @@ export async function claimWorkspaceArchiveCapture(
             ? await scopedDb.execute<{ abandoned: boolean }>(sql`
                 select coalesce(bool_and(coalesce(
                   admission.actor_kind = 'turn'
+                  and admission.actor_id = attempt.id
                   and admission.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
                   and admission.route_kind = 'home'
+                  and admission.route_target_id is null
                   and attempt.state = 'closed'
                   and attempt.closed_at
                     <= now() - (${abandonAfterMs}::bigint * interval '1 millisecond')
