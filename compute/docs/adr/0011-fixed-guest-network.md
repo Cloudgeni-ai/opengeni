@@ -29,4 +29,8 @@ Sandboxes run untrusted code next to each other and next to the host.
 
 - A restored guest's network configuration is right on any host; nothing is
   repaired after restore. Open connections do not survive.
+- Guest ports relay bytes and add no identity: every sandbox's forwarded
+  connections reach their upstream from the host's address. The upstream
+  authenticates each one by a credential only that sandbox holds, never by
+  address or an id the guest states.
 - Setting up a namespace takes a few milliseconds at create, nothing at wake.

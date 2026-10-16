@@ -8,6 +8,13 @@
 //!
 //! The listeners belong to the sandbox, not to one VM process, so they stay
 //! in place while the sandbox sleeps at any level and across restores.
+//!
+//! A forwarded connection carries no proof of which sandbox opened it. Every
+//! sandbox's relay reaches the upstream from the same host address, and
+//! whatever identity the guest states in its bytes is the guest's own claim.
+//! An upstream that acts for a sandbox must authenticate each connection by
+//! a credential only that sandbox was given, such as a per-sandbox token
+//! handed to it at create, and never by address or a stated id.
 
 use std::ffi::OsString;
 use std::fmt;
