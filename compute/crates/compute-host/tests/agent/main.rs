@@ -108,6 +108,14 @@ struct World {
     /// VMs that cannot be checked on, by name: adopting one fails as when
     /// its VMM does not answer.
     unadoptable: Mutex<HashSet<String>>,
+    /// While set, no VM's processor time can be read.
+    unreadable_cpu: AtomicBool,
+    /// While set, every pause moves a burst of data, as a VMM writing a
+    /// snapshot does: work the host does, not the guest.
+    transition_traffic: AtomicBool,
+    /// Traffic readings taken, so a test can line up with the agent's
+    /// sampling.
+    samples: AtomicUsize,
 }
 
 /// What a fake VM process is, independent of any agent's handle to it.
@@ -118,7 +126,7 @@ struct Process {
     paused: Arc<Mutex<bool>>,
     exit: watch::Sender<bool>,
     guest: AbortHandle,
-    cpu: Arc<Mutex<CpuMeter>>,
+    work: Arc<Mutex<Work>>,
     /// What [`Engine::hold`] keeps for it, which ends with it.
     held: Arc<Mutex<Option<OwnedFd>>>,
 }
@@ -158,15 +166,23 @@ impl std::ops::Deref for FakeVm {
     }
 }
 
-/// Processor time a fake VM used: one full processor while its guest is
-/// told to be busy.
+/// What a fake VM's guest is told to be doing.
 #[derive(Debug, Default)]
-struct CpuMeter {
+struct Work {
+    /// One full processor while busy.
+    cpu: Meter,
+    /// A byte of traffic every microsecond while streaming.
+    io: Meter,
+}
+
+/// Time a fake VM spent on one kind of work.
+#[derive(Debug, Default)]
+struct Meter {
     used: Duration,
     busy_since: Option<Instant>,
 }
 
-impl CpuMeter {
+impl Meter {
     fn total(&self) -> Duration {
         self.used
             + self
@@ -202,14 +218,14 @@ impl Fake {
         let _ = std::fs::remove_file(&vsock);
         let listener = UnixListener::bind(&vsock).unwrap();
         let memory = Arc::new(Mutex::new(memory));
-        let cpu = Arc::new(Mutex::new(CpuMeter::default()));
+        let work = Arc::new(Mutex::new(Work::default()));
         let (exit, mut exited) = watch::channel(false);
         let guest = tokio::spawn(guest(
             listener,
             Arc::clone(&memory),
             spec.drives[0].path.clone(),
             Arc::default(),
-            Arc::clone(&cpu),
+            Arc::clone(&work),
             Arc::clone(&self.world),
         ));
         let world = Arc::clone(&self.world);
@@ -228,7 +244,7 @@ impl Fake {
             paused: Arc::default(),
             exit,
             guest: guest.abort_handle(),
-            cpu,
+            work,
             held: Arc::default(),
         };
         self.world
@@ -278,14 +294,14 @@ async fn guest(
     memory: Arc<Mutex<String>>,
     disk: PathBuf,
     notice: Arc<Mutex<Option<String>>>,
-    cpu: Arc<Mutex<CpuMeter>>,
+    work: Arc<Mutex<Work>>,
     world: Arc<World>,
 ) {
     while let Ok((stream, _)) = listener.accept().await {
         let memory = Arc::clone(&memory);
         let disk = disk.clone();
         let notice = Arc::clone(&notice);
-        let cpu = Arc::clone(&cpu);
+        let work = Arc::clone(&work);
         let world = Arc::clone(&world);
         tokio::spawn(async move {
             let (read, mut write) = stream.into_split();
@@ -331,11 +347,19 @@ async fn guest(
                         .unwrap_or_default()
                         .to_owned(),
                     ("busy", _) => {
-                        cpu.lock().unwrap().set_busy(true);
+                        work.lock().unwrap().cpu.set_busy(true);
                         "ok".into()
                     }
                     ("quiet", _) => {
-                        cpu.lock().unwrap().set_busy(false);
+                        work.lock().unwrap().cpu.set_busy(false);
+                        "ok".into()
+                    }
+                    ("stream", _) => {
+                        work.lock().unwrap().io.set_busy(true);
+                        "ok".into()
+                    }
+                    ("still", _) => {
+                        work.lock().unwrap().io.set_busy(false);
                         "ok".into()
                     }
                     (other, _) => format!("unknown {other}"),
@@ -382,11 +406,13 @@ impl Engine for Fake {
             left.checked_sub(1).map(|fewer| *left = fewer)
         };
         if refuse.is_some() {
+            // As Firecracker does: the VMM starts, then refuses the load.
             return Err(EngineError::new(
                 ErrorKind::MemoryLost,
                 "restore",
                 "snapshot load refused",
-            ));
+            )
+            .after_launch());
         }
         let MemorySource::File(path) = &files.memory else {
             panic!("a bare-metal host restores local images from files");
@@ -403,6 +429,10 @@ impl Engine for Fake {
     }
 
     fn pause(&self, vm: &FakeVm) -> impl Future<Output = Result<(), EngineError>> + Send {
+        if self.world.transition_traffic.load(Ordering::SeqCst) {
+            // A second of streaming: a million bytes.
+            vm.work.lock().unwrap().io.used += Duration::from_secs(1);
+        }
         ready(self.set_paused(vm, "pause", true))
     }
 
@@ -575,7 +605,20 @@ impl Engine for Fake {
     }
 
     fn cpu_time(&self, vm: &FakeVm) -> Result<Duration, EngineError> {
-        Ok(vm.cpu.lock().unwrap().total())
+        if self.world.unreadable_cpu.load(Ordering::SeqCst) {
+            return Err(EngineError::new(
+                ErrorKind::Transient,
+                "cpu_time",
+                "cpu.stat unreadable",
+            ));
+        }
+        Ok(vm.work.lock().unwrap().cpu.total())
+    }
+
+    fn io_bytes(&self, vm: &FakeVm) -> Result<u64, EngineError> {
+        self.world.samples.fetch_add(1, Ordering::SeqCst);
+        let streamed = vm.work.lock().unwrap().io.total();
+        Ok(u64::try_from(streamed.as_micros()).unwrap_or(u64::MAX))
     }
 
     fn exited(&self, vm: &FakeVm) -> impl Future<Output = ()> + Send + 'static {
@@ -633,6 +676,7 @@ impl Lab {
             network: None,
             busy: Some(BusyRule {
                 cpu_percent: 50,
+                io_bytes_per_second: 100_000,
                 window: Duration::from_millis(100),
             }),
             can_compress: true,

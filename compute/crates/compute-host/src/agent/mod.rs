@@ -109,33 +109,75 @@ pub struct HostConfig {
     pub pool: Option<PoolConfig>,
 }
 
-/// When a running sandbox counts as busy: its VM used at least
-/// `cpu_percent` of one processor, averaged over `window`.
+/// When a running sandbox counts as busy: over `window`, its VM used at
+/// least `cpu_percent` of one processor on average, or moved at least
+/// `io_bytes_per_second` on average through its network and disk (see
+/// [`Engine::io_bytes`]).
+///
+/// Vsock traffic is not reliably measured here: some of it reaches the
+/// traffic counters and can count toward the rule, but no keep-awake
+/// guarantee rests on it. Streams the host opens into the guest hold the
+/// sandbox awake while they are open. Connections the
+/// guest opens to its host (see [`crate::guest_ports`]) deliberately do
+/// not: a control link carries keepalives for as long as the guest lives,
+/// so its traffic alone must not keep a sandbox awake. Data arriving on one
+/// can wake the sandbox, and the guest's own work for it shows as
+/// processor use.
 ///
 /// This is how the host sees work nobody told it about, such as a build or
-/// test run an agent left in the background. A quiet guest uses well under
-/// one percent; short periodic jobs average out over the window.
+/// test run an agent left in the background, or a download that mostly
+/// waits on the network. A quiet guest uses well under one percent of a
+/// processor and moves no data at all; short periodic jobs average out over
+/// the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BusyRule {
-    /// Percent of one processor.
+    /// Percent of one processor; 0 ignores processor use.
     pub cpu_percent: u32,
+    /// Bytes per second; 0 ignores traffic.
+    pub io_bytes_per_second: u64,
     /// Averaging window. Readings come every [`HostConfig::sample_every`],
     /// so the effective window is at least that long.
     pub window: Duration,
 }
 
 impl BusyRule {
-    /// A quarter of one processor over five seconds.
+    /// A quarter of one processor, or 4 KiB a second of traffic, over five
+    /// seconds. An idle guest moves nothing; a guest still writing back a
+    /// finished command's files, or fetching something slowly, moves more.
     pub const DEFAULT: Self = Self {
         cpu_percent: 25,
+        io_bytes_per_second: 4 << 10,
         window: Duration::from_secs(5),
     };
 
-    /// Whether using `used` processor time over `elapsed` counts as busy.
+    /// Whether using `used` processor time and moving `moved` bytes over
+    /// `elapsed` counts as busy.
     #[must_use]
-    pub fn is_busy(&self, used: Duration, elapsed: Duration) -> bool {
-        !elapsed.is_zero()
-            && used.as_micros() * 100 >= elapsed.as_micros() * u128::from(self.cpu_percent)
+    pub fn is_busy(&self, used: Duration, moved: u64, elapsed: Duration) -> bool {
+        let elapsed_us = elapsed.as_micros();
+        if elapsed_us == 0 {
+            return false;
+        }
+        // Saturating: a product too large to hold is a bar nothing reaches.
+        let cpu = self.cpu_percent > 0
+            && used.as_micros().saturating_mul(100)
+                >= elapsed_us.saturating_mul(u128::from(self.cpu_percent));
+        let io = self.io_bytes_per_second > 0
+            && u128::from(moved).saturating_mul(1_000_000)
+                >= elapsed_us.saturating_mul(u128::from(self.io_bytes_per_second));
+        cpu || io
+    }
+
+    /// Whether the rule reads processor use at all.
+    #[must_use]
+    pub fn watches_cpu(&self) -> bool {
+        self.cpu_percent > 0
+    }
+
+    /// Whether the rule reads traffic at all.
+    #[must_use]
+    pub fn watches_io(&self) -> bool {
+        self.io_bytes_per_second > 0
     }
 }
 
@@ -329,12 +371,17 @@ struct Running {
     started: Instant,
 }
 
-/// The start of one VM's current processor-use window.
+/// The start of one VM's current activity window. Each reading is kept only
+/// when the rule wants it and it worked, so one signal failing leaves the
+/// other to judge alone.
 #[derive(Clone, Copy, Debug)]
-struct CpuWindow {
+struct ActivityWindow {
     incarnation: u64,
     started: Instant,
-    cpu: Duration,
+    /// Processor time so far.
+    cpu: Option<Duration>,
+    /// Traffic so far.
+    io: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -359,8 +406,8 @@ struct Slot<V> {
     waiters: Vec<Waiter>,
     /// A step the core started that waits for a dead VM's teardown.
     deferred: Option<Step>,
-    /// Processor use measured so far, while the VM runs.
-    cpu: Option<CpuWindow>,
+    /// Processor use and traffic measured so far, while the VM runs.
+    activity: Option<ActivityWindow>,
 }
 
 /// A request waiting for a sandbox to run.
@@ -709,7 +756,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 removers: Vec::new(),
                 waiters: Vec::new(),
                 deferred: None,
-                cpu: None,
+                activity: None,
             },
         );
     }

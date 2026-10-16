@@ -56,10 +56,10 @@ pub enum Input {
         hold: HoldId,
     },
     /// The sandbox did work on its own while running, such as a build using
-    /// its processors. Counts as activity only while it runs with no step in
-    /// progress: it never wakes the sandbox, never cancels an
-    /// [`Input::Sleep`] request, and a step already putting the sandbox to
-    /// sleep goes ahead.
+    /// its processors or a download moving data. Counts as activity only
+    /// while it runs with no step in progress: it never wakes the sandbox,
+    /// never cancels an [`Input::Sleep`] request, and a step already putting
+    /// the sandbox to sleep goes ahead.
     Busy {
         /// The sandbox.
         sandbox: SandboxId,
@@ -341,7 +341,7 @@ impl Host {
 
     /// Applies several inputs observed together at time `now`, then decides
     /// once. Use it for readings taken in one sweep, such as [`Input::Busy`]
-    /// for every sandbox that used its processors: deciding after each one
+    /// for every sandbox that did work of its own: deciding after each one
     /// would let a sleep timer fire for a sandbox whose own reading has not
     /// been applied yet.
     pub fn handle_all(

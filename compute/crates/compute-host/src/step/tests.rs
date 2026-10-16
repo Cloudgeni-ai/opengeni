@@ -94,6 +94,10 @@ impl Engine for Counting {
         Ok(Duration::ZERO)
     }
 
+    fn io_bytes(&self, (): &()) -> Result<u64, EngineError> {
+        Ok(0)
+    }
+
     fn exited(&self, (): &()) -> impl Future<Output = ()> + Send + 'static {
         std::future::pending()
     }

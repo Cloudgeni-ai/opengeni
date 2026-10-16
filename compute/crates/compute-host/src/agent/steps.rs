@@ -167,6 +167,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             });
             return;
         };
+        // What the VM does from here is the step's work, not the guest's.
+        slot.activity = None;
         slot.op = Some(Running {
             op,
             step,
