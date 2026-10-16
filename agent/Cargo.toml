@@ -8,6 +8,7 @@ members = [
     "crates/opengeni-agent-platform",
     "crates/opengeni-agent-files-ffi",
     "crates/opengeni-agent-linux-ffi",
+    "crates/opengeni-agent-pipewire-ffi",
     "crates/opengeni-agent-macos-ffi",
     "crates/opengeni-agent-windows-ffi",
     "crates/opengeni-agent-stream",

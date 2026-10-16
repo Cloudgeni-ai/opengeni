@@ -141,13 +141,21 @@ for target in $TARGETS; do
   if readelf -d "$browserd" | grep -F 'libc.musl'; then
     log "browserd must not link musl libc"; exit 1
   fi
+  # computer-native loads the session's libpipewire at runtime for GNOME
+  # Wayland screen capture, which a static musl binary cannot do.
+  native_target="${target%-musl}-gnu"
   (
     cd "$AGENT_DIR"
-    rustup target add "$target"
-    cargo zigbuild --locked --release --target "$target" -p opengeni-computer-native
+    rustup target add "$target" "$native_target"
+    cargo zigbuild --locked --release --target "$native_target.2.28" -p opengeni-computer-native
   )
-  cp "$AGENT_DIR/target/$target/release/opengeni-computer-native" "$computer_native"
+  cp "$AGENT_DIR/target/$native_target/release/opengeni-computer-native" "$computer_native"
   test -s "$computer_native"
+  interp="$(readelf -l "$computer_native" | sed -n 's/.*program interpreter: \(.*\)]/\1/p')"
+  case "$target:$interp" in
+    x86_64-unknown-linux-musl:/lib64/ld-linux-x86-64.so.2|aarch64-unknown-linux-musl:/lib/ld-linux-aarch64.so.1) ;;
+    *) log "computer-native must use the native glibc dynamic linker"; exit 1 ;;
+  esac
   (
     cd "$AGENT_DIR"
     OPENGENI_EMBEDDED_BROWSERD="$browserd" \

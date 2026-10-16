@@ -30,6 +30,7 @@ async-lock = { workspace = true }
 async-signal = { workspace = true }
 image = { workspace = true }
 indexmap = { workspace = true }
+opengeni-agent-pipewire-ffi = { path = "../opengeni-agent-pipewire-ffi" }
 opengeni-agent-platform = { path = "../opengeni-agent-platform" }
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
 proc-macro-crate = { workspace = true }

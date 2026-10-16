@@ -409,14 +409,15 @@ export class ExistingComputerEnvironmentAllocator implements ComputerEnvironment
         "the native ComputerSession adapter supports macOS and Linux",
       );
     }
-    const displayId = platform === "darwin" ? "aqua" : environment.DISPLAY;
+    // A Wayland session without Xwayland still has a seat: the native adapter
+    // drives GNOME through Mutter and explains other compositors itself.
+    const displayId =
+      platform === "darwin" ? "aqua" : environment.DISPLAY || environment.WAYLAND_DISPLAY;
     if (!displayId) {
       throw new InteractionControllerError(
-        environment.WAYLAND_DISPLAY ? "unsupported" : "resource_unavailable",
-        environment.WAYLAND_DISPLAY
-          ? "the current Linux ComputerSession adapter requires an X11 or XWayland display"
-          : "connected Linux ComputerSession has no active graphical display",
-        !environment.WAYLAND_DISPLAY,
+        "resource_unavailable",
+        "connected Linux ComputerSession has no active graphical display",
+        true,
       );
     }
     return {
