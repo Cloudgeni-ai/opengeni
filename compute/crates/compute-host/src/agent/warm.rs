@@ -249,6 +249,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Keeps the ordinals of builds an earlier agent left running taken,
     /// and their memory counted as unmanaged until a build of the same
     /// name proves them gone or the next start of the agent ends them.
+    /// Such a VM may have stopped part way through coming up, so what it
+    /// may still take stays claimed above the high watermark meanwhile,
+    /// as for a build of this agent that could not be ended.
     /// One whose ordinal is unknown could clash with any new sandbox, so
     /// none is created while it may run.
     pub(super) fn hold_builds(&mut self, held: Vec<Held>) {
@@ -262,10 +265,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             let name = self.spare_name();
-            self.input(Input::Unmanaged {
-                sandbox: name.0,
-                bytes: build.bytes,
-            });
+            self.inputs([
+                Input::Spare {
+                    sandbox: name.0,
+                    bytes: build.bytes,
+                    disk: DiskSpace::default(),
+                    filling: true,
+                },
+                Input::Unmanaged {
+                    sandbox: name.0,
+                    bytes: build.bytes,
+                },
+            ]);
             self.build_left(build.name, Some(name));
         }
     }
@@ -286,14 +297,21 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }) else {
             return;
         };
-        let disk = self.build_disk(shape);
-        if !self.core.spare_fits(shape.bytes(), disk) {
+        let disk = pool::build_disk(shape, &sources.base_image, self.save_copies, SAVE_EXTRA);
+        if !disk
+            .as_ref()
+            .is_ok_and(|disk| self.core.spare_fits(shape.bytes(), *disk))
+        {
             if let Some(warm) = &mut self.warm {
-                let problem = "the host has no memory or disk to spare for a template build";
-                warm.pool.built(shape, Err(problem.into()), Instant::now());
+                let problem = match &disk {
+                    Ok(_) => "the host has no memory or disk to spare for a template build".into(),
+                    Err(error) => format!("reading the base image: {error}"),
+                };
+                warm.pool.built(shape, Err(problem), Instant::now());
             }
             return;
         }
+        let disk = disk.unwrap_or_default();
         let ordinal = match self.take_ordinal() {
             Ok(ordinal) => ordinal,
             Err(problem) => {
@@ -341,13 +359,5 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 built,
             });
         });
-    }
-
-    /// What a build of `shape` may write to local disk, booked as a
-    /// sandbox save of that size: its snapshot holds the whole of guest
-    /// memory, and where files cannot share extents a second copy's worth
-    /// stands for its own copy of the base image.
-    fn build_disk(&self, shape: Shape) -> DiskSpace {
-        DiskSpace::save(shape.bytes() * self.save_copies + SAVE_EXTRA)
     }
 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use compute_core::{Admission, DiskPolicy, HostPolicy};
+use compute_core::{Admission, DiskPolicy, HostPolicy, MemoryPolicy};
 use compute_host::protocol::{HostStatus, Id, LevelName, Reply, TemplateState};
 use compute_host::{HostConfig, PoolConfig, Shape};
 use tokio::time::{Instant, sleep};
@@ -451,6 +451,106 @@ async fn a_build_waits_for_disk_its_snapshot_may_take() {
     })
     .await;
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 0, "nothing booted");
+}
+
+/// The host's `MemAvailable`, which the agent reads as available memory
+/// with the fake engine's base pages.
+fn mem_available() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = meminfo
+        .lines()
+        .find(|line| line.starts_with("MemAvailable:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kib << 10)
+}
+
+/// Keeps templates of `shape`, with `ready` ready sandboxes.
+fn keeping(shape: Shape, ready: u32) -> impl FnOnce(&mut HostConfig) {
+    move |config| {
+        warm(vec![shape])(config);
+        if let Some(pool) = &mut config.pool {
+            pool.ready = std::collections::BTreeMap::from([(shape, ready)]);
+        }
+    }
+}
+
+/// A build VM a restart finds and cannot end may have stopped part way
+/// through coming up, so what it may still take stays claimed above the
+/// high watermark: no ready sandbox takes that room until it is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_surviving_build_keeps_its_claim_on_memory_across_a_restart() {
+    let Some(available) = mem_available() else {
+        return;
+    };
+    // A shape of a quarter of what the host has free; the fake engine
+    // takes nothing for it. The high watermark leaves room for one and a
+    // half of it, so memory read at any moment in the test stays within
+    // half a shape of that.
+    let mib = u32::try_from((available >> 20) / 4)
+        .unwrap_or(u32::MAX)
+        .min(compute_host::protocol::MAX_MEMORY_MIB);
+    if mib < 1024 {
+        eprintln!("skipped: the host has too little memory free");
+        return;
+    }
+    let big = Shape {
+        vcpus: 1,
+        memory_mib: mib,
+    };
+    let high = available - big.bytes() * 3 / 2;
+    let policy = || HostPolicy {
+        memory: Some(MemoryPolicy {
+            low_watermark: high - big.bytes(),
+            high_watermark: high,
+            compressed_percent: 30,
+            balloon_grace: Duration::from_secs(2),
+        }),
+        ..HostPolicy::default()
+    };
+    let state = |status: &HostStatus| {
+        status
+            .templates
+            .iter()
+            .find(|template| template.memory_mib == mib)
+            .map(|template| (template.state, template.ready, template.filling))
+    };
+    let world = Arc::<World>::default();
+    world.stuck_clean_ups.store(true, Ordering::Relaxed);
+    let start = |root: PathBuf, world: Arc<World>, ready: u32| {
+        Lab::start_configured(
+            root,
+            world,
+            Delays::default(),
+            policy(),
+            keeping(big, ready),
+        )
+    };
+    let lab = start(Lab::root(), Arc::clone(&world), 0).await;
+    lab.wait_until("a template whose build VM survives", |status| {
+        state(status).is_some_and(|(state, ..)| state == TemplateState::Ready)
+    })
+    .await;
+    let (root, world) = lab.stop().await;
+
+    let lab = start(root, world, 1).await;
+    lab.wait_until("the template checked", |status| {
+        state(status).is_some_and(|(state, ..)| state == TemplateState::Ready)
+    })
+    .await;
+    sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        state(&lab.status().await),
+        Some((TemplateState::Ready, 0, 0)),
+        "the surviving build's claim leaves no room for a ready sandbox"
+    );
+    let (root, world) = lab.stop().await;
+
+    world.stuck_clean_ups.store(false, Ordering::Relaxed);
+    let lab = start(root, world, 1).await;
+    lab.wait_until("a ready sandbox once the build is gone", |status| {
+        state(status) == Some((TemplateState::Ready, 1, 0))
+    })
+    .await;
 }
 
 /// Checks that `lab`, started with an ordinal it cannot know, creates no

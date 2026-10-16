@@ -125,7 +125,8 @@ pick a VM.
   proven gone, stay counted as unmanaged at their size (a build's is in
   its directory, for a later agent) and are no relief, until a later
   build of the same VM or the next start of the agent ends them; one still
-  filling keeps its claim above the high watermark until it is gone. On
+  filling keeps its claim above the high watermark until it is gone, and
+  a later agent claims the same for a build VM it finds and cannot end. On
   huge-page hosts available memory is the smaller of `MemAvailable` and
   the free huge-page pool.
 - Local disk is booked the same way, because a full disk blocks the very
@@ -138,8 +139,9 @@ pick a VM.
   filesystem has free, read every sample. A booking whose save has written
   stays counted until a reading taken after it shows what the save used,
   and before the first reading after a start nothing that needs disk is
-  admitted. A template build books its snapshot the same way, at its
-  shape's worst-case save, before it starts, and waits without the room;
+  admitted. A template build books its copy of the base image (its
+  allocated blocks) and its worst-case snapshot the same way before it
+  starts, and waits without the room;
   what it wrote stays booked until the next reading after it ends. Ready
   clones' disk copies, which share extents with their template where
   the filesystem can, and guests' disk growth are not booked. A wake that

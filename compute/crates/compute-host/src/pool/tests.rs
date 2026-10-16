@@ -31,6 +31,28 @@ fn kept_shapes_parse_with_an_optional_ready_count() {
     }
 }
 
+/// A build books its copy of the base image as well as its snapshot, so a
+/// base image larger than guest memory is booked at its allocated size;
+/// holes cost nothing.
+#[test]
+fn a_build_books_its_base_image_copy_and_its_snapshot() {
+    const MIB: u64 = 1 << 20;
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("base.img");
+    let file = fs::File::create(&image).unwrap();
+    // 8 MiB written, then a 64 MiB hole.
+    std::io::Write::write_all(&mut &file, &vec![7; 8 << 20]).unwrap();
+    file.set_len(72 * MIB).unwrap();
+    file.sync_all().unwrap();
+    let booked = build_disk(shape(1, 1), &image, 2, MIB).unwrap();
+    assert!(
+        (11 * MIB..20 * MIB).contains(&booked.bytes),
+        "8 MiB copied, 2 x 1 MiB of memory and 1 MiB besides: {booked:?}"
+    );
+    assert!(booked.inodes > DiskSpace::save(0).inodes, "{booked:?}");
+    assert!(build_disk(shape(1, 1), &dir.path().join("missing"), 1, 0).is_err());
+}
+
 #[test]
 fn shapes_parse_and_print_alike() {
     let parsed: Shape = "2x1024".parse().unwrap();

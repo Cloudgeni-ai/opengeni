@@ -65,7 +65,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use compute_core::{LoanId, Step};
+use compute_core::{DiskSpace, LoanId, Step};
 use compute_engine::{Engine, SnapshotFiles, SnapshotKind, VmSpec, vsock};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -924,6 +924,25 @@ async fn attempt<E: Engine>(
     stopped?;
     let (root, paths) = (build.root.clone(), paths.clone());
     blocking(move || publish(&root, inputs, &paths, &files, &runtime)).await
+}
+
+/// What a build of `shape` from `base_image` may write to local disk at
+/// most: its copy of the base image's allocated blocks, and a snapshot of
+/// the whole of guest memory, `copies` times where publishing it cannot
+/// share extents, plus `extra` for its device state; with the inodes of
+/// two saves for the build's few files.
+pub(crate) fn build_disk(
+    shape: Shape,
+    base_image: &Path,
+    copies: u64,
+    extra: u64,
+) -> io::Result<DiskSpace> {
+    let copy = fs::metadata(base_image)?.blocks().saturating_mul(512);
+    let snapshot = DiskSpace::save(shape.bytes().saturating_mul(copies).saturating_add(extra));
+    Ok(DiskSpace {
+        bytes: snapshot.bytes.saturating_add(copy),
+        inodes: snapshot.inodes.saturating_mul(2),
+    })
 }
 
 /// Waits until the guest of `vm` accepts a connection on `port`.

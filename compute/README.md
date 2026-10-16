@@ -190,13 +190,13 @@ twice, plus 64 MiB), and bookings plus `--disk-reserve-mib` and
 `--disk-reserve-inodes` (default a twentieth of the filesystem) stay within
 what is free. A booking stays until a reading after its save shows what
 the save used, and nothing needing disk is admitted before the first
-reading. A template build books its snapshot like a save before it starts
-and waits without the room; ready sandboxes' disk copies and guests' disk
-growth are not booked. A wake the disk cannot book gets `host_full` naming
-disk or inodes; archived idle sandboxes give up their local copies in the
-background to make room. The status shows the disk (available, booked,
-reserve, free), and a sandbox's `failed_step` with the error while a step
-such as a save keeps failing.
+reading. A template build books its copy of the base image and its
+snapshot like a save before it starts and waits without the room; ready
+sandboxes' disk copies and guests' disk growth are not booked. A wake the
+disk cannot book gets `host_full` naming disk or inodes; archived idle
+sandboxes give up their local copies in the background to make room. The
+status shows the disk (available, booked, reserve, free), and a sandbox's
+`failed_step` with the error while a step such as a save keeps failing.
 
 The request also sets the VM's guarantees in its cgroup: `memory.low` while
 it runs (zero while paused, so the kernel takes from idle VMs first; not
