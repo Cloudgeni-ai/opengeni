@@ -50,6 +50,10 @@ const NOTICE_DEADLINE: Duration = Duration::from_secs(5);
 /// Longest a wake waits for its learned working set before resuming the
 /// guest anyway; whatever is missing then arrives on demand.
 const PREFETCH_LIMIT: Duration = Duration::from_secs(5);
+/// How long a step first waits before trying again to settle a record
+/// whose last write has an unknown fate, and the longest it waits between
+/// tries.
+const SETTLE_RETRY: (Duration, Duration) = (Duration::from_millis(50), Duration::from_secs(5));
 
 mod live;
 
@@ -141,20 +145,12 @@ fn io_failure(operation: &'static str, error: io::Error) -> Outcome {
 
 /// What failing to record a step's effect means for the sandbox.
 fn state_failure(error: &StateError) -> Outcome {
-    match error {
-        StateError::Io(_) => {
-            tracing::warn!(%error, "step could not record its effect");
-            Outcome::Failed(Failure::Transient)
-        }
-        // The record may or may not vouch for the saved copies now.
-        StateError::Unsure(_) => {
-            tracing::error!(%error, "step could not settle its record");
-            Outcome::Failed(Failure::Untrusted)
-        }
-        _ => {
-            tracing::error!(%error, "step refused: the sandbox's record moved on");
-            Outcome::Failed(Failure::Fatal)
-        }
+    if let StateError::Io(_) = error {
+        tracing::warn!(%error, "step could not record its effect");
+        Outcome::Failed(Failure::Transient)
+    } else {
+        tracing::error!(%error, "step refused: the sandbox's record moved on");
+        Outcome::Failed(Failure::Fatal)
     }
 }
 
@@ -313,8 +309,10 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// Records `change` against the version this step last saw. A write
     /// whose fate is unknown is settled before this returns: it either
     /// landed durably, which counts as success, or durably did not, which
-    /// is a plain I/O failure that changed nothing. If neither can be
-    /// established the record is [`StateError::Unsure`].
+    /// is a plain I/O failure that changed nothing. Until one of the two is
+    /// established the step waits, trying again with backoff, and touches
+    /// nothing: an unknown fate says nothing about the sandbox's copies,
+    /// so it is never taken as their loss.
     async fn commit(&mut self, change: Change) -> Result<(), StateError> {
         let before = self.record.clone();
         let failed = match self.records.commit(self.id, before.fence(), change).await {
@@ -326,13 +324,29 @@ impl<E: Engine, S: Store> Job<E, S> {
             Err(error) => return Err(error),
         };
         let intended = apply(self.id, Some(&before), before.fence(), change);
-        match self.records.settle(self.id).await {
-            Ok(durable) if durable == before => Err(StateError::Io(failed)),
-            Ok(durable) if matches!(&intended, Ok(Some(next)) if *next == durable) => {
-                self.record = durable;
-                Ok(())
+        let (mut wait, longest) = SETTLE_RETRY;
+        loop {
+            match self.records.settle(self.id).await {
+                Ok(durable) if durable == before => return Err(StateError::Io(failed)),
+                Ok(durable) if matches!(&intended, Ok(Some(next)) if *next == durable) => {
+                    self.record = durable;
+                    return Ok(());
+                }
+                // Only this step changes the record while it runs.
+                Ok(durable) => {
+                    return Err(StateError::Stale {
+                        id: self.id,
+                        expected: before.fence(),
+                        found: durable.fence(),
+                    });
+                }
+                Err(StateError::Io(error)) => {
+                    tracing::warn!(id = %self.id, %error, ?wait, "record write has an unknown fate; the step waits with every copy as it is");
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(longest);
+                }
+                Err(error) => return Err(error),
             }
-            _ => Err(StateError::Unsure(self.id)),
         }
     }
 
@@ -505,15 +519,31 @@ impl<E: Engine, S: Store> Job<E, S> {
             SnapshotKind::Diff
         };
         let files = diff_files(&self.paths);
+        // The VMM syncs the disk while it takes the snapshot, so the check
+        // that vouches for the disk starts first.
+        let watch = Arc::clone(&live.memory.disk);
+        let starting = Arc::clone(&watch);
+        blocking(move || starting.begin())
+            .await
+            .and_then(|begun| begun)
+            .map_err(|error| {
+                let kind = if watch.failed() {
+                    // No snapshot of this VM can be trusted again; it
+                    // keeps running from memory until someone removes it.
+                    ErrorKind::Fatal
+                } else {
+                    ErrorKind::Transient
+                };
+                EngineError::caused_by(kind, OP, error)
+            })?;
         let started = Instant::now();
         // From here on the VM's dirty pages are being reset: any failure
         // leaves its base unknown.
         live.memory.base = Base::Unknown;
         self.engine.snapshot(&live.vm, &files, kind).await?;
         let snapshot = started.elapsed();
-        let (scratch, disk) = (self.paths.dir.join("saving"), self.paths.disk.clone());
-        let watch = live.memory.disk.clone();
-        let watching = watch.clone();
+        let scratch = self.paths.dir.join("saving");
+        let watching = Arc::clone(&watch);
         let published = blocking(move || {
             // The VMM wrote these inside its jail, where it could have put
             // links instead: they move somewhere only the host reaches and
@@ -522,10 +552,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             // The image is only good with the disk as it was when the
             // snapshot was taken, so the disk must be durable first, with
             // nothing written since the VM started lost on the way.
-            match &watching {
-                Some(watch) => watch.sync(&disk)?,
-                None => sync_jailed(&disk)?,
-            }
+            watching.sync()?;
             let parts = match base {
                 Base::Image(generation) if kind == SnapshotKind::Diff => Parts::Diff {
                     base: generation,
@@ -548,7 +575,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         .await
         .map_err(|error| EngineError::io(OP, error))?
         .map_err(|suspect| {
-            if watch.as_ref().is_some_and(|watch| watch.failed()) {
+            if watch.failed() {
                 // No snapshot of this VM can be trusted again; it keeps
                 // running from memory until someone removes it.
                 EngineError::caused_by(ErrorKind::Fatal, OP, suspect)
@@ -592,18 +619,18 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
             Err(error) => return (io_failure(OP, error), After::NoVm),
         };
-        let (memory, mut live_memory) = match self.memory_source(&images, &image) {
-            Ok(prepared) => prepared,
-            Err(error) => return (failure(&error), After::NoVm),
-        };
-        let disk = self.paths.disk.clone();
-        match blocking(move || DiskWatch::open(&disk))
+        let paths = self.paths.clone();
+        let watch = match blocking(move || DiskWatch::fresh(&paths))
             .await
             .and_then(|opened| opened)
         {
-            Ok(watch) => live_memory.disk = Some(Arc::new(watch)),
+            Ok(watch) => watch,
             Err(error) => return (io_failure(OP, error), After::NoVm),
-        }
+        };
+        let (memory, live_memory) = match self.memory_source(&images, &image, watch) {
+            Ok(prepared) => prepared,
+            Err(error) => return (failure(&error), After::NoVm),
+        };
         let files = RestoreFiles {
             state: self.paths.snapshot.state.clone(),
             memory,
@@ -718,6 +745,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         &self,
         images: &Images,
         image: &Verified,
+        disk: DiskWatch,
     ) -> Result<(MemorySource, LiveMemory), EngineError> {
         const OP: &str = "restore";
         let paths = &self.paths;
@@ -729,7 +757,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             base: Base::Image(generation),
             #[cfg(target_os = "linux")]
             paging: None,
-            disk: None,
+            disk: Arc::new(disk),
         };
         if !image.meta().remote && !profile.needs_pager() {
             link(&images.memory(generation), &paths.snapshot.memory).map_err(io)?;
@@ -850,7 +878,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         let (kernel, paths) = (self.kernel.clone(), self.paths.clone());
         let prepared = blocking(move || {
             link_kernel(&kernel, &paths)?;
-            DiskWatch::open(&paths.disk)
+            DiskWatch::fresh(&paths)
         })
         .await
         .and_then(|prepared| prepared);
@@ -1138,13 +1166,6 @@ pub(crate) fn take_written(files: &SnapshotFiles, scratch: &Path) -> io::Result<
         compute_engine::confined::check_written(moved)?;
     }
     Ok(taken)
-}
-
-/// Flushes a file in a VM's jail to disk without following a link or
-/// blocking on a pipe the VMM might have put in its place.
-pub(crate) fn sync_jailed(path: &Path) -> io::Result<()> {
-    crate::layout::failpoint(path, "sync")?;
-    crate::layout::open_jailed(path)?.sync_all()
 }
 
 /// Deletes the sandbox's local disk, memory images and snapshot files.

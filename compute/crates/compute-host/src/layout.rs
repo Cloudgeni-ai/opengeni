@@ -280,6 +280,7 @@ pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
         file.write_all(contents)?;
         file.sync_all()?;
     }
+    failpoint(path, "staged")?;
     fs::rename(&staging, path)?;
     failpoint(path, "renamed")?;
     sync_parent(path)
@@ -341,10 +342,14 @@ pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
 
 /// Creates `dir` if missing, with its entry in its parent made durable.
 /// The parent is synced even when `dir` exists already: an earlier call may
-/// have created it and then failed to sync.
+/// have created it and then failed to sync. The parent must exist: an
+/// ancestor this did not create could not be vouched for, so a missing one
+/// fails with [`io::ErrorKind::NotFound`] instead of being made.
 pub(crate) fn create_dir_durably(dir: &Path) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    sync_parent(dir)
+    match fs::create_dir(dir) {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => Err(error),
+        _ => sync_parent(dir),
+    }
 }
 
 /// Opens a file in a VM's jail for reading. Its VMM may have put a link to

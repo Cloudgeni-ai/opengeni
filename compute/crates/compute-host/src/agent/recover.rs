@@ -10,7 +10,7 @@ use futures::StreamExt;
 
 use crate::layout::{Images, Paths, vm_spec};
 use crate::protocol::Id;
-use crate::state::{Change, Disk, Record, Stray};
+use crate::state::{Change, Disk, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory};
 use crate::store::Store;
 
@@ -58,13 +58,24 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         }
         let mut recovering = Vec::new();
-        for record in self.records.all() {
+        for (record, settled) in self.settle_records().await {
             let id = record.id;
             if !self.ordinals.insert(record.ordinal) {
                 tracing::error!(%id, ordinal = record.ordinal, "ordinal taken twice; leaving the sandbox on disk");
                 self.block(id, format!("ordinal {} is taken twice", record.ordinal));
                 continue;
             }
+            // Nothing is done for a sandbox, not even looking at its VM,
+            // before its record is known to be durable: a crash could
+            // still bring back an older one.
+            let record = match settled {
+                Ok(record) => record,
+                Err(error) => {
+                    tracing::error!(%id, %error, "record not known to be durable; blocking the sandbox and leaving it alone");
+                    self.block(id, format!("record not known to be durable: {error}"));
+                    continue;
+                }
+            };
             if record.removing {
                 self.remove_recorded(&record, None, Vec::new());
                 continue;
@@ -105,6 +116,21 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             blocked = self.blocked.len(),
             "recovered"
         );
+    }
+
+    /// Every record as found, with what its file durably holds or why that
+    /// is unknown. Each sandbox's own directory is synced, so they are
+    /// settled all at once.
+    async fn settle_records(&self) -> Vec<(Record, Result<Record, StateError>)> {
+        const CONCURRENT: usize = 64;
+        futures::stream::iter(self.records.all())
+            .map(|found| async move {
+                let settled = self.records.settle(found.id).await;
+                (found, settled)
+            })
+            .buffer_unordered(CONCURRENT)
+            .collect()
+            .await
     }
 
     /// Stops managing sandbox `id` for now: requests for it fail with
@@ -234,19 +260,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             (self.sleeping_state(&record, &paths).await?, None)
         };
         let adopted = vm.is_some();
-        // Writes the disk lost while no agent watched it go unseen; see
-        // `DiskWatch`.
-        let watch = adopted
-            .then(|| DiskWatch::open(&paths.disk))
-            .and_then(|opened| {
-                opened
-                    .inspect_err(
-                        |error| tracing::warn!(%id, %error, "no watch on an adopted VM's disk"),
-                    )
-                    .ok()
-            });
+        // Opened before the agent can ask the VMM to sync the disk, so it
+        // sees what the disk lost while no agent watched; see `DiskWatch`.
+        let watch = adopted.then(|| DiskWatch::adopt(&paths));
         self.insert(id, paths, spec);
-        if let Some(vm) = vm {
+        if let (Some(vm), Some(watch)) = (vm, watch) {
             // What its memory was based on is unknown, so its next save
             // holds every page.
             let live = self.own(id, vm, LiveMemory::adopted(watch));

@@ -725,6 +725,10 @@ impl Engine for Firecracker {
             )
             .await?;
             for drive in &spec.drives {
+                // No `cache_type`: Firecracker's default, `Unsafe`, offers
+                // the guest no flush, so the VMM syncs a drive only while
+                // it takes a snapshot. Callers that check a disk for lost
+                // writes around each snapshot rely on that.
                 vm.call(
                     OP,
                     ErrorKind::Fatal,

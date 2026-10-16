@@ -3,22 +3,31 @@ use std::sync::atomic::AtomicUsize;
 
 use compute_core::SandboxId;
 use compute_engine::Found;
+use tokio::task::JoinHandle;
 
 use crate::layout::tests::FAILPOINTS;
-use crate::layout::{Images, vm_spec};
+use crate::layout::vm_spec;
 use crate::protocol::{SandboxConfig, SleepConfig};
 use crate::state::Allocation;
-use crate::store::NoStore;
+use crate::store::{Directory, NoStore};
 
-/// A VMM whose one VM is paused and resumes when asked.
+/// A VMM with one VM, which counts what it is asked to do.
 #[derive(Debug, Default)]
-struct Paused {
+struct Counting {
+    restores: AtomicUsize,
     resumes: AtomicUsize,
+    stops: AtomicUsize,
+}
+
+impl Counting {
+    fn count(counter: &AtomicUsize) -> usize {
+        counter.load(Ordering::SeqCst)
+    }
 }
 
 // A fake answers at once; the trait is async for the real VMMs.
 #[allow(clippy::unused_async_trait_impl)]
-impl Engine for Paused {
+impl Engine for Counting {
     type Vm = ();
 
     fn memory_profile(&self) -> MemoryProfile {
@@ -26,11 +35,12 @@ impl Engine for Paused {
     }
 
     async fn boot(&self, _: &VmSpec) -> Result<(), EngineError> {
-        unreachable!("only resumes are asked for")
+        unreachable!("no step here boots")
     }
 
     async fn restore(&self, _: &VmSpec, _: &RestoreFiles) -> Result<(), EngineError> {
-        unreachable!("only resumes are asked for")
+        self.restores.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn pause(&self, (): &()) -> Result<(), EngineError> {
@@ -43,7 +53,7 @@ impl Engine for Paused {
     }
 
     async fn compress(&self, (): &(), _: &CancellationToken) -> Result<Completion, EngineError> {
-        unreachable!("only resumes are asked for")
+        unreachable!("no step here compresses")
     }
 
     async fn snapshot(
@@ -52,15 +62,16 @@ impl Engine for Paused {
         _: &SnapshotFiles,
         _: SnapshotKind,
     ) -> Result<(), EngineError> {
-        unreachable!("only resumes are asked for")
+        unreachable!("no step here snapshots")
     }
 
     async fn stop(&self, (): ()) -> Result<(), EngineError> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
     async fn adopt(&self, _: &VmSpec) -> Result<Option<((), Found)>, EngineError> {
-        unreachable!("only resumes are asked for")
+        unreachable!("no step here adopts")
     }
 
     async fn clean_up(&self, _: &VmSpec) -> Result<(), EngineError> {
@@ -80,115 +91,370 @@ impl Engine for Paused {
     }
 }
 
-/// A resume step on the paused VM of `record`'s sandbox.
-fn resume_job(
-    engine: &Arc<Paused>,
-    records: &Arc<Records>,
-    root: &Path,
-    record: Record,
-) -> Job<Paused, NoStore> {
-    let paths = Paths::new(root, record.id);
-    let images = Images {
-        kernel: root.join("vmlinux"),
-        boot_args: String::new(),
-        first_uid: 1_000_000,
-        network: None,
-    };
-    Job {
-        engine: Arc::clone(engine),
-        store: Arc::new(NoStore),
-        records: Arc::clone(records),
-        id: record.id,
-        spec: vm_spec(&record, &paths, &images),
-        record,
-        paths,
-        cancel: CancellationToken::new(),
-        live: Some(Live {
-            vm: (),
-            incarnation: 1,
-            stopping: Arc::default(),
-            memory: LiveMemory::adopted(None),
-        }),
-        restore_notice_port: None,
-        base_image: root.join("base.ext4"),
-        kernel: root.join("vmlinux"),
-        #[cfg(target_os = "linux")]
-        fetcher: None,
-        launches: 0,
+/// One sandbox under a fresh state root, with a disk in its jail.
+struct Sandbox {
+    root: tempfile::TempDir,
+    records: Arc<Records>,
+    engine: Arc<Counting>,
+    paths: Paths,
+    id: Id,
+}
+
+impl Sandbox {
+    async fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let (records, _) = Records::open(root.path().into(), Duration::ZERO, None)
+            .await
+            .unwrap();
+        let id = Id(SandboxId(1));
+        let paths = Paths::new(root.path(), id);
+        fs::create_dir_all(&paths.jail).unwrap();
+        fs::write(&paths.disk, "disk").unwrap();
+        Self {
+            root,
+            records: Arc::new(records),
+            engine: Arc::default(),
+            paths,
+            id,
+        }
     }
+
+    /// Inserts the sandbox's record and applies `change` to it.
+    async fn record(&self, change: Change) -> Record {
+        let config = SandboxConfig {
+            vcpus: 1,
+            memory_mib: 256,
+            sleep: SleepConfig::default(),
+        };
+        let allocation = Allocation {
+            uid: 1_000_000,
+            gid: 1_000_000,
+            link: None,
+        };
+        let created = self
+            .records
+            .insert(Record::new(self.id, 0, allocation, config))
+            .await
+            .unwrap();
+        self.records
+            .commit(self.id, created.fence(), change)
+            .await
+            .unwrap()
+    }
+
+    /// A step on the sandbox as `record` has it, with its VM if `live`.
+    fn job<S>(&self, store: S, record: Record, live: bool) -> Job<Counting, S> {
+        let images = crate::layout::Images {
+            kernel: self.root.path().join("vmlinux"),
+            boot_args: String::new(),
+            first_uid: 1_000_000,
+            network: None,
+        };
+        Job {
+            engine: Arc::clone(&self.engine),
+            store: Arc::new(store),
+            records: Arc::clone(&self.records),
+            id: record.id,
+            spec: vm_spec(&record, &self.paths, &images),
+            record,
+            paths: self.paths.clone(),
+            cancel: CancellationToken::new(),
+            live: live.then(|| Live {
+                vm: (),
+                incarnation: 1,
+                stopping: Arc::default(),
+                memory: LiveMemory::adopted(DiskWatch::fresh(&self.paths).unwrap()),
+            }),
+            restore_notice_port: None,
+            base_image: self.root.path().join("base.ext4"),
+            kernel: self.root.path().join("vmlinux"),
+            #[cfg(target_os = "linux")]
+            fetcher: None,
+            launches: 0,
+        }
+    }
+
+    /// Makes every write of the record land without becoming durable.
+    fn fail_record_writes(&self) {
+        let failing = [
+            (self.paths.record.clone(), "renamed"),
+            (self.paths.record.clone(), "parent"),
+        ];
+        FAILPOINTS.lock().unwrap().extend(failing);
+    }
+
+    fn heal_record_writes(&self) {
+        FAILPOINTS
+            .lock()
+            .unwrap()
+            .retain(|(path, _)| path != &self.paths.record);
+    }
+
+    /// The agent stops: every handle on the state root goes, and a new
+    /// agent opens it.
+    async fn restart(self) -> Self {
+        let Self {
+            root,
+            records,
+            engine,
+            paths,
+            id,
+        } = self;
+        drop(records);
+        // Record work runs on to its end on a blocking thread, holding the
+        // root's lock until it does.
+        let mut tries = 0;
+        let records = loop {
+            match Records::open(root.path().into(), Duration::ZERO, None).await {
+                Ok((records, _)) => break records,
+                Err(StateError::Locked(_)) if tries < 100 => {
+                    tries += 1;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        Self {
+            root,
+            records: Arc::new(records),
+            engine,
+            paths,
+            id,
+        }
+    }
+}
+
+/// Lets a job run until it is waiting, then reports that it still is.
+async fn still_waiting<T>(job: &JoinHandle<T>) -> bool {
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    !job.is_finished()
+}
+
+async fn finished<V>(job: JoinHandle<Ran<V>>) -> Ran<V> {
+    tokio::time::timeout(Duration::from_secs(10), job)
+        .await
+        .expect("the step did not finish once its record could be settled")
+        .unwrap()
 }
 
 /// A resume first stops the record vouching for the saved image. If
 /// that write lands but cannot be made durable, a crash could bring
-/// the old record back: the guest must not run until it is settled,
-/// neither in that step nor in a retry that sees the newer record.
-#[tokio::test]
-async fn a_resume_never_runs_on_an_invalidation_that_is_not_durable() {
-    let root = tempfile::tempdir().unwrap();
-    let (records, _) = Records::open(root.path().into(), Duration::ZERO, None)
-        .await
-        .unwrap();
-    let records = Arc::new(records);
-    let id = Id(SandboxId(1));
-    let paths = Paths::new(root.path(), id);
-    fs::create_dir_all(&paths.dir).unwrap();
-    let config = SandboxConfig {
-        vcpus: 1,
-        memory_mib: 256,
-        sleep: SleepConfig::default(),
-    };
-    let allocation = Allocation {
-        uid: 1_000_000,
-        gid: 1_000_000,
-        link: None,
-    };
-    let created = records
-        .insert(Record::new(id, 0, allocation, config))
-        .await
-        .unwrap();
-    let saved = records
-        .commit(id, created.fence(), Change::new().image(true))
-        .await
-        .unwrap();
-    let engine = Arc::new(Paused::default());
-    let failing = [
-        (paths.record.clone(), "renamed"),
-        (paths.record.clone(), "parent"),
-    ];
-    FAILPOINTS.lock().unwrap().extend(failing);
+/// the old record back: the guest must not run until it is settled, and
+/// the step waits for that with the saved image and the VM as they are.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resume_waits_for_its_invalidation_to_be_durable() {
+    let sandbox = Sandbox::new().await;
+    let saved = sandbox.record(Change::new().image(true)).await;
+    sandbox.fail_record_writes();
 
-    let ran = resume_job(&engine, &records, root.path(), saved)
-        .run(Step::Resume)
-        .await;
-    assert_eq!(ran.outcome, Outcome::Failed(Failure::Untrusted));
-    let retry = records.get(id).unwrap();
-    assert!(!retry.image, "the cache shows the write that landed");
-    let ran = resume_job(&engine, &records, root.path(), retry.clone())
-        .run(Step::Resume)
-        .await;
-    assert_eq!(ran.outcome, Outcome::Failed(Failure::Transient));
+    let job = tokio::spawn(sandbox.job(NoStore, saved, true).run(Step::Resume));
+    assert!(
+        still_waiting(&job).await,
+        "an unsettled write ended the step"
+    );
     assert_eq!(
-        engine.resumes.load(Ordering::SeqCst),
+        Counting::count(&sandbox.engine.resumes),
         0,
         "the guest ran while its record could still be taken back"
     );
 
+    sandbox.heal_record_writes();
+    let ran = finished(job).await;
+    assert_eq!(ran.outcome, Outcome::Done);
+    assert_eq!(Counting::count(&sandbox.engine.resumes), 1);
+    assert_eq!(Counting::count(&sandbox.engine.stops), 0);
+    let sandbox = sandbox.restart().await;
+    assert!(!sandbox.records.settle(sandbox.id).await.unwrap().image);
+}
+
+/// An agent that restarts after a record write landed but was not made
+/// durable must not act on what it reads until the write is settled:
+/// the write may still be lost, or may already have been.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_agent_acts_on_no_record_it_could_not_settle() {
+    for lost in [false, true] {
+        let sandbox = Sandbox::new().await;
+        let saved = sandbox.record(Change::new().image(true)).await;
+        sandbox.fail_record_writes();
+        let job = tokio::spawn(sandbox.job(NoStore, saved.clone(), true).run(Step::Resume));
+        assert!(still_waiting(&job).await);
+        job.abort();
+        let _ = job.await;
+        if lost {
+            // The host lost power before the rename reached the disk.
+            let mut bytes = serde_json::to_vec(&saved).unwrap();
+            bytes.push(b'\n');
+            fs::write(&sandbox.paths.record, bytes).unwrap();
+        }
+        let sandbox = sandbox.restart().await;
+
+        let found = sandbox.records.get(sandbox.id).unwrap();
+        assert_eq!(found.image, lost, "the file is read as it is");
+        assert!(
+            sandbox.records.settle(sandbox.id).await.is_err(),
+            "a record read after a restart was taken as durable"
+        );
+        let ran = sandbox.job(NoStore, found, true).run(Step::Resume).await;
+        assert_eq!(ran.outcome, Outcome::Failed(Failure::Transient));
+        assert_eq!(
+            Counting::count(&sandbox.engine.resumes),
+            0,
+            "the guest ran on a record a crash could still take back"
+        );
+
+        sandbox.heal_record_writes();
+        let durable = sandbox.records.settle(sandbox.id).await.unwrap();
+        assert_eq!(durable.image, lost);
+        let ran = sandbox.job(NoStore, durable, true).run(Step::Resume).await;
+        assert_eq!(ran.outcome, Outcome::Done);
+        assert_eq!(Counting::count(&sandbox.engine.resumes), 1);
+        assert!(!sandbox.records.settle(sandbox.id).await.unwrap().image);
+    }
+}
+
+/// A restore whose record cannot settle keeps the image it restored from
+/// and the VM it started until the record does, then finishes.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_uncertain_restore_keeps_the_image_and_the_vm() {
+    let sandbox = Sandbox::new().await;
+    let saved = sandbox.record(Change::new().image(true)).await;
+    let (state, memory) = (
+        sandbox.paths.dir.join("state"),
+        sandbox.paths.dir.join("memory"),
+    );
+    fs::write(&state, "state").unwrap();
+    fs::write(&memory, vec![7; 8192]).unwrap();
+    let images = images_of(&sandbox.paths);
+    images
+        .publish(Parts::Whole {
+            state: &state,
+            memory: &memory,
+        })
+        .unwrap();
+    sandbox.fail_record_writes();
+
+    let job = tokio::spawn(sandbox.job(NoStore, saved, false).run(Step::Restore));
+    assert!(
+        still_waiting(&job).await,
+        "an unsettled write ended the restore"
+    );
+    assert_eq!(Counting::count(&sandbox.engine.restores), 1);
+    assert_eq!(
+        Counting::count(&sandbox.engine.stops),
+        0,
+        "the restored VM was stopped"
+    );
+    assert_eq!(
+        Counting::count(&sandbox.engine.resumes),
+        0,
+        "the guest ran unsettled"
+    );
+    assert!(
+        images.current_verified().unwrap().is_some(),
+        "the image was dropped"
+    );
+
+    sandbox.heal_record_writes();
+    let ran = finished(job).await;
+    assert_eq!(ran.outcome, Outcome::Done);
+    assert!(matches!(ran.after, After::New(..)));
+    assert_eq!(Counting::count(&sandbox.engine.resumes), 1);
+    assert_eq!(Counting::count(&sandbox.engine.stops), 0);
+    let sandbox = sandbox.restart().await;
+    let durable = sandbox.records.settle(sandbox.id).await.unwrap();
+    assert!(
+        !durable.image,
+        "the record still vouches for the image the guest left"
+    );
+}
+
+/// An eviction whose record cannot settle deletes nothing until it does:
+/// the local copy may still be the one the record relies on.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_uncertain_eviction_keeps_the_local_copy() {
+    let sandbox = Sandbox::new().await;
+    let store = sandbox.root.path().join("store");
+    let idle = sandbox.record(Change::new()).await;
+    let ran = sandbox
+        .job(Directory::new(&store), idle, false)
+        .run(Step::Archive)
+        .await;
+    assert_eq!(ran.outcome, Outcome::Done);
+    let archived = sandbox.records.get(sandbox.id).unwrap();
+    assert!(archived.archived);
+    sandbox.fail_record_writes();
+
+    let job = tokio::spawn(
+        sandbox
+            .job(Directory::new(&store), archived, false)
+            .run(Step::Evict),
+    );
+    assert!(
+        still_waiting(&job).await,
+        "an unsettled write ended the eviction"
+    );
+    assert!(sandbox.paths.disk.exists(), "the local disk went unsettled");
+
+    sandbox.heal_record_writes();
+    let ran = finished(job).await;
+    assert_eq!(ran.outcome, Outcome::Done);
+    assert!(!sandbox.paths.disk.exists());
+    let sandbox = sandbox.restart().await;
+    let durable = sandbox.records.settle(sandbox.id).await.unwrap();
+    assert_eq!(durable.disk, Disk::Remote);
+}
+
+/// A failed disk check, or one an agent never finished, keeps every later
+/// snapshot of the VM untrusted, even by a new agent; only a new VM starts
+/// clean.
+#[tokio::test]
+async fn a_disk_check_that_failed_or_never_ended_outlives_the_agent() {
+    let sandbox = Sandbox::new().await;
+    let paths = &sandbox.paths;
+    let marker = live::check_marker(paths);
+
+    let watch = DiskWatch::fresh(paths).unwrap();
+    watch.begin().unwrap();
+    watch.sync().unwrap();
+    assert!(!marker.exists(), "a clean check left its marker");
+    assert!(!DiskWatch::adopt(paths).failed());
+
+    // An agent stops part way through a check.
+    watch.begin().unwrap();
+    drop(watch);
+    assert!(
+        DiskWatch::adopt(paths).failed(),
+        "an unfinished check was forgotten"
+    );
+
+    let watch = DiskWatch::fresh(paths).unwrap();
+    assert!(!marker.exists(), "a new VM inherited an old check");
+    watch.begin().unwrap();
     FAILPOINTS
         .lock()
         .unwrap()
-        .retain(|(path, _)| path != &paths.record);
-    let ran = resume_job(&engine, &records, root.path(), retry)
-        .run(Step::Resume)
-        .await;
-    assert_eq!(ran.outcome, Outcome::Done);
-    assert_eq!(engine.resumes.load(Ordering::SeqCst), 1);
-    drop(Arc::into_inner(records).unwrap());
-    let (records, _) = Records::open(root.path().into(), Duration::ZERO, None)
-        .await
-        .unwrap();
+        .push((paths.disk.clone(), "sync"));
+    assert!(watch.sync().is_err());
+    FAILPOINTS
+        .lock()
+        .unwrap()
+        .retain(|(path, _)| path != &paths.disk);
+    assert!(watch.failed());
+    assert!(watch.begin().is_err(), "a failed watch started a check");
+    assert!(watch.sync().is_err(), "a failed watch vouched for the disk");
+    assert!(marker.exists());
+    drop(watch);
+    let adopted = DiskWatch::adopt(paths);
+    assert!(adopted.failed(), "the failure was lost with the agent");
+    assert!(adopted.sync().is_err());
+
+    // A disk the new agent cannot open is not vouched for either.
+    fs::remove_file(&marker).unwrap();
+    fs::rename(&paths.disk, paths.dir.join("moved")).unwrap();
+    std::os::unix::fs::symlink(paths.dir.join("moved"), &paths.disk).unwrap();
     assert!(
-        !records.get(id).unwrap().image,
-        "after a crash the record vouches for an image the guest moved past"
+        DiskWatch::adopt(paths).failed(),
+        "a linked disk was watched"
     );
 }
 
@@ -224,25 +490,4 @@ fn snapshot_outputs_must_be_plain_files_of_their_own() {
     fs::write(&files.state, "state").unwrap();
     assert!(take_written(&files, &scratch).is_err());
     assert_eq!(fs::read_to_string(&secret).unwrap(), "host only");
-}
-
-#[test]
-fn syncing_a_jailed_file_follows_no_link_and_opens_no_pipe() {
-    let dir = tempfile::tempdir().unwrap();
-    let disk = dir.path().join("disk.ext4");
-    fs::write(&disk, "disk").unwrap();
-    sync_jailed(&disk).unwrap();
-
-    let link = dir.path().join("link");
-    std::os::unix::fs::symlink(&disk, &link).unwrap();
-    assert!(sync_jailed(&link).is_err());
-
-    let pipe = dir.path().join("pipe");
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        &pipe,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    )
-    .unwrap();
-    assert!(sync_jailed(&pipe).is_err(), "a pipe must not block or pass");
 }

@@ -64,7 +64,7 @@ use crate::layout::{
 };
 use crate::net::Isolated;
 use crate::protocol::{SandboxConfig, TemplateState, TemplateStatus};
-use crate::step::{sync_jailed, take_written};
+use crate::step::{DiskWatch, take_written};
 
 /// Version of the template layout; a change rebuilds every template.
 const FORMAT: u32 = 1;
@@ -532,20 +532,24 @@ async fn attempt<E: Engine>(
         .clean_up(spec)
         .await
         .map_err(|error| error.to_string())?;
-    {
+    // The watch is opened before the VMM starts, so it sees every write
+    // to the template's disk that is lost; see `DiskWatch`.
+    let disk = {
         let (paths, sources, uid) = (paths.clone(), Arc::clone(&build.sources), build.uid);
-        blocking(move || {
-            remove_dir(&paths.dir)?;
-            fs::create_dir_all(&paths.jail)?;
-            copy_sparse(&sources.base_image, &paths.disk)?;
-            link_kernel(&sources.kernel, &paths)?;
-            if let Some(isolated) = isolated {
-                isolated.ensure(uid, uid).map_err(io::Error::other)?;
-            }
-            Ok(())
-        })
-        .await?;
-    }
+        Arc::new(
+            blocking(move || {
+                remove_dir(&paths.dir)?;
+                fs::create_dir_all(&paths.jail)?;
+                copy_sparse(&sources.base_image, &paths.disk)?;
+                link_kernel(&sources.kernel, &paths)?;
+                if let Some(isolated) = isolated {
+                    isolated.ensure(uid, uid).map_err(io::Error::other)?;
+                }
+                DiskWatch::fresh(&paths)
+            })
+            .await?,
+        )
+    };
     let vm = engine.boot(spec).await.map_err(|error| error.to_string())?;
     let files = SnapshotFiles {
         state: paths.in_jail("save.state"),
@@ -554,10 +558,15 @@ async fn attempt<E: Engine>(
     let saved = async {
         ready(engine, &vm, spec, build.ready_port, build.ready_timeout).await?;
         engine.pause(&vm).await.map_err(|error| error.to_string())?;
+        let watch = Arc::clone(&disk);
+        blocking(move || watch.begin()).await?;
         engine
             .snapshot(&vm, &files, SnapshotKind::Full)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        // The template is trusted only if no write to its disk was lost.
+        let watch = Arc::clone(&disk);
+        blocking(move || watch.sync()).await
     }
     .await;
     let stopped = engine.stop(vm).await.map_err(|error| error.to_string());
@@ -611,7 +620,6 @@ fn publish(
     // What the VMM wrote, and its disk, leave the jail before anything
     // reads them.
     let written = take_written(files, &paths.dir.join("saving"))?;
-    sync_jailed(&paths.disk)?;
     let disk = staging.join(DISK);
     fs::rename(&paths.disk, &disk)?;
     compute_engine::confined::check_written(&disk)?;
