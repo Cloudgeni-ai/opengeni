@@ -18,6 +18,7 @@ import * as schema from "./schema";
 import { checkWorkspaceAllowance } from "./usage-allowances";
 import { creditDebitAttributionForTurn } from "./credit-debit-attribution";
 import { getSpendableCreditBalance } from "./credit-balances";
+import { expireEndedPlanCreditPeriods } from "./subscription-plans";
 
 export const ACTIVE_VIDEO_GENERATION_STATUSES = [
   "preparing",
@@ -1333,6 +1334,7 @@ async function debitVideoGenerationCredits(
   // Model settlement locks the account before the ledger trigger's workspace
   // allowance fence. Preserve that order during prepaid media admission.
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${operation.accountId}))`);
+  await expireEndedPlanCreditPeriods(tx, operation.accountId);
   const attribution = await creditDebitAttributionForTurn(tx, {
     accountId: operation.accountId,
     workspaceId: operation.workspaceId,
@@ -1402,6 +1404,7 @@ async function refundVideoGenerationCredits(
     throw new Error("Video generation credit refund has an invalid funding binding");
   }
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${operation.accountId}))`);
+  await expireEndedPlanCreditPeriods(tx, operation.accountId);
   const inserted = await tx
     .insert(schema.creditLedgerEntries)
     .values({

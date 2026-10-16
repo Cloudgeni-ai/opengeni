@@ -198,6 +198,8 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   "subscription_plan_definition(text)",
   "plan_period_usage(plan_credit_periods, timestamp with time zone)",
+  "plan_general_balance(uuid)",
+  "expire_refunded_plan_credit()",
   "enforce_organization_plan_seats()",
   // Migration 0598's Claude pool activation receipt. Readiness no longer
   // requires it (the retirement migration 0751 dropped the pool routines);
@@ -1386,6 +1388,7 @@ export const SUBSCRIPTION_PLAN_RUNTIME_ROUTINES = [
   "grant_plan_credit_period(uuid, text, timestamp with time zone, timestamp with time zone, text)",
   "replace_plan_credit_period(uuid, text, timestamp with time zone, timestamp with time zone, text)",
   "read_organization_plan_balance(uuid)",
+  "expire_ended_plan_credit_periods(uuid)",
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [

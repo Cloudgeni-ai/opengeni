@@ -33,6 +33,8 @@ export const BillingPlanBalance = z.object({
   status: z.string(),
   creditGrantedMicros: z.number().int().nonnegative(),
   creditRemainingMicros: z.number().int().nonnegative(),
+  /** Already unavailable, but not yet removed from the physical ledger. */
+  creditPendingExpiryMicros: z.number().int().nonnegative().optional(),
   periodResetAt: z.string().nullable(),
   seatLimit: z.number().int().positive().nullable(),
   seatsUsed: z.number().int().nonnegative(),

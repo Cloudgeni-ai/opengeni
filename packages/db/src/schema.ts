@@ -13334,6 +13334,7 @@ export const planCreditPeriods = pgTable(
     periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
     periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
     grantedMicros: bigint("granted_micros", { mode: "number" }).notNull(),
+    openingDebtMicros: bigint("opening_debt_micros", { mode: "number" }).notNull(),
     grantEntryId: uuid("grant_entry_id").notNull().unique(),
     idempotencyKey: text("idempotency_key").notNull().unique(),
     grantedAt: timestamp("granted_at", { withTimezone: true })
@@ -13344,6 +13345,10 @@ export const planCreditPeriods = pgTable(
     usageAtExpiryMicros: bigint("usage_at_expiry_micros", { mode: "number" }),
   },
   (table) => ({
+    openingDebt: check(
+      "plan_credit_periods_opening_debt_check",
+      sql`${table.openingDebtMicros} between 0 and ${table.grantedMicros}`,
+    ),
     grant: foreignKey({
       columns: [table.grantEntryId, table.accountId],
       foreignColumns: [creditLedgerEntries.id, creditLedgerEntries.accountId],

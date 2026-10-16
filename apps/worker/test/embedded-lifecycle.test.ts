@@ -644,6 +644,14 @@ describe("embedded worker lifecycle contract", () => {
           can_delete: false,
         },
         {
+          name: "subscription_plan_catalog_revisions",
+          owner: "opengeni_migrator",
+          can_select: true,
+          can_insert: false,
+          can_update: false,
+          can_delete: false,
+        },
+        {
           name: "personal_resource_delegation_capabilities",
           owner: "opengeni_migrator",
           can_select: false,

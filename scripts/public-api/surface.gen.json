@@ -10796,6 +10796,7 @@
         "$": "object",
         "$.cancelAtPeriodEnd": "boolean!",
         "$.creditGrantedMicros": "integer!",
+        "$.creditPendingExpiryMicros": "integer?",
         "$.creditRemainingMicros": "integer!",
         "$.key": "string!",
         "$.label": "string!",

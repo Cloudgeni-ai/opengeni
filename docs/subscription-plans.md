@@ -6,6 +6,12 @@ jobs, changes no machine-time pricing and does not configure Stripe prices.
 Self-hosted and embedded organizations with no plan row retain uncapped seats
 and their existing credit behavior.
 
+Migration 0793 is **maintenance**, despite adding only new structures: the
+preceding binary's closed readiness contract rejects unknown RLS tables and
+their runtime SELECT privileges. A rolling deployment would require an earlier
+compatibility-binary release. Drain the old API/workers before migrating and
+start only the updated binary afterward; do not weaken FORCE RLS to hide this.
+
 ## Runtime catalog
 
 `bun run plans:catalog -- --show` reads the current catalog. To change it, use
@@ -33,7 +39,7 @@ the existing `account_id` convention.
   nullable `stripe_subscription_id`, nullable `current_period_start/end`,
   `cancel_at_period_end`, `created_at`, `updated_at`.
 - `plan_credit_periods`: `id`, `account_id`, `plan_key`, `catalog_revision`,
-  `stripe_subscription_id`, `period_start/end`, `granted_micros`, `grant_entry_id`,
+  `stripe_subscription_id`, `period_start/end`, `granted_micros`, `opening_debt_micros`, `grant_entry_id`,
   unique `idempotency_key`, `granted_at`, `expired_at`, `expiry_entry_id`,
   `usage_at_expiry_micros`. There is at most one unexpired period per account;
   ended unexpired periods have a maintenance discovery index.
@@ -46,6 +52,7 @@ from `@opengeni/db` establish it. SQL signatures (timestamps are `timestamptz`):
 upsert_organization_plan(uuid, text, text, text, timestamptz, timestamptz, boolean) -> jsonb
 grant_plan_credit_period(uuid, text, timestamptz, timestamptz, text DEFAULT NULL) -> jsonb
 expire_plan_credit_period(uuid, uuid, boolean DEFAULT false) -> jsonb
+expire_ended_plan_credit_periods(uuid) -> integer
 replace_plan_credit_period(uuid, text, timestamptz, timestamptz, text DEFAULT NULL) -> jsonb
 free_plan_credit_eligible(uuid) -> boolean
 organization_plan_seats_used(uuid) -> integer
@@ -78,7 +85,10 @@ the frozen receipt and never recompute usage or remove a later top-up.
 It expires the old period and grants the full new amount atomically. Retries
 check the grant receipt before expiring anything, so a duplicated upgrade
 cannot expire its own or a successor period. A failed new grant rolls the
-expiry back. A replacement cannot move behind the open period.
+expiry back. A replacement cannot move behind the open period. Use this path
+for **every** plan transition, including Free to Pro/Max: unused Free monthly
+credit must never stack on top of the paid allowance. The separately issued
+signup promotion is not monthly plan credit and remains available.
 
 For a paid renewal or upgrade, update state then grant/replace **in one outer
 `withRlsContext` transaction using its `tx` handle**. This keeps membership/org
@@ -102,14 +112,32 @@ debit counters. The signup receipt trigger remains the only signup-trial issuer.
 Recurring plan funding deliberately does not fire the signup/coupon/manual
 `credits.granted` acquisition/lifecycle triggers of migration 0566.
 
-Remaining allowance is granted minus net settled usage, floored at zero.
+Remaining allowance is granted minus opening general-credit debt absorbed by
+the grant and net settled usage, floored at zero. `opening_debt_micros` records
+that already-consumed funding, so a later purchased top-up cannot be mistaken
+for unspent plan credit at expiry.
 Usage excludes `credit_topup`, `grant`, `manual_credit_grant`,
 `plan_credit_grant`, `plan_credit_expiry`, `credit_refund`,
 `credit_dispute_hold`, `credit_dispute_release`. Every other type counts;
-positive `video_generation_refund` reduces usage. Promotional allocations are
-subtracted, so eligible promotional credit pays first, then plan, then top-up.
+positive `video_generation_refund` reduces usage only when its original debit
+(same account/source identity) belongs to the same period. A reversal of a
+pre-plan or older-period debit returns general credit, never inflating the new
+period's refundable allowance. For an expired plan-funded video debit, a ledger
+trigger reconstructs its original plan-paid portion from the serialized usage
+history and immediately expires that portion of the refund with a separate,
+workspace-less `plan_credit_expiry` receipt. Purchased portions survive. Video
+admission is prepaid, so video debits cannot create the opening debt repaid by
+a later grant. Promotional allocations are
+subtracted. Monthly plan credit pays **first**, before any other funding; only
+usage beyond the remaining monthly allowance allocates eligible promotional
+grants, then other general credit/top-ups. This overrides the original design's
+promotional-first order following Bendik's updated product decision. A single
+request can exhaust the plan and allocate only its excess to promotions. When
+pre-existing general debt has already absorbed the allowance, prepaid
+admission cannot recreate it by repeatedly preserving promotional balances.
 All ledger helper writers and both video debit/refund paths share the account
-advisory lock. Settlement `created_at` is stamped after that lock, rather than
+advisory lock and settle ended periods before new ledger writes, independently
+of maintenance timing. Settlement `created_at` is stamped after that lock, rather than
 using provider/backdated `occurred_at` or a transaction-start default. Usage is
 bounded by actual grant time and period end/early expiry. No charge settled
 before the grant is retroactively paid by it; no queued charge can enter an
@@ -148,9 +176,12 @@ SQLSTATE `P0S01` maps through `rethrowMembershipError` to HTTP 402:
 
 `BillingBalance.plan` is optional/nullable. It is null for unenrolled accounts;
 otherwise it contains `key`, `label`, `status`, `creditGrantedMicros`,
-`creditRemainingMicros`, nullable `periodResetAt`, nullable `seatLimit`,
+`creditRemainingMicros`, `creditPendingExpiryMicros`, nullable `periodResetAt`, nullable `seatLimit`,
 `seatsUsed`, `cancelAtPeriodEnd`. Existing balance/general/promotional fields
-retain their meanings. Expired allowance projects zero remaining even before
-maintenance writes its expiry. The existing billing routes return this shared
+exclude an ended, unavailable allowance even before its physical expiry row
+is written; `creditPendingExpiryMicros` shows that ledger/projection difference.
+Reads remain lock-free. The next ledger writer settles it under the account
+lock before admitting or recording fresh funding/usage, so late post-use
+charges cannot spend it or hide debt. The existing billing routes return this shared
 snapshot, and the SDK re-exports `BillingPlanBalance`, `SubscriptionPlan`, and
 `SubscriptionPlanCatalog` alongside `BillingBalance`.

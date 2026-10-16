@@ -184,7 +184,7 @@ test("grants general plan credit once under concurrent retries, and rejects chan
   );
 }, 180_000);
 
-test("spends promotional then plan then top-up; video refunds reduce usage; expiry preserves top-ups", async () => {
+test("spends plan before promotional and top-up credit; refunds reduce usage and expiry preserves other funding", async () => {
   if (!client || !shared) return;
   const { accountId } = await account();
   const input = await activate(accountId);
@@ -207,23 +207,38 @@ test("spends promotional then plan then top-up; video refunds reduce usage; expi
         idempotencyKey: crypto.randomUUID(),
       })
     ).grantDebitedMicros,
+  ).toBe(0);
+  expect(
+    (await getBillingBalance(client.db, accountId)).promotionalCredits[0]?.remainingMicros,
   ).toBe(100 * M);
-  await debit(accountId, 40 * M, "video_generation_debit");
+  const videoSource = crypto.randomUUID();
+  await applyCreditDebitAfterUse(client.db, {
+    accountId,
+    type: "video_generation_debit",
+    amountMicros: 40 * M,
+    sourceType: "video_generation_operation",
+    sourceId: videoSource,
+    idempotencyKey: crypto.randomUUID(),
+  });
   await applyCreditLedgerEntry(client.db, {
     accountId,
     type: "video_generation_refund",
     amountMicros: 10 * M,
+    sourceType: "video_generation_operation",
+    sourceId: videoSource,
     idempotencyKey: crypto.randomUUID(),
   });
-  expect((await getBillingBalance(client.db, accountId)).plan?.creditRemainingMicros).toBe(120 * M);
+  expect((await getBillingBalance(client.db, accountId)).plan?.creditRemainingMicros).toBe(20 * M);
   const expired = await expirePlanCreditPeriod(client.db, {
     accountId,
     periodId: period.id,
     force: true,
   });
-  expect(expired.usage_at_expiry_micros).toBe(80 * M);
+  expect(expired.usage_at_expiry_micros).toBe(180 * M);
   expect(await getBillingBalance(client.db, accountId)).toMatchObject({
-    balanceMicros: 50 * M,
+    balanceMicros: 150 * M,
+    generalBalanceMicros: 50 * M,
+    promotionalCredits: [{ remainingMicros: 100 * M }],
     plan: { creditRemainingMicros: 0 },
   });
   expect(
@@ -231,7 +246,59 @@ test("spends promotional then plan then top-up; video refunds reduce usage; expi
   ).toEqual(expired);
   const [expiry] =
     await shared.admin`select workspace_id, amount_micros from credit_ledger_entries where id = ${expired.expiry_entry_id}`;
-  expect(expiry).toEqual({ workspace_id: null, amount_micros: String(-120 * M) });
+  expect(expiry).toEqual({ workspace_id: null, amount_micros: String(-20 * M) });
+}, 180_000);
+
+test("a request exhausts the plan mid-charge before using promotional credit, then top-ups", async () => {
+  if (!client) return;
+  const { accountId } = await account();
+  await grantPlanCreditPeriod(client.db, await activate(accountId));
+  await topup(accountId, 50 * M);
+  await applyCreditLedgerEntry(client.db, {
+    accountId,
+    type: "grant",
+    amountMicros: 100 * M,
+    eligibleModelIds: ["model-a"],
+    idempotencyKey: crypto.randomUUID(),
+  });
+  await applyCreditDebitAfterUse(client.db, {
+    accountId,
+    type: "model_usage_debit",
+    amountMicros: 180 * M,
+    usage: "model-a",
+    sourceType: "test",
+    sourceId: crypto.randomUUID(),
+    idempotencyKey: crypto.randomUUID(),
+  });
+  const mixed = await applyCreditDebitUpToBalance(client.db, {
+    accountId,
+    type: "model_usage_debit",
+    requestedAmountMicros: 80 * M,
+    modelId: "model-a",
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(mixed.grantDebitedMicros).toBe(60 * M);
+  expect(mixed.balance).toMatchObject({
+    balanceMicros: 90 * M,
+    generalBalanceMicros: 50 * M,
+    plan: { creditRemainingMicros: 0 },
+    promotionalCredits: [{ remainingMicros: 40 * M }],
+  });
+  await applyCreditDebitAfterUse(client.db, {
+    accountId,
+    type: "model_usage_debit",
+    amountMicros: 60 * M,
+    usage: "model-a",
+    sourceType: "test",
+    sourceId: crypto.randomUUID(),
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(await getBillingBalance(client.db, accountId)).toMatchObject({
+    balanceMicros: 30 * M,
+    generalBalanceMicros: 30 * M,
+    promotionalCredits: [],
+    plan: { creditRemainingMicros: 0 },
+  });
 }, 180_000);
 
 test("funding and Stripe adjustments are not usage; unknown usage types and backdated settlements are", async () => {
@@ -275,6 +342,139 @@ test("expiry never makes an exhausted or negative balance more negative", async 
   expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(-50 * M);
   await topup(accountId, 75 * M);
   expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(25 * M);
+}, 180_000);
+
+test("opening debt is already consumed plan credit and cannot expire a later purchased top-up", async () => {
+  if (!client) return;
+  const { accountId } = await account();
+  await debit(accountId, 100 * M);
+  const period = await grantPlanCreditPeriod(client.db, await activate(accountId));
+  expect(period.opening_debt_micros).toBe(100 * M);
+  expect((await getBillingBalance(client.db, accountId)).plan?.creditRemainingMicros).toBe(100 * M);
+  await topup(accountId, 100 * M);
+  await expirePlanCreditPeriod(client.db, { accountId, periodId: period.id, force: true });
+  expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(100 * M);
+}, 180_000);
+
+test("a refund of a pre-plan or prior-period video debit cannot inflate the new plan's expiry", async () => {
+  if (!client) return;
+  const { accountId } = await account();
+  const sourceId = crypto.randomUUID();
+  await topup(accountId, 100 * M);
+  await applyCreditDebitAfterUse(client.db, {
+    accountId,
+    type: "video_generation_debit",
+    amountMicros: 40 * M,
+    sourceType: "video_generation_operation",
+    sourceId,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  const period = await grantPlanCreditPeriod(client.db, await activate(accountId));
+  await applyCreditLedgerEntry(client.db, {
+    accountId,
+    type: "video_generation_refund",
+    amountMicros: 40 * M,
+    sourceType: "video_generation_operation",
+    sourceId,
+    idempotencyKey: crypto.randomUUID(),
+  });
+  await debit(accountId, 50 * M);
+  expect((await getBillingBalance(client.db, accountId)).plan?.creditRemainingMicros).toBe(150 * M);
+  await expirePlanCreditPeriod(client.db, { accountId, periodId: period.id, force: true });
+  expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(100 * M);
+}, 180_000);
+
+test("ended plan credit is unavailable before maintenance and ledger writers expire it before settlement", async () => {
+  if (!client || !shared) return;
+  const { accountId } = await account();
+  const period = await grantPlanCreditPeriod(client.db, await activate(accountId, "pro", 100));
+  await topup(accountId, 100 * M);
+  await Bun.sleep(120);
+  expect(await getBillingBalance(client.db, accountId)).toMatchObject({
+    balanceMicros: 100 * M,
+    generalBalanceMicros: 100 * M,
+    plan: { creditRemainingMicros: 0, creditPendingExpiryMicros: 200 * M },
+  });
+  const [physical] =
+    await shared.admin`select expired_at from plan_credit_periods where id=${period.id}`;
+  expect(physical!.expired_at).toBeNull();
+  await debit(accountId, 150 * M);
+  expect(await getBillingBalance(client.db, accountId)).toMatchObject({
+    balanceMicros: -50 * M,
+    generalBalanceMicros: -50 * M,
+    plan: { creditPendingExpiryMicros: 0 },
+  });
+  await topup(accountId, 75 * M);
+  expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(25 * M);
+}, 180_000);
+
+test("late video refunds preserve purchased funding but never roll expired plan funding into the new period", async () => {
+  if (!client) return;
+  for (const cost of [40 * M, 250 * M]) {
+    const { accountId } = await account();
+    const old = await grantPlanCreditPeriod(client.db, await activate(accountId));
+    await topup(accountId, 100 * M);
+    const sourceId = crypto.randomUUID();
+    await applyCreditDebitAfterUse(client.db, {
+      accountId,
+      type: "video_generation_debit",
+      amountMicros: cost,
+      sourceType: "video_generation_operation",
+      sourceId,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    await expirePlanCreditPeriod(client.db, { accountId, periodId: old.id, force: true });
+    await grantPlanCreditPeriod(client.db, await activate(accountId, "max"));
+    const refundKey = crypto.randomUUID();
+    const refund = {
+      accountId,
+      type: "video_generation_refund",
+      amountMicros: cost,
+      sourceType: "video_generation_operation",
+      sourceId,
+      idempotencyKey: refundKey,
+    };
+    await applyCreditLedgerEntry(client.db, refund);
+    await applyCreditLedgerEntry(client.db, refund);
+    expect(await getBillingBalance(client.db, accountId)).toMatchObject({
+      balanceMicros: 2100 * M,
+      plan: { creditRemainingMicros: 2000 * M },
+    });
+  }
+}, 180_000);
+
+test("a state sync before invoice payment keeps spending the already-granted allowance first", async () => {
+  if (!client) return;
+  const { accountId } = await account();
+  await grantPlanCreditPeriod(client.db, await activate(accountId));
+  await applyCreditLedgerEntry(client.db, {
+    accountId,
+    type: "grant",
+    amountMicros: 100 * M,
+    eligibleModelIds: ["model-a"],
+    idempotencyKey: crypto.randomUUID(),
+  });
+  const unpaid = await activate(accountId, "max");
+  await upsertOrganizationPlan(client.db, {
+    ...unpaid,
+    status: "past_due",
+    currentPeriodStart: unpaid.periodStart,
+    currentPeriodEnd: unpaid.periodEnd,
+  });
+  const charged = await applyCreditDebitUpToBalance(client.db, {
+    accountId,
+    type: "model_usage_debit",
+    requestedAmountMicros: 50 * M,
+    modelId: "model-a",
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(charged.grantDebitedMicros).toBe(0);
+  expect(charged.balance.plan).toMatchObject({
+    key: "max",
+    status: "past_due",
+    creditGrantedMicros: 200 * M,
+    creditRemainingMicros: 150 * M,
+  });
 }, 180_000);
 
 test("renewal expires the prior period without rollover; late ended grants expire immediately", async () => {
@@ -395,6 +595,44 @@ test("only the organization that actually received the verified signup trial is 
       ),
     "42501",
   );
+  // Free allowance never stacks on top of the paid plan on conversion. The
+  // separate verified-signup promotion remains untouched (plan-first spending).
+  const beforeUpgrade = await getBillingBalance(client.db, setup.organizationId);
+  const paid = await activate(setup.organizationId, "pro");
+  paid.periodStart = new Date();
+  await sync(paid);
+  const replacement = await replacePlanCreditPeriod(client.db, paid);
+  expect(replacement.granted_micros).toBe(200 * M);
+  expect(await getBillingBalance(client.db, setup.organizationId)).toMatchObject({
+    balanceMicros: beforeUpgrade.balanceMicros + 190 * M,
+    plan: { key: "pro", creditGrantedMicros: 200 * M, creditRemainingMicros: 200 * M },
+    promotionalCredits: beforeUpgrade.promotionalCredits,
+  });
+}, 180_000);
+
+test("pre-existing general debt cannot make a prepaid plan spend promotional funds repeatedly", async () => {
+  if (!client) return;
+  const { accountId } = await account();
+  await debit(accountId, 250 * M);
+  await grantPlanCreditPeriod(client.db, await activate(accountId));
+  await applyCreditLedgerEntry(client.db, {
+    accountId,
+    type: "grant",
+    amountMicros: 100 * M,
+    eligibleModelIds: ["model-a"],
+    idempotencyKey: crypto.randomUUID(),
+  });
+  const spend = () =>
+    applyCreditDebitUpToBalance(client!.db, {
+      accountId,
+      type: "model_usage_debit",
+      requestedAmountMicros: 100 * M,
+      modelId: "model-a",
+      idempotencyKey: crypto.randomUUID(),
+    });
+  expect((await spend()).grantDebitedMicros).toBe(100 * M);
+  expect((await spend()).debitedMicros).toBe(0);
+  expect((await getBillingBalance(client.db, accountId)).generalBalanceMicros).toBe(-50 * M);
 }, 180_000);
 
 const invite = (accountId: string, actorSubjectId: string, targetSubjectId: string | null = null) =>

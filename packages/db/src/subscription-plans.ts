@@ -53,6 +53,7 @@ export type PlanCreditPeriod = {
   period_start: string;
   period_end: string;
   granted_micros: number;
+  opening_debt_micros: number;
   grant_entry_id: string;
   idempotency_key: string;
   granted_at: string;
@@ -98,6 +99,20 @@ export async function expirePlanCreditPeriod(
       sql`select expire_plan_credit_period(${input.accountId}::uuid, ${input.periodId}::uuid, ${input.force ?? false}) as period`,
     );
     return row!.period;
+  });
+}
+
+/** Called under the existing account lock before any new ledger settlement. */
+export async function expireEndedPlanCreditPeriods(
+  db: Database,
+  accountId: string,
+): Promise<number> {
+  return await withAccountRls(db, accountId, async (tx) => {
+    const [row] = await rawRows<{ expired: number }>(
+      tx,
+      sql`select expire_ended_plan_credit_periods(${accountId}::uuid) as expired`,
+    );
+    return row!.expired;
   });
 }
 

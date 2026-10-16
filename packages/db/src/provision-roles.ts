@@ -1745,7 +1745,7 @@ BEGIN
         EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I', ${literal(schema)}, routine_signature, ${literal(role)});
       END IF;
     END LOOP;
-    FOREACH routine_signature IN ARRAY ARRAY['subscription_plan_definition(text)', 'plan_period_usage(' || quote_ident(${literal(schema)}) || '.plan_credit_periods,timestamptz)', 'enforce_organization_plan_seats()'] LOOP
+    FOREACH routine_signature IN ARRAY ARRAY['subscription_plan_definition(text)', 'plan_period_usage(' || quote_ident(${literal(schema)}) || '.plan_credit_periods,timestamptz)', 'plan_general_balance(uuid)', 'expire_refunded_plan_credit()', 'enforce_organization_plan_seats()'] LOOP
       IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
         EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM PUBLIC', routine_signature);
         EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.%s FROM %I', routine_signature, ${literal(role)});
