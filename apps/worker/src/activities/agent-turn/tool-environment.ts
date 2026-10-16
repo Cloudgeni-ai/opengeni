@@ -121,7 +121,11 @@ import {
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
 import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
-import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
+import {
+  codeSearchToolDefinitions,
+  codeSearchWorkspaceFromChannel,
+  type CodeSearchFetchWrapper,
+} from "./code-search";
 import { turnWebSearchPlan, webSearchToolDefinitions } from "./web-search";
 import {
   createWorkspaceSkillTools,
@@ -205,6 +209,8 @@ export type PrepareTurnToolRuntimeDeps = {
   runWorkspaceMutationForSandbox: SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
   /** Deployment and workspace allow the Jev-backed code_search tool. */
   codeSearchEnabled: boolean;
+  /** Optional trusted-host physical transport observation; absent in ordinary workers. */
+  codeSearchFetchWrapper?: CodeSearchFetchWrapper;
   /**
    * False for an optional repository that sits this turn out after losing
    * access (dropUnavailableOptionalRepositories), so no tool surface offers it.
@@ -752,6 +758,21 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     backend: activeSandboxBackend ?? groupBoxBackend,
     machineWorkspaceRoot: sandboxState.machinePrimarySession?.workspaceRoot ?? null,
     observability,
+    ...(deps.codeSearchFetchWrapper
+      ? {
+          transport: {
+            scope: {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              attemptId: input.attemptId,
+              executionGeneration: attempt.executionGeneration,
+            },
+            wrapFetch: deps.codeSearchFetchWrapper,
+          },
+        }
+      : {}),
     // Opengeni's Jev key pays for these calls whatever model billing the
     // workspace uses; record them per workspace so the cost stays visible.
     recordUsage: async (usage) => {

@@ -234,3 +234,23 @@ two usage events against its workspace, session, turn and attempt:
 - `opengeni_code_search_jev_cost_micro_usd_total`
 
 Tool calls and results also appear in the session timeline like any other tool.
+
+### Optional in-process transport observation
+
+The worker's `prepareTurnToolRuntime` accepts an optional
+`codeSearchFetchWrapper`. It is forwarded through `codeSearchToolDefinitions`
+to the existing Jev fetch seam. The trusted invocation identity contains the
+attempt scope and operation id, not model-supplied fields. Concurrent searches,
+retries and detached health warmups retain the invocation that started them.
+The wrapper is not part of the model-facing schema, directive or Jev payload.
+
+This hook is absent in ordinary workers. It does not add a budget, request cap,
+retry policy, ledger or event sink, or change search decisions. A host-supplied
+wrapper is responsible for its own observation/admission policy and errors.
+It receives the original request and fetch function; returning the original
+response preserves streaming, body failures and cancellation without buffering.
+It sees physical retries and health GETs separately. Fetch resolving proves
+only that headers arrived, not that usage is known or billing has settled.
+The completed-search usage events above are not a physical-request ledger:
+failed, interrupted and retried requests need separate host accounting. Do not
+treat missing usage as zero or infer a provider invoice from catalog estimates.

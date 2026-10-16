@@ -1243,6 +1243,10 @@ tools (`opengeni__goal_*` lifecycle, `opengeni__command_read`/`command_wait`,
 `opengeni__wait_for_input`) are also always visible; the `opengeni` server then
 joins the first-request barrier. Other non-MCP functions/non-eager MCP schemas require search.
 
+Worker code search also has an optional in-process fetch wrapper with trusted
+attempt/operation correlation. It leaves search defaults and exposure unchanged;
+physical-request admission/receipts belong to the host ([details](code-search.md#optional-in-process-transport-observation)).
+
 Web search is hosted by the model provider where the catalog declares it, or
 worker-run through deployment-configured search and page-reading providers
 (`web_search` / `web_fetch`, each an ordered failover list from one provider
