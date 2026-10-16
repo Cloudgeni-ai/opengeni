@@ -64,8 +64,8 @@ import {
 /**
  * Site-runtime: the narrow API a Site gateway calls for one published Site
  * host, after the gateway signature passed. Everything here works for exactly
- * one Site: the host names it, the viewer is resolved for it, and the agent
- * principal is `site:<siteId>`.
+ * one Site: the host names it and the viewer is resolved for it. Members retain
+ * their human identity; outsiders use the viewer-bound `site:<siteId>` principal.
  */
 
 export type SiteRuntimeDeps = Pick<ApiRouteDeps, "db" | "settings" | "objectStorage">;

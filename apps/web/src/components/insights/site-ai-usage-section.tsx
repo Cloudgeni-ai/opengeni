@@ -76,7 +76,7 @@ export function SiteAiUsageView({ usage }: { usage: InsightsSiteUsageResponse })
                     className="py-3 text-right"
                     title={`Subscriptions: ${formatMoney(row.subscriptionApiEquivalentMicros)}; own API keys: ${formatMoney(row.ownKeyApiEquivalentMicros)}. ${row.pricedCalls} of ${row.calls} calls priced.`}
                   >
-                    {formatMoney(row.apiEquivalentMicros)}
+                    {row.pricedCalls > 0 ? formatMoney(row.apiEquivalentMicros) : "—"}
                     {row.pricedCalls < row.calls ? (
                       <span className="ml-1 text-xs text-fg-subtle">partial</span>
                     ) : null}

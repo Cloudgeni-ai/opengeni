@@ -1,4 +1,5 @@
 -- deployment-mode: maintenance
+-- maintenance-justification: old Site writers cannot supply the new immutable viewer audience or proof; drain them before activating the fail-closed native boundary.
 -- Freeze an independent viewer audience on native sessions. Published legacy
 -- mappings prove their audience; historical console provenance does not, and
 -- is deliberately not converted into an asserted private owner.
@@ -18,6 +19,9 @@ ALTER TABLE model_call_facts ADD COLUMN site_id uuid;
 ALTER TABLE site_runtime_conversations NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE model_call_facts NO FORCE ROW LEVEL SECURITY;
+-- Table locks already exclude runtime writers; do not acquire a workspace
+-- advisory fence after those locks. Restore the exact trigger before commit.
+ALTER TABLE sessions DISABLE TRIGGER session_tenancy_workspace_fence;
 DO $backfill$
 DECLARE scope record;
 BEGIN
@@ -43,6 +47,7 @@ BEGIN
   END LOOP;
 END
 $backfill$;
+ALTER TABLE sessions ENABLE TRIGGER session_tenancy_workspace_fence;
 ALTER TABLE site_runtime_conversations FORCE ROW LEVEL SECURITY;
 ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
 ALTER TABLE model_call_facts FORCE ROW LEVEL SECURITY;

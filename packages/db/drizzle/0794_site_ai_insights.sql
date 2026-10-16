@@ -1,4 +1,5 @@
 -- deployment-mode: maintenance
+-- maintenance-justification: backfill exact model debit attribution during the private Site audience cutover before old writers or analytical readers can resume.
 -- Retain exact Site attribution on actual model debits, independently of fact
 -- delivery and session retention. No repricing or changes to charged amounts.
 SET LOCAL lock_timeout='5s';

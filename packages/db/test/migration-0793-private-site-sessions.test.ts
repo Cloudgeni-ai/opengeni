@@ -57,6 +57,7 @@ test.skipIf(!enabled)(
       await tx`set local session_replication_role=replica`;
       await tx`insert into managed_accounts(id,name) values(${accountId},'Upgrade')`;
       await tx`insert into workspaces(id,account_id,name) values(${workspaceId},${accountId},'Upgrade')`;
+      await tx`insert into workspace_inference_controls(workspace_id,account_id) values(${workspaceId},${accountId})`;
       await tx`insert into workspace_artifacts(id,account_id,workspace_id,slug,title,current_version_id,created_by_subject_id)
       values(${siteId},${accountId},${workspaceId},'upgrade','Retained app',${versionId},'user:owner')`;
       await tx`insert into workspace_artifact_versions(id,account_id,workspace_id,artifact_id,revision,content_key,content_sha256,size_bytes,operation_key,created_by_subject_id)
@@ -71,7 +72,7 @@ test.skipIf(!enabled)(
         nested_agent_depth,created_by_kind,created_by_subject_id,metadata,tool_policy,
         effective_max_nested_agent_depth,nested_agent_depth_policy_source,reasoning_effort,latency_mode)
         values(${id},${accountId},${workspaceId},'Private content','fixture','none',${root},${parent},${root},${parent ? 1 : 0},'service',${`site:${siteId}`},
-          ${tx.json({ _opengeniSiteOrigin: { siteId, title: "Untrusted old label" } })},'{"mode":"explicit"}',3,'default','medium','standard')`;
+          ${tx.json({ _opengeniSiteOrigin: { siteId, title: "Untrusted old label" } })},'{"mode":"explicit","inheritedFromSessionId":null}',3,'default','medium','standard')`;
       }
       for (const [id, viewer, kind] of [
         [guest, "guest:visit-one", "guest"],
@@ -138,7 +139,8 @@ test.skipIf(!enabled)(
       sql.begin(async (tx) => {
         await tx`select set_config('opengeni.account_id',${accountId},true),set_config('opengeni.workspace_id',${workspaceId},true),
         set_config('opengeni.subject_id',${actor},true),set_config('opengeni.site_id',${siteId},true),
-        set_config('opengeni.site_viewer_principal',${viewer},true)`;
+        set_config('opengeni.site_viewer_principal',${viewer},true),
+        set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
         return await run(tx);
       });
     expect(
@@ -178,13 +180,16 @@ test.skipIf(!enabled)(
     values(${oldWriter},${accountId},${workspaceId},${siteId},'guest:old-writer','guest',1000000,0)`;
     await expect(
       scoped(admin, `site:${siteId}`, async (tx) => {
-        await tx`select set_config('opengeni.site_session_audience_v1','',true)`;
-    await tx`insert into sessions(id,account_id,workspace_id,initial_message,model,sandbox_backend,sandbox_group_id,root_session_id,created_by_kind,created_by_subject_id,
+        await tx`select acquire_session_tenancy_fence(${workspaceId}::uuid)`;
+        await tx`select set_config('opengeni.site_session_audience_v1','',true),
+          set_config('opengeni.session_activity_gate_state','open',true),
+          set_config('opengeni.session_activity_gate_workspace_id',${workspaceId},true)`;
+        await tx`insert into sessions(id,account_id,workspace_id,initial_message,model,sandbox_backend,sandbox_group_id,root_session_id,created_by_kind,created_by_subject_id,
       tool_policy,nested_agent_depth,effective_max_nested_agent_depth,nested_agent_depth_policy_source,reasoning_effort,latency_mode)
       values(${oldWriter},${accountId},${workspaceId},'Old writer','fixture','none',${oldWriter},${oldWriter},'service',${`site:${siteId}`},
-        '{"mode":"explicit"}',0,3,'default','medium','standard')`;
+        '{"mode":"explicit","inheritedFromSessionId":null}',0,3,'default','medium','standard')`;
       }),
-    ).rejects.toMatchObject({ code: "55000" });
+    ).rejects.toMatchObject({ code: "55000", message: expect.stringContaining("Site") });
   },
   180_000,
 );

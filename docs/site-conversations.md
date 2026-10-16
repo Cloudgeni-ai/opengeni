@@ -270,3 +270,62 @@ console/published-host ownership, cross-viewer and guest denial across reads,
 events/files/control, discovery/pagination/search, policy refusal, native
 cancellation and exact accounting. Preview the actual Insights and limits UI
 in light/dark desktop/mobile before handoff.
+
+### Staging acceptance (release-coordinator owned)
+
+These migrations require a maintenance cutover: drain old API and worker writers,
+apply the reviewed release's migrations and role provisioning, then start the
+matching source. Do not run old Site writers against the new audience schema.
+The backfill only binds historical published conversations with an existing
+viewer mapping; existing Site source, titles and historical console chats are
+not rewritten. This recipe does not authorize a deployment.
+
+Run the deterministic source checks against an isolated PostgreSQL fixture first:
+
+```sh
+OPENGENI_REQUIRE_REAL_DB=1 bun test --max-concurrency=4 \
+  packages/db/test/migration-0793-private-site-sessions.test.ts \
+  apps/api/test/site-frame-boundary-postgres.test.ts \
+  apps/api/test/published-sites-postgres.test.ts
+bun test packages/sdk/test/site-ai.test.ts apps/api/test/sse-stream-bounds.test.ts
+bun scripts/public-api/check.ts
+OPENGENI_REQUIRE_REAL_DB=1 bun scripts/public-api/sdk-compat.ts
+```
+
+Use the repository's pinned Bun/Node and an explicitly configured
+`OPENGENI_TEST_PG_URL`; do not point test fixtures at the staging application
+database. After the coordinator deploys the exact reviewed source:
+
+1. Create a disposable Site and two ordinary test members. Open both the console
+   iframe and its published host as each member. Start one optional chat and one
+   `client.ai.run({ initialMessage: appPrompt, idempotencyKey })` action. The app
+   renders its own streamed/final output; no chat component is required. Verify
+   retrying the same key does not create another session.
+2. Verify the signed-in creator/owner is the real member, not the Site author or
+   a service identity. Verify each action is absent from ordinary workspace
+   session lists, sidebar, message search and pins. An explicit Site-origin list
+   may return only work the requesting viewer is allowed to see.
+3. Try the other viewer's known ID through detail, events, live stream, queue,
+   turns, file-list/download and control/send paths. Expect refusal, including
+   for workspace administrators. Repeat with two independent guest cookie jars;
+   a guest's current jar may reconnect, the second must not. Do not inspect or
+   publish private prompts in the acceptance record.
+4. In the disposable organization, disable private sessions and verify explicit
+   creation refusal, not shared fallback. Restore the setting. Revoke one test
+   member or unpublish the disposable Site; verify the published host refuses
+   further admission/stream delivery and native cancellation stops existing work.
+5. Exercise a small deterministic pending/approval fixture, cancellation, failure,
+   reconnect and observation abort. Pending is not success; observation abort is
+   not execution cancellation. Existing tool selection, approvals and model
+   eligibility remain authoritative. Use mocked providers for automated coverage;
+   no load test or paid model probe is necessary for this source acceptance.
+6. Check a member's ordinary model/subscription eligibility and an outsider's
+   credit-only model and Site/per-person caps. In Insights compare source-stamped
+   Site actual charges to model-debit ledger totals, separately from frozen
+   API-equivalent/subscription/own-key estimates. Private/unavailable Site names
+   must aggregate anonymously, with no session/viewer/prompt fields. Platform
+   requests/rows/storage appear separately with their billing mode. Usage shows
+   limit settings, not those analytics.
+7. Inspect actual Insights and Usage in light/dark at desktop and mobile widths.
+   Record the deployed source SHA, test outcomes and any limitations, then remove
+   only the disposable test Site/accounts and restore settings changed above.
