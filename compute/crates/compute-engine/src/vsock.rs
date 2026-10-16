@@ -12,7 +12,7 @@ use tokio::net::UnixStream;
 /// one Unix socket and a one-line `CONNECT <port>` handshake. The returned
 /// stream carries the guest connection with the handshake consumed.
 pub async fn connect(uds: &Path, port: u32) -> io::Result<UnixStream> {
-    let mut stream = UnixStream::connect(uds).await?;
+    let mut stream = crate::confined::connect(uds).await?;
     stream
         .write_all(format!("CONNECT {port}\n").as_bytes())
         .await?;

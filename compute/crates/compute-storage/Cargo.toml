@@ -10,16 +10,22 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+base64 = "0.22"
 blake3 = "1.8"
 bytes = "1"
+crc32c = "0.6"
+http = "1"
+md-5 = "0.10"
 object_store = { version = "0.12.4", features = ["aws", "azure", "gcp"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 futures = "0.3"
 zstd = "0.13"
 libc = "0.2"
 
 [dev-dependencies]
+async-trait = "0.1"
+tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"

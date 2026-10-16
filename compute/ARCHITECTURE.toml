@@ -87,6 +87,7 @@ mode = "advisory"
 patterns = ['\bunsafe\b']
 allow = [
   "crates/compute-pager/src/linux.rs",
+  "crates/compute-pager/src/source.rs",
   "crates/compute-storage/src/fiemap.rs",
 ]
 

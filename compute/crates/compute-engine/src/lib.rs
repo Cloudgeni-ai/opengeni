@@ -9,8 +9,10 @@
 //! [`firecracker::Firecracker`] is the first implementation.
 
 pub mod cgroup;
+pub mod confined;
 mod error;
 pub mod firecracker;
+mod profile;
 mod spec;
 pub mod vsock;
 
@@ -18,7 +20,8 @@ use std::future::Future;
 use std::time::Duration;
 
 pub use error::{EngineError, ErrorKind};
-pub use spec::{Drive, Network, SnapshotFiles, VmSpec};
+pub use profile::{MemoryProfile, PageSize, ProfileError, SaveMode};
+pub use spec::{Drive, MemorySource, Network, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
 pub use tokio_util::sync::CancellationToken;
 
 /// How an interruptible operation ended.
@@ -31,20 +34,38 @@ pub enum Completion {
     Cancelled,
 }
 
+/// What a VM found alive by [`Engine::adopt`] is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Found {
+    /// Its processors run.
+    Running,
+    /// Its processors are stopped; its memory is in place.
+    Paused,
+}
+
 /// What the host needs from a VM program.
 ///
 /// Every method that can fail reports an [`ErrorKind`] saying what the
 /// failure means for the sandbox. Operations on one VM are never issued
 /// concurrently.
+///
+/// VM processes outlive the host agent: stopping, crashing or upgrading the
+/// agent leaves every VM as it was, and the next agent takes them back with
+/// [`Engine::adopt`].
 pub trait Engine: Send + Sync + 'static {
     /// A running VM process.
     type Vm: Send + Sync + 'static;
+
+    /// How this engine backs, saves and compresses guest memory.
+    fn memory_profile(&self) -> MemoryProfile;
 
     /// Boots a fresh VM from its disks.
     fn boot(&self, spec: &VmSpec) -> impl Future<Output = Result<Self::Vm, EngineError>> + Send;
 
     /// Starts a VM from saved state and leaves it paused. Memory is loaded
-    /// lazily, as the guest touches it.
+    /// lazily, as the guest touches it, from `files.memory`. A
+    /// [`MemorySource::Pager`] must already be listening, and must keep
+    /// serving until the VM ends: restoring devices touches guest memory.
     ///
     /// The VM stays paused so the caller can mark the saved image as stale
     /// before the guest runs: once the guest writes to its disk, the old
@@ -53,7 +74,7 @@ pub trait Engine: Send + Sync + 'static {
     fn restore(
         &self,
         spec: &VmSpec,
-        files: &SnapshotFiles,
+        files: &RestoreFiles,
     ) -> impl Future<Output = Result<Self::Vm, EngineError>> + Send;
 
     /// Stops the VM's processors. Memory stays in place. A transient
@@ -73,22 +94,43 @@ pub trait Engine: Send + Sync + 'static {
         cancel: &CancellationToken,
     ) -> impl Future<Output = Result<Completion, EngineError>> + Send;
 
-    /// Writes a paused VM's processor, device and memory state to `files`.
-    /// The VM stays paused, so the caller can still resume it instead of
-    /// stopping it.
+    /// Writes a paused VM's processor, device and memory state to `files`,
+    /// which must not exist yet. The VM stays paused, so the caller can
+    /// still resume it instead of stopping it.
+    ///
+    /// A [`SnapshotKind::Diff`] that succeeds is the only record of which
+    /// pages changed: the next diff starts from it. A caller that cannot
+    /// merge it, or sees this call fail, must ask for
+    /// [`SnapshotKind::Full`] next time.
     fn snapshot(
         &self,
         vm: &Self::Vm,
         files: &SnapshotFiles,
+        kind: SnapshotKind,
     ) -> impl Future<Output = Result<(), EngineError>> + Send;
 
     /// Ends the VM process and releases its host resources. Its disks and
     /// any snapshot stay on disk. Resolves only once the process has ended,
     /// so that nothing is still using the disks when a replacement starts.
+    /// Fails at once if the process cannot be signalled, and after it ended
+    /// if its resources could not be released; [`Engine::clean_up`] then
+    /// releases them later.
     fn stop(&self, vm: Self::Vm) -> impl Future<Output = Result<(), EngineError>> + Send;
 
-    /// Ends any VM process an earlier run of the host agent left behind for
-    /// `spec` and releases its host resources. Succeeds when there is none.
+    /// Takes over the VM an earlier run of the host agent left running for
+    /// `spec`, if there is one in a usable state, without disturbing it.
+    /// `None` means no guest runs for `spec`: none was found, or the one
+    /// found provably never started its guest or has exited, and has been
+    /// cleaned up. A VM that may hold a running guest but cannot be taken
+    /// over (it does not answer, say) is an error and is left alone, so
+    /// its memory is never lost to a slow probe.
+    fn adopt(
+        &self,
+        spec: &VmSpec,
+    ) -> impl Future<Output = Result<Option<(Self::Vm, Found)>, EngineError>> + Send;
+
+    /// Ends any VM process left behind for `spec` and releases its host
+    /// resources. Succeeds when there is none.
     fn clean_up(&self, spec: &VmSpec) -> impl Future<Output = Result<(), EngineError>> + Send;
 
     /// Bytes of host memory the VM holds right now.

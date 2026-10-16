@@ -9,7 +9,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::time::Instant;
 
 use crate::agent::{Handle, HostError};
-use crate::protocol::{Reply, Request, step_name};
+use crate::protocol::{ErrorCode, Reply, Request, step_name};
 
 /// Requests are small; anything longer is refused.
 const MAX_REQUEST: u64 = 64 << 10;
@@ -47,22 +47,25 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
         Ok(request) => request,
         Err(error) => {
             let message = format!("bad request: {error}");
-            return write_reply(&mut client, &Reply::Error { message }).await;
+            let code = ErrorCode::Invalid;
+            return write_reply(&mut client, &Reply::Error { message, code }).await;
         }
     };
     let reply = match request {
-        Request::Connect { id, port, priority } => {
-            let lease = match handle.acquire(id, priority.into()).await {
+        Request::Connect {
+            id,
+            generation,
+            port,
+            priority,
+        } => {
+            let lease = match handle.acquire(id, generation, priority.into()).await {
                 Ok(lease) => lease,
                 Err(error) => return write_reply(&mut client, &error_reply(&error)).await,
             };
             let started = Instant::now();
             let mut guest = match lease.connect(port, CONNECT_TIMEOUT).await {
                 Ok(guest) => guest,
-                Err(error) => {
-                    let message = format!("guest port {port} unreachable: {error}");
-                    return write_reply(&mut client, &Reply::Error { message }).await;
-                }
+                Err(error) => return write_reply(&mut client, &error_reply(&error)).await,
             };
             write_reply(
                 &mut client,
@@ -78,11 +81,20 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
             return Ok(());
         }
         Request::Create { id, config } => done(handle.create(id, config).await),
-        Request::Remove { id } => done(handle.remove(id).await),
-        Request::Touch { id, priority } => done(handle.touch(id, priority.into())),
-        Request::Sleep { id, level } => done(handle.sleep(id, level.into()).await),
+        Request::Remove { id, generation } => done(handle.remove(id, generation).await),
+        Request::Touch {
+            id,
+            generation,
+            priority,
+        } => done(handle.touch(id, generation, priority.into()).await),
+        Request::Sleep {
+            id,
+            generation,
+            level,
+        } => done(handle.sleep(id, generation, level.into()).await),
         Request::Hold {
             id,
+            generation,
             hold,
             ttl_ms,
             priority,
@@ -90,14 +102,23 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
             handle
                 .hold(
                     id,
+                    generation,
                     &hold,
                     ttl_ms.map(Duration::from_millis),
                     priority.into(),
                 )
                 .await,
         ),
-        Request::Release { id, hold } => done(handle.release(id, &hold).await),
-        Request::Wake { id, priority } => match handle.acquire(id, priority.into()).await {
+        Request::Release {
+            id,
+            generation,
+            hold,
+        } => done(handle.release(id, generation, &hold).await),
+        Request::Wake {
+            id,
+            generation,
+            priority,
+        } => match handle.acquire(id, generation, priority.into()).await {
             Ok(lease) => Reply::Woken {
                 waited_us: micros(lease.waited()),
                 during: lease.during().map(|step| step_name(step).to_owned()),
@@ -119,6 +140,17 @@ fn done(result: Result<(), HostError>) -> Reply {
 fn error_reply(error: &HostError) -> Reply {
     Reply::Error {
         message: error.to_string(),
+        code: match error {
+            HostError::NotFound(_) => ErrorCode::NotFound,
+            HostError::Exists(_) => ErrorCode::Exists,
+            HostError::Busy(_) => ErrorCode::Busy,
+            HostError::Broken(_) => ErrorCode::Broken,
+            HostError::Removed(_) => ErrorCode::Removed,
+            HostError::Invalid(_) => ErrorCode::Invalid,
+            HostError::Stale { .. } => ErrorCode::Stale,
+            HostError::Unreachable { .. } => ErrorCode::Unreachable,
+            HostError::Io(_) | HostError::Stopped => ErrorCode::Internal,
+        },
     }
 }
 

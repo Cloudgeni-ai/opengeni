@@ -14,10 +14,15 @@ mod agent;
 mod chunked;
 pub mod client;
 pub mod guest_ports;
+mod image;
 mod layout;
+#[cfg(target_os = "linux")]
+mod lazy;
+pub mod net;
 pub mod protocol;
 pub mod restore_notice;
 mod server;
+mod state;
 mod step;
 mod store;
 
@@ -25,4 +30,6 @@ pub use agent::{BusyRule, Handle, HostAgent, HostConfig, HostError, Lease};
 pub use chunked::{CHUNK_BYTES, Chunked};
 pub use guest_ports::{GuestPort, Route};
 pub use server::serve;
-pub use store::{Directory, NoStore, SavedFiles, Store};
+pub use store::{
+    Directory, FetchInto, FetchedMemory, NoStore, Receipt, SavedFiles, SavedImage, Store,
+};

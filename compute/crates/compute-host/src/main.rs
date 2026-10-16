@@ -1,5 +1,6 @@
 //! `compute-host`: run the host agent, or talk to one.
 
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -7,8 +8,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use compute_core::{HostPolicy, MemoryPolicy, SandboxId, Step};
-use compute_engine::firecracker::Firecracker;
+use compute_engine::MemoryProfile;
+use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
+use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::protocol::{
     HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
 };
@@ -33,7 +36,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the agent.
-    Serve(ServeArgs),
+    Serve(Box<ServeArgs>),
     /// Create a sandbox.
     Create {
         id: Id,
@@ -93,6 +96,17 @@ struct ServeArgs {
     root: PathBuf,
     #[arg(long)]
     firecracker: PathBuf,
+    /// Firecracker's jailer, from the same release.
+    #[arg(long)]
+    jailer: PathBuf,
+    /// User id of the first sandbox; each sandbox's VMM runs as its own
+    /// user and group from here up.
+    #[arg(long, default_value_t = 1 << 30, value_parser = clap::value_parser!(u32).range(1..))]
+    first_uid: u32,
+    /// A host-wide lock file: only one agent may manage VMs, users and
+    /// networks on a host, whatever state root it uses.
+    #[arg(long, default_value = "/run/opengeni-compute.lock")]
+    host_lock: PathBuf,
     #[arg(long)]
     kernel: PathBuf,
     /// Root disk image new sandboxes start from.
@@ -130,6 +144,33 @@ struct ServeArgs {
     /// the guest can set its clock and reconnect.
     #[arg(long)]
     restore_notice_port: Option<u32>,
+    /// How guest memory is backed and saved: `bare-metal` (4 KiB pages,
+    /// dirty-page tracking, compression allowed) or `nested` (2 MiB pages
+    /// from the host's reserved huge-page pool, resident-page saves, no
+    /// compression). Nested hosts need the pool reserved first, for example
+    /// through `/proc/sys/vm/nr_hugepages`.
+    #[arg(long, default_value_t = MemoryProfile::bare_metal())]
+    memory_profile: MemoryProfile,
+    /// Give every sandbox a network: its own namespace, a fixed guest
+    /// address, internet access through NAT, and nothing else.
+    #[arg(long)]
+    network: bool,
+    /// Addresses for the host's links to sandbox namespaces, two per
+    /// sandbox. Must not be used for anything else.
+    #[arg(long, default_value = "198.18.0.0/15")]
+    network_pool: Ipv4Net,
+    /// Let sandboxes reach this host's local network (private and shared
+    /// ranges). The host itself, metadata services and other sandboxes
+    /// stay blocked.
+    #[arg(long)]
+    trusted: bool,
+    /// Another range sandboxes may not reach, such as the host's public
+    /// address where the cloud maps it onto a private one. Repeatable.
+    #[arg(long = "block")]
+    blocked: Vec<Ipv4Net>,
+    /// A name server for guests; repeatable, at most two are used.
+    #[arg(long = "dns", default_values_t = [Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(8, 8, 8, 8)])]
+    dns: Vec<Ipv4Addr>,
     /// A running sandbox whose VM uses at least this percent of one
     /// processor counts as busy and stays awake; 0 ignores processor use.
     #[arg(long, default_value_t = BusyRule::DEFAULT.cpu_percent)]
@@ -138,7 +179,7 @@ struct ServeArgs {
     #[arg(long, default_value = "5s", value_parser = parse_duration)]
     busy_window: Duration,
     /// This host cannot compress paused VMs' memory, for example because
-    /// guest memory uses huge pages.
+    /// guest memory uses huge pages. The `nested` memory profile implies it.
     #[arg(long)]
     no_compress: bool,
 }
@@ -296,7 +337,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let client = Client::new(&cli.socket);
     match cli.command {
-        Command::Serve(args) => run_serve(args, cli.socket).await,
+        Command::Serve(args) => run_serve(*args, cli.socket).await,
         Command::Create {
             id,
             vcpus,
@@ -323,23 +364,43 @@ async fn main() -> anyhow::Result<()> {
             };
             expect_done(client.call(&Request::Create { id, config }).await?)
         }
-        Command::Remove { id } => expect_done(client.call(&Request::Remove { id }).await?),
-        Command::Sleep { id, level } => {
-            expect_done(client.call(&Request::Sleep { id, level }).await?)
-        }
+        Command::Remove { id } => expect_done(
+            client
+                .call(&Request::Remove {
+                    id,
+                    generation: None,
+                })
+                .await?,
+        ),
+        Command::Sleep { id, level } => expect_done(
+            client
+                .call(&Request::Sleep {
+                    id,
+                    generation: None,
+                    level,
+                })
+                .await?,
+        ),
         Command::Hold { id, name, ttl } => expect_done(
             client
                 .call(&Request::Hold {
                     id,
+                    generation: None,
                     hold: name,
                     ttl_ms: ttl.map(millis),
                     priority: PriorityName::Interactive,
                 })
                 .await?,
         ),
-        Command::Release { id, name } => {
-            expect_done(client.call(&Request::Release { id, hold: name }).await?)
-        }
+        Command::Release { id, name } => expect_done(
+            client
+                .call(&Request::Release {
+                    id,
+                    generation: None,
+                    hold: name,
+                })
+                .await?,
+        ),
         Command::Status => {
             let reply = client.call(&Request::Status).await?;
             println!("{}", serde_json::to_string_pretty(&reply)?);
@@ -367,8 +428,16 @@ fn expect_done(reply: Reply) -> anyhow::Result<()> {
 }
 
 async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
-    let engine = Firecracker::new(&args.firecracker, &args.cgroup)
-        .with_context(|| format!("creating cgroup {}", args.cgroup.display()))?;
+    let engine = Firecracker::new(FirecrackerConfig {
+        firecracker: args.firecracker,
+        jailer: args.jailer,
+        cgroup_parent: args.cgroup.clone(),
+    })
+    .with_context(|| format!("setting up Firecracker in cgroup {}", args.cgroup.display()))?
+    .with_memory_profile(args.memory_profile)
+    .with_context(|| format!("memory profile {}", args.memory_profile))?;
+    check_huge_pages(args.memory_profile)?;
+    raise_open_file_limit();
     let mut policy = HostPolicy::default();
     for (step, limit) in args.limits {
         policy.limits = policy.limits.with(step, limit);
@@ -389,6 +458,14 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         sample_every: Duration::from_secs(1),
         guest_ports: args.guest_ports,
         restore_notice_port: args.restore_notice_port,
+        first_uid: args.first_uid,
+        host_lock: Some(args.host_lock),
+        network: args.network.then_some(NetworkConfig {
+            pool: args.network_pool,
+            trusted: args.trusted,
+            blocked: args.blocked,
+            dns: args.dns,
+        }),
         busy: (args.busy_cpu_percent > 0).then_some(BusyRule {
             cpu_percent: args.busy_cpu_percent,
             window: args.busy_window,
@@ -654,7 +731,15 @@ async fn put_to_sleep(
     let mut requests = JoinSet::new();
     for id in ids {
         let (client, id) = (client.clone(), *id);
-        requests.spawn(async move { client.call(&Request::Sleep { id, level }).await });
+        requests.spawn(async move {
+            client
+                .call(&Request::Sleep {
+                    id,
+                    generation: None,
+                    level,
+                })
+                .await
+        });
     }
     while let Some(result) = requests.join_next().await {
         expect_done(result??)?;
@@ -750,11 +835,72 @@ async fn bench(client: &Client, args: &BenchArgs) -> anyhow::Result<()> {
         let mut removes = JoinSet::new();
         for id in &ids {
             let (client, id) = (client.clone(), *id);
-            removes.spawn(async move { client.call(&Request::Remove { id }).await });
+            removes.spawn(async move {
+                client
+                    .call(&Request::Remove {
+                        id,
+                        generation: None,
+                    })
+                    .await
+            });
         }
         while let Some(result) = removes.join_next().await {
             expect_done(result??)?;
         }
     }
+    Ok(())
+}
+
+/// Refuses a huge-page memory profile on a host without a reserved pool of
+/// 2 MiB pages: every VM's memory would fail to allocate.
+/// Lets the agent hold as many open files as the system allows it. Every VM
+/// keeps several open here (its process, pager, image files and store
+/// connections), so the usual soft limit of 1024 runs out near a hundred
+/// VMs.
+fn raise_open_file_limit() {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let limit = getrlimit(Resource::Nofile);
+    if limit.current == limit.maximum {
+        return;
+    }
+    let raised = Rlimit {
+        current: limit.maximum,
+        maximum: limit.maximum,
+    };
+    match setrlimit(Resource::Nofile, raised) {
+        Ok(()) => tracing::info!(limit = ?limit.maximum, "open-file limit raised"),
+        Err(error) => {
+            tracing::warn!(%error, current = ?limit.current, "could not raise the open-file limit");
+        }
+    }
+}
+
+fn check_huge_pages(profile: MemoryProfile) -> anyhow::Result<()> {
+    if profile.pages != compute_engine::PageSize::Huge {
+        return Ok(());
+    }
+    let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
+    let field = |name: &str| {
+        meminfo
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    if field("Hugepagesize:") != 2048 {
+        bail!("the {profile} memory profile needs 2 MiB default huge pages");
+    }
+    let total = field("HugePages_Total:");
+    if total == 0 {
+        bail!(
+            "the {profile} memory profile needs reserved huge pages; set /proc/sys/vm/nr_hugepages"
+        );
+    }
+    tracing::info!(
+        pool_mib = total * 2,
+        free_mib = field("HugePages_Free:") * 2,
+        "huge-page pool"
+    );
     Ok(())
 }
