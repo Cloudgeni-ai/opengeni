@@ -32,6 +32,27 @@ const PROCESS_QUERY_TIMEOUT_MS = 2_000;
 const MAX_PROCESS_QUERY_BYTES = 8 * 1024;
 const CHROME_STDERR_DIAGNOSTIC_BYTES = 64 * 1024;
 
+/** Chromium features every managed browser turns off. Chromium honors only
+ * the last `--disable-features` switch, agent-browser sends its own, and its
+ * launch-argument list splits on commas, so the launch wrapper appends this
+ * one complete switch after every other argument. */
+const MANAGED_CHROME_DISABLED_FEATURES = [
+  // agent-browser's own default, which any later switch would re-enable.
+  "Translate",
+  // Component-update suppression does not stop Chromium's on-demand local
+  // model downloads. Managed profiles must not each fetch gigabytes of AI
+  // weights; Opengeni's model provider is independent of Chrome's local AI.
+  "OptimizationGuideOnDeviceModel",
+  // The address-bar suggestion popups are WebUI pages that Chrome preloads
+  // into two dedicated renderers (about 200 MB) for the browser's lifetime.
+  // Nothing types into a managed browser's address bar, and Chrome falls back
+  // to its native popup. Pages cannot observe the difference.
+  "WebUIOmniboxPopup",
+  "WebUIOmniboxAimPopup",
+] as const;
+
+export const MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT = `--disable-features=${MANAGED_CHROME_DISABLED_FEATURES.join(",")}`;
+
 export type AgentBrowserEnvelope<T = unknown> = {
   success: boolean;
   data: T | null;
@@ -746,7 +767,8 @@ async function managedBrowserLaunch(
  * reader consumes stderr and retains only the last bounded diagnostic bytes.
  *
  * Fixed Chrome arguments that agent-browser cannot carry (its argument list
- * is comma-separated, and a User-Agent contains commas) are added here too.
+ * is comma-separated, and a User-Agent contains commas) are added here too,
+ * and so is the managed browser's complete disabled-feature list.
  *
  * With a reachable systemd user manager the wrapper first re-executes itself
  * through `systemd-run --scope`, which execs in place: the PID agent-browser
@@ -782,11 +804,12 @@ async function chromeStderrDrainWrapper(
       ? `if [ "\${${BROWSER_SCOPE_MARKER}:-}" != ${shellQuote(scope.unit)} ]; then\n  ${BROWSER_SCOPE_MARKER}=${shellQuote(scope.unit)} exec ${shellQuote(scopeLauncher.systemdRun)} --user --scope --quiet --collect --property=Delegate=yes --slice=${BROWSER_SCOPE_SLICE} --unit=${shellQuote(scope.unit)} -- ${shellQuote(wrapper)} "$@"\nfi\nunset ${BROWSER_SCOPE_MARKER}\n`
       : "";
   const fixed = fixedArguments.map((argument) => ` ${shellQuote(argument)}`).join("");
+  const trailing = ` ${shellQuote(MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT)}`;
   try {
     await runProcess(mkfifo, ["-m", "600", fifo]);
     await writeFile(
       wrapper,
-      `#!/bin/sh\numask 077\n${scopeEntry}${shellQuote(tail)} -c ${CHROME_STDERR_DIAGNOSTIC_BYTES} ${shellQuote(fifo)} > ${shellQuote(log)} 2>/dev/null &\nexec ${shellQuote(executable)}${fixed} "$@" 2>${shellQuote(fifo)}\n`,
+      `#!/bin/sh\numask 077\n${scopeEntry}${shellQuote(tail)} -c ${CHROME_STDERR_DIAGNOSTIC_BYTES} ${shellQuote(fifo)} > ${shellQuote(log)} 2>/dev/null &\nexec ${shellQuote(executable)}${fixed} "$@"${trailing} 2>${shellQuote(fifo)}\n`,
       { mode: 0o700, flag: "wx" },
     );
     await chmod(wrapper, 0o700);
@@ -1603,9 +1626,9 @@ export function browserLaunchArguments(
     "--disable-field-trial-config",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
-    // Component-update suppression does not stop Chromium's on-demand local
-    // model downloads. Managed profiles must not each fetch gigabytes of AI
-    // weights; Opengeni's model provider is independent of Chrome's local AI.
+    // Chromium's on-demand local AI model downloads (see
+    // MANAGED_CHROME_DISABLED_FEATURES). Launches through the stderr wrapper
+    // replace this switch with the complete list; the rest keep this one.
     "--disable-features=OptimizationGuideOnDeviceModel",
     // Chromium's free-disk-derived default can retain gigabytes per actor.
     // Bound disposable HTTP caching without limiting cookies or site storage.

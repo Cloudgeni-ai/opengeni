@@ -529,7 +529,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // That tab stays in the inventory for the user to close; startup selects
       // the first live tab instead, and only creates one when none is live.
       let page: TargetInfo | undefined;
-      for (const candidate of visiblePageTargets(await this.targetInfos(connection))) {
+      const initialTargets = await this.targetInfos(connection);
+      for (const candidate of visiblePageTargets(initialTargets)) {
         try {
           await this.ensureTargetState(candidate);
         } catch (error) {
@@ -551,6 +552,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         page = await this.waitForCreatedTargetInfo(connection, created.targetId);
       }
       target = page;
+      this.closeStartupNewTabPages(connection, initialTargets, page.targetId);
     }
     this.selectedTargetId = target.targetId;
     if (deferNavigation) {
@@ -666,6 +668,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     } catch {
       // Best effort: the tab may already be gone, and the original failure
       // is what the caller needs to see.
+    }
+  }
+
+  /** A managed Chrome opens its own new-tab page at launch beside the page
+   * the driver uses. Tab lists hide it, yet it keeps a renderer for the page
+   * and another for its embedded Google bar alive for the browser's lifetime.
+   * Close it in the background; startup does not wait for the close. */
+  private closeStartupNewTabPages(
+    connection: BrowserCdpConnection,
+    targets: readonly TargetInfo[],
+    selectedTargetId: string,
+  ): void {
+    for (const info of targets) {
+      if (info.type !== "page" || info.targetId === selectedTargetId) continue;
+      if (info.url !== "chrome://newtab/" && info.url !== "chrome://new-tab-page/") continue;
+      this.removeState(info.targetId);
+      void connection.send("Target.closeTarget", { targetId: info.targetId }).catch(() => {});
     }
   }
 
