@@ -18,6 +18,7 @@ function fixture(
       if (options.setupError) throw options.setupError;
       return [
         {
+          resolved_account_id: context.accountId,
           account_id: context.accountId,
           workspace_id: context.workspaceId,
           subject_id: "",
@@ -28,6 +29,17 @@ function fixture(
           agent_root_session_id: "",
           site_id: "",
           site_viewer_principal: "",
+          // A nested scope's enclosing settings (read by the same statement).
+          parent_account_id: context.accountId,
+          parent_workspace_id: context.workspaceId,
+          parent_subject_id: "",
+          parent_private_file_owner: "",
+          parent_initiating_human_subject_id: "",
+          parent_personal_resource_human_subject_id: "",
+          parent_personal_resource_actor_subject_id: "",
+          parent_agent_root_session_id: "",
+          parent_site_id: "",
+          parent_site_viewer_principal: "",
         },
       ];
     },
@@ -63,7 +75,13 @@ describe("opt-in scoped DB timing", () => {
       entered = resolve;
     });
     const tx = {
-      execute: async () => [{ account_id: context.accountId, workspace_id: context.workspaceId }],
+      execute: async () => [
+        {
+          resolved_account_id: context.accountId,
+          account_id: context.accountId,
+          workspace_id: context.workspaceId,
+        },
+      ],
     } as unknown as Database;
     const db = {
       transaction: async (work: (db: Database) => Promise<unknown>) => {
