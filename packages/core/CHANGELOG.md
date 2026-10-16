@@ -1,5 +1,41 @@
 # @opengeni/core
 
+## 3.4.0
+
+### Patch Changes
+
+- acc2718: Preserve the caller's actor scope while building a capability catalog inside a transaction, so prepared MCP setup persists its replay receipt. Roll back completion writes if the receipt cannot be saved instead of reporting success.
+- 3418893: Report authorized browser and computer entry tools as upfront in the effective tool projection, matching the runtime's progressive disclosure behavior.
+- 8d93488: Session authorization reads everything it needs in one database round trip. Authorizing an agent's action on its own session used to make five sequential scoped reads (Slack ownership, the session's authority, the full caller session with its event cursor and connector metadata, the live attempt's turn with its goal snapshot, and the target identity), about 37 statements. One scoped statement now returns the target's authority and Slack ownership together with the caller session and its live attempt turn, so the check is BEGIN, setup, read and COMMIT. Every fact comes from the same snapshot and the same RLS visibility, and every denial (missing or hidden target, stale or forged attempt, ended attempt, revoked linked authority, Slack-private ownership, private sessions, cross-tree reach and host decisions) is decided exactly as before.
+- Updated dependencies [28844d8]
+- Updated dependencies [a544972]
+- Updated dependencies [0ed367a]
+- Updated dependencies [fbb2765]
+- Updated dependencies [acc2718]
+- Updated dependencies [462fa87]
+- Updated dependencies [2f370c3]
+- Updated dependencies [ad17c9e]
+- Updated dependencies [cac0334]
+- Updated dependencies [33bf04d]
+- Updated dependencies [8d93488]
+- Updated dependencies [c594c1d]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+- Updated dependencies [8053c9b]
+  - @opengeni/contracts@3.4.0
+  - @opengeni/runtime@3.4.0
+  - @opengeni/db@3.4.0
+  - @opengeni/config@3.4.0
+  - @opengeni/capabilities@3.4.0
+  - @opengeni/codex@3.4.0
+  - @opengeni/documents@3.4.0
+  - @opengeni/events@3.4.0
+  - @opengeni/observability@3.4.0
+  - @opengeni/storage@3.4.0
+  - @opengeni/vaults@3.4.0
+  - @opengeni/network@3.4.0
+
 ## 3.3.0
 
 ### Patch Changes

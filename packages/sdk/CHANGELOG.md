@@ -1,5 +1,24 @@
 # @opengeni/sdk
 
+## 3.4.0
+
+### Minor Changes
+
+- c594c1d: The session list can show only your workstreams. `mineOnly=true` (with `view=page`; SDK `listSessionPage`/`listSessionSummaryPage` `mineOnly`, React `useWorkspaceSessions` `mineOnly`) keeps a workstream when any session in its tree was created by you or received a message you sent directly; agent-relayed messages and service turns do not count. Matching roots list their children in full, totals follow the filter, and the response echoes `mineOnly: true`. The web sidebar's view menu adds an "Only mine" option. A new online index (`session_turns_human_prompt_subject_idx`, built concurrently in rolling migration 0799) keeps the probe to one index lookup per tree session.
+- 7998676: Add an inert subscription-plan catalog, organization plan state, non-rollover period credit accounting, and database-enforced human seat caps. Expose optional plan funding and seat information in billing balances without enrolling existing organizations.
+- 7998676: Add default-off organization subscription checkout, paid-invoice plan synchronization, immediate paid upgrades, period-end changes/cancellation, and hosted portal endpoints with typed SDK methods. Serialize Stripe customer creation across billing entry points and recover duplicate subscriptions without treating their payments as prepaid credit purchases.
+
+### Patch Changes
+
+- 28844d8: Opening a new browser makes two fewer API round trips. A create that launches the browser now returns `initialView` with the tab inventory and the opened tab's observation exactly as the controller produced them, so an agent's browser_open no longer lists targets and observes again. Replayed, failed and older-controller creates omit it, and callers fall back to reading as before. The tool result the model sees is unchanged.
+- 60191f6: No API changes. Republishes the 3.3.0 packages on a main whose CI is green again: Site test fixtures and the generated MCP action catalog are aligned, the desktop artifact browser test is mapped in the change-impact plan, and changesets that name only ignored packages no longer block Version PRs.
+- Updated dependencies [28844d8]
+- Updated dependencies [c594c1d]
+- Updated dependencies [7998676]
+- Updated dependencies [7998676]
+  - @opengeni/contracts@3.4.0
+  - @opengeni/connect@3.4.0
+
 ## 3.3.0
 
 ### Minor Changes
