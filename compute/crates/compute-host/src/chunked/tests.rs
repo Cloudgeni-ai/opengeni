@@ -243,11 +243,13 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
         memory_len,
         chunks: map,
         manifest,
+        prefilled,
     } = store.fetch(sandbox, &into).await.unwrap()
     else {
         panic!("memory should stay in the store");
     };
     assert_eq!(memory_len, big);
+    assert!(prefilled.is_none(), "an unusable profile packs nothing");
     assert_eq!(
         fs::read(&saved.disk).unwrap(),
         fs::read(&into.disk).unwrap()
@@ -269,6 +271,97 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
     assert!(!store.verify(sandbox, &second).await.unwrap());
     let gone = store.fetch(sandbox, &into).await.unwrap_err();
     assert_eq!(gone.kind, ErrorKind::Fatal);
+}
+
+#[tokio::test]
+async fn a_wake_brings_its_working_set_back_with_the_state() {
+    const PAGE: u64 = 4096;
+    let dir = tempfile::tempdir().unwrap();
+    let mut saved = files(dir.path(), true);
+    let big = 4 * CHUNK_BYTES;
+    sparse(&saved.disk, CHUNK_BYTES, &[(0, b"disk")]);
+    let snapshot = saved.memory.clone().unwrap();
+    sparse(&snapshot.state, 10, &[(0, b"state")]);
+    sparse(
+        &snapshot.memory,
+        big,
+        &[
+            (0, b"first"),
+            (2 * CHUNK_BYTES, b"x"),
+            (2 * CHUNK_BYTES + PAGE, b"y"),
+            (CHUNK_BYTES, b"cold"),
+        ],
+    );
+    // The guest touched these first after its last wake; the third is zeros.
+    let learned = WakeProfile {
+        version: 1,
+        offsets: vec![2 * CHUNK_BYTES, 0, 3 * CHUNK_BYTES, 2 * CHUNK_BYTES + PAGE],
+        page_size: PAGE,
+    };
+    fs::write(
+        dir.path().join("profile"),
+        serde_json::to_vec(&learned).unwrap(),
+    )
+    .unwrap();
+    saved.profile = Some(dir.path().join("profile"));
+    let store = Chunked::new(ChunkStore::new(
+        Arc::new(InMemory::new()),
+        ObjectPath::from("t"),
+    ));
+    let sandbox = id("0123456789abcdef0123456789abcdef");
+    store
+        .archive(sandbox, &saved, &CancellationToken::new())
+        .await
+        .unwrap()
+        .stored()
+        .unwrap();
+
+    let restored = tempfile::tempdir().unwrap();
+    let into = into(restored.path(), true);
+    let FetchedMemory::Remote {
+        state,
+        memory_len,
+        chunks: map,
+        manifest,
+        prefilled: Some(prefilled),
+    } = store.fetch(sandbox, &into).await.unwrap()
+    else {
+        panic!("the working set should come back with the state");
+    };
+    assert_eq!(
+        prefilled.pages,
+        [
+            0..PAGE,
+            2 * CHUNK_BYTES..2 * CHUNK_BYTES + 2 * PAGE,
+            3 * CHUNK_BYTES..3 * CHUNK_BYTES + PAGE
+        ]
+    );
+    let original = fs::read(&snapshot.memory).unwrap();
+    let fetched = fs::read(&prefilled.memory).unwrap();
+    assert_eq!(fetched.len() as u64, big);
+    for range in &prefilled.pages {
+        let range = usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap();
+        assert_eq!(fetched[range.clone()], original[range]);
+    }
+    // Nothing outside the working set is there yet.
+    let cold = usize::try_from(CHUNK_BYTES).unwrap();
+    assert_eq!(&fetched[cold..cold + 4], &[0; 4]);
+
+    // Published as a remote image, it keeps what was filled.
+    let images = crate::image::Images::new(restored.path().join("images"));
+    let image = images
+        .publish(crate::image::Parts::Remote {
+            state: &state,
+            memory_len,
+            chunks: crate::image::ChunkMap(map),
+            manifest: &manifest,
+            prefilled: Some(&prefilled),
+        })
+        .unwrap();
+    assert_eq!(images.filled(&image).unwrap(), prefilled.pages);
+    assert!(!prefilled.memory.exists(), "the file was moved in");
+    let memory = fs::read(images.memory(image.generation())).unwrap();
+    assert_eq!(memory, fetched);
 }
 
 #[tokio::test]

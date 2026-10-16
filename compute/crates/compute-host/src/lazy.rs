@@ -8,13 +8,14 @@
 //! memory is still in object storage, fetched chunk by chunk as the guest
 //! touches it.
 //!
-//! A remote wake runs in three overlapping phases:
+//! A remote wake runs in three overlapping phases, after the fetch has
+//! brought in the image's working-set pack (see [`crate::working_set`]):
 //!
 //! 1. **Prefetch.** The pages the guest touched after its previous wake
-//!    (its learned profile, in first-touch order) are requested as soon as
-//!    the source exists, before the VMM even starts. The guest resumes once
-//!    the first [`READY_BYTES`] of them are in place; the rest stream in
-//!    behind it, still ahead of hydration.
+//!    (its learned profile, in first-touch order) are installed as soon as
+//!    the VMM connects: those the pack filled at once, the rest fetched.
+//!    The guest resumes once the first [`READY_BYTES`] of them are in
+//!    place; the rest stream in behind it, still ahead of hydration.
 //! 2. **Demand.** Any other page the guest touches is fetched at once,
 //!    ahead of everything else, with a few chunks after it; the fault
 //!    waits only for its own chunk.
@@ -26,7 +27,10 @@
 //! Fetched chunks land in the image's own memory file, which is also the
 //! source's cache. Every chunk read from the store is checked against its
 //! content hash (see [`compute_storage::store::ChunkStore::get_chunk`]) and
-//! against the image's chunk map.
+//! against the image's chunk map. Pages the pack filled are never written
+//! again: every one is compared with the chunk that holds it when that
+//! chunk arrives, and a chunk the pack filled entirely is hashed in place
+//! instead of fetched, so a pack that disagrees with the image is caught.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -45,10 +49,10 @@ use futures::FutureExt as _;
 use futures::future::{BoxFuture, Shared};
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use memmap2::{Mmap, MmapOptions};
-use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, mpsc, watch};
 
 use crate::image::{CHUNK_BYTES, Hash, ZERO, chunk_count, chunk_range};
+use crate::working_set::{PageSet, READY_BYTES, WakeProfile};
 
 /// Chunk fetches in flight per VM for demand and prefetch.
 const FOREGROUND_PER_VM: usize = 64;
@@ -74,8 +78,6 @@ const CACHE_BYTES: usize = 1 << 30;
 const RETRY_FOR: Duration = Duration::from_secs(60);
 /// The longest pause between two tries of a chunk.
 const RETRY_DELAY_MAX: Duration = Duration::from_secs(2);
-/// Most pages a learned profile keeps.
-const PROFILE_PAGES: usize = 1 << 16;
 /// How long a pager waits for its VMM to connect.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the first-touch order is recorded after a wake. A VM that
@@ -84,10 +86,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// seconds to reach the working set the next wake should prefetch, so it
 /// is generous; the profile's order keeps the earliest pages first.
 const RECORD_FOR: Duration = Duration::from_secs(120);
-/// How much of the learned profile a wake waits for before the guest
-/// resumes. More is prefetched behind it, but a guest that only needs the
-/// start of its working set to answer should not wait for all of it.
-const READY_BYTES: u64 = 128 << 20;
 
 type Fetched = Result<Arc<Vec<u8>>, Arc<compute_storage::Error>>;
 
@@ -237,6 +235,9 @@ pub(crate) struct Hydration {
     present: Vec<AtomicBool>,
     requested: Vec<AtomicU8>,
     missing: AtomicUsize,
+    /// Pages the working-set pack filled before the VM started: readable
+    /// at once and never written again.
+    filled: PageSet,
     /// Signalled whenever chunks arrive; the pager waits on it.
     arrived: OwnedFd,
     requests: mpsc::UnboundedSender<Request>,
@@ -249,13 +250,14 @@ pub(crate) struct Hydration {
 impl Hydration {
     /// Starts filling `memory` (a sparse file of the image's full length)
     /// from `refs`, the chunk at each position, checked against `hashes`,
-    /// the image's chunk map. `first` are image offsets to fetch at once,
-    /// in order.
+    /// the image's chunk map. `filled` are the pages already in the file;
+    /// `first` are image offsets to fetch at once, in order.
     pub fn start(
         fetcher: Arc<Fetcher>,
         memory: &Path,
         refs: Vec<Option<ChunkRef>>,
         hashes: Vec<Hash>,
+        filled: PageSet,
         first: &[u64],
     ) -> io::Result<Arc<Self>> {
         let file = std::fs::OpenOptions::new()
@@ -289,6 +291,7 @@ impl Hydration {
             present,
             requested: (0..count).map(|_| AtomicU8::new(NOT_ASKED)).collect(),
             missing: AtomicUsize::new(missing),
+            filled,
             arrived,
             requests,
             failure: Mutex::new(None),
@@ -299,7 +302,7 @@ impl Hydration {
             hydration.done.send_replace(Some(Ok(())));
         }
         for offset in first {
-            if *offset < len {
+            if *offset < len && !hydration.filled.covers(*offset..*offset + 1) {
                 hydration.ask(usize::try_from(offset / CHUNK_BYTES).unwrap_or(0), false);
             }
         }
@@ -346,6 +349,8 @@ impl Hydration {
         });
     }
 
+    /// Writes chunk `index`, fetched as `plain`, around the pages already
+    /// filled, which must hold the same bytes.
     fn store(&self, index: usize, plain: &[u8]) -> Result<(), Unavailable> {
         let range = chunk_range(index, self.len);
         if plain.len() as u64 != range.end - range.start {
@@ -358,15 +363,55 @@ impl Hydration {
                 "chunk {index} does not match the image's chunk map"
             )));
         }
+        let failed = |error: io::Error| Unavailable::passing(format!("chunk {index}: {error}"));
+        let within = |at: u64| usize::try_from(at - range.start).unwrap_or(usize::MAX);
+        for (run, filled) in self.filled.runs(range.clone()) {
+            let Some(bytes) = plain.get(within(run.start)..within(run.end)) else {
+                return Err(Unavailable::permanent(format!(
+                    "chunk {index} has the wrong length"
+                )));
+            };
+            if filled {
+                let mut held = vec![0; bytes.len()];
+                self.file
+                    .read_exact_at(&mut held, run.start)
+                    .map_err(failed)?;
+                if held != bytes {
+                    return Err(Unavailable::permanent(format!(
+                        "pages the working-set pack filled differ from chunk {index}"
+                    )));
+                }
+            } else {
+                self.file.write_all_at(bytes, run.start).map_err(failed)?;
+            }
+        }
+        self.arrived(index);
+        Ok(())
+    }
+
+    /// Checks chunk `index`, which the pack filled entirely, against the
+    /// image's chunk map in place, instead of fetching it.
+    fn check_filled(&self, index: usize) -> Result<(), Unavailable> {
+        let range = chunk_range(index, self.len);
+        let mut held = vec![0; usize::try_from(range.end - range.start).unwrap_or(0)];
         self.file
-            .write_all_at(plain, range.start)
-            .map_err(|error| Unavailable::passing(format!("writing chunk {index}: {error}")))?;
+            .read_exact_at(&mut held, range.start)
+            .map_err(|error| Unavailable::passing(format!("chunk {index}: {error}")))?;
+        if *blake3::hash(&held).as_bytes() != self.hashes[index] {
+            return Err(Unavailable::permanent(format!(
+                "pages the working-set pack filled differ from chunk {index}"
+            )));
+        }
+        self.arrived(index);
+        Ok(())
+    }
+
+    fn arrived(&self, index: usize) {
         self.present[index].store(true, Ordering::Release);
         if self.missing.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.done.send_replace(Some(Ok(())));
         }
         self.signal();
-        Ok(())
     }
 
     fn fail(&self, why: Unavailable) {
@@ -477,6 +522,17 @@ fn fetch_one(
         let Some(reference) = hydration.refs[index].clone() else {
             return (index, Ok(()));
         };
+        if hydration.filled.covers(chunk_range(index, hydration.len)) {
+            let checking = Arc::clone(&hydration);
+            let checked = tokio::task::spawn_blocking(move || checking.check_filled(index))
+                .await
+                .unwrap_or_else(|error| {
+                    Err(Unavailable::passing(format!(
+                        "checking chunk {index}: {error}"
+                    )))
+                });
+            return (index, checked);
+        }
         let started = tokio::time::Instant::now();
         let mut delay = Duration::from_millis(50);
         loop {
@@ -525,9 +581,10 @@ pub(crate) struct ChunkSource {
 
 impl ChunkSource {
     pub fn new(hydration: Arc<Hydration>) -> io::Result<Self> {
-        // SAFETY: the memory file is only ever written in whole chunks that
-        // were not yet present, and read only once present, so no byte is
-        // read while it changes; the file's length never changes.
+        // SAFETY: a byte of the memory file is read only once it is filled
+        // or its chunk is present, and never written after that: chunks are
+        // written once, around the filled pages. So no byte is read while
+        // it changes, and the file's length never changes.
         let map = unsafe { MmapOptions::new().map(&hydration.file)? };
         Ok(Self { hydration, map })
     }
@@ -547,6 +604,11 @@ impl Source for ChunkSource {
             .checked_add(len)
             .filter(|end| *end <= hydration.len && len > 0)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "range outside image"))?;
+        let start = usize::try_from(offset).map_err(io::Error::other)?;
+        let stop = usize::try_from(end).map_err(io::Error::other)?;
+        if hydration.filled.covers(offset..end) {
+            return Ok(self.map.get(start..stop));
+        }
         let first = usize::try_from(offset / CHUNK_BYTES).unwrap_or(usize::MAX);
         let last = usize::try_from((end - 1) / CHUNK_BYTES).unwrap_or(usize::MAX);
         let mut ready = true;
@@ -559,8 +621,6 @@ impl Source for ChunkSource {
         if !ready {
             return Ok(None);
         }
-        let start = usize::try_from(offset).map_err(io::Error::other)?;
-        let stop = usize::try_from(end).map_err(io::Error::other)?;
         Ok(self.map.get(start..stop))
     }
 
@@ -610,45 +670,6 @@ impl Source for Memory {
         match self {
             Self::Local(source) => source.acknowledge(),
             Self::Remote(source) => source.acknowledge(),
-        }
-    }
-}
-
-/// The pages a guest touched first after a wake, in order, as image
-/// offsets. Prefetched before the next wake.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct WakeProfile {
-    pub version: u32,
-    pub offsets: Vec<u64>,
-}
-
-impl WakeProfile {
-    /// Reads a profile, or an empty one if there is none or it is unusable.
-    pub fn load(path: &Path) -> Self {
-        std::fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Self>(&bytes).ok())
-            .filter(|profile| profile.version == 1)
-            .unwrap_or_default()
-    }
-
-    /// The profile after a wake that prefetched `self` and then faulted on
-    /// `touched`: pages prefetched never fault, so the old order is kept and
-    /// new pages follow it, up to a bound.
-    #[must_use]
-    pub fn learn(&self, touched: &[u64]) -> Self {
-        let mut seen = std::collections::HashSet::new();
-        let offsets = self
-            .offsets
-            .iter()
-            .chain(touched)
-            .copied()
-            .filter(|offset| seen.insert(*offset))
-            .take(PROFILE_PAGES)
-            .collect();
-        Self {
-            version: 1,
-            offsets,
         }
     }
 }
@@ -826,12 +847,17 @@ fn serve(
     let (ready, rest) = plan.split_at(ready_prefix(&plan, READY_BYTES));
     pager.queue_prefetch(ready, MAX_BATCH)?;
     pager.queue_background(rest)?;
+    let page_size = pager
+        .layout()
+        .regions()
+        .first()
+        .map_or(0, |region| region.page_size);
     let result = pager.run(stop, |progress| match progress {
         Progress::Prefetched => {
             let _ = prefetched.send(true);
         }
         Progress::Recorded(touched) => {
-            let next = profile.learn(touched);
+            let next = profile.learn(touched, page_size);
             if let Ok(bytes) = serde_json::to_vec(&next) {
                 let _ = crate::layout::write_atomic(learned, &bytes);
             }
@@ -895,20 +921,88 @@ mod tests {
         assert_eq!(ready_prefix(&pages(&[2 << 20; 4]), 4 << 20), 2);
     }
 
-    #[test]
-    fn learning_keeps_the_old_order_first_and_bounds_the_profile() {
-        let old = WakeProfile {
-            version: 1,
-            offsets: vec![8192, 0],
-        };
-        let next = old.learn(&[4096, 0, 12288]);
-        assert_eq!(next.offsets, vec![8192, 0, 4096, 12288]);
-        let many: Vec<u64> = (0..2 * PROFILE_PAGES as u64)
-            .map(|page| page * 4096)
+    const PAGE: u64 = 4096;
+
+    /// Hydrates a three-chunk image whose chunk 1 is never stored, with
+    /// `filled` written into the memory file first by `prefill`.
+    async fn hydrate(
+        filled: &[std::ops::Range<u64>],
+        prefill: impl Fn(&File, &[Vec<u8>]),
+    ) -> (Result<(), Unavailable>, Vec<u8>, Vec<u8>) {
+        let chunk = usize::try_from(CHUNK_BYTES).unwrap();
+        let plain: Vec<Vec<u8>> = (1..=3_u8).map(|fill| vec![fill; chunk]).collect();
+        let backend = Arc::new(object_store::memory::InMemory::new());
+        let chunks = ChunkStore::new(backend, object_store::path::Path::from("p"));
+        let encoded: Vec<_> = plain
+            .iter()
+            .map(|bytes| compute_storage::chunk::EncodedChunk::encode(bytes, 1).unwrap())
             .collect();
-        assert_eq!(
-            WakeProfile::default().learn(&many).offsets.len(),
-            PROFILE_PAGES
-        );
+        for (index, chunk) in encoded.iter().enumerate() {
+            if index != 1 {
+                chunks.put_chunk(chunk).await.unwrap();
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory");
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(3 * CHUNK_BYTES).unwrap();
+        prefill(&file, &plain);
+        let hydration = Hydration::start(
+            Arc::new(Fetcher::new(chunks)),
+            &path,
+            encoded
+                .iter()
+                .map(|chunk| Some(chunk.reference.clone()))
+                .collect(),
+            plain.iter().map(|bytes| chunk_hash(bytes)).collect(),
+            PageSet::new(filled),
+            &[],
+        )
+        .unwrap();
+        let finished = tokio::time::timeout(Duration::from_secs(10), hydration.finished())
+            .await
+            .unwrap_or_else(|_| Err(Unavailable::passing("still hydrating".to_owned())));
+        let mut held = vec![0; 3 * chunk];
+        file.read_exact_at(&mut held, 0).unwrap();
+        (finished, held, plain.concat())
+    }
+
+    #[tokio::test]
+    async fn filled_pages_are_kept_and_a_filled_chunk_is_checked_in_place() {
+        let filled = [0..PAGE, CHUNK_BYTES..2 * CHUNK_BYTES];
+        let (finished, held, image) = hydrate(&filled, |file, plain| {
+            file.write_all_at(&plain[0][..4096], 0).unwrap();
+            file.write_all_at(&plain[1], CHUNK_BYTES).unwrap();
+        })
+        .await;
+        finished.unwrap();
+        assert_eq!(held, image);
+    }
+
+    #[tokio::test]
+    async fn filled_pages_that_differ_from_their_chunk_fail_for_good() {
+        // A wrong page in a chunk that is fetched.
+        let filled = [PAGE..2 * PAGE, CHUNK_BYTES..2 * CHUNK_BYTES];
+        let (finished, _, _) = hydrate(&filled, |file, plain| {
+            file.write_all_at(&[9; 4096], PAGE).unwrap();
+            file.write_all_at(&plain[1], CHUNK_BYTES).unwrap();
+        })
+        .await;
+        assert!(finished.unwrap_err().permanent);
+        // A wrong byte in a chunk filled whole, which is not fetched.
+        let (finished, _, _) = hydrate(
+            std::slice::from_ref(&(CHUNK_BYTES..2 * CHUNK_BYTES)),
+            |file, plain| {
+                file.write_all_at(&plain[1], CHUNK_BYTES).unwrap();
+                file.write_all_at(&[9], CHUNK_BYTES + 100).unwrap();
+            },
+        )
+        .await;
+        assert!(finished.unwrap_err().permanent);
     }
 }

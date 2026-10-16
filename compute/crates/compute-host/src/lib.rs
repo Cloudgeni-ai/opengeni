@@ -25,11 +25,13 @@ mod server;
 mod state;
 mod step;
 mod store;
+mod working_set;
 
 pub use agent::{BusyRule, Handle, HostAgent, HostConfig, HostError, Lease};
 pub use chunked::{CHUNK_BYTES, Chunked};
 pub use guest_ports::{GuestPort, Route};
 pub use server::serve;
 pub use store::{
-    Archive, Directory, FetchInto, FetchedMemory, NoStore, Receipt, SavedFiles, SavedImage, Store,
+    Archive, Directory, FetchInto, FetchedMemory, NoStore, Prefilled, Receipt, SavedFiles,
+    SavedImage, Store,
 };

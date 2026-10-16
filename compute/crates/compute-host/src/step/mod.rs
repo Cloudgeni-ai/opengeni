@@ -39,11 +39,13 @@ use serde::{Deserialize, Serialize};
 use crate::image::{Generation, Images, Parts, Suspect, Verified};
 use crate::layout::{Paths, link_kernel, remove_durably, remove_if_present, write_atomic};
 #[cfg(target_os = "linux")]
-use crate::lazy::{ChunkSource, Fetcher, Hydration, Memory, Paging, WakeProfile};
+use crate::lazy::{ChunkSource, Fetcher, Hydration, Memory, Paging};
 use crate::protocol::Id;
 use crate::restore_notice::tell_restored;
 use crate::state::{Change, Disk, Record, Records, StateError};
 use crate::store::{Receipt, Store};
+#[cfg(target_os = "linux")]
+use crate::working_set::{PageSet, WakeProfile};
 
 /// How long a restore waits for the guest to acknowledge the restore notice.
 /// A guest that listens answers in about a millisecond.
@@ -280,11 +282,13 @@ fn served_memory(
         EngineError::new(ErrorKind::MemoryLost, OP, "memory manifest not in chunks")
     })?;
     let hashes = images.chunk_map(image).map_err(io)?.0;
+    let filled = PageSet::new(&images.filled(image).map_err(io)?);
     let hydration = Hydration::start(
         Arc::clone(fetcher),
         &images.memory(generation),
         refs,
         hashes,
+        filled,
         first,
     )
     .map_err(io)?;

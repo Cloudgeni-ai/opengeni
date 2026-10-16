@@ -186,12 +186,14 @@ impl<E: Engine, S: Store> Job<E, S> {
                     memory_len,
                     chunks,
                     manifest,
+                    prefilled,
                 } => images
                     .publish(Parts::Remote {
                         state,
                         memory_len: *memory_len,
                         chunks: crate::image::ChunkMap(chunks.clone()),
                         manifest,
+                        prefilled: prefilled.as_ref(),
                     })
                     .map(Some),
             };

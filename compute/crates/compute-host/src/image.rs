@@ -14,6 +14,7 @@
 //!     memory                 guest memory, sparse
 //!     chunks                 BLAKE3 of each 256 KiB chunk of memory; zeros for a zero chunk
 //!     remote.json            only while memory is still in object storage: its manifest
+//!     filled                 memory ranges a working-set pack filled before hydration
 //!   <generation>.staging/    a generation being built; removed on recovery
 //!   quarantine/              suspect generations, kept for inspection, never used
 //! ```
@@ -40,6 +41,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::{remove_durably, write_atomic};
+use crate::store::Prefilled;
+use crate::working_set::{decode_filled, encode_filled};
 
 /// Bytes per memory chunk: the unit of hashing, upload and lazy fetch.
 pub const CHUNK_BYTES: u64 = 256 << 10;
@@ -56,6 +59,7 @@ const STATE: &str = "state";
 const MEMORY: &str = "memory";
 const CHUNKS: &str = "chunks";
 const REMOTE: &str = "remote.json";
+const FILLED: &str = "filled";
 const CURRENT: &str = "current";
 const QUARANTINE: &str = "quarantine";
 /// Quarantined generations kept per sandbox; older ones are removed so a
@@ -99,6 +103,10 @@ pub(crate) struct Meta {
     /// Whether the memory file is still being filled from object storage;
     /// `remote.json` then names the manifest the rest comes from.
     pub remote: bool,
+    /// BLAKE3 of the `filled` file, hex, when a fetch filled part of a
+    /// remote image's memory ahead of hydration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filled_hash: Option<String>,
 }
 
 /// Per-chunk hashes of a memory image.
@@ -189,12 +197,14 @@ pub(crate) enum Parts<'a> {
         diff: &'a Path,
     },
     /// Device state only; memory stays in object storage under `manifest`
-    /// (its JSON), to be paged in on demand.
+    /// (its JSON), to be paged in on demand, apart from what `prefilled`
+    /// already holds (its file is moved in).
     Remote {
         state: &'a Path,
         memory_len: u64,
         chunks: ChunkMap,
         manifest: &'a [u8],
+        prefilled: Option<&'a Prefilled>,
     },
 }
 
@@ -315,6 +325,12 @@ impl Images {
         if meta.remote && !dir.join(REMOTE).exists() {
             return Err(damaged("remote memory without its manifest".into()));
         }
+        if let Some(expected) = &meta.filled_hash {
+            let filled = fs::read(dir.join(FILLED))?;
+            if blake3::hash(&filled).to_hex().as_str() != expected {
+                return Err(damaged("filled ranges do not match their hash".into()));
+            }
+        }
         if depth == Depth::Deep && !meta.remote {
             let all: Vec<usize> = (0..chunks.0.len()).collect();
             let hashed = hash_chunks(&memory, meta.memory_len, &all)?;
@@ -332,6 +348,19 @@ impl Images {
             return Err(invalid("chunk map changed after it was verified"));
         }
         ChunkMap::decode(&bytes, image.meta.memory_len)
+    }
+
+    /// The memory ranges a fetch filled ahead of hydration in a verified
+    /// remote generation; none for any other.
+    pub fn filled(&self, image: &Verified) -> io::Result<Vec<Range<u64>>> {
+        let Some(expected) = &image.meta.filled_hash else {
+            return Ok(Vec::new());
+        };
+        let bytes = fs::read(self.path(image.generation()).join(FILLED))?;
+        if blake3::hash(&bytes).to_hex().as_str() != expected {
+            return Err(invalid("filled ranges changed after they were verified"));
+        }
+        decode_filled(&bytes, image.meta.memory_len)
     }
 
     /// The newest generation `current` names, if it passes a light check.
@@ -355,7 +384,7 @@ impl Images {
         }
         fs::create_dir(&staging)?;
         let memory = staging.join(MEMORY);
-        let (parent, state, memory_len, chunks, remote) = match parts {
+        let (parent, state, memory_len, chunks, remote, filled) = match parts {
             Parts::Whole {
                 state,
                 memory: whole,
@@ -365,7 +394,7 @@ impl Images {
                 let len = file.metadata()?.len();
                 let all: Vec<usize> = (0..chunk_count(len)).collect();
                 let chunks = ChunkMap(hash_chunks(&file, len, &all)?);
-                (None, state, len, chunks, None)
+                (None, state, len, chunks, None, None)
             }
             Parts::Diff { base, state, diff } => {
                 let parent = self.verify(base, Depth::Light)?;
@@ -383,17 +412,17 @@ impl Images {
                     chunks.0[*index] = hash;
                 }
                 fs::remove_file(diff)?;
-                (Some(base), state, len, chunks, None)
+                (Some(base), state, len, chunks, None, None)
             }
             Parts::Remote {
                 state,
                 memory_len,
                 chunks,
                 manifest,
+                prefilled,
             } => {
-                let file = File::create(&memory)?;
-                file.set_len(memory_len)?;
-                (None, state, memory_len, chunks, Some(manifest))
+                let filled = remote_memory(&memory, memory_len, prefilled)?;
+                (None, state, memory_len, chunks, Some(manifest), filled)
             }
         };
         move_in(state, &staging.join(STATE))?;
@@ -403,8 +432,10 @@ impl Images {
             return Err(invalid("chunk map does not cover memory").into());
         }
         write_synced(&staging.join(CHUNKS), &chunk_bytes)?;
-        if let Some(manifest) = remote {
-            write_synced(&staging.join(REMOTE), manifest)?;
+        for (name, bytes) in [(REMOTE, remote), (FILLED, filled.as_deref())] {
+            if let Some(bytes) = bytes {
+                write_synced(&staging.join(name), bytes)?;
+            }
         }
         let meta = Meta {
             version: VERSION,
@@ -415,6 +446,7 @@ impl Images {
             state_hash: blake3::hash(&state_bytes).to_hex().to_string(),
             chunks_hash: blake3::hash(&chunk_bytes).to_hex().to_string(),
             remote: remote.is_some(),
+            filled_hash: filled.map(|filled| blake3::hash(&filled).to_hex().to_string()),
         };
         write_synced(
             &staging.join(META),
@@ -456,6 +488,8 @@ impl Images {
         seal(&dir.join(MEMORY))?;
         let meta = Meta {
             remote: false,
+            // Every chunk is in place and checked, filled pages included.
+            filled_hash: None,
             ..image.meta.clone()
         };
         write_atomic(
@@ -463,6 +497,7 @@ impl Images {
             &serde_json::to_vec_pretty(&meta).map_err(io::Error::other)?,
         )?;
         remove_durably(&dir.join(REMOTE))?;
+        remove_durably(&dir.join(FILLED))?;
         self.verify(image.generation(), Depth::Light)
     }
 
@@ -755,6 +790,27 @@ fn move_in(from: &Path, to: &Path) -> io::Result<()> {
         }
         Err(error) => Err(error),
     }
+}
+
+/// Makes `memory` for a remote image of `memory_len` bytes: the file a
+/// fetch `prefilled`, moved in, or an empty sparse one. Returns the filled
+/// ranges as stored, if any.
+fn remote_memory(
+    memory: &Path,
+    memory_len: u64,
+    prefilled: Option<&Prefilled>,
+) -> io::Result<Option<Vec<u8>>> {
+    let Some(prefilled) = prefilled else {
+        File::create(memory)?.set_len(memory_len)?;
+        return Ok(None);
+    };
+    let filled = encode_filled(&prefilled.pages);
+    decode_filled(&filled, memory_len)?;
+    move_in(&prefilled.memory, memory)?;
+    if File::open(memory)?.metadata()?.len() != memory_len {
+        return Err(invalid("prefilled memory has the wrong length"));
+    }
+    Ok(Some(filled))
 }
 
 /// Makes a published file read-only and owned by the host agent, so a VMM
@@ -1095,6 +1151,7 @@ mod tests {
                 memory_len: LEN,
                 chunks,
                 manifest: b"{}",
+                prefilled: None,
             })
             .unwrap();
         assert!(image.meta().remote);

@@ -104,7 +104,20 @@ pub enum FetchedMemory {
         chunks: Vec<[u8; 32]>,
         /// The stored memory manifest (JSON), from which the chunks come.
         manifest: Vec<u8>,
+        /// What the fetch brought back of memory already: the working set
+        /// the guest touched first after its last wake.
+        prefilled: Option<Prefilled>,
     },
+}
+
+/// Part of a memory image brought back ahead of the rest.
+#[derive(Debug)]
+pub struct Prefilled {
+    /// A file of the image's full length, in the scratch directory, holding
+    /// the image's bytes in `pages` and zeros elsewhere.
+    pub memory: PathBuf,
+    /// The byte ranges filled, sorted, disjoint and 4 KiB-aligned.
+    pub pages: Vec<std::ops::Range<u64>>,
 }
 
 /// Somewhere that keeps sandboxes when the host does not.

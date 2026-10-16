@@ -13,12 +13,14 @@
 //! crash mid-archive leaves the previous copy intact. Memory and disk are
 //! named by the same pointer: they are only ever restored together.
 //!
-//! Fetching brings the disk and device state back whole but leaves memory
-//! in the store, to be paged in as the guest touches it (see
-//! [`crate::lazy`]). A disk starts as a copy (a reflink where the
-//! filesystem allows) of the host's base image it was created from, and
-//! only chunks that differ from the base at the same offset are downloaded:
-//! a sandbox that changed little of its disk wakes from local bytes.
+//! Fetching brings the disk and device state back whole, and of memory only
+//! the working set its guest touched first after the last wake (see
+//! [`crate::working_set`]); the rest stays in the store, to be paged in as
+//! the guest touches it (see [`crate::lazy`]). A disk starts as a copy (a
+//! reflink where the filesystem allows) of the host's base image it was
+//! created from, and only chunks that differ from the base at the same
+//! offset are downloaded: a sandbox that changed little of its disk wakes
+//! from local bytes.
 //!
 //! Chunks no pointer refers to any more are left for garbage collection,
 //! which is not part of this module.
@@ -44,7 +46,8 @@ use tokio::sync::{Mutex, Semaphore};
 pub use crate::image::CHUNK_BYTES;
 use crate::image::{Hash, ZERO, chunk_count, chunk_range, data_ranges, hash_chunks, overlaps};
 use crate::protocol::Id;
-use crate::store::{Archive, FetchInto, FetchedMemory, Receipt, SavedFiles, Store};
+use crate::store::{Archive, FetchInto, FetchedMemory, Prefilled, Receipt, SavedFiles, Store};
+use crate::working_set::{self, WakeProfile};
 
 /// Chunk uploads in flight per file.
 const UPLOADS_PER_FILE: usize = 32;
@@ -57,8 +60,8 @@ const TRANSFERS_PER_HOST: usize = 512;
 /// zstd level 1: measured nearly as small as higher levels at a fraction of
 /// the time, which matters because sleeping waits for it.
 const ZSTD_LEVEL: i32 = 1;
-/// Version 2 added the learned wake profile.
-const HEAD_VERSION: u32 = 2;
+/// Version 2 added the learned wake profile; version 3 its working-set pack.
+const HEAD_VERSION: u32 = 3;
 
 /// One chunk-sized piece of a stored file: where it is, and the chunk
 /// holding it (`None` for zeros).
@@ -74,6 +77,10 @@ struct Head {
     /// one chunk.
     #[serde(default)]
     profile: Option<ChunkRef>,
+    /// The memory pages at the start of that order, packed for one fetch:
+    /// the index chunk of a [`working_set`] pack.
+    #[serde(default)]
+    pack: Option<ChunkRef>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,6 +475,57 @@ impl Chunked {
         .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
         .map_err(|error| EngineError::io(OP, error))
     }
+
+    /// Brings the working-set pack `index` names into `memory` in
+    /// `scratch`, a file of the image's `memory_len` bytes. `None` if it
+    /// filled nothing: the wake then pages everything in by chunk.
+    /// `zero_chunks` says which of the image's chunks are zeros.
+    async fn fetch_pack(
+        &self,
+        index: &ChunkRef,
+        scratch: &Path,
+        memory_len: u64,
+        zero_chunks: &Arc<[bool]>,
+    ) -> Option<Prefilled> {
+        let path = scratch.join("memory");
+        let created = {
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || {
+                let file = File::create(&path)?;
+                file.set_len(memory_len)?;
+                Ok::<_, io::Error>(Arc::new(file))
+            })
+            .await
+            .unwrap_or_else(|error| Err(io::Error::other(error)))
+        };
+        let file = match created {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::warn!(%error, "no file for the working-set pack");
+                return None;
+            }
+        };
+        let pages = working_set::fetch(
+            &self.chunks,
+            &self.transfers,
+            index,
+            &file,
+            memory_len,
+            zero_chunks,
+        )
+        .await;
+        // Publishing the image makes the filled pages durable with it.
+        if pages.is_empty() {
+            let _ = tokio::fs::remove_file(&path).await;
+            return None;
+        }
+        let bytes: u64 = pages.iter().map(|range| range.end - range.start).sum();
+        tracing::debug!(bytes, ranges = pages.len(), "working-set pack brought back");
+        Some(Prefilled {
+            memory: path,
+            pages,
+        })
+    }
 }
 
 impl Store for Chunked {
@@ -507,17 +565,18 @@ impl Store for Chunked {
                 _ => None,
             })
         };
+        let learned = match &files.profile {
+            Some(path) => tokio::fs::read(path)
+                .await
+                .ok()
+                .filter(|bytes| !bytes.is_empty()),
+            None => None,
+        };
         let profile = async {
-            let Some(path) = &files.profile else {
+            let Some(bytes) = &learned else {
                 return Ok(None);
             };
-            let Ok(bytes) = tokio::fs::read(path).await else {
-                return Ok(None);
-            };
-            if bytes.is_empty() {
-                return Ok(None);
-            }
-            let chunk = EncodedChunk::encode(&bytes, ZSTD_LEVEL)
+            let chunk = EncodedChunk::encode(bytes, ZSTD_LEVEL)
                 .map_err(|error| storage_error(OP, error))?;
             self.chunks
                 .put_chunk(&chunk)
@@ -525,7 +584,31 @@ impl Store for Chunked {
                 .map_err(|error| storage_error(OP, error))?;
             Ok(Some(chunk.reference))
         };
-        let (disk, memory, profile) = tokio::join!(disk, memory, profile);
+        // Only makes the next wake faster: a pack that cannot be stored is
+        // left out.
+        let pack = async {
+            let (Some(image), Some(learned)) = (&files.memory, &learned) else {
+                return None;
+            };
+            let profile = WakeProfile::parse(learned);
+            match working_set::put(
+                &self.chunks,
+                &self.transfers,
+                &image.memory,
+                &profile,
+                cancel,
+            )
+            .await
+            {
+                Ok(index) => index,
+                Err(working_set::PackError::Cancelled) => None,
+                Err(error) => {
+                    tracing::warn!(%id, %error, "working-set pack not stored; the next wake fetches by chunk");
+                    None
+                }
+            }
+        };
+        let (disk, memory, profile, pack) = tokio::join!(disk, memory, profile, pack);
         let (Some(disk), Some(memory), profile) = (disk?, memory?, profile?) else {
             return Ok(Archive::Cancelled);
         };
@@ -537,6 +620,7 @@ impl Store for Chunked {
             disk,
             memory,
             profile,
+            pack,
         };
         let bytes = serde_json::to_vec(&head)
             .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
@@ -627,15 +711,28 @@ impl Store for Chunked {
                 .await
                 .map_err(|error| EngineError::io(OP, error))?;
             let state = into.scratch.join("state");
-            let manifest = async {
-                self.chunks
+            // The working set follows the manifest, which gives the image's
+            // length, while the state comes in beside both.
+            let memory = async {
+                let manifest = self
+                    .chunks
                     .get_manifest(&stored.memory)
                     .await
-                    .map_err(|error| storage_error(OP, error))
+                    .map_err(|error| storage_error(OP, error))?;
+                let refs = chunk_refs(&manifest);
+                let prefilled = match (&head.pack, &refs) {
+                    (Some(index), Some(refs)) => {
+                        let zero_chunks = refs.iter().map(Option::is_none).collect();
+                        self.fetch_pack(index, &into.scratch, manifest.disk_len, &zero_chunks)
+                            .await
+                    }
+                    _ => None,
+                };
+                Ok::<_, EngineError>((manifest, refs, prefilled))
             };
-            let ((), manifest) =
-                tokio::try_join!(self.get_file(&stored.state, &state, None), manifest)?;
-            if let Some(refs) = chunk_refs(&manifest) {
+            let ((), (manifest, refs, prefilled)) =
+                tokio::try_join!(self.get_file(&stored.state, &state, None), memory)?;
+            if let Some(refs) = refs {
                 let chunks = refs
                     .iter()
                     .map(|reference| {
@@ -655,6 +752,7 @@ impl Store for Chunked {
                     memory_len: manifest.disk_len,
                     chunks,
                     manifest: manifest_bytes,
+                    prefilled,
                 });
             }
             // A manifest not laid out in whole chunks cannot be paged in;
