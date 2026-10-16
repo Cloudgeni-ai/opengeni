@@ -1,17 +1,13 @@
-//! Content-addressed checkpoints for sleepable compute disks.
+//! Content-addressed storage of sandbox disks and memory images.
 //!
-//! The caller must supply an immutable, point-in-time disk view. Dirty tracking
-//! is a candidate filter, not a replacement for quiescing or snapshotting a disk.
-//! Object publication is separate from advancing the control-plane checkpoint.
+//! The caller must supply an immutable, point-in-time view of what it stores.
+//! Publishing objects is separate from advancing which stored copy is current;
+//! that pointer belongs to the host agent.
 
 pub mod chunk;
-pub mod dirty;
 #[cfg(test)]
 mod fake;
-#[cfg(target_os = "linux")]
-pub mod fiemap;
 pub mod fresh;
-pub mod lazy;
 pub mod manifest;
 pub mod store;
 pub mod sweep;

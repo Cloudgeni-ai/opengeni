@@ -107,44 +107,6 @@ impl DiskManifest {
     }
 }
 
-/// Process snapshots are not interchangeable merely because disks are portable.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RestoreClass {
-    pub architecture: String,
-    pub cpu_vendor: String,
-    pub cpu_model: String,
-    pub cpu_microcode: String,
-    pub cpu_template_digest: String,
-    pub kvm_capabilities_digest: String,
-    pub machine_config_digest: String,
-    pub host_kernel: String,
-    pub vmm_version: String,
-    pub guest_kernel_digest: String,
-}
-
-impl RestoreClass {
-    /// Conservative default. Relax only for an explicitly measured compatibility
-    /// matrix owned by the scheduler, never by comparing just CPUID features.
-    #[must_use]
-    pub fn compatible_with(&self, destination: &Self) -> bool {
-        [
-            &self.architecture,
-            &self.cpu_vendor,
-            &self.cpu_model,
-            &self.cpu_microcode,
-            &self.cpu_template_digest,
-            &self.kvm_capabilities_digest,
-            &self.machine_config_digest,
-            &self.host_kernel,
-            &self.vmm_version,
-            &self.guest_kernel_digest,
-        ]
-        .iter()
-        .all(|identity| !identity.is_empty())
-            && self == destination
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,28 +154,5 @@ mod tests {
         let mut bad = fixture();
         bad.base_len = 1;
         assert!(bad.validate().is_err());
-    }
-
-    #[test]
-    fn restore_class_is_not_just_cpu_features() {
-        let source = RestoreClass {
-            architecture: "x86_64".into(),
-            cpu_vendor: "vendor".into(),
-            cpu_model: "model".into(),
-            cpu_microcode: "revision".into(),
-            cpu_template_digest: "template".into(),
-            kvm_capabilities_digest: "capabilities".into(),
-            machine_config_digest: "configuration".into(),
-            host_kernel: "kernel".into(),
-            vmm_version: "vmm".into(),
-            guest_kernel_digest: "guest".into(),
-        };
-        assert!(source.compatible_with(&source));
-        let mut destination = source.clone();
-        destination.cpu_microcode = "different revision".into();
-        assert!(!source.compatible_with(&destination));
-        destination = source.clone();
-        destination.kvm_capabilities_digest = "different hypervisor".into();
-        assert!(!source.compatible_with(&destination));
     }
 }
