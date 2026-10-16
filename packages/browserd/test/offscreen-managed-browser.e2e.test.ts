@@ -42,6 +42,12 @@ e2e(
       browserSessionId: randomUUID(),
       controllerGeneration: randomUUID(),
     };
+    // Loopback HTTP is a secure context, so User-Agent Client Hints exist.
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => new Response("<h1>Offscreen</h1>", { headers: { "content-type": "text/html" } }),
+    });
     const frontBefore = frontmostApplication();
     try {
       const created = await supervisor.createSession({
@@ -51,7 +57,7 @@ e2e(
         ...(process.env.OPENGENI_BROWSER_EXECUTABLE
           ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
           : {}),
-        initialUrl: "data:text/html,<h1>Offscreen</h1>",
+        initialUrl: `http://127.0.0.1:${server.port}/`,
       });
       const profileDirectory = join(root, "sessions", reference.browserSessionId, "profile");
       const [pid] = profileBrowserPids(profileDirectory);
@@ -107,7 +113,9 @@ e2e(
       await supervisor.endSession(reference, { removeState: true });
       expect(profileBrowserPids(profileDirectory)).toEqual([]);
     } finally {
+      await supervisor.endSession(reference, { removeState: true }).catch(() => undefined);
       await supervisor.close();
+      server.stop(true);
       await rm(root, { recursive: true, force: true });
       await rm(sockets, { recursive: true, force: true });
     }
