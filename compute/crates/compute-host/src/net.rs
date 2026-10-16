@@ -403,7 +403,7 @@ link set dev {host} up
 
     /// `ip -batch` lines run inside the namespace, given whether its tap
     /// exists. A tap in use by a VM is never replaced, only set right.
-    fn namespace_commands(&self, tap_exists: bool) -> String {
+    fn namespace_commands(&self, tap: Tap) -> String {
         let Self {
             host_ip,
             inner_ip,
@@ -418,7 +418,10 @@ link set dev {UPLINK} up
 route replace default via {host_ip} dev {UPLINK}
 "
         );
-        if !tap_exists {
+        if tap == Tap::Foreign {
+            let _ = writeln!(commands, "tuntap del dev {TAP} mode tap");
+        }
+        if tap != Tap::Fits {
             let _ = writeln!(
                 commands,
                 "tuntap add dev {TAP} mode tap user {uid} group {gid}"
@@ -434,6 +437,47 @@ neigh replace {GUEST_IP} lladdr {GUEST_MAC} dev {TAP} nud permanent
         );
         commands
     }
+}
+
+/// The tap a sandbox namespace has, as far as its VM is concerned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tap {
+    Missing,
+    /// It exists and only the sandbox's own user and group may open it.
+    Fits,
+    /// It exists but belongs to someone else, as one left behind by an
+    /// earlier sandbox with the same id can: the VMM could not open it.
+    Foreign,
+}
+
+impl Tap {
+    /// Looks at the tap of the namespace the calling thread is in.
+    fn find(uid: u32, gid: u32) -> Result<Self, NetError> {
+        if !has_interface(TAP) {
+            return Ok(Self::Missing);
+        }
+        let details = output("ip", &["-details", "-oneline", "link", "show", "dev", TAP])?;
+        Ok(if tap_owner(&details) == (Some(uid), Some(gid)) {
+            Self::Fits
+        } else {
+            Self::Foreign
+        })
+    }
+}
+
+/// The owner a tap's `ip -details link show` names, from its tun details
+/// (`... persist on user U group G ...`); the line also holds an unrelated
+/// `group default`.
+fn tap_owner(details: &str) -> (Option<u32>, Option<u32>) {
+    let words: Vec<&str> = details.split_whitespace().collect();
+    let Some(user) = words.iter().position(|word| *word == "user") else {
+        return (None, None);
+    };
+    let number = |at: usize| words.get(at).and_then(|word| word.parse().ok());
+    let group = (words.get(user + 2) == Some(&"group"))
+        .then(|| number(user + 3))
+        .flatten();
+    (number(user + 1), group)
 }
 
 /// The namespace name of sandbox `id`.
@@ -484,7 +528,7 @@ impl Networks {
         let host = link.host_commands(self.mtu, namespace_exists, link_exists);
         run("ip", &["-batch", "-"], Some(&host))?;
         in_namespace(&path, || {
-            let inner = link.namespace_commands(has_interface(TAP));
+            let inner = link.namespace_commands(Tap::find(link.uid, link.gid)?);
             run("ip", &["-batch", "-"], Some(&inner))
         })?;
         self.configure(link)
@@ -748,7 +792,7 @@ mod tests {
             host.contains("link add ogc2 mtu 1460 type veth peer name uplink mtu 1460 netns ogc-")
         );
         assert!(host.contains("addr replace 198.18.0.4/31 dev ogc2"));
-        let inner = link.namespace_commands(false);
+        let inner = link.namespace_commands(Tap::Missing);
         assert!(inner.contains("route replace default via 198.18.0.4 dev uplink"));
         assert!(inner.contains("tuntap add dev tap0 mode tap user 1002 group 1002"));
         assert!(inner.contains("neigh replace 169.254.0.21 lladdr 06:00:a9:fe:00:15"));
@@ -757,12 +801,25 @@ mod tests {
         let host = link.host_commands(1460, true, true);
         assert!(!host.contains("netns add") && !host.contains("link add"));
         assert!(host.contains("link set dev ogc2 up"));
-        let inner = link.namespace_commands(true);
-        assert!(
-            !inner.contains("tuntap add"),
-            "a live tap is never replaced"
-        );
+        let inner = link.namespace_commands(Tap::Fits);
+        assert!(!inner.contains("tuntap"), "a live tap is never replaced");
         assert!(inner.contains("addr replace 169.254.0.22/30 dev tap0"));
         assert!(inner.contains("link set dev tap0 address 06:00:a9:fe:00:16"));
+
+        // A tap someone else owns is replaced by one the VM may open.
+        let inner = link.namespace_commands(Tap::Foreign);
+        let replaced =
+            "tuntap del dev tap0 mode tap\ntuntap add dev tap0 mode tap user 1002 group 1002";
+        assert!(inner.contains(replaced), "{inner}");
+    }
+
+    #[test]
+    fn a_taps_owner_is_read_from_its_details() {
+        let details = "3: tap0: <BROADCAST,UP> mtu 1500 qdisc fq_codel state DOWN mode DEFAULT group default qlen 1000\\    link/ether 06:00:a9:fe:00:16 brd ff:ff:ff:ff:ff:ff \\    tun type tap pi off vnet_hdr on persist on user 1073741843 group 1073741843 addrgenmode eui64";
+        assert_eq!(
+            tap_owner(details),
+            (Some(1_073_741_843), Some(1_073_741_843))
+        );
+        assert_eq!(tap_owner("3: tap0: tun type tap persist on"), (None, None));
     }
 }

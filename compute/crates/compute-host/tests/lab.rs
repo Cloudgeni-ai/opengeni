@@ -545,21 +545,20 @@ fn forbidden(port: u16) -> Vec<String> {
 }
 
 /// A guest script line probing each of `targets`, printing
-/// `target open|closed micros` per target.
+/// `target open|refused|timeout micros` per target: how the connection
+/// attempt ended, which unlike its duration does not depend on how busy
+/// the guest is.
 fn probe_script(targets: &[String]) -> String {
     format!(
-        "for t in {}; do s=$(date +%s%N); if timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*}}/${{t#*:}}\" 2>/dev/null; then r=open; else r=closed; fi; echo $t $r $(( ($(date +%s%N) - s) / 1000 )); done",
+        "for t in {}; do s=$(date +%s%N); timeout 3 bash -c \"exec 3<>/dev/tcp/${{t%:*}}/${{t#*:}}\" 2>/dev/null; c=$?; if [ $c = 0 ]; then r=open; elif [ $c = 124 ]; then r=timeout; else r=refused; fi; echo $t $r $(( ($(date +%s%N) - s) / 1000 )); done",
         targets.join(" ")
     )
 }
 
-/// Longest a refusal may take: blocked connections are refused with a reset
-/// at once, never left to time out.
-const REFUSAL_LIMIT_US: u64 = 1_000_000;
-
-/// Checks that `lines` hold one row per target, in order, each `closed`
-/// within the refusal limit except those in `open`. Returns the refusal
-/// times in milliseconds.
+/// Checks that `lines` hold one row per target, in order: those in `open`
+/// connected, every other one was refused (a reset or ICMP error), never
+/// left to time out as a dropped packet would be. Returns the refusal times
+/// in milliseconds.
 fn check_probes(context: &str, lines: &[&str], targets: &[String], open: &[&str]) -> Vec<f64> {
     assert_eq!(
         lines.len(),
@@ -573,15 +572,11 @@ fn check_probes(context: &str, lines: &[&str], targets: &[String], open: &[&str]
         let expected = if open.contains(&target.as_str()) {
             "open"
         } else {
-            "closed"
+            "refused"
         };
         assert_eq!(fields.get(1), Some(&expected), "{context}: {line}");
-        let micros: u64 = fields[2].parse().unwrap();
-        if expected == "closed" {
-            assert!(
-                micros < REFUSAL_LIMIT_US,
-                "{context}: {target} took {micros} us to refuse"
-            );
+        if expected == "refused" {
+            let micros: u64 = fields[2].parse().unwrap();
             #[allow(clippy::cast_precision_loss)]
             refusals.push(micros as f64 / 1e3);
         }
@@ -682,6 +677,7 @@ if getent hosts example.com >/dev/null; then echo dns ok; else echo dns-failed; 
             "first_outbound_connect_ms": summary(&first_connect_ms),
             "second_outbound_connect_ms": summary(&second_connect_ms),
             "blocked_refusal_ms": summary(&refusal_ms),
+            "blocked_refusals_over_100ms": refusal_ms.iter().filter(|ms| **ms > 100.0).count(),
         }),
     );
     agent.remove_all().await;
