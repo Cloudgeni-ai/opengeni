@@ -6,22 +6,25 @@ import { parseAllDocuments } from "yaml";
 
 const chart = resolve(import.meta.dir, "..");
 const script = join(chart, "files/postgres-major-upgrade.sh");
+const preflightScript = join(chart, "files/postgres-upgrade-preflight.sh");
 const helm = Bun.which("helm");
 const bash = Bun.which("bash");
 
 type Container = {
   name: string;
   image: string;
-  env?: Array<{ name: string; value: string }>;
+  command?: string[];
+  env?: Array<{ name: string; value?: string; valueFrom?: unknown }>;
   volumeMounts?: Array<{ name: string; mountPath: string; readOnly?: boolean }>;
 };
 type Resource = {
   kind: string;
-  metadata: { name: string };
+  metadata: { name: string; annotations?: Record<string, string> };
   data?: Record<string, string>;
   spec?: {
+    backoffLimit?: number;
     template?: {
-      metadata?: { annotations?: Record<string, string> };
+      metadata?: { annotations?: Record<string, string>; labels?: Record<string, string> };
       spec: {
         initContainers?: Container[];
         containers: Container[];
@@ -55,7 +58,20 @@ async function render(values: Record<string, unknown>) {
   );
   const pod = statefulSet?.spec?.template;
   if (!pod || !configMap) throw new Error("embedded postgres was not rendered");
-  return { pod, configMap };
+  const preflight = resources.find(
+    (resource) =>
+      resource?.kind === "Job" && resource.metadata.name.endsWith("-postgres-upgrade-preflight"),
+  );
+  const preflightScriptMap = resources.find(
+    (resource) =>
+      resource?.kind === "ConfigMap" &&
+      resource.metadata.name.endsWith("-postgres-upgrade-preflight"),
+  );
+  const postgresPolicy = resources.find(
+    (resource) =>
+      resource?.kind === "NetworkPolicy" && resource.metadata.name.endsWith("-postgres"),
+  );
+  return { pod, configMap, preflight, preflightScriptMap, postgresPolicy };
 }
 
 const env = (container: Container | undefined, name: string) =>
@@ -100,6 +116,57 @@ describe("embedded postgres major version", () => {
     expect(guard?.volumeMounts?.map((mount) => mount.name)).toContain("postgres-old");
     expect(pod.spec.volumes).toContainEqual({ name: "postgres-old", emptyDir: {} });
   });
+
+  test.skipIf(!helm)("no upgrade renders no preflight hook", async () => {
+    const { preflight, preflightScriptMap } = await render({ postgres: { enabled: true } });
+    expect(preflight).toBeUndefined();
+    expect(preflightScriptMap).toBeUndefined();
+  });
+
+  test.skipIf(!helm)(
+    "an enabled upgrade rehearses pg_upgrade --check before Helm changes anything",
+    async () => {
+      const { preflight, preflightScriptMap, postgresPolicy } = await render({
+        networkPolicy: { enabled: true },
+        postgres: {
+          enabled: true,
+          majorUpgrade: { enabled: true, fromImage: { repository: "example/pg", tag: "17" } },
+        },
+      });
+      if (!preflight || !preflightScriptMap) throw new Error("preflight hook was not rendered");
+      for (const resource of [preflight, preflightScriptMap]) {
+        expect(resource.metadata.annotations?.["helm.sh/hook"]).toBe("pre-upgrade");
+        expect(resource.metadata.annotations?.["helm.sh/hook-delete-policy"]).toBe(
+          "before-hook-creation,hook-succeeded",
+        );
+      }
+      expect(Number(preflightScriptMap.metadata.annotations?.["helm.sh/hook-weight"])).toBeLessThan(
+        Number(preflight.metadata.annotations?.["helm.sh/hook-weight"]),
+      );
+      expect(preflightScriptMap.data?.["postgres-upgrade-preflight.sh"]).toBe(
+        (await readFile(preflightScript, "utf8")).trimEnd(),
+      );
+      expect(preflight.spec?.backoffLimit).toBe(0);
+      const pod = preflight.spec?.template;
+      const [binaries] = pod?.spec.initContainers ?? [];
+      expect(binaries?.image).toBe("example/pg:17");
+      const [check] = pod?.spec.containers ?? [];
+      expect(check?.image).toBe("pgvector/pgvector:pg18-bookworm");
+      expect(check?.command).toEqual([
+        "/bin/bash",
+        "/opengeni-postgres-preflight-script/postgres-upgrade-preflight.sh",
+      ]);
+      expect(env(check, "PGHOST")).toBe("pg-test-opengeni-postgres");
+      expect(check?.env?.find((entry) => entry.name === "PGPASSWORD")?.valueFrom).toBeDefined();
+      // The hook mounts no data volume: it never touches the running server's
+      // files, only reads its schema over the network.
+      expect(pod?.spec.volumes?.some((volume) => volume.name === "data")).toBe(false);
+      expect(pod?.metadata?.labels?.["app.kubernetes.io/component"]).toBe(
+        "postgres-upgrade-preflight",
+      );
+      expect(JSON.stringify(postgresPolicy)).toContain('"postgres-upgrade-preflight"');
+    },
+  );
 
   test.skipIf(!helm)("ephemeral storage still mounts a data volume", async () => {
     const { pod } = await render({ postgres: { enabled: true, persistence: { enabled: false } } });
