@@ -20,6 +20,7 @@ import {
   assertManagedBrowserProfileUnused,
   browserLaunchArguments,
   browserProfileCryptoPolicy,
+  browserScopeEntry,
   linuxHeadlessChromeArguments,
   macosOffscreenChromeArguments,
   MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT,
@@ -29,6 +30,60 @@ import {
 } from "../src/runner";
 
 describe("managed browser profile cryptography", () => {
+  test("a browser scope is requested from the user manager, and Chrome keeps the launch's own bus", async () => {
+    const root = await mkdtemp("/tmp/og-scope-entry-");
+    try {
+      const record = join(root, "systemd-run.env");
+      const systemdRun = join(root, "systemd-run");
+      // Records the bus it was asked to use, then execs the command after `--`
+      // in place, as `systemd-run --scope` does.
+      await writeFile(
+        systemdRun,
+        `#!/bin/sh\nprintf '%s|%s\\n' "\${DBUS_SESSION_BUS_ADDRESS-unset}" "\${XDG_RUNTIME_DIR-unset}" > '${record}'\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n`,
+        { mode: 0o700 },
+      );
+      const wrapper = join(root, "wrapper.sh");
+      await writeFile(
+        wrapper,
+        `#!/bin/sh\n${browserScopeEntry(
+          {
+            systemdRun,
+            busctl: "/usr/bin/busctl",
+            managerEnvironment: {
+              DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus",
+              XDG_RUNTIME_DIR: "/run/user/1000",
+            },
+          },
+          "opengeni-browser-fixture.scope",
+          wrapper,
+        )}printf '%s|%s|%s|%s\\n' "\${DBUS_SESSION_BUS_ADDRESS-unset}" "\${XDG_RUNTIME_DIR-unset}" "\${OPENGENI_BROWSER_SCOPE-unset}" "$1"\n`,
+        { mode: 0o700 },
+      );
+      const linked = spawnSync(wrapper, ["operand with space"], {
+        env: {
+          PATH: process.env.PATH,
+          DBUS_SESSION_BUS_ADDRESS: "unix:path=/tmp/desktop/bus",
+          XDG_RUNTIME_DIR: "/tmp/desktop",
+        },
+        encoding: "utf8",
+      });
+      expect(linked.status).toBe(0);
+      expect(await readFile(record, "utf8")).toBe("unix:path=/run/user/1000/bus|/run/user/1000\n");
+      expect(linked.stdout).toBe(
+        "unix:path=/tmp/desktop/bus|/tmp/desktop|unset|operand with space\n",
+      );
+
+      const unsetBus = spawnSync(wrapper, ["x"], {
+        env: { PATH: process.env.PATH, XDG_RUNTIME_DIR: "/tmp/desktop" },
+        encoding: "utf8",
+      });
+      expect(unsetBus.status).toBe(0);
+      expect(unsetBus.stdout).toBe("unset|/tmp/desktop|unset|x\n");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("offscreen macOS browsers present the host display and an ordinary User-Agent", async () => {
     const geometry = parseMacosDisplayGeometry(
       JSON.stringify({ w: 1920, h: 1080, x: 0, y: 88, vw: 1920, vh: 962, scale: 1 }),
