@@ -281,6 +281,88 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
     expect(metrics).not.toContain("opengeni_model_provider_ttft_seconds_count{");
     expect(metrics).not.toContain("opengeni_model_request_pre_dispatch_seconds_count{");
   });
+
+  test("completeResponse returns each dispatched call's timing exactly once", () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "openai",
+      now: () => now,
+    });
+
+    // No dispatch observed: no timing.
+    expect(timing.completeResponse()).toBeNull();
+
+    now = 1_000;
+    timing.onModelRequestEntry();
+    now = 1_040;
+    timing.onProviderDispatch();
+    now = 1_300;
+    timing.onEvent("agent.reasoning.delta");
+    now = 1_900;
+    timing.onEvent("agent.message.delta");
+    now = 2_000;
+    timing.onEvent("agent.message.delta");
+    now = 3_040;
+    expect(timing.completeResponse()).toEqual({
+      preDispatchMs: 40,
+      timeToFirstTokenMs: 260,
+      timeToFirstTextMs: 860,
+      durationMs: 2_000,
+    });
+    // A mirrored terminal event for the same call gets nothing.
+    expect(timing.completeResponse()).toBeNull();
+
+    // A tool-call-only response has no first text. A transport retry goes
+    // through admission again (a second model entry) and re-dispatches; the
+    // call keeps its first request's pre-dispatch work and is measured from
+    // its first dispatch.
+    now = 5_000;
+    timing.onModelRequestEntry();
+    now = 5_040;
+    timing.onProviderDispatch();
+    now = 5_495;
+    timing.onModelRequestEntry();
+    now = 5_500;
+    timing.onProviderDispatch();
+    now = 5_700;
+    timing.onEvent("agent.toolCall.output");
+    now = 6_000;
+    expect(timing.completeResponse()).toEqual({
+      preDispatchMs: 40,
+      timeToFirstTokenMs: null,
+      timeToFirstTextMs: null,
+      durationMs: 960,
+    });
+  });
+
+  test("a provider continuation (Claude pause_turn) is timed as one call from its first dispatch", () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "claude-subscription",
+      now: () => now,
+    });
+    timing.onModelRequestEntry();
+    now = 20;
+    timing.onProviderDispatch();
+    now = 120;
+    timing.onEvent("agent.reasoning.delta");
+    now = 1_000;
+    timing.onModelRequestEntry();
+    now = 1_010;
+    timing.onProviderDispatch(); // continuation request, same logical response
+    now = 1_400;
+    timing.onEvent("agent.message.delta");
+    now = 2_020;
+    expect(timing.completeResponse()).toEqual({
+      preDispatchMs: 20,
+      timeToFirstTokenMs: 100,
+      timeToFirstTextMs: 1_380,
+      durationMs: 2_000,
+    });
+    expect(timing.completeResponse()).toBeNull();
+  });
 });
 
 describe("provider request lifecycle diagnostics", () => {

@@ -4,6 +4,7 @@ import { alias } from "drizzle-orm/pg-core";
 import type { Database } from "./database";
 import { rlsContextForWorkspace, withRlsContext } from "./database";
 import * as schema from "./schema";
+import { modelCallTimingColumns, modelCallTimingOrNull } from "./model-call-timing";
 
 export const INSIGHTS_WARM_GROUP_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -1314,6 +1315,7 @@ async function insertModelCallFactFromUsageEvent(
       listCacheWriteCostMicros: capturedClasses ? classValues[2]! : null,
       listOutputCostMicros: capturedClasses ? classValues[3]! : null,
       listCostIsApprox: capturedClasses ? payload.listByClassApprox === true : null,
+      ...modelCallTimingColumns(modelCallTimingOrNull(payload.timing)),
       occurredAt: event.occurredAt,
       connectionId:
         provider === "codex-subscription"

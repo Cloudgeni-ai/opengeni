@@ -7,6 +7,12 @@ export {
 } from "./scheduled-task-lifecycle";
 export * from "./scheduled-task-blockers";
 export * from "./session-target";
+export * from "./model-call-timing";
+import {
+  modelCallTimingColumns,
+  modelCallTimingOrNull,
+  type ModelCallTiming,
+} from "./model-call-timing";
 export * from "./human-input-secret-answers";
 export * from "./connected-machine-audience";
 import { sessionRetentionFromRow } from "./session-archive";
@@ -5977,6 +5983,8 @@ export async function recordModelCallFact(
     cacheWriteTokens?: number | null;
     reasoningTokens?: number | null;
     totalTokens?: number | null;
+    /** Worker-measured timing of the call; absent for calls it did not stream. */
+    timing?: ModelCallTiming | null;
     occurredAt?: Date;
     /**
      * The shared-core subscription connection that served the call (core
@@ -6020,6 +6028,7 @@ export async function recordModelCallFact(
     input.contextContributions == null
       ? null
       : ModelContextContributionSummaries.parse(input.contextContributions);
+  const timing = modelCallTimingOrNull(input.timing);
   const classes = input.listByClassMicros;
   if (
     classes != null &&
@@ -6093,6 +6102,7 @@ export async function recordModelCallFact(
           listCostIsApprox: classes == null ? null : (input.listByClassApprox ?? false),
           contextContributions,
           connectionId: input.connectionId ?? null,
+          ...modelCallTimingColumns(timing),
           occurredAt,
         })
         .onConflictDoUpdate({
@@ -6117,6 +6127,10 @@ export async function recordModelCallFact(
             listCostIsApprox: sql`coalesce(${schema.modelCallFacts.listCostIsApprox}, excluded.list_cost_is_approx)`,
             contextContributions: sql`coalesce(${schema.modelCallFacts.contextContributions}, excluded.context_contributions)`,
             connectionId: sql`coalesce(${schema.modelCallFacts.connectionId}, excluded.connection_id)`,
+            preDispatchMs: sql`coalesce(${schema.modelCallFacts.preDispatchMs}, excluded.pre_dispatch_ms)`,
+            timeToFirstTokenMs: sql`coalesce(${schema.modelCallFacts.timeToFirstTokenMs}, excluded.time_to_first_token_ms)`,
+            timeToFirstTextMs: sql`coalesce(${schema.modelCallFacts.timeToFirstTextMs}, excluded.time_to_first_text_ms)`,
+            durationMs: sql`coalesce(${schema.modelCallFacts.durationMs}, excluded.duration_ms)`,
           },
         })
         .returning();

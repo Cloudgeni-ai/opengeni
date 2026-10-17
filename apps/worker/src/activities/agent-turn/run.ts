@@ -139,17 +139,23 @@ import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environmen
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
+import {
+  isAuxiliaryProviderDispatch,
+  runAuxiliaryProviderDispatch,
+} from "../auxiliary-provider-dispatch";
 
 /**
  * Retain subscription credential/account authority for the title sidecar
  * without sharing main-stream recovery, startup, audit, or opaque-artifact
- * callbacks. Title usage is returned by the runtime and metered separately.
+ * callbacks. Title usage is returned by the runtime and metered separately, and
+ * its dispatches run the main checks without counting as a main-stream dispatch.
  */
 export function sessionTitleCodexRequestContext(
   context: CodexRequestContext,
   nextRequestId: () => string,
   requests?: ReturnType<typeof createCoreCodexRequests>,
 ): CodexRequestContext {
+  const mainChecks = context.beforeProviderDispatch;
   return {
     clientVersion: context.clientVersion,
     ...(context.sessionId !== undefined ? { sessionId: context.sessionId } : {}),
@@ -162,13 +168,17 @@ export function sessionTitleCodexRequestContext(
           beforeProviderDispatch: async (
             request: Parameters<NonNullable<CodexRequestContext["beforeProviderDispatch"]>>[0],
           ) => {
-            await context.beforeProviderDispatch?.();
+            if (mainChecks) await runAuxiliaryProviderDispatch(() => mainChecks());
             if (request) await requests.reserve(request);
           },
           onProviderRequestSettled: requests.observe,
         }
-      : context.beforeProviderDispatch
-        ? { beforeProviderDispatch: context.beforeProviderDispatch }
+      : mainChecks
+        ? {
+            beforeProviderDispatch: (
+              request: Parameters<NonNullable<CodexRequestContext["beforeProviderDispatch"]>>[0],
+            ) => runAuxiliaryProviderDispatch(() => mainChecks(request)),
+          }
         : {}),
     ...(context.responseTimeoutPolicy
       ? { responseTimeoutPolicy: context.responseTimeoutPolicy }
@@ -470,6 +480,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     });
     // Diagnostic only: a timing observer can never fence or fail a request.
     const observeProviderDispatch = () => {
+      // Titles and generated images run these checks too, but are separate calls.
+      if (isAuxiliaryProviderDispatch()) return;
       try {
         eventing.providerDispatchObserver?.();
       } catch {

@@ -851,3 +851,48 @@ test("repeated facet metadata preserves every measure, daily group series, and t
   expect(excluded.totals.calls).toBe(0);
   expect(excluded.dataThrough).toBe(latest.toISOString());
 });
+
+test("a fact keeps the first measured timing, and a replay only fills what was unknown", async () => {
+  const base = {
+    accountId,
+    workspaceId,
+    sessionId,
+    turnId: sessionId,
+    provider: "timing-provider",
+    providerApi: "responses",
+    model: "timing-model",
+    billingPath: "external" as const,
+    pricedCostMicros: 0,
+    occurredAt: new Date("2026-09-07T00:00:00Z"),
+  };
+  const timing = {
+    preDispatchMs: 8,
+    timeToFirstTokenMs: 250,
+    timeToFirstTextMs: 700,
+    durationMs: 1_900,
+  };
+  const read = async (sourceKey: string) => {
+    const [row] = await fixture.admin<Array<{ timing: Array<number | null> }>>`
+      select jsonb_build_array(pre_dispatch_ms, time_to_first_token_ms, time_to_first_text_ms, duration_ms) as timing
+      from model_call_facts where workspace_id = ${workspaceId} and source_key = ${sourceKey}`;
+    return row?.timing;
+  };
+
+  await actor(() => recordModelCallFact(client.db, { ...base, sourceKey: "timing-a", timing }));
+  // A replay without timing, or with different timing, never rewrites it.
+  await actor(() => recordModelCallFact(client.db, { ...base, sourceKey: "timing-a" }));
+  await actor(() =>
+    recordModelCallFact(client.db, {
+      ...base,
+      sourceKey: "timing-a",
+      timing: { ...timing, durationMs: 99 },
+    }),
+  );
+  expect(await read("timing-a")).toEqual([8, 250, 700, 1_900]);
+
+  // A fact first written without timing is filled in by a later write with it.
+  await actor(() => recordModelCallFact(client.db, { ...base, sourceKey: "timing-b" }));
+  expect(await read("timing-b")).toEqual([null, null, null, null]);
+  await actor(() => recordModelCallFact(client.db, { ...base, sourceKey: "timing-b", timing }));
+  expect(await read("timing-b")).toEqual([8, 250, 700, 1_900]);
+});

@@ -1364,6 +1364,14 @@ Telemetry/comparison prices cannot authorize capacity/debits. `agent.model.usage
 preserves accepted billing/Gateway authority; repair prefers it over legacy inference.
 Its worker-set `purpose` names the call: `main` (the turn's own inference, including
 the aggregate fallback), `compaction` or `session-title`. Older events have none.
+Streamed main calls also carry worker-measured `timing` (whole milliseconds: pre-dispatch
+work, first dispatch to first token and first text, first dispatch to terminal response)
+on the event and on `model_call_facts`. A call that needed several requests (a transport
+retry or a provider continuation) is measured from its first dispatch. The first
+measurement wins on replay and repair, and absent or malformed values stay null. Output
+tokens per second is derived, not stored:
+`1000 * output_tokens / (duration_ms - time_to_first_token_ms)` when the denominator is
+positive.
 
 Insights retains private/deleted/unmatched amounts. Details require actor
 visibility and canonical selected-key/explicit-permission ceilings. Mask before

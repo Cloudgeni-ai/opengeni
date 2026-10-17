@@ -12922,6 +12922,12 @@ export const modelCallFacts = pgTable(
     listCostIsApprox: boolean("list_cost_is_approx"),
     contextContributions:
       jsonb("context_contributions").$type<readonly ModelContextContributionSummary[]>(),
+    // Worker-measured call timing in milliseconds (see ModelCallTiming); null
+    // for calls before 0802 and calls the worker did not stream.
+    preDispatchMs: integer("pre_dispatch_ms"),
+    timeToFirstTokenMs: integer("time_to_first_token_ms"),
+    timeToFirstTextMs: integer("time_to_first_text_ms"),
+    durationMs: integer("duration_ms"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },

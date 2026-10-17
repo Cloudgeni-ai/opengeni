@@ -13,6 +13,7 @@ import {
   type ActiveUserWindow,
   type CreditGrantTotals,
   type IdleInteractionInspection,
+  type ModelCallTiming,
   type SessionEventAppendPhaseObservation,
 } from "@opengeni/db";
 import {
@@ -2783,6 +2784,15 @@ export type ProviderFirstContent = "any" | "text";
  * still be persisting the previous response's tool results when the producer
  * dispatches the next request, but the next request's first delta always
  * follows its own dispatch. Purely observational and clock-injectable.
+ *
+ * `completeResponse` also returns the same measurements for one model call,
+ * which the worker stores on its usage event and Insights fact. The next model
+ * entry waits until the consumer has settled the previous response, so a
+ * response's terminal event is always read before the next dispatch.
+ * A call that needs several requests before its one terminal response (a
+ * transport retry, or a provider continuation such as Claude's `pause_turn`)
+ * is measured from its first dispatch and keeps that request's pre-dispatch
+ * work, so its duration and first token cover the whole response.
  */
 export class StreamTimingMetrics {
   private readonly now: () => number;
@@ -2792,6 +2802,13 @@ export class StreamTimingMetrics {
   private modelEntryAt: number | null = null;
   private dispatchedAt: number | null = null;
   private readonly providerFirstRecorded = new Set<ProviderFirstContent>();
+  /** The model call awaiting its terminal response, if one was dispatched. */
+  private openCall: {
+    dispatchedAt: number;
+    preDispatchMs: number | null;
+    firstContentAt: number | null;
+    firstTextAt: number | null;
+  } | null = null;
 
   constructor(
     private readonly observability: Observability,
@@ -2810,13 +2827,15 @@ export class StreamTimingMetrics {
   /** Producer side: request bytes are about to leave this process. */
   onProviderDispatch(): void {
     const at = this.now();
+    let preDispatchMs: number | null = null;
     if (this.modelEntryAt !== null) {
+      preDispatchMs = Math.max(0, at - this.modelEntryAt);
       this.observability.observeHistogram({
         name: "opengeni_model_request_pre_dispatch_seconds",
         help: "Seconds of Opengeni work from SDK model-request entry to literal provider dispatch.",
         buckets: MODEL_REQUEST_PRE_DISPATCH_BUCKETS,
         labels: { provider: this.options.provider },
-        value: Math.max(0, (at - this.modelEntryAt) / 1000),
+        value: preDispatchMs / 1000,
       });
       this.modelEntryAt = null;
     }
@@ -2824,6 +2843,8 @@ export class StreamTimingMetrics {
     // belongs to the latest dispatch.
     this.dispatchedAt = at;
     this.providerFirstRecorded.clear();
+    // Later dispatches before the terminal response belong to the same call.
+    this.openCall ??= { dispatchedAt: at, preDispatchMs, firstContentAt: null, firstTextAt: null };
   }
 
   onEvent(type: SessionEventType): void {
@@ -2838,6 +2859,10 @@ export class StreamTimingMetrics {
       return;
     }
     const at = this.now();
+    if (this.openCall) {
+      this.openCall.firstContentAt ??= at;
+      if (deltaClass === "message") this.openCall.firstTextAt ??= at;
+    }
     if (this.ttftArmed) {
       this.observability.observeHistogram({
         name: "opengeni_stream_ttft_seconds",
@@ -2863,6 +2888,26 @@ export class StreamTimingMetrics {
       });
     }
     this.lastDeltaAt.set(deltaClass, at);
+  }
+
+  /**
+   * Consumer side: the dispatched call's terminal response was read. Returns its
+   * timing once, measured from the call's first dispatch, or null when no call
+   * is open (for example a mirrored terminal event, or a provider that reports
+   * no dispatch).
+   */
+  completeResponse(): ModelCallTiming | null {
+    const call = this.openCall;
+    if (!call) return null;
+    this.openCall = null;
+    const since = (at: number | null) =>
+      at === null ? null : Math.round(Math.max(0, at - call.dispatchedAt));
+    return {
+      preDispatchMs: call.preDispatchMs === null ? null : Math.round(call.preDispatchMs),
+      timeToFirstTokenMs: since(call.firstContentAt),
+      timeToFirstTextMs: since(call.firstTextAt),
+      durationMs: since(this.now()),
+    };
   }
 
   private observeProviderFirst(content: ProviderFirstContent, at: number): void {
