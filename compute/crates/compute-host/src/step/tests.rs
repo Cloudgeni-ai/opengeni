@@ -320,8 +320,24 @@ async fn a_restarted_agent_acts_on_no_record_it_could_not_settle() {
         sandbox.fail_record_writes();
         let job = tokio::spawn(sandbox.job(NoStore, saved.clone(), true).run(Step::Resume));
         assert!(still_waiting(&job).await);
+        // The scenario starts once the step's write has landed; on a busy
+        // host that can take longer than the wait above.
+        let landed = tokio::time::timeout(Duration::from_secs(10), async {
+            while fs::read(&sandbox.paths.record)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+                .is_none_or(|record| record.image)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        landed.await.expect("the step's record write landed");
         job.abort();
         let _ = job.await;
+        // Record work runs on to its end on a blocking thread after the
+        // step is stopped; wait for it, so the power loss below comes after
+        // every write and nothing replaces the file it leaves.
+        assert!(sandbox.records.settle(sandbox.id).await.is_err());
         if lost {
             // The host lost power before the rename reached the disk.
             let mut bytes = serde_json::to_vec(&saved).unwrap();
