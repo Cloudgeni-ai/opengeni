@@ -168,7 +168,6 @@ export type { ApplyPatchOperation } from "./parsers";
 export { KnowledgeActivityProvider } from "./knowledge-receipt";
 export {
   LearningRefusalActionsProvider,
-  LearningRefusalRow,
   type LearningRefusalActions,
 } from "./learning-refusal-row";
 export type { LearningRefusalPlace } from "./learning-refusal-copy";

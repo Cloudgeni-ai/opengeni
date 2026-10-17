@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
-import { LEARNING_REFUSAL_META_KEY } from "@opengeni/sdk/learning-refusal";
+import { LEARNING_REFUSAL_META_KEY } from "@opengeni/contracts/learning-refusal";
 import { buildTimeline, groupTimeline } from "../src/timeline/projection";
 import { createOpenGeniText } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
-const skillId = "21a78814-7662-4252-b40a-b57971b244e7";
+const skillId = "1b496aec-f6a2-410c-be19-68070edb7080";
 let sequence = 0;
 
 function event(type: string, payload: unknown): SessionEvent {
@@ -38,9 +38,9 @@ function refusedSave(id: string, fact: unknown) {
 
 describe("learning refusal timeline notice", () => {
   test("a refused save is told to the person once per turn, outside the work row", () => {
-    const fact = { destination: "skill", reason: "personal_chat", skillId } as const;
+    const fact = { destination: "skill", reason: "not_permitted", skillId } as const;
     const items = buildTimeline(englishText, [
-      event("user.message", { text: "Always remember to pick the smaller model for grunt work" }),
+      event("user.message", { text: "Always remember to use metric units in reports" }),
       event("agent.toolCall.created", { id: "read", name: "skill_read", arguments: {} }),
       event("agent.toolCall.output", { id: "read", output: "Skill text" }),
       event("agent.message.completed", { text: "Updating the Skill.", phase: "commentary" }),
@@ -57,7 +57,7 @@ describe("learning refusal timeline notice", () => {
     expect(notice.tone).toBe("failed");
     expect(notice.learningRefusal).toEqual(fact);
     expect(notice.text).toContain("Not saved to Skills");
-    expect(notice.text).toContain("shared with the workspace");
+    expect(notice.text).toContain("isn't allowed to change this Skill");
     // Never folded away with the turn's work: it stays beside the answer,
     // whether settled turns fold into one row or not.
     for (const readableTurns of [false, true]) {
@@ -73,7 +73,7 @@ describe("learning refusal timeline notice", () => {
 
   test("different destinations each get their notice; ordinary failures get none", () => {
     const items = buildTimeline(englishText, [
-      ...refusedSave("call-1", { destination: "skill", reason: "personal_chat", skillId }),
+      ...refusedSave("call-1", { destination: "skill", reason: "not_permitted", skillId }),
       event("agent.toolCall.created", { id: "call-2", name: "instruction_policy_save" }),
       event("agent.toolCall.output", {
         id: "call-2",
@@ -81,7 +81,7 @@ describe("learning refusal timeline notice", () => {
           isError: true,
           content: [{ type: "text", text: "{}" }],
           _meta: {
-            [LEARNING_REFUSAL_META_KEY]: { destination: "instruction", reason: "personal_chat" },
+            [LEARNING_REFUSAL_META_KEY]: { destination: "instruction", reason: "not_permitted" },
           },
         },
       }),

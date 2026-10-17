@@ -189,7 +189,7 @@ const appendRule = () => ({
     operationId: crypto.randomUUID(),
     target: { kind: "policy", scope: "global", roleKey: null },
     editMode: "append",
-    content: "Always pick the smaller model for grunt work.",
+    content: "Always use metric units in reports.",
     expectedCurrentRevisionId: null,
     expectedActivationVersion: 0,
     reason: "The person asked to always remember it",
@@ -234,6 +234,13 @@ describe("learning refusal facts", () => {
     try {
       const result = await client.callTool(appendRule());
       expect(result.isError).toBe(true);
+      const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
+      const { message } = (JSON.parse(text) as { error: { message: string } }).error;
+      expect(message).toContain("Nothing was saved");
+      expect(message).toContain("Agent learning for workspace instructions is Off");
+      // The agent is asked to tell the person, never discouraged from it.
+      expect(message).toContain("Tell the person in your reply that it was not saved");
+      expect(message).not.toMatch(/ask for (an )?approval/iu);
       expect(result._meta?.[LEARNING_REFUSAL_META_KEY]).toEqual({
         destination: "instruction",
         reason: "learning_off",
@@ -270,6 +277,26 @@ describe("learning refusal facts", () => {
       const proposed = await pending.callTool(correctSharedFact(pending));
       expect(proposed.isError, JSON.stringify(proposed.content)).toBeFalsy();
       expect(JSON.stringify(proposed)).toMatch(/outcome[^a-z]*pending/);
+      // A new entry the agent explicitly saves for everyone.
+      const chosen = await pending.callTool({
+        name: "knowledge_save",
+        arguments: {
+          operationId: crypto.randomUUID(),
+          expectedVersion: 0,
+          scope: "workspace",
+          entry: {
+            kind: "fact",
+            title: "Support hours",
+            content: "Support answers on weekdays.",
+            groupIds: [],
+            evidence: [],
+            relationships: [],
+          },
+        },
+      });
+      expect(chosen.isError, JSON.stringify(chosen.content)).toBeFalsy();
+      // Pending: the workspace's Review first applied, not the chat's Automatic.
+      expect(JSON.stringify(chosen)).toMatch(/outcome[^a-z]*pending/);
       const refused = await off.callTool(correctSharedFact(off));
       expect(refused.isError).toBe(true);
       expect(refused._meta?.[LEARNING_REFUSAL_META_KEY]).toEqual({
@@ -280,6 +307,58 @@ describe("learning refusal facts", () => {
       await Promise.all([published.close(), pending.close(), off.close()]);
     }
   }, 180_000);
+
+  test("citing personal evidence in a shared save is a correction for the agent, not a notice", async () => {
+    if (!app || !shared) return;
+    const client = await liveAgent(
+      app.db,
+      "personal",
+      {},
+      { personal: "automatic", workspace: "automatic" },
+    );
+    const fact = (content: string) => ({
+      kind: "fact",
+      title: "Units",
+      content,
+      groupIds: [],
+      relationships: [],
+    });
+    try {
+      const saved = await client.callTool({
+        name: "knowledge_save",
+        arguments: {
+          operationId: crypto.randomUUID(),
+          expectedVersion: 0,
+          entry: { ...fact("The person asked for metric units."), evidence: [] },
+        },
+      });
+      expect(saved.isError, JSON.stringify(saved.content)).toBeFalsy();
+      const personal = JSON.parse((saved.content as Array<{ text: string }>)[0]!.text) as {
+        entryId: string;
+        revisionId: string;
+      };
+      const result = await client.callTool({
+        name: "knowledge_save",
+        arguments: {
+          operationId: crypto.randomUUID(),
+          expectedVersion: 0,
+          scope: "workspace",
+          entry: {
+            ...fact("Reports use metric units."),
+            evidence: [{ entryId: personal.entryId, revisionId: personal.revisionId }],
+          },
+        },
+      });
+      expect(result.isError).toBe(true);
+      const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
+      expect(text).toContain("Nothing was saved");
+      expect(text).toContain("Retry without it");
+      expect(text).not.toContain("isn't allowed");
+      expect(result._meta?.[LEARNING_REFUSAL_META_KEY]).toBeUndefined();
+    } finally {
+      await client.close();
+    }
+  }, 120_000);
 
   test("a saved instruction carries no refusal fact", async () => {
     if (!app || !shared) return;
