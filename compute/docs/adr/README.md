@@ -20,9 +20,11 @@ old one; old records stay as history.
 | 12 | [Templates and a ready pool for new sandboxes](0012-templates-and-ready-pool.md) | Accepted, in progress |
 | 13 | [Structure rules checked on every change](0013-structure-rules.md) | Accepted |
 | 14 | [Requests, limits and admission](0014-requests-limits-and-admission.md) | Accepted |
-| 15 | [Placement and moving sandboxes between hosts](0015-placement-and-moves-between-hosts.md) | Proposed |
+| 15 | [Placement and moving sandboxes between hosts](0015-placement-and-moves-between-hosts.md) | Accepted, built by 18 |
 | 16 | [Observability: wide events, small metrics, zero alarms](0016-observability.md) | Proposed |
 | 17 | [Sweeping the chunks no copy names](0017-sweeping-unnamed-chunks.md) | Accepted |
+| 18 | [The fleet: one service, leases in Postgres, fences on every write](0018-the-fleet-service-leases-and-fences.md) | Accepted, in progress |
+| 19 | [An E2B-compatible front door and our own guest init](0019-e2b-compatible-front-door-and-guest-init.md) | Accepted, in progress |
 
 ## Format
 
