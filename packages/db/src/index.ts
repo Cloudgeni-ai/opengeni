@@ -79,6 +79,7 @@ import {
 } from "./session-attempt-fence";
 export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
 export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
+export { sessionHasToolRouterHistory } from "./session-tool-router-history";
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
@@ -38968,31 +38969,6 @@ export async function installOrReadTurnExecutionPolicyForAttempt(
   );
 }
 
-/** Historical router exposure is a protocol fact, not renewed tool authority. */
-export async function sessionHasToolRouterHistory(
-  db: Database,
-  input: { accountId: string; workspaceId: string; sessionId: string },
-): Promise<boolean> {
-  return withRlsContext(db, input, async (scopedDb) => {
-    const rows = await scopedDb
-      .select({ id: schema.sessionHistoryItems.id })
-      .from(schema.sessionHistoryItems)
-      .where(
-        and(
-          eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-          eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-          sql`(
-          ${schema.sessionHistoryItems.item}->>'type' IN ('tool_search_call', 'tool_search_output')
-          OR (${schema.sessionHistoryItems.item}->>'type' = 'function_call'
-            AND ${schema.sessionHistoryItems.item}->>'name' IN ('tool_search', 'tool_list', 'tool_invoke'))
-        )`,
-        ),
-      )
-      .limit(1);
-    return rows.length > 0;
-  });
-}
-
 /** Persist the current catalog once per logical turn; retries reuse its exact snapshot. */
 export async function ensureSessionSkillCatalog(
   db: Database,
@@ -39907,43 +39883,7 @@ export async function clearDurablePendingSessionToolCalls(
           )
           .for("update");
         if (pending.length === 0) return { accepted: true, cleared: 0 };
-        const history = await tx
-          .select({
-            position: schema.sessionHistoryItems.position,
-            item: schema.sessionHistoryItems.item,
-            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-          })
-          .from(schema.sessionHistoryItems)
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-              eq(schema.sessionHistoryItems.turnId, input.turnId),
-            ),
-          );
-        const decodedHistory = history.map((row) => ({
-          ...row,
-          item: fromPostgresLosslessJson(row.item, row.itemCodecVersion),
-        }));
-        const durableIds = pending
-          .filter((call) => {
-            const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[call.callType];
-            if (!resultType) return false;
-            const durableCall = decodedHistory.find(
-              ({ item }) =>
-                historyItemType(item) === call.callType && historyCallId(item) === call.callId,
-            );
-            return Boolean(
-              durableCall &&
-              decodedHistory.some(
-                ({ item, position }) =>
-                  position > durableCall.position &&
-                  historyItemType(item) === resultType &&
-                  historyCallId(item) === call.callId,
-              ),
-            );
-          })
-          .map((call) => call.id);
+        const durableIds = await durableToolCallPairIdsTx(tx, input, pending);
         if (durableIds.length > 0) {
           await tx
             .delete(schema.sessionPendingToolCalls)
@@ -39952,6 +39892,74 @@ export async function clearDurablePendingSessionToolCalls(
         return { accepted: true, cleared: durableIds.length };
       }),
   );
+}
+
+const DURABLE_TOOL_CALL_SCAN_PAGE = 32;
+
+/**
+ * A pending call is durable once its call item and a later result item are in
+ * the turn's history. The batch being cleared was just appended, so read the
+ * turn newest-first a page at a time and stop as soon as every pending call is
+ * proven: the cost follows the batch, not the whole turn transcript. A result
+ * after any matching call item is a result after the earliest one, so the
+ * newest-first proof is the same predicate as a whole-turn scan. Unproven
+ * calls still read the whole turn before staying pending.
+ */
+async function durableToolCallPairIdsTx(
+  tx: Pick<Database, "select">,
+  scope: { workspaceId: string; sessionId: string; turnId: string },
+  pending: Array<{ id: string; callId: string; callType: string }>,
+): Promise<string[]> {
+  const unproven = new Map<string, { id: string; callType: string; resultType: string }>();
+  for (const call of pending) {
+    const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[call.callType];
+    if (resultType) unproven.set(call.callId, { id: call.id, callType: call.callType, resultType });
+  }
+  // Pending calls whose result item was already seen at a later position.
+  const resultSeen = new Set<string>();
+  const durable: string[] = [];
+  let before: number | null = null;
+  while (unproven.size > 0) {
+    const page = await tx
+      .select({
+        position: schema.sessionHistoryItems.position,
+        item: schema.sessionHistoryItems.item,
+        itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+      })
+      .from(schema.sessionHistoryItems)
+      .where(
+        and(
+          eq(schema.sessionHistoryItems.workspaceId, scope.workspaceId),
+          eq(schema.sessionHistoryItems.sessionId, scope.sessionId),
+          eq(schema.sessionHistoryItems.turnId, scope.turnId),
+          before === null ? undefined : lt(schema.sessionHistoryItems.position, before),
+        ),
+      )
+      .orderBy(desc(schema.sessionHistoryItems.position))
+      .limit(DURABLE_TOOL_CALL_SCAN_PAGE);
+    // Positions are unique per session, so each row is strictly older than
+    // every row already seen.
+    for (const row of page) {
+      const item = fromPostgresLosslessJson(row.item, row.itemCodecVersion) as Record<
+        string,
+        unknown
+      >;
+      const callId = historyCallId(item);
+      const type = historyItemType(item);
+      if (callId === null || type === null) continue;
+      const call = unproven.get(callId);
+      if (!call) continue;
+      if (type === call.callType && resultSeen.has(callId)) {
+        durable.push(call.id);
+        unproven.delete(callId);
+      } else if (type === call.resultType) {
+        resultSeen.add(callId);
+      }
+    }
+    if (page.length < DURABLE_TOOL_CALL_SCAN_PAGE) break;
+    before = page[page.length - 1]!.position;
+  }
+  return durable;
 }
 
 export async function getSessionHistoryItems(
