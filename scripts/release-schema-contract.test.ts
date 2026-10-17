@@ -2338,6 +2338,7 @@ describe("release schema contract", () => {
       "0816_insights_usage_hourly_queue.sql",
       "0815_insights_usage_hourly.sql",
       "0823_live_personal_machine_consent.sql",
+      "0831_connected_machine_audience_rls.sql",
       "0813_preserve_accepted_learning_scope.sql",
       "0812_session_events_usage_source_key_index.sql",
       "0811_session_events_usage_source_key_backfill.sql",
