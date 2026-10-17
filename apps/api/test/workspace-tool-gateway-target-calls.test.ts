@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { mock, spyOn } from "bun:test";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { Client as StreamableHttpClient } from "@modelcontextprotocol/client";
 import type { AccessGrant, ConnectionMetadata, ToolGatewayCatalog } from "@opengeni/contracts";
 import type {
   ApiIntegrationRuntime,
@@ -816,7 +816,9 @@ describe("portable known-tool calls", () => {
           controller.abort();
         },
       });
-      const close = spyOn(Client.prototype, "close");
+      // Remote connectors connect through the spec 2026-07-28 streamable HTTP
+      // client; the in-process gateway still uses the v1 SDK client.
+      const close = spyOn(StreamableHttpClient.prototype, "close");
       let admitted = false;
       if (phase === "preflight")
         f.state.onPhysical = async () => {

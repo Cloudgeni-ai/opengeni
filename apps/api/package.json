@@ -81,6 +81,7 @@
     "zod": "^4.2.1"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
     "@opengeni/testing": "workspace:*",
     "@types/json-bigint": "^1.0.4",
     "@types/pg": "^8.20.0",
