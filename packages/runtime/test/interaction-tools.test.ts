@@ -235,6 +235,48 @@ describe("interaction attempt tools", () => {
     ).rejects.toThrow();
     expect(calls).toBe(1);
   });
+
+  test("a native call the API refuses is a definite tool error, not an unknown outcome", async () => {
+    let failure: Error = new OpenGeniApiError(
+      409,
+      "This Desktop belonged to a previous task placement and was retired. Open a new Desktop.",
+      { code: "conflict", retryable: false },
+    );
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        callNativeComputerTool: async () => {
+          throw failure;
+        },
+      }),
+    });
+    const listWindows = definitions.find(
+      (definition) => definition.modelName === "interaction__cua_list_windows",
+    )!;
+    const context = {
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    };
+    const refused = await listWindows.execute({ computerSessionId }, context);
+    expect(refused).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: "conflict",
+          retryable: false,
+          message: expect.stringContaining("was retired. Open a new Desktop."),
+        },
+      },
+    });
+    // A server failure or an uncertain dispatch keeps its failure path.
+    failure = new OpenGeniApiError(503, "Unavailable", { code: "unavailable", retryable: true });
+    await expect(listWindows.execute({ computerSessionId }, context)).rejects.toThrow(
+      "Unavailable",
+    );
+  });
   test("oversized native output retains completed operation evidence through the prepared gateway", async () => {
     const definitions = createInteractionAttemptToolDefinitions({
       workspaceId,

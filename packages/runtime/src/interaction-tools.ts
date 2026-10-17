@@ -1825,15 +1825,23 @@ export function createInteractionAttemptToolDefinitions(
         execute: async (raw, context) => {
           const { computerSessionId, ...args } = raw;
           const id = z.string().uuid().parse(computerSessionId);
-          const receipt = boundComputerNativeReceipt(
-            ComputerNativeReceipt.parse(
-              await input.transport.callNativeComputerTool!(input.workspaceId, id, {
-                operationId: context.operationId,
-                tool: tool.name,
-                arguments: args,
-              }),
-            ),
-          );
+          let response: unknown;
+          try {
+            response = await input.transport.callNativeComputerTool!(input.workspaceId, id, {
+              operationId: context.operationId,
+              tool: tool.name,
+              arguments: args,
+            });
+          } catch (error) {
+            // The API refused the call before dispatching it (a retired or
+            // ended ComputerSession, a missing permission, invalid
+            // arguments): a definite failure the model can act on, not an
+            // operation of unknown outcome or a failure worth retrying.
+            const refused = refusedNativeCallResult(error);
+            if (refused) return refused;
+            throw error;
+          }
+          const receipt = boundComputerNativeReceipt(ComputerNativeReceipt.parse(response));
           const evidence = {
             operationId: receipt.operationId,
             state: receipt.state,
@@ -2925,6 +2933,24 @@ function interactionErrorResult(
     content: [{ type: "text" as const, text: JSON.stringify({ error }) }],
     structuredContent: { error },
   };
+}
+
+/** A native computer call the API rejected with a definite client error. */
+function refusedNativeCallResult(error: unknown): AttemptToolResultValue | null {
+  const secretReferenceFailure = secretReferenceToolResult(error);
+  if (secretReferenceFailure) return secretReferenceFailure;
+  if (!(error instanceof OpenGeniApiError) || error.outcomeUnknown || error.status >= 500) {
+    return null;
+  }
+  return (
+    interactionToolErrorOutput(error) ??
+    interactionErrorResult(
+      error.code ?? `http_${error.status}`,
+      boundedErrorMessage(error.message),
+      error.retryable,
+      error.correlationId,
+    )
+  );
 }
 
 /** The API refused a Browser or Computer action before dispatch because a
