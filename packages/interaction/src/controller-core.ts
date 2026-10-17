@@ -18,6 +18,10 @@ export class InteractionControllerError extends Error {
 
 /** Driver proof that a dispatched command definitively failed without an ambiguous outcome. */
 export class InteractionDefiniteDriverError extends Error {
+  /** Optional page or screen state the driver observed after the failure, so
+   * the caller can act on it without another observation round trip. */
+  observation: unknown = null;
+
   constructor(
     readonly code: InteractionError["code"],
     message: string,
@@ -32,6 +36,9 @@ export class InteractionDefiniteDriverError extends Error {
  * be confirmed. Unlike an arbitrary transport exception, this preserves the
  * adapter's bounded, user-actionable diagnosis without pretending certainty. */
 export class InteractionOutcomeUnknownDriverError extends Error {
+  /** Optional state observed after the failure; see InteractionDefiniteDriverError. */
+  observation: unknown = null;
+
   constructor(
     readonly code: InteractionError["code"],
     message: string,
@@ -434,21 +441,27 @@ export class InteractionControllerCore<
       if (error instanceof InteractionDefiniteDriverError) {
         return await this.settle(
           entry,
-          this.makeReceipt(command, "failed", dispatchedAt, this.timestamp(), null, {
-            code: error.code,
-            message: error.message,
-            retryable: error.retryable,
-          }),
+          this.makeReceipt(
+            command,
+            "failed",
+            dispatchedAt,
+            this.timestamp(),
+            this.failureObservation(error.observation, command),
+            { code: error.code, message: error.message, retryable: error.retryable },
+          ),
         );
       }
       if (error instanceof InteractionOutcomeUnknownDriverError) {
         return await this.settle(
           entry,
-          this.makeReceipt(command, "outcome_unknown", dispatchedAt, this.timestamp(), null, {
-            code: error.code,
-            message: error.message,
-            retryable: error.retryable,
-          }),
+          this.makeReceipt(
+            command,
+            "outcome_unknown",
+            dispatchedAt,
+            this.timestamp(),
+            this.failureObservation(error.observation, command),
+            { code: error.code, message: error.message, retryable: error.retryable },
+          ),
         );
       }
       return await this.settle(
@@ -459,6 +472,19 @@ export class InteractionControllerCore<
           retryable: false,
         }),
       );
+    }
+  }
+
+  /** A failure's observation is optional context. One that does not parse or
+   * belongs to another target is dropped; it never changes the failure. */
+  private failureObservation(observation: unknown, command: TCommand): TObservation | null {
+    if (observation === null || observation === undefined) return null;
+    try {
+      const parsed = this.adapter.parseObservation(observation);
+      this.adapter.assertObservationAuthority(parsed, command.targetId);
+      return parsed;
+    } catch {
+      return null;
     }
   }
 

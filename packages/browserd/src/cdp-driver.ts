@@ -1306,13 +1306,27 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             completedActions === 0 &&
             state.actionEffectCount === initialEffectCount
           )
-            throw error;
-          throw error instanceof InteractionDefiniteDriverError
-            ? new InteractionOutcomeUnknownDriverError(
-                "outcome_unknown",
-                `browser action sent input or completed ${completedActions} action(s) before a later failure (${error.code}: ${error.message}); inspect the outcome before continuing and do not replay automatically`,
-              )
-            : error;
+            throw await this.withFailureObservation(
+              state,
+              info.targetId,
+              command,
+              secretValues,
+              error,
+              null,
+            );
+          throw await this.withFailureObservation(
+            state,
+            info.targetId,
+            command,
+            secretValues,
+            error instanceof InteractionDefiniteDriverError
+              ? new InteractionOutcomeUnknownDriverError(
+                  "outcome_unknown",
+                  `browser action sent input or completed ${completedActions} action(s) before a later failure (${error.code}: ${error.message}); check the current page before continuing and do not replay the completed actions automatically`,
+                )
+              : error,
+            requestsBeforeActions,
+          );
         }
       }
       if (command.observationMode === "none") return null;
@@ -1405,6 +1419,46 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
     this.refreshSubscribedFrame(command.targetId);
     return redactInteractionSecretValues(observation, secretValues);
+  }
+
+  /**
+   * Attaches the page as it is after a failed action, so the receipt already
+   * shows current elements (for example fresh refs after a stale one) and the
+   * caller needs no separate observation. Best effort: the failure itself
+   * always stands, and a page that cannot be read leaves it without one.
+   * `settleAfter` is set when input may have been sent.
+   */
+  private async withFailureObservation(
+    state: TargetState,
+    targetId: string,
+    command: BrowserActionCommandValue,
+    secretValues: BrowserActionCommandValue["secretValues"],
+    error: unknown,
+    settleAfter: { open: ReadonlySet<string>; activity: number } | null,
+  ): Promise<unknown> {
+    if (
+      !(
+        error instanceof InteractionDefiniteDriverError ||
+        error instanceof InteractionOutcomeUnknownDriverError
+      ) ||
+      (command.observationMode !== undefined && command.observationMode !== "full") ||
+      state.dialog
+    )
+      return error;
+    try {
+      if (settleAfter) {
+        await this.settleActionRequests(state, settleAfter);
+        await this.settleFiniteAnimations(state);
+      }
+      const info = await this.requireTargetInfo(await this.ensureConnection(), targetId);
+      error.observation = redactInteractionSecretValues(
+        await this.observeUnlocked(state, info),
+        secretValues,
+      );
+    } catch {
+      // Optional context only; never replace the action's own failure.
+    }
+    return error;
   }
 
   readClipboard(): BrowserClipboardValue {
@@ -3122,6 +3176,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "fill": {
         const node = await this.resolveActionLocator(state, action.locator);
         if (await this.fillNativeDateTimeInput(state, node.backendDOMNodeId, action.value)) return;
+        await this.assertFillableTarget(state, node.backendDOMNodeId);
         await this.focusNode(state, node.backendDOMNodeId);
         await this.selectAllAndDelete(state, node.backendDOMNodeId);
         if (action.value || this.engine === "lightpanda")
@@ -3137,7 +3192,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (confirmed !== true) {
           throw new InteractionOutcomeUnknownDriverError(
             "outcome_unknown",
-            "browser fill was dispatched but the target did not retain the requested value; re-observe before continuing",
+            "browser fill was dispatched but the field did not keep the requested value; check the current page before continuing",
           );
         }
         return;
@@ -4208,10 +4263,49 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (retained !== true) {
       throw new InteractionOutcomeUnknownDriverError(
         "outcome_unknown",
-        `browser set the ${type} input's value but the page did not keep it; re-observe before continuing`,
+        `browser set the ${type} input's value but the page did not keep it; check the current page before continuing`,
       );
     }
     return true;
+  }
+
+  /**
+   * Fill replaces the text of an editable field. Refuse any other element
+   * before focusing or typing, with the action that does work on it: typing
+   * into a select or a custom combobox would at best do nothing and at worst
+   * pick an option through type-ahead, leaving an unknown outcome.
+   */
+  private async assertFillableTarget(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+  ): Promise<void> {
+    if (backendDOMNodeId === null) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "browser fill needs a text input, textarea or editable element",
+      );
+    }
+    const inspected = await this.callOnNode(state, backendDOMNodeId, FILL_TARGET_FUNCTION, []);
+    if (!isRecord(inspected) || inspected.kind === "editable") return;
+    const role = typeof inspected.role === "string" && inspected.role ? inspected.role : "element";
+    const type = typeof inspected.type === "string" ? inspected.type : "";
+    const message =
+      inspected.kind === "read_only"
+        ? "browser fill target is disabled or read-only"
+        : inspected.kind === "select"
+          ? "this is a native select, not a text field; use the select action with the option's value or label"
+          : inspected.kind === "input"
+            ? `this is a ${type} input, not a text field; use ${
+                type === "checkbox" || type === "radio"
+                  ? "check"
+                  : type === "file"
+                    ? "upload"
+                    : "click"
+              } instead`
+            : inspected.kind === "popup"
+              ? `this ${role} is not a text field; click it to open its options, then click the option`
+              : `browser fill needs a text input, textarea or editable element, and this ${role} is not one`;
+    throw new InteractionDefiniteDriverError("invalid_action", message);
   }
 
   private async selectAllAndDelete(
@@ -5703,6 +5797,26 @@ const LIGHTPANDA_CLEAR_EDITABLE_FUNCTION = `function() {
   if (typeof setter !== "function") return false;
   setter.call(this, "");
   return true;
+}`;
+
+// Classifies a fill target. Text-like inputs, textareas and editable content
+// are fillable; anything else reports what it is, so the refusal can name the
+// action that works on it.
+const FILL_TARGET_FUNCTION = `function() {
+  if (!(this instanceof Element) || !this.isConnected) return { kind: "other", role: "element" };
+  const tag = String(this.tagName || "").toLowerCase();
+  const role = String(this.getAttribute("role") || "").toLowerCase();
+  if (tag === "textarea" || (tag === "input" && ["text", "search", "url", "tel", "password", "email", "number"].includes(String(this.type).toLowerCase()))) {
+    return this.disabled || this.readOnly ? { kind: "read_only" } : { kind: "editable" };
+  }
+  if (this.isContentEditable === true) return { kind: "editable" };
+  if (tag === "select") return { kind: "select" };
+  if (tag === "input") return { kind: "input", type: String(this.type).toLowerCase() };
+  const popup = String(this.getAttribute("aria-haspopup") || "").toLowerCase();
+  if (role === "combobox" || role === "listbox" || (popup !== "" && popup !== "false")) {
+    return { kind: "popup", role: role || "button" };
+  }
+  return { kind: "other", role: role || tag || "element" };
 }`;
 
 const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
