@@ -3,10 +3,11 @@
 
 use std::time::Duration;
 
-use compute_core::{DiskSpace, Input, Level, SandboxId};
+use compute_core::{DiskSpace, Input, Level, SandboxId, Step};
 use compute_engine::{Engine, PageSize};
 use tokio::time::Instant;
 
+use crate::step::Reading;
 use crate::store::Store;
 
 use super::{ActivityWindow, BusyRule, HostAgent};
@@ -76,7 +77,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// whenever the sandbox is not simply running, and whenever a step
     /// starts for it ([`HostAgent::start_step`]), so the work of waking,
     /// pausing or saving never counts, even when a whole pause and resume
-    /// falls between two readings. Each signal counts only when it was read
+    /// falls between two readings. A checkpoint holds the VM while its
+    /// guest runs, and sends what it reads from its resume on: those
+    /// readings stand in for the agent's own, timed when they were taken.
+    /// Each signal counts only when it was read
     /// at both ends of the window, so one that cannot be read leaves the
     /// other to decide alone. A sandbox none of whose watched signals could
     /// be read counts as busy at once, whatever its window: putting a
@@ -88,25 +92,38 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let watching = rule.watches_cpu() || rule.watches_io();
         let mut busy = Vec::new();
         for (id, slot) in &mut self.slots {
-            let running = self
-                .core
-                .sandbox(*id)
-                .is_some_and(|view| view.state.level == Level::Running && view.step.is_none());
-            let Some(live) = slot.vm.as_ref().filter(|_| running) else {
+            let view = self.core.sandbox(*id);
+            let reading = match (&slot.vm, view) {
+                (Some(live), Some(view))
+                    if view.state.level == Level::Running && view.step.is_none() =>
+                {
+                    Some(Reading {
+                        incarnation: live.incarnation,
+                        at: now,
+                        cpu: rule
+                            .watches_cpu()
+                            .then(|| self.engine.cpu_time(&live.vm).ok())
+                            .flatten(),
+                        io: rule
+                            .watches_io()
+                            .then(|| self.engine.io_bytes(&live.vm).ok())
+                            .flatten(),
+                    })
+                }
+                (None, Some(view)) if view.runs() && view.step == Some(Step::Checkpoint) => {
+                    slot.lent
+                }
+                _ => None,
+            };
+            let Some(reading) = reading else {
                 slot.activity = None;
                 continue;
             };
-            let cpu = rule
-                .watches_cpu()
-                .then(|| self.engine.cpu_time(&live.vm).ok())
-                .flatten();
-            let io = rule
-                .watches_io()
-                .then(|| self.engine.io_bytes(&live.vm).ok())
-                .flatten();
+            let cpu = reading.cpu.filter(|_| rule.watches_cpu());
+            let io = reading.io.filter(|_| rule.watches_io());
             let mut fresh = ActivityWindow {
-                incarnation: live.incarnation,
-                started: now,
+                incarnation: reading.incarnation,
+                started: reading.at,
                 cpu,
                 io,
                 unseen: false,
@@ -124,10 +141,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // A window that began unreadable has nothing to compare
                 // against; one starts now.
                 Some(window)
-                    if window.incarnation == live.incarnation
+                    if window.incarnation == reading.incarnation
                         && (window.cpu.is_some() || window.io.is_some()) =>
                 {
-                    let elapsed = now.duration_since(window.started);
+                    let elapsed = reading.at.duration_since(window.started);
                     if elapsed >= rule.window {
                         let used = window
                             .cpu

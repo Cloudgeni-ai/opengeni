@@ -99,9 +99,10 @@ pub enum Input {
     },
     /// The sandbox did work on its own while running, such as a build using
     /// its processors or a download moving data. Counts as activity only
-    /// while it runs with no step in progress: it never wakes the sandbox,
-    /// never cancels an [`Input::Sleep`] request, and a step already putting
-    /// the sandbox to sleep goes ahead.
+    /// while it runs with no step in progress but a checkpoint, which lets
+    /// it run: it never wakes the sandbox, never cancels an
+    /// [`Input::Sleep`] request, and a step already putting the sandbox to
+    /// sleep goes ahead.
     Busy {
         /// The sandbox.
         sandbox: SandboxId,
@@ -730,9 +731,13 @@ impl Host {
                 }
             }
             Input::Busy { sandbox } => {
+                // A checkpoint pauses the VM only while it captures it: its
+                // guest runs, and works, through the rest.
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox)
                     && slot.state.level == Level::Running
-                    && slot.in_flight.is_none()
+                    && slot
+                        .in_flight
+                        .is_none_or(|flight| flight.step == Step::Checkpoint)
                 {
                     slot.touch(now);
                     self.mark(sandbox);

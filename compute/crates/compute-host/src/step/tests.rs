@@ -26,6 +26,8 @@ struct Counting {
     /// Whether it refuses every memory image, as a VMM refuses a snapshot
     /// format it no longer reads.
     refuses: AtomicBool,
+    /// How its next resumes fail, one each, before they succeed again.
+    resume_failures: std::sync::Mutex<std::collections::VecDeque<ErrorKind>>,
 }
 
 impl Counting {
@@ -76,7 +78,10 @@ impl Engine for Counting {
 
     async fn resume(&self, (): &()) -> Result<(), EngineError> {
         self.resumes.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        let failure = self.resume_failures.lock().unwrap().pop_front();
+        failure.map_or(Ok(()), |kind| {
+            Err(EngineError::new(kind, "resume", "refused"))
+        })
     }
 
     async fn compress(&self, (): &(), _: &CancellationToken) -> Result<Completion, EngineError> {
@@ -215,6 +220,7 @@ impl Sandbox {
             pager: crate::PagerConfig::new(self.root.path().join("no-pager")),
             launches: 0,
             unthrottle: None,
+            meter: None,
             last_used_ms: 1_700_000_000_000,
         }
     }
@@ -728,6 +734,51 @@ async fn a_vm_whose_disk_cannot_be_vouched_for_is_kept_unsaved() {
     );
     let durable = sandbox.records.settle(sandbox.id).await.unwrap();
     assert!(!durable.image, "the record vouches for an image");
+}
+
+/// A checkpoint resumes the VM it paused through failures that changed
+/// nothing, even once cancelled, since its sandbox is in use; one that may
+/// have changed something, or failures past the deadline, end the tries.
+#[tokio::test]
+async fn a_checkpoint_resumes_its_paused_vm_through_transient_failures() {
+    let sandbox = Sandbox::new().await;
+    let record = sandbox.record(Change::new()).await;
+    let job = sandbox.job(NoStore, record, true);
+    job.cancel.cancel();
+    let fail = |kinds: &[ErrorKind]| {
+        let mut failures = sandbox.engine.resume_failures.lock().unwrap();
+        failures.clear();
+        failures.extend(kinds);
+    };
+    let within = Duration::from_secs(30);
+
+    fail(&[ErrorKind::Transient; 3]);
+    job.resume_paused(&(), within).await.unwrap();
+    assert_eq!(Counting::count(&sandbox.engine.resumes), 4);
+
+    fail(&[
+        ErrorKind::Transient,
+        ErrorKind::MemoryLost,
+        ErrorKind::Transient,
+    ]);
+    let error = job.resume_paused(&(), within).await.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::MemoryLost);
+    assert_eq!(Counting::count(&sandbox.engine.resumes), 6);
+
+    fail(&[ErrorKind::Transient; 100]);
+    let begin = std::time::Instant::now();
+    let error = job
+        .resume_paused(&(), Duration::from_millis(100))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Transient);
+    assert!(
+        begin.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        begin.elapsed()
+    );
+    let tries = Counting::count(&sandbox.engine.resumes) - 6;
+    assert!((2..10).contains(&tries), "{tries} tries");
 }
 
 fn written(jail: &Path) -> SnapshotFiles {

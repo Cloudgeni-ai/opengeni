@@ -22,7 +22,7 @@ use crate::pool::{Loaning, Template};
 use crate::protocol::Id;
 use crate::restore_notice::ask_commands;
 use crate::state::{Change, Disk, Fence, Record, Records};
-use crate::step::{After, Job, Live, LiveMemory, Report};
+use crate::step::{After, Job, Live, LiveMemory, Meter, Report};
 use crate::store::{Owned, Store};
 
 use super::holds::Closing;
@@ -64,6 +64,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.input(Input::Return { loan });
             }
             Event::Unthrottled { id, op } => self.input(Input::Unthrottled { sandbox: id.0, op }),
+            Event::Reading { id, reading } => {
+                if let Some(slot) = self.slots.get_mut(&id.0) {
+                    slot.lent = Some(reading);
+                }
+            }
             Event::Exited { id, incarnation } => self.exited(id, incarnation),
             Event::Asked {
                 id,
@@ -310,8 +315,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             });
             return;
         };
-        // What the VM does from here is the step's work, not the guest's.
+        // What the VM does from here is the step's work, not the guest's,
+        // until a checkpoint lets the guest run again and reads it.
         slot.activity = None;
+        slot.lent = None;
         slot.op = Some(Running {
             op,
             step,
@@ -442,6 +449,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let _ = events.send(Event::Unthrottled { id, op });
             })
         });
+        if step == Step::Checkpoint {
+            let events = events.clone();
+            job.meter = Some(Meter {
+                every: self.sample_every,
+                send: Box::new(move |reading| {
+                    let _ = events.send(Event::Reading { id, reading });
+                }),
+            });
+        }
         tokio::spawn(async move {
             // Without that kept, the step does not run: it fails for now,
             // handing back its VM untouched, and is tried again.
@@ -505,6 +521,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             pager: self.pager.clone(),
             launches: 0,
             unthrottle: None,
+            meter: None,
             last_used_ms: self.unix_ms(last_activity),
         }
     }

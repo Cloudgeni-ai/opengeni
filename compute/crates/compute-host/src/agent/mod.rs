@@ -36,7 +36,7 @@ use crate::pool::{Built, Held, Lender, Loaning, Pool, PoolConfig, Shape, Sources
 
 use crate::protocol::{About, HostStatus, Id, SandboxConfig, StepStats};
 use crate::state::{Record, Records, StateError, Stray, claim_host, unix_ms_now};
-use crate::step::{After, Live, Report};
+use crate::step::{After, Live, Reading, Report};
 use crate::store::{OwnerEpoch, Store};
 use compute_protocol::fleet::Verdict;
 
@@ -568,6 +568,12 @@ enum Event<V> {
         id: Id,
         op: OpId,
     },
+    /// A step that holds `id`'s running VM read its activity; see
+    /// [`crate::step::Meter`].
+    Reading {
+        id: Id,
+        reading: Reading,
+    },
     Exited {
         id: Id,
         incarnation: u64,
@@ -671,6 +677,9 @@ struct Slot<V> {
     deferred: Option<Step>,
     /// Processor use and traffic measured so far, while the VM runs.
     activity: Option<ActivityWindow>,
+    /// The latest reading of its VM's activity from a step that holds the
+    /// VM while its guest runs; see [`crate::step::Meter`].
+    lent: Option<Reading>,
     /// The incarnation of the running VM and its memory statistics when
     /// last sampled running; see [`HostAgent::check_uncompressed`].
     stats: Option<(u64, MemoryStats)>,
@@ -1201,6 +1210,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 hand_off: false,
                 deferred: None,
                 activity: None,
+                lent: None,
                 stats: None,
                 reported: None,
                 summarized: Instant::now(),

@@ -17,16 +17,23 @@
 //! The record goes on vouching for no local copy, since the VM moves on;
 //! only its `backed_up_ms` moves, to when the bundle was captured, once
 //! the store holds it. Protection starts there, not when the step began.
+//!
+//! From the resume on, the step sends readings of the VM's activity to the
+//! agent (see [`Meter`]): the guest's use while the image is made and
+//! uploaded counts, and the capture's own work does not.
 
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use compute_core::{Failure, Outcome};
 use compute_engine::{Engine, EngineError, ErrorKind};
+use tokio::time::Instant;
 
 use super::{
-    After, Base, Job, Live, Taken, blocking, checkpoint_disk, failure, images_of, state_failure,
-    wake_profile,
+    After, Base, Job, Live, Meter, Reading, Taken, blocking, checkpoint_disk, failure, images_of,
+    state_failure, wake_profile,
 };
 use crate::image::Verified;
 use crate::layout::{clone_jailed, remove_if_present};
@@ -35,6 +42,13 @@ use crate::state::{Change, unix_ms_now};
 use crate::store::{JailedFile, SavedFiles, SavedImage, Store};
 
 const OP: &str = "checkpoint";
+
+/// How long a checkpoint goes on resuming the VM it paused while the VMM
+/// answers that nothing changed: past that the VM is beyond control.
+const RESUME_FOR: Duration = Duration::from_secs(30);
+
+/// The first wait between those tries; each doubles it, up to a second.
+const RESUME_AGAIN_AFTER: Duration = Duration::from_millis(10);
 
 /// What a checkpoint captured while its VM was paused.
 struct Captured<I> {
@@ -84,14 +98,14 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
         let captured = self.capture(&mut live, disk.clone()).await;
         // The VM runs again whatever the capture came to.
-        let resumed = self.engine.resume(&live.vm).await;
+        let resumed = self.resume_paused(&live.vm, RESUME_FOR).await;
         notes::paused(paused.elapsed());
         notes::phase("resume");
         let outcome = match (captured, resumed) {
             (_, Err(error)) => {
-                // Paused against the core's belief that it runs, with no
-                // way to tell its programs to go on: the VM ends, and the
-                // sandbox goes back to what it has saved.
+                // Paused against the core's belief that it runs, and beyond
+                // control: the VM ends, and the sandbox goes back to what it
+                // has saved.
                 tracing::error!(id = %self.id, %error, "a checkpoint could not resume the VM");
                 notes::error(&error);
                 Outcome::Failed(Failure::MemoryLost)
@@ -107,17 +121,30 @@ impl<E: Engine, S: Store> Job<E, S> {
                     failure(&error)
                 }
             }
-            (Ok(captured), Ok(())) => match self.make_image(&mut live, captured.image).await {
-                Ok(image) => {
-                    self.publish(Captured {
-                        image,
-                        disk: captured.disk,
-                        at_ms: captured.at_ms,
-                    })
-                    .await
+            (Ok(captured), Ok(())) => {
+                // The guest runs from here: what its VM does counts as its
+                // use, while the image is made and uploaded.
+                let (meter, engine) = (self.meter.take(), Arc::clone(&self.engine));
+                let metering = report_activity(&*engine, &live.vm, live.incarnation, meter);
+                let base = &mut live.memory.base;
+                let work = async {
+                    match self.make_image(base, captured.image).await {
+                        Ok(image) => {
+                            self.publish(Captured {
+                                image,
+                                disk: captured.disk,
+                                at_ms: captured.at_ms,
+                            })
+                            .await
+                        }
+                        Err(error) => failure(&error),
+                    }
+                };
+                tokio::select! {
+                    outcome = work => outcome,
+                    never = metering => match never {},
                 }
-                Err(error) => failure(&error),
-            },
+            }
         };
         let left = disk;
         if let Err(error) = blocking(move || remove_if_present(&left))
@@ -127,6 +154,31 @@ impl<E: Engine, S: Store> Job<E, S> {
             tracing::warn!(id = %self.id, %error, "checkpoint's disk clone not removed; the next checkpoint or recovery removes it");
         }
         (outcome, After::Kept(live))
+    }
+
+    /// Resumes the VM a checkpoint paused, trying again for up to `within`
+    /// while the VMM answers that nothing changed, cancelled or not: the
+    /// sandbox is in use, and the core believes it runs. Fails at once on
+    /// a failure that may have changed something.
+    pub(super) async fn resume_paused(
+        &self,
+        vm: &E::Vm,
+        within: Duration,
+    ) -> Result<(), EngineError> {
+        let deadline = Instant::now() + within;
+        let mut wait = RESUME_AGAIN_AFTER;
+        loop {
+            match self.engine.resume(vm).await {
+                Err(error)
+                    if error.kind == ErrorKind::Transient && Instant::now() + wait < deadline =>
+                {
+                    tracing::warn!(id = %self.id, %error, "a checkpoint's resume failed; trying again");
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(Duration::from_secs(1));
+                }
+                resumed => return resumed,
+            }
+        }
     }
 
     /// Captures the paused VM: a snapshot of its memory, from which an
@@ -204,5 +256,22 @@ impl<E: Engine, S: Store> Job<E, S> {
             Ok(()) => Outcome::Done,
             Err(error) => state_failure(&error),
         }
+    }
+}
+
+/// Sends readings of `vm`'s activity through `meter` at once and then every
+/// [`Meter::every`], until dropped; without a meter, waits forever.
+async fn report_activity<E: Engine>(
+    engine: &E,
+    vm: &E::Vm,
+    incarnation: u64,
+    meter: Option<Meter>,
+) -> Infallible {
+    let Some(meter) = meter else {
+        return std::future::pending().await;
+    };
+    loop {
+        (meter.send)(Reading::of(engine, vm, incarnation));
+        tokio::time::sleep(meter.every).await;
     }
 }

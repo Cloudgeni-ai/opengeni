@@ -133,6 +133,40 @@ pub(crate) struct Report {
     pub reading: Option<(u64, MemoryStats)>,
 }
 
+/// A VM's activity counters, read at one moment: what the host judges
+/// whether its guest is busy by.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Reading {
+    /// The VM process read.
+    pub incarnation: u64,
+    pub at: tokio::time::Instant,
+    /// Processor time so far, if it could be read.
+    pub cpu: Option<Duration>,
+    /// Traffic so far, if it could be read.
+    pub io: Option<u64>,
+}
+
+impl Reading {
+    /// Reads the counters of `vm`, VM process `incarnation`, now.
+    pub fn of<E: Engine>(engine: &E, vm: &E::Vm, incarnation: u64) -> Self {
+        Self {
+            incarnation,
+            at: tokio::time::Instant::now(),
+            cpu: engine.cpu_time(vm).ok(),
+            io: engine.io_bytes(vm).ok(),
+        }
+    }
+}
+
+/// Where a step that holds a running VM without stopping its guest sends
+/// readings of its activity (see [`Reading`]), so the guest's use still
+/// counts while the agent cannot read the VM itself.
+pub(crate) struct Meter {
+    /// How often.
+    pub every: Duration,
+    pub send: Box<dyn Fn(Reading) + Send + Sync>,
+}
+
 /// Which stored copy matches the local files. The record says whether an
 /// archived copy exists; this names it, so eviction can check the store
 /// still holds exactly that copy.
@@ -174,6 +208,9 @@ pub(crate) struct Job<E: Engine, S> {
     /// concurrency limit protects (a wake, once its VMM has resumed), so
     /// another may start while this one waits for its guest.
     pub unthrottle: Option<Box<dyn FnOnce() + Send + Sync>>,
+    /// Takes readings of the VM's activity while the step holds it and its
+    /// guest runs: a checkpoint's, once the VM runs again.
+    pub meter: Option<Meter>,
     /// The sandbox's last activity when the step was issued, in
     /// milliseconds since the Unix epoch; every write of the record keeps it.
     pub last_used_ms: u64,
@@ -576,7 +613,7 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// generation, which becomes the VM's base.
     async fn write_image(&self, live: &mut Live<E::Vm>) -> Result<Verified, EngineError> {
         let taken = self.take_snapshot(live).await?;
-        self.make_image(live, taken).await
+        self.make_image(&mut live.memory.base, taken).await
     }
 
     /// Has the paused VM's VMM write a snapshot, moves it out of the jail
@@ -660,12 +697,8 @@ impl<E: Engine, S: Store> Job<E, S> {
 
     /// Publishes what [`Self::take_snapshot`] took as a new image
     /// generation, merging a diff over the image it was taken against, and
-    /// makes it the VM's base. The VM may run meanwhile.
-    async fn make_image(
-        &self,
-        live: &mut Live<E::Vm>,
-        taken: Taken,
-    ) -> Result<Verified, EngineError> {
+    /// makes it the VM's `base`. The VM may run meanwhile.
+    async fn make_image(&self, base: &mut Base, taken: Taken) -> Result<Verified, EngineError> {
         const OP: &str = "save";
         let images = images_of(&self.paths);
         let memory_len = self.spec.memory_bytes();
@@ -700,7 +733,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         .map_err(|suspect| suspect_error(OP, suspect))?;
         notes::phase("merge");
         tracing::debug!(id = %self.id, generation = %published.generation(), "memory image saved");
-        live.memory.base = Base::Image(published.generation());
+        *base = Base::Image(published.generation());
         Ok(published)
     }
 

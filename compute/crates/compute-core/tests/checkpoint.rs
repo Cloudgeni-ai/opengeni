@@ -246,6 +246,47 @@ fn a_sandbox_that_never_ran_is_archived_at_once_and_a_wake_comes_first() {
 }
 
 #[test]
+fn work_during_a_checkpoint_keeps_its_sandbox_awake_after_it() {
+    let mut rig = Rig::new(HostPolicy::default());
+    let policy = SleepPolicy::new(SleepRules {
+        checkpoint_every: Some(EVERY),
+        ..SleepRules::RECOMMENDED
+    })
+    .unwrap();
+    rig.add(1, State::RUNNING, policy, Size::whole(GIB));
+    let busy = Input::Busy {
+        sandbox: SandboxId(1),
+    };
+    // The guest works throughout: a build, say, with nobody holding it.
+    let mut op = None;
+    for second in (5..=FIRST_CHECKPOINT.as_secs()).step_by(5) {
+        rig.now = At::from_duration(secs(second));
+        let mut actions = rig.send(busy);
+        actions.extend(rig.send(Input::Tick));
+        for (_, step, started) in started(&actions) {
+            assert_eq!(step, Step::Checkpoint, "{actions:?}");
+            op = Some(started);
+        }
+    }
+    let op = op.expect("no checkpoint started");
+    // A slow upload: the guest goes on working, and that counts.
+    for second in (65..=300).step_by(5) {
+        rig.now = At::from_duration(secs(second));
+        assert_eq!(started(&rig.send(busy)), Vec::new());
+    }
+    assert_eq!(
+        started(&rig.finish(1, op, Outcome::Done)),
+        Vec::new(),
+        "a working guest was put to sleep as its checkpoint ended"
+    );
+    assert_eq!(
+        rig.host.next_deadline(),
+        Some(At::from_duration(secs(300 + 10))),
+        "it sleeps once idle for its pause delay"
+    );
+}
+
+#[test]
 fn a_checkpoint_books_its_disks_whole_growth_while_it_runs() {
     let mut rig = Rig::new(HostPolicy {
         disk: Some(DiskPolicy {

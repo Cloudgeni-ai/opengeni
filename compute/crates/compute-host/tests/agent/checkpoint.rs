@@ -181,6 +181,68 @@ async fn checkpointed_since(lab: &Lab, id: Id, after_ms: u64) -> SandboxStatus {
     Lab::sandbox(&status, id).clone()
 }
 
+/// A store whose archives take `delay` longer, as a large upload does.
+struct Slow {
+    inner: Directory,
+    delay: Duration,
+}
+
+impl Store for Slow {
+    fn archive(
+        &self,
+        id: Id,
+        save: Stamp,
+        files: &SavedFiles,
+        cancel: &CancellationToken,
+    ) -> impl Future<Output = Result<Archive, EngineError>> + Send {
+        let (archived, delay) = (self.inner.archive(id, save, files, cancel), self.delay);
+        async move {
+            sleep(delay).await;
+            archived.await
+        }
+    }
+
+    fn verify(
+        &self,
+        id: Id,
+        receipt: &Receipt,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send {
+        self.inner.verify(id, receipt)
+    }
+
+    fn fetch(
+        &self,
+        id: Id,
+        into: &FetchInto,
+    ) -> impl Future<Output = Result<FetchedMemory, EngineError>> + Send {
+        self.inner.fetch(id, into)
+    }
+
+    fn delete(
+        &self,
+        id: Id,
+        own: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<()>, EngineError>> + Send {
+        self.inner.delete(id, own)
+    }
+
+    fn claim(
+        &self,
+        id: Id,
+        own: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<Option<Claimed>>, EngineError>> + Send {
+        self.inner.claim(id, own)
+    }
+
+    fn forget_memory(
+        &self,
+        id: Id,
+        change: Stamp,
+    ) -> impl Future<Output = Result<Owned<Option<Receipt>>, EngineError>> + Send {
+        self.inner.forget_memory(id, change)
+    }
+}
+
 fn snapshots(lab: &Lab) -> usize {
     lab.world
         .snapshots
@@ -337,6 +399,54 @@ async fn use_during_a_checkpoint_neither_waits_for_it_nor_cancels_it() {
         1,
         "the checkpoint was not cancelled and taken again"
     );
+    one.assert_clean();
+}
+
+/// A guest working on its own throughout a checkpoint whose upload takes
+/// longer than its pause delay is not taken for idle: it runs on once the
+/// checkpoint ends, and sleeps only once it goes quiet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guest_working_through_a_slow_checkpoint_stays_awake_after_it() {
+    let Some(dir) = shared_extents() else {
+        return;
+    };
+    let root = Lab::root_in(&dir);
+    let config = Lab::config(&root, HostPolicy::default());
+    let upload = Duration::from_millis(3_000);
+    let store = Slow {
+        inner: Directory::new(root.join("shelf")),
+        delay: upload,
+    };
+    let one = Lab::launch(root, Arc::default(), Delays::default(), config, store).await;
+    let sandbox = id(5);
+    let sleep_config = SleepConfig {
+        pause_after_ms: Some(1_000),
+        ..CHECKPOINTED
+    };
+    one.create(sandbox, sleep_config).await;
+    assert_eq!(one.run(sandbox, &["busy"]).await, ["ok"]);
+    let written = unix_ms();
+    let began = one
+        .wait_until("a checkpoint under way", |status: &HostStatus| {
+            Lab::sandbox(status, sandbox).step.as_deref() == Some("checkpoint")
+        })
+        .await;
+    assert_eq!(Lab::sandbox(&began, sandbox).level, LevelName::Running);
+    let done = checkpointed_since(&one, sandbox, written).await;
+    assert_eq!(
+        done.level,
+        LevelName::Running,
+        "a working guest was put to sleep as its checkpoint ended"
+    );
+    sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(one.current(sandbox).await.level, LevelName::Running);
+    // Quiet now: it sleeps after its pause delay, checkpoint or not.
+    assert_eq!(one.run(sandbox, &["quiet"]).await, ["ok"]);
+    one.wait_until("the quiet guest paused", |status: &HostStatus| {
+        let view = Lab::sandbox(status, sandbox);
+        view.level == LevelName::Paused && view.step.is_none()
+    })
+    .await;
     one.assert_clean();
 }
 
