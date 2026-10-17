@@ -425,3 +425,35 @@ the victim kept 92 % of its speed. A processor request is a guarantee
 under contention, not a cap, so a sandbox requesting little still runs at
 full speed on an idle host.
 
+## An Opengeni session on the fabric (2026-10-17)
+
+The proof ADR 20 asks for. An Opengeni development stack (API, worker
+and web on a laptop in Norway, branch `feat/opengeni-e2b-endpoint` at
+`f2c3868a7`) ran with `OPENGENI_SANDBOX_BACKEND=e2b`, a timeout of 900 s,
+`OPENGENI_E2B_TIMEOUT_ACTION=pause` and auto-resume, against the fleet
+service's E2B front door over HTTPS with a test certificate authority. The
+fleet ran on one GCP n2-highmem-32 with nested virtualization in
+europe-west4-a (one host agent, `nested` profile, local NVMe), with the
+Azurite emulator on the same host as its object storage. The sandbox image
+was `ghcr.io/cloudgeni-ai/opengeni-sandbox:0.20.0`, built into a bootable
+image by the fabric's OCI image builder; each sandbox had 2 vCPUs and
+1 GiB. A hosted model drove the session from two user messages.
+
+| What | Result |
+| --- | --- |
+| Create (Opengeni's provision step, workspace root included) | 500 ms |
+| Commands (`uname -a`, write and read a file under `/workspace`, start `python3 -m http.server 8000` in the background, `curl` it) | all exit 0; the first answered 1.7 s after the create finished, later tool calls took 71 to 111 ms, the commands themselves 62 to 104 ms |
+| Preview port: `https://8000-<id>.<domain>/notes/fabric.txt` from the laptop | 200 with the file, 144 to 155 ms |
+| Idle during the session | the agent paused it after its idle delay (2.3 ms), saved it locally (diff snapshot, 238 ms) and archived it (18.4 MB uploaded, 5.4 s) while the model was not calling it |
+| Timeout | E2B's pause at 900 s became a sleep to `saved`; the copy was already archived, so the step only dropped the local one (21 ms) |
+| Resume on the next message (Opengeni's provision, `origin: resumed`) | 230 ms seen from the laptop; the wake from the archive, memory served lazily by the pager, took 80 ms on the host |
+| After the resume | the file still read `hello from the fabric`, the same server process (pid 901) still ran and answered; the first command took 0.9 s as its pages came from object storage, later ones about 0.1 s |
+
+The run found two adapter defects, fixed on the Opengeni branch and
+described in ADR 20: terminal commands never finished, and the workspace
+root of this image was not writable by E2B's default user. Before the
+fixes, the first turn hung until the sandbox's timeout and then failed
+with "the sandbox is still transitioning". Opengeni has no tool that gives
+the model a preview link, so the model could not hand one out; the
+address above is the one the adapter's exposed-port lookup returns.
+

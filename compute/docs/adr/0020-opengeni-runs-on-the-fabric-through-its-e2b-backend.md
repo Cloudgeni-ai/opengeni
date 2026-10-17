@@ -72,5 +72,20 @@ The options were:
 - envd runs in every guest, a few MiB each.
 - The SDK adapter Opengeni uses does not pass connection options, so
   Opengeni carries a small patch to it until the adapter accepts them.
+- The proof found two more defects in that adapter, which any E2B
+  backend would hit, and the same patch fixes them. E2B's terminal
+  always starts an interactive login bash, and the adapter typed each
+  command into it, so a terminal command never finished and a turn
+  waiting for one hung until the sandbox timed out; the command now runs
+  from a one-shot script and the shell exits with its status. And in an
+  image whose workspace root belongs to root, E2B's default user could
+  not write the workspace; creating a sandbox now hands that one
+  directory to the default user, as root, when it has to. Because the
+  first change alters the command output the model sees, it waits for
+  review as a draft pull request.
+- Opengeni has no tool that gives the model a preview link on any
+  backend. A preview port is reachable at `https://<port>-<id>.<domain>`,
+  and the adapter's exposed-port lookup returns that address; showing it
+  to the model is Opengeni's choice, not the fabric's.
 - Features E2B's backend lacks in Opengeni, and the front door's gaps
   (snapshots by id, volumes), stay gaps until either side adds them.
