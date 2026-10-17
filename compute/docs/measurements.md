@@ -521,7 +521,7 @@ sandbox node) does all of it.
 | Resting state | N | Bound | Sustained | Worst repeat there, p50/p99 | Next rate up |
 | --- | --- | --- | --- | --- | --- |
 | Ours, running | 40 | 1 s | at least 300/s | 8.1/16 ms | 500/s client-limited: no errors, p99 21 ms |
-| Agent Sandbox, running | 40 | 1 s | at least 500/s | 6.0/13 ms | 1000/s client-limited: no errors, p99 64 ms |
+| Agent Sandbox, running | 40 | 1 s | at least 500/s | 6.4/14 ms | 1000/s client-limited: no errors, p99 65 ms |
 | Ours, paused | 40 | 1 s | 80/s | 8.2/15 ms | 90/s: 8 `host_full` errors |
 | Ours, saved (local disk) | 300 | 1 s | 0.8/s | 170/751 ms | 0.9/s: p99 1.07 s in the second repeat |
 | Ours, remote (object storage only) | 150 | 3 s | 0.4/s | 643 ms/1.14 s | 0.5/s: p99 3.1 s in the first repeat |
@@ -547,8 +547,8 @@ zonal cluster fee, $0.329 an hour, are a fixed cost per cluster):
   what 40 sandboxes let the client offer: a step is client-limited when
   an arrival finds every sandbox busy and nothing failed. At 500/s ours
   had no errors and p50/p99 9.3/21 ms, but 35 of 25,000 arrivals found no
-  free sandbox; theirs held twice with 6.0/13 ms. At 1000/s theirs had
-  1,638 such arrivals and p99 64 ms. Both run commands in running
+  free sandbox; theirs held twice, at worst 6.4/14 ms. At 1000/s theirs
+  had 1,638 such arrivals and p99 65 ms. Both run commands in running
   sandboxes at 300 to 500 a second or more on one host, theirs a few
   milliseconds faster under load. Ours pays one TCP connection per
   request through the lab relay; theirs reuses HTTP connections.
@@ -578,10 +578,11 @@ zonal cluster fee, $0.329 an hour, are a fixed cost per cluster):
   fetch from object storage was 2.6 s (it is usually 0.5 s), while about
   fifteen re-uploads of other sandboxes were in flight. Because each
   state is judged against its own unloaded p99, ours is held to a bound
-  less than half of Pod Snapshot's: against their 8 s, every remote step
-  we ran held, up to 1/s in the first search (p99 3.4 s), so at an equal
-  bound our remote rate is above 1/s per host, where theirs is 0.5/s per
-  node; that higher limit was not searched for.
+  less than half of Pod Snapshot's. An exploratory observation, not
+  confirmed with repeats: no remote step we ran, in either search, had a
+  p99 over 3.5 s, up to a single window at a nominal 1/s in the first
+  search, so against Pod Snapshot's 8 s our remote rate per host may well
+  exceed their 0.5/s per node; an equal-bound search was not run.
 - **Pod Snapshot** on one sandbox node holds 0.5 restores a second, each
   followed by a new snapshot when the sandbox goes back to rest, with p50
   rising from about 2.7 s at 0.3/s to 4.6 s at 0.5/s. The bound is 8 s, twice

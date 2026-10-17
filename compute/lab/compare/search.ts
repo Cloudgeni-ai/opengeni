@@ -20,6 +20,11 @@ export interface StepResult {
   reason?: string;
   /** The first few error messages, for the record. */
   sampleErrors?: string[];
+  /**
+   * The search cannot go on after it: sandboxes were lost, so a later step
+   * would test a smaller population than N.
+   */
+  ends?: boolean;
 }
 
 export interface Criteria {
@@ -71,7 +76,7 @@ export function judgeStep(
   const latency = succeeded.length > 0 ? summarize(succeeded.map((outcome) => outcome.latencyMs)) : undefined;
   const sampleErrors = [...new Set(failed.map((outcome) => outcome.error ?? "unknown"))].slice(0, 3);
   const base = { rate, measured: measured.length, errors: errors + restFailures, starved, completedRate, latency, sampleErrors };
-  if (restFailures > 0) return { ...base, holds: false, reason: `${restFailures} sandboxes failed to rest again` };
+  if (restFailures > 0) return { ...base, holds: false, ends: true, reason: `${restFailures} sandboxes failed to rest again` };
   // Starvation with no error is the client's limit; with errors, the errors decide.
   if (starved > 0 && errors === 0) return { ...base, holds: false, reason: "client-limited: no resting sandbox was free" };
   if (measured.length < criteria.minSamples) return { ...base, holds: false, reason: `only ${measured.length} samples` };
@@ -96,7 +101,8 @@ export interface SearchResult {
  * Runs `step` up `ladder` (ascending) until a step does not hold, then
  * bisects `refinements` times between the last rate that held and the first
  * that did not. A client-limited step stops the search: it says nothing
- * about the system.
+ * about the system. So does a step that `ends` it, after which the
+ * sandboxes left are no longer the N the search started with.
  */
 export async function searchSustainedRate(
   ladder: readonly number[],
@@ -117,6 +123,7 @@ export async function searchSustainedRate(
   for (const rate of ladder) {
     const result = await run(rate);
     if (isClientLimited(result)) return finish(steps, good, true);
+    if (result.ends) return finish(steps, good, false);
     if (!result.holds) {
       bad = rate;
       break;
@@ -128,6 +135,7 @@ export async function searchSustainedRate(
     if (rate <= good || rate >= bad) break;
     const result = await run(rate);
     if (isClientLimited(result)) return finish(steps, good, true);
+    if (result.ends) return finish(steps, good, false);
     if (result.holds) good = rate;
     else bad = rate;
   }

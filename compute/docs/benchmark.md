@@ -97,9 +97,9 @@ longer, so that it holds 40 arrivals. A step **holds** when every
 activation succeeded, every sandbox went back to rest, at least 20 were
 measured, and p99 is under 1 second. Every arrival is waited for, so a
 system that falls behind shows it in the p99; the completed rate is
-reported but not judged. A sandbox that does not go back to rest within
-five minutes of a step ends the search, since the next step would run on
-a different system.
+reported but not judged. A sandbox that fails to go back to rest, or has
+not within five minutes of a step, fails that step and ends the search,
+since a later step would run on fewer sandboxes than N.
 
 A first search offers each rate once and, after the first step that does
 not hold, halves the gap between the last step that held and the first

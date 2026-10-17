@@ -61,9 +61,24 @@ test("starvation is the client's limit", () => {
 test("a sandbox that fails to rest again fails the step, however good the activations were", () => {
   const all = outcomes(500, 50_000, 100).map((o) => ({ ...o, at: o.at + 10_000 }));
   const step = judgeStep(10, all, 10_000, 50_000, DEFAULT_CRITERIA, 1);
-  expect(step).toMatchObject({ holds: false, errors: 1 });
+  expect(step).toMatchObject({ holds: false, errors: 1, ends: true });
   expect(step.reason).toContain("rest");
   expect(isClientLimited(step)).toBe(false);
+});
+
+test("after sandboxes are lost the search stops instead of refining on fewer", async () => {
+  const tried: number[] = [];
+  const result = await searchSustainedRate(
+    [0.5, 1, 2],
+    async (rate) => {
+      tried.push(rate);
+      // 1/s loses a sandbox; any later step would hold on the 99 left.
+      return rate === 1 ? { ...step(rate, false, 1), ends: true } : step(rate, true);
+    },
+    3,
+  );
+  expect(tried).toEqual([0.5, 1]);
+  expect(result).toMatchObject({ sustained: 0.5, errorOnset: 1, clientLimited: false });
 });
 
 test("starvation alongside errors is the system's failure, not the client's limit", () => {
