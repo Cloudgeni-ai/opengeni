@@ -3,7 +3,6 @@ import {
   COMPUTER_SCREENSHOT_MAX_DIMENSION,
   COMPUTER_SCREENSHOT_MAX_PIXELS,
   COMPUTER_SCREENSHOT_RETENTION_MS,
-  COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES,
   RetainedArtifactMetadataSchema,
   retainedScreenshotReferenceFromFile,
   retainedSessionScreenshotKindFromObjectKey,
@@ -677,7 +676,8 @@ export async function retainSessionScreenshot(input: {
   kind?: RetainedSessionScreenshotKind | undefined;
   now?: Date;
   retentionMs?: number;
-  workspaceQuotaBytes?: number;
+  /** The workspace's retained-image limit; see `retainedImageWorkspaceQuotaBytes`. */
+  workspaceQuotaBytes: number;
 }): Promise<RetainedArtifactMetadata> {
   const identity = retainedScreenshotIdentity({
     sessionId: input.sessionId,
@@ -728,7 +728,7 @@ export async function retainSessionScreenshot(input: {
         retentionExpiresAt,
         bucket: input.objectStorage.bucket,
         objectKey,
-        workspaceQuotaBytes: input.workspaceQuotaBytes ?? COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES,
+        workspaceQuotaBytes: input.workspaceQuotaBytes,
       })
     ).artifact;
   } catch (error) {

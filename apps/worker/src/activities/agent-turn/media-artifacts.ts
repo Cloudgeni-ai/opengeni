@@ -11,7 +11,7 @@ import {
   type SandboxFileDownload,
   type TurnToolCancellationFence,
 } from "@opengeni/runtime";
-import type { Settings } from "@opengeni/config";
+import { retainedImageWorkspaceQuotaBytes, type Settings } from "@opengeni/config";
 import type { RetainedSessionScreenshotKind } from "@opengeni/contracts";
 import type { ResumedTurnSandbox } from "../../sandbox-resume";
 import type { SharedActivityServices } from "../types";
@@ -340,6 +340,10 @@ export class TurnMediaArtifacts {
         turnId: activeTurnId,
         attemptId: this.deps.attemptId,
         output: typedScreenshot,
+        workspaceQuotaBytes: retainedImageWorkspaceQuotaBytes(
+          this.deps.getModelRunSettings(),
+          this.deps.workspaceId,
+        ),
       }),
     );
   };

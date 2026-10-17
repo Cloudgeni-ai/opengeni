@@ -163,6 +163,42 @@ const EnvGoalIdleBackoffMs = z.preprocess((value) => {
   });
 }, z.array(z.number().int().nonnegative()).min(1, "OPENGENI_GOAL_IDLE_BACKOFF_MS must list at least one delay in milliseconds").readonly());
 
+/** `{"<workspace id>": bytes}`: per-workspace retained-image limits. */
+const EnvRetainedImageWorkspaceQuotaOverrides = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const source = value.trim();
+    if (!source) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(source);
+    } catch {
+      return value;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
+    return Object.fromEntries(
+      Object.entries(parsed).map(([workspaceId, bytes]) => [workspaceId.toLowerCase(), bytes]),
+    );
+  },
+  z
+    .record(z.string().uuid(), z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER))
+    .default({}),
+);
+
+/** The retained-image byte limit for one workspace: its override, else the deployment default. */
+export function retainedImageWorkspaceQuotaBytes(
+  settings: Pick<
+    Settings,
+    "retainedImageWorkspaceQuotaBytes" | "retainedImageWorkspaceQuotaOverrides"
+  >,
+  workspaceId: string,
+): number {
+  return (
+    settings.retainedImageWorkspaceQuotaOverrides[workspaceId.toLowerCase()] ??
+    settings.retainedImageWorkspaceQuotaBytes
+  );
+}
+
 const EnvFirstPartyMcpTools = z.preprocess(
   (value) => {
     if (typeof value !== "string") return value;
@@ -733,6 +769,17 @@ const SettingsSchema = z.object({
     .positive()
     .max(Number.MAX_SAFE_INTEGER)
     .default(20 * 1024 * 1024 * 1024),
+  // Bytes of retained session images (screenshots, viewed images) a workspace
+  // keeps. When a new image does not fit, the workspace's oldest images are
+  // evicted to make room; a new image is only refused when it is larger than
+  // the whole limit. The overrides map a workspace id to its own limit.
+  retainedImageWorkspaceQuotaBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(5 * 1024 * 1024 * 1024),
+  retainedImageWorkspaceQuotaOverrides: EnvRetainedImageWorkspaceQuotaOverrides,
   videoGenerationTempDirectory: z.string().trim().min(1).max(1_024).default("/tmp/opengeni-video"),
   videoGenerationFfprobePath: z.string().trim().min(1).max(1_024).default("ffprobe"),
   // Opengeni's customer price, not a claim about the provider's delayed cost report.
@@ -4831,6 +4878,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_VIDEO_GENERATION_MAX_CONCURRENT_PER_WORKSPACE",
     ),
     videoGenerationWorkspaceQuotaBytes: optional("OPENGENI_VIDEO_GENERATION_WORKSPACE_QUOTA_BYTES"),
+    retainedImageWorkspaceQuotaBytes: optional("OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_BYTES"),
+    retainedImageWorkspaceQuotaOverrides: optional(
+      "OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_OVERRIDES",
+    ),
     videoGenerationTempDirectory: optional("OPENGENI_VIDEO_GENERATION_TEMP_DIRECTORY"),
     videoGenerationFfprobePath: optional("OPENGENI_VIDEO_GENERATION_FFPROBE_PATH"),
     videoGenerationCredit480pMicrosPerSecond: optional(

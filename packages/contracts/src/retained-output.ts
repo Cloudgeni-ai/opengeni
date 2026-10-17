@@ -14,8 +14,6 @@ export const COMPUTER_SCREENSHOT_MAX_DIMENSION = 16_384;
 export const COMPUTER_SCREENSHOT_MAX_PIXELS = 67_108_864;
 /** Canonical ready-object retention window: 30 days from successful settlement. */
 export const COMPUTER_SCREENSHOT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
-/** Hard workspace reservation across pending + ready screenshot artifacts. */
-export const COMPUTER_SCREENSHOT_WORKSPACE_QUOTA_BYTES = 5 * 1024 * 1024 * 1024;
 /** Generated images are permanent workspace files, never inline history blobs. */
 export const GENERATED_IMAGE_MAX_BYTES = 64 * 1024 * 1024;
 /** Generated videos are permanent workspace files and are always streamed. */

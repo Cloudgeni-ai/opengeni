@@ -222,6 +222,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     videoGenerationReferenceUrlTtlSeconds: 60 * 60,
     videoGenerationMaxConcurrentPerWorkspace: 2,
     videoGenerationWorkspaceQuotaBytes: 20 * 1024 * 1024 * 1024,
+    retainedImageWorkspaceQuotaBytes: 5 * 1024 * 1024 * 1024,
+    retainedImageWorkspaceQuotaOverrides: {},
     videoGenerationTempDirectory: "/tmp/opengeni-video",
     videoGenerationFfprobePath: "ffprobe",
     videoGenerationCredit480pMicrosPerSecond: 155_000,
