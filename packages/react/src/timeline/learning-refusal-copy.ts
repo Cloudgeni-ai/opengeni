@@ -20,27 +20,20 @@ export function learningRefusalTitle(t: OpenGeniText, refusal: LearningRefusal):
 /** Why it was not saved and what would make it work, in plain words. */
 export function learningRefusalBody(t: OpenGeniText, refusal: LearningRefusal): string {
   if (refusal.reason === "site_agent") return t("timeline.learningRefusal.siteAgent");
+  const off = refusal.reason === "learning_off";
   switch (refusal.destination) {
     case "skill":
-      return refusal.reason === "personal_chat"
-        ? t("timeline.learningRefusal.skillPersonalChat")
-        : refusal.reason === "personal_target"
-          ? t("timeline.learningRefusal.skillPersonalTarget")
-          : refusal.reason === "learning_off"
-            ? t("timeline.learningRefusal.skillLearningOff")
-            : t("timeline.learningRefusal.skillNotPermitted");
+      return off
+        ? t("timeline.learningRefusal.skillLearningOff")
+        : t("timeline.learningRefusal.skillNotPermitted");
     case "instruction":
-      return refusal.reason === "personal_chat"
-        ? t("timeline.learningRefusal.instructionPersonalChat")
-        : refusal.reason === "learning_off"
-          ? t("timeline.learningRefusal.instructionLearningOff")
-          : t("timeline.learningRefusal.instructionNotPermitted");
+      return off
+        ? t("timeline.learningRefusal.instructionLearningOff")
+        : t("timeline.learningRefusal.instructionNotPermitted");
     case "knowledge":
-      return refusal.reason === "personal_chat"
-        ? t("timeline.learningRefusal.knowledgePersonalChat")
-        : refusal.reason === "learning_off"
-          ? t("timeline.learningRefusal.knowledgeLearningOff")
-          : t("timeline.learningRefusal.knowledgeNotPermitted");
+      return off
+        ? t("timeline.learningRefusal.knowledgeLearningOff")
+        : t("timeline.learningRefusal.knowledgeNotPermitted");
   }
 }
 

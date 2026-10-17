@@ -858,7 +858,6 @@ export { SessionCommands } from "./components/session-commands";
 export { KnowledgeActivityProvider } from "./timeline/knowledge-receipt";
 export {
   LearningRefusalActionsProvider,
-  LearningRefusalRow,
   type LearningRefusalActions,
 } from "./timeline/learning-refusal-row";
 export type { LearningRefusalPlace } from "./timeline/learning-refusal-copy";

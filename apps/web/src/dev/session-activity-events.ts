@@ -62,7 +62,7 @@ export function activityEvents(): SessionEvent[] {
       _meta: {
         "opengeni/learningRefusal": {
           destination: "skill",
-          reason: "personal_chat",
+          reason: "learning_off",
           skillId: "21a78814-7662-4252-b40a-b57971b244e7",
         },
       },

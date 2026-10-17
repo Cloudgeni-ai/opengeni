@@ -7,9 +7,11 @@ import {
   KnowledgeEntrySaveRequest,
   KnowledgeTaskNotePromotionRequest,
   type AccessGrant,
+} from "@opengeni/contracts";
+import {
   type LearningRefusal,
   withLearningRefusalMeta,
-} from "@opengeni/contracts";
+} from "@opengeni/contracts/learning-refusal";
 import {
   prepareKnowledgeFile,
   prepareKnowledgeSave,
@@ -63,11 +65,11 @@ function refusalAgentMessage(
   }
   if (surface === "instruction") {
     return refusal?.reason === "learning_off"
-      ? `Nothing was saved. Agent learning for workspace instructions is Off for this change, in this chat's or the workspace's settings. The person can turn it on in Agent learning settings, or make the change in workspace instructions. ${TELL_PERSON}`
-      : `Nothing was saved. This chat can't change workspace instructions. The person can make the change in workspace instructions. ${TELL_PERSON}`;
+      ? `Nothing was saved. Agent learning for workspace instructions is Off for this change, in this chat's or the workspace's settings. Turning it on in Agent learning settings would let you save it. ${TELL_PERSON}`
+      : `Nothing was saved. This chat isn't allowed to change workspace instructions. ${TELL_PERSON}`;
   }
   return refusal?.reason === "learning_off"
-    ? `Nothing was saved. Agent learning for Knowledge is Off for this chat. The person can turn it on in Agent learning settings, or add it in Knowledge. ${TELL_PERSON_IF_ASKED}`
+    ? `Nothing was saved. Agent learning for Knowledge is Off for this change, in this chat's or the workspace's settings. Turning it on in Agent learning settings would let you save it. ${TELL_PERSON_IF_ASKED}`
     : `Nothing was saved. The entry, reference, or write is not available in this chat's scope or Agent learning policy. ${TELL_PERSON_IF_ASKED}`;
 }
 

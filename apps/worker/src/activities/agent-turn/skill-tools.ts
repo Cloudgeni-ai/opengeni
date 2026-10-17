@@ -1,12 +1,10 @@
 import { createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
+import type { SkillActor, SkillScope, SkillWriteReceipt } from "@opengeni/contracts";
 import {
   type LearningRefusal,
-  type SkillActor,
-  type SkillScope,
-  type SkillWriteReceipt,
   withLearningRefusalMeta,
-} from "@opengeni/contracts";
+} from "@opengeni/contracts/learning-refusal";
 import {
   assertSkillReadAttempt,
   classifyLearningRefusal,
@@ -76,14 +74,10 @@ export function skillRefusalMessage(
     return `Nothing was saved: ${error.message}. Read the Skill again for its current revision and scope version, then retry with a new operation ID if the change still applies.`;
   }
   switch (refusal?.reason) {
-    case "personal_chat":
-      return `Nothing was saved. This chat learns for the person (a private chat or personal memory), so it can save and edit workspace Skills but can't review Skills or install plugins. The person can do this under Skills, or ask for it in a shared chat. ${TELL_PERSON}`;
-    case "personal_target":
-      return `Nothing was saved. This Skill is personal, and this chat saves what it learns for the whole workspace, so it can't change it. The person can make the change under Skills, or ask for it in a private chat. Do not copy it into the workspace unless they ask. ${TELL_PERSON}`;
     case "learning_off":
-      return `Nothing was saved. Agent learning for Skills is Off for this change, in this chat's or the workspace's settings. The person can turn it on in Agent learning settings, or make the change under Skills. ${TELL_PERSON}`;
+      return `Nothing was saved. Agent learning for Skills is Off for this change, in this chat's or the workspace's settings. Turning it on in Agent learning settings would let you save it. ${TELL_PERSON}`;
     case "not_permitted":
-      return `Nothing was saved: ${error.message}. The person can make the change under Skills. ${TELL_PERSON}`;
+      return `Nothing was saved: ${error.message}. This chat isn't allowed to make this Skill change. ${TELL_PERSON}`;
     default:
       return `Nothing was saved: ${error.message}.`;
   }
@@ -96,31 +90,17 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
  * timeline notice that tells them it was not saved. Null for refusals that
  * are not a policy decision (a stale edit, invalid files, a transient fence).
  */
-export async function skillLearningRefusal(
+export function skillLearningRefusal(
   error: SkillLifecycleRefusedError,
   args: unknown,
-  skillScope: (skillId: string) => Promise<SkillScope | null>,
-): Promise<LearningRefusal | null> {
+): LearningRefusal | null {
   if (error.code !== "42501") return null;
   const requested =
     args && typeof args === "object" ? (args as { skillId?: unknown }).skillId : undefined;
   const skillId = typeof requested === "string" && UUID.test(requested) ? requested : undefined;
   if (error.message === siteClampedAgentMessage("Skills"))
     return { destination: "skill", reason: "site_agent", ...(skillId ? { skillId } : {}) };
-  let scope: SkillScope | null = null;
-  if (skillId && error.message === "Skill outside accepted learning scope") {
-    try {
-      scope = await skillScope(skillId);
-    } catch {
-      // The notice falls back to the generic refusal.
-    }
-  }
-  return classifyLearningRefusal({
-    destination: "skill",
-    message: error.message,
-    skillId,
-    skillScope: scope,
-  });
+  return classifyLearningRefusal({ destination: "skill", message: error.message, skillId });
 }
 
 /**
@@ -129,10 +109,7 @@ export async function skillLearningRefusal(
  * authority refusal also carries the content-free refusal fact in `_meta`,
  * which the model never sees, so the person is told it was not saved.
  */
-function withDefiniteSkillRefusals(
-  definition: AttemptToolDefinition,
-  skillScope: (skillId: string) => Promise<SkillScope | null>,
-): AttemptToolDefinition {
+function withDefiniteSkillRefusals(definition: AttemptToolDefinition): AttemptToolDefinition {
   return {
     ...definition,
     execute: async (args, context) => {
@@ -140,7 +117,7 @@ function withDefiniteSkillRefusals(
         return await definition.execute(args, context);
       } catch (error) {
         if (!(error instanceof SkillLifecycleRefusedError)) throw error;
-        const refusal = await skillLearningRefusal(error, args, skillScope);
+        const refusal = skillLearningRefusal(error, args);
         const message = skillRefusalMessage(error, refusal);
         const result = {
           isError: true,
@@ -455,12 +432,7 @@ export function createWorkspaceSkillTools(input: {
       filesystem: input.filesystem,
       save,
     }),
-  ].map((definition) =>
-    withDefiniteSkillRefusals(
-      definition,
-      async (skillId) => (await readSkill(input.db, context, skillId))?.scope ?? null,
-    ),
-  );
+  ].map(withDefiniteSkillRefusals);
 }
 
 function registrySkillSource(scope: SkillScope): SkillReadOrigin["source"] {

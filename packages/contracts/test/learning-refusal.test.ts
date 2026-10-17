@@ -16,17 +16,17 @@ describe("learning refusal fact", () => {
     };
     const withFact = withLearningRefusalMeta(result, {
       destination: "skill",
-      reason: "personal_chat",
+      reason: "learning_off",
       skillId,
     });
     expect(withFact.content).toBe(result.content);
     expect(withFact._meta as Record<string, unknown>).toEqual({
       other: 1,
-      [LEARNING_REFUSAL_META_KEY]: { destination: "skill", reason: "personal_chat", skillId },
+      [LEARNING_REFUSAL_META_KEY]: { destination: "skill", reason: "learning_off", skillId },
     });
     expect(learningRefusalFromToolOutput(withFact)).toEqual({
       destination: "skill",
-      reason: "personal_chat",
+      reason: "learning_off",
       skillId,
     });
   });
@@ -35,12 +35,12 @@ describe("learning refusal fact", () => {
     expect(() =>
       withLearningRefusalMeta({}, {
         destination: "skill",
-        reason: "personal_chat",
+        reason: "learning_off",
         message: "private text",
       } as never),
     ).toThrow();
     expect(() =>
-      withLearningRefusalMeta({}, { destination: "skill", reason: "personal_chat", skillId: "x" }),
+      withLearningRefusalMeta({}, { destination: "skill", reason: "learning_off", skillId: "x" }),
     ).toThrow();
   });
 
