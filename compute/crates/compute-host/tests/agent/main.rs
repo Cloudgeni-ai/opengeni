@@ -133,6 +133,10 @@ struct World {
     guarantees: Mutex<Vec<(String, u32, u16)>>,
     /// While set, no VM can be given new guarantees.
     refuse_guarantees: AtomicBool,
+    /// Each VM started: its name and the memory limit it started under.
+    started_limits: Mutex<Vec<(String, Option<u64>)>>,
+    /// Memory limits set on VMs after they started.
+    limits_set: Mutex<Vec<(String, Option<u64>)>>,
 }
 
 /// What a fake VM process is, independent of any agent's handle to it.
@@ -227,6 +231,11 @@ impl Meter {
 impl Fake {
     fn launch(&self, spec: &VmSpec, memory: String) -> FakeVm {
         let name = spec.name.clone();
+        self.world
+            .started_limits
+            .lock()
+            .unwrap()
+            .push((name.clone(), spec.memory_limit));
         if !self.world.live.lock().unwrap().insert(name.clone()) {
             self.world.violation(format!("two VMs at once for {name}"));
         }
@@ -732,6 +741,15 @@ impl Engine for Fake {
             memory_request_mib,
             cpu_weight,
         ));
+        Ok(())
+    }
+
+    fn set_memory_limit(&self, vm: &FakeVm, bytes: Option<u64>) -> Result<(), EngineError> {
+        self.world
+            .limits_set
+            .lock()
+            .unwrap()
+            .push((vm.name.clone(), bytes));
         Ok(())
     }
 

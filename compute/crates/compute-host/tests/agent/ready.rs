@@ -202,6 +202,34 @@ async fn a_create_claims_a_ready_sandbox_that_learns_its_id_before_use() {
     lab.assert_clean();
 }
 
+/// A ready sandbox's VM is filled limited to the memory its fill books,
+/// so the booking is a bound, and a claim lifts the limit before its
+/// guest runs for the create.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fill_is_limited_to_its_booking_until_it_is_claimed() {
+    let lab = ready_lab(Lab::root(), Arc::default(), 1).await;
+    wait_filled(&lab, 1).await;
+    let filled = ready_dirs(&lab);
+    let limit = lab
+        .world
+        .started_limits
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(name, _)| filled.contains(name))
+        .and_then(|(_, limit)| *limit)
+        .expect("the fill's VM started under a memory limit");
+    assert!(
+        limit < SHAPE.bytes(),
+        "the limit is the booking, not the shape"
+    );
+    assert!(lab.world.limits_set.lock().unwrap().is_empty());
+    assert_eq!(create(&lab, id(1)).await, Reply::Done);
+    let (dir, _) = record_of(&lab, id(1));
+    assert!(filled.contains(&dir), "it took the ready sandbox");
+    assert_eq!(*lab.world.limits_set.lock().unwrap(), [(dir, None)]);
+}
+
 /// A ready sandbox is filled guaranteed its whole shape, but a create of
 /// its shape asking for less takes it all the same: its VM is given the
 /// request's guarantees before the claim is kept.

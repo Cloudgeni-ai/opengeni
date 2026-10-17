@@ -245,6 +245,18 @@ pub trait Engine: Send + Sync + 'static {
         ))
     }
 
+    /// Sets the most host memory the VM may hold from now on, as
+    /// [`VmSpec::memory_limit`] sets it for a new one, or lifts the limit
+    /// for `None`. Engines that cannot change it report an error.
+    fn set_memory_limit(&self, vm: &Self::Vm, bytes: Option<u64>) -> Result<(), EngineError> {
+        let _ = (vm, bytes);
+        Err(EngineError::new(
+            ErrorKind::Transient,
+            "set_memory_limit",
+            "this engine cannot change a VM's memory limit",
+        ))
+    }
+
     /// Resolves once the VM process has ended for any reason, including
     /// [`Engine::stop`]. The future does not borrow the VM, so the host can
     /// watch for a VM dying on its own while a step uses it.

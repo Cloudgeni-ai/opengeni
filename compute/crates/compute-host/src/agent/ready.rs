@@ -217,19 +217,21 @@ impl<E: Engine, S: Store> Fill<E, S> {
                 {
                     net.ensure(link)?;
                 }
-                Ok::<_, std::io::Error>(start)
+                Ok::<_, std::io::Error>((start, std::fs::metadata(&paths.disk)?.len()))
             })
             .await
             .unwrap_or_else(|error| Err(std::io::Error::other(error)))
         };
-        let stale = matches!(prepared, Ok(Start::Stale));
+        let stale = matches!(prepared, Ok((Start::Stale, _)));
         let inserted = match prepared {
-            Ok(Start::Template) => self
-                .records
-                .insert(self.job.record.clone())
-                .await
-                .map_err(|error| error.to_string()),
-            Ok(start) => Err(format!("the template could not be copied ({start:?})")),
+            Ok((Start::Template, disk_bytes)) => {
+                self.job.record.allocation.disk_bytes = Some(disk_bytes);
+                self.records
+                    .insert(self.job.record.clone())
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            Ok((start, _)) => Err(format!("the template could not be copied ({start:?})")),
             Err(error) => Err(error.to_string()),
         };
         match inserted {
@@ -385,7 +387,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// [`FILL_SLACK`] for its VMM and what its guest touches before it
     /// answers, never more than its whole guest memory. With huge pages,
     /// which no guest gives back, every sandbox reserves its whole size,
-    /// and so does a fill.
+    /// and so does a fill. Below its whole size, the booking is the fill
+    /// VM's memory limit too (see [`compute_engine::VmSpec::memory_limit`]), so it is a
+    /// bound and not an estimate: a guest that needs more is ended and its
+    /// fill fails, to be tried again, rather than take memory no one
+    /// booked. A claim lifts the limit before the guest runs again.
     fn fill_memory(&self, template: &Template) -> u64 {
         let whole = template.shape().bytes();
         if self.reserve_whole {
@@ -510,11 +516,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         record.image = true;
         record.identity = Identity::Pending;
         let paths = Paths::of(&self.root, &record);
-        let spec = vm_spec(&record, &paths, &self.images);
+        let (memory, disk) = (self.fill_memory(template), self.fill_disk());
+        let mut spec = vm_spec(&record, &paths, &self.images);
+        spec.memory_limit = (memory < shape.bytes()).then_some(memory);
         let link = Images::link(&record);
         self.ready.filling.insert(host.0, shape);
         // Booked before it starts, so no wake takes the same room.
-        let (memory, disk) = (self.fill_memory(template), self.fill_disk());
         self.book_spare(host, memory, disk, true);
         let fill = Fill {
             job: self.job(record, spec, paths, CancellationToken::new()),
@@ -744,6 +751,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 if !fits {
                     return Fit::Stale;
                 }
+                // Filled under its booking as a limit; the claimed sandbox
+                // may use what its shape allows.
+                if let Err(error) = engine.set_memory_limit(&idle.live.vm, None) {
+                    return Fit::Unfit(error.to_string());
+                }
                 let (memory, weight) = guarantees;
                 match change.then(|| engine.set_guarantees(&idle.live.vm, memory, weight)) {
                     Some(Err(error)) => Fit::Unfit(error.to_string()),
@@ -850,7 +862,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let last_activity = record
             .last_used_ms
             .map_or_else(|| self.now(), |unix_ms| self.at_unix_ms(unix_ms));
-        let size = self.size(&record.config);
+        let size = self.record_size(&record);
         self.inputs([
             Input::Add {
                 sandbox: id.0,

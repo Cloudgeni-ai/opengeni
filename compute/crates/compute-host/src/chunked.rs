@@ -522,6 +522,7 @@ impl Chunked {
         match working_set::put(
             &self.chunks,
             &self.transfers,
+            &self.compress,
             &image.memory,
             image.chunks.clone(),
             &profile,

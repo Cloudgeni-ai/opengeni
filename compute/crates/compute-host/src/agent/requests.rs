@@ -392,7 +392,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // One that could never run here is refused at once, so it can be
         // placed elsewhere.
         if let Some(capacity) = self.core.capacity() {
-            let needed = self.size(config).request;
+            let needed = self.size(config, None).request;
             if needed > capacity.budget {
                 return Err(HostError::HostFull {
                     id,
@@ -486,18 +486,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 if let (Some(net), Some(link)) = (&networks, &link) {
                     net.ensure(link)?;
                 }
-                Ok(start)
+                Ok((start, std::fs::metadata(&paths.disk)?.len()))
             })
             .await
             .unwrap_or_else(|error| Err(io::Error::other(error)));
             let stale = match prepared {
-                Ok(Start::Stale) => template,
+                Ok((Start::Stale, _)) => template,
                 _ => None,
             };
             // The record goes last: a directory without one is an
             // unfinished creation and is cleaned up on recovery.
             let result = match prepared {
-                Ok(start) => {
+                Ok((start, disk_bytes)) => {
+                    record.allocation.disk_bytes = Some(disk_bytes);
                     // A sandbox started from a template holds a memory image
                     // of a guest that never ran as it: its first wake
                     // restores it.

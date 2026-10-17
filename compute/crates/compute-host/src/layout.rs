@@ -175,6 +175,7 @@ impl Images {
             uid,
             gid: uid,
             link,
+            disk_bytes: None,
         })
     }
 
@@ -207,7 +208,7 @@ impl Images {
 
     /// The network `record` was given, if any.
     pub fn link(record: &Record) -> Option<Link> {
-        let Allocation { uid, gid, link } = record.allocation;
+        let Allocation { uid, gid, link, .. } = record.allocation;
         link.map(|addresses| Link::new(record.host(), record.ordinal, addresses, uid, gid))
     }
 }
@@ -263,6 +264,7 @@ impl Machine<'_> {
             memory_mib: self.memory_mib,
             memory_request_mib: self.memory_request_mib,
             cpu_weight: self.cpu_weight,
+            memory_limit: None,
             kernel: self.paths.kernel.clone(),
             boot_args: self.boot_args,
             drives: vec![Drive {

@@ -93,6 +93,11 @@ pub(crate) struct Allocation {
     pub gid: u32,
     /// Its link to the host, when it is networked.
     pub link: Option<LinkAddresses>,
+    /// Its disk's length, from when its first files were written. A disk
+    /// keeps its length, in object storage too, whatever base image the
+    /// host has since; unknown for a record written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
 }
 
 /// Everything the host keeps about one sandbox across restarts.

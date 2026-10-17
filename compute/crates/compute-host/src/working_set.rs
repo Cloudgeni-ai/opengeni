@@ -166,7 +166,8 @@ pub(crate) enum PackError {
 /// Packs the first pages of `profile` from the memory image at `memory`
 /// and stores the pack, uploading each part as soon as it is made. Returns
 /// the index chunk, or `None` when the profile names no page of the image.
-/// Uploads take a permit from `transfers` each.
+/// Uploads take a permit from `transfers` each, and compressing a part one
+/// from `compress`, which every sandbox's compression shares.
 ///
 /// `chunk_map`, when given, is the BLAKE3 of each of the image's chunks as
 /// stored ([`ZERO`] for a chunk of zeros): pages in a chunk the file no
@@ -174,6 +175,7 @@ pub(crate) enum PackError {
 pub(crate) async fn put(
     chunks: &ChunkStore,
     transfers: &Arc<Semaphore>,
+    compress: &Arc<Semaphore>,
     memory: &Path,
     chunk_map: Option<Arc<Vec<Hash>>>,
     profile: &WakeProfile,
@@ -191,9 +193,15 @@ pub(crate) async fn put(
     let (made, mut parts) = mpsc::channel(PARTS_IN_FLIGHT);
     let packing = {
         let stop = stop.clone();
+        let compress = Arc::clone(compress);
+        let runtime = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
             let mut canonical = Canonical::new(&file, len, chunk_map.as_deref().map(Vec::as_slice));
-            make_parts(&mut canonical, page_size, &pages, &made, &stop)
+            let compress = Compress {
+                permits: &compress,
+                runtime: &runtime,
+            };
+            make_parts(&mut canonical, page_size, &pages, &made, &stop, &compress)
         })
     };
     let uploads = stream::poll_fn(|context| parts.poll_recv(context))
@@ -311,14 +319,23 @@ impl<'a> Canonical<'a> {
     }
 }
 
+/// The permits a blocking packer takes to compress, on the runtime that
+/// hands them out.
+struct Compress<'a> {
+    permits: &'a Semaphore,
+    runtime: &'a tokio::runtime::Handle,
+}
+
 /// Reads `pages` of `page_size` bytes from the image and sends them on as
-/// encoded parts, keeping the zero pages out. Returns the zero pages.
+/// encoded parts, keeping the zero pages out, each compressed under a
+/// permit from `compress`. Returns the zero pages.
 fn make_parts(
     image: &mut Canonical<'_>,
     page_size: u64,
     pages: &[u64],
     made: &mpsc::Sender<Result<(Vec<u64>, EncodedChunk), PackError>>,
     stop: &CancellationToken,
+    compress: &Compress<'_>,
 ) -> Result<Vec<u64>, PackError> {
     let size = usize::try_from(page_size).map_err(io::Error::other)?;
     let mut zeros = Vec::new();
@@ -330,7 +347,17 @@ fn make_parts(
         if stop.is_cancelled() {
             return Err(PackError::Cancelled);
         }
+        let permit = compress.runtime.block_on(async {
+            tokio::select! {
+                permit = compress.permits.acquire() => permit.ok(),
+                () = stop.cancelled() => None,
+            }
+        });
+        let Some(permit) = permit else {
+            return Err(PackError::Cancelled);
+        };
         let chunk = EncodedChunk::encode(bytes, ZSTD_LEVEL).map_err(PackError::Storage);
+        drop(permit);
         // A closed channel means the uploads stopped; they say why.
         made.blocking_send(chunk.map(|chunk| (pages, chunk)))
             .map_err(|_| PackError::Cancelled)

@@ -8,6 +8,11 @@
 //! extents, as on XFS or btrfs, a disk copied from the base image or a
 //! template shares their blocks, and a guest write to a shared block takes
 //! a new one: only blocks the disk holds alone are written in place.
+//! Btrfs writes every change to new blocks, and frees the old ones only
+//! once nothing in their whole extent is still used, and it stores
+//! compressed extents in fewer blocks than they hold: there no block a
+//! disk holds bounds what it may still take, and its whole bound stays
+//! booked.
 
 use std::io;
 use std::path::Path;
@@ -33,7 +38,9 @@ pub(crate) fn headroom(path: &Path, unit: u64, shares: bool) -> io::Result<u64> 
 
     let file = std::fs::File::open(path)?;
     let metadata = file.metadata()?;
-    let held = if shares {
+    let held = if copies_every_write(&file)? {
+        0
+    } else if shares {
         unshared_bytes(&file, unit)?
     } else {
         metadata.blocks().saturating_mul(512)
@@ -41,17 +48,51 @@ pub(crate) fn headroom(path: &Path, unit: u64, shares: bool) -> io::Result<u64> 
     Ok(disk_bound(metadata.len(), unit).saturating_sub(held))
 }
 
-/// The bytes `file` holds in extents no other file shares, each widened to
-/// whole allocation units, as the kernel maps them (`FS_IOC_FIEMAP`).
-/// Extents still waiting to be written out count, since the filesystem
-/// already set space aside for them.
+/// Whether `file` is on a filesystem that writes every change to new
+/// blocks: btrfs, unless told otherwise per file, which is not counted on.
+#[cfg(target_os = "linux")]
+fn copies_every_write(file: &std::fs::File) -> io::Result<bool> {
+    const BTRFS_SUPER_MAGIC: i64 = 0x9123_683e;
+    let found = rustix::fs::fstatfs(file)?;
+    #[allow(
+        clippy::useless_conversion,
+        reason = "f_type's width differs by target"
+    )]
+    Ok(i64::from(found.f_type) == BTRFS_SUPER_MAGIC)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn copies_every_write(_: &std::fs::File) -> io::Result<bool> {
+    Ok(false)
+}
+
+/// What a disk holds alone in `extents`, each its logical start, length
+/// and FIEMAP flags, widened to whole allocation units of `unit` bytes.
+/// Shared extents are another file's too, and an encoded (compressed)
+/// extent takes fewer blocks than it holds, so neither bounds what writing
+/// over it takes.
+fn held_alone(extents: impl Iterator<Item = (u64, u64, u32)>, unit: u64) -> u64 {
+    const ENCODED: u32 = 0x8;
+    const SHARED: u32 = 0x2000;
+    let unit = unit.max(1);
+    extents
+        .filter(|(_, _, flags)| flags & (SHARED | ENCODED) == 0)
+        .fold(0_u64, |held, (logical, length, _)| {
+            let end = logical.saturating_add(length);
+            held.saturating_add(end.next_multiple_of(unit) - logical / unit * unit)
+        })
+}
+
+/// The bytes `file` holds alone, as the kernel maps its extents
+/// (`FS_IOC_FIEMAP`); see [`held_alone`]. Extents still waiting to be
+/// written out count, since the filesystem already set space aside for
+/// them.
 #[cfg(target_os = "linux")]
 fn unshared_bytes(file: &std::fs::File, unit: u64) -> io::Result<u64> {
     use rustix::ioctl::{Updater, ioctl, opcode};
 
     const EXTENTS: u32 = 256;
     const LAST: u32 = 0x1;
-    const SHARED: u32 = 0x2000;
     const FIEMAP: rustix::ioctl::Opcode = opcode::read_write::<Header>(b'f', 11);
 
     /// `struct fiemap` of `linux/fiemap.h`, without its extents.
@@ -82,7 +123,6 @@ fn unshared_bytes(file: &std::fs::File, unit: u64) -> io::Result<u64> {
         extents: [Extent; EXTENTS as usize],
     }
 
-    let unit = unit.max(1);
     let mut map = Box::new(Map {
         header: Header::default(),
         extents: [Extent::default(); EXTENTS as usize],
@@ -104,13 +144,10 @@ fn unshared_bytes(file: &std::fs::File, unit: u64) -> io::Result<u64> {
         let Some(last) = map.extents[..mapped].last().copied() else {
             return Ok(held);
         };
-        for extent in &map.extents[..mapped] {
-            if extent.flags & SHARED == 0 {
-                let end = extent.logical.saturating_add(extent.length);
-                held =
-                    held.saturating_add(end.next_multiple_of(unit) - extent.logical / unit * unit);
-            }
-        }
+        let extents = map.extents[..mapped]
+            .iter()
+            .map(|extent| (extent.logical, extent.length, extent.flags));
+        held = held.saturating_add(held_alone(extents, unit));
         if last.flags & LAST != 0 {
             return Ok(held);
         }
@@ -139,6 +176,23 @@ mod tests {
     fn a_disk_may_take_its_whole_length_and_its_map() {
         assert_eq!(disk_bound(256 * MIB, 4096), 257 * MIB);
         assert_eq!(disk_bound(MIB + 1, MIB), 2 * MIB + 4096);
+    }
+
+    /// Only extents a disk holds alone, stored as they are, bound what
+    /// writing over them takes: a shared one is another file's too, and a
+    /// compressed one takes fewer blocks than it holds.
+    #[test]
+    fn shared_and_compressed_extents_are_not_held_alone() {
+        let plain = (0, 8 * MIB, 0);
+        let shared = (8 * MIB, MIB, 0x2000);
+        let compressed = (16 * MIB, 4 * MIB, 0x8);
+        let last = (32 * MIB, 4096, 0x1);
+        assert_eq!(
+            held_alone([plain, shared, compressed, last].into_iter(), 4096),
+            8 * MIB + 4096
+        );
+        // Widened to whole allocation units.
+        assert_eq!(held_alone([(100, 10, 0)].into_iter(), 4096), 4096);
     }
 
     /// What a disk holds already it can no longer take, so its headroom

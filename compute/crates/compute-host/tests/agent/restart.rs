@@ -870,3 +870,25 @@ async fn a_repeated_create_succeeds_only_with_the_same_settings() {
     );
     lab.assert_clean();
 }
+
+/// A sandbox's record keeps its disk's length, so what it books stays its
+/// own disk's however the host's base image changes, in object storage
+/// too, where no local file shows it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_keeps_its_disk_length_when_the_base_image_changes() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(48);
+    lab.create(sandbox, NEVER).await;
+    let base = lab.root.join("base.img");
+    let length = std::fs::metadata(&base).unwrap().len();
+    assert_eq!(lab.record(sandbox)["allocation"]["disk_bytes"], length);
+    let (root, world) = lab.stop().await;
+    std::fs::write(&base, vec![1; 64 << 10]).unwrap();
+
+    let lab = Lab::start(root, world, Delays::default(), HostPolicy::default()).await;
+    assert_eq!(lab.record(sandbox)["allocation"]["disk_bytes"], length);
+    let other = id(49);
+    lab.create(other, NEVER).await;
+    assert_eq!(lab.record(other)["allocation"]["disk_bytes"], 64 << 10);
+    lab.assert_clean();
+}

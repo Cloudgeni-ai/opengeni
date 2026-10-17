@@ -211,7 +211,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// still run, against the admission budget at its full size while this
     /// agent does not manage it: until a removal ends it.
     fn unmanaged(&mut self, id: Id, config: &SandboxConfig) {
-        let bytes = self.size(config).limit;
+        let bytes = self.size(config, None).limit;
         self.input(Input::Unmanaged {
             sandbox: id.0,
             bytes,
@@ -391,7 +391,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return Err(HostError::Invalid(error));
             }
         };
-        let size = self.size(&record.config);
+        let size = self.record_size(&record);
         let paths = Paths::of(&self.root, &record);
         let spec = vm_spec(&record, &paths, &self.images);
         let found = match found? {

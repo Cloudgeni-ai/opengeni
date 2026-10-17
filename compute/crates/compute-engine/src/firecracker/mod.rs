@@ -1092,6 +1092,12 @@ impl Engine for Firecracker {
         Ok(())
     }
 
+    fn set_memory_limit(&self, vm: &FirecrackerVm, bytes: Option<u64>) -> Result<(), EngineError> {
+        vm.cgroup
+            .set_memory_max(bytes)
+            .map_err(|error| EngineError::io("set_memory_limit", error))
+    }
+
     fn cpu_time(&self, vm: &FirecrackerVm) -> Result<Duration, EngineError> {
         vm.cgroup
             .cpu_time()

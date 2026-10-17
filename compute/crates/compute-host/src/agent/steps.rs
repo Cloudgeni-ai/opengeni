@@ -143,7 +143,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let paths = Paths::of(&self.root, &record);
         let spec = vm_spec(&record, &paths, &self.images);
-        let size = self.size(&record.config);
+        let size = self.record_size(&record);
         self.insert(id, paths, spec);
         // A new sandbox is a saved one: a disk, with a memory image when it
         // started from a template. Its first wake boots or restores it,
@@ -408,6 +408,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         let (spec, paths) = (VmSpec::clone(&slot.spec), Paths::clone(&slot.paths));
         let live = if needs_vm { slot.vm.take() } else { None };
+        // A sandbox paused for memory is known to wait for room before
+        // any step can leave it saved: a restart then still wakes it.
+        let kept =
+            (!step.wakes() && slot.holds.paused_for_memory().is_some()).then(|| slot.holds.flush());
         let mut job = self.job(record, spec, paths, cancel);
         job.live = live;
         job.unthrottle = Some({
@@ -417,6 +421,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             })
         });
         tokio::spawn(async move {
+            if let Some(kept) = kept
+                && let Err(error) = kept.await
+            {
+                tracing::warn!(%id, %error, "could not keep that the sandbox waits for memory");
+            }
             let ran = job.run(step).await;
             let _ = events.send(Event::StepDone {
                 id,
