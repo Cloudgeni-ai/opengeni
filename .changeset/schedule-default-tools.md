@@ -1,6 +1,6 @@
 ---
-"@opengeni/api": patch
-"@opengeni/worker": patch
+"@opengeni/api-router": patch
+"@opengeni/worker-bundle": patch
 "@opengeni/core": patch
 "@opengeni/db": patch
 "@opengeni/contracts": patch
