@@ -60,15 +60,33 @@ import {
 import type { SkillFileSystem } from "./skill-transfer";
 import type { AttemptToolDefinition } from "@opengeni/codemode";
 
-/** What a refused Skill change means for the agent, in words it can act on. */
-export function skillRefusalMessage(error: SkillLifecycleRefusedError): string {
-  if (error.message === "Skill outside accepted learning scope") {
-    return "Nothing was saved. This Skill is in a different scope (personal or workspace) than this chat's Agent learning saves to, so it can't be changed from this chat. A person can edit it under Skills, or it can be changed from a chat whose learning saves to that scope. Do not copy it into another scope as a workaround.";
-  }
+const TELL_PERSON =
+  "Tell the person in your reply that it was not saved, why, and what would make it work; your other work can continue.";
+
+/**
+ * What a refused Skill change means for the agent, in words it can act on.
+ * `refusal` is the same classification the person's timeline notice uses, so
+ * the agent's account and the notice agree.
+ */
+export function skillRefusalMessage(
+  error: SkillLifecycleRefusedError,
+  refusal: LearningRefusal | null = null,
+): string {
   if (error.code === "40001" || error.code === "23505") {
     return `Nothing was saved: ${error.message}. Read the Skill again for its current revision and scope version, then retry with a new operation ID if the change still applies.`;
   }
-  return `Nothing was saved: ${error.message}.`;
+  switch (refusal?.reason) {
+    case "personal_chat":
+      return `Nothing was saved. This chat learns for the person (a private chat or personal memory), so it can save and edit workspace Skills but can't review Skills or install plugins. The person can do this under Skills, or ask for it in a shared chat. ${TELL_PERSON}`;
+    case "personal_target":
+      return `Nothing was saved. This Skill is personal, and this chat saves what it learns for the whole workspace, so it can't change it. The person can make the change under Skills, or ask for it in a private chat. Do not copy it into the workspace unless they ask. ${TELL_PERSON}`;
+    case "learning_off":
+      return `Nothing was saved. Agent learning for Skills is Off for this change, in this chat's or the workspace's settings. The person can turn it on in Agent learning settings, or make the change under Skills. ${TELL_PERSON}`;
+    case "not_permitted":
+      return `Nothing was saved: ${error.message}. The person can make the change under Skills. ${TELL_PERSON}`;
+    default:
+      return `Nothing was saved: ${error.message}.`;
+  }
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -122,7 +140,8 @@ function withDefiniteSkillRefusals(
         return await definition.execute(args, context);
       } catch (error) {
         if (!(error instanceof SkillLifecycleRefusedError)) throw error;
-        const message = skillRefusalMessage(error);
+        const refusal = await skillLearningRefusal(error, args, skillScope);
+        const message = skillRefusalMessage(error, refusal);
         const result = {
           isError: true,
           content: [{ type: "text" as const, text: message }],
@@ -130,7 +149,6 @@ function withDefiniteSkillRefusals(
             error: { code: "skill_change_refused", message, retryable: error.retryable },
           },
         };
-        const refusal = await skillLearningRefusal(error, args, skillScope);
         return refusal ? withLearningRefusalMeta(result, refusal) : result;
       }
     },
@@ -255,7 +273,7 @@ export function createWorkspaceSkillTools(input: {
       ...(reviewResolution ? { reviewResolution } : {}),
     };
   };
-  const save = async (request: SkillSaveRequest) => {
+  const save = async ({ scope, ...request }: SkillSaveRequest) => {
     const artifact = buildPortableSkillArtifact(request.files);
     const base = request.expectedRevisionId
       ? await readSkill(input.db, context, request.skillId, request.expectedRevisionId)
@@ -264,6 +282,9 @@ export function createWorkspaceSkillTools(input: {
       await saveSkill(input.db, {
         ...context,
         ...request,
+        ...(scope
+          ? { scope: scope === "personal" ? ("user" as const) : ("workspace" as const) }
+          : {}),
         actor: input.actor,
         files: [...artifact.files],
         stableKey: base?.stableKey ?? `authored-${request.skillId.replaceAll("-", "")}`,

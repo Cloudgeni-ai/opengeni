@@ -41,6 +41,36 @@ import {
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+const TELL_PERSON =
+  "Tell the person in your reply that it was not saved, why, and what would make it work; your other work can continue.";
+const TELL_PERSON_IF_ASKED =
+  "If the person asked you to save or remember this, tell them in your reply that it was not saved and why; your other work can continue.";
+
+/**
+ * What an authority refusal means for the agent, in words it can act on.
+ * `refusal` is the same classification the person's timeline notice uses, so
+ * the agent's account and the notice agree.
+ */
+function refusalAgentMessage(
+  surface: "knowledge" | "instruction",
+  mode: "read" | "write",
+  refusal: LearningRefusal | null,
+): string {
+  if (mode === "read") {
+    return surface === "instruction"
+      ? "This instruction is unavailable in this task's scope."
+      : "The entry or reference is unavailable in this task's scope and Agent learning policy.";
+  }
+  if (surface === "instruction") {
+    return refusal?.reason === "learning_off"
+      ? `Nothing was saved. Agent learning for workspace instructions is Off for this change, in this chat's or the workspace's settings. The person can turn it on in Agent learning settings, or make the change in workspace instructions. ${TELL_PERSON}`
+      : `Nothing was saved. This chat can't change workspace instructions. The person can make the change in workspace instructions. ${TELL_PERSON}`;
+  }
+  return refusal?.reason === "learning_off"
+    ? `Nothing was saved. Agent learning for Knowledge is Off for this chat. The person can turn it on in Agent learning settings, or add it in Knowledge. ${TELL_PERSON_IF_ASKED}`
+    : `Nothing was saved. The entry, reference, or write is not available in this chat's scope or Agent learning policy. ${TELL_PERSON_IF_ASKED}`;
+}
+
 /** One structured write and retrieval path, independent of the legacy Memory toggle. */
 export function registerKnowledgeEntryTools(
   server: McpServer,
@@ -110,6 +140,11 @@ export function registerKnowledgeEntryTools(
         };
       }
       const state = nestedPostgresSqlState(error);
+      const refusalMessage =
+        mode === "write" && state === "42501" ? nestedAuthorityRefusalMessage(error) : null;
+      const refusal: LearningRefusal | null = refusalMessage
+        ? classifyLearningRefusal({ destination: surface, message: refusalMessage })
+        : null;
       const message =
         surface === "instruction"
           ? state === "40001"
@@ -117,7 +152,7 @@ export function registerKnowledgeEntryTools(
             : state === "23505"
               ? "This instruction operation ID was already used with different input. Reuse it only for an exact retry."
               : state === "42501"
-                ? "The instruction change is unavailable in this task's scope or Agent learning policy. Off disables authoring, not the task. Do not ask for approval to continue."
+                ? refusalAgentMessage(surface, mode, refusal)
                 : state === "22023" || state === "23514"
                   ? `Invalid instruction change. Read the current instruction, use append for a new rule, or edit with one localized exact oldText match to update or remove text. Agents cannot replace the complete instruction. Each supplied text and the resulting instruction must stay within ${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters, the same limit as the human editor.`
                   : "Workspace instructions are temporarily unavailable. Retry the same operation ID only if the prior change may have succeeded."
@@ -126,7 +161,7 @@ export function registerKnowledgeEntryTools(
             : state === "23505"
               ? "This operation ID was already used with different input. Reuse it only for an exact retry."
               : state === "42501"
-                ? "The entry, reference, or write is unavailable in this task's scope and Agent learning policy. Off disables saving, not your task. Do not ask for an approval to continue."
+                ? refusalAgentMessage(surface, mode, refusal)
                 : state === "22023" || state === "23514"
                   ? "Invalid Knowledge entry or relationship. Check the referenced IDs and revision before retrying."
                   : "Knowledge is temporarily unavailable. Your task can continue; retry the same operation ID if saving may have succeeded.";
@@ -142,11 +177,6 @@ export function registerKnowledgeEntryTools(
       // A definite authority refusal of a write also carries the content-free
       // refusal fact in `_meta`, which the model never sees, so the timeline
       // tells the person it was not saved.
-      const refusalMessage =
-        mode === "write" && state === "42501" ? nestedAuthorityRefusalMessage(error) : null;
-      const refusal: LearningRefusal | null = refusalMessage
-        ? classifyLearningRefusal({ destination: surface, message: refusalMessage })
-        : null;
       return refusal ? withLearningRefusalMeta(result, refusal) : result;
     }
   }
@@ -347,7 +377,7 @@ export function registerKnowledgeEntryTools(
   server.registerTool(
     "instruction_policy_save",
     {
-      description: `Change a concise standing workspace instruction through this task's Agent learning policy. Use for short always-on behavior such as 'Keep replies concise; expand when asked', within the intended workspace scope; active instructions enter applicable prompts without Knowledge retrieval. Read the current policy first and submit its exact baseline. Use editMode=append by default for a new rule; it preserves the current content and adds one blank-line separator. Use edit with a localized oldText that occurs exactly once and newText to update or remove only that passage. Agents cannot replace the complete instruction; direct the user to the manual workspace-instruction editor for a whole-policy rewrite. Each supplied text and the resulting instruction are limited to ${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters, the same limit as the human editor. Facts and incidents belong in knowledge_save and reusable procedures or context-specific preferences in skill_save. Preserve personal scope rather than creating a workspace-wide rule. Review first saves an inactive revision and returns pending; continue the task without an approval question. Report the actual receipt; Knowledge is not a workaround for Off, pending review, unavailable scope or size limits.`,
+      description: `Change a concise standing workspace instruction through this task's Agent learning policy. Use for short always-on behavior such as 'Keep replies concise; expand when asked', within the intended workspace scope; active instructions enter applicable prompts without Knowledge retrieval. Read the current policy first and submit its exact baseline. Use editMode=append by default for a new rule; it preserves the current content and adds one blank-line separator. Use edit with a localized oldText that occurs exactly once and newText to update or remove only that passage. Agents cannot replace the complete instruction; direct the user to the manual workspace-instruction editor for a whole-policy rewrite. Each supplied text and the resulting instruction are limited to ${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters, the same limit as the human editor. Facts and incidents belong in knowledge_save and reusable procedures or context-specific preferences in skill_save. An instruction applies to everyone in the workspace, also when saved from a private chat; keep a rule meant only for the person in their personal Skill. Review first saves an inactive revision and returns pending; continue the task without an approval question. Report the actual receipt; Knowledge is not a workaround for Off, pending review, unavailable scope or size limits.`,
       inputSchema: AgentInstructionSaveRequest.shape,
     },
     (input) =>

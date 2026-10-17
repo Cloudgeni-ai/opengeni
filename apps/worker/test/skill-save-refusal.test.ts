@@ -206,6 +206,7 @@ async function skillSaveFixture(
     workspaceId,
     subjectId,
     actor,
+    skillSave,
     skillId,
     privateText,
     saved,
@@ -228,7 +229,10 @@ describe("skill_save refusals", () => {
     expect(result.structuredContent.error?.code).toBe("skill_change_refused");
     expect(result.structuredContent.error?.retryable).toBe(false);
     const text = result.content.map((part) => part.text).join("\n");
-    expect(text).toContain("different scope");
+    expect(text).toContain("This Skill is personal");
+    // The agent is asked to tell the person, never discouraged from it.
+    expect(text).toContain("Tell the person in your reply that it was not saved");
+    expect(text).not.toMatch(/ask for (an )?approval/iu);
     expect(text).not.toContain("Failed query");
     expect(text).not.toContain(fixture.privateText);
     // The person is told, in the timeline, that it was not saved and why.
@@ -251,6 +255,10 @@ describe("skill_save refusals", () => {
     const result = await fixture.editNotes();
 
     expect(result.isError).toBe(true);
+    expect(result.structuredContent.error?.code).toBe("skill_change_refused");
+    const text = result.content.map((part) => part.text).join("\n");
+    expect(text).toContain("Agent learning for Skills is Off");
+    expect(text).toContain("Tell the person in your reply that it was not saved");
     expect(result._meta?.[LEARNING_REFUSAL_META_KEY]).toEqual({
       destination: "skill",
       reason: "learning_off",
@@ -392,6 +400,37 @@ describe("explicit workspace Skill destination from a chat that learns for its p
         reason: "Wrong scope",
       }),
     ).rejects.toThrow("Skill scope differs from the requested scope");
+  }, 120_000);
+
+  test("skill_save's scope argument creates a workspace Skill from a private chat", async () => {
+    if (!app || !shared) return;
+    const fixture = await skillSaveFixture(app.db, {
+      skillScope: "workspace",
+      learning: "personal",
+      modes: { personal: "automatic", workspace: "review_first" },
+    });
+    const skillId = crypto.randomUUID();
+    const result = (await fixture.skillSave.execute(
+      {
+        operationId: crypto.randomUUID(),
+        skillId,
+        expectedRevisionId: null,
+        expectedScopeVersion: 1,
+        scope: "workspace",
+        files: [{ path: "SKILL.md", content: "---\nname: rule\ndescription: Rule\n---\nBody" }],
+        reason: "The person wants this rule for the whole workspace",
+      },
+      { operationId: crypto.randomUUID(), caller: { kind: "model" } } as never,
+    )) as SkillSaveResult;
+    expect(result.isError, JSON.stringify(result.content)).toBe(false);
+    // The workspace's Review first governs the explicit workspace destination.
+    expect(result.structuredContent.outcome).toBe("pending");
+    const head = await readSkill(
+      app.db,
+      { accountId: fixture.accountId, workspaceId: fixture.workspaceId },
+      skillId,
+    );
+    expect(head?.scope).toBe("workspace");
   }, 120_000);
 
   test("a shared chat without a person cannot choose a personal destination", async () => {

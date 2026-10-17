@@ -234,6 +234,13 @@ describe("learning refusal facts", () => {
     try {
       const result = await client.callTool(appendRule());
       expect(result.isError).toBe(true);
+      const text = (result.content as Array<{ text?: string }>)[0]?.text ?? "";
+      const { message } = (JSON.parse(text) as { error: { message: string } }).error;
+      expect(message).toContain("Nothing was saved");
+      expect(message).toContain("Agent learning for workspace instructions is Off");
+      // The agent is asked to tell the person, never discouraged from it.
+      expect(message).toContain("Tell the person in your reply that it was not saved");
+      expect(message).not.toMatch(/ask for (an )?approval/iu);
       expect(result._meta?.[LEARNING_REFUSAL_META_KEY]).toEqual({
         destination: "instruction",
         reason: "learning_off",
