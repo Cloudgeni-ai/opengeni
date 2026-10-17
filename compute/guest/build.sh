@@ -11,9 +11,9 @@
 # None of them is committed; images are built from this directory
 # (`compute-host build-image --guest <OUT>`). Needs cargo with the
 # x86_64-unknown-linux-musl target (added with rustup when missing),
-# musl-gcc, git and curl. Go comes from PATH or /usr/local/go; with none,
-# a pinned, checksummed Go is fetched into TOOLS (~/.cache/compute-guest).
-# Go fetches the version envd's go.mod asks for when its own is older.
+# musl-gcc, git and curl. Go comes from PATH or /usr/local/go when it is at
+# least the version envd's go.mod asks for; otherwise that version is
+# fetched, checksummed, into TOOLS (~/.cache/compute-guest).
 # ENVD_SRC may name a checkout of the runtime at the pinned commit to build
 # from instead of fetching it. envd and bash are built again only when
 # OUT's VERSIONS does not match their pins.
@@ -64,7 +64,12 @@ rm -f "$OUT/VERSIONS"
 command -v musl-gcc >/dev/null || fail "musl-gcc is not on PATH (Debian and Ubuntu: musl-tools)"
 
 [ -x /usr/local/go/bin/go ] && PATH=$PATH:/usr/local/go/bin
-if ! command -v go >/dev/null; then
+go_new_enough() {
+  local have
+  have=$(go env GOVERSION 2>/dev/null) || return 1
+  [ "$(printf '%s\n' "go$GO_VERSION" "$have" | sort -V | head -1)" = "go$GO_VERSION" ]
+}
+if ! go_new_enough; then
   if [ ! -x "$TOOLS/go-$GO_VERSION/bin/go" ]; then
     log "fetching Go $GO_VERSION"
     mkdir -p "$TOOLS"
