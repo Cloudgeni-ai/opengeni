@@ -23,7 +23,7 @@ import {
 import { useCallback, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
-import { createOpenGeniText } from "../src/messages/runtime";
+import { createOpenGeniText } from "@opengeni/react/messages";
 
 const englishText = createOpenGeniText();
 

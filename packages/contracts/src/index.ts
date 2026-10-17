@@ -8888,30 +8888,26 @@ export const TimelineAnnotation = /* @__PURE__ */ defineSchema(() =>
 export type TimelineAnnotation = z.infer<typeof TimelineAnnotation>;
 
 function timelineAnnotationArray<T extends z.ZodTypeAny>(item: T) {
-  return z
-    .array(item)
-    .superRefine((annotations, ctx) => {
-      const ids = new Set<string>();
-      for (let index = 0; index < annotations.length; index += 1) {
-        const id = (annotations[index] as { id?: unknown }).id;
-        if (typeof id === "string" && ids.has(id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [index, "id"],
-            message: "annotation ids must be unique",
-          });
-        }
-        if (typeof id === "string") ids.add(id);
-      }
-      if (
-        timelineAnnotationUtf8Bytes(JSON.stringify(annotations)) > TIMELINE_ANNOTATIONS_MAX_BYTES
-      ) {
+  return z.array(item).superRefine((annotations, ctx) => {
+    const ids = new Set<string>();
+    for (let index = 0; index < annotations.length; index += 1) {
+      const id = (annotations[index] as { id?: unknown }).id;
+      if (typeof id === "string" && ids.has(id)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `annotations must be at most ${TIMELINE_ANNOTATIONS_MAX_BYTES} UTF-8 bytes`,
+          path: [index, "id"],
+          message: "annotation ids must be unique",
         });
       }
-    });
+      if (typeof id === "string") ids.add(id);
+    }
+    if (timelineAnnotationUtf8Bytes(JSON.stringify(annotations)) > TIMELINE_ANNOTATIONS_MAX_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `annotations must be at most ${TIMELINE_ANNOTATIONS_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
 }
 
 export const DraftTimelineAnnotations = timelineAnnotationArray(DraftTimelineAnnotation);

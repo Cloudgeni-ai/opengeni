@@ -348,8 +348,9 @@ export function ModelPolicyPickerPopover(
     portalStyle: CSSProperties;
   },
 ) {
+  const t = useOpenGeniText();
   const outside = useRef(false);
-  const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
+  const messages = { ...defaultModelPolicyPickerMessages(t), ...props.messages };
   return (
     <Popover.Root open onOpenChange={(open) => props.onOpenChange?.(open)}>
       <Popover.Anchor virtualRef={props.anchor} />

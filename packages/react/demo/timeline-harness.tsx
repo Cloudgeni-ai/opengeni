@@ -25,7 +25,7 @@ import {
 } from "./timeline-fixtures";
 import "./styles.css";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
-import { createOpenGeniText } from "../src/messages/runtime";
+import { createOpenGeniText } from "@opengeni/react/messages";
 
 const englishText = createOpenGeniText();
 

@@ -4,6 +4,7 @@ import {
   sortPickerRows,
   type PickerModelRow,
 } from "@opengeni/react/model-policy";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAccount } from "@/account";
 
@@ -19,6 +20,7 @@ export type WorkspaceModelCatalog = {
 
 /** The workspace model catalog the web picker reads, for the native model sheet. */
 export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceModelCatalog {
+  const t = useOpenGeniText();
   const { client } = useAccount();
   const [models, setModels] = useState<WorkspaceModelCatalogModel[]>([]);
   const [defaultSelection, setDefaultSelection] = useState<DefaultModelSelection | null>(null);
@@ -46,7 +48,7 @@ export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceM
       });
     return () => abort.abort();
   }, [client, workspaceId, generation]);
-  const rows = useMemo(() => sortPickerRows(projectPickerRows(models)), [models]);
+  const rows = useMemo(() => sortPickerRows(projectPickerRows(t, models)), [t, models]);
   const refresh = useCallback(() => setGeneration((value) => value + 1), []);
   return { rows, defaultSelection, loading, error, refresh };
 }

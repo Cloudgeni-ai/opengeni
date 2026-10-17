@@ -92,6 +92,7 @@ import {
 import { prefixedMcpToolName, prepareAgentTools } from "@opengeni/runtime";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
 import { buildTimeline } from "../../packages/react/src/timeline";
+import { createOpenGeniText } from "../../packages/react/src/messages/runtime";
 import { submitTestHumanPrompt } from "./helpers/session-control";
 
 async function setSessionStatus(
@@ -350,7 +351,9 @@ describe("API component integration", () => {
     ]);
     // Admission accepted the initial prompt directly. It belongs in chat even
     // while the physical turn row waits for a worker claim.
-    expect(buildTimeline(events).map((item) => item.kind)).toEqual(["user-message"]);
+    expect(buildTimeline(createOpenGeniText(), events).map((item) => item.kind)).toEqual([
+      "user-message",
+    ]);
     expect(events.find((event) => event.type === "user.message")?.payload).toMatchObject({
       routing: "accepted_for_execution",
     });

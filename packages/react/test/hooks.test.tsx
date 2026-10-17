@@ -6008,6 +6008,8 @@ describe("useAvailableModels", () => {
     expect(hook.result.current.models).toEqual([]);
     expect(hook.result.current.defaultModel).toBeNull();
     await hook.unmount();
+    // The shared read is released one task after its last reader leaves.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(nativeSignal?.aborted).toBe(true);
   });
 });

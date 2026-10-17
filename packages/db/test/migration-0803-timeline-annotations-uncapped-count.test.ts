@@ -4,7 +4,10 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-const replaceUrl = new URL("../drizzle/0803_timeline_annotations_uncapped_count.sql", import.meta.url);
+const replaceUrl = new URL(
+  "../drizzle/0803_timeline_annotations_uncapped_count.sql",
+  import.meta.url,
+);
 const validateUrl = new URL("../drizzle/0804_timeline_annotations_validate.sql", import.meta.url);
 
 describe("migrations 0803-0804 timeline annotations without a count cap", () => {
@@ -23,7 +26,9 @@ describe("migrations 0803-0804 timeline annotations without a count cap", () => 
     const sql = postgres(blank.databaseUrl, { max: 1, onnotice: () => undefined });
     try {
       await migrate(blank.databaseUrl);
-      const constraints = await sql<Array<{ name: string; validated: boolean; definition: string }>>`
+      const constraints = await sql<
+        Array<{ name: string; validated: boolean; definition: string }>
+      >`
         select conname as name, convalidated as validated, pg_get_constraintdef(oid) as definition
         from pg_constraint
         where conname in (
