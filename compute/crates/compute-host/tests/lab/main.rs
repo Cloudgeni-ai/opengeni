@@ -393,6 +393,7 @@ const NEVER: SleepConfig = SleepConfig {
     evict_after_ms: None,
     forget_after_ms: None,
     compress: false,
+    checkpoint_every_ms: None,
 };
 
 /// Pauses, saves and lets go of the VM soon after each use.

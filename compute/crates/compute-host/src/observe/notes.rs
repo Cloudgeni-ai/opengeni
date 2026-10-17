@@ -23,6 +23,9 @@ pub(crate) struct Notes {
     /// Facts about how the step went, such as where a restore's memory
     /// came from.
     pub details: Vec<(&'static str, &'static str)>,
+    /// How long the step kept a guest that goes on running paused, as a
+    /// checkpoint does while it captures its state.
+    pub paused: Option<Duration>,
     /// Alarms raised, with what happened.
     pub alarms: Vec<(Alarm, String)>,
     /// When the current phase began.
@@ -99,6 +102,11 @@ pub(crate) fn detail(key: &'static str, value: &'static str) {
         notes.details.retain(|(known, _)| *known != key);
         notes.details.push((key, value));
     });
+}
+
+/// Adds `took` to how long the step kept its running guest paused.
+pub(crate) fn paused(took: Duration) {
+    with(|notes| *notes.paused.get_or_insert_default() += took);
 }
 
 /// Raises `alarm` for the step's sandbox.

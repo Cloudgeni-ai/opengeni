@@ -1046,6 +1046,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         )
         .await;
         let runtime = engine.runtime().to_owned();
+        let store_configured = store.is_configured();
         let mut agent = Self {
             engine: Arc::new(engine),
             #[cfg(target_os = "linux")]
@@ -1101,6 +1102,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             allocation_unit,
             about: About {
                 runtime,
+                checkpoints: store_configured && save_copies == 1,
                 ..config.about
             },
             lease: config.lease,
@@ -1217,7 +1219,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         config.validate()?;
         let mut rules = config.sleep.rules();
         rules.compress_under_pressure &= self.can_compress;
+        // A checkpoint clones the disk while its VM is paused. Where files
+        // cannot share extents that would copy the whole disk with the VM
+        // paused, so such a host takes none (its status says so), and its
+        // sandboxes reach the store only as they sleep.
+        if !self.shares_extents() {
+            rules.checkpoint_every = None;
+        }
         SleepPolicy::new(rules).map_err(|error| format!("invalid sleep settings: {error}"))
+    }
+
+    /// Whether files under the state root share extents, which checkpoints
+    /// need: a save then writes one copy of memory at most.
+    const fn shares_extents(&self) -> bool {
+        self.save_copies == 1
     }
 
     /// What a sandbox of `config` whose disk is `disk_bytes` long reserves

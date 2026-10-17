@@ -148,6 +148,33 @@ async fn a_sandbox_is_created_woken_connected_to_listed_and_deleted() {
 }
 
 #[tokio::test]
+async fn a_sandbox_whose_create_says_nothing_of_sleep_is_checkpointed_as_the_fleet_says() {
+    let fleet = Fleet::start().await;
+    let host = fleet.host("host-a.example").await;
+    let sandbox = fleet.create(json!({})).await;
+    let (_, row) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
+    assert_eq!(
+        row["config"]["sleep"]["checkpoint_every_ms"], 600_000,
+        "{row}"
+    );
+    let Request::Create { config, .. } = &host.seen()[0].envelope.request else {
+        panic!("not a create");
+    };
+    assert_eq!(config.sleep, compute_control::service::DEFAULT_SLEEP);
+
+    // One that says how it sleeps is taken at its word.
+    let sleep = json!({ "pause_after_ms": 10_000, "compress": false });
+    let (status, row) = fleet
+        .post(
+            "/v1/sandboxes",
+            json!({ "vcpus": 1, "memory_mib": 256, "sleep": sleep }),
+        )
+        .await;
+    assert_eq!(status, 201, "{row}");
+    assert_eq!(row["config"]["sleep"], sleep);
+}
+
+#[tokio::test]
 async fn keys_are_needed_and_a_team_sees_only_its_own_sandboxes() {
     let fleet = Fleet::start().await;
     let _host = fleet.host("host-a.example").await;

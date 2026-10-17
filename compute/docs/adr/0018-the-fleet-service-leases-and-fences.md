@@ -241,12 +241,56 @@ can be built and tested.
   and the host must register again), it raises the owner epoch of each of
   its sandboxes and clears their owner. Each comes back on its next wake,
   from its latest archive, on another host. A sandbox never archived is
-  lost with its host. Early copies, a first archive soon after a sandbox
-  is created and periodic checkpoints while it runs, are planned as their
-  own piece; until they land, a sandbox survives the loss of its host
-  only once it has been archived. A lost host that comes back gets back each sandbox nobody
+  lost with its host; checkpoints, below, keep that window short. A lost
+  host that comes back gets back each sandbox nobody
   adopted since, with its local state, which is at least as new as the
   archive, and drops the rest.
+- **Checkpoints.** A sandbox whose sleep rules set `checkpoint_every_ms`
+  is copied to object storage while it runs, so losing its host costs
+  only what changed since. The fleet sets it to 10 minutes for every
+  sandbox whose create names no sleep rules. The period counts running
+  time from the later of its newest copy in the store and its last wake,
+  so a sandbox that sleeps and is archived anyway takes none. One with no
+  copy yet gets its first within a minute of running, and one created
+  and never run is archived at once, before its first boot, so the loss
+  of its host never loses the sandbox itself.
+  - *A coherent bundle.* The step settles a lazily woken VM first (its
+    image whole, its pager holding all of it), then pauses the VM, has
+    its VMM write the pages changed since its last snapshot, and clones
+    the disk sharing every extent once the snapshot has made it durable.
+    The VM then runs again while those pages are merged over its last
+    image into a new self-contained one, and the bundle, which nothing
+    changes any more, is uploaded as the owner's next save under the
+    same owner stamp and fences as an archive. The guest stands still
+    only from the pause to the resume (`compute.paused_us`): the merge
+    and the upload run while it works.
+  - *Still volatile.* The record goes on vouching for no local copy, since
+    the VM moves on: the sandbox stays `Running` and `Volatile`. Only its
+    `backed_up_ms` moves, to when the bundle was captured, and only once
+    the store holds it; protection starts at publication, not when the
+    step began.
+  - *The base moves even if the upload fails.* The new image becomes the
+    VM's base as soon as it is made, so its next save is a diff over it
+    whether or not this upload succeeded; a failed upload is retried
+    after the usual backoff from a fresh bundle, never from the old one.
+    From the snapshot until the image is made the VM's base is unknown,
+    so a merge that fails makes its next save a full one.
+  - *Ordered by the step.* The step runs in the sandbox's single step
+    slot and reserves its save number there, so no later save,
+    retirement or forgetting can touch the bundle while it uploads, and a
+    save captured after it always carries a higher number.
+  - *Use goes on, memory pressure wins.* A request during a checkpoint
+    neither waits for it nor cancels it: the guest is paused only while
+    its state is captured. A host that needs the memory cancels it, as it
+    cancels an archive, and the sandbox is checkpointed again once it runs.
+  - *Fenced like an archive.* A checkpoint that finds a later owner in the
+    store is refused and drops this host's copy, ending its VM.
+  - *Only where extents are shared.* The disk clone needs a state root on
+    a filesystem whose files share extents (XFS, btrfs). A host on any
+    other says so in its status (`about.checkpoints` false) and takes
+    none; a host without a store refuses a sandbox that asks for them, as
+    it refuses an archive. The sleep ladder is unchanged: an idle sandbox
+    pauses, saves and archives as before, and checkpoints never skip it.
 - **Moves while asleep.** To drain or rebalance a host, the service sends
   `hand_off` for its sleeping sandboxes and clears their owner with a raised
   epoch once the host answers; the next wake adopts each elsewhere. Live

@@ -39,7 +39,7 @@ impl Why {
 /// the sandbox was paused for memory, for its holds if it is held, and
 /// otherwise to put things right. A sleep step is for pressure when the
 /// host demands that depth, for a request when one asked for it, and
-/// otherwise for being idle.
+/// otherwise for being idle. A checkpoint is for its schedule.
 pub(super) fn cause(
     step: Step,
     view: Option<&SandboxView>,
@@ -49,6 +49,9 @@ pub(super) fn cause(
     let Some(view) = view.filter(|_| !recovering) else {
         return Why::plain(Cause::Recovery);
     };
+    if step == Step::Checkpoint {
+        return Why::plain(Cause::Schedule);
+    }
     if step.wakes() {
         return match asked {
             Some(asked) => asked,
@@ -193,6 +196,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         for (key, value) in &report.notes.details {
             event = event.with(*key, *value);
+        }
+        if let Some(paused) = report.notes.paused {
+            event = event.with("compute.paused_us", paused);
         }
         if let (Some(reading), Some(slot)) = (report.reading, self.slots.get_mut(&id.0)) {
             event = with_pressure(event, pressure_since(slot.reported, reading));

@@ -584,6 +584,8 @@ fn describe(memory_profile: MemoryProfile, base_image: &std::path::Path) -> Abou
         runtime: String::new(),
         memory_profile: memory_profile.to_string(),
         base_image,
+        // The agent says, once it knows its store and state root.
+        checkpoints: false,
     }
 }
 

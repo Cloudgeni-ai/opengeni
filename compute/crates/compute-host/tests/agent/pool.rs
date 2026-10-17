@@ -123,23 +123,25 @@ async fn new_sandboxes_restore_the_template_and_learn_who_they_are() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn without_a_ready_template_a_sandbox_boots_cold_at_once() {
-    let delays = Delays {
-        boot: Duration::from_millis(300),
-        ..Delays::default()
-    };
-    let lab = warm_lab(Lab::root(), Arc::default(), delays, Vec::new()).await;
+    let lab = warm_lab(Lab::root(), Arc::default(), Delays::default(), Vec::new()).await;
     assert!(
         lab.status().await.templates.is_empty(),
         "built on first use"
     );
 
-    let started = Instant::now();
-    lab.create(id(1), NEVER).await;
-    assert!(
-        started.elapsed() < Duration::from_millis(250),
-        "creating never waits for a template build"
+    // A template build boots a VM, and every boot waits now: a create that
+    // waited for the build would never return.
+    lab.world.hold_boots.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(10), lab.create(id(1), NEVER))
+        .await
+        .expect("creating never waits for a template build");
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 0, "none booted");
+    assert_ne!(
+        template_state(&lab.status().await),
+        Some(TemplateState::Ready)
     );
     assert!(!memory_saved(&lab.status().await, id(1)));
+    lab.world.hold_boots.store(false, Ordering::SeqCst);
     assert_eq!(lab.run(id(1), &["sandbox?"]).await, [""]);
 
     wait_ready(&lab).await;

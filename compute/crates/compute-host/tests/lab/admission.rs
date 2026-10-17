@@ -21,6 +21,7 @@ const SAVE_SOON: SleepConfig = SleepConfig {
     evict_after_ms: None,
     forget_after_ms: None,
     compress: false,
+    checkpoint_every_ms: None,
 };
 
 /// How long the guests' own background work (a disk flush seconds after a

@@ -27,11 +27,20 @@ pub enum Cause {
     /// Putting things right: after the agent started, or after a VM
     /// process ended on its own.
     Recovery,
+    /// The sandbox's checkpoint interval: a copy of it in object storage
+    /// while it runs.
+    Schedule,
 }
 
 impl Cause {
     /// Every cause.
-    pub const ALL: [Self; 4] = [Self::Request, Self::Idle, Self::Pressure, Self::Recovery];
+    pub const ALL: [Self; 5] = [
+        Self::Request,
+        Self::Idle,
+        Self::Pressure,
+        Self::Recovery,
+        Self::Schedule,
+    ];
 
     /// Its name on events and metrics.
     #[must_use]
@@ -41,6 +50,7 @@ impl Cause {
             Self::Idle => "idle",
             Self::Pressure => "pressure",
             Self::Recovery => "recovery",
+            Self::Schedule => "schedule",
         }
     }
 }

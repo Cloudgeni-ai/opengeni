@@ -203,6 +203,7 @@ const COMPRESS_WHEN_NEEDED: SleepConfig = SleepConfig {
     evict_after_ms: None,
     forget_after_ms: None,
     compress: true,
+    checkpoint_every_ms: None,
 };
 
 /// The parent of the groups the memory-pressure test makes: the agent's

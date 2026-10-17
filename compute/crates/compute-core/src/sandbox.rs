@@ -100,6 +100,11 @@ pub(crate) struct Sandbox {
     /// What it may still write to local disk, and what it booked there.
     pub local_disk: LocalDisk,
     pub in_flight: Option<InFlight>,
+    /// When the state its newest copy in object storage holds was taken,
+    /// as far as this core knows: `None` while it has none, or none known.
+    pub copied: Option<At>,
+    /// When its VM last started running: what a checkpoint counts from.
+    pub running_since: At,
     /// The VM process died while a step was in flight.
     pub process_lost: bool,
     pub retry: Option<Retry>,
@@ -136,8 +141,9 @@ pub(crate) enum Health {
 
 impl Sandbox {
     pub fn new(last_activity: At, state: State, policy: SleepPolicy, size: Size) -> Self {
+        let state = State::new(state.level, state.durability, state.memory_saved);
         Self {
-            state: State::new(state.level, state.durability, state.memory_saved),
+            state,
             policy,
             last_activity,
             wake: None,
@@ -163,6 +169,11 @@ impl Sandbox {
                 booked: DiskSpace::default(),
             },
             in_flight: None,
+            // A copy found in object storage counts as taken at its last
+            // activity; a running one found has none known, and is
+            // checkpointed soon.
+            copied: (state.durability == Durability::Remote).then_some(last_activity),
+            running_since: last_activity,
             process_lost: false,
             retry: None,
             queued: None,
@@ -212,6 +223,10 @@ impl Sandbox {
                 }
                 if step.wakes() && self.state.level == Level::Running {
                     self.touch(now);
+                    self.running_since = now;
+                }
+                if matches!(step, Step::Archive | Step::Checkpoint) {
+                    self.copied = Some(now);
                 }
                 self.retry = None;
             }
@@ -390,7 +405,7 @@ impl Sandbox {
                 return None;
             }
             return match self.state.level {
-                Level::Running => None,
+                Level::Running => self.checkpoint_due(now).then_some(Step::Checkpoint),
                 Level::Paused | Level::Compressed => Some(Step::Resume),
                 Level::Saved | Level::Archived if self.state.memory_saved => Some(Step::Restore),
                 Level::Saved | Level::Archived => Some(Step::Boot),
@@ -398,8 +413,38 @@ impl Sandbox {
             };
         }
         let idle = now.saturating_since(self.last_activity);
+        let floor = self.floor.max(self.requested);
         self.policy()
-            .next_step(self.state, idle, self.floor.max(self.requested))
+            .next_step(self.state, idle, floor)
+            .or_else(|| self.first_copy(floor))
+            .or_else(|| self.checkpoint_due(now).then_some(Step::Checkpoint))
+    }
+
+    /// When its next checkpoint is due, if it runs and has one coming.
+    fn checkpoint_at(&self) -> Option<At> {
+        if self.state.level != Level::Running {
+            return None;
+        }
+        let after = self.policy().checkpoint_after(self.copied.is_some())?;
+        let from = self
+            .copied
+            .map_or(self.running_since, |copied| copied.max(self.running_since));
+        Some(from + after)
+    }
+
+    fn checkpoint_due(&self, now: At) -> bool {
+        self.checkpoint_at().is_some_and(|due| due <= now)
+    }
+
+    /// A sandbox that checkpoints, has no copy in object storage, and
+    /// sleeps with only a local one, as a new one that never ran: archived
+    /// at once, so losing the host never loses the sandbox itself.
+    fn first_copy(&self, floor: Level) -> Option<Step> {
+        let wanted = self.copied.is_none()
+            && self.policy().checkpoint_after(false).is_some()
+            && floor == Level::Running
+            && self.state.level == Level::Saved;
+        (wanted && Step::Archive.can_start(self.state)).then_some(Step::Archive)
     }
 
     /// Queue position for `step`: wakes by urgency then age, sleep steps
@@ -438,7 +483,8 @@ impl Sandbox {
                 .map(|after| self.last_activity + after)
         };
         let balloon = self.balloon_retry.map(|(at, _)| at);
-        [retry, lease, idle, balloon]
+        let checkpoint = self.checkpoint_at();
+        [retry, lease, idle, balloon, checkpoint]
             .into_iter()
             .flatten()
             .filter(|at| *at > now)

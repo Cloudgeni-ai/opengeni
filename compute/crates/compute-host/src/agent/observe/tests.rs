@@ -71,6 +71,36 @@ fn a_wake_nobody_asked_for_is_for_memory_holds_or_recovery() {
 }
 
 #[test]
+fn a_checkpoint_is_for_its_schedule_whatever_else_holds() {
+    let running = SandboxView {
+        state: State::RUNNING,
+        ..view()
+    };
+    let pressed = SandboxView {
+        floor: Level::Saved,
+        requested: Level::Saved,
+        ..running
+    };
+    let asked = Why {
+        cause: Cause::Request,
+        trace: trace(),
+    };
+    for view in [running, pressed] {
+        for asked in [None, Some(asked)] {
+            assert_eq!(
+                cause(Step::Checkpoint, Some(&view), asked, false),
+                Why::plain(Cause::Schedule)
+            );
+        }
+    }
+    assert_eq!(
+        cause(Step::Checkpoint, Some(&running), None, true),
+        Why::plain(Cause::Recovery),
+        "the agent taking over its state root comes first"
+    );
+}
+
+#[test]
 fn sleep_steps_are_for_pressure_then_a_request_then_idleness() {
     let running = SandboxView {
         state: State::RUNNING,

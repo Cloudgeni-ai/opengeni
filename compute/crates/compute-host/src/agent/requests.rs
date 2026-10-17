@@ -13,7 +13,7 @@ use crate::observe::Cause;
 use crate::pool::{Shape, Sources, Start, Template, first_files};
 use crate::protocol::{
     BlockedSandbox, CapacityStatus, DiskStatus, FailedStep, HostStatus, Id, MemoryStatus,
-    SandboxConfig, SandboxStatus, step_name,
+    SandboxConfig, SandboxStatus, SleepConfig, step_name,
 };
 use crate::state::{Identity, Record, check_generation};
 use crate::step::images_of;
@@ -443,22 +443,28 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         match self.sleep_policy(config) {
             Err(error) => Some(Err(HostError::Invalid(error))),
-            Ok(policy) if policy.rules().archive_after.is_some() && !self.store.is_configured() => {
-                Some(Err(HostError::Invalid(
-                    "this host has no store, so sandboxes cannot be archived".into(),
-                )))
-            }
-            Ok(_) => None,
+            Ok(_) => self.needs_absent_store(&config.sleep).map(Err),
         }
+    }
+
+    /// The refusal of `sleep` on a host without a store, if it archives or
+    /// checkpoints: judged by what was asked, before the host drops
+    /// checkpoints it cannot take.
+    fn needs_absent_store(&self, sleep: &SleepConfig) -> Option<HostError> {
+        (!self.store.is_configured()
+            && (sleep.archive_after_ms.is_some() || sleep.checkpoint_every_ms.is_some()))
+        .then(|| {
+            HostError::Invalid(
+                "this host has no store, so sandboxes cannot be archived or checkpointed".into(),
+            )
+        })
     }
 
     /// Refuses a new sandbox `id` of `config` that cannot be created here.
     pub(super) fn can_create(&self, id: Id, config: &SandboxConfig) -> Result<(), HostError> {
-        let policy = self.sleep_policy(config).map_err(HostError::Invalid)?;
-        if policy.rules().archive_after.is_some() && !self.store.is_configured() {
-            return Err(HostError::Invalid(
-                "this host has no store, so sandboxes cannot be archived".into(),
-            ));
+        self.sleep_policy(config).map_err(HostError::Invalid)?;
+        if let Some(refused) = self.needs_absent_store(&config.sleep) {
+            return Err(refused);
         }
         // One that could never run here is refused at once, so it can be
         // placed elsewhere.

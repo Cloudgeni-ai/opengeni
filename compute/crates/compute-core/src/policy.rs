@@ -33,6 +33,8 @@ pub enum Rule {
     Forget,
     /// [`SleepRules::compress_under_pressure`].
     Compress,
+    /// [`SleepRules::checkpoint_every`].
+    Checkpoint,
 }
 
 impl fmt::Display for Rule {
@@ -45,6 +47,7 @@ impl fmt::Display for Rule {
             Self::Evict => "evict",
             Self::Forget => "forget",
             Self::Compress => "compress",
+            Self::Checkpoint => "checkpoint",
         })
     }
 }
@@ -80,7 +83,21 @@ pub struct SleepRules {
     /// ending its process. Needs ordinary pages: memory backed by huge pages
     /// cannot be compressed.
     pub compress_under_pressure: bool,
+    /// Copy a sandbox in use to object storage once it has run this long
+    /// since its newest copy there, or since it woke if that is later,
+    /// pausing it only while its memory and disk are captured; see
+    /// [`Step::Checkpoint`]. Unlike the rules above this counts running
+    /// time, not idle time: it bounds what losing the host costs a sandbox
+    /// that never goes idle. One with no copy there yet gets its first after
+    /// at most [`FIRST_CHECKPOINT`], and one that never ran is archived at
+    /// once. Needs a host with a store.
+    pub checkpoint_every: Option<Duration>,
 }
+
+/// The longest a sandbox with no copy in object storage runs before its
+/// first checkpoint, whatever [`SleepRules::checkpoint_every`] says: until
+/// then, losing its host loses the sandbox, not only its latest changes.
+pub const FIRST_CHECKPOINT: Duration = Duration::from_secs(60);
 
 impl SleepRules {
     /// Never sleeps.
@@ -92,6 +109,7 @@ impl SleepRules {
         evict_after: None,
         forget_after: None,
         compress_under_pressure: false,
+        checkpoint_every: None,
     };
 
     /// A starting point for interactive agent sandboxes.
@@ -100,7 +118,8 @@ impl SleepRules {
     /// archive after two minutes, so a typical pause between two replies
     /// already ends protected against losing the host. Free memory only
     /// under pressure, delete the local copy after three idle days and the
-    /// memory image after 30.
+    /// memory image after 30. No checkpoints: they need a store, and a
+    /// fleet sets them for its sandboxes.
     pub const RECOMMENDED: Self = Self {
         pause_after: Some(Duration::from_secs(10)),
         save_after: Some(Duration::from_secs(30)),
@@ -109,6 +128,7 @@ impl SleepRules {
         evict_after: Some(Duration::from_secs(3 * 86_400)),
         forget_after: Some(Duration::from_secs(30 * 86_400)),
         compress_under_pressure: true,
+        checkpoint_every: None,
     };
 
     const fn get(&self, rule: Rule) -> Option<Duration> {
@@ -126,6 +146,7 @@ impl SleepRules {
                     None
                 }
             }
+            Rule::Checkpoint => self.checkpoint_every,
         }
     }
 }
@@ -174,6 +195,9 @@ impl SleepPolicy {
                 });
             }
         }
+        if rules.checkpoint_every == Some(Duration::ZERO) {
+            return Err(PolicyError::Zero(Rule::Checkpoint));
+        }
         let end_after = [rules.drop_after, rules.evict_after, rules.forget_after]
             .into_iter()
             .flatten()
@@ -182,17 +206,31 @@ impl SleepPolicy {
     }
 
     /// This policy for a VM process that cannot be saved: it may pause and
-    /// compress, but never save or end, since ending it would lose its
-    /// programs.
+    /// compress, but never save, checkpoint or end, since ending it would
+    /// lose its programs.
     #[must_use]
     pub(crate) const fn without_saving(&self) -> Self {
         Self {
             rules: SleepRules {
                 save_after: None,
+                checkpoint_every: None,
                 ..self.rules
             },
             end_after: None,
         }
+    }
+
+    /// How long a running sandbox runs before its next checkpoint, counted
+    /// from the later of its newest copy in object storage and its wake;
+    /// `copied` says whether it has such a copy. `None`: never.
+    #[must_use]
+    pub fn checkpoint_after(&self, copied: bool) -> Option<Duration> {
+        let every = self.rules.checkpoint_every?;
+        Some(if copied {
+            every
+        } else {
+            every.min(FIRST_CHECKPOINT)
+        })
     }
 
     /// The rules this policy was built from.
@@ -511,6 +549,8 @@ pub enum PolicyError {
     Watermarks,
     /// The compressed share is above 100 percent.
     CompressedPercent,
+    /// A rule that counts running time is zero, so it would never stop.
+    Zero(Rule),
 }
 
 impl fmt::Display for PolicyError {
@@ -524,6 +564,7 @@ impl fmt::Display for PolicyError {
             }
             Self::Watermarks => f.write_str("the low memory watermark is above the high one"),
             Self::CompressedPercent => f.write_str("the compressed share is above 100 percent"),
+            Self::Zero(rule) => write!(f, "the {rule} rule must be longer than zero"),
         }
     }
 }

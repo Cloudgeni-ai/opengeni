@@ -19,6 +19,7 @@
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use compute_core::HostPolicy;
@@ -29,6 +30,8 @@ use compute_host::protocol::{
     Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
 };
 use compute_host::{Chunked, Directory, HostAgent, HostConfig, NoStore, PagerConfig, Store, serve};
+use compute_storage::store::ChunkStore;
+use object_store::memory::InMemory;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::Instant;
 
@@ -84,14 +87,47 @@ impl Drop for Agent {
 }
 
 async fn start<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> Agent {
+    start_with(lab, name, first_uid, store, Setup::default()).await
+}
+
+/// What sets an in-process agent apart from another on the same machine.
+struct Setup {
+    /// The cgroup that holds its VMs: two agents holding the same sandbox
+    /// need one each.
+    cgroup: PathBuf,
+    observer: compute_host::observe::Observer,
+}
+
+impl Default for Setup {
+    fn default() -> Self {
+        Self {
+            cgroup: "/sys/fs/cgroup/compute-host-test".into(),
+            observer: compute_host::observe::Observer::default(),
+        }
+    }
+}
+
+async fn start_with<S: Store>(
+    lab: &Path,
+    name: &str,
+    first_uid: u32,
+    store: S,
+    setup: Setup,
+) -> Agent {
     let root = lab.join("ht").join(name);
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    restart(lab, name, first_uid, store).await
+    restart_with(lab, name, first_uid, store, setup).await
 }
 
 /// Starts an agent on the state root of an earlier one, as after a crash.
-async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> Agent {
+async fn restart_with<S: Store>(
+    lab: &Path,
+    name: &str,
+    first_uid: u32,
+    store: S,
+    setup: Setup,
+) -> Agent {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
@@ -101,7 +137,7 @@ async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> 
         firecracker: lab.join("bin/firecracker"),
         retained: Vec::new(),
         jailer: lab.join("bin/jailer"),
-        cgroup_parent: "/sys/fs/cgroup/compute-host-test".into(),
+        cgroup_parent: setup.cgroup,
     })
     .unwrap()
     .with_memory_profile(profile())
@@ -130,7 +166,7 @@ async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> 
         },
         about: compute_host::protocol::About::default(),
         lease: None,
-        observer: compute_host::observe::Observer::default(),
+        observer: setup.observer,
         summary_every: HostConfig::SUMMARY_EVERY,
     };
     let socket = root.join("agent.sock");
@@ -709,4 +745,274 @@ async fn a_guest_whose_pager_died_boots_afresh() {
         .await
         .unwrap();
     assert!(matches!(removed, Reply::Done), "{removed:?}");
+}
+
+/// The next event of a checkpoint of `id` that ended done, and the
+/// microseconds it kept the guest paused.
+async fn checkpoint_done(
+    events: &mut tokio::sync::mpsc::Receiver<compute_host::observe::Event>,
+    id: Id,
+) -> compute_host::observe::Event {
+    use compute_host::observe::Value;
+    let sandbox = id.to_string();
+    let text = |event: &compute_host::observe::Event, key: &str| match event.get(key) {
+        Some(Value::Str(text)) => Some(text.to_string()),
+        _ => None,
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let event = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("no checkpoint within a minute")
+            .expect("the observer ended");
+        if event.name != "compute.step"
+            || text(&event, "compute.sandbox.id").as_deref() != Some(sandbox.as_str())
+            || text(&event, "compute.step").as_deref() != Some("checkpoint")
+        {
+            continue;
+        }
+        assert_eq!(
+            text(&event, "compute.outcome").as_deref(),
+            Some("done"),
+            "{event:?}"
+        );
+        return event;
+    }
+}
+
+fn micros(event: &compute_host::observe::Event, key: &str) -> u64 {
+    match event.get(key) {
+        Some(compute_host::observe::Value::Int(us)) => u64::try_from(*us).unwrap(),
+        other => panic!("{key}: {other:?} in {event:?}"),
+    }
+}
+
+async fn status(client: &Client) -> compute_host::protocol::HostStatus {
+    match client.call(&Request::Status).await.unwrap() {
+        Reply::Status(status) => *status,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The first uid of the first host in the checkpoint test; the second
+/// starts a thousand higher.
+const CHECKPOINT_UID: u32 = (1 << 30) + 4000;
+
+/// A sandbox in use is checkpointed while it runs, its guest paused only
+/// while its memory and disk are captured: a whole image the first time, a
+/// diff merged into it after. Losing its host then costs only what it did
+/// since. Another host adopts it under a later owner epoch and wakes it
+/// from the checkpoint with its programs, memory and files as they were,
+/// and the first host's next checkpoint finds itself fenced off and drops
+/// its copy.
+///
+/// Both hosts keep sandboxes in one store that stamps each with its owner,
+/// as a fleet's does: the bucket `COMPUTE_TEST_STORE` names, or else one
+/// in memory.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_checkpoint_of_a_running_guest_brings_it_back_on_another_host() {
+    let Some(lab) = lab() else { return };
+    let store = std::env::var("COMPUTE_TEST_STORE")
+        .ok()
+        .and_then(|url| Chunked::from_url(&url).unwrap())
+        .unwrap_or_else(|| {
+            Chunked::new(ChunkStore::new(
+                Arc::new(InMemory::new()),
+                "checkpoint".into(),
+            ))
+        });
+    let id: Id = "00000000-0000-4000-8000-0000000000b6".parse().unwrap();
+    let Some((one, mut events)) = checkpointing(&lab, store.clone()).await else {
+        return;
+    };
+    // The host it moves to is up before the move, so the fleet's adoption
+    // follows the last writes at once, well before the next checkpoint.
+    let two = start_with(
+        &lab,
+        &format!("l{}", short()),
+        CHECKPOINT_UID + 1000,
+        store,
+        Setup {
+            cgroup: "/sys/fs/cgroup/compute-host-test-2".into(),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let config = SandboxConfig {
+        vcpus: 2,
+        memory_mib: 512,
+        memory_request_mib: None,
+        cpu_request_millis: None,
+        sleep: SleepConfig {
+            checkpoint_every_ms: Some(4_000),
+            ..SleepConfig::default()
+        },
+    };
+    let created = one
+        .client
+        .call(&Request::Create {
+            id,
+            config: config.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(created, Reply::Done), "{created:?}");
+    let setup = exec(&one.client, id, SETUP).await;
+    let pid = field(&setup, "pid").to_owned();
+    let (sum, count) = checkpoint_twice(&one, &mut events, id, &pid).await;
+    // What it does from now on is in no copy.
+    exec(
+        &one.client,
+        id,
+        "echo lost > /lost; echo lost > /dev/shm/lost",
+    )
+    .await;
+    // Its host is cut off, and the fleet gives it to another under a later
+    // owner epoch.
+    adopt_checkpointed(&two, id, config, &pid, (&sum, count)).await;
+    // The first host's next checkpoint finds a later owner and drops its
+    // copy, ending its VM.
+    let fenced = Instant::now();
+    while status(&one.client)
+        .await
+        .sandboxes
+        .iter()
+        .any(|sandbox| sandbox.id == id)
+    {
+        assert!(
+            fenced.elapsed() < Duration::from_secs(30),
+            "the first host kept a sandbox another owns"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let removed = two
+        .client
+        .call(&Request::Remove {
+            id,
+            generation: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(removed, Reply::Done), "{removed:?}");
+}
+
+/// An agent keeping sandboxes in `store`, with a tap on its events; none
+/// when the lab directory's files share no extents, so it takes no
+/// checkpoints.
+async fn checkpointing(
+    lab: &Path,
+    store: Chunked,
+) -> Option<(
+    Agent,
+    tokio::sync::mpsc::Receiver<compute_host::observe::Event>,
+)> {
+    use compute_host::observe::{ObserveConfig, Observer};
+    let (tap, events) = tokio::sync::mpsc::channel(4096);
+    let observer = Observer::start(ObserveConfig {
+        journal: false,
+        tap: Some(tap),
+        ..ObserveConfig::default()
+    });
+    let agent = start_with(
+        lab,
+        &format!("k{}", short()),
+        CHECKPOINT_UID,
+        store,
+        Setup {
+            observer,
+            ..Setup::default()
+        },
+    )
+    .await;
+    if !status(&agent.client).await.about.checkpoints {
+        skip("lab", "files under the lab directory share no extents");
+        return None;
+    }
+    Some((agent, events))
+}
+
+/// Waits out `id`'s first checkpoint (a whole image) and, once its memory
+/// and disk changed, its second (a diff), and prints how long each kept
+/// the guest paused. Returns its data's checksum and its counter as the
+/// second captured them.
+async fn checkpoint_twice(
+    agent: &Agent,
+    events: &mut tokio::sync::mpsc::Receiver<compute_host::observe::Event>,
+    id: Id,
+    pid: &str,
+) -> (String, u64) {
+    let first = checkpoint_done(events, id).await;
+    let output = exec(
+        &agent.client,
+        id,
+        &format!("{}\necho kept > /kept", check(pid)),
+    )
+    .await;
+    assert_eq!(field(&output, "alive"), "yes", "{output}");
+    let sum = field(&output, "sum").to_owned();
+    let count = field(&output, "count").parse().unwrap();
+    let second = checkpoint_done(events, id).await;
+    eprintln!(
+        "checkpoint pauses: first (whole image) {} us, then (diff) {} us; \
+         steps took {} us and {} us",
+        micros(&first, "compute.paused_us"),
+        micros(&second, "compute.paused_us"),
+        micros(&first, "compute.duration_us"),
+        micros(&second, "compute.duration_us"),
+    );
+    let checkpointed = status(&agent.client)
+        .await
+        .sandboxes
+        .into_iter()
+        .find(|sandbox| sandbox.id == id)
+        .unwrap();
+    assert_eq!(checkpointed.level, LevelName::Running);
+    assert!(checkpointed.backed_up_ms.is_some());
+    (sum, count)
+}
+
+/// Adopts `id` on `agent` under owner epoch 2 and checks that its guest
+/// woke as its last checkpoint left it: process `pid` still counting from
+/// at least `count`, its data reading `sum`, its disk holding what it wrote
+/// before, and nothing it did after.
+async fn adopt_checkpointed(
+    agent: &Agent,
+    id: Id,
+    config: SandboxConfig,
+    pid: &str,
+    (sum, count): (&str, u64),
+) {
+    let adopted = agent
+        .client
+        .call(&Request::Adopt {
+            id,
+            config,
+            owner_epoch: 2,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(adopted, Reply::Done), "{adopted:?}");
+    let started = Instant::now();
+    let output = exec(
+        &agent.client,
+        id,
+        &format!(
+            "{}\necho disk=$(cat /kept)\necho lost=$(cat /lost /dev/shm/lost 2>/dev/null | wc -l)",
+            check(pid)
+        ),
+    )
+    .await;
+    eprintln!(
+        "woke on the second host from the checkpoint in {:?}",
+        started.elapsed()
+    );
+    assert_eq!(field(&output, "alive"), "yes", "{output}");
+    assert_eq!(field(&output, "was"), sum, "memory as at the checkpoint");
+    assert!(field(&output, "count").parse::<u64>().unwrap() >= count);
+    assert_eq!(field(&output, "disk"), "kept", "{output}");
+    assert_eq!(
+        field(&output, "lost"),
+        "0",
+        "nothing done after it: {output}"
+    );
 }

@@ -28,12 +28,15 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep};
 
 mod admission;
+mod checkpoint;
 mod disk_lengths;
 mod fleet;
 mod observe;
 mod pool;
 mod ready;
 mod requests;
+#[path = "../support/required.rs"]
+mod required;
 mod restart;
 mod sleep;
 
@@ -85,6 +88,8 @@ struct World {
     /// While set, every boot fails as a launch does that could not prove
     /// the VMM it may have started is gone.
     stuck_boots: AtomicBool,
+    /// While set, every boot waits before it starts its VM.
+    hold_boots: AtomicBool,
     /// While set, a refused resume also makes the sandbox's directory
     /// read-only, as a failing disk would.
     freeze_on_refusal: AtomicBool,
@@ -489,6 +494,9 @@ impl Engine for Fake {
     type Vm = FakeVm;
 
     async fn boot(&self, spec: &VmSpec) -> Result<FakeVm, EngineError> {
+        while self.world.hold_boots.load(Ordering::SeqCst) {
+            sleep(Duration::from_millis(5)).await;
+        }
         sleep(self.delays.boot).await;
         self.world.boots.fetch_add(1, Ordering::Relaxed);
         if self.world.stuck_boots.load(Ordering::SeqCst) {
@@ -809,8 +817,13 @@ static NEXT_LAB: AtomicUsize = AtomicUsize::new(0);
 impl Lab {
     /// Unix socket paths are short, so labs live directly under /tmp.
     fn root() -> PathBuf {
+        Self::root_in(std::path::Path::new("/tmp"))
+    }
+
+    /// A lab directly under `dir`, which must be short.
+    fn root_in(dir: &std::path::Path) -> PathBuf {
         let n = NEXT_LAB.fetch_add(1, Ordering::Relaxed);
-        let root = PathBuf::from(format!("/tmp/ch-{}-{n}", std::process::id()));
+        let root = dir.join(format!("ch-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("base.img"), "base").unwrap();
@@ -1062,6 +1075,7 @@ const NEVER: SleepConfig = SleepConfig {
     evict_after_ms: None,
     forget_after_ms: None,
     compress: false,
+    checkpoint_every_ms: None,
 };
 
 /// Pauses and saves quickly, and keeps the paused VM.

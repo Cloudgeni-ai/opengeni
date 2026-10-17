@@ -237,6 +237,11 @@ pub enum Step {
     /// Copy the current saved state to object storage: Local to Remote, and
     /// Saved to Archived. A paused VM is left as it is.
     Archive,
+    /// Copy a running VM's state to object storage as it was at one moment,
+    /// pausing it only while its memory and disk are captured. The VM goes
+    /// on running, so the copy is never current and the state does not
+    /// change: it bounds what losing the host costs a sandbox in use.
+    Checkpoint,
     /// Delete the local copy: Archived to Remote.
     Evict,
     /// Delete the saved memory image and keep the files. The next wake boots
@@ -246,7 +251,7 @@ pub enum Step {
 
 impl Step {
     /// Number of steps.
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 12;
 
     /// Every step in admission order: wake steps first.
     pub const ALL: [Self; Self::COUNT] = [
@@ -259,6 +264,7 @@ impl Step {
         Self::Compress,
         Self::Save,
         Self::Archive,
+        Self::Checkpoint,
         Self::Evict,
         Self::Forget,
     ];
@@ -287,7 +293,8 @@ impl Step {
             Self::Restore => matches!(level, Level::Saved | Level::Archived) && state.memory_saved,
             Self::Boot => matches!(level, Level::Saved | Level::Archived) && !state.memory_saved,
             Self::Fetch => matches!(level, Level::Remote),
-            Self::Pause => matches!(level, Level::Running),
+            // A checkpoint copies a running VM and leaves it running.
+            Self::Pause | Self::Checkpoint => matches!(level, Level::Running),
             Self::Drop => {
                 matches!(level, Level::Paused | Level::Compressed)
                     && !matches!(state.durability, Durability::Volatile)
@@ -310,7 +317,8 @@ impl Step {
     }
 
     /// The state once the step has succeeded from `state`. Only meaningful
-    /// when [`Step::can_start`] holds.
+    /// when [`Step::can_start`] holds. Every step but
+    /// [`Step::Checkpoint`] changes it.
     #[must_use]
     pub const fn apply(self, state: State) -> State {
         let State {
@@ -334,6 +342,7 @@ impl Step {
                 Level::Saved => State::new(Level::Archived, Durability::Remote, memory_saved),
                 _ => State::new(level, Durability::Remote, memory_saved),
             },
+            Self::Checkpoint => state,
             Self::Evict => State::new(Level::Remote, Durability::Remote, memory_saved),
             Self::Forget => State::new(level, durability, false),
         }
@@ -389,7 +398,11 @@ mod tests {
                         after.is_consistent(),
                         "{step:?} from {state:?} gives {after:?}"
                     );
-                    assert_ne!(after, state, "{step:?} from {state:?} changes nothing");
+                    assert_eq!(
+                        after == state,
+                        step == Step::Checkpoint,
+                        "{step:?} from {state:?} gives {after:?}"
+                    );
                 }
             }
         }
@@ -399,7 +412,7 @@ mod tests {
     fn only_wake_steps_reach_running_and_every_sleeping_state_can_wake() {
         for state in every_state() {
             for step in Step::ALL {
-                if step.can_start(state) {
+                if step.can_start(state) && step != Step::Checkpoint {
                     let after = step.apply(state).level;
                     // Fetching wakes in two steps: download, then restore.
                     assert_eq!(after == Level::Running, step.wakes() && step != Step::Fetch);

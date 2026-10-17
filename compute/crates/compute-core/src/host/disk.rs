@@ -168,13 +168,26 @@ impl Sandbox {
     /// waking, since only a running VM writes to it; and what a wake from
     /// object storage still writes locally, from its admission, across
     /// any retry, until its copy is whole.
+    ///
+    /// While a checkpoint runs, a clone of its disk shares every block the
+    /// disk held alone, so any guest write may take a new one: its disk
+    /// may grow by its whole bound until the clone is gone and a reading
+    /// shows what it took.
     pub(super) fn disk_booking(&self) -> DiskSpace {
         let mut booked = DiskSpace::default();
         if self.books_save() {
             booked = booked.add(self.save_space());
         }
         if self.reserves() {
-            booked = booked.add(DiskSpace::bytes(self.local_disk.growth));
+            let checkpointing = self
+                .in_flight
+                .is_some_and(|flight| flight.step == Step::Checkpoint);
+            let growth = if checkpointing {
+                self.local_disk.growth.max(self.size.disk)
+            } else {
+                self.local_disk.growth
+            };
+            booked = booked.add(DiskSpace::bytes(growth));
         }
         if self.local_disk.hydrating || (self.reserves() && self.state.level == Level::Remote) {
             booked = booked.add(DiskSpace::save(self.size.fetch));

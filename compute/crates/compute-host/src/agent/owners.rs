@@ -481,9 +481,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             waiting.push(reply);
             return;
         }
-        let awake = self.core.sandbox(id.0).is_none_or(|view| {
-            view.holds > 0 || (view.state.level == Level::Running && view.step.is_none())
-        });
+        let awake = self
+            .core
+            .sandbox(id.0)
+            .is_none_or(|view| view.holds > 0 || view.runs());
         if awake {
             let _ = reply.send(Err(HostError::Awake(id)));
             return;

@@ -14,7 +14,7 @@ use compute_engine::SnapshotFiles;
 #[cfg(target_os = "linux")]
 use super::Reconnected;
 use super::{Archived, blocking};
-use crate::image::Images;
+use crate::image::{Generation, Images};
 use crate::layout::{Paths, remove_if_present, write_atomic};
 #[cfg(target_os = "linux")]
 use crate::lazy::Fetcher;
@@ -30,6 +30,19 @@ pub(crate) fn images_of(paths: &Paths) -> Images {
 /// The learned order the guest touches memory after a wake.
 pub(super) fn wake_profile(paths: &Paths) -> PathBuf {
     paths.dir.join("wake-profile.json")
+}
+
+/// The clone of the disk a checkpoint takes while its VM is paused, which
+/// it archives once the VM runs again. Outside the jail: only the host
+/// writes or reads it.
+pub(crate) fn checkpoint_disk(paths: &Paths) -> PathBuf {
+    paths.dir.join("checkpoint.disk")
+}
+
+/// Removes the clone a checkpoint cut short by a crash left behind: as
+/// the disk moves on it would take up to the disk's whole size. Blocks.
+pub(crate) fn clear_checkpoint(paths: &Paths) -> io::Result<()> {
+    remove_if_present(&checkpoint_disk(paths))
 }
 
 /// Names the stored copy the record's `archived` flag refers to.
@@ -100,6 +113,18 @@ pub(super) fn diff_files(paths: &Paths) -> SnapshotFiles {
     }
 }
 
+/// A snapshot moved out of the jail, with the disk durable as it needs:
+/// everything a memory image is made from, none of which changes when the
+/// guest runs again.
+pub(super) struct Taken {
+    pub(super) files: SnapshotFiles,
+    /// The image a diff was taken against; `None` when the snapshot is whole.
+    pub(super) over: Option<Generation>,
+    /// The runtime of the VMM that wrote it, which after an upgrade can be
+    /// older than the engine's own.
+    pub(super) runtime: String,
+}
+
 /// Makes the sandbox's images consistent after a host restart and reports
 /// whether a good current image exists, or why not. An error means they
 /// could not be checked, which proves nothing about them.
@@ -139,6 +164,7 @@ pub(crate) async fn clear_local(paths: &Paths) -> io::Result<()> {
     let paths = paths.clone();
     blocking(move || {
         remove_if_present(&paths.disk)?;
+        clear_checkpoint(&paths)?;
         remove_if_present(&paths.snapshot.state)?;
         remove_if_present(&paths.snapshot.memory)?;
         remove_if_present(&paged_marker(&paths))?;

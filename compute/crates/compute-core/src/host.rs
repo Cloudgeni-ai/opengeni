@@ -447,6 +447,15 @@ pub struct SandboxView {
     pub balloon: u64,
 }
 
+impl SandboxView {
+    /// Whether its VM runs with nothing stopping it: no step in flight, or
+    /// a checkpoint, which pauses it only while its state is captured.
+    #[must_use]
+    pub fn runs(&self) -> bool {
+        self.state.level == Level::Running && self.step.is_none_or(|step| step == Step::Checkpoint)
+    }
+}
+
 /// The decision core for one host.
 ///
 /// Feed it every [`Input`] with the current time; execute the [`Action`]s it
@@ -917,7 +926,7 @@ impl Host {
         // it stays booked until a reading shows it.
         if matches!(outcome, Outcome::Failed(_)) {
             let wrote = match flight.step {
-                Step::Save => slot.save_space(),
+                Step::Save | Step::Checkpoint => slot.save_space(),
                 Step::Fetch => DiskSpace::save(slot.size.fetch),
                 _ => DiskSpace::default(),
             };
@@ -1066,7 +1075,13 @@ impl Host {
             return;
         };
         slot.settle_room();
-        if slot.state.level == Level::Running && slot.in_flight.is_none() {
+        // A checkpoint leaves the VM running, so a sandbox under one is
+        // already awake: a use meanwhile wakes nothing.
+        if slot.state.level == Level::Running
+            && slot
+                .in_flight
+                .is_none_or(|flight| flight.step == Step::Checkpoint)
+        {
             slot.wake = None;
         } else if slot.wake.is_none() && !slot.holds.is_empty() && slot.room != WakeRoom::Refused {
             slot.wake = Some(Wake {
@@ -1080,8 +1095,11 @@ impl Host {
                 slot.floor = Level::Running;
                 slot.floor_relief = 0;
             }
+            // A checkpoint is for a sandbox in use: it goes on, and the VM
+            // runs again as soon as its state is captured.
             if let Some(flight) = &mut slot.in_flight
                 && !flight.step.wakes()
+                && flight.step != Step::Checkpoint
                 && !flight.cancel_sent
             {
                 flight.cancel_sent = true;
@@ -1092,12 +1110,13 @@ impl Host {
             }
         } else if slot.floor != Level::Running
             && let Some(flight) = &mut slot.in_flight
-            && flight.step == Step::Archive
+            && matches!(flight.step, Step::Archive | Step::Checkpoint)
             && !flight.cancel_sent
         {
             // Archiving frees no memory and is not needed to free it, so it
             // must not hold up the memory pressure demands. It starts again
-            // from the saved copy once the pressure is relieved.
+            // from the saved copy once the pressure is relieved; a
+            // checkpoint, once the sandbox runs again.
             flight.cancel_sent = true;
             out.push(Action::Cancel {
                 sandbox: id,

@@ -419,7 +419,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // step finishes; archiving a paused VM's saved copy hands it back.
         let needs_vm = matches!(
             step,
-            Step::Pause | Step::Resume | Step::Compress | Step::Save | Step::Drop | Step::Archive
+            Step::Pause
+                | Step::Resume
+                | Step::Compress
+                | Step::Save
+                | Step::Drop
+                | Step::Archive
+                | Step::Checkpoint
         );
         let events = self.events_tx.clone();
         let (spec, paths) = (VmSpec::clone(&slot.spec), Paths::clone(&slot.paths));
@@ -930,7 +936,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let result = if view.broken {
             Err(HostError::Broken(id))
-        } else if view.state.level == Level::Running && view.step.is_none() && slot.vm.is_some() {
+        } else if view.runs() && (slot.vm.is_some() || view.step == Some(Step::Checkpoint)) {
+            // A checkpoint holds the VM while it runs on: its guest answers
+            // once the capture's pause ends.
             Ok(slot.spec.vsock_path())
         } else {
             return;

@@ -157,6 +157,11 @@ pub struct SleepConfig {
     /// can.
     #[serde(default)]
     pub compress: bool,
+    /// Copy the sandbox to object storage after it ran this many
+    /// milliseconds since its last copy there, while it runs; counts running
+    /// time, not idle time (see [`SleepRules::checkpoint_every`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_every_ms: Option<u64>,
 }
 
 impl SleepConfig {
@@ -182,6 +187,7 @@ impl SleepConfig {
             evict_after_ms: ms(rules.evict_after),
             forget_after_ms: ms(rules.forget_after),
             compress: rules.compress_under_pressure,
+            checkpoint_every_ms: ms(rules.checkpoint_every),
         }
     }
 
@@ -197,6 +203,7 @@ impl SleepConfig {
             evict_after: after(self.evict_after_ms),
             forget_after: after(self.forget_after_ms),
             compress_under_pressure: self.compress,
+            checkpoint_every: after(self.checkpoint_every_ms),
         }
     }
 }
@@ -772,6 +779,10 @@ pub struct About {
     /// change.
     #[serde(default)]
     pub base_image: String,
+    /// Whether it checkpoints running sandboxes that ask for it: it has a
+    /// store, and files under its state root share extents.
+    #[serde(default)]
+    pub checkpoints: bool,
 }
 
 /// One shape's warm template.
@@ -836,6 +847,7 @@ pub fn step_name(step: Step) -> &'static str {
         Step::Archive => "archive",
         Step::Evict => "evict",
         Step::Forget => "forget",
+        Step::Checkpoint => "checkpoint",
     }
 }
 

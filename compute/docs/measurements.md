@@ -307,6 +307,39 @@ seed 247, and letting the sleep hook skip the freeze does so at seed 1.
 Making every registration copy a new attempt fails the lease's unit test
 for a registration answered after copies were sent again, and the
 simulation then never sees such an answer count.
+
+## Checkpoints
+
+Measured on 2026-10-17 by `save_wake`'s
+`a_checkpoint_of_a_running_guest_brings_it_back_on_another_host` (release
+build, real Firecracker, `COMPUTE_TEST_PROFILE=nested`) on one Azure
+Standard_D32ds_v5 in norwayeast: 32 vCPUs, 128 GiB, nested virtualization,
+the state root on XFS so the disk clone shares every extent. The sandbox has
+2 vCPUs and 512 MiB, runs a program holding a sum in memory and has written
+files; it is checkpointed every 4 seconds, and a second agent then adopts it
+from the store under a later owner epoch.
+
+The pause is the time the guest stood still: from asking Firecracker to
+pause until its resume returned (`compute.paused_us`). The step is the whole
+checkpoint, including the upload. Five runs:
+
+| Checkpoint | Pause p50 | Pause range | Step p50 |
+| --- | --- | --- | --- |
+| First: a whole image | 122 ms | 112 to 154 ms | 2.58 s |
+| Next: a diff merged into the last image | 131 ms | 112 to 147 ms | 1.54 s |
+
+Merging a diff into the last image used to happen while the guest was
+paused, which made the diff's pause about 261 ms, twice the whole image's.
+The guest now runs again as soon as the snapshot is written and its disk is
+cloned; the merge and the upload run while it works. What is left in the
+pause is Firecracker writing the snapshot, the disk's sync and the clone.
+
+In every run the adopting host woke the sandbox from the checkpoint with
+its program still running and its sum and files as they were at the
+checkpoint (in 933 ms in the run that timed it); what the guest wrote after
+it (a file on disk and one in memory) was lost, as it should be, and the
+first host's next checkpoint was fenced off and dropped its copy.
+
 ## Admission gaps (2026-10-17)
 
 Measured on 2026-10-17 on branch `feat/compute-gaps`, on one Azure
