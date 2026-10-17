@@ -2326,6 +2326,7 @@ describe("release schema contract", () => {
     }
     const appendedMigrationPaths = [
       "0822_session_pin_owner_short_circuit.sql",
+      "0821_session_history_owner_backfill_repair.sql",
       "0820_browser_retained_downloads.sql",
       "0819_explicit_workspace_learning_destination.sql",
       "0818_insights_usage_hourly_reader.sql",

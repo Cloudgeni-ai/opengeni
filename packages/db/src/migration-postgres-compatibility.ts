@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type postgres from "postgres";
+import { sessionHistoryCompatibilitySql } from "./migration-session-history-backfills";
 
 // Published migration bytes are release identities. PostgreSQL 18 added NOT
 // NULL rows to pg_constraint; adapt only the affected catalog reads at execution
@@ -79,6 +80,7 @@ export async function migrationSqlForServer(
   file: string,
   source: string,
 ): Promise<string> {
+  source = sessionHistoryCompatibilitySql(file, source);
   const migration = Object.hasOwn(migrations, file) ? migrations[file] : undefined;
   if (!migration) return source;
   const [server] = await sql<{ version: string }[]>`
