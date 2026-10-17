@@ -1182,6 +1182,13 @@ All producers use the ordinary session/turn runtime:
 
 Schedule indicators include authorized reusable-session targets and paused schedules; the API filters by `sessionId`.
 
+Scheduled first-party selection follows the ordinary session model: explicit
+choices stay fixed, while default-following resolves current workspace/deployment
+defaults at admission. Permission ceilings remain unchanged. Generated reusable
+chats retain that intent; an accepted occurrence retains its exact catalog.
+Ordinary `notify_user` notifications reach the calling turn's initiating human,
+not the destination chat's creator. A turn with no human has no default recipient.
+
 Conversational schedules default to the signed calling session. Existing-session
 messages inherit the destination's execution settings at admission, while account
 choices retain the schedule's own captured authority. Separate-agent modes are

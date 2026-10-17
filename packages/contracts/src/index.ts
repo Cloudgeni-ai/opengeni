@@ -12209,6 +12209,7 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ /* @__PURE__ */
       generatedSessionBinding: z
         .object({
           createIdempotencyKey: z.string().min(1).max(512),
+          toolPolicy: SessionToolPolicy.optional(),
           effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
           nestedAgentDepthPolicySource: NestedAgentDepthPolicySource,
           codexCompactionMode: CodexCompactionMode,
