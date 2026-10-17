@@ -60,7 +60,24 @@ export const WindowState = z.object({
   screenshot_height: id.optional(),
   screenshot_frame_valid: z.boolean().optional(),
   screenshot_mime_type: text.optional(),
+  // Walk outcome: CUA returns the partial tree it has when a budget runs out.
+  truncated: z.boolean().optional(),
+  truncation_reason: z.string().max(64).optional(),
+  nodes_pending: z.number().int().nonnegative().optional(),
 });
+
+/** How a partial CUA walk stopped, or null when CUA read the whole tree. A
+ * walk that stopped for any reason other than the node cap ran out of time
+ * (including an application that did not answer before the budget). */
+export function walkIncompleteness(
+  state: z.infer<typeof WindowState>,
+): { reason: "time_budget" | "node_budget"; unreadCount: number } | null {
+  if (state.truncated !== true) return null;
+  return {
+    reason: state.truncation_reason === "node_budget" ? "node_budget" : "time_budget",
+    unreadCount: Math.min(state.nodes_pending ?? 0, 1_000_000),
+  };
+}
 
 const errorCodes: Record<string, ComputerBackendErrorCode> = {
   capture_not_found: "frame_stale",

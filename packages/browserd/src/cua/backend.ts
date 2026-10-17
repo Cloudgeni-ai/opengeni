@@ -12,7 +12,13 @@ import {
   type ComputerBackendActionCommand,
   type ComputerBackendClipboard,
 } from "../computer-backend";
-import { callDesktop, Windows, WindowState, type CuaDesktopRuntime } from "./wire";
+import {
+  callDesktop,
+  walkIncompleteness,
+  Windows,
+  WindowState,
+  type CuaDesktopRuntime,
+} from "./wire";
 import { locate, projectElements, unindexedTextByElement } from "./projection";
 
 type Target = { native: ComputerBackendTarget; pid: number; windowId: number };
@@ -358,6 +364,7 @@ export class CuaComputerBackend implements ComputerBackend {
       this.identity.platform,
       unindexedTextByElement(state.tree_markdown),
     );
+    const incomplete = walkIncompleteness(state);
     const observation: ComputerBackendObservation = {
       observationId: `${this.session}:${state.snapshot_id}`,
       target: { ...target.native, bounds: state.window_bounds ?? target.native.bounds },
@@ -367,6 +374,7 @@ export class CuaComputerBackend implements ComputerBackend {
           .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
       roots,
       nodeCount: roots.length,
+      ...(incomplete ? { incomplete } : {}),
       focusedRef: roots.find((node) => node.states.includes("focused"))?.ref ?? null,
       changedRegions: [],
     };

@@ -146,6 +146,34 @@ describe("computerObservationText", () => {
     ]);
   });
 
+  test("says when the platform stopped reading the tree early", () => {
+    const roots = [node("e_row", "AXRow", "bun")];
+    const slow = computerObservationText(
+      observation({
+        kind: "snapshot",
+        roots,
+        nodeCount: 1,
+        incomplete: { reason: "time_budget", unreadCount: 567 },
+      }),
+    );
+    expect(slow.split("\n").at(-1)).toBe(
+      "Partial tree: reading stopped because the app answered too slowly; at least 567 more elements were not read. Elements not listed here may still exist; use the screenshot for them.",
+    );
+    const capped = computerObservationText(
+      observation({
+        kind: "snapshot",
+        roots,
+        nodeCount: 1,
+        incomplete: { reason: "node_budget", unreadCount: 1 },
+      }),
+    );
+    expect(capped).toContain(
+      "reading stopped because it reached its element limit; at least 1 more element was not read.",
+    );
+    const whole = computerObservationText(observation({ kind: "snapshot", roots, nodeCount: 1 }));
+    expect(whole).not.toContain("Partial tree");
+  });
+
   test("reports diffs, removed elements, a missing tree and a focus outside the view", () => {
     const diff = computerObservationText(
       observation(
