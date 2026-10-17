@@ -5,6 +5,51 @@ const input = { workspaceId: "workspace", sessionId: "session", observerAccountI
 const services = async () => ({ db: {}, bus: {}, settings: {}, observability: {} }) as any;
 
 describe("deleted session control activities", () => {
+  for (const activityName of ["recoverDispatch", "settleSessionInputWait"] as const) {
+    test.each(["deleted", "live", "hidden", "unavailable"] as const)(
+      `${activityName} only returns stale after deletion proof (%s)`,
+      async (state) => {
+        const activityFailure = new Error("Control activity database lookup failed");
+        const proofFailure = new Error("Deletion proof database unavailable");
+        const failed = mock(async () => {
+          throw activityFailure;
+        });
+        const proof = mock(async () => {
+          if (state === "unavailable") throw proofFailure;
+          return state === "deleted";
+        });
+        const publish = mock(async () => undefined);
+        const notify = mock(async () => undefined);
+        const metrics = mock(() => undefined);
+        const activities = createSessionStateActivities(services, {
+          recoverSessionDispatch: failed,
+          settleSessionInputWait: failed,
+          isSessionDefinitivelyDeleted: proof,
+          publishDurableSessionEvents: publish,
+          deliverFailedChildTurnToParent: notify,
+          recordWorkerDeathRecoveryMetrics: metrics,
+        });
+        const result = activities[activityName]({
+          ...input,
+          accountId: "account",
+          attemptId: "attempt",
+          timeoutType: "HEARTBEAT",
+          waitTurnId: "wait-turn",
+          disposition: "timeout",
+        });
+        if (state === "deleted") await expect(result).resolves.toEqual({ action: "stale" });
+        else
+          await expect(result).rejects.toBe(
+            state === "unavailable" ? proofFailure : activityFailure,
+          );
+        expect(proof).toHaveBeenCalledWith(expect.anything(), "workspace", "session", "account");
+        expect(publish).not.toHaveBeenCalled();
+        expect(notify).not.toHaveBeenCalled();
+        expect(metrics).not.toHaveBeenCalled();
+      },
+    );
+  }
+
   test.each([true, false])(
     "late interruption and proof activities tolerate only deletion (%s)",
     async (deleted) => {

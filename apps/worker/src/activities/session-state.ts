@@ -909,10 +909,12 @@ export function createSessionStateActivities(
       settleUnlessDeleted(input, undefined, () => persistSessionAttemptQuiescence(input)),
     reconcileSessionAttemptQuiescence: reconcileSessionAttemptQuiescenceActivity,
     reconcileSettledSessionAttempt: reconcileSettledSessionAttemptActivity,
-    recoverDispatch,
+    recoverDispatch: (input: RecoverDispatchInput) =>
+      settleUnlessDeleted(input, { action: "stale" as const }, () => recoverDispatch(input)),
     recoverEscapedMcpTimeout,
     peekSessionWork,
-    settleSessionInputWait,
+    settleSessionInputWait: (input: SettleSessionInputWaitInput) =>
+      settleUnlessDeleted(input, { action: "stale" as const }, () => settleSessionInputWait(input)),
     expireSessionHumanInput,
     expireSessionInteractionIntervention,
     expireScheduledRunHumanWait,

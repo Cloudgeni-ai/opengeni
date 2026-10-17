@@ -1,11 +1,18 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   bootstrapWorkspace,
+  applySessionTurnSettlement,
+  claimSessionWorkForAttempt,
   createDb,
   createSession,
+  createWorkspace,
   deleteSessionTreeIfQuiescent,
+  deleteWorkspaceIfQuiescent,
+  initializeSessionStartAtomically,
   isSessionDefinitivelyDeleted,
+  peekSessionWork,
+  waitForSessionInputWithEvent,
   withSessionRlsActorContext,
 } from "../src/index";
 import { createSessionStateActivities } from "../../../apps/worker/src/activities/session-state";
@@ -24,7 +31,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-test("application-role deletion proof distinguishes tenant/actor invisibility and deleted rows", async () => {
+async function fixture(initialMessage = "") {
   const id = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "deletion-test",
@@ -40,7 +47,8 @@ test("application-role deletion proof distinguishes tenant/actor invisibility an
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId,
-    initialMessage: "",
+    initialMessage,
+    createdBy: { kind: "subject", subjectId: grant.subjectId },
     resources: [],
     metadata: {},
     model: "scripted-model",
@@ -48,6 +56,11 @@ test("application-role deletion proof distinguishes tenant/actor invisibility an
     latencyMode: "standard",
     sandboxBackend: "none",
   });
+  return { grant, workspaceId, session };
+}
+
+test("application-role deletion proof distinguishes tenant/actor invisibility and deleted rows", async () => {
+  const { grant, workspaceId, session } = await fixture();
   const absentId = crypto.randomUUID();
   expect(
     await isSessionDefinitivelyDeleted(client.db, workspaceId, session.id, grant.accountId),
@@ -108,4 +121,121 @@ test("application-role deletion proof distinguishes tenant/actor invisibility an
       attemptId: crypto.randomUUID(),
     }),
   ).resolves.toBeUndefined();
+}, 60_000);
+
+async function settledFixture(waitForInput = false) {
+  const scope = await fixture("Complete this turn");
+  const { grant, workspaceId, session } = scope;
+  await initializeSessionStartAtomically(client.db, {
+    accountId: grant.accountId,
+    workspaceId,
+    sessionId: session.id,
+    clientEventId: `initial:${session.id}`,
+    reasoningEffortFallback: "medium",
+    createdEventPayload: {},
+    goal: null,
+  });
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(client.db, workspaceId, {
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error("Test turn was not claimed");
+  const turn = claimed.turn;
+  if (waitForInput) {
+    await waitForSessionInputWithEvent(client.db, workspaceId, session.id, {
+      reason: "Waiting for test input",
+      timeoutSeconds: 600,
+      command: {
+        accountId: grant.accountId,
+        actor: {
+          type: "agent_attempt",
+          attemptId,
+          sessionId: session.id,
+          turnId: turn.id,
+          executionGeneration: turn.executionGeneration,
+        },
+        operationKey: crypto.randomUUID(),
+      },
+    });
+  }
+  expect(
+    await applySessionTurnSettlement(client.db, workspaceId, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { reason: "test" } }],
+    }),
+  ).toMatchObject({ action: "settled" });
+  return { ...scope, turn, attemptId };
+}
+
+test("recoverDispatch returns stale after canonical deletion of a durably settled session", async () => {
+  const { grant, workspaceId, session, attemptId } = await settledFixture();
+  const publish = mock(async () => undefined);
+  const activities = createSessionStateActivities(async () => ({ db: client.db }) as any, {
+    publishDurableSessionEvents: publish,
+  });
+  expect(
+    await deleteSessionTreeIfQuiescent(client.db, {
+      workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+    }),
+  ).toMatchObject({ status: "deleted" });
+  const input = {
+    accountId: grant.accountId,
+    workspaceId,
+    sessionId: session.id,
+    attemptId,
+    timeoutType: "HEARTBEAT" as const,
+  };
+  // A denied absence proof must keep the original activity failure retryable.
+  await expect(
+    activities.recoverDispatch({ ...input, accountId: crypto.randomUUID() }),
+  ).rejects.toThrow();
+  await expect(
+    withSessionRlsActorContext({ subjectId: "other-human" }, () =>
+      activities.recoverDispatch(input),
+    ),
+  ).rejects.toThrow();
+  await expect(activities.recoverDispatch(input)).resolves.toEqual({ action: "stale" });
+  expect(publish).not.toHaveBeenCalled();
+}, 60_000);
+
+test("settleSessionInputWait returns stale after canonical workspace deletion between peek and settlement", async () => {
+  const { grant, workspaceId, session, turn } = await settledFixture(true);
+  // Canonical deletion requires another workspace in the same organization.
+  await createWorkspace(client.db, {
+    accountId: grant.accountId,
+    name: "Surviving test workspace",
+  });
+  const peek = await peekSessionWork(client.db, workspaceId, session.id, false, grant.accountId);
+  expect(peek).toMatchObject({ kind: "input-wait", disposition: "held", waitTurnId: turn.id });
+  if (peek.kind !== "input-wait") throw new Error("Missing durable input wait");
+  expect(
+    await deleteWorkspaceIfQuiescent(client.db, { accountId: grant.accountId, workspaceId }),
+  ).toMatchObject({ status: "deleted" });
+  const publish = mock(async () => undefined);
+  const activities = createSessionStateActivities(async () => ({ db: client.db }) as any, {
+    publishDurableSessionEvents: publish,
+  });
+  await expect(
+    activities.settleSessionInputWait({
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      waitTurnId: peek.waitTurnId,
+      disposition: peek.disposition,
+    }),
+  ).resolves.toEqual({ action: "stale" });
+  expect(publish).not.toHaveBeenCalled();
 }, 60_000);
