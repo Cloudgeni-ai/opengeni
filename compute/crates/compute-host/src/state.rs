@@ -236,6 +236,7 @@ pub(crate) struct Change {
     identity: Option<Identity>,
     last_used_ms: Option<u64>,
     backed_up_ms: Option<u64>,
+    disk_bytes: Option<u64>,
 }
 
 impl Change {
@@ -289,6 +290,13 @@ impl Change {
         self
     }
 
+    /// Records the disk's length where the record does not know it yet,
+    /// as for one written before it was kept; a known length never changes.
+    pub fn disk_bytes(mut self, bytes: u64) -> Self {
+        self.disk_bytes = Some(bytes);
+        self
+    }
+
     fn apply_to(self, record: &mut Record) {
         if let Some(disk) = self.disk {
             record.disk = disk;
@@ -311,6 +319,9 @@ impl Change {
         }
         if let Some(at) = self.backed_up_ms {
             record.backed_up_ms = Some(record.backed_up_ms.map_or(at, |was| was.max(at)));
+        }
+        if let Some(bytes) = self.disk_bytes {
+            record.allocation.disk_bytes.get_or_insert(bytes);
         }
     }
 }

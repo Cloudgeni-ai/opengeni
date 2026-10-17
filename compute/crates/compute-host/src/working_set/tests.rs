@@ -497,6 +497,67 @@ async fn packing_waits_for_a_compression_permit() {
     assert!(packed.unwrap().is_some());
 }
 
+/// Packing never holds a blocking thread while it waits for a compression
+/// permit: with one blocking thread and one permit, it and other
+/// compression that takes a permit and then a blocking thread, as an
+/// archive's does, both finish.
+#[test]
+fn packing_and_other_compression_share_one_blocking_thread() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let finished = runtime.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = image(dir.path(), 1024, &[]);
+        let (_backend, chunks) = store();
+        let compress = Arc::new(Semaphore::new(1));
+        let order = (0..1024).map(|page| page * PAGE).collect();
+        let packing = {
+            let compress = Arc::clone(&compress);
+            tokio::spawn(async move {
+                put(
+                    &chunks,
+                    &transfers(),
+                    &compress,
+                    &memory,
+                    None,
+                    &profile(order, PAGE),
+                    &CancellationToken::new(),
+                )
+                .await
+            })
+        };
+        let others: Vec<_> = (0..50)
+            .map(|_| {
+                let compress = Arc::clone(&compress);
+                tokio::spawn(async move {
+                    let _permit = compress.acquire().await.unwrap();
+                    tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(2)))
+                        .await
+                        .unwrap();
+                })
+            })
+            .collect();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            for other in others {
+                other.await.unwrap();
+            }
+            packing.await.unwrap().unwrap().is_some()
+        })
+        .await
+    });
+    // A stuck blocking thread must not hold the test up.
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    assert_eq!(
+        finished.ok(),
+        Some(true),
+        "packing and compression deadlocked"
+    );
+}
+
 #[test]
 fn packing_follows_the_page_size_and_stops_at_the_ready_bytes() {
     let huge = 2 << 20;

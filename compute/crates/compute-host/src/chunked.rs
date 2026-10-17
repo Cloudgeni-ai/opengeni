@@ -751,6 +751,19 @@ impl Store for Chunked {
             .map_err(|error| storage_error("delete", error))
     }
 
+    async fn disk_len(&self, id: Id) -> Result<Option<u64>, EngineError> {
+        const OP: &str = "disk_len";
+        let Some(head) = self.head(OP, id).await? else {
+            return Ok(None);
+        };
+        let manifest = self
+            .chunks
+            .get_manifest(&head.disk)
+            .await
+            .map_err(|error| storage_error(OP, error))?;
+        Ok(Some(manifest.disk_len))
+    }
+
     /// Points the sandbox at its disk alone, without the memory image or
     /// the working-set pack of its pages. Their chunks stay until a sweep
     /// finds nothing names them. The new pointer lands only on the version

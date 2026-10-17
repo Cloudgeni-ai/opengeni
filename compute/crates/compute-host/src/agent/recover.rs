@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use compute_core::{Durability, Input, Level, Priority, SandboxId, State};
+use compute_core::{DiskSpace, Durability, Input, Level, Priority, SandboxId, Size, State};
 use compute_engine::{Engine, EngineError, ErrorKind, Found, VmSpec};
 use futures::StreamExt;
 
@@ -41,7 +41,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 tracing::error!(%id, ordinal = record.ordinal, "ordinal taken twice; leaving the sandbox on disk");
                 self.block(id, format!("ordinal {} is taken twice", record.ordinal));
                 // Its VM may still run.
-                self.unmanaged(id, &record.config);
+                self.unmanaged(id, self.record_size(&record));
                 continue;
             }
             // Nothing is done for a sandbox, not even looking at its VM,
@@ -52,7 +52,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Err(error) => {
                     tracing::error!(%id, %error, "record not known to be durable; blocking the sandbox and leaving it alone");
                     self.block(id, format!("record not known to be durable: {error}"));
-                    self.unmanaged(id, &record.config);
+                    self.unmanaged(id, self.record_size(&record));
                     continue;
                 }
             };
@@ -63,13 +63,58 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // and the pool fills again.
             if record.removing || record.ready {
                 // Its VM may still run until the removal ends it.
-                self.unmanaged(id, &record.config);
+                self.unmanaged(id, self.record_size(&record));
                 self.remove_recorded(&record, None, Vec::new(), None);
                 continue;
             }
             recovering.push(record);
         }
+        let recovering = self.learn_disk_lengths(recovering).await;
         self.recover_recorded(recovering).await;
+    }
+
+    /// Records the disk length of every sandbox whose record predates
+    /// keeping it, before anything of it is admitted: from its local disk,
+    /// or from the store's copy of one that is only there. One whose length
+    /// cannot be learned is blocked, since today's base image may be
+    /// shorter than its disk.
+    async fn learn_disk_lengths(&mut self, recovering: Vec<Record>) -> Vec<Record> {
+        let mut known = Vec::with_capacity(recovering.len());
+        for record in recovering {
+            if record.allocation.disk_bytes.is_some() {
+                known.push(record);
+                continue;
+            }
+            let id = record.id;
+            let length = match record.disk {
+                Disk::Local => tokio::fs::metadata(Paths::of(&self.root, &record).disk)
+                    .await
+                    .map(|metadata| metadata.len())
+                    .map_err(|error| error.to_string()),
+                Disk::Remote => match self.store.disk_len(id).await {
+                    Ok(Some(length)) => Ok(length),
+                    Ok(None) => Err("the store holds no copy".to_owned()),
+                    Err(error) => Err(error.to_string()),
+                },
+            };
+            let learned = match length {
+                Ok(length) => self
+                    .records
+                    .commit(id, record.fence(), Change::new().disk_bytes(length))
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error),
+            };
+            match learned {
+                Ok(record) => known.push(record),
+                Err(error) => {
+                    tracing::error!(%id, %error, "disk length unknown; blocking the sandbox and leaving it alone");
+                    self.block(id, format!("disk length unknown: {error}"));
+                    self.unmanaged(id, self.record_size(&record));
+                }
+            }
+        }
+        known
     }
 
     /// Tidies the sandboxes whose records are missing, and blocks those
@@ -127,10 +172,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         .map_or(MAX_MEMORY_MIB, |mib| {
                             u32::try_from(mib).map_or(MAX_MEMORY_MIB, |mib| mib.min(MAX_MEMORY_MIB))
                         });
-                    self.input(Input::Unmanaged {
-                        sandbox: stray.id.0,
-                        bytes: u64::from(mib) << 20,
-                    });
+                    let config =
+                        SandboxConfig::new(1, mib, crate::protocol::SleepConfig::default());
+                    self.unmanaged(stray.id, self.size(&config, None));
                 }
             }
         }
@@ -154,7 +198,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // A VM found, or not known to be gone, keeps its memory even if
             // the sandbox cannot be taken back.
             let live = !matches!(vm, Ok(None));
-            let config = live.then(|| record.config.clone());
+            let size = live.then(|| self.record_size(&record));
             let result = match broken_networks.get(&id.0) {
                 // A VM found running is left as it is: its guest's programs
                 // matter more than its network, and its memory keeps coming.
@@ -170,8 +214,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Err(error) => {
                     tracing::error!(%id, %error, "could not recover sandbox; blocking it and leaving it on disk");
                     self.block(id, format!("not recovered: {error}"));
-                    if let Some(config) = config {
-                        self.unmanaged(id, &config);
+                    if let Some(size) = size {
+                        self.unmanaged(id, size);
                     }
                 }
             }
@@ -207,15 +251,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.blocked.insert(id.0, problem);
     }
 
-    /// Counts the VM of sandbox `id`, configured as `config`, which may
-    /// still run, against the admission budget at its full size while this
-    /// agent does not manage it: until a removal ends it.
-    fn unmanaged(&mut self, id: Id, config: &SandboxConfig) {
-        let bytes = self.size(config, None).limit;
-        self.input(Input::Unmanaged {
-            sandbox: id.0,
-            bytes,
-        });
+    /// Counts the VM of sandbox `id`, of `size`, which may still run,
+    /// against the admission budget at its full size while this agent does
+    /// not manage it, and books what it may still write to local disk: a
+    /// save an earlier agent may have started, and its guest disk's growth.
+    /// Both last until a removal ends it.
+    fn unmanaged(&mut self, id: Id, size: Size) {
+        self.inputs([
+            Input::Unmanaged {
+                sandbox: id.0,
+                bytes: size.limit,
+            },
+            Input::Writes {
+                key: id.0,
+                disk: DiskSpace::save(size.save.saturating_add(size.disk)),
+            },
+        ]);
     }
 
     /// Looks for every recorded sandbox's VM, taking back those still

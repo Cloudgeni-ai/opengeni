@@ -191,24 +191,39 @@ pub(crate) async fn put(
     // Stops the packing on a cancel or a failed upload.
     let stop = cancel.child_token();
     let (made, mut parts) = mpsc::channel(PARTS_IN_FLIGHT);
-    let packing = {
-        let stop = stop.clone();
-        let compress = Arc::clone(compress);
-        let runtime = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || {
-            let mut canonical = Canonical::new(&file, len, chunk_map.as_deref().map(Vec::as_slice));
-            let compress = Compress {
-                permits: &compress,
-                runtime: &runtime,
+    let mut packer = Packer::new(Canonical::new(file, len, chunk_map), page_size, pages)?;
+    // Each part is read and compressed on a blocking thread taken only
+    // once a compression permit is held, as every other compression does,
+    // so no blocking thread ever waits for a permit or for the uploads.
+    let packing = async {
+        let made = made;
+        loop {
+            let permit = tokio::select! {
+                biased;
+                () = stop.cancelled() => return Err(PackError::Cancelled),
+                permit = compress.acquire() => permit.map_err(|_| PackError::Cancelled)?,
             };
-            make_parts(&mut canonical, page_size, &pages, &made, &stop, &compress)
-        })
+            let (back, part) = tokio::task::spawn_blocking(move || {
+                let part = packer.next_part();
+                (packer, part)
+            })
+            .await
+            .map_err(|error| PackError::Io(io::Error::other(error)))?;
+            drop(permit);
+            packer = back;
+            let Some(part) = part? else {
+                return Ok(packer.finish());
+            };
+            // A closed channel means the uploads stopped; they say why.
+            if made.send(part).await.is_err() {
+                return Err(PackError::Cancelled);
+            }
+        }
     };
     let uploads = stream::poll_fn(|context| parts.poll_recv(context))
-        .map(|part: Result<(Vec<u64>, EncodedChunk), PackError>| {
+        .map(|(pages, chunk): (Vec<u64>, EncodedChunk)| {
             let stop = stop.clone();
             async move {
-                let (pages, chunk) = part.inspect_err(|_| stop.cancel())?;
                 let stored = match transfers.acquire().await {
                     Ok(_permit) => chunks.put_chunk(&chunk).await.map_err(PackError::Storage),
                     Err(_) => Err(PackError::Cancelled),
@@ -228,14 +243,11 @@ pub(crate) async fn put(
         .buffered(PARTS_IN_FLIGHT)
         // Every upload runs to its end, so none is still writing after a
         // failure is reported.
-        .collect::<Vec<_>>()
-        .await;
-    let packed = packing
-        .await
-        .map_err(|error| PackError::Io(io::Error::other(error)))?;
+        .collect::<Vec<_>>();
+    let (zeros, uploads) = tokio::join!(packing, uploads);
     // What stopped the uploads outranks the packing's report of the stop.
     let parts = uploads.into_iter().collect::<Result<Vec<_>, _>>()?;
-    let zeros = packed?;
+    let zeros = zeros?;
     if stop.is_cancelled() {
         return Err(PackError::Cancelled);
     }
@@ -253,18 +265,18 @@ pub(crate) async fn put(
 
 /// Reads the image's pages, each only after the chunks holding it have
 /// been checked against the image's chunk map.
-struct Canonical<'a> {
-    file: &'a File,
+struct Canonical {
+    file: File,
     len: u64,
-    map: Option<&'a [Hash]>,
+    map: Option<Arc<Vec<Hash>>>,
     /// Per chunk: whether the file matches the map there, once checked.
     agrees: Vec<Option<bool>>,
     buffer: Vec<u8>,
     left_out: usize,
 }
 
-impl<'a> Canonical<'a> {
-    fn new(file: &'a File, len: u64, map: Option<&'a [Hash]>) -> Self {
+impl Canonical {
+    fn new(file: File, len: u64, map: Option<Arc<Vec<Hash>>>) -> Self {
         let count = usize::try_from(len.div_ceil(CHUNK_BYTES)).unwrap_or(0);
         Self {
             file,
@@ -279,12 +291,12 @@ impl<'a> Canonical<'a> {
     /// Reads the page at `offset` into `page`; `false` (and nothing read)
     /// if a chunk holding it differs from the chunk map.
     fn read(&mut self, page: &mut [u8], offset: u64) -> io::Result<bool> {
-        if let Some(map) = self.map {
+        if let Some(map) = self.map.clone() {
             let first = usize::try_from(offset / CHUNK_BYTES).map_err(io::Error::other)?;
             let last = usize::try_from((offset + page.len() as u64 - 1) / CHUNK_BYTES)
                 .map_err(io::Error::other)?;
             for index in first..=last {
-                if !self.agrees(map, index)? {
+                if !self.agrees(&map, index)? {
                     self.left_out += 1;
                     return Ok(false);
                 }
@@ -319,75 +331,71 @@ impl<'a> Canonical<'a> {
     }
 }
 
-/// The permits a blocking packer takes to compress, on the runtime that
-/// hands them out.
-struct Compress<'a> {
-    permits: &'a Semaphore,
-    runtime: &'a tokio::runtime::Handle,
+/// Makes the pack's parts from the image's `pages` of `page_size` bytes,
+/// one part at a time, keeping the zero pages out.
+struct Packer {
+    image: Canonical,
+    pages: Vec<u64>,
+    /// The next of `pages` to read.
+    next: usize,
+    page: Vec<u8>,
+    /// Bytes the next part grows to before it is made.
+    target: u64,
+    zeros: Vec<u64>,
 }
 
-/// Reads `pages` of `page_size` bytes from the image and sends them on as
-/// encoded parts, keeping the zero pages out, each compressed under a
-/// permit from `compress`. Returns the zero pages.
-fn make_parts(
-    image: &mut Canonical<'_>,
-    page_size: u64,
-    pages: &[u64],
-    made: &mpsc::Sender<Result<(Vec<u64>, EncodedChunk), PackError>>,
-    stop: &CancellationToken,
-    compress: &Compress<'_>,
-) -> Result<Vec<u64>, PackError> {
-    let size = usize::try_from(page_size).map_err(io::Error::other)?;
-    let mut zeros = Vec::new();
-    let mut target = FIRST_PART;
-    let mut part_pages = Vec::new();
-    let mut part = Vec::new();
-    let mut page = vec![0; size];
-    let send = |pages: Vec<u64>, bytes: &[u8]| {
-        if stop.is_cancelled() {
-            return Err(PackError::Cancelled);
-        }
-        let permit = compress.runtime.block_on(async {
-            tokio::select! {
-                permit = compress.permits.acquire() => permit.ok(),
-                () = stop.cancelled() => None,
+impl Packer {
+    fn new(image: Canonical, page_size: u64, pages: Vec<u64>) -> io::Result<Self> {
+        let size = usize::try_from(page_size).map_err(io::Error::other)?;
+        Ok(Self {
+            image,
+            pages,
+            next: 0,
+            page: vec![0; size],
+            target: FIRST_PART,
+            zeros: Vec::new(),
+        })
+    }
+
+    /// Reads pages until the next part is full or none are left and
+    /// encodes them: the part's pages and its chunk, or `None` once no
+    /// page is left to pack. Blocks.
+    fn next_part(&mut self) -> Result<Option<(Vec<u64>, EncodedChunk)>, PackError> {
+        let mut part_pages = Vec::new();
+        let mut part = Vec::new();
+        while let Some(&offset) = self.pages.get(self.next) {
+            self.next += 1;
+            if !self.image.read(&mut self.page, offset)? {
+                continue;
             }
-        });
-        let Some(permit) = permit else {
-            return Err(PackError::Cancelled);
-        };
-        let chunk = EncodedChunk::encode(bytes, ZSTD_LEVEL).map_err(PackError::Storage);
-        drop(permit);
-        // A closed channel means the uploads stopped; they say why.
-        made.blocking_send(chunk.map(|chunk| (pages, chunk)))
-            .map_err(|_| PackError::Cancelled)
-    };
-    for &offset in pages {
-        if !image.read(&mut page, offset)? {
-            continue;
+            if self.page.iter().all(|&byte| byte == 0) {
+                self.zeros.push(offset);
+                continue;
+            }
+            part_pages.push(offset);
+            part.extend_from_slice(&self.page);
+            if part.len() as u64 >= self.target {
+                self.target = (self.target * 2).min(LARGEST_PART);
+                break;
+            }
         }
-        if page.iter().all(|&byte| byte == 0) {
-            zeros.push(offset);
-            continue;
+        if part_pages.is_empty() {
+            return Ok(None);
         }
-        part_pages.push(offset);
-        part.extend_from_slice(&page);
-        if part.len() as u64 >= target {
-            send(std::mem::take(&mut part_pages), &part)?;
-            part.clear();
-            target = (target * 2).min(LARGEST_PART);
+        let chunk = EncodedChunk::encode(&part, ZSTD_LEVEL)?;
+        Ok(Some((part_pages, chunk)))
+    }
+
+    /// The zero pages, once every part is made.
+    fn finish(self) -> Vec<u64> {
+        if self.image.left_out > 0 {
+            tracing::warn!(
+                pages = self.image.left_out,
+                "pages that differ from the stored image left out of the working-set pack"
+            );
         }
+        self.zeros
     }
-    if !part_pages.is_empty() {
-        send(part_pages, &part)?;
-    }
-    if image.left_out > 0 {
-        tracing::warn!(
-            pages = image.left_out,
-            "pages that differ from the stored image left out of the working-set pack"
-        );
-    }
-    Ok(zeros)
 }
 
 /// The chunks holding the parts of the pack `index` names, for a sweep to

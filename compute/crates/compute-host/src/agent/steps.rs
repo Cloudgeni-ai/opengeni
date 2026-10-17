@@ -177,10 +177,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.leftovers.remove(&id.0);
                 self.hosts.remove(&host.0);
                 // Its VM has ended: its memory is free for others, under
-                // whichever name it was counted.
+                // whichever name it was counted, and what a restart booked
+                // for it on disk shows in the next reading.
                 self.inputs([id, host].map(|name| Input::Unmanaged {
                     sandbox: name.0,
                     bytes: 0,
+                }));
+                self.inputs([id, host].map(|name| Input::Writes {
+                    key: name.0,
+                    disk: DiskSpace::default(),
                 }));
             }
             Err(error) => {
@@ -421,10 +426,21 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             })
         });
         tokio::spawn(async move {
+            // Without that kept, the step does not run: it fails for now,
+            // handing back its VM untouched, and is tried again.
             if let Some(kept) = kept
                 && let Err(error) = kept.await
             {
                 tracing::warn!(%id, %error, "could not keep that the sandbox waits for memory");
+                let _ = events.send(Event::StepDone {
+                    id,
+                    op,
+                    outcome: Outcome::Failed(Failure::Transient),
+                    after: job.live.take().map_or(After::NoVm, After::Kept),
+                    launches: 0,
+                    error: Some(format!("could not keep that it waits for memory: {error}")),
+                });
+                return;
             }
             let ran = job.run(step).await;
             let _ = events.send(Event::StepDone {

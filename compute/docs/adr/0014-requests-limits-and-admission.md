@@ -191,7 +191,11 @@ pick a VM.
     as settled while a write may still add to it.
   - A removed sandbox's bookings, its next save and its disk growth, last
     until its VM has ended, as its guest and VMM may still write until
-    then; so do those of a ready clone that could not be ended.
+    then; so do those of a ready clone that could not be ended. A VM a
+    restarted agent finds and does not manage (a removal under way, an
+    unclaimed ready clone, a blocked sandbox) books its worst-case save,
+    which an earlier agent may have started, and its disk's growth, and a
+    build VM it cannot end its disk and a snapshot, until it has ended.
   - A new sandbox's first files (its copy of its template's disk or the
     base image, by data ranges, whichever is larger since a stale template
     falls back to the base image) are booked before the copy starts, and a
@@ -204,8 +208,10 @@ pick a VM.
     worst-case snapshot, before it starts, and waits without the room.
   A sandbox's bound comes from its own disk's length, recorded when its
   disk is made, so a base image that changes later does not change what
-  older sandboxes book; a sandbox recorded before that, and a new one
-  before its disk exists, use today's base image. An awake VM's
+  older sandboxes book; a new one before its disk exists uses today's
+  base image. A record written before lengths were kept learns its length
+  on the next start, before anything of it is admitted, from its local
+  disk or the store's copy, and is blocked if neither can say. An awake VM's
   measurement uses its own disk's length too. A boot also relinks the
   kernel (tens of MiB, replacing the previous copy), which the reserve
   covers. A wake that cannot book what it needs
@@ -226,9 +232,11 @@ pick a VM.
   core says the wait starts or ends. The core says it starts before the
   sandbox is paused for memory, and the pause and save begin only once the
   holds file says so; it ends only once the sandbox runs again, so a crash
-  at any point in between leaves it waiting. One a restarted agent finds
-  still holding its VM was never saved: its wait ends, and it wakes again
-  if paused. Otherwise a restarted agent gives it back to the
+  at any point in between leaves it waiting, and a pause or save for it
+  that cannot first write the holds file fails and is tried again rather
+  than run without it. One a restarted agent finds still holding its VM
+  was never saved: a running one waits no more, and a paused one wakes,
+  still waiting until it runs. Otherwise a restarted agent gives it back to the
   core, which waits for room above the high watermark for it again, and
   wakes it by itself once there is. If that write fails, a restart finds it
   saved and waiting only for use, as before.
