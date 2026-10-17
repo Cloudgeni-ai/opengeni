@@ -83,6 +83,12 @@ import type {
 import type { AgentBrowserJsonCommand, OwnedManagedBrowserProcess } from "./runner";
 import type { BrowserPasskeyManager } from "./passkeys";
 import {
+  completeClientHints,
+  hasEmptiedHighEntropyHints,
+  hostClientHints,
+  type ClientHintsMetadata,
+} from "./client-hints";
+import {
   captureHeadlessSessionCookies,
   restoreHeadlessSessionCookies,
   validateHeadlessSessionCookies,
@@ -300,6 +306,10 @@ export type AgentBrowserDriverOptions = {
   /** Headless shell has no chrome://version page. Read its real Client Hints
    * from a controller-intercepted secure-origin document instead. */
   userAgentMetadataSource?: "chrome_internal" | "intercepted_local";
+  /** The browser runs on this machine. When its User-Agent switch has emptied
+   * the high-entropy Client Hints, present this machine's real values on
+   * every page, frame and worker, as an ordinary Chrome would. */
+  completeClientHints?: boolean;
   /** Set only by the verified, dedicated managed headless-shell launcher. */
   preserveHeadlessSessionCookies?: boolean;
   headlessSessionCookies?: HeadlessSessionCookies;
@@ -321,18 +331,10 @@ export type BrowserSessionEmulation = {
   } | null;
 };
 
-type BrowserUserAgentMetadata = {
-  brands?: Array<{ brand: string; version: string }>;
-  fullVersionList?: Array<{ brand: string; version: string }>;
-  platform: string;
-  platformVersion: string;
-  architecture: string;
-  model: string;
-  mobile: boolean;
-  bitness?: string;
-  wow64?: boolean;
-  formFactors?: string[];
-};
+type BrowserUserAgentMetadata = ClientHintsMetadata;
+
+/** The User-Agent this controller presents on every scope it can reach. */
+type PresentedUserAgent = { userAgent: string; userAgentMetadata: BrowserUserAgentMetadata };
 
 /** How a tab's navigation treats a page that fails to load. */
 export type BrowserTabNavigationOptions = {
@@ -392,6 +394,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly ownedDownloads = new Set<string>();
   private readonly userAgentMetadataSource: "chrome_internal" | "intercepted_local";
   private userAgentMetadataPromise: Promise<BrowserUserAgentMetadata> | null = null;
+  private readonly completeClientHints: boolean;
+  /** Completed Client Hints for this browser connection; null when Chrome's
+   * own hints are already complete. */
+  private presentedUserAgent: PresentedUserAgent | null = null;
+  /** Auto-attached page and frame sessions that hold the presented User-Agent,
+   * with the listeners that extend it to their child frames. */
+  private readonly presentationSessions = new Map<
+    string,
+    { parent: string | null; stop: Array<() => void> }
+  >();
   private readonly resolveWorkspaceFiles:
     | ((operationId: string, workspaceFileIds: readonly string[]) => Promise<readonly string[]>)
     | undefined;
@@ -470,6 +482,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.targetAutoAttach = options.targetAutoAttach ?? this.engine === "chromium";
     this.passkeys = options.passkeys ?? null;
     this.userAgentMetadataSource = options.userAgentMetadataSource ?? "chrome_internal";
+    this.completeClientHints = options.completeClientHints ?? false;
     this.resolveWorkspaceFiles = options.resolveWorkspaceFiles;
     this.downloadDirectory = options.downloadDirectory
       ? resolvePath(options.downloadDirectory)
@@ -1552,6 +1565,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }>("Browser.getVersion");
       this.browserProduct = typeof version.product === "string" ? version.product : "";
       this.userAgent = typeof version.userAgent === "string" ? version.userAgent : "";
+      this.presentedUserAgent = this.completeClientHints
+        ? await this.loadPresentedUserAgent(connection)
+        : null;
       if (this.downloadDirectory) {
         await connection.send("Browser.setDownloadBehavior", {
           ...this.contextScope(),
@@ -1676,8 +1692,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   /**
    * Attach every page target in this controller's context as Chromium creates
    * it, including window.open popups, while it is paused before its first
-   * script. Each gets its passkey authenticator, then resumes. These sessions
-   * only host per-target setup; actions keep their own lazily attached session.
+   * script. Each gets its passkey authenticator and presented User-Agent, then
+   * resumes. These sessions only host per-target setup; actions keep their own
+   * lazily attached session. Shared and service workers attach the same way
+   * when the presented User-Agent must reach them.
    */
   private async enableTargetAutoAttach(connection: BrowserCdpConnection): Promise<void> {
     const unsubscribe = [
@@ -1692,6 +1710,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         for (const [targetId, autoSession] of this.autoSessions) {
           if (autoSession === sessionId) this.autoSessions.delete(targetId);
         }
+        this.forgetPresentationSession(sessionId);
         this.passkeys?.detachSession(sessionId);
       }),
       connection.on("Target.targetDestroyed", (event) => {
@@ -1704,7 +1723,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         autoAttach: true,
         waitForDebuggerOnStart: true,
         flatten: true,
-        filter: [{ type: "page" }],
+        // Shared and service workers take no User-Agent from any page; they
+        // present it only through their own attachment.
+        filter: this.presentedUserAgent
+          ? [{ type: "page" }, { type: "shared_worker" }, { type: "service_worker" }]
+          : [{ type: "page" }],
       });
     } catch (error) {
       if (error instanceof CdpTransportError) throw error;
@@ -1732,16 +1755,32 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         .send("Runtime.runIfWaitingForDebugger", {}, { sessionId, timeoutMs: 5_000 })
         .catch(() => undefined);
     };
-    // The page filter means every non-page attachment is our own explicit
+    const worker = info.type === "shared_worker" || info.type === "service_worker";
+    // The filter means every other attachment is our own explicit
     // Target.attachToTarget (for example the hidden metadata target, which
     // Chromium reports as "other"). That session belongs to its caller.
-    if (info.type !== "page") return;
+    if (info.type !== "page" && !worker) return;
     if (this.browserContextId !== undefined && info.browserContextId !== this.browserContextId) {
       // Another controller's context: never hold it.
       await resume();
       await connection
         .send("Target.detachFromTarget", { sessionId }, { timeoutMs: 5_000 })
         .catch(() => undefined);
+      return;
+    }
+    if (worker) {
+      // The worker keeps this session, and with it the override, for its
+      // lifetime. Send both at once: a worker waiting for its debugger
+      // answers the override only after it resumes.
+      const presented = this.presentedUserAgentOverride();
+      await Promise.all([
+        presented
+          ? connection
+              .send("Network.setUserAgentOverride", presented, { sessionId, timeoutMs: 5_000 })
+              .catch(() => undefined)
+          : undefined,
+        resume(),
+      ]);
       return;
     }
     // Our own explicit Target.attachToTarget also reports an attachment. The
@@ -1755,14 +1794,106 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // A new tab or popup may have taken the front.
     if (waiting) this.frontTargetId = null;
     try {
-      await this.passkeys?.attachTarget(connection, { targetId: info.targetId, sessionId });
+      await Promise.all([
+        this.presentUserAgent(connection, sessionId, null),
+        this.passkeys?.attachTarget(connection, { targetId: info.targetId, sessionId }),
+      ]);
     } finally {
       await resume();
     }
   }
 
+  /** The User-Agent override every scope gets: the completed Client Hints,
+   * with the emulated locale's Accept-Language. */
+  private presentedUserAgentOverride(): Record<string, unknown> | null {
+    if (!this.presentedUserAgent) return null;
+    const locale = this.emulation?.locale;
+    return { ...this.presentedUserAgent, ...(locale ? { acceptLanguage: locale } : {}) };
+  }
+
+  /**
+   * Present the completed User-Agent on an auto-attached page or frame
+   * session, and on each cross-origin frame it hosts, nested ones included,
+   * before that frame runs its first script. Same-origin frames and dedicated
+   * workers inherit it from their document. Never fails the attachment: a
+   * target that closed meanwhile simply needs nothing.
+   */
+  private async presentUserAgent(
+    connection: BrowserCdpConnection,
+    sessionId: string,
+    parent: string | null,
+  ): Promise<void> {
+    const presented = this.presentedUserAgentOverride();
+    if (!presented || this.presentationSessions.has(sessionId)) return;
+    this.presentationSessions.set(sessionId, {
+      parent,
+      stop: [
+        connection.on(
+          "Target.attachedToTarget",
+          (event) => void this.onPresentationFrameAttached(connection, sessionId, event.params),
+          sessionId,
+        ),
+        connection.on(
+          "Target.detachedFromTarget",
+          (event) => {
+            if (typeof event.params.sessionId === "string")
+              this.forgetPresentationSession(event.params.sessionId);
+          },
+          sessionId,
+        ),
+      ],
+    });
+    await Promise.all([
+      connection
+        .send("Emulation.setUserAgentOverride", presented, { sessionId, timeoutMs: 5_000 })
+        .catch(() => undefined),
+      connection
+        .send(
+          "Target.setAutoAttach",
+          {
+            autoAttach: true,
+            waitForDebuggerOnStart: true,
+            flatten: true,
+            filter: [{ type: "iframe" }],
+          },
+          { sessionId, timeoutMs: 5_000 },
+        )
+        .catch(() => undefined),
+    ]);
+  }
+
+  private async onPresentationFrameAttached(
+    connection: BrowserCdpConnection,
+    parentSessionId: string,
+    params: Record<string, unknown>,
+  ): Promise<void> {
+    const sessionId = params.sessionId;
+    if (typeof sessionId !== "string") return;
+    try {
+      await this.presentUserAgent(connection, sessionId, parentSessionId);
+    } finally {
+      if (params.waitingForDebugger === true)
+        await connection
+          .send("Runtime.runIfWaitingForDebugger", {}, { sessionId, timeoutMs: 5_000 })
+          .catch(() => undefined);
+    }
+  }
+
+  private forgetPresentationSession(sessionId: string): void {
+    const entry = this.presentationSessions.get(sessionId);
+    if (!entry) return;
+    this.presentationSessions.delete(sessionId);
+    for (const stop of entry.stop) stop();
+    // Nested frames went with their parent session.
+    for (const [child, nested] of [...this.presentationSessions]) {
+      if (nested.parent === sessionId) this.forgetPresentationSession(child);
+    }
+  }
+
   private forgetAutoAttachments(): void {
     this.autoSessions.clear();
+    for (const sessionId of [...this.presentationSessions.keys()])
+      this.forgetPresentationSession(sessionId);
     this.frontTargetId = null;
     if (this.connection) this.passkeys?.detachConnection(this.connection);
   }
@@ -1778,6 +1909,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.selectedTargetId = null;
     this.userAgentMetadataPromise = null;
     this.userAgent = "";
+    this.presentedUserAgent = null;
     this.browserProduct = "";
     this.physicalGeneration = randomUUID();
     const previous = this.connection;
@@ -2382,6 +2514,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         this.focusEmulation = false;
       }
     }
+    if (this.presentedUserAgent && !this.emulation?.locale) {
+      // The auto-attached session already presents it; this attachment holds
+      // it too, so a page attached without one still presents it.
+      await connection.send("Emulation.setUserAgentOverride", this.presentedUserAgent, {
+        sessionId,
+      });
+    }
     if (!this.emulation) return;
     if (this.emulation.locale) {
       if (!this.userAgent) {
@@ -2470,6 +2609,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     connection: BrowserCdpConnection,
     sessionId: string,
   ): Promise<BrowserUserAgentMetadata> {
+    if (this.presentedUserAgent) return this.presentedUserAgent.userAgentMetadata;
     if (!this.userAgentMetadataPromise) {
       this.userAgentMetadataPromise = this.loadNormalUserAgentMetadata(connection, sessionId);
     }
@@ -2506,6 +2646,34 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return parseUserAgentMetadata(evaluated.result.value);
     }
     return await this.loadUserAgentMetadataFromHiddenTarget(connection);
+  }
+
+  /**
+   * The User-Agent to present when Chrome's switch emptied its high-entropy
+   * Client Hints: Chrome's own brands and full version with this machine's
+   * platform version and architecture. Null when the hints are already
+   * complete, or cannot be read or derived; Chrome's own then stay.
+   */
+  private async loadPresentedUserAgent(
+    connection: BrowserCdpConnection,
+  ): Promise<PresentedUserAgent | null> {
+    const separator = this.browserProduct.indexOf("/");
+    const browserVersion = separator >= 0 ? this.browserProduct.slice(separator + 1) : "";
+    if (!this.userAgent || !/^\d+(\.\d+){3}$/u.test(browserVersion)) return null;
+    let metadata: BrowserUserAgentMetadata;
+    try {
+      metadata = await this.loadUserAgentMetadataFromHiddenTarget(connection);
+    } catch (error) {
+      if (error instanceof CdpTransportError) throw error;
+      return null;
+    }
+    if (!hasEmptiedHighEntropyHints(metadata)) return null;
+    const host = await hostClientHints().catch(() => null);
+    if (!host) return null;
+    return {
+      userAgent: this.userAgent,
+      userAgentMetadata: completeClientHints(metadata, browserVersion, host),
+    };
   }
 
   private async loadUserAgentMetadataFromHiddenTarget(
