@@ -28,9 +28,42 @@ Existing keys cannot be removed; existing period grants retain their amount.
 
 Each array entry has `key`, `label`, nullable `stripePriceId`, nullable
 `monthlyPriceMicros`, `monthlyCreditMicros`, nullable `seatLimit` (unlimited),
-and `freeCredit`. All monetary values are USD micro-units (1 USD = 1,000,000).
+and `freeCredit`. Optional `legacyStripePriceIds` lists up to 100 previous Stripe
+prices for the same key (omitted means none). Current and legacy price IDs must
+be unique throughout the catalog, including within an entry; both the operator
+CLI schema and the database setter reject ambiguous mappings. All monetary
+values are USD micro-units (1 USD = 1,000,000).
 Defaults: Free $0/$10 credit/5 seats, Pro $20/$200/10, Max $200/$2,000/unlimited,
 Enterprise manual price/0 automatic credit/unlimited. Stripe IDs start null.
+
+### Changing a plan's price or monthly credit
+
+1. Apply migration `0801_subscription_plan_legacy_prices.sql` and finish rolling
+   out compatible API/workers/operator tooling before writing the new optional
+   field. Old catalog revisions remain valid and are not rewritten, but old
+   binaries' strict parsers do not understand entries containing the new field.
+2. Create the new active monthly USD, per-unit Stripe Price. Read the full current
+   catalog with `plans:catalog -- --show` and retain every existing plan key.
+3. For that plan, move the former `stripePriceId` into `legacyStripePriceIds`,
+   preserving earlier aliases, then set `stripePriceId` to the new ID and
+   `monthlyPriceMicros` to its amount. Change `monthlyCreditMicros` if desired.
+   For example, a $20 Pro price replaced by $30 becomes
+   `"stripePriceId": "price_pro_30", "legacyStripePriceIds": ["price_pro_20"],
+   "monthlyPriceMicros": 30000000`. Apply the complete catalog using the
+   owner-only setter command above with an operator and reason.
+4. Existing subscriptions stay on their old Stripe price and billed amount;
+   webhooks resolve those explicit aliases to the same plan even if the old
+   price is inactive or differs from today's amount. This does **not** migrate
+   customer prices in Stripe. New checkout, upgrades and future downgrade phases
+   use only the current price; a downgrade's existing phase retains its old price.
+   Upgrade/downgrade direction follows the plans' current catalog prices.
+5. Existing grant receipts retain their original amount and catalog revision.
+   The next paid period receives the credit defined by the then-current catalog,
+   including for subscribers paying an older price. Duplicate/late invoices do
+   not re-grant old periods. Keep aliases while any subscription or scheduled
+   phase can still reference them; never reuse a price ID for a different plan
+   key. If rolling back to a previous current price, retain the displaced price
+   as an alias too. Unknown prices and current-price amount mismatches still fail.
 
 ## Database and worker contract
 
