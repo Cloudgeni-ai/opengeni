@@ -211,17 +211,17 @@ pick a VM.
   saved and waiting only for use, as before.
 - The room a paused sandbox waits for is its VM's cgroup footprint, file
   cache included, so it may wait somewhat longer than its guest needs.
-- Free page reporting does not return huge pages, so on nested hosts a
-  guest's freed memory stays booked until the VM is saved and ended.
-  Confirmed on a nested host ([measurements](../measurements.md)): with
-  huge pages Firecracker 1.17 backs guest memory with a shared memfd, and
-  discards reported ranges with `madvise(MADV_DONTNEED)`, which only unmaps
-  them; the memfd keeps the pages. Nested hosts book every running VM
-  whole, so nothing is overcommitted by it. Firecracker's next release
-  frees the whole huge pages inside a discarded range (its change 6237),
-  and the guest reports in 2 MiB blocks by default, so after that upgrade
-  nested hosts could count running VMs by what they hold, as bare metal
-  does; that is a change for then.
+- On nested hosts free page reporting does return huge pages: Firecracker
+  1.17 maps guest memory as private anonymous huge pages, booted or
+  restored, and a discarded range frees the whole pages inside it.
+  Measured ([measurements](../measurements.md)), 1.5 GiB a guest freed was
+  back in the pool within 30 s. A balloon returns nothing there: it gives
+  back 4 KiB pages, and a huge page is freed only whole. Nested hosts still
+  book every awake VM whole and never count it by what it holds: a guest
+  that takes memory back while the pool is empty stalls until a page is
+  free, with no compression or swap to absorb it, so the pool is never
+  overcommitted. What reporting returns does count as available memory
+  against the watermarks, so fewer idle sandboxes are pushed deeper.
 - Nested hosts hold fewer running sandboxes for the same memory, in exchange
   for cheaper wakes ([5](0005-host-memory-profiles.md)).
 - Disk bookings are worst cases: an awake VM on ext4 books all of its

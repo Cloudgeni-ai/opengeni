@@ -29,6 +29,14 @@ died with it, every upgrade would interrupt every sandbox on the host.
   sends a pager only messages that pager understands. A pager it cannot
   serve is reported blocked, as above. Supporting the previous release is
   the rule; a rollback across two releases is not supported.
+- Where a pager's control socket lives is part of that contract, and it
+  moved during development (into the pager's own directory). No release
+  with the old place was ever deployed, so agents look only in the current
+  one. A restarted agent that finds no pager there treats it as one that
+  exited: the engine then shows whether the VM is whole or its memory is
+  lost, and a lost one is ended and recovers as
+  [10](0010-crash-safety-bar.md) says. Moving it again after a deployment
+  must keep the previous place readable for one release.
 
 ## Consequences
 

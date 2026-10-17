@@ -32,6 +32,8 @@ compressing huge pages, and mapping a huge-page image from a file.
 - Bare metal packs about three to four times as many idle sandboxes into the
   same RAM, because their memory compresses.
 - Nested hosts wake fast despite nesting, but have no Compressed level.
-- Huge pages are not returned by free page reporting, so a nested guest's
-  freed memory stays with its VM until it is saved and ended.
+- Free page reporting returns a nested guest's freed huge pages to the pool
+  (measured; see [14](0014-requests-limits-and-admission.md)), but a balloon
+  does not, and a guest that takes memory back from an empty pool stalls.
+  Nested hosts therefore book every awake VM whole.
 - Mixing profiles on one host is not supported.

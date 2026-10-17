@@ -146,8 +146,10 @@ its commands keep running but can no longer be listed, read or waited for.
 A host takes on only the memory it can hold. Each sandbox has a memory
 request, what it is guaranteed while awake (`memory_request_mib`, all of
 `memory_mib` unless set lower), and a limit, its VM size; on huge-page hosts
-the request is always the whole VM, since a guest never gives huge pages
-back. The requests of awake and waking sandboxes, together with what paused
+the request is always the whole VM: a guest that takes memory back from an
+empty huge-page pool stalls until a page is free, so the pool is never
+overcommitted (free page reporting does return freed huge pages, but they
+stay booked). The requests of awake and waking sandboxes, together with what paused
 ones still hold and any use above a request, stay within the host's
 capacity (`--memory-capacity-mib`; by default the huge-page pool, or the
 host's memory less `--memory-headroom-mib`).
