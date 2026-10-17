@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Agent, Runner, tool, type AgentOutputItem } from "@openai/agents";
+import { Agent, Runner, tool as functionTool, type AgentOutputItem } from "@openai/agents";
 import { assistantMessage, ScriptedModel, testSettings } from "@opengeni/testing";
 import { status } from "@grpc/grpc-js";
 import { ModalCommandRouterWire } from "../src/sandbox/providers/modal-command-router-wire";
@@ -97,7 +97,7 @@ describe("apply_patch ordering within one model response", () => {
       .tools()
       .find((candidate) => candidate.name === "apply_patch")!;
     let probes = 0;
-    const probe = tool({
+    const probe = functionTool({
       name: "probe",
       description: "Records when it runs.",
       parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
