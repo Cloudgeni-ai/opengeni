@@ -1,4 +1,4 @@
-// Reaching the person who owns a session. A notification is a session event:
+// Reaching the person the calling turn works for. A notification is a session event:
 // it stays in the timeline, reaches webhook subscribers, opens an item in the
 // person's inbox and, when new, alerts their phones. Posting the same key again
 // updates that item in place without a new alert. Agents can withdraw their own
@@ -213,7 +213,12 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
     async ({ title, subtitle, message, facts, link, key, urgency, recipient }) => {
       await authorize();
       const resolvedKey = NotificationKey.parse(key ?? `n-${crypto.randomUUID().slice(0, 8)}`);
-      const owner = await sessionOwner(deps, grant.workspaceId, sessionId);
+      const owner = await getSessionInboxRecipient(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        attempt().callerTurnId,
+      );
       let member: Member | null = null;
       if (recipient) {
         // Only a session that works for a person can speak for them to others.

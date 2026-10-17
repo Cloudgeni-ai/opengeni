@@ -6698,9 +6698,9 @@ export type ScheduledTaskCreatorSessionPolicy = {
  * Frozen creator boundary of a scheduled task (migration 0428). Every field is
  * null for an ordinary human/API-created task, which keeps the deployment default for
  * its generated sessions. An agent-created task stores its creating session's
- * effective first-party selection and permission set so a narrowed session
- * cannot widen itself through a schedule. Only its owner's explicit access
- * refresh re-freezes the tools and permissions, within that person's grants;
+ * explicit first-party selection (null follows defaults) and permission set
+ * so a narrowed session cannot widen its permissions through a schedule.
+ * Its owner's explicit access refresh re-freezes tools and permissions within their grants;
  * the session policy and optional credential restriction never change after
  * create. A restriction alone does not select tools or permissions.
  */
