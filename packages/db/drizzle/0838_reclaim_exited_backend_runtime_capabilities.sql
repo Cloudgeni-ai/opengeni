@@ -30,7 +30,9 @@
 -- under READ COMMITTED. Under REPEATABLE READ or SERIALIZABLE, deleting or
 -- locking a row that another grant removed after the snapshot was taken
 -- raises a serialization failure, so such a grant leaves finished rows to
--- the next READ COMMITTED grant.
+-- the next READ COMMITTED grant. Writers that grant under REPEATABLE READ or
+-- SERIALIZABLE therefore leave at most one finished row per backend, which
+-- the stale sweep of later READ COMMITTED grants removes.
 SET LOCAL lock_timeout = '5s';
 
 TRUNCATE opengeni_private.subscription_runtime_capabilities;
