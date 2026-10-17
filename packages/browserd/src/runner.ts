@@ -1262,6 +1262,7 @@ async function terminateManagedBrowser(input: {
     executablePath,
     discovered?.startTime,
   );
+  const daemon = await launchingAgentBrowserDaemon(pid);
   signalProcess(pid, "SIGTERM");
   if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
     await assertManagedBrowserIdentity(pid, input.profileDirectory, executablePath, startTime);
@@ -1270,6 +1271,7 @@ async function terminateManagedBrowser(input: {
       throw new AgentBrowserCommandError("process_failed", "managed browser did not terminate");
     }
   }
+  await stopLaunchingAgentBrowserDaemon(daemon);
   await rm(input.pidFile, { force: true });
 }
 
@@ -2111,19 +2113,73 @@ export async function stopEndedManagedBrowserProcess(
         recorded.profileDirectory,
         recorded.executablePath,
       );
+      const daemon = await launchingAgentBrowserDaemon(recorded.pid);
       await stopIdentifiedProcess(recorded.pid);
+      await stopLaunchingAgentBrowserDaemon(daemon);
     }
   }
   if (process.platform !== "linux") return;
   for (let attempt = 0; attempt < 4; attempt++) {
     const survivor = await findLinuxManagedBrowserProcess(profileDirectory, null);
     if (!survivor) return;
+    const daemon = await launchingAgentBrowserDaemon(survivor.pid);
     await stopIdentifiedProcess(survivor.pid);
+    await stopLaunchingAgentBrowserDaemon(daemon);
   }
   throw new AgentBrowserCommandError(
     "process_failed",
     "a browser kept running the ended session's private profile",
   );
+}
+
+/** The pinned agent-browser executable as installed (agent-browser) or as
+ * shipped per platform (agent-browser-darwin-arm64 and so on). */
+const AGENT_BROWSER_EXECUTABLE_NAME = /^agent-browser(?:-[a-z0-9-]+)?(?:\.exe)?$/u;
+
+type LaunchingAgentBrowserDaemon = { pid: number; birth: string };
+
+/** The agent-browser daemon that launched an identified managed browser: the
+ * browser's parent, while that parent runs an agent-browser executable. A
+ * daemon has no idle timeout and does not exit when its browser does, so a
+ * controller that lost track of a session (for example after an agent update
+ * replaced the runtime) must stop it with the browser, or it runs forever. */
+async function launchingAgentBrowserDaemon(
+  browserPid: number,
+): Promise<LaunchingAgentBrowserDaemon | null> {
+  try {
+    const pid = await processParentPid(browserPid);
+    if (pid === process.pid) return null;
+    const birth = await processBirth(pid);
+    if (!AGENT_BROWSER_EXECUTABLE_NAME.test(await processExecutableName(pid))) return null;
+    if ((await processParentPid(browserPid)) !== pid) return null;
+    return { pid, birth };
+  } catch {
+    return null;
+  }
+}
+
+/** Stop a launching daemon found before its browser was stopped, only while
+ * its PID birth still identifies it, so a reused PID is never signalled. */
+async function stopLaunchingAgentBrowserDaemon(
+  daemon: LaunchingAgentBrowserDaemon | null,
+): Promise<void> {
+  if (!daemon || !(await processRunning(daemon.pid))) return;
+  try {
+    if ((await processBirth(daemon.pid)) !== daemon.birth) return;
+  } catch {
+    return;
+  }
+  await stopIdentifiedProcess(daemon.pid);
+}
+
+/** The file name of a process's executable, including one an upgrade has
+ * since removed (Linux reports it with a " (deleted)" suffix). */
+async function processExecutableName(pid: number): Promise<string> {
+  const path =
+    process.platform === "linux"
+      ? (await readlink(`/proc/${pid}/exe`)).replace(/ \(deleted\)$/u, "")
+      : (await boundedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "comm="])).trim();
+  return basename(path);
 }
 
 /** Read-only proof that no process is running a browser on this exact private
