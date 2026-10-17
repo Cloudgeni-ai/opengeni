@@ -48,7 +48,7 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     for (const name of await readdir(join(import.meta.dir, "../drizzle"))) {
-      if (name.endsWith(".sql") && name >= MIGRATION && name !== "0830_session_activity_xid.sql")
+      if (name.endsWith(".sql") && name >= MIGRATION && name !== "0832_session_activity_xid.sql")
         await owner`insert into schema_migrations(name) values (${name})`;
     }
     await migrate(shared.ownerUrl);

@@ -285,4 +285,9 @@ export const embeddingMigrationTail = [
   "0800_session_tenancy_fence_registry_schema_name.sql",
   // Cleans and adds a trigger to the shared-core capability table from 0642.
   "0807_subscription_rls_admin_once_per_statement.sql",
+  // Their owner backfill paths disable/use the tenancy guards installed by
+  // withheld 0345; the repair must follow those guarded tables too.
+  "0809_session_open_settlement_index.sql",
+  "0811_session_events_usage_source_key_backfill.sql",
+  "0821_session_history_owner_backfill_repair.sql",
 ];
