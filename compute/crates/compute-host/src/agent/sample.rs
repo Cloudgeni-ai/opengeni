@@ -67,6 +67,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.observer.metrics().set_gauges(&gauges);
         self.summarize();
         self.retire_unused();
+        self.retire_unused_images();
         self.refill();
     }
 

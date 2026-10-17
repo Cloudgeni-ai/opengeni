@@ -431,6 +431,10 @@ class WatchHandle:
 class Sandbox:
     """One sandbox, addressed by id through the host agent."""
 
+    # Whether a process's result can still be collected after it ended
+    # unobserved. envd forgets ended processes, so through E2B it cannot.
+    keeps_ended_processes = True
+
     def __init__(
         self,
         host: HostAgent,

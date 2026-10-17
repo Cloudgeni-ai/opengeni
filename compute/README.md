@@ -17,6 +17,8 @@ Opengeni does not use this yet.
 | Fleet decisions: placement, host leases with a safety budget, the VM guard, fences on every archive write, recovery and moves, with a seeded simulation of the whole protocol | on `feat/compute-fleet` |
 | A host in a fleet: registering and renewing over mutual TLS, the guard service, owner epochs on every request, adopt, hand-off and reconcile, no decisions while the lease has run out | on `feat/compute-fleet` |
 | Observability: wide events, bounded metrics, zero alarms, per-sandbox host pressure, a canary, an OTLP exporter | on `feat/compute-lab` |
+| Sandbox images from OCI images, with our init and E2B's envd in every guest | on `feat/compute-e2b` |
+| An E2B-compatible front door: E2B's REST API and sandbox traffic, for unchanged E2B clients | on `feat/compute-e2b` |
 | The fleet service (Postgres store, public API, proxy), multi-host runs, autoscaling, Opengeni integration | in progress |
 
 Decisions and their reasons are in [docs/adr](docs/adr/README.md). Numbers
@@ -260,6 +262,43 @@ id and hostname. A fill books its template's memory footprint and its disk
 copy until it is ready and measured. A shape unused for a week gives up its
 template and ready clones until its next create.
 
+A create may name a sandbox image: any OCI image, built into an ext4 file
+with our init and E2B's envd added, and named by the BLAKE3 digest of the
+file ([guest/README.md](guest/README.md)). A host fetches an image from its
+store the first time a create names it, once however many creates wait,
+booking the disk the fetch may take first, and keeps it under
+`<root>/rootfs/`. Templates and ready clones are per image and shape. An
+image no create used for as long as a template may go unused, and whose
+template is gone, is removed. A create without an image uses the host's
+base image, as before.
+
+## The E2B front door
+
+`compute-control` can also serve E2B's API, so clients built for E2B use
+this fabric unchanged ([ADR 19](docs/adr/0019-e2b-compatible-front-door-and-guest-init.md)).
+The baseline is the E2B JS SDK 2.56.0. One listener (`--e2b-listen`,
+`--e2b-domain`) answers the REST API (create from a template, get, list,
+connect, pause, kill, set the timeout, list templates) and traffic to
+`<port>-<id>.<domain>`, or to one address with the `E2b-Sandbox-Id` and
+`E2b-Sandbox-Port` headers. Templates name an image and a shape
+(`--e2b-template base=<image>:2x1024`). With `--e2b-tls-cert` and
+`--e2b-tls-key` it serves HTTPS itself, with one certificate for the API's
+name and `*.<domain>`; without them it speaks plain HTTP behind a load
+balancer that terminates TLS.
+
+E2B's pause and timeout are lifecycle states the service records, apart
+from our own idle sleep: a paused sandbox is saved to disk and wakes only
+on connect, or on traffic if it was created with auto-resume. An open
+command or PTY stream keeps a sandbox awake; heartbeats on it move neither
+its timeout nor anything else. What Opengeni's e2b backend uses works:
+create with environment, metadata, timeout, internet access, public
+traffic and pause-or-kill at the timeout with auto-resume; connect;
+commands in the foreground and background; PTYs with input and kill;
+files read, write, make directory and remove; `getHost`; pause; kill.
+Left out: snapshots (the backend's optional native snapshot persistence),
+volumes, MCP, IAM, egress rules, sandboxes without internet access,
+template builds, metrics and logs. A create asking for those is refused.
+
 ## Code map
 
 | Path | What it owns |
@@ -268,6 +307,10 @@ template and ready clones until its next create.
 | `crates/compute-engine` | VM operations (boot, pause, resume, compress, snapshot, restore, stop) behind one trait; Firecracker with its jailer, cgroups. |
 | `crates/compute-host` | The agent: API, records, steps, images, archives, network, activity, templates, and a host's part in a fleet (lease, guard, listener). |
 | `crates/compute-host/src/observe` | What the agent reports: wide events, metrics, the canary and the OTLP/HTTP exporter ([ADR 16](docs/adr/0016-observability.md)). |
+| `crates/compute-guest` | The guest's init (PID 1): mounts, network, hostname, envd kept running, the image's command, clean shutdown, and the host's vsock ports. |
+| `crates/compute-image` | Turns an OCI image into a sandbox image: pull, checked layers, our init and envd added, an ext4 file. Run as `compute-host build-image`. |
+| `crates/compute-control/src/e2b` | The E2B front door: REST API, lifecycle states and their sweeper, traffic routing with kept streams and holds, TLS. |
+| `guest/` | Builds the guest's files: compute-guest, envd from a pinned E2B commit, and a static bash. |
 | `crates/compute-pager` | The userfaultfd pager, with a pure, separately tested memory-layout core. |
 | `crates/compute-storage` | Content-addressed chunks, manifests and stores; archive pointers stamped with their owner. |
 | `crates/compute-fleet` | Pure fleet decisions: placement, host leases, the guard that stops a cut-off host's VMs, the fence rule for archive writes, recovery and moves. No I/O, clock or randomness. |
@@ -368,18 +411,41 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
   paused, saved and woken again (bare metal); `disk` fills a small
   filesystem until wakes are refused for disk and checks that a save it
   cannot hold shows in the status and succeeds once there is room.
+- The guest tests boot real sandbox images with envd. They need the guest's
+  files from `guest/build.sh` and network access to registries:
+
+  ```sh
+  OUT=/lab/guest guest/build.sh
+  sudo env COMPUTE_TEST_LAB=/lab COMPUTE_TEST_GUEST=/lab/guest COMPUTE_TEST_PROFILE=nested \
+    cargo test --release -p compute-host --test guest -- --test-threads 1
+  ```
+
+  They build alpine, busybox and the Opengeni sandbox image, run commands
+  and move files through envd, sleep and wake a sandbox and find its files
+  and environment again, fetch an image from a store once for many creates
+  with its own template, give each sandbox cloned from a template its own
+  environment and token, run the image's command as its user, and shut the
+  guest down cleanly. `COMPUTE_TEST_REQUIRE=lab,guest` makes them fail,
+  not skip, when either is missing.
 - `smoke/` runs SPACE's E2B-style scenarios through one adapter for our API,
   plus our own: sleep levels, concurrent wakes, holds, and an agent restart
   in the middle, with output read on by cursor and live streams ending
   ([smoke/README.md](smoke/README.md)).
+- `conformance/e2b/run.sh` starts a fleet on one lab host (the service with
+  its E2B front door serving HTTPS, a host agent with its guard, object
+  storage) with the public sandbox image and a minimal image without bash,
+  and runs against the front door: the unchanged E2B JS SDK 2.56.0, the
+  E2B client Opengeni's e2b backend uses, with that backend's options, and
+  the smoke scenarios with `COMPUTE_SMOKE_TARGET=e2b`. It records the
+  SDK's create, first command, connect and resume times and envd's memory.
 
 ## Not built yet
 
 - **A control plane**: placement, moving sandboxes between hosts, recovery
   after losing a host, autoscaling ([ADR 15](docs/adr/0015-placement-and-moves-between-hosts.md)).
 - **The Opengeni integration**.
-- **Comparisons**: an E2B-compatible API and an activations-per-second
-  benchmark, to measure this fabric directly against other sandbox systems.
+- **Comparisons**: an activations-per-second benchmark, to measure this
+  fabric directly against other sandbox systems through the E2B front door.
 
 ## Credits
 

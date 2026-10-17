@@ -31,6 +31,7 @@ mod admission;
 mod checkpoint;
 mod disk_lengths;
 mod fleet;
+mod images;
 mod observe;
 mod pool;
 mod ready;
@@ -946,6 +947,7 @@ impl Lab {
 
     async fn create(&self, id: Id, sleep: SleepConfig) {
         let config = SandboxConfig {
+            image: None,
             vcpus: 1,
             memory_mib: 256,
             memory_request_mib: None,

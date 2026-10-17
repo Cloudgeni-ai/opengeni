@@ -34,13 +34,15 @@ use crate::net::{NetworkConfig, Networks};
 use crate::observe::{Observer, TraceContext};
 use crate::pool::{Built, Held, Lender, Loaning, Pool, PoolConfig, Shape, Sources, Template, Uses};
 
-use crate::protocol::{About, HostStatus, Id, SandboxConfig, StepStats};
-use crate::state::{Record, Records, StateError, Stray, claim_host, unix_ms_now};
+use crate::protocol::{About, HostStatus, Id, ImageId, SandboxConfig, StepStats};
+use crate::rootfs::{Cache, Missing};
+use crate::state::{Ownership, Record, Records, StateError, Stray, claim_host, unix_ms_now};
 use crate::step::{After, Live, Reading, Report};
 use crate::store::{OwnerEpoch, Store};
 use compute_protocol::fleet::Verdict;
 
 mod disk;
+mod fetch;
 mod handle;
 mod holds;
 mod observe;
@@ -381,6 +383,17 @@ impl From<StateError> for HostError {
     }
 }
 
+impl From<Missing> for HostError {
+    /// An image nowhere to be had is the caller's mistake; a failed fetch
+    /// may succeed when retried.
+    fn from(missing: Missing) -> Self {
+        match missing {
+            Missing::Unknown(_) => Self::Invalid(missing.to_string()),
+            Missing::Failed { .. } => Self::Io(missing.to_string()),
+        }
+    }
+}
+
 type Reply<T> = oneshot::Sender<Result<T, HostError>>;
 
 /// Copies of guest memory one save may write at most on the filesystem
@@ -607,6 +620,16 @@ enum Event<V> {
         host: Id,
         filled: Box<ready::Filled<V>>,
     },
+    /// The store told the length of an image creates wait for.
+    ImageSized {
+        image: ImageId,
+        length: Result<Option<u64>, compute_engine::EngineError>,
+    },
+    /// The fetch of an image creates wait for ended.
+    ImageFetched {
+        image: ImageId,
+        result: Result<(), HostError>,
+    },
     /// A create's claim of a ready sandbox ended.
     Claimed {
         id: Id,
@@ -777,6 +800,12 @@ pub struct HostAgent<E: Engine, S: Store> {
     net: Option<Arc<Networks>>,
     root: PathBuf,
     base_image: PathBuf,
+    /// The sandbox images creates name (ADR 19).
+    rootfs: Arc<Cache>,
+    /// When unused images were last looked for.
+    rootfs_retired: Instant,
+    /// Images being fetched for the creates that wait for them.
+    fetching: HashMap<ImageId, fetch::Fetch>,
     images: Images,
     warm: Option<Warm>,
     core: Host,
@@ -976,6 +1005,21 @@ impl Activity for Toucher {
     }
 }
 
+/// The host's sandbox images. An image goes unused as long as a template
+/// may before it is removed.
+async fn open_rootfs(config: &HostConfig, owner: Ownership) -> Result<Arc<Cache>, HostError> {
+    let dir = crate::layout::rootfs_dir(&config.root);
+    let unused_after = config
+        .pool
+        .as_ref()
+        .map_or(PoolConfig::UNUSED_AFTER, |pool| pool.unused_after);
+    let cache = tokio::task::spawn_blocking(move || Cache::open(dir, unused_after, owner))
+        .await
+        .map_err(|error| HostError::Io(error.to_string()))?
+        .map_err(|error| HostError::Io(format!("sandbox images: {error}")))?;
+    Ok(Arc::new(cache))
+}
+
 /// Why `config` cannot run an agent, if it cannot.
 fn check_config(config: &HostConfig) -> Result<(), String> {
     check_root(&config.root)?;
@@ -1020,6 +1064,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let reserve_whole = engine.memory_profile().pages == PageSize::Huge;
         let allocation_unit = allocation_unit(&config.root)?;
         let save_copies = save_copies(&config.root)?;
+        let rootfs = open_rootfs(&config, records.ownership()).await?;
         // Template VMs an earlier agent left are ended before any sandbox
         // can be given the user one of them ran as.
         let warm::Started {
@@ -1027,15 +1072,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             shapes: warm_shapes,
             held,
             ready,
-        } = Warm::start(
-            config.pool,
-            &engine,
-            &config.root,
-            &config.base_image,
-            config.network.is_some(),
-            &images,
-        )
-        .await;
+        } = Warm::start(&engine, &config, &rootfs, &images).await;
         let runtime = engine.runtime().to_owned();
         let store_configured = store.is_configured();
         let mut agent = Self {
@@ -1051,6 +1088,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             root: config.root,
             base_length: std::fs::metadata(&config.base_image).map_or(0, |found| found.len()),
             base_image: config.base_image,
+            rootfs,
+            rootfs_retired: Instant::now(),
+            fetching: HashMap::new(),
             warm,
             memory_policy: config.policy.memory,
             ready: ready::Ready::new(ready),
@@ -1232,8 +1272,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// extents, and its device state and chunk map; what its disk may grow
     /// by while it runs; and what a wake from object storage writes
     /// locally: its disk, the memory image its pager fills, and its device
-    /// state. A disk of unknown length counts as a copy of today's base
-    /// image, as a new sandbox's is.
+    /// state. A disk of unknown length counts as a copy of its image as it
+    /// is today, as a new sandbox's is.
     fn size(&self, config: &SandboxConfig, disk_bytes: Option<u64>) -> Size {
         let limit = u64::from(config.memory_mib) << 20;
         let request = if self.reserve_whole {
@@ -1242,7 +1282,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             u64::from(config.memory_request()) << 20
         };
         let disk = disk_bytes.map_or_else(
-            || self.disk_bound(),
+            || self.disk_bound(config.image),
             |length| crate::disk_growth::disk_bound(length, self.allocation_unit),
         );
         Size {

@@ -13,9 +13,8 @@
 //! Every request names its key in `X-API-Key`; the store holds only the
 //! key's digest.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Json, Path, Query, Request, State};
@@ -27,20 +26,13 @@ use compute_protocol::host::{Id, LevelName, PriorityName, Reply, SandboxConfig, 
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 
+use crate::keys::Keys;
+pub use crate::keys::key_digest;
 use crate::service::{Drained, Failure, Service};
 use crate::store::{SandboxRow, Spec, Store};
 
 /// The protocol name a connect upgrades to.
 pub const STREAM_PROTOCOL: &str = "compute-stream";
-
-/// How long a key's team stays cached.
-const KEY_TTL: Duration = Duration::from_secs(60);
-
-/// The digest the store keeps of an API key.
-#[must_use]
-pub fn key_digest(key: &str) -> String {
-    blake3::hash(key.as_bytes()).to_hex().to_string()
-}
 
 /// A failure as a response.
 #[derive(Debug)]
@@ -79,7 +71,7 @@ impl IntoResponse for ApiError {
 struct Inner<S> {
     service: Arc<Service<S>>,
     operator: String,
-    keys: Mutex<HashMap<String, (String, Instant)>>,
+    keys: Keys,
 }
 
 /// The public API's state.
@@ -102,44 +94,17 @@ impl<S> Clone for Api<S> {
 impl<S: Store> Api<S> {
     /// The team of the request's key.
     async fn team(&self, headers: &HeaderMap) -> Result<String, ApiError> {
-        let unauthorized = || {
-            ApiError(
-                StatusCode::UNAUTHORIZED,
-                "a valid X-API-Key is needed".into(),
-            )
-        };
-        let key = headers
-            .get("x-api-key")
-            .and_then(|key| key.to_str().ok())
-            .ok_or_else(unauthorized)?;
-        let digest = key_digest(key);
-        let cached = {
-            let keys = self
-                .0
-                .keys
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            keys.get(&digest)
-                .filter(|(_, when)| when.elapsed() < KEY_TTL)
-                .map(|(team, _)| team.clone())
-        };
-        if let Some(team) = cached {
-            return Ok(team);
-        }
-        let team = self
-            .0
-            .service
-            .store()
-            .team_of(&digest)
-            .await
-            .map_err(Failure::from)?
-            .ok_or_else(unauthorized)?;
         self.0
             .keys
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(digest, (team.clone(), Instant::now()));
-        Ok(team)
+            .team(&**self.0.service.store(), headers)
+            .await
+            .map_err(Failure::from)?
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::UNAUTHORIZED,
+                    "a valid X-API-Key is needed".into(),
+                )
+            })
     }
 
     async fn operator(&self, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -274,6 +239,8 @@ async fn create<S: Store>(
         memory_request_mib: body.memory_request_mib,
         cpu_request_millis: body.cpu_request_millis,
         sleep: body.sleep.unwrap_or(service.settings().sleep),
+        // Set by the service from the image the create names.
+        image: None,
     };
     let spec = Spec {
         image: body
@@ -482,7 +449,7 @@ pub fn router<S: Store>(service: Arc<Service<S>>, operator: String) -> Router {
     let api = Api(Arc::new(Inner {
         service,
         operator,
-        keys: Mutex::new(HashMap::new()),
+        keys: Keys::default(),
     }));
     Router::new()
         .route("/v1/sandboxes", post(create::<S>).get(list::<S>))

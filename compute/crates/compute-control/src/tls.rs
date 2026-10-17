@@ -97,6 +97,26 @@ impl Tls {
     }
 }
 
+/// A TLS server with the certificate chain in `cert` and the key in
+/// `key`, both PEM, that asks callers for no certificate: for the E2B
+/// front door.
+///
+/// # Errors
+///
+/// When either cannot be read or they do not match.
+pub fn public_server(cert: &Path, key: &Path) -> anyhow::Result<Arc<ServerConfig>> {
+    let chain = certificates(cert)?;
+    let key = PrivateKeyDer::from_pem_file(key)
+        .with_context(|| format!("reading the key in {}", key.display()))?;
+    let mut server = ServerConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_single_cert(chain, key)
+        .context("the front door's certificate and key")?;
+    server.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(Arc::new(server))
+}
+
 /// A TLS client that trusts the authorities in `ca`, for the database.
 pub fn database_client(ca: &Path) -> anyhow::Result<ClientConfig> {
     Ok(ClientConfig::builder_with_provider(provider())

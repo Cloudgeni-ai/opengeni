@@ -271,6 +271,7 @@ impl Agent {
 /// Creates `sandbox` with sleep settings `sleep`.
 async fn create(client: &Client, sandbox: Id, sleep: SleepConfig) {
     let config = SandboxConfig {
+        image: None,
         vcpus: 1,
         memory_mib: 512,
         memory_request_mib: None,

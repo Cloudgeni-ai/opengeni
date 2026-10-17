@@ -20,6 +20,7 @@ use super::{Delays, Lab, NEVER, World, id};
 
 /// The shape [`Lab::create`] gives every sandbox.
 const SHAPE: Shape = Shape {
+    image: None,
     vcpus: 1,
     memory_mib: 256,
 };

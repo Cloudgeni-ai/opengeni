@@ -1,5 +1,6 @@
 //! `compute-control`: the fleet service, and adding API keys to its store.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand};
 use compute_control::api::key_digest;
+use compute_control::e2b;
 use compute_control::group::{COMPUTE_API, GcpGroup, METADATA};
 use compute_control::leader::Scaling;
 use compute_control::service::Settings;
@@ -15,6 +17,7 @@ use compute_control::store::{MemoryStore, PostgresStore, Store};
 use compute_control::tls::{Tls, TlsFiles, database_client};
 use compute_control::{Config, start};
 use compute_fleet::ScalePolicy;
+use compute_protocol::host::ImageId;
 use compute_storage::store::ChunkStore;
 
 #[derive(Parser)]
@@ -78,6 +81,10 @@ struct Serve {
     /// The image a create that names none starts from.
     #[arg(long, default_value = "base")]
     image: String,
+    /// A stored image creates may name, as `name=<image id>`; repeat for
+    /// more. The default image is the hosts' base image unless named here.
+    #[arg(long = "stored-image", value_parser = parse_image)]
+    stored_images: Vec<(String, ImageId)>,
     /// Disk in MiB each sandbox is booked for where it is placed.
     #[arg(long, default_value_t = 1024)]
     disk_mib: u64,
@@ -119,9 +126,88 @@ struct Serve {
     /// Seconds between looks at the group.
     #[arg(long, default_value_t = 10)]
     scale_every_s: u64,
+    /// Where the E2B front door listens; without it there is none.
+    #[arg(long)]
+    e2b_listen: Option<SocketAddr>,
+    /// The domain sandbox host names are under, `<port>-<id>.<domain>`.
+    #[arg(long, default_value = "localhost")]
+    e2b_domain: String,
+    /// The front door's certificate chain, PEM, naming the API's host and
+    /// `*.<domain>`; with it the front door serves HTTPS itself, without it
+    /// plain HTTP for a TLS terminator in front.
+    #[arg(long, requires = "e2b_tls_key")]
+    e2b_tls_cert: Option<PathBuf>,
+    /// The key of `--e2b-tls-cert`, PEM.
+    #[arg(long, requires = "e2b_tls_cert")]
+    e2b_tls_key: Option<PathBuf>,
+    /// An E2B template, as `id=image:VCPUSxMEMORY_MIB`, for example
+    /// `base=base:2x1024`; repeat for more. Without any, `base` is the
+    /// default image at 2x1024.
+    #[arg(long = "e2b-template", value_parser = parse_template)]
+    e2b_templates: Vec<(String, e2b::Template)>,
+}
+
+fn parse_image(text: &str) -> Result<(String, ImageId), String> {
+    let (name, id) = text
+        .split_once('=')
+        .ok_or("a stored image is `name=<image id>`")?;
+    Ok((name.to_owned(), id.parse()?))
+}
+
+fn parse_template(text: &str) -> Result<(String, e2b::Template), String> {
+    let shape = "a template is `id=image:VCPUSxMEMORY_MIB`";
+    let (id, rest) = text.split_once('=').ok_or(shape)?;
+    let (image, size) = rest.rsplit_once(':').ok_or(shape)?;
+    let (vcpus, memory) = size.split_once('x').ok_or(shape)?;
+    Ok((
+        id.to_owned(),
+        e2b::Template {
+            image: image.to_owned(),
+            vcpus: vcpus.parse().map_err(|_| shape)?,
+            memory_mib: memory.parse().map_err(|_| shape)?,
+            disk_mib: 0,
+        },
+    ))
 }
 
 impl Serve {
+    fn e2b_listen(&self) -> anyhow::Result<Option<e2b::listen::Listen>> {
+        let Some(address) = self.e2b_listen else {
+            return Ok(None);
+        };
+        let tls = match (&self.e2b_tls_cert, &self.e2b_tls_key) {
+            (Some(cert), Some(key)) => Some(compute_control::tls::public_server(cert, key)?),
+            _ => None,
+        };
+        Ok(Some(e2b::listen::Listen {
+            address,
+            tls,
+            settings: self.e2b_settings(),
+        }))
+    }
+
+    fn e2b_settings(&self) -> e2b::Settings {
+        let mut settings = e2b::Settings {
+            domain: self.e2b_domain.clone(),
+            ..e2b::Settings::default()
+        };
+        if !self.e2b_templates.is_empty() {
+            settings.templates = self
+                .e2b_templates
+                .iter()
+                .map(|(id, template)| {
+                    let mut template = template.clone();
+                    template.disk_mib = self.disk_mib;
+                    (id.clone(), template)
+                })
+                .collect();
+        } else if let Some(base) = settings.templates.get_mut("base") {
+            base.image.clone_from(&self.image);
+            base.disk_mib = self.disk_mib;
+        }
+        settings
+    }
+
     fn scaling(&self) -> anyhow::Result<Option<Scaling>> {
         let Some(path) = &self.gcp_group else {
             return Ok(None);
@@ -193,14 +279,20 @@ async fn serve<S: Store>(store: Arc<S>, args: Serve) -> anyhow::Result<()> {
             disk_mib: args.disk_mib,
             wake_within: Duration::from_secs(args.wake_within_s),
             image: args.image.clone(),
+            images: args
+                .stored_images
+                .iter()
+                .map(|(name, id)| (name.clone(), Some(*id)))
+                .collect::<BTreeMap<_, _>>(),
             ..Settings::default()
         },
         operator: args.operator_team.clone(),
         scaling: args.scaling()?,
         seed: seed()?,
+        e2b: args.e2b_listen()?,
     };
     let running = start(store, config).await?;
-    tracing::info!(api = %running.api, hosts = %running.hosts, "serving");
+    tracing::info!(api = %running.api, hosts = %running.hosts, e2b = ?running.e2b, "serving");
     shutdown().await;
     Ok(())
 }

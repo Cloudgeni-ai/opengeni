@@ -204,9 +204,9 @@ pub(crate) struct Job<E: Engine, S> {
     pub live: Option<Live<E::Vm>>,
     /// Guest port to tell about a restore, if any.
     pub restore_notice_port: Option<u32>,
-    /// The image new sandboxes' disks are copied from, which a fetched
-    /// disk probably still mostly matches.
-    pub base_image: PathBuf,
+    /// The image the sandbox's disk started as, which a fetched disk
+    /// probably still mostly matches.
+    pub disk_image: PathBuf,
     /// The host's guest kernel, linked into the jail at each boot.
     pub kernel: PathBuf,
     /// Fetches remote memory for every VM on the host, when the store keeps

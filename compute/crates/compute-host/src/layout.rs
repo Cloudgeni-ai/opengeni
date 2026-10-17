@@ -127,6 +127,12 @@ pub(crate) fn templates_dir(root: &Path) -> PathBuf {
     root.join("templates")
 }
 
+/// The directory holding the host's sandbox images (see
+/// [`crate::rootfs::Cache`]).
+pub(crate) fn rootfs_dir(root: &Path) -> PathBuf {
+    root.join("rootfs")
+}
+
 /// Checks that every socket a sandbox under `root` needs fits in a Unix
 /// socket address.
 pub(crate) fn check_root(root: &Path) -> Result<(), String> {

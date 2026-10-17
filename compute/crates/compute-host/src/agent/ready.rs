@@ -144,6 +144,7 @@ impl<V> Ready<V> {
             let shape = Shape {
                 vcpus: status.vcpus,
                 memory_mib: status.memory_mib,
+                image: status.image,
             };
             let held = usage.get(&shape).copied().unwrap_or_default();
             status.ready = held.count;
@@ -326,6 +327,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             || self.ready.filling.contains_key(&id.0)
             || self.ready.spares.contains_key(&id.0)
             || self.ready.left_builds.values().any(|name| *name == id)
+            || self.fetching.values().any(|fetch| fetch.key() == id)
             || self.records.get(id).is_some()
     }
 
@@ -377,8 +379,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// high watermark, counting every spare booked already, and disk for
     /// its fill (see [`HostAgent::fill_disk`]).
     pub(super) fn memory_allows(&self, template: &Template) -> bool {
-        self.core
-            .spare_fits(self.fill_memory(template), self.fill_disk())
+        self.core.spare_fits(
+            self.fill_memory(template),
+            self.fill_disk(template.shape().image),
+        )
     }
 
     /// What a ready sandbox filled from `template` books of host memory
@@ -506,17 +510,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return false;
             }
         };
-        let config = SandboxConfig::new(
-            shape.vcpus,
-            shape.memory_mib,
-            crate::protocol::SleepConfig::default(),
-        );
+        let config = SandboxConfig {
+            image: shape.image,
+            ..SandboxConfig::new(
+                shape.vcpus,
+                shape.memory_mib,
+                crate::protocol::SleepConfig::default(),
+            )
+        };
         let mut record = Record::new(host, ordinal, allocation, config);
         record.ready = true;
         record.image = true;
         record.identity = Identity::Pending;
         let paths = Paths::of(&self.root, &record);
-        let (memory, disk) = (self.fill_memory(template), self.fill_disk());
+        let (memory, disk) = (
+            self.fill_memory(template),
+            self.fill_disk(template.shape().image),
+        );
         let mut spec = vm_spec(&record, &paths, &self.images);
         spec.memory_limit = (memory < shape.bytes()).then_some(memory);
         let link = Images::link(&record);
@@ -527,7 +537,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             job: self.job(record, spec, paths, CancellationToken::new()),
             template: Arc::clone(template),
             sources,
-            base: self.base_image.clone(),
+            base: self.image_path(shape.image),
             link,
             net: self.net.clone(),
             records: Arc::clone(&self.records),

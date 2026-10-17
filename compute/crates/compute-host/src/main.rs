@@ -20,7 +20,8 @@ use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::observe::StoreAlarms;
 use compute_host::observe::canary::{self, CanaryConfig};
 use compute_host::protocol::{
-    About, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
+    About, Id, ImageId, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
+    step_name,
 };
 use compute_host::{
     BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, Keep, NoStore, PagerConfig,
@@ -85,6 +86,10 @@ enum Command {
         /// Let memory pressure compress the sandbox's memory while paused.
         #[arg(long)]
         compress: Option<bool>,
+        /// The image its disk starts as (ADR 19), by the id `build-image`
+        /// printed; defaults to the host's base image.
+        #[arg(long)]
+        image: Option<ImageId>,
     },
     /// Delete a sandbox.
     Remove { id: Id },
@@ -116,6 +121,8 @@ enum Command {
     },
     /// Create many sandboxes, let them sleep, then wake them all at once.
     Bench(BenchArgs),
+    /// Build a sandbox image from an OCI image (ADR 19), and store it.
+    BuildImage(Box<compute_host::rootfs::BuildArgs>),
     /// Run the guard of a host in a fleet: it stops the VMs when the
     /// host's lease runs out, whatever happens to the agent. Run it as a
     /// service of its own, before the agent.
@@ -468,6 +475,7 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
             recommended,
             sleep,
             compress,
+            image,
         } => {
             let mut settings = if recommended {
                 SleepConfig::RECOMMENDED
@@ -481,6 +489,7 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
                 settings.compress = compress;
             }
             let config = SandboxConfig {
+                image,
                 vcpus,
                 memory_mib,
                 memory_request_mib,
@@ -533,6 +542,7 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Exec { id, script, port } => exec(&client, id, port, &script).await,
         Command::Bench(args) => bench(&client, &args).await,
+        Command::BuildImage(args) => compute_host::rootfs::build(*args).await,
         Command::Guard(args) => {
             let config = args.config();
             tokio::task::spawn_blocking(move || compute_host::fleet::run_guard(&config)).await?

@@ -17,14 +17,18 @@ path = "src/main.rs"
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 blake3 = "1.8"
+bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 compute-fleet = { path = "../compute-fleet" }
+compute-guest = { path = "../compute-guest" }
 compute-protocol = { path = "../compute-protocol" }
 compute-storage = { path = "../compute-storage" }
 deadpool-postgres = "0.14"
+form_urlencoded = "1"
 futures = "0.3"
 getrandom = { version = "0.3", features = ["std"] }
-hyper = { version = "1", features = ["http1", "server"] }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["server", "service", "tokio", "http1"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

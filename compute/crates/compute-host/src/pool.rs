@@ -2,8 +2,9 @@
 //! booted.
 //!
 //! A cold boot runs the guest's whole startup before the first command can
-//! run. A template is that startup done once per shape (processors and
-//! memory): a VM booted from the base image, left until its guest accepts
+//! run. A template is that startup done once per shape (processors, memory
+//! and the image the disk starts as, the host's base image unless a create
+//! names another): a VM booted from that image, left until its guest accepts
 //! connections on the ready port, then paused and saved whole. A new
 //! sandbox of that shape gets a copy of the template's disk (a shared-extent
 //! clone where the filesystem has them) and the template's memory image as
@@ -50,8 +51,10 @@
 //! A shape unused for a while (see [`uses`]) retires: its template is
 //! removed and no ready sandboxes are kept of it until its next create.
 
+mod shape;
 mod uses;
 
+pub use shape::{Keep, Shape};
 pub(crate) use uses::{Uses, write_use};
 
 use std::collections::{BTreeMap, HashMap};
@@ -60,7 +63,6 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -77,7 +79,8 @@ use crate::layout::{
     templates_dir, write_atomic,
 };
 use crate::net::Isolated;
-use crate::protocol::{MAX_MEMORY_MIB, SandboxConfig, TemplateState, TemplateStatus};
+use crate::protocol::{ImageId, MAX_MEMORY_MIB, TemplateState, TemplateStatus};
+use crate::rootfs::Cache;
 use crate::step::{DiskWatch, take_written};
 
 /// Version of the template layout; a change rebuilds every template.
@@ -99,96 +102,6 @@ const VM_PREFIX: &str = "template-";
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 /// How often the ready port is tried while the guest boots.
 const READY_POLL: Duration = Duration::from_millis(20);
-
-/// A sandbox shape: what a memory image fixes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Shape {
-    /// Virtual processors.
-    pub vcpus: u8,
-    /// Guest memory in MiB.
-    pub memory_mib: u32,
-}
-
-impl Shape {
-    /// The shape of sandboxes created with `config`.
-    #[must_use]
-    pub fn of(config: &SandboxConfig) -> Self {
-        Self {
-            vcpus: config.vcpus,
-            memory_mib: config.memory_mib,
-        }
-    }
-
-    /// Guest memory in bytes.
-    #[must_use]
-    pub fn bytes(self) -> u64 {
-        u64::from(self.memory_mib) << 20
-    }
-}
-
-impl fmt::Display for Shape {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}x{}", self.vcpus, self.memory_mib)
-    }
-}
-
-impl FromStr for Shape {
-    type Err = String;
-
-    /// Parses `VCPUS x MEMORY_MIB`, such as `2x1024`.
-    fn from_str(text: &str) -> Result<Self, String> {
-        let (vcpus, memory) = text
-            .split_once('x')
-            .ok_or_else(|| format!("shape {text:?} is not VCPUSxMEMORY_MIB, such as 2x1024"))?;
-        let shape = Self {
-            vcpus: vcpus
-                .parse()
-                .map_err(|error| format!("vcpus in {text:?}: {error}"))?,
-            memory_mib: memory
-                .parse()
-                .map_err(|error| format!("memory in {text:?}: {error}"))?,
-        };
-        SandboxConfig::new(
-            shape.vcpus,
-            shape.memory_mib,
-            crate::protocol::SleepConfig::default(),
-        )
-        .validate()
-        .map(|_| shape)
-    }
-}
-
-/// A shape and how many ready sandboxes of it to keep, written
-/// `SHAPE[:READY]` such as `1x512:16`. Without `:READY`, none: new
-/// sandboxes of the shape restore its template.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Keep {
-    /// The shape, whose template is built as soon as the agent starts.
-    pub shape: Shape,
-    /// How many sandboxes of it to keep restored, warm and paused.
-    pub ready: u32,
-}
-
-impl FromStr for Keep {
-    type Err = String;
-
-    fn from_str(text: &str) -> Result<Self, String> {
-        let (shape, ready) = match text.split_once(':') {
-            Some((shape, ready)) => (
-                shape,
-                ready
-                    .parse()
-                    .map_err(|error| format!("ready count in {text:?}: {error}"))?,
-            ),
-            None => (text, 0),
-        };
-        Ok(Self {
-            shape: shape.parse()?,
-            ready,
-        })
-    }
-}
 
 /// How a host keeps warm templates.
 #[derive(Clone, Debug)]
@@ -225,6 +138,8 @@ impl PoolConfig {
 pub(crate) struct Sources {
     pub kernel: PathBuf,
     pub base_image: PathBuf,
+    /// The images shapes that name one start from.
+    pub rootfs: Arc<Cache>,
     pub depends_on: Vec<PathBuf>,
     /// The kernel command line every VM boots with, before any sandbox's
     /// own arguments.
@@ -240,14 +155,30 @@ pub(crate) struct Sources {
 }
 
 impl Sources {
+    /// The image sandboxes of `shape` start as.
+    pub fn image(&self, shape: Shape) -> PathBuf {
+        shape
+            .image
+            .map_or_else(|| self.base_image.clone(), |image| self.rootfs.path(image))
+    }
+
     /// The inputs a template of `shape` built now has. Blocks: the first
-    /// time, and after a file changed, it reads the whole file.
+    /// time, and after a file changed, it reads the whole file. Fails for
+    /// a shape whose image file is not that image.
     pub fn inputs(&self, shape: Shape) -> io::Result<Inputs> {
-        let files = [&self.kernel, &self.base_image]
+        let files: Vec<FileId> = [&self.kernel, &self.image(shape)]
             .into_iter()
             .chain(&self.depends_on)
             .map(|path| self.content(path))
             .collect::<io::Result<_>>()?;
+        if let Some(image) = shape.image
+            && files[1].blake3 != image.to_string()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("the file of image {image} holds another image"),
+            ));
+        }
         Ok(Inputs {
             format: FORMAT,
             shape,
@@ -489,12 +420,13 @@ pub(crate) enum Start {
 }
 
 /// Gives the new sandbox at `paths` its first files: from `template` when
-/// it still fits today's `sources`, otherwise a copy of `base_image`.
-/// `images` is the sandbox's own image directory. Blocks.
+/// it still fits today's `sources`, otherwise a copy of `image`, the image
+/// its shape starts as. `images` is the sandbox's own image directory.
+/// Blocks.
 pub(crate) fn first_files(
     paths: &Paths,
     images: &Images,
-    base_image: &Path,
+    image: &Path,
     template: Option<(&Template, &Sources)>,
 ) -> io::Result<Start> {
     let mut start = Start::Cold;
@@ -518,7 +450,7 @@ pub(crate) fn first_files(
             Err(error) => tracing::warn!(%error, "could not check the template's inputs"),
         }
     }
-    copy_sparse(base_image, &paths.disk)?;
+    copy_sparse(image, &paths.disk)?;
     Ok(start)
 }
 
@@ -664,6 +596,15 @@ impl Pool {
         self.want(shape, now)
     }
 
+    /// The images of the shapes whose templates are kept or being built.
+    pub fn images(&self) -> std::collections::HashSet<ImageId> {
+        self.entries
+            .iter()
+            .filter(|(_, entry)| !matches!(entry, Entry::Retired))
+            .filter_map(|(shape, _)| shape.image)
+            .collect()
+    }
+
     /// Every shape's template, by shape.
     pub fn status(&self) -> Vec<TemplateStatus> {
         let mut all: Vec<TemplateStatus> = self
@@ -672,6 +613,7 @@ impl Pool {
             .map(|(shape, entry)| TemplateStatus {
                 vcpus: shape.vcpus,
                 memory_mib: shape.memory_mib,
+                image: shape.image,
                 state: match entry {
                     Entry::Ready(_) => TemplateState::Ready,
                     Entry::Building => TemplateState::Building,
@@ -684,7 +626,7 @@ impl Pool {
                 filling: 0,
             })
             .collect();
-        all.sort_by_key(|status| (status.vcpus, status.memory_mib));
+        all.sort_by_key(|status| (status.vcpus, status.memory_mib, status.image));
         all
     }
 }
@@ -904,6 +846,7 @@ async fn attempt<E: Engine>(
         let (paths, sources, uid) = (paths.clone(), Arc::clone(&build.sources), build.uid);
         let ordinal = build.ordinal;
         let memory_mib = build.shape.memory_mib;
+        let shape = build.shape;
         Arc::new(
             blocking(move || {
                 remove_dir(&paths.dir)?;
@@ -913,7 +856,7 @@ async fn attempt<E: Engine>(
                 // so it needs no flush to disk.
                 fs::write(paths.dir.join(ORDINAL), ordinal.to_string())?;
                 fs::write(paths.dir.join(MEMORY), memory_mib.to_string())?;
-                copy_sparse(&sources.base_image, &paths.disk)?;
+                copy_sparse(&sources.image(shape), &paths.disk)?;
                 link_kernel(&sources.kernel, &paths)?;
                 if let Some(isolated) = isolated {
                     isolated.ensure(uid, uid).map_err(io::Error::other)?;
@@ -1169,10 +1112,7 @@ pub(crate) async fn end_leftover_builds<E: Engine>(
     let mut held = Vec::new();
     for name in leftovers {
         // Only its name and paths matter for ending it.
-        let shape = Shape {
-            vcpus: 1,
-            memory_mib: 128,
-        };
+        let shape = Shape::new(1, 128);
         let dir = jails.join(&name);
         let (ordinal, memory_mib) = {
             let dir = dir.clone();

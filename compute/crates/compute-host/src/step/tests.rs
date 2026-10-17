@@ -172,6 +172,7 @@ impl Sandbox {
     /// Inserts the sandbox's record and applies `change` to it.
     async fn record(&self, change: Change) -> Record {
         let config = SandboxConfig {
+            image: None,
             vcpus: 1,
             memory_mib: 256,
             memory_request_mib: None,
@@ -219,7 +220,7 @@ impl Sandbox {
                 memory: LiveMemory::adopted(DiskWatch::fresh(&self.paths).unwrap()),
             }),
             restore_notice_port: None,
-            base_image: self.root.path().join("base.ext4"),
+            disk_image: self.root.path().join("base.ext4"),
             kernel: self.root.path().join("vmlinux"),
             #[cfg(target_os = "linux")]
             fetcher: None,

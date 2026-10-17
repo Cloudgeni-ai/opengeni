@@ -15,6 +15,7 @@ use crate::protocol::{
     BlockedSandbox, CapacityStatus, DiskStatus, FailedStep, HostStatus, Id, MemoryStatus,
     SandboxConfig, SandboxStatus, SleepConfig, step_name,
 };
+use crate::rootfs::Missing;
 use crate::state::{Identity, Record, check_generation};
 use crate::step::images_of;
 use crate::store::{OwnerEpoch, Store};
@@ -522,12 +523,25 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.create_fresh(id, config, owner, reply);
     }
 
-    /// Creates sandbox `id` from its shape's template, or cold.
-    fn create_fresh(&mut self, id: Id, config: SandboxConfig, owner: OwnerEpoch, reply: Reply<()>) {
-        let template = self.template_for(Shape::of(&config));
+    /// Creates sandbox `id` from its shape's template, or cold, once the
+    /// host has its image.
+    pub(super) fn create_fresh(
+        &mut self,
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+    ) {
+        if let Some(image) = config.image.filter(|image| !self.rootfs.has(*image)) {
+            self.create_after_fetch(image, id, config, owner, reply);
+            return;
+        }
+        let shape = Shape::of(&config);
+        let template = self.template_for(shape);
         // Its first files are written before the core knows it: they are
         // booked from before the copy until a reading shows them.
-        let disk = match self.first_files_fit(id, template.as_ref().map(|t| t.disk()).as_deref()) {
+        let template_disk = template.as_ref().map(|t| t.disk());
+        let disk = match self.first_files_fit(id, shape.image, template_disk.as_deref()) {
             Ok(disk) => disk,
             Err(error) => {
                 let _ = reply.send(Err(error));
@@ -551,23 +565,56 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
         };
-        let sources = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources));
+        self.input(Input::Writes { key: id.0, disk });
         let mut record = Record::new(id, ordinal, allocation, config);
         record.owner_epoch = owner.0;
+        self.prepare(record, template, reply);
+    }
+
+    /// Makes the files of the new sandbox `record` describes in the
+    /// background, from `template` if it has one, then records it;
+    /// [`Event::Prepared`] says how it went.
+    fn prepare(&self, mut record: Record, template: Option<Arc<Template>>, reply: Reply<()>) {
+        let (id, ordinal) = (record.id, record.ordinal);
+        let image = record.config.image;
+        let sources = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources));
         let link = Images::link(&record);
         let paths = Paths::new(&self.root, id);
         let dir = paths.dir.clone();
         let base = self.base_image.clone();
+        let rootfs = Arc::clone(&self.rootfs);
         let records = Arc::clone(&self.records);
         let net = self.net.clone();
         let events = self.events_tx.clone();
-        self.input(Input::Writes { key: id.0, disk });
         tokio::spawn(async move {
+            // Held until its disk is copied, so it is not removed meanwhile.
+            let held = match image {
+                Some(image) => {
+                    let Some(held) = rootfs.hold(image).await else {
+                        let missing = Missing::Failed {
+                            image,
+                            error: "it was removed before the create could copy it".into(),
+                        };
+                        tracing::warn!(%id, %missing, "a create's image is gone");
+                        let _ = events.send(Event::Prepared {
+                            id,
+                            ordinal,
+                            result: Err(missing.into()),
+                            reply,
+                            stale: None,
+                        });
+                        return;
+                    };
+                    Some(held)
+                }
+                None => None,
+            };
+            let first = held.as_ref().map_or(base, |held| held.path.clone());
             let networks = net.clone();
             let from = template.clone();
             let prepared = tokio::task::spawn_blocking(move || {
                 let warm = from.as_deref().zip(sources.as_deref());
-                let start = new_files(&paths, &base, warm)?;
+                let start = new_files(&paths, &first, warm)?;
                 if let (Some(net), Some(link)) = (&networks, &link) {
                     net.ensure(link)?;
                 }
@@ -575,6 +622,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             })
             .await
             .unwrap_or_else(|error| Err(io::Error::other(error)));
+            drop(held);
             let stale = match prepared {
                 Ok((Start::Stale, _)) => template,
                 _ => None,

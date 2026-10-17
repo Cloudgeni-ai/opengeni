@@ -125,6 +125,7 @@ async fn a_full_host_refuses_wakes_and_creates_it_cannot_hold() {
 
     // A sandbox bigger than the whole host is refused at creation.
     let config = SandboxConfig {
+        image: None,
         memory_request_mib: Some(256),
         ..SandboxConfig::new(1, 1024, NEVER)
     };

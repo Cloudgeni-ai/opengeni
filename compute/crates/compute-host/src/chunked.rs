@@ -48,7 +48,7 @@ use tokio::sync::{Mutex, Semaphore};
 pub use crate::image::CHUNK_BYTES;
 use crate::image::{Hash, ZERO, chunk_count, chunk_range, hash_chunks};
 use crate::lanes::Lanes;
-use crate::protocol::Id;
+use crate::protocol::{Id, ImageId};
 use crate::store::{
     Archive, Claimed, FetchInto, FetchedMemory, Owned, OwnerEpoch, Prefilled, Receipt, SavedFiles,
     Stamp, Store,
@@ -824,6 +824,14 @@ impl Store for Chunked {
         Ok(Some(manifest.disk_len))
     }
 
+    async fn image_len(&self, image: ImageId) -> Result<Option<u64>, EngineError> {
+        self.rootfs_len(image).await
+    }
+
+    async fn fetch_image(&self, image: ImageId, path: &Path) -> Result<bool, EngineError> {
+        self.get_rootfs(image, path).await
+    }
+
     /// Points the sandbox at its disk alone, without the memory image or
     /// the working-set pack of its pages. Their chunks stay until a sweep
     /// finds nothing names them. The new pointer lands only on the version
@@ -950,5 +958,7 @@ fn storage_error(operation: &'static str, error: StorageError) -> EngineError {
 }
 
 mod files;
+mod rootfs;
+pub(crate) use rootfs::file_id;
 #[cfg(test)]
 mod tests;

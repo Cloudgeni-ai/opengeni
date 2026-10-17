@@ -8,8 +8,10 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 
+use compute_control::e2b::lifecycle::{OnTimeout, Record, State};
 use compute_control::store::{
-    Admission, MemoryStore, PostgresStore, SandboxRow, Spec, Store, Write,
+    Admission, LifecycleRow, MemoryStore, PostgresStore, SandboxRow, Spec, Store, Write,
+    replace_lifecycle,
 };
 use compute_fleet::{HostId, HostState, OwnerEpoch, Ownership, SandboxId, Sends};
 use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Verdict};
@@ -67,6 +69,7 @@ fn sandbox(owner: HostId) -> SandboxRow {
                 memory_request_mib: None,
                 cpu_request_millis: None,
                 sleep: SleepConfig::RECOMMENDED,
+                image: None,
             },
         },
         metadata: BTreeMap::from([("purpose".to_owned(), "conformance".to_owned())]),
@@ -339,4 +342,160 @@ async fn keys<S: Store>(store: S) {
 #[tokio::test]
 async fn keys_name_their_team() {
     each(keys, keys).await;
+}
+
+fn lifecycle(team: &str, state: State, end_ms: u64) -> LifecycleRow {
+    LifecycleRow {
+        id: Id(SandboxId(u128::from(random()) << 64 | u128::from(random()))),
+        team: team.to_owned(),
+        record: Record {
+            template: "base".into(),
+            state,
+            started_ms: 1,
+            end_ms,
+            timeout_ms: 300_000,
+            on_timeout: OnTimeout::Pause,
+            auto_resume: true,
+            envd_token: "token".into(),
+            traffic_token: None,
+            cpu_count: 1,
+            memory_mb: 512,
+            changed_ms: 1,
+        },
+        version: 0,
+    }
+}
+
+async fn lifecycles<S: Store>(store: S) {
+    let team = format!("team-{:x}", random());
+    // Due long ago, so other checks sharing the database find it first.
+    let mut running = lifecycle(&team, State::Running, 5);
+    let paused = lifecycle(&team, State::Paused, 5);
+    assert!(store.insert_lifecycle(&running).await.unwrap());
+    assert!(!store.insert_lifecycle(&running).await.unwrap(), "exists");
+    assert!(store.insert_lifecycle(&paused).await.unwrap());
+    assert_eq!(
+        store.lifecycle(running.id).await.unwrap().as_ref(),
+        Some(&running)
+    );
+
+    let stale = running.clone();
+    running.record.set(State::Pausing, 7);
+    assert!(replace_lifecycle(&store, &mut running).await.unwrap());
+    assert_eq!(running.version, 1);
+    assert!(
+        !store.replace_lifecycle(&stale).await.unwrap(),
+        "a write from the version before loses"
+    );
+    assert_eq!(
+        store.lifecycle(running.id).await.unwrap(),
+        Some(running.clone())
+    );
+
+    let mut listed = store.lifecycles(&team).await.unwrap();
+    listed.sort_by_key(|row| row.id);
+    let mut both = vec![running.clone(), paused.clone()];
+    both.sort_by_key(|row| row.id);
+    assert_eq!(listed, both);
+
+    // A pause under way is due at once; a paused sandbox never is.
+    let due: Vec<Id> = store
+        .lifecycles_due(u64::MAX - 1, None, 100_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert!(due.contains(&running.id));
+    assert!(!due.contains(&paused.id));
+    assert!(
+        store
+            .lifecycles_due(0, None, 10)
+            .await
+            .unwrap()
+            .iter()
+            .all(|row| row.record.due_ms() == 0)
+    );
+
+    // Read a page at a time, the due ones come each once, in order, past
+    // any number due at the same time.
+    let mut same = Vec::new();
+    for _ in 0..5 {
+        let row = lifecycle(&team, State::Killing, 0);
+        assert!(store.insert_lifecycle(&row).await.unwrap());
+        same.push(row.id);
+    }
+    let mut paged = Vec::new();
+    let mut after = None;
+    loop {
+        let page = store.lifecycles_due(u64::MAX - 1, after, 2).await.unwrap();
+        after = page.last().map(|row| (row.record.due_ms(), row.id));
+        paged.extend(page.iter().map(|row| (row.record.due_ms(), row.id)));
+        if page.len() < 2 {
+            break;
+        }
+    }
+    let mut sorted = paged.clone();
+    sorted.sort_by_key(|(due, id)| (*due, id.to_string()));
+    sorted.dedup();
+    assert_eq!(paged, sorted, "in order, each once");
+    for id in same.iter().chain([&running.id]) {
+        assert!(paged.iter().any(|(_, paged)| paged == id));
+    }
+    for id in same {
+        assert!(store.delete_lifecycle(id, 0).await.unwrap());
+    }
+
+    assert!(!store.delete_lifecycle(running.id, 0).await.unwrap());
+    assert!(store.delete_lifecycle(running.id, 1).await.unwrap());
+    assert!(store.delete_lifecycle(paused.id, 0).await.unwrap());
+    assert_eq!(store.lifecycle(running.id).await.unwrap(), None);
+    assert_eq!(store.lifecycles(&team).await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn e2b_lifecycle_writes_are_conditional_and_due_ones_are_found() {
+    each(lifecycles, lifecycles).await;
+}
+
+/// Paused lifecycles come a page at a time, each once, in order of id, and
+/// nothing else does.
+async fn paused_lifecycles<S: Store>(store: S) {
+    let team = format!("team-{:x}", random());
+    let running = lifecycle(&team, State::Running, 5);
+    assert!(store.insert_lifecycle(&running).await.unwrap());
+    let mut more = Vec::new();
+    for _ in 0..5 {
+        let row = lifecycle(&team, State::Paused, 5);
+        assert!(store.insert_lifecycle(&row).await.unwrap());
+        more.push(row.id);
+    }
+    let mut paged = Vec::new();
+    let mut after = None;
+    loop {
+        let page = store.lifecycles_paused(after, 2).await.unwrap();
+        assert!(page.iter().all(|row| row.record.state == State::Paused));
+        after = page.last().map(|row| row.id);
+        paged.extend(page.iter().map(|row| row.id.to_string()));
+        if page.len() < 2 {
+            break;
+        }
+    }
+    let mut sorted = paged.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(paged, sorted, "in order, each once");
+    for id in &more {
+        assert!(paged.contains(&id.to_string()));
+    }
+    assert!(!paged.contains(&running.id.to_string()));
+    assert!(store.delete_lifecycle(running.id, 0).await.unwrap());
+    for id in &more {
+        assert!(store.delete_lifecycle(*id, 0).await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn paused_e2b_lifecycles_are_read_a_page_at_a_time() {
+    each(paused_lifecycles, paused_lifecycles).await;
 }

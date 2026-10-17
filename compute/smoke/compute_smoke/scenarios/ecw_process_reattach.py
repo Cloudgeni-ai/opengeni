@@ -4,7 +4,8 @@
 """ECW process reattachment happy path.
 
 Extended: also reattaches to a process that already ended, whose result no
-one has collected yet.
+one has collected yet, where the sandbox's API keeps ended processes (envd,
+behind E2B, does not).
 """
 
 import compute_smoke as smoke
@@ -38,6 +39,9 @@ def process_reattach(test: smoke.Ecw) -> None:
             command_stdout=result.stdout,
             command_stderr=result.stderr,
         )
+
+    if not getattr(test.sandbox, "keeps_ended_processes", True):
+        return
 
     with test.phase("start a short process and let it end unobserved"):
         ended = test.sandbox.start_background(f"printf %s {ENDED_MARKER}; exit 7", timeout=20)

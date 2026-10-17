@@ -554,6 +554,76 @@ the victim kept 92 % of its speed. A processor request is a guarantee
 under contention, not a cap, so a sandbox requesting little still runs at
 full speed on an idle host.
 
+## Sandbox images (2026-10-17)
+
+Measured on 2026-10-17 at `588e229ff` on branch `feat/compute-e2b`, on one
+GCP n2-highmem-32 with nested virtualization in europe-west4-a, `nested`
+memory profile. Each sandbox has 1 vCPU and 512 MiB and runs our init and
+envd. Images were pulled anonymously from Docker Hub and GHCR.
+
+Building an image:
+
+| Image | Content | Layers | Pull | Unpack | ext4 | Id | Total |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| alpine:3.20 | 23 MB | 1 | 0.96 s | 0.10 s | 0.08 s | 3.3 s | 4.4 s |
+| busybox:1.37 | 18 MB | 1 | 0.93 s | 0.07 s | 0.06 s | 3.3 s | 4.4 s |
+| ghcr.io/cloudgeni-ai/opengeni-sandbox:0.20.0 | 1.66 GB | 18 | 9.3 s | 16.8 s | 4.5 s | 3.0 s | 34.3 s |
+
+Each file is 6 GiB and sparse. "Id" is the BLAKE3 digest of the whole
+file, holes read as zeros, so it costs the same for small and large
+images.
+
+From the guest's side:
+
+| Image | Create until envd answers | Wake from Saved until envd answers |
+| --- | --- | --- |
+| alpine:3.20 | 730 ms | 60 ms |
+| busybox:1.37 | 727 ms | 61 ms |
+| opengeni-sandbox:0.20.0 | 745 ms | 49 ms |
+
+A create is a cold boot here: these sandboxes had no template. The first
+create naming an image the host lacked took 3.1 s, from a store on the
+same disk, most of it checking the 6 GiB file against its id.
+
+## The E2B front door (2026-10-17)
+
+Measured on 2026-10-17 with `conformance/e2b/run.sh` at `dd50cbedb` on
+branch `feat/compute-e2b`, on the same GCP host as above (`nested`
+profile), with the fleet service, its front door on HTTPS and one host
+agent all on that host, so there is no network between them. The client
+is the unchanged E2B JS SDK 2.56.0. The `base` template is
+`opengeni-sandbox:0.20.0` at 2 vCPUs and 1,024 MiB, with a ready pool of
+one. All 30 SDK checks, the 10 header-routed ones, the 12 checks of the
+E2B client Opengeni uses and the 16 `ecw` smoke scenarios passed.
+
+| What the SDK timed | Median of 5 or one run |
+| --- | --- |
+| `Sandbox.create` from a ready clone | 14 ms (12 to 17) |
+| `Sandbox.create` until its first `commands.run` returns | 80 ms (76 to 88) |
+| The run's first create (cause not broken down) | 856 ms |
+| `Sandbox.connect` to a running sandbox | 2 ms |
+| `sandbox.pause()`, complete when it answers (saved to disk) | 256 ms |
+| `Sandbox.connect` resuming a paused sandbox | 68 ms |
+| A command to a paused sandbox with auto-resume | 93 ms |
+| A command to a sandbox the host saved to disk on its own | 81 ms |
+
+A create answers once envd in the clone has its own environment and
+access token, so a create from the pool is the API's own work; the
+first command adds a TLS connection and envd's process start. In the
+guest, envd used 22.1 MiB of resident memory, and the guest as a whole
+144 MiB of its 1,024 MiB (`free`, used). A sandbox left with only a
+background command, its stream let go, was paused by the host 44 s later:
+ten seconds idle, after the guest stopped counting as busy on processor
+or disk.
+
+Building the two images for the run, from the registries, with the
+store upload:
+
+| Image | Content | Layers | Pull | Unpack | ext4 | Id or store | Total |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| busybox:1.37 (bash and `user` added) | 18 MB | 1 | 0.95 s | 0.15 s | 0.07 s | 3.7 s | 4.9 s |
+| opengeni-sandbox:0.20.0 (`user` added) | 1.66 GB | 18 | 9.8 s | 17.1 s | 4.6 s | 3.0 s | 35.2 s |
+
 ## An Opengeni session on the fabric (2026-10-17)
 
 The proof ADR 20 asks for. An Opengeni development stack (API, worker

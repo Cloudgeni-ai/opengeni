@@ -10,7 +10,9 @@ use compute_fleet::{HostEpoch, HostId, HostState};
 use compute_protocol::fleet::{Register, Renew, Report, Ruling};
 use compute_protocol::host::Id;
 
-use super::{Admission, Admits, HostRow, Result, SandboxRow, Store, Write, admits, rule};
+use super::{
+    Admission, Admits, HostRow, LifecycleRow, Result, SandboxRow, Store, Write, admits, rule,
+};
 
 #[derive(Debug)]
 struct Host {
@@ -25,6 +27,7 @@ struct Inner {
     by_name: HashMap<String, HostId>,
     sandboxes: BTreeMap<Id, SandboxRow>,
     keys: HashMap<String, String>,
+    lifecycles: BTreeMap<Id, LifecycleRow>,
     next_host: u64,
     next_host_epoch: u64,
     changes: u64,
@@ -321,6 +324,92 @@ impl MemoryStore {
     fn add_key_now(&self, digest: &str, team: &str) {
         self.lock().keys.insert(digest.to_owned(), team.to_owned());
     }
+
+    fn insert_lifecycle_now(&self, row: &LifecycleRow) -> bool {
+        let mut inner = self.lock();
+        if inner.lifecycles.contains_key(&row.id) {
+            return false;
+        }
+        inner.lifecycles.insert(row.id, row.clone());
+        true
+    }
+
+    fn replace_lifecycle_now(&self, row: &LifecycleRow) -> bool {
+        let mut inner = self.lock();
+        let Some(stored) = inner.lifecycles.get_mut(&row.id) else {
+            return false;
+        };
+        if stored.version != row.version {
+            return false;
+        }
+        *stored = row.clone();
+        stored.version += 1;
+        true
+    }
+
+    fn delete_lifecycle_now(&self, id: Id, version: u64) -> bool {
+        let mut inner = self.lock();
+        if inner
+            .lifecycles
+            .get(&id)
+            .is_none_or(|row| row.version != version)
+        {
+            return false;
+        }
+        inner.lifecycles.remove(&id);
+        true
+    }
+
+    fn lifecycles_now(&self, team: &str) -> Vec<LifecycleRow> {
+        self.lock()
+            .lifecycles
+            .values()
+            .filter(|row| row.team == team)
+            .cloned()
+            .collect()
+    }
+
+    fn lifecycles_due_now(
+        &self,
+        now_ms: u64,
+        after: Option<(u64, Id)>,
+        limit: usize,
+    ) -> Vec<LifecycleRow> {
+        // Ids compare as the database compares them: as text.
+        let after = after.map(|(due, id)| (due, id.to_string()));
+        let key = |row: &LifecycleRow| (row.record.due_ms(), row.id.to_string());
+        let mut due: Vec<LifecycleRow> = self
+            .lock()
+            .lifecycles
+            .values()
+            .filter(|row| row.record.due_ms() <= now_ms)
+            .filter(|row| after.as_ref().is_none_or(|after| key(row) > *after))
+            .cloned()
+            .collect();
+        due.sort_by_cached_key(key);
+        due.truncate(limit);
+        due
+    }
+
+    fn lifecycles_paused_now(&self, after: Option<Id>, limit: usize) -> Vec<LifecycleRow> {
+        // Ids compare as the database compares them: as text.
+        let after = after.map(|id| id.to_string());
+        let mut paused: Vec<LifecycleRow> = self
+            .lock()
+            .lifecycles
+            .values()
+            .filter(|row| row.record.due_ms() == u64::MAX)
+            .filter(|row| {
+                after
+                    .as_ref()
+                    .is_none_or(|after| row.id.to_string() > *after)
+            })
+            .cloned()
+            .collect();
+        paused.sort_by_cached_key(|row| row.id.to_string());
+        paused.truncate(limit);
+        paused
+    }
 }
 
 impl Store for MemoryStore {
@@ -410,5 +499,42 @@ impl Store for MemoryStore {
     fn add_key(&self, digest: &str, team: &str) -> impl Future<Output = Result<()>> + Send {
         self.add_key_now(digest, team);
         ready(Ok(()))
+    }
+
+    fn insert_lifecycle(&self, row: &LifecycleRow) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.insert_lifecycle_now(row)))
+    }
+
+    fn lifecycle(&self, id: Id) -> impl Future<Output = Result<Option<LifecycleRow>>> + Send {
+        ready(Ok(self.lock().lifecycles.get(&id).cloned()))
+    }
+
+    fn replace_lifecycle(&self, row: &LifecycleRow) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.replace_lifecycle_now(row)))
+    }
+
+    fn delete_lifecycle(&self, id: Id, version: u64) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.delete_lifecycle_now(id, version)))
+    }
+
+    fn lifecycles(&self, team: &str) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send {
+        ready(Ok(self.lifecycles_now(team)))
+    }
+
+    fn lifecycles_due(
+        &self,
+        now_ms: u64,
+        after: Option<(u64, Id)>,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send {
+        ready(Ok(self.lifecycles_due_now(now_ms, after, limit)))
+    }
+
+    fn lifecycles_paused(
+        &self,
+        after: Option<Id>,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send {
+        ready(Ok(self.lifecycles_paused_now(after, limit)))
     }
 }

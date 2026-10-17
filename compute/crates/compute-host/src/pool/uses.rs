@@ -128,10 +128,7 @@ mod tests {
     #[test]
     fn a_shape_retires_after_going_unused_and_its_use_outlives_a_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let shape = Shape {
-            vcpus: 1,
-            memory_mib: 512,
-        };
+        let shape = Shape::new(1, 512);
         let start = SystemTime::now() - 30 * DAY;
         let mut uses = Uses::load(dir.path(), 7 * DAY, [shape], start);
         assert_eq!(uses.unused(start + 6 * DAY), NONE);

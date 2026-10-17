@@ -26,6 +26,7 @@ impl Rng {
 
 fn config() -> SandboxConfig {
     SandboxConfig {
+        image: None,
         vcpus: 1,
         memory_mib: 256,
         memory_request_mib: None,

@@ -97,6 +97,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.filled(host, *filled);
                 self.refill();
             }
+            Event::ImageSized { image, length } => self.image_sized(image, length),
+            Event::ImageFetched { image, result } => self.fetch_ended(image, &result),
             Event::Claimed {
                 id,
                 config,
@@ -506,6 +508,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .core
             .sandbox(record.id.0)
             .map_or_else(|| self.now(), |view| view.last_activity);
+        let disk_image = self.image_path(record.config.image);
         Job {
             engine: Arc::clone(&self.engine),
             store: Arc::clone(&self.store),
@@ -517,7 +520,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             cancel,
             live: None,
             restore_notice_port: self.restore_notice_port,
-            base_image: self.base_image.clone(),
+            disk_image,
             kernel: self.images.kernel.clone(),
             #[cfg(target_os = "linux")]
             fetcher: self.fetcher.clone(),

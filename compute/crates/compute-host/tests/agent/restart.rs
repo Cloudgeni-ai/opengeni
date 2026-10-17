@@ -336,6 +336,7 @@ async fn an_unreadable_record_blocks_its_id() {
         Request::Create {
             id: broken,
             config: SandboxConfig {
+                image: None,
                 vcpus: 1,
                 memory_mib: 256,
                 memory_request_mib: None,
@@ -434,6 +435,7 @@ fn create_request(id: Id) -> Request {
     Request::Create {
         id,
         config: SandboxConfig {
+            image: None,
             vcpus: 1,
             memory_mib: 256,
             memory_request_mib: None,
@@ -779,6 +781,7 @@ async fn create_refuses_an_existing_directory() {
         .call(&Request::Create {
             id: sandbox,
             config: SandboxConfig {
+                image: None,
                 vcpus: 1,
                 memory_mib: 256,
                 memory_request_mib: None,
@@ -811,6 +814,7 @@ async fn a_repeated_create_succeeds_only_with_the_same_settings() {
     let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
     let sandbox = id(43);
     let config = SandboxConfig {
+        image: None,
         vcpus: 1,
         memory_mib: 256,
         memory_request_mib: None,
@@ -826,6 +830,7 @@ async fn a_repeated_create_succeeds_only_with_the_same_settings() {
         assert!(matches!(reply, Reply::Done), "{reply:?}");
     }
     let other = SandboxConfig {
+        image: None,
         memory_mib: 512,
         ..config.clone()
     };

@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lanes::Lanes;
 use crate::layout::{copy_file, copy_sparse, sync_file};
-use crate::protocol::Id;
+use crate::protocol::{Id, ImageId};
 
 /// A memory image as the store sees it.
 #[derive(Clone, Debug)]
@@ -291,6 +291,29 @@ pub trait Store: Send + Sync + 'static {
         id: Id,
         change: Stamp,
     ) -> impl Future<Output = Result<Owned<Option<Receipt>>, EngineError>> + Send;
+
+    /// The length of the stored sandbox image `image`'s file, `None` if
+    /// the store does not hold it, which a store that keeps no images
+    /// never does.
+    fn image_len(
+        &self,
+        image: ImageId,
+    ) -> impl Future<Output = Result<Option<u64>, EngineError>> + Send {
+        let _ = image;
+        ready(Ok(None))
+    }
+
+    /// Copies the stored sandbox image `image` (ADR 19) to `path`, a new
+    /// file, checked against its id. False if the store does not hold it,
+    /// which a store that keeps no images never does.
+    fn fetch_image(
+        &self,
+        image: ImageId,
+        path: &Path,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send {
+        let _ = (image, path);
+        ready(Ok(false))
+    }
 }
 
 /// No store: sandboxes never leave the host.
@@ -375,6 +398,36 @@ impl Directory {
 
     fn dir(&self, id: Id) -> PathBuf {
         self.root.join(id.to_string())
+    }
+
+    /// Where the image `image` is kept: beside the sandboxes, under a name
+    /// no sandbox id has.
+    fn rootfs(&self, image: ImageId) -> PathBuf {
+        self.root.join("rootfs").join(format!("{image}.ext4"))
+    }
+
+    /// Stores the image at `path` and returns its id.
+    pub async fn put_rootfs(&self, path: &Path) -> Result<ImageId, EngineError> {
+        let (from, root) = (path.to_owned(), self.clone());
+        blocking("store image", move || {
+            let image = ImageId(
+                *blake3::Hasher::new()
+                    .update_reader(File::open(&from)?)?
+                    .finalize()
+                    .as_bytes(),
+            );
+            let to = root.rootfs(image);
+            if let Some(dir) = to.parent() {
+                fs::create_dir_all(dir)?;
+            }
+            let staging = to.with_extension("staging");
+            copy_sparse(&from, &staging)?;
+            sync_file(&staging)?;
+            fs::rename(&staging, &to)?;
+            sync_file(to.parent().unwrap_or(&root.root))?;
+            Ok(image)
+        })
+        .await
     }
 }
 
@@ -642,6 +695,36 @@ impl Store for Directory {
             Ok(metadata) => Ok(Some(metadata.len())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
+        })
+        .await
+    }
+
+    async fn image_len(&self, image: ImageId) -> Result<Option<u64>, EngineError> {
+        let file = self.rootfs(image);
+        blocking("image length", move || match fs::metadata(&file) {
+            Ok(metadata) => Ok(Some(metadata.len())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        })
+        .await
+    }
+
+    async fn fetch_image(&self, image: ImageId, path: &Path) -> Result<bool, EngineError> {
+        let (from, to) = (self.rootfs(image), path.to_owned());
+        blocking("fetch image", move || {
+            match File::open(&from) {
+                Ok(file) => copy_file(&file, &to)?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error),
+            }
+            if hash_file(&to)? != image.to_string() {
+                let _ = fs::remove_file(&to);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("the stored image {image} differs from its id"),
+                ));
+            }
+            Ok(true)
         })
         .await
     }

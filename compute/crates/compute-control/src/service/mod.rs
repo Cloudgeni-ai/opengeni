@@ -7,6 +7,7 @@
 //! each write conditional on the row's version. A write that loses to
 //! another replica's decides again from the row as it is then.
 
+mod holds;
 mod moves;
 mod reach;
 
@@ -18,13 +19,14 @@ use compute_fleet::{
     Demand, HostId, LeaseTerms, Next, Op, Outcome, OwnerEpoch, Ownership, Prefer, SandboxId,
     answered,
 };
-use compute_protocol::host::{ErrorCode, Id, Reply, Request, SandboxConfig, SleepConfig};
+use compute_protocol::host::{ErrorCode, Id, ImageId, Reply, Request, SandboxConfig, SleepConfig};
 use compute_storage::store::ChunkStore;
 
 use crate::hosts::{Answered, Hosts};
 use crate::store::{SandboxRow, Spec, Store, StoreError, Write, replace};
 use crate::view::{Target, View, shape_key};
 
+pub use holds::Depth;
 pub use moves::Drained;
 pub use reach::Reached;
 
@@ -102,6 +104,23 @@ pub struct Settings {
     pub image: String,
     /// How a sandbox whose create says nothing sleeps.
     pub sleep: SleepConfig,
+    /// The images creates may name, by the fleet's names for them: the id
+    /// of each stored image (ADR 19), which hosts fetch by it, or `None`
+    /// for the hosts' own base image. The default image is always known,
+    /// as the base image unless named here.
+    pub images: BTreeMap<String, Option<ImageId>>,
+}
+
+impl Settings {
+    /// The image the fleet calls `name`: `Some(None)` for the hosts' base
+    /// image, `None` for no image it knows.
+    #[must_use]
+    pub fn image_named(&self, name: &str) -> Option<Option<ImageId>> {
+        match self.images.get(name) {
+            Some(image) => Some(*image),
+            None => (name == self.image).then_some(None),
+        }
+    }
 }
 
 impl Default for Settings {
@@ -113,6 +132,7 @@ impl Default for Settings {
             wake_within: Duration::from_secs(60),
             image: "base".into(),
             sleep: DEFAULT_SLEEP,
+            images: BTreeMap::new(),
         }
     }
 }
@@ -146,7 +166,11 @@ fn now_ms() -> u64 {
 
 /// A new sandbox id: the time in milliseconds, then random bits, laid out
 /// as a version 7 UUID, so ids sort by when they were made.
-fn new_id() -> Result<Id, Failure> {
+///
+/// # Errors
+///
+/// When the system's random numbers cannot be read.
+pub fn new_id() -> Result<Id, Failure> {
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(|error| Failure::Host(error.to_string()))?;
     let random = u128::from_le_bytes(random);
@@ -294,7 +318,19 @@ impl<S: Store> Service<S> {
         spec: Spec,
         metadata: BTreeMap<String, String>,
     ) -> Result<SandboxRow, Failure> {
-        let (mut row, demand) = self.new_row(team, spec, metadata)?;
+        self.create_as(new_id()?, team, spec, metadata).await
+    }
+
+    /// Creates a sandbox for `team` as [`Self::create`] does, under `id`
+    /// (from [`new_id`]), for a caller that records the id first.
+    pub async fn create_as(
+        &self,
+        id: Id,
+        team: &str,
+        spec: Spec,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<SandboxRow, Failure> {
+        let (mut row, demand) = self.new_row(id, team, spec, metadata)?;
         let id = row.id;
         let mut exclude = Vec::new();
         let mut inserted = false;
@@ -379,19 +415,18 @@ impl<S: Store> Service<S> {
     /// A new sandbox's row, not yet placed, and what it asks of a host.
     fn new_row(
         &self,
+        id: Id,
         team: &str,
-        spec: Spec,
+        mut spec: Spec,
         metadata: BTreeMap<String, String>,
     ) -> Result<(SandboxRow, Demand), Failure> {
         spec.config.validate().map_err(Failure::Invalid)?;
-        // Hosts start every sandbox from their one base image until hosts
-        // can fetch images; a create naming another must not get it.
-        if spec.image != self.settings.image {
-            return Err(Failure::Invalid(format!(
-                "no such image: {} (this fleet has only {})",
-                spec.image, self.settings.image
-            )));
-        }
+        // The host boots the image the config names, fetching it by id;
+        // a name the fleet does not know must not boot something else.
+        spec.config.image = self
+            .settings
+            .image_named(&spec.image)
+            .ok_or_else(|| Failure::Invalid(format!("no such image: {}", spec.image)))?;
         let shape = shape_key(
             &spec.image,
             u32::from(spec.config.vcpus),
@@ -399,7 +434,7 @@ impl<S: Store> Service<S> {
         );
         let demand = self.demand(&spec.config, Prefer::ReadyClone(shape));
         let row = SandboxRow {
-            id: new_id()?,
+            id,
             team: team.to_owned(),
             spec,
             metadata,
