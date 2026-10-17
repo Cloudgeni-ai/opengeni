@@ -100,7 +100,8 @@ an init system of its own.
   A check starts every minute, or as soon as the previous one ends if it
   took longer. It reads the paused records 256 at a time, reads each one's
   fleet row (16 at once), and asks each owner host once per page how deep
-  its sandboxes sleep, all hosts at once, each within 10 s. A sandbox found
+  its sandboxes sleep, all hosts at once, each with up to 3 s to connect
+  and 10 s to answer. A sandbox found
   awake is recorded as pausing again, conditional on the record read
   before its host was asked, so a resume meanwhile wins; the sweeper then
   saves it like any other pause. So a paused sandbox woken this way is
