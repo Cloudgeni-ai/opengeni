@@ -13,7 +13,7 @@ use bytes::Bytes;
 use compute_control::e2b::{self, Front, Settings, Template};
 use compute_control::store::{MemoryStore, Store as _};
 use compute_guest::{ENVD_PORT, GATEWAY_PORT};
-use compute_protocol::host::{Id, LevelName, Reply, Request};
+use compute_protocol::host::{ErrorCode, Id, LevelName, Reply, Request};
 use http_body_util::{Full, StreamBody};
 use hyper::body::Frame;
 use hyper_util::rt::TokioIo;
@@ -130,6 +130,8 @@ struct Levels {
     holds: HashMap<Id, BTreeSet<String>>,
     /// Sandboxes that never go to sleep, though their sleeps are answered.
     stuck: HashSet<Id>,
+    /// Sandboxes whose wakes and connects are answered busy.
+    busy: HashSet<Id>,
     log: Vec<String>,
 }
 
@@ -142,6 +144,12 @@ async fn host(fleet: &Fleet, seen: &Arc<Seen>) -> (FakeHost, Arc<Mutex<Levels>>)
     host.behave(move |envelope| {
         let mut state = state.lock().unwrap();
         match &envelope.request {
+            Request::Wake { id, .. } | Request::Connect { id, .. } if state.busy.contains(id) => {
+                return Act::Reply(Reply::Error {
+                    message: "busy".into(),
+                    code: ErrorCode::Busy,
+                });
+            }
             Request::Create { id, .. } | Request::Wake { id, .. } | Request::Connect { id, .. } => {
                 state.at.insert(*id, LevelName::Running);
             }
@@ -742,10 +750,17 @@ async fn timeouts_kill_or_pause() {
         .await;
     let killed = killed["sandboxID"].as_str().unwrap().to_owned();
     let paused = paused["sandboxID"].as_str().unwrap().to_owned();
+    // A pause under way already shows as paused: wait for it to finish.
     until(Duration::from_secs(10), "the timeouts pass", async || {
         let (gone, _) = door.get(&format!("/sandboxes/{killed}")).await;
         let (_, detail) = door.get(&format!("/sandboxes/{paused}")).await;
-        gone == 404 && detail["state"] == "paused"
+        let state = fleet
+            .store
+            .lifecycle(paused.parse().unwrap())
+            .await
+            .unwrap()
+            .map(|row| row.record.state);
+        gone == 404 && detail["state"] == "paused" && state == Some(e2b::lifecycle::State::Paused)
     })
     .await;
     // The killed one is gone from the fleet as well, its record too.
@@ -912,6 +927,127 @@ async fn pause_work_from_before_a_resume_leaves_the_sandbox_running() {
     assert_eq!(levels.lock().unwrap().at[&sandbox_id], LevelName::Running);
     let (_, detail) = door.get(&format!("/sandboxes/{id}")).await;
     assert_eq!(detail["state"], "running");
+}
+
+/// A pause leaves one more check of the host for later: a sandbox found
+/// awake then (a wake that started before the pause landed after it, from
+/// a replica that has since stopped, say) is paused again; one found saved
+/// only has the check cleared.
+#[tokio::test]
+async fn a_pause_checks_its_host_again_later_and_pauses_a_sandbox_found_awake() {
+    let (fleet, _host, levels, _seen, door) = fleet_with_guest().await;
+    let saves = |levels: &Arc<Mutex<Levels>>| {
+        let levels = levels.lock().unwrap();
+        levels
+            .log
+            .iter()
+            .filter(|line| *line == "sleep Saved")
+            .count()
+    };
+    for awake in [true, false] {
+        let sandbox = door.create(json!({"templateID": "base"})).await;
+        let id = sandbox["sandboxID"].as_str().unwrap().to_owned();
+        let sandbox_id: Id = id.parse().unwrap();
+        let (status, _) = door
+            .post(&format!("/sandboxes/{id}/pause"), json!({}))
+            .await;
+        assert_eq!(status, 204);
+        let mut row = fleet.store.lifecycle(sandbox_id).await.unwrap().unwrap();
+        assert_eq!(row.record.state, e2b::lifecycle::State::Paused);
+        let check = row.record.check_ms.expect("a pause leaves a check");
+        assert!(
+            check > e2b::ops::now_ms() + 60_000,
+            "the check is past the bound"
+        );
+        if awake {
+            levels
+                .lock()
+                .unwrap()
+                .at
+                .insert(sandbox_id, LevelName::Running);
+        }
+        let before = saves(&levels);
+        row.record.check_ms = Some(0);
+        assert!(
+            compute_control::store::replace_lifecycle(&*fleet.store, &mut row)
+                .await
+                .unwrap()
+        );
+        until(Duration::from_secs(10), "the check is done", async || {
+            let record = fleet
+                .store
+                .lifecycle(sandbox_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .record;
+            record.state == e2b::lifecycle::State::Paused
+                && record.check_ms.is_none_or(|check| check > 0)
+                && levels.lock().unwrap().at[&sandbox_id] == LevelName::Saved
+        })
+        .await;
+        assert_eq!(
+            saves(&levels),
+            before + usize::from(awake),
+            "awake: {awake}"
+        );
+        let record = fleet
+            .store
+            .lifecycle(sandbox_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .record;
+        // Paused again, it has a check of its own; found saved, none.
+        assert_eq!(record.check_ms.is_some(), awake);
+    }
+}
+
+/// An explicit connect whose wake lands only after a later pause
+/// completed does not leave the sandbox running under a paused record:
+/// the connect sees the pause, and resumes the sandbox again.
+#[tokio::test]
+async fn a_connect_whose_wake_outlasts_a_later_pause_resumes_again() {
+    let (fleet, _host, levels, _seen, door) = fleet_with_guest().await;
+    let sandbox = door.create(json!({"templateID": "base"})).await;
+    let id = sandbox["sandboxID"].as_str().unwrap().to_owned();
+    let sandbox_id: Id = id.parse().unwrap();
+    let (status, _) = door
+        .post(&format!("/sandboxes/{id}/pause"), json!({}))
+        .await;
+    assert_eq!(status, 204);
+    levels.lock().unwrap().busy.insert(sandbox_id);
+    let connect = tokio::spawn({
+        let call = door
+            .http
+            .post(format!("http://{}/v2/sandboxes/{id}/connect", door.address))
+            .header("x-api-key", KEY)
+            .json(&json!({"timeout": 600}));
+        async move { call.send().await.unwrap().status().as_u16() }
+    });
+    until(
+        Duration::from_secs(5),
+        "the connect records the resume",
+        async || {
+            fleet
+                .store
+                .lifecycle(sandbox_id)
+                .await
+                .unwrap()
+                .is_some_and(|row| row.record.state == e2b::lifecycle::State::Running)
+        },
+    )
+    .await;
+    // A later pause completes while the connect's wake is held up.
+    let (status, _) = door
+        .post(&format!("/sandboxes/{id}/pause"), json!({}))
+        .await;
+    assert_eq!(status, 204);
+    levels.lock().unwrap().busy.remove(&sandbox_id);
+    assert_eq!(connect.await.unwrap(), 201);
+    let (_, detail) = door.get(&format!("/sandboxes/{id}")).await;
+    assert_eq!(detail["state"], "running");
+    assert_eq!(levels.lock().unwrap().at[&sandbox_id], LevelName::Running);
 }
 
 /// A sweep that read a sandbox when its timeout had passed, and runs only

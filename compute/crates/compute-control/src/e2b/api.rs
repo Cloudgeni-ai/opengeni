@@ -323,7 +323,9 @@ async fn connect<S: Store>(
         None => None,
         seconds => Some(lifecycle::timeout_ms(seconds).map_err(Refused::invalid)?),
     };
-    let Connected { record, resumed } = ops::connect(&front, &team, id, timeout_ms).await?;
+    let Connected {
+        record, resumed, ..
+    } = ops::connect(&front, &team, id, timeout_ms).await?;
     let status = if resumed {
         StatusCode::CREATED
     } else {

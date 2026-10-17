@@ -12,7 +12,7 @@ use crate::store::{SandboxRow, Store};
 use crate::view::Target;
 
 /// How long a host may take to answer a hold, a release or a status.
-const ASK_WAIT: Duration = Duration::from_secs(10);
+pub(super) const ASK_WAIT: Duration = Duration::from_secs(10);
 
 /// Where a sandbox is, as far as sleeping goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

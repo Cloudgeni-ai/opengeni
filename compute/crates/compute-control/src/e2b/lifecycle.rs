@@ -14,6 +14,14 @@
 //! by connect and set-timeout calls: traffic, keepalives and open streams
 //! never move it.
 //!
+//! Calls that may wake a sandbox (a connect to the guest, a hold, a
+//! resume's wake) start only while it is recorded running, and each lands
+//! on its host within a bound or not at all. One that started before a
+//! pause may still land after the pause completed, from a replica that has
+//! since stopped, too. So a pause records, with `Paused`, a time past that
+//! bound when the sweeper checks the host once more: a sandbox found awake
+//! then is paused again.
+//!
 //! Every decision here is a pure function of the record and the time, so
 //! the API, the traffic router and the sweeper that finishes pauses, kills
 //! and timeouts after a crash all decide alike.
@@ -85,20 +93,25 @@ pub struct Record {
     pub memory_mb: u32,
     /// When the state last changed, in milliseconds since the Unix epoch.
     pub changed_ms: u64,
+    /// For a paused sandbox, when the sweeper checks once more that its
+    /// host keeps it saved, in milliseconds since the Unix epoch; `None`
+    /// once checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_ms: Option<u64>,
 }
 
 impl Record {
     /// When the sweeper must next look at it, in milliseconds since the
     /// Unix epoch: at once for a pause or kill under way (one cut short by
     /// a crash is finished there), at the create deadline, at the timeout,
-    /// and never for a paused one.
+    /// and for a paused one at its check, if any.
     #[must_use]
     pub fn due_ms(&self) -> u64 {
         match self.state {
             State::Creating => self.changed_ms.saturating_add(CREATE_WITHIN_MS),
             State::Running => self.end_ms,
             State::Pausing | State::Killing => 0,
-            State::Paused => u64::MAX,
+            State::Paused => self.check_ms.unwrap_or(u64::MAX),
         }
     }
 
@@ -113,10 +126,11 @@ impl Record {
         }
     }
 
-    /// Moves it to `state` at `now_ms`.
+    /// Moves it to `state` at `now_ms`, with no check pending.
     pub fn set(&mut self, state: State, now_ms: u64) {
         self.state = state;
         self.changed_ms = now_ms;
+        self.check_ms = None;
     }
 }
 
@@ -143,6 +157,8 @@ pub enum Due {
     Pause,
     /// Begin or finish a kill.
     Kill,
+    /// Check that a paused sandbox's host keeps it saved.
+    Check,
 }
 
 /// What is due for `record` at `now_ms`.
@@ -160,7 +176,7 @@ pub fn due(record: &Record, now_ms: u64) -> Due {
             OnTimeout::Pause => Due::Pause,
         },
         State::Pausing => Due::Pause,
-        State::Paused => Due::Nothing,
+        State::Paused => Due::Check,
     }
 }
 
@@ -269,6 +285,7 @@ mod tests {
             cpu_count: 2,
             memory_mb: 1024,
             changed_ms: 1_000,
+            check_ms: None,
         }
     }
 
@@ -282,11 +299,17 @@ mod tests {
     }
 
     #[test]
-    fn pauses_and_kills_under_way_are_always_due_and_paused_ones_never() {
+    fn pauses_and_kills_under_way_are_always_due_and_paused_ones_at_their_check() {
         assert_eq!(due(&record(State::Pausing), 0), Due::Pause);
         assert_eq!(due(&record(State::Killing), 0), Due::Kill);
         assert_eq!(due(&record(State::Paused), u64::MAX - 1), Due::Nothing);
         assert_eq!(record(State::Paused).due_ms(), u64::MAX);
+        let mut checked = record(State::Paused);
+        checked.check_ms = Some(5_000);
+        assert_eq!(due(&checked, 4_999), Due::Nothing);
+        assert_eq!(due(&checked, 5_000), Due::Check);
+        checked.set(State::Running, 6_000);
+        assert_eq!(checked.check_ms, None);
     }
 
     #[test]

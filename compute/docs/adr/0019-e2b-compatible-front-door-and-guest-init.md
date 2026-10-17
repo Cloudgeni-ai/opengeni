@@ -90,6 +90,21 @@ an init system of its own.
   pausing again, which any replica's sweeper then finishes. A pause
   records `Paused` only if the record is unchanged since the host reported
   the save, and pause work stops once the record no longer asks for it.
+- **A pause checks its host once more.** Every call that may wake a
+  sandbox (a connect, a hold, a resume's wake, a pause's corrective wake)
+  starts only after a read or write found the record running, and stops
+  sending at a fixed bound after that read (the wake limit plus the
+  host's own answer limits, about 130 s by default). A host acts on a
+  request only within a few lease terms of its sending (about 30 s by
+  default), so no such call lands later than that. So a pause records,
+  with `Paused`, a time past both bounds plus a 30 s margin for clock
+  differences between replicas. Then any replica's sweeper asks the host
+  once more: a sandbox it keeps saved only has the check cleared, and one
+  found awake is paused again. This covers a wake that lands late when
+  its replica stopped or its caller went away before the read above, so
+  the record and the host agree in the end without anything held in
+  memory. The read after each call stays, so the usual case is repaired
+  at once.
 - **TLS: either the front door or a terminator in front.** The SDK uses
   HTTPS for the API and for `<port>-<id>.<domain>`. With `--e2b-tls-cert`
   and `--e2b-tls-key` the front door serves HTTPS itself, with one

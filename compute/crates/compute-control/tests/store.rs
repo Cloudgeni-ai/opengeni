@@ -361,6 +361,7 @@ fn lifecycle(team: &str, state: State, end_ms: u64) -> LifecycleRow {
             cpu_count: 1,
             memory_mb: 512,
             changed_ms: 1,
+            check_ms: None,
         },
         version: 0,
     }

@@ -61,6 +61,29 @@ pub struct Reached {
 }
 
 impl<S: Store> Service<S> {
+    /// How long a wake, connect or hold may go on sending: a reach tries
+    /// until `wake_within`, and its last call waits up to its own limit;
+    /// a hold may reach first, then ask.
+    #[must_use]
+    pub fn reach_within(&self) -> Duration {
+        self.settings.wake_within + WAKE_WAIT + super::holds::ASK_WAIT
+    }
+
+    /// The longest a host may still act on a request after it was sent.
+    /// A host refuses a request stamped more than the request window of
+    /// renewals before its latest answered one, and acts only while the
+    /// renewal answered last was sent within the term, under the
+    /// registration the request names. So each renewal it holds past the
+    /// stamp was sent within a term of the one before, and it acts on
+    /// none sent more than (window + 1) terms ago, on its clock.
+    #[must_use]
+    pub fn request_age(&self) -> Duration {
+        let terms = self.settings.terms;
+        let count = u32::try_from(terms.request_window.saturating_add(1)).unwrap_or(u32::MAX);
+        let span = terms.term.saturating_mul(count);
+        span.saturating_add(span / 1_000_000 * terms.rate_error_ppm)
+    }
+
     /// Wakes a team's sandbox and answers once it runs.
     pub async fn wake(
         &self,
