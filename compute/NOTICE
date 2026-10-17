@@ -27,3 +27,15 @@ listed here; each says so at its top.
   - Every guest gets the same fixed address behind NAT in its own network
     namespace, so a guest restored from a snapshot needs no
     reconfiguration.
+
+Sandbox images built by `compute-host build-image` (ADR 19) contain two
+programs this repository does not include. guest/build.sh fetches and builds
+them; neither is changed:
+
+- envd, E2B's in-guest daemon, from https://github.com/e2b-dev/runtime at
+  the commit guest/build.sh pins. Copyright E2B; licensed under the Apache
+  License, Version 2.0.
+- GNU bash, at the version guest/build.sh pins, added as /bin/bash to images
+  that have none. Copyright the Free Software Foundation; licensed under
+  the GNU General Public License, version 3 or later. Its source is the
+  release tarball guest/build.sh downloads and checks.
