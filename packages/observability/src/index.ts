@@ -714,6 +714,31 @@ export function createObservability(
   return new Observability(settings, options);
 }
 
+/**
+ * Default metrics whose collection walks the whole JavaScript heap on Bun.
+ * Bun answers `v8.getHeapSpaceStatistics()` from a full heap census, which
+ * blocks the event loop for hundreds of milliseconds on a busy process at
+ * every scrape, stalling every request in flight. The per-space split is
+ * V8-specific anyway; heap totals stay available from the cheap
+ * `nodejs_heap_size_*` and `process_heap_bytes` series.
+ */
+export const FULL_HEAP_WALK_DEFAULT_METRICS = [
+  "nodejs_heap_space_size_total_bytes",
+  "nodejs_heap_space_size_used_bytes",
+  "nodejs_heap_space_size_available_bytes",
+] as const;
+
+export function dropFullHeapWalkMetrics(
+  registry: Registry,
+  prefix: string,
+  runtime: { bun?: string | undefined } = process.versions,
+): void {
+  if (!runtime.bun) return;
+  for (const name of FULL_HEAP_WALK_DEFAULT_METRICS) {
+    registry.removeSingleMetric(`${prefix}${name}`);
+  }
+}
+
 type MetricRegistration = {
   kind: "counter" | "gauge" | "histogram";
   labelNames: string[];
@@ -776,6 +801,7 @@ export class Observability {
     });
     if (settings.observabilityMetricsEnabled) {
       collectDefaultMetrics({ register: this.registry, prefix: "opengeni_" });
+      dropFullHeapWalkMetrics(this.registry, "opengeni_");
       this.setGauge({
         name: "opengeni_build_info",
         help: "Opengeni build information.",
