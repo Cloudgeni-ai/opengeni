@@ -103,6 +103,7 @@ import {
   withRefShorthandLocators,
 } from "./interaction-tool-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
+import { compactComputerImage, compactComputerImageContent } from "./computer-image-encoding";
 import {
   browserActionText,
   browserObservationText,
@@ -1702,6 +1703,7 @@ export function createInteractionAttemptToolDefinitions(
       if (observation.target.targetGeneration !== frame.targetGeneration) {
         throw new Error("computer target changed while its visual observation was captured");
       }
+      const image = await compactComputerImage(frame.data, frame.mediaType);
       return new InteractionExecutionResult(
         {
           ...observation,
@@ -1711,8 +1713,8 @@ export function createInteractionAttemptToolDefinitions(
         [
           {
             type: "image",
-            data: Buffer.from(frame.data).toString("base64"),
-            mimeType: frame.mediaType,
+            data: Buffer.from(image.data).toString("base64"),
+            mimeType: image.mimeType,
           },
         ],
       );
@@ -1870,6 +1872,7 @@ export function createInteractionAttemptToolDefinitions(
                 receipt.error?.code ?? "driver_failed",
                 receipt.error?.message ?? "Native CUA result is unavailable",
               );
+          result.content = await compactComputerImageContent(result.content);
           if (receipt.state !== "completed") {
             result.isError = true;
             result.content.push({
