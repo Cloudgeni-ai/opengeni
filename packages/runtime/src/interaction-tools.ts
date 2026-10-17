@@ -110,6 +110,12 @@ import {
   browserReadText,
   browserTabsText,
 } from "./browser-model-text";
+import {
+  computerActionText,
+  computerObservationText,
+  computerOpenText,
+  computerTargetsText,
+} from "./computer-model-text";
 
 export const INTERACTION_ATTEMPT_TOOL_NAMES = FIRST_PARTY_IN_PROCESS_TOOL_NAMES;
 
@@ -1623,6 +1629,7 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerOpenOutput,
     readOnly: false,
     idempotent: true,
+    modelText: computerOpenText,
     execute: async (value, context) =>
       await openComputer(input.transport, input.workspaceId, input.sessionId, value, context),
   });
@@ -1637,6 +1644,7 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerTargetListResponse,
     readOnly: true,
     idempotent: true,
+    modelText: (output) => computerTargetsText(output.targets),
     execute: async (value) =>
       await input.transport.listComputerTargets(input.workspaceId, value.computerSessionId),
   });
@@ -1651,17 +1659,22 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerObserveOutput,
     readOnly: true,
     idempotent: true,
+    modelText: computerObservationText,
     execute: async (value) => {
-      let observation = await input.transport.observeComputerTarget(
-        input.workspaceId,
-        value.computerSessionId,
-        value.targetId,
-      );
-      const frame = await input.transport.captureComputerTarget(
-        input.workspaceId,
-        value.computerSessionId,
-        value.targetId,
-      );
+      // The tree and the pixels are independent reads of the same target;
+      // a generation mismatch below re-reads the tree once.
+      let [observation, frame] = await Promise.all([
+        input.transport.observeComputerTarget(
+          input.workspaceId,
+          value.computerSessionId,
+          value.targetId,
+        ),
+        input.transport.captureComputerTarget(
+          input.workspaceId,
+          value.computerSessionId,
+          value.targetId,
+        ),
+      ]);
       if (observation.target.targetGeneration !== frame.targetGeneration) {
         observation = await input.transport.observeComputerTarget(
           input.workspaceId,
@@ -1713,6 +1726,7 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerActionReceipt,
     readOnly: false,
     idempotent: true,
+    modelText: computerActionText,
     execute: async (value, context) => {
       const current =
         value.expectedTargetGeneration !== undefined &&
