@@ -73962,8 +73962,11 @@ export type SessionWorkPeek =
   | { kind: "runnable"; admissionFence?: SessionAdmissionFence }
   | {
       kind: "admission-blocked";
-      reason?: "sandbox_setup_outcome_unknown" | "sandbox_setup_recovery_exhausted";
-      ref?: SandboxSetupOutcomeUnknown | SandboxSetupRecoveryExhausted;
+      reason?:
+        | "sandbox_setup_outcome_unknown"
+        | "sandbox_setup_recovery_exhausted"
+        | "recovery_backoff";
+      ref?: SandboxSetupOutcomeUnknown | SandboxSetupRecoveryExhausted | SessionTurnRecoveryRetry;
     }
   | {
       kind: "sandbox-lifecycle-wait";
@@ -74562,6 +74565,32 @@ export async function peekSessionWork(
             .limit(1);
           if (sandboxLifecycleWaitIsPending(lifecycleWait, lease)) {
             return { kind: "sandbox-lifecycle-wait", ref: lifecycleWait };
+          }
+        }
+        const recoveryRetry =
+          turn.status === "recovering" ? sessionTurnRecoveryRetryFromMetadata(turn.metadata) : null;
+        if (
+          recoveryRetry &&
+          (await transactionNow(scopedDb)).getTime() < Date.parse(recoveryRetry.notBefore)
+        ) {
+          // Wakes are hints; this deadline is the authority. A person's new
+          // message is the one thing that ends the backoff early.
+          const [newInput] = await scopedDb
+            .select({ id: schema.sessionEvents.id })
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, workspaceId),
+                eq(schema.sessionEvents.sessionId, sessionId),
+                eq(schema.sessionEvents.type, "user.message"),
+                gt(schema.sessionEvents.sequence, recoveryRetry.afterSequence),
+              ),
+            )
+            .limit(1);
+          if (!newInput) {
+            // Existing workflow releases close on this kind and rely on the
+            // recovery's delayed wake; current ones wait until the deadline.
+            return { kind: "admission-blocked", reason: "recovery_backoff", ref: recoveryRetry };
           }
         }
         return runnable;
@@ -77481,11 +77510,50 @@ function recoveryTurnMetadata(
   lifecycleWait: SandboxLifecycleWait | undefined,
 ): Record<string, unknown> {
   const next = metadataWithoutSandboxLifecycleWait(metadataWithoutTurnDispatchAttempt(metadata));
+  delete next[RECOVERY_RETRY_METADATA_KEY];
   if (lifecycleWait) {
     next[SANDBOX_LIFECYCLE_WAIT_METADATA_KEY] = lifecycleWait;
   }
   return next;
 }
+
+/**
+ * The earliest moment a recovering turn may dispatch its replacement attempt.
+ * Durable on the turn so that every wake (the session's own receipts and
+ * outbox retries included) re-reads the same deadline instead of cutting the
+ * backoff short. Only new user input after `afterSequence` ends it early.
+ */
+const RECOVERY_RETRY_METADATA_KEY = "recoveryRetry";
+
+export type SessionTurnRecoveryRetry = {
+  version: 1;
+  notBefore: string;
+  afterSequence: number;
+};
+
+export function sessionTurnRecoveryRetryFromMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): SessionTurnRecoveryRetry | null {
+  const value = metadata?.[RECOVERY_RETRY_METADATA_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const retry = value as Record<string, unknown>;
+  if (
+    retry.version !== 1 ||
+    typeof retry.notBefore !== "string" ||
+    !Number.isFinite(Date.parse(retry.notBefore)) ||
+    !Number.isSafeInteger(retry.afterSequence)
+  ) {
+    return null;
+  }
+  return {
+    version: 1,
+    notBefore: retry.notBefore,
+    afterSequence: retry.afterSequence as number,
+  };
+}
+
+/** Longest backoff a recovery may request; anything longer is a caller bug. */
+export const SESSION_TURN_RECOVERY_RETRY_MAX_MS = 15 * 60_000;
 
 function providerRecoveryCountFromTurnMetadata(
   metadata: Record<string, unknown> | null | undefined,
@@ -78970,6 +79038,12 @@ export type RequestSessionTurnRecoveryInput = {
   /** Park proven non-dispatch after the existing five-recovery budget. */
   sandboxSetupRecoveryExhausted?: true;
   providerRecoveryCount?: number;
+  /**
+   * Backoff before the replacement attempt may dispatch, measured on the
+   * database clock. Stored on the turn and armed as a delayed workflow wake,
+   * so the session's own wakes cannot shorten it; new user input can.
+   */
+  retryAfterMs?: number;
   /** In-flight calls with call-scoped proof that their command never started. */
   notStartedToolCallIds?: readonly string[];
   /**
@@ -79165,6 +79239,23 @@ export async function requestSessionTurnRecovery(
         throw new Error("providerRecoveryCount must be a positive safe integer");
       }
       if (
+        input.retryAfterMs !== undefined &&
+        (!Number.isFinite(input.retryAfterMs) || input.retryAfterMs < 0)
+      ) {
+        throw new Error("retryAfterMs must be a non-negative number of milliseconds");
+      }
+      // Database clock, like every other wake deadline: the outbox dispatcher
+      // and the admission peek both compare against DB `now()`. The bound
+      // keeps a miscomputed delay from parking a turn indefinitely.
+      const retryAfterMs = Math.min(
+        Math.ceil(input.retryAfterMs ?? 0),
+        SESSION_TURN_RECOVERY_RETRY_MAX_MS,
+      );
+      const retryNotBefore =
+        retryAfterMs > 0
+          ? new Date((await transactionNow(tx as unknown as Database)).getTime() + retryAfterMs)
+          : null;
+      if (
         input.sandboxLifecycleWait &&
         (!sandboxLifecycleWaitFromTurnMetadata({
           [SANDBOX_LIFECYCLE_WAIT_METADATA_KEY]: input.sandboxLifecycleWait,
@@ -79359,6 +79450,15 @@ export async function requestSessionTurnRecovery(
           version: turn.version + 1,
           metadata: {
             ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
+            ...(retryNotBefore
+              ? {
+                  [RECOVERY_RETRY_METADATA_KEY]: {
+                    version: 1,
+                    notBefore: retryNotBefore.toISOString(),
+                    afterSequence: sequence,
+                  } satisfies SessionTurnRecoveryRetry,
+                }
+              : {}),
             ...(servingTarget ? { turnPendingServingPolicyV1: servingTarget } : {}),
             ...(input.subscriptionLeaseBusy
               ? {
@@ -79444,6 +79544,10 @@ export async function requestSessionTurnRecovery(
         sessionId: input.sessionId,
         temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
         reason: "turn_recovery_requested",
+        // The backstop wake fires when the backoff ends, not immediately: an
+        // immediate wake would end the workflow's backoff hold seconds after
+        // it began and spend the whole recovery budget within a minute.
+        ...(retryNotBefore ? { notBefore: retryNotBefore } : {}),
       });
       return {
         action: "recovering" as const,

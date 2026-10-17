@@ -854,6 +854,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       triggerEventId: attempt.triggerEventId!,
       attemptId: input.attemptId,
       reason: SESSION_USAGE_CUSTODY_PENDING,
+      retryAfterMs: SESSION_USAGE_CUSTODY_RECHECK_MS,
       detail: {
         code: SESSION_USAGE_CUSTODY_PENDING,
         retryable: true,
