@@ -160,7 +160,7 @@ DECLARE
   new_qual text;
   new_check text;
   prefix text;
-  rewritten integer := 0;
+  visibility_rewritten boolean := false;
 BEGIN
   qualified_private_call := pg_catalog.format(
     '%I.session_private_actor_visible(account_id, workspace_id, owner_organization_membership_id, owner_subject_id)',
@@ -222,6 +222,7 @@ BEGIN
         RAISE EXCEPTION 'session_visibility_isolation has no private-actor predicate to guard'
           USING ERRCODE = '55000';
       END IF;
+      visibility_rewritten := true;
     ELSIF policy.polname = 'site_viewer_isolation' THEN
       prefix := site_prefix;
     ELSE
@@ -236,10 +237,11 @@ BEGIN
       prefix,
       new_check
     );
-    rewritten := rewritten + 1;
   END LOOP;
-  IF rewritten <> 3 THEN
-    RAISE EXCEPTION 'Missing sessions policy contract (% of 3 found)', rewritten
+  -- The Site and writer-protocol policies are optional here: a database that
+  -- lacks one simply has nothing to speed up for it.
+  IF NOT visibility_rewritten THEN
+    RAISE EXCEPTION 'Missing sessions policy contract: session_visibility_isolation'
       USING ERRCODE = '55000';
   END IF;
 END
