@@ -204,6 +204,64 @@ impl SleepConfig {
 /// The most guest memory a sandbox may have, in MiB.
 pub const MAX_MEMORY_MIB: u32 = 65_536;
 
+/// A sandbox image built from an OCI image (ADR 19): the BLAKE3 digest of
+/// its ext4 file, written as 64 lowercase hex digits. The same file always
+/// has the same id, on every host, and a host checks a fetched image
+/// against it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ImageId(pub [u8; 32]);
+
+impl fmt::Display for ImageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for ImageId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ImageId({self})")
+    }
+}
+
+impl FromStr for ImageId {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, String> {
+        let bad = || format!("image id {text:?} is not 64 lowercase hex digits");
+        let digits = text.as_bytes();
+        if digits.len() != 64 {
+            return Err(bad());
+        }
+        let nibble = |digit: u8| match digit {
+            b'0'..=b'9' => Some(digit - b'0'),
+            b'a'..=b'f' => Some(digit - b'a' + 10),
+            _ => None,
+        };
+        let mut id = [0; 32];
+        for (byte, [high, low]) in id.iter_mut().zip(digits.as_chunks::<2>().0) {
+            *byte = (nibble(*high).ok_or_else(bad)? << 4) | nibble(*low).ok_or_else(bad)?;
+        }
+        Ok(Self(id))
+    }
+}
+
+impl Serialize for ImageId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ImageId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// What a sandbox looks like and how it sleeps.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxConfig {
@@ -227,6 +285,10 @@ pub struct SandboxConfig {
     /// How it sleeps; omitted, it never sleeps.
     #[serde(default)]
     pub sleep: SleepConfig,
+    /// The image its disk starts as; omitted, the host's base image. A
+    /// host that does not have it yet fetches it from its store first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageId>,
 }
 
 impl SandboxConfig {
@@ -240,7 +302,15 @@ impl SandboxConfig {
             memory_request_mib: None,
             cpu_request_millis: None,
             sleep,
+            image: None,
         }
+    }
+
+    /// The same, starting from the image `image`.
+    #[must_use]
+    pub fn with_image(mut self, image: ImageId) -> Self {
+        self.image = Some(image);
+        self
     }
 
     /// Guest memory in MiB it is guaranteed.
@@ -725,6 +795,9 @@ pub struct About {
 pub struct TemplateStatus {
     pub vcpus: u8,
     pub memory_mib: u32,
+    /// The image its sandboxes start as; omitted, the host's base image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageId>,
     pub state: TemplateState,
     /// Ready sandboxes of the shape: restored, warm and paused, waiting
     /// for a create to claim one.
@@ -816,6 +889,7 @@ mod tests {
     #[test]
     fn configs_are_validated() {
         let mut config = SandboxConfig {
+            image: None,
             vcpus: 2,
             memory_mib: 1024,
             memory_request_mib: None,

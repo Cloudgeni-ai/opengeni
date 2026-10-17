@@ -28,6 +28,7 @@ mod paging;
 mod pool;
 pub mod protocol;
 pub mod restore_notice;
+pub mod rootfs;
 mod server;
 mod state;
 mod step;

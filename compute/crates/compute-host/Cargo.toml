@@ -19,6 +19,7 @@ blake3 = "1.8"
 clap = { version = "4", features = ["derive"] }
 compute-core = { path = "../compute-core" }
 compute-engine = { path = "../compute-engine" }
+compute-image = { path = "../compute-image" }
 compute-pager = { path = "../compute-pager" }
 compute-storage = { path = "../compute-storage" }
 futures = "0.3"
@@ -41,6 +42,11 @@ tikv-jemallocator = { version = "0.7", features = [
 
 [dev-dependencies]
 async-trait = "0.1"
+base64 = "0.22"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 

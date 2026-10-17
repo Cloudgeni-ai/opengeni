@@ -3,7 +3,7 @@
 use super::*;
 
 fn shape(vcpus: u8, memory_mib: u32) -> Shape {
-    Shape { vcpus, memory_mib }
+    Shape::new(vcpus, memory_mib)
 }
 
 fn template(shape: Shape) -> Template {
@@ -138,6 +138,7 @@ fn inputs_follow_file_contents() {
     let sources = Sources {
         kernel: file("vmlinux", "kernel"),
         base_image: file("base.img", "base one"),
+        rootfs: Arc::new(Cache::open(dir.path().join("rootfs"), PoolConfig::UNUSED_AFTER).unwrap()),
         depends_on: Vec::new(),
         boot_args: String::new(),
         networked: false,

@@ -414,7 +414,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(error));
             return;
         }
-        self.template_used(Shape::of(&config));
+        let shape = Shape::of(&config);
+        self.template_used(shape);
         let Some((config, reply)) = self.claim(id, config, reply) else {
             return;
         };
@@ -435,22 +436,55 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
         };
-        let template = self.template_for(Shape::of(&config));
+        self.prepare(Record::new(id, ordinal, allocation, config), reply);
+    }
+
+    /// Makes the files of the new sandbox `record` describes in the
+    /// background, then records it; [`Event::Prepared`] says how it went.
+    fn prepare(&mut self, mut record: Record, reply: Reply<()>) {
+        let (id, ordinal) = (record.id, record.ordinal);
+        let shape = Shape::of(&record.config);
+        // A template of an image the host has yet to fetch is asked for
+        // once it has it (see `prepared`).
+        let template = if shape.image.is_none_or(|image| self.rootfs.has(image)) {
+            self.template_for(shape)
+        } else {
+            None
+        };
         let sources = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources));
-        let mut record = Record::new(id, ordinal, allocation, config);
         let link = Images::link(&record);
         let paths = Paths::new(&self.root, id);
         let dir = paths.dir.clone();
         let base = self.base_image.clone();
+        let (rootfs, store) = (Arc::clone(&self.rootfs), Arc::clone(&self.store));
         let records = Arc::clone(&self.records);
         let net = self.net.clone();
         let events = self.events_tx.clone();
         tokio::spawn(async move {
+            // Held until its disk is copied, so it is not removed meanwhile.
+            let image = match shape.image {
+                Some(image) => match rootfs.get(image, &*store).await {
+                    Ok(held) => Some(held),
+                    Err(missing) => {
+                        tracing::warn!(%id, %missing, "a create's image is not to be had");
+                        let _ = events.send(Event::Prepared {
+                            id,
+                            ordinal,
+                            result: Err(missing.into()),
+                            reply,
+                            stale: None,
+                        });
+                        return;
+                    }
+                },
+                None => None,
+            };
+            let first = image.as_ref().map_or(base, |held| held.path.clone());
             let networks = net.clone();
             let from = template.clone();
             let prepared = tokio::task::spawn_blocking(move || {
                 let warm = from.as_deref().zip(sources.as_deref());
-                let start = new_files(&paths, &base, warm)?;
+                let start = new_files(&paths, &first, warm)?;
                 if let (Some(net), Some(link)) = (&networks, &link) {
                     net.ensure(link)?;
                 }
@@ -458,6 +492,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             })
             .await
             .unwrap_or_else(|error| Err(io::Error::other(error)));
+            drop(image);
             let stale = match prepared {
                 Ok(Start::Stale) => template,
                 _ => None,

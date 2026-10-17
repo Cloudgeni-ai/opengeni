@@ -1,0 +1,113 @@
+//! Sandbox images in the store: root file systems built from OCI images.
+//!
+//! An image is known by its id, the BLAKE3 digest of its file. It is stored
+//! like any disk, as content-named chunks and a manifest, and a pointer
+//! named [`rootfs_pointer`] holds a stored copy with only that disk, which
+//! keeps it from sweeps (a sweep already reads such a copy). Like an
+//! archive, a store begins its pointer before it stores anything and
+//! publishes only if no sweep took stock meanwhile; otherwise it starts
+//! again. A fetch checks every chunk, then the whole file against the id.
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::path::Path;
+
+use compute_engine::{CancellationToken, EngineError, ErrorKind};
+use compute_storage::Error as StorageError;
+
+use super::{Chunked, HEAD_VERSION, Head, parse_head, storage_error};
+use crate::protocol::ImageId;
+
+/// The pointer that keeps the image `image`.
+#[must_use]
+pub fn rootfs_pointer(image: ImageId) -> String {
+    format!("rootfs-{image}")
+}
+
+/// The id of the file at `path`: the BLAKE3 digest of its bytes.
+pub async fn file_id(path: &Path) -> Result<ImageId, EngineError> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update_reader(std::io::BufReader::with_capacity(
+            1 << 20,
+            File::open(&path)?,
+        ))?;
+        Ok(ImageId(*hasher.finalize().as_bytes()))
+    })
+    .await
+    .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, "hash image", error))?
+    .map_err(|error: std::io::Error| EngineError::io("hash image", error))
+}
+
+/// Stores refused because a sweep took stock meanwhile, before giving up.
+const TRIES: u32 = 3;
+
+impl Chunked {
+    /// Stores the image at `path` and returns its id.
+    pub async fn put_rootfs(&self, path: &Path) -> Result<ImageId, EngineError> {
+        const OP: &str = "store image";
+        let digest = file_id(path).await?;
+        for _ in 0..TRIES {
+            let publication = self
+                .chunks
+                .begin(&rootfs_pointer(digest))
+                .await
+                .map_err(|error| storage_error(OP, error))?;
+            let disk = self
+                .put_file(
+                    path,
+                    File::open(path),
+                    HashMap::new(),
+                    None,
+                    &CancellationToken::new(),
+                )
+                .await?
+                .ok_or_else(|| EngineError::new(ErrorKind::Fatal, OP, "not stored"))?;
+            let head = Head {
+                version: HEAD_VERSION,
+                disk,
+                memory: None,
+                profile: None,
+                pack: None,
+            };
+            let bytes = serde_json::to_vec(&head)
+                .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
+            match self.chunks.publish(publication, bytes).await {
+                Ok(()) => return Ok(digest),
+                Err(StorageError::Superseded) => {
+                    tracing::info!(%digest, "a sweep took stock while the image was stored; storing again");
+                }
+                Err(error) => return Err(storage_error(OP, error)),
+            }
+        }
+        Err(storage_error(OP, StorageError::Superseded))
+    }
+
+    /// Writes the stored image `image` to `path`. False if the store does
+    /// not hold it.
+    pub async fn get_rootfs(&self, image: ImageId, path: &Path) -> Result<bool, EngineError> {
+        const OP: &str = "fetch image";
+        let Some(pointer) = self
+            .chunks
+            .get_pointer(&rootfs_pointer(image))
+            .await
+            .map_err(|error| storage_error(OP, error))?
+            .filter(|pointer| !pointer.is_empty())
+        else {
+            return Ok(false);
+        };
+        let head = parse_head(OP, &pointer)?;
+        self.get_file(&head.disk, path, None).await?;
+        let fetched = file_id(path).await?;
+        if fetched != image {
+            let _ = std::fs::remove_file(path);
+            return Err(EngineError::new(
+                ErrorKind::Fatal,
+                OP,
+                format!("image {image} arrived as {fetched}"),
+            ));
+        }
+        Ok(true)
+    }
+}

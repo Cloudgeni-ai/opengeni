@@ -2,20 +2,24 @@
 //! them to new sandboxes (see [`crate::pool`]).
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use compute_core::{DiskSpace, Input};
 use compute_engine::Engine;
 use tokio::time::Instant;
 
 use crate::layout::{Images, templates_dir};
-use crate::pool::{self, Build, Built, Held, Pool, PoolConfig, Shape, Sources, Template, Uses};
-use crate::protocol::Id;
+use crate::pool::{self, Build, Built, Held, Pool, Shape, Sources, Template, Uses};
+use crate::protocol::{Id, ImageId};
+use crate::rootfs::Cache;
 use crate::store::Store;
 
-use super::{Event, HostAgent, SAVE_EXTRA, Warm};
+use super::{Event, HostAgent, HostConfig, SAVE_EXTRA, Warm};
+
+/// How often unused images are looked for.
+const ROOTFS_RETIRE_EVERY: Duration = Duration::from_secs(60);
 
 /// How a starting agent stands with templates.
 pub(super) struct Started {
@@ -35,22 +39,22 @@ impl Warm {
     /// if it keeps any, keeps the templates that still fit today's inputs
     /// and whose shapes have been used lately; the others retire.
     pub(super) async fn start<E: Engine>(
-        config: Option<PoolConfig>,
         engine: &E,
-        root: &Path,
-        base_image: &Path,
-        networked: bool,
+        host: &HostConfig,
+        rootfs: &Arc<Cache>,
         images: &Images,
     ) -> Started {
+        let (config, root) = (host.pool.clone(), host.root.as_path());
         let (depends_on, ready_port) = config.as_ref().map_or((Vec::new(), 0), |config| {
             (config.depends_on.clone(), config.ready_port)
         });
         let sources = Arc::new(Sources {
             kernel: images.kernel.clone(),
-            base_image: base_image.to_owned(),
+            base_image: host.base_image.clone(),
+            rootfs: Arc::clone(rootfs),
             depends_on,
             boot_args: images.boot_args.clone(),
-            networked,
+            networked: host.network.is_some(),
             memory: format!("{:?}", engine.memory_profile()),
             ready_port,
             hashes: std::sync::Mutex::default(),
@@ -160,6 +164,29 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.build_template(shape);
         }
         template
+    }
+
+    /// The image a sandbox's disk starts as: `image`, or the host's base
+    /// image.
+    pub(super) fn image_path(&self, image: Option<ImageId>) -> PathBuf {
+        image.map_or_else(|| self.base_image.clone(), |image| self.rootfs.path(image))
+    }
+
+    /// Removes the images no create used for as long as a template may go
+    /// unused, unless a template of theirs is kept or being built; looks at
+    /// most once a minute.
+    pub(super) fn retire_unused_images(&mut self) {
+        if self.rootfs_retired.elapsed() < ROOTFS_RETIRE_EVERY {
+            return;
+        }
+        self.rootfs_retired = Instant::now();
+        let keep = self
+            .warm
+            .as_ref()
+            .map(|warm| warm.pool.images())
+            .unwrap_or_default();
+        let rootfs = Arc::clone(&self.rootfs);
+        tokio::spawn(async move { rootfs.retire(&keep, SystemTime::now()).await });
     }
 
     /// Records a create of `shape`, which keeps its template from retiring.
@@ -299,7 +326,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let disk = pool::build_disk(
             shape,
-            &[&sources.base_image, &sources.kernel],
+            &[&sources.image(shape), &sources.kernel],
             self.allocation_unit,
             self.save_copies,
             SAVE_EXTRA,

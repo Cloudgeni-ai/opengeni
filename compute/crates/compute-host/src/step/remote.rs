@@ -174,7 +174,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             scratch: scratch.clone(),
             profile: wake_profile(&paths),
             memory: self.record.image,
-            seed: Some(self.base_image.clone()),
+            seed: Some(self.disk_image.clone()),
         };
         let fetched = match self.store.fetch(self.id, &into).await {
             Ok(fetched) => fetched,

@@ -14,7 +14,8 @@ use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
 use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::protocol::{
-    About, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
+    About, Id, ImageId, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
+    step_name,
 };
 use compute_host::{
     BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, Keep, NoStore, PagerConfig,
@@ -78,6 +79,10 @@ enum Command {
         /// Let memory pressure compress the sandbox's memory while paused.
         #[arg(long)]
         compress: Option<bool>,
+        /// The image its disk starts as (ADR 19), by the id `build-image`
+        /// printed; defaults to the host's base image.
+        #[arg(long)]
+        image: Option<ImageId>,
     },
     /// Delete a sandbox.
     Remove { id: Id },
@@ -109,6 +114,8 @@ enum Command {
     },
     /// Create many sandboxes, let them sleep, then wake them all at once.
     Bench(BenchArgs),
+    /// Build a sandbox image from an OCI image (ADR 19), and store it.
+    BuildImage(Box<compute_host::rootfs::BuildArgs>),
     /// Delete the chunks and manifests in object storage that no sandbox's
     /// stored copy names any more, on any host. Run on a schedule, such as
     /// daily; safe while agents archive. Without `--delete`, only reports.
@@ -418,6 +425,7 @@ async fn agent_main() -> anyhow::Result<()> {
             recommended,
             sleep,
             compress,
+            image,
         } => {
             let mut settings = if recommended {
                 SleepConfig::RECOMMENDED
@@ -431,6 +439,7 @@ async fn agent_main() -> anyhow::Result<()> {
                 settings.compress = compress;
             }
             let config = SandboxConfig {
+                image,
                 vcpus,
                 memory_mib,
                 memory_request_mib,
@@ -483,6 +492,7 @@ async fn agent_main() -> anyhow::Result<()> {
         }
         Command::Exec { id, script, port } => exec(&client, id, port, &script).await,
         Command::Bench(args) => bench(&client, &args).await,
+        Command::BuildImage(args) => compute_host::rootfs::build(*args).await,
         Command::Sweep { store, delete } => {
             let chunked = Chunked::from_url(&store)?
                 .with_context(|| format!("{store} is not an object storage URL"))?;

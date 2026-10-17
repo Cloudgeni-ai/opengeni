@@ -33,6 +33,7 @@ use crate::net::{NetworkConfig, Networks};
 use crate::pool::{Built, Lender, Loaning, Pool, PoolConfig, Shape, Sources, Template, Uses};
 
 use crate::protocol::{About, HostStatus, Id, SandboxConfig, StepStats};
+use crate::rootfs::{Cache, Missing};
 use crate::state::{Record, Records, StateError, claim_host, unix_ms_now};
 use crate::step::{After, Live};
 use crate::store::Store;
@@ -324,6 +325,17 @@ impl From<StateError> for HostError {
             StateError::NotFound(id) => Self::NotFound(id),
             StateError::Exists(id) => Self::Exists(id),
             other => Self::Io(other.to_string()),
+        }
+    }
+}
+
+impl From<Missing> for HostError {
+    /// An image nowhere to be had is the caller's mistake; a failed fetch
+    /// may succeed when retried.
+    fn from(missing: Missing) -> Self {
+        match missing {
+            Missing::Unknown(_) => Self::Invalid(missing.to_string()),
+            Missing::Failed { .. } => Self::Io(missing.to_string()),
         }
     }
 }
@@ -641,6 +653,10 @@ pub struct HostAgent<E: Engine, S: Store> {
     net: Option<Arc<Networks>>,
     root: PathBuf,
     base_image: PathBuf,
+    /// The sandbox images creates name (ADR 19).
+    rootfs: Arc<Cache>,
+    /// When unused images were last looked for.
+    rootfs_retired: Instant,
     images: Images,
     warm: Option<Warm>,
     core: Host,
@@ -803,6 +819,21 @@ impl Activity for Toucher {
     }
 }
 
+/// The host's sandbox images. An image goes unused as long as a template
+/// may before it is removed.
+async fn open_rootfs(config: &HostConfig) -> Result<Arc<Cache>, HostError> {
+    let dir = crate::layout::rootfs_dir(&config.root);
+    let unused_after = config
+        .pool
+        .as_ref()
+        .map_or(PoolConfig::UNUSED_AFTER, |pool| pool.unused_after);
+    let cache = tokio::task::spawn_blocking(move || Cache::open(dir, unused_after))
+        .await
+        .map_err(|error| HostError::Io(error.to_string()))?
+        .map_err(|error| HostError::Io(format!("sandbox images: {error}")))?;
+    Ok(Arc::new(cache))
+}
+
 /// Why `config` cannot run an agent, if it cannot.
 fn check_config(config: &HostConfig) -> Result<(), String> {
     check_root(&config.root)?;
@@ -857,6 +888,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let reserve_whole = engine.memory_profile().pages == PageSize::Huge;
         let allocation_unit = allocation_unit(&config.root)?;
         let save_copies = save_copies(&config.root)?;
+        let rootfs = open_rootfs(&config).await?;
         // Template VMs an earlier agent left are ended before any sandbox
         // can be given the user one of them ran as.
         let warm::Started {
@@ -864,15 +896,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             shapes: warm_shapes,
             held,
             ready,
-        } = Warm::start(
-            config.pool,
-            &engine,
-            &config.root,
-            &config.base_image,
-            config.network.is_some(),
-            &images,
-        )
-        .await;
+        } = Warm::start(&engine, &config, &rootfs, &images).await;
         let about = About {
             runtime: engine.runtime().to_owned(),
             ..config.about
@@ -889,6 +913,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             images,
             root: config.root,
             base_image: config.base_image,
+            rootfs,
+            rootfs_retired: Instant::now(),
             warm,
             memory_policy: config.policy.memory,
             ready: ready::Ready::new(ready),

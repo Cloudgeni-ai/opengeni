@@ -140,6 +140,7 @@ impl<V> Ready<V> {
             let shape = Shape {
                 vcpus: status.vcpus,
                 memory_mib: status.memory_mib,
+                image: status.image,
             };
             let held = usage.get(&shape).copied().unwrap_or_default();
             status.ready = held.count;
@@ -479,11 +480,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return false;
             }
         };
-        let config = SandboxConfig::new(
-            shape.vcpus,
-            shape.memory_mib,
-            crate::protocol::SleepConfig::default(),
-        );
+        let config = SandboxConfig {
+            image: shape.image,
+            ..SandboxConfig::new(
+                shape.vcpus,
+                shape.memory_mib,
+                crate::protocol::SleepConfig::default(),
+            )
+        };
         let mut record = Record::new(host, ordinal, allocation, config);
         record.ready = true;
         record.image = true;
@@ -498,7 +502,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             job: self.job(record, spec, paths, CancellationToken::new()),
             template: Arc::clone(template),
             sources,
-            base: self.base_image.clone(),
+            base: self.image_path(shape.image),
             link,
             net: self.net.clone(),
             records: Arc::clone(&self.records),

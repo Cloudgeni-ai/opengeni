@@ -15,7 +15,7 @@ use tokio::time::{Instant, sleep};
 
 use crate::layout::{Paths, vm_spec};
 use crate::net::Networks;
-use crate::pool::{Loaning, Template};
+use crate::pool::{Loaning, Shape, Template};
 use crate::protocol::Id;
 use crate::restore_notice::ask_commands;
 use crate::state::{Change, Fence, Record, Records};
@@ -135,6 +135,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let Ok(policy) = self.sleep_policy(&record.config) else {
             return;
         };
+        // A create that had to fetch its image could not ask for its
+        // shape's template before; the host has the image now.
+        if record.config.image.is_some() && !record.image {
+            let _ = self.template_for(Shape::of(&record.config));
+        }
         let paths = Paths::of(&self.root, &record);
         let spec = vm_spec(&record, &paths, &self.images);
         let size = self.size(&record.config);
@@ -436,6 +441,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .core
             .sandbox(record.id.0)
             .map_or_else(|| self.now(), |view| view.last_activity);
+        let disk_image = self.image_path(record.config.image);
         Job {
             engine: Arc::clone(&self.engine),
             store: Arc::clone(&self.store),
@@ -447,7 +453,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             cancel,
             live: None,
             restore_notice_port: self.restore_notice_port,
-            base_image: self.base_image.clone(),
+            disk_image,
             kernel: self.images.kernel.clone(),
             #[cfg(target_os = "linux")]
             fetcher: self.fetcher.clone(),

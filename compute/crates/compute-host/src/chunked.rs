@@ -48,7 +48,7 @@ use tokio::sync::{Mutex, Semaphore};
 pub use crate::image::CHUNK_BYTES;
 use crate::image::{Hash, ZERO, chunk_count, chunk_range, hash_chunks};
 use crate::lanes::Lanes;
-use crate::protocol::Id;
+use crate::protocol::{Id, ImageId};
 use crate::store::{Archive, FetchInto, FetchedMemory, Prefilled, Receipt, SavedFiles, Store};
 use crate::working_set::{self, WakeProfile};
 
@@ -743,6 +743,10 @@ impl Store for Chunked {
     /// finds nothing names them. The new pointer lands only on the version
     /// read, so a write held up past a newer copy never replaces it; a
     /// sweep's fence meanwhile means reading it again.
+    async fn fetch_image(&self, image: ImageId, path: &Path) -> Result<bool, EngineError> {
+        self.get_rootfs(image, path).await
+    }
+
     async fn forget_memory(&self, id: Id) -> Result<Option<Receipt>, EngineError> {
         const OP: &str = "forget";
         /// Reads before giving up for now: each fence a sweep stored since
@@ -844,5 +848,7 @@ fn storage_error(operation: &'static str, error: StorageError) -> EngineError {
 }
 
 mod files;
+mod rootfs;
+pub(crate) use rootfs::file_id;
 #[cfg(test)]
 mod tests;
