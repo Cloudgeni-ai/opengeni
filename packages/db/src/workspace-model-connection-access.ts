@@ -86,6 +86,7 @@ export async function getWorkspaceConnectionModelRestrictions(
     "organization-gateway/": [],
     "organization-openrouter/": [],
     "organization-opper/": [],
+    "organization-azure-openai/": [],
     "organization-anthropic/": [],
     "organization-claude-subscription/": claudeCoreRestrictions
       ? copied(claudeCoreRestrictions["organization-claude-subscription/"])
@@ -98,7 +99,7 @@ export async function getWorkspaceConnectionModelRestrictions(
     }>(
       tx,
       sql`
-      SELECT CASE provider_kind WHEN 'vercel_gateway' THEN 'organization-gateway/' WHEN 'anthropic' THEN 'organization-anthropic/' WHEN 'claude_subscription' THEN 'organization-claude-subscription/' WHEN 'opper' THEN 'organization-opper/' ELSE 'organization-openrouter/' END AS prefix,
+      SELECT CASE provider_kind WHEN 'vercel_gateway' THEN 'organization-gateway/' WHEN 'anthropic' THEN 'organization-anthropic/' WHEN 'claude_subscription' THEN 'organization-claude-subscription/' WHEN 'opper' THEN 'organization-opper/' WHEN 'azure_openai' THEN 'organization-azure-openai/' ELSE 'organization-openrouter/' END AS prefix,
         allowed_model_ids AS "allowedModelIds" FROM organization_model_provider_connections WHERE status = 'active' AND provider_kind <> 'claude_subscription'
       UNION ALL
       SELECT CASE metadata->>'credentialRole' WHEN 'vercel_ai_gateway' THEN 'workspace-gateway/' WHEN 'anthropic' THEN 'workspace-anthropic/' WHEN 'claude_subscription' THEN 'workspace-claude-subscription/' WHEN 'opper' THEN 'workspace-opper/' ELSE 'workspace-openrouter/' END,
@@ -170,10 +171,11 @@ export async function assertModelConnectionAllowsTurn(
     model.startsWith("organization-gateway/") ||
     model.startsWith("organization-openrouter/") ||
     model.startsWith("organization-opper/") ||
+    model.startsWith("organization-azure-openai/") ||
     model.startsWith("organization-anthropic/")
   ) {
     query = sql`SELECT allowed_model_ids AS models FROM organization_model_provider_connections
-      WHERE provider_kind = ${model.startsWith("organization-gateway/") ? "vercel_gateway" : model.startsWith("organization-anthropic/") ? "anthropic" : model.startsWith("organization-claude-subscription/") ? "claude_subscription" : model.startsWith("organization-opper/") ? "opper" : "openrouter"} AND status = 'active'`;
+      WHERE provider_kind = ${model.startsWith("organization-gateway/") ? "vercel_gateway" : model.startsWith("organization-anthropic/") ? "anthropic" : model.startsWith("organization-claude-subscription/") ? "claude_subscription" : model.startsWith("organization-opper/") ? "opper" : model.startsWith("organization-azure-openai/") ? "azure_openai" : "openrouter"} AND status = 'active'`;
   } else if (
     model.startsWith("workspace-gateway/") ||
     model.startsWith("workspace-openrouter/") ||
