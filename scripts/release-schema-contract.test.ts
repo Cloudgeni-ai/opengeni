@@ -2325,6 +2325,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0821_session_history_owner_backfill_repair.sql",
       "0819_session_pin_owner_short_circuit.sql",
       "0813_preserve_accepted_learning_scope.sql",
       "0812_session_events_usage_source_key_index.sql",

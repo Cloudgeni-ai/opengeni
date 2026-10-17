@@ -11,6 +11,10 @@ import { migrateLegacySkillConfigurations } from "./skill-config-migration";
 import { batchedBackfillTransactionLocalSetting } from "./migration-runner-settings";
 import { migrationSqlForServer } from "./migration-postgres-compatibility";
 import {
+  executeSessionHistoryBackfills,
+  sessionHistoryBackfillPlan,
+} from "./migration-session-history-backfills";
+import {
   CLAUDE_POOL_MIGRATION_MARKER,
   migrateClaudeSubscriptionPoolCredentials,
 } from "./claude-subscription-pool-migration";
@@ -260,6 +264,11 @@ export async function executeMigrationFile(
     "preinstalledVector" | "environmentsEncryptionKey" | "interruptedTurnRetirement"
   >,
 ): Promise<void> {
+  const sessionHistoryPlan = sessionHistoryBackfillPlan(file, sqlText);
+  if (sessionHistoryPlan) {
+    await executeSessionHistoryBackfills(sql, sessionHistoryPlan);
+    return;
+  }
   sqlText = await migrationSqlForServer(sql, file, sqlText);
   if (sqlText.includes(INTERRUPTED_TURN_RETIREMENT_MARKER)) {
     if (file !== INTERRUPTED_TURN_RETIREMENT_MIGRATION)
