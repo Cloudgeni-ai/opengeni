@@ -421,12 +421,19 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "fullEvidenceAvailable",
   "retainedOutputKind",
   "suppressedCount",
+  // On-demand CPU profile summaries (cpu-sampling.ts): counts and durations.
+  "cpuProfileWindowMs",
+  "cpuProfileSamples",
+  "cpuProfileBusyMs",
+  "cpuProfileLongestBlockMs",
+  "cpuProfileBlocksOver100Ms",
 ]);
 
 /** Opaque correlation fields require both a reviewed name and a closed value
  * grammar. Merely adding one to the ordinary allow-list would let an unrelated
  * caller accidentally publish a raw identifier under that name. */
 const HTTP_REJECTION_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+const CPU_PROFILE_FRAMES_PATTERN = /^[\w$<>()[\]:./@ |#*,-]{0,2000}$/;
 const HTTP_REJECTION_REASON_PATTERN =
   /^(?:permission:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*|control:[a-z][a-z0-9_]{0,31}|[A-Za-z][A-Za-z0-9_.-]{0,63})$/;
 
@@ -449,6 +456,12 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   // enum and a code-registered workflow type name, never an identifier.
   ["sdkComponent", TEMPORAL_SDK_COMPONENT_PATTERN],
   ["workflowType", TEMPORAL_TYPE_NAME_PATTERN],
+  // CPU profile summaries: the report file under the temp directory, and
+  // sampled code locations (function names and bundle file:line:column,
+  // joined with counts and separators). Code identity, never request data.
+  ["cpuProfilePath", /^\/[\w./-]{1,255}$/],
+  ["cpuProfileTopSelf", CPU_PROFILE_FRAMES_PATTERN],
+  ["cpuProfileLongestBlockTopStack", CPU_PROFILE_FRAMES_PATTERN],
 ]);
 
 /**
