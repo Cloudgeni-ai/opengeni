@@ -40,8 +40,11 @@ can be built and tested.
   counts on its own monotonic clock, and a host is lost once its count has
   not moved for T plus a margin (5 s). Marking it lost is conditional on
   the count it watched (`… where renewals = $seen and state = 'live'`), so
-  a renewal accepted meanwhile saves it. A new leader starts with nothing
-  seen and so waits a whole T plus margin. No two clocks are compared;
+  a renewal accepted meanwhile saves it. The leader times a count from
+  when the read that showed it returned, never from when it was sent, so
+  a slow read cannot make a renewal look older than it is. A new leader
+  starts with nothing seen and so waits a whole T plus margin. No two
+  clocks are compared;
   each needs only to run at a rate within a stated bound of true time
   (below).
 - **A cut-off host stops its VMs, with or without its agent.** The host's
@@ -97,10 +100,22 @@ can be built and tested.
   Their writes to object storage are still fenced, but what they run and
   send over the network is not. Cloud live migration pauses a VM for well
   under a second, far inside the margin, so only an abnormally long pause
-  matters. Where even that must be excluded, the leader stops a lost
-  host's instance through the cloud's API, and waits for the cloud to
-  confirm it stopped, before it hands the host's sandboxes on; for hosts
-  in a cloud host group it does so anyway.
+  matters. For hosts in a cloud host group the leader excludes even that:
+  before it gives up on a lapsed host it fences the instance through the
+  cloud's API and waits for the cloud to confirm it. A running instance is
+  reset, a hard power cycle with no guest shutdown, so its VMs are gone
+  the moment the reset is done, while its local disk, and the sandboxes
+  on it that were never archived, stay for the host to offer back when it
+  registers again. One already stopped or deleted needs nothing; one being
+  created or started is reset as well; a suspended one is stopped. A
+  fence the cloud does not confirm in two minutes, or that fails, keeps
+  the host live and is tried again five seconds later, so nothing is
+  handed on from a host whose VMs might still run. Once given up on, a
+  stopped instance is started again, and the scaling step starts any
+  stopped member whose host is lost or never registered, so the group
+  keeps its size. Only zonal groups are supported, since a fence must name
+  the instance's zone. Hosts outside a group rely on their deadline, guard
+  and watchdog alone.
 - **A host that comes back is fenced until it has caught up.** It
   registers again only once its last registration lapsed (the store
   refuses while that one is live, since its VMs may still run), and lists
@@ -214,6 +229,11 @@ can be built and tested.
   new epoch and adopts it there from the archive; a late answer about the
   old epoch then changes nothing. A sandbox with no owner, because its
   host was lost or it was released, is placed like a create and adopted.
+  A row is never written naming an owner the leader gave up on: the
+  write checks the owner host's state in the same statement, under a
+  share lock on its row, so it is refused (`owner lost`) if the leader
+  marked the host lost after the view placed on it, and the service
+  places the sandbox again elsewhere.
 - **Recovery.** When the leader marks a host lost (so a late renewal fails
   and the host must register again), it raises the owner epoch of each of
   its sandboxes and clears their owner. Each comes back on its next wake,

@@ -41,8 +41,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
+object_store = "0.12.4"
 rcgen = "0.13"
 tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
 
 [lints]
 workspace = true

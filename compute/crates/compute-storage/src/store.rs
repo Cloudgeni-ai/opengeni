@@ -70,6 +70,17 @@ enum Uploader {
     ReadBack,
 }
 
+/// Told about every stored object found bad, and about each copy of one
+/// kept in quarantine, for example to raise alarms. Called from whichever
+/// task found it, so it must not wait.
+pub trait QuarantineWatch: Send + Sync + std::fmt::Debug {
+    /// The object stored under `key` (relative to the store's prefix) is
+    /// bad, for the reason `why` gives: it failed its check on every read.
+    fn verification_failed(&self, key: &str, why: &str);
+    /// A copy of the bad object under `key` is now kept in quarantine.
+    fn quarantined(&self, key: &str);
+}
+
 #[derive(Clone, Debug)]
 pub struct ChunkStore {
     backend: Arc<dyn ObjectStore>,
@@ -77,6 +88,7 @@ pub struct ChunkStore {
     uploader: Uploader,
     freshness: Freshness,
     clock: Clock,
+    watch: Option<Arc<dyn QuarantineWatch>>,
 }
 
 /// The kinds of stored object, each under its own prefix.
@@ -137,6 +149,16 @@ impl ChunkStore {
             uploader: Uploader::ReadBack,
             freshness: Freshness::DEFAULT,
             clock: Clock::system(),
+            watch: None,
+        }
+    }
+
+    /// The same store telling `watch` about every object it quarantines.
+    #[must_use]
+    pub fn with_watch(self, watch: Arc<dyn QuarantineWatch>) -> Self {
+        Self {
+            watch: Some(watch),
+            ..self
         }
     }
 
@@ -172,6 +194,7 @@ impl ChunkStore {
             uploader: Uploader::Gcs(crate::fake::gcs(fake)),
             freshness: Freshness::DEFAULT,
             clock: fake.clock.clone(),
+            watch: None,
         }
     }
 
@@ -228,6 +251,7 @@ impl ChunkStore {
             uploader,
             freshness: Freshness::DEFAULT,
             clock: Clock::system(),
+            watch: None,
         }))
     }
 
@@ -286,7 +310,8 @@ impl ChunkStore {
         // write or a damaged copy. Keep it for inspection and write ours
         // over it; the name allows no other bytes, so this cannot replace
         // a good object.
-        self.quarantine(&path).await?;
+        self.quarantine(&path, "other bytes are stored under its name")
+            .await?;
         self.replace(&path, &bytes).await?;
         if self.holds(&path, &bytes).await? {
             Ok(true)
@@ -373,7 +398,7 @@ impl ChunkStore {
     /// Copies the object at `path` under `quarantine/v1/` for inspection.
     /// The object itself stays: only a write of the bytes its name allows
     /// replaces it, so a copy repaired meanwhile is never lost.
-    async fn quarantine(&self, path: &Path) -> Result<()> {
+    async fn quarantine(&self, path: &Path, why: &str) -> Result<()> {
         // Unique per move, so quarantining the same name twice keeps both.
         static MOVES: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
@@ -389,9 +414,19 @@ impl ChunkStore {
             })
             .unwrap_or_default()
             .join("/");
+        if let Some(watch) = &self.watch {
+            watch.verification_failed(&relative, why);
+        }
         let target = self.path(&format!("quarantine/v1/{relative}.{nanos}-{moves}"));
         match self.backend.copy(path, &target).await {
-            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Ok(()) => {
+                if let Some(watch) = &self.watch {
+                    watch.quarantined(&relative);
+                }
+                Ok(())
+            }
+            // Gone meanwhile: nothing to keep.
+            Err(object_store::Error::NotFound { .. }) => Ok(()),
             Err(error) => Err(error.into()),
         }
     }
@@ -438,7 +473,7 @@ impl ChunkStore {
             match self.read_chunk(&path, reference).await {
                 Err(Error::Integrity | Error::Truncated { .. }) if attempt == 1 => {}
                 Err(error @ (Error::Integrity | Error::Truncated { .. })) => {
-                    self.quarantine(&path).await?;
+                    self.quarantine(&path, &error.to_string()).await?;
                     return Err(error);
                 }
                 result => return result,
@@ -481,6 +516,9 @@ impl ChunkStore {
         format!("manifests/v1/{digest}.json")
     }
 
+    /// Reads the manifest whose digest is `digest`, checking it. A read
+    /// that does not match its digest is tried once more, since the damage
+    /// may have happened in transit; one bad twice is copied to quarantine.
     pub async fn get_manifest(&self, digest: &str) -> Result<DiskManifest> {
         if digest.len() != 64
             || !digest
@@ -489,10 +527,24 @@ impl ChunkStore {
         {
             return Err(Error::Invalid("manifest digest"));
         }
-        let result = self
-            .backend
-            .get(&self.path(&Self::manifest_key(digest)))
-            .await?;
+        let path = self.path(&Self::manifest_key(digest));
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.read_manifest(&path, digest).await {
+                Err(Error::Integrity) if attempt == 1 => {}
+                Err(Error::Integrity) => {
+                    self.quarantine(&path, "the manifest does not match its digest")
+                        .await?;
+                    return Err(Error::Integrity);
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn read_manifest(&self, path: &Path, digest: &str) -> Result<DiskManifest> {
+        let result = self.backend.get(path).await?;
         if result.meta.size > MAX_MANIFEST_BYTES as u64 {
             return Err(Error::Invalid("manifest too large"));
         }

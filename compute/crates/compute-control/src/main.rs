@@ -131,7 +131,7 @@ impl Serve {
             "--scale-host-memory-mib is needed to grow a group"
         );
         Ok(Some(Scaling {
-            group: GcpGroup::new(path, &self.gcp_api, &self.gcp_metadata)?,
+            group: std::sync::Arc::new(GcpGroup::new(path, &self.gcp_api, &self.gcp_metadata)?),
             policy: ScalePolicy {
                 spare_per_mille: self.scale_spare_per_mille,
                 spare_largest: self.scale_spare_largest,

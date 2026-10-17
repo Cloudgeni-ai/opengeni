@@ -88,16 +88,17 @@ impl Host {
         if bytes == 0 {
             self.unmanaged.remove(&sandbox);
             self.removed_claims.remove(&sandbox);
+            self.removal_ended(sandbox);
         } else {
             // A spare VM that could not be ended moves to this book: it
             // freed nothing, so it is no relief. One still filling may go
-            // on taking memory, so its claim lasts until it is gone; what
-            // it wrote stays booked until the next disk reading.
+            // on taking memory and writing, so its claim and its disk
+            // booking last until it is gone.
             if let Some(spare) = self.spares.vms.remove(&sandbox) {
                 if spare.filling {
                     *self.removed_claims.entry(sandbox).or_default() += spare.bytes;
                 }
-                self.disk_spent = self.disk_spent.add(spare.disk);
+                self.book_removed(sandbox, spare.disk);
             }
             self.unmanaged.insert(sandbox, bytes);
         }
@@ -135,6 +136,9 @@ impl Host {
         if spare.filling && !filling {
             self.unread_claims = self.unread_claims.saturating_add(spare.bytes);
         }
+        // What it no longer books may have been written, such as a ready
+        // sandbox's disk copy once it is filled: the next reading shows it.
+        self.disk_spent = self.disk_spent.add(spare.disk.saturating_sub(disk));
         spare.bytes = bytes;
         spare.disk = disk;
         spare.filling = filling;
@@ -179,10 +183,7 @@ impl Host {
     /// reading.
     #[must_use]
     pub fn spare_fits(&self, bytes: u64, disk: DiskSpace) -> bool {
-        self.spare_room().is_none_or(|room| room >= bytes)
-            && self
-                .disk_room()
-                .is_none_or(|mut room| room.take(disk).is_ok())
+        self.spare_room().is_none_or(|room| room >= bytes) && self.disk_shortage(disk).is_none()
     }
 
     /// Asks ready spare VMs to end, oldest first, until they free `needed`

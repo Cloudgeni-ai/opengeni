@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 blake3 = "1.8"
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
 compute-core = { path = "../compute-core" }
 compute-engine = { path = "../compute-engine" }
@@ -26,7 +27,7 @@ compute-storage = { path = "../compute-storage" }
 futures = "0.3"
 getrandom = { version = "0.3", features = ["std"] }
 object_store = { version = "0.12.4", features = ["aws", "azure", "gcp"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-manual-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-manual-roots", "rustls-tls-native-roots"] }
 rustix = { version = "1", features = ["event", "fs", "param", "process", "thread", "time"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 memmap2 = "0.9"

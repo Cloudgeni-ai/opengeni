@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use compute_core::{HoldId, Level, Priority, Step};
+use compute_core::{HoldId, Level, OpId, Priority, Step};
 use compute_engine::vsock;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -13,11 +13,11 @@ use tokio::time::{Instant, sleep};
 
 use compute_protocol::fleet::Verdict;
 
-use crate::protocol::{HostStatus, Id, SandboxConfig};
-use crate::store::OwnerEpoch;
-
 use super::{Command, Handle, HostError, Lease, Origin, ReleaseOnDrop};
 use crate::fleet::{Admission, LeaseGate};
+use crate::observe::{Observer, TraceContext};
+use crate::protocol::{HostStatus, Id, SandboxConfig};
+use crate::store::OwnerEpoch;
 
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
@@ -35,6 +35,7 @@ impl Handle {
         commands: mpsc::UnboundedSender<Command>,
         stream_idle: Duration,
         lease: Option<LeaseGate>,
+        observer: Observer,
     ) -> Self {
         Self {
             commands,
@@ -42,6 +43,8 @@ impl Handle {
             stream_idle,
             origin: Origin::Local,
             lease,
+            observer,
+            trace: None,
         }
     }
 
@@ -68,10 +71,17 @@ impl Handle {
             command.refuse(HostError::LeaseLapsed);
             return answer.await.map_err(|_| HostError::Stopped);
         }
-        self.commands
-            .send(command)
-            .map_err(|_| HostError::Stopped)?;
+        self.send(command)?;
         answer.await.map_err(|_| HostError::Stopped)
+    }
+
+    /// Sends `command`, carrying the handle's trace if it has one.
+    fn send(&self, command: Command) -> Result<(), HostError> {
+        let command = match self.trace {
+            Some(trace) => Command::Traced(trace, Box::new(command)),
+            None => command,
+        };
+        self.commands.send(command).map_err(|_| HostError::Stopped)
     }
 
     /// A handle for the fleet service's requests about the ownership of a
@@ -183,10 +193,24 @@ impl Handle {
         make: impl FnOnce(oneshot::Sender<T>) -> Command,
     ) -> Result<T, HostError> {
         let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(make(reply))
-            .map_err(|_| HostError::Stopped)?;
+        self.send(make(reply))?;
         answer.await.map_err(|_| HostError::Stopped)
+    }
+
+    /// The same handle, its requests carrying `trace`: the steps they
+    /// cause name the caller's trace on their events.
+    #[must_use]
+    pub fn traced(&self, trace: Option<TraceContext>) -> Self {
+        Self {
+            trace,
+            ..self.clone()
+        }
+    }
+
+    /// Where the host's events and metrics go.
+    #[must_use]
+    pub fn observer(&self) -> &Observer {
+        &self.observer
     }
 
     /// Deletes a sandbox and everything it stores, waiting until it is gone.
@@ -261,6 +285,7 @@ impl Handle {
             vsock: woke.vsock,
             waited: started.elapsed(),
             during: woke.during,
+            op: woke.op,
             generation: woke.generation,
             pinned: generation.is_some(),
             commands: self.commands.clone(),
@@ -304,6 +329,20 @@ impl Handle {
         ttl: Option<Duration>,
         priority: Priority,
     ) -> Result<(), HostError> {
+        self.hold_renewing(id, generation, name, ttl, priority)
+            .await
+            .map(|_| ())
+    }
+
+    /// Like [`Self::hold`], telling whether the hold was already there.
+    pub(crate) async fn hold_renewing(
+        &self,
+        id: Id,
+        generation: Option<u64>,
+        name: &str,
+        ttl: Option<Duration>,
+        priority: Priority,
+    ) -> Result<bool, HostError> {
         self.ask(|reply| Command::Hold {
             id,
             generation,
@@ -313,6 +352,11 @@ impl Handle {
             reply,
         })
         .await?
+    }
+
+    /// One sandbox's level and the step under way, if the host has it.
+    pub(crate) async fn inspect(&self, id: Id) -> Result<Option<(Level, Option<Step>)>, HostError> {
+        self.ask(|reply| Command::Inspect { id, reply }).await
     }
 
     /// Ends a named hold. Ending one that does not exist does nothing. With
@@ -345,6 +389,13 @@ impl Lease {
     #[must_use]
     pub fn during(&self) -> Option<Step> {
         self.during
+    }
+
+    /// The wake step the request waited for, if one ran: its events carry
+    /// the same operation id.
+    #[must_use]
+    pub fn op(&self) -> Option<OpId> {
+        self.op
     }
 
     /// The execution the lease reaches. It changes only when the sandbox

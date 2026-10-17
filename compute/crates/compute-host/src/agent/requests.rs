@@ -9,6 +9,7 @@ use compute_core::{Durability, HoldId, Input, Level, Priority, Resource, Sandbox
 use compute_engine::Engine;
 
 use crate::layout::{Images, Paths, sync_parent};
+use crate::observe::Cause;
 use crate::pool::{Shape, Sources, Start, Template, first_files};
 use crate::protocol::{
     BlockedSandbox, CapacityStatus, DiskStatus, FailedStep, HostStatus, Id, MemoryStatus,
@@ -19,16 +20,18 @@ use crate::step::images_of;
 use crate::store::{OwnerEpoch, Store};
 
 use super::holds::{Write, hold_id};
+use super::observe::Why;
 use super::{Command, Event, HostAgent, HostError, Reply, Slot, Waiter, Woke, unix_ms_now};
 
 /// Replies to `reply` once the write in `outcome` has made a change
 /// durable, or with why the change was refused or could not be kept.
-fn answer_once_written(outcome: Result<Write, HostError>, reply: Reply<()>) {
+fn answer_once_written<T: Send + 'static>(outcome: Result<(Write, T), HostError>, reply: Reply<T>) {
     match outcome {
-        Ok(write) => {
+        Ok((write, answer)) => {
             tokio::spawn(async move {
                 let result = write
                     .await
+                    .map(|()| answer)
                     .map_err(|error| HostError::Io(format!("keeping the holds failed: {error}")));
                 let _ = reply.send(result);
             });
@@ -69,16 +72,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 owner,
                 reply,
             } => self.create(id, config, owner, reply),
-            Command::Adopt {
-                id,
-                config,
-                owner,
-                reply,
-            } => self.adopt(id, config, owner, reply),
-            Command::HandOff { id, owner, reply } => self.hand_off(id, owner, reply),
-            Command::Reconcile { rulings, reply } => self.reconcile(rulings, reply),
-            command @ (Command::Owned { .. } | Command::Inventory { .. }) => {
-                self.on_fleet_command(command);
+            command @ (Command::Adopt { .. }
+            | Command::HandOff { .. }
+            | Command::Reconcile { .. }
+            | Command::Owned { .. }
+            | Command::Inventory { .. }) => self.on_fleet_command(command),
+            Command::Traced(trace, command) => {
+                self.trace = Some(trace);
+                self.on_command(*command);
+                self.trace = None;
             }
             Command::Remove {
                 id,
@@ -118,6 +120,26 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     .and_then(|()| self.request_sleep(id, level));
                 let _ = reply.send(result);
             }
+            command @ (Command::Hold { .. }
+            | Command::Unhold { .. }
+            | Command::Acquire { .. }
+            | Command::Release { .. }) => self.on_hold_command(command),
+            Command::Status { reply } => {
+                let _ = reply.send(self.status());
+            }
+            Command::Inspect { id, reply } => {
+                let _ = reply.send(
+                    self.core
+                        .sandbox(id.0)
+                        .map(|view| (view.state.level, view.step)),
+                );
+            }
+        }
+    }
+
+    /// Holds taken, ended, acquired and released.
+    fn on_hold_command(&mut self, command: Command) {
+        match command {
             Command::Hold {
                 id,
                 generation,
@@ -140,7 +162,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let outcome = self
                     .check(id, generation)
                     .and_then(|()| self.unhold(id, &name));
-                answer_once_written(outcome, reply);
+                answer_once_written(outcome.map(|write| (write, ())), reply);
             }
             Command::Acquire {
                 id,
@@ -157,9 +179,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     });
                 }
             }
-            Command::Status { reply } => {
-                let _ = reply.send(self.status());
-            }
+            _ => unreachable!("not a hold command"),
+        }
+    }
+
+    /// Notes that a request asks about `id`, for the step it causes.
+    fn note_ask(&mut self, id: Id) {
+        let trace = self.trace;
+        if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.asked = Some(Why {
+                cause: Cause::Request,
+                trace,
+            });
         }
     }
 
@@ -213,6 +244,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if !self.slots.contains_key(&id.0) {
             return Err(HostError::NotFound(id));
         }
+        self.note_ask(id);
         self.input(Input::Touch {
             sandbox: id.0,
             priority,
@@ -263,8 +295,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         slot.waiters.push(Waiter {
             generation,
             during,
+            queued: false,
             reply,
         });
+        self.note_ask(id);
         self.input(Input::Hold {
             sandbox: id.0,
             hold,
@@ -272,6 +306,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             priority,
         });
         self.settle(id);
+        // Still waiting: whatever wake runs now is the one it joins.
+        if let Some(waiter) = self
+            .slots
+            .get_mut(&id.0)
+            .and_then(|slot| slot.waiters.last_mut())
+        {
+            waiter.queued = true;
+        }
     }
 
     /// Refuses a request that names an execution the sandbox no longer
@@ -311,6 +353,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 "this host cannot compress memory; ask for saved instead".into(),
             ));
         }
+        let trace = self.trace;
+        if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.sleep_asked = Some(Why {
+                cause: Cause::Request,
+                trace,
+            });
+        }
         self.input(Input::Sleep {
             sandbox: id.0,
             level,
@@ -319,19 +368,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Holds sandbox `id` awake for `name`, returning the write that makes
-    /// the hold durable.
+    /// the hold durable, and whether the hold was already there.
     pub(super) fn hold(
         &mut self,
         id: Id,
         name: String,
         ttl: Option<Duration>,
         priority: Priority,
-    ) -> Result<Write, HostError> {
+    ) -> Result<(Write, bool), HostError> {
         if self.slots.get(&id.0).is_none_or(|slot| slot.destroy) {
             return Err(HostError::NotFound(id));
         }
         self.not_handing_off(id)?;
         let until = ttl.map(|ttl| self.now() + ttl);
+        self.note_ask(id);
         self.input(Input::Hold {
             sandbox: id.0,
             hold: hold_id(&name),
@@ -342,8 +392,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let lapses_ms = ttl
             .map(|ttl| now_ms.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)));
         let slot = self.slots.get_mut(&id.0).ok_or(HostError::NotFound(id))?;
-        slot.holds.set(name, lapses_ms);
-        Ok(slot.holds.write(now_ms))
+        let renewed = slot.holds.set(name, lapses_ms);
+        Ok((slot.holds.write(now_ms), renewed))
     }
 
     /// The refusal of a request for blocked sandbox `id`.
@@ -413,7 +463,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // One that could never run here is refused at once, so it can be
         // placed elsewhere.
         if let Some(capacity) = self.core.capacity() {
-            let needed = self.size(config).request;
+            let needed = self.size(config, None).request;
             if needed > capacity.budget {
                 return Err(HostError::HostFull {
                     id,
@@ -433,6 +483,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         owner: OwnerEpoch,
         reply: Reply<()>,
     ) {
+        self.create_from(id, config, owner, reply, true);
+    }
+
+    /// Creates sandbox `id`, from a ready sandbox if `ready` and there is
+    /// one, for the ownership under `owner`.
+    pub(super) fn create_from(
+        &mut self,
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+        ready: bool,
+    ) {
         if let Some(answer) = self.create_answer(id, &config) {
             let _ = reply.send(answer);
             return;
@@ -442,8 +505,28 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         }
         self.template_used(Shape::of(&config));
-        let Some((config, reply)) = self.claim(id, config, owner, reply) else {
+        let unclaimed = if ready {
+            self.claim(id, config, owner, reply)
+        } else {
+            Some((config, reply))
+        };
+        let Some((config, reply)) = unclaimed else {
             return;
+        };
+        self.create_fresh(id, config, owner, reply);
+    }
+
+    /// Creates sandbox `id` from its shape's template, or cold.
+    fn create_fresh(&mut self, id: Id, config: SandboxConfig, owner: OwnerEpoch, reply: Reply<()>) {
+        let template = self.template_for(Shape::of(&config));
+        // Its first files are written before the core knows it: they are
+        // booked from before the copy until a reading shows them.
+        let disk = match self.first_files_fit(id, template.as_ref().map(|t| t.disk()).as_deref()) {
+            Ok(disk) => disk,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
         };
         let ordinal = match self.take_ordinal() {
             Ok(ordinal) => ordinal,
@@ -462,7 +545,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
         };
-        let template = self.template_for(Shape::of(&config));
         let sources = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources));
         let mut record = Record::new(id, ordinal, allocation, config);
         record.owner_epoch = owner.0;
@@ -473,6 +555,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let records = Arc::clone(&self.records);
         let net = self.net.clone();
         let events = self.events_tx.clone();
+        self.input(Input::Writes { key: id.0, disk });
         tokio::spawn(async move {
             let networks = net.clone();
             let from = template.clone();
@@ -482,18 +565,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 if let (Some(net), Some(link)) = (&networks, &link) {
                     net.ensure(link)?;
                 }
-                Ok(start)
+                Ok((start, std::fs::metadata(&paths.disk)?.len()))
             })
             .await
             .unwrap_or_else(|error| Err(io::Error::other(error)));
             let stale = match prepared {
-                Ok(Start::Stale) => template,
+                Ok((Start::Stale, _)) => template,
                 _ => None,
             };
             // The record goes last: a directory without one is an
             // unfinished creation and is cleaned up on recovery.
             let result = match prepared {
-                Ok(start) => {
+                Ok((start, disk_bytes)) => {
+                    record.allocation.disk_bytes = Some(disk_bytes);
                     // A sandbox started from a template holds a memory image
                     // of a guest that never ran as it: its first wake
                     // restores it.

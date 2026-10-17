@@ -16,7 +16,7 @@ use tokio_postgres::Row;
 use tokio_postgres::types::Json;
 
 use super::{
-    Admission, Admits, HostRow, Result, SandboxRow, Spec, Store, StoreError, admits, rule,
+    Admission, Admits, HostRow, Result, SandboxRow, Spec, Store, StoreError, Write, admits, rule,
 };
 
 /// The tables, created if missing. Replicas starting together take turns
@@ -76,6 +76,31 @@ const SANDBOX_COLUMNS: &str = "id, team, spec, metadata, owner, epoch, taken, \
 
 const HOST_COLUMNS: &str = "id, info, epoch, state, renewals, seq, capacity, changed";
 
+/// The owner a sandbox write names, its parameter `param`, locked against
+/// giving up on it: a write waits for a give-up under way and then sees the
+/// host lost, and a give-up waits for the write and then clears the owner
+/// it wrote.
+fn owner_lost(param: u8) -> String {
+    format!(
+        "owner as (select state = 'lost' as lost from compute_hosts \
+         where id = ${param} for share)"
+    )
+}
+
+/// What a sandbox write returns: whether the owner was lost, and whether
+/// the row was written.
+const WRITTEN: &str = "select exists (select 1 from owner where lost) as lost, \
+     exists (select 1 from written) as written";
+
+/// How a sandbox write went, from its [`WRITTEN`] row.
+fn write_of(row: &Row) -> Write {
+    match (row.get("lost"), row.get("written")) {
+        (true, _) => Write::OwnerLost,
+        (false, true) => Write::Done,
+        (false, false) => Write::Conflict,
+    }
+}
+
 /// Postgres, through a pool.
 #[derive(Clone, Debug)]
 pub struct PostgresStore {
@@ -103,6 +128,17 @@ fn big(value: u64) -> Result<i64> {
 /// A `bigint` back as a `u64`.
 fn small(value: i64) -> Result<u64> {
     u64::try_from(value).map_err(corrupt)
+}
+
+/// A registration attempt, a nonce over all of `u64`, as the `bigint` of the
+/// same bits: compared only for equality, it needs no order.
+fn nonce(attempt: u64) -> i64 {
+    i64::from_ne_bytes(attempt.to_ne_bytes())
+}
+
+/// A stored attempt back as the nonce it was.
+fn nonce_of(stored: i64) -> u64 {
+    u64::from_ne_bytes(stored.to_ne_bytes())
 }
 
 fn state_name(state: HostState) -> &'static str {
@@ -344,7 +380,7 @@ impl PostgresStore {
                 &register.info.name,
                 &Json(&register.info),
                 &epoch,
-                &big(register.attempt)?,
+                &nonce(register.attempt),
                 &Json(&rulings),
                 &Json(&register.capacity),
             ],
@@ -377,7 +413,7 @@ impl Store for PostgresStore {
             Some(row) => Some((
                 row.get::<_, i64>("id"),
                 state_of(row.get("state"))?,
-                small(row.get("attempt"))?,
+                nonce_of(row.get("attempt")),
             )),
             None => None,
         };
@@ -530,16 +566,21 @@ impl Store for PostgresStore {
         !lead.0.is_closed() && lead.0.simple_query("select 1").await.is_ok()
     }
 
-    async fn insert(&self, row: &SandboxRow) -> Result<bool> {
+    async fn insert(&self, row: &SandboxRow) -> Result<Write> {
         let fields = Fields::of(row)?;
-        let inserted = self
+        let written = self
             .client()
             .await?
-            .execute(
+            .query_one(
                 &format!(
-                    "insert into compute_sandboxes ({SANDBOX_COLUMNS}) values \
-                     ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
-                     on conflict (id) do nothing"
+                    "with {}, written as ( \
+                     insert into compute_sandboxes ({SANDBOX_COLUMNS}) \
+                     select $1::text, $2::text, $3::jsonb, $4::jsonb, $5::bigint, $6::bigint, \
+                     $7::bigint, $8::bigint, $9::bigint, $10::bigint, $11::bigint, $12::bigint, \
+                     $13::text, $14::bigint, $15::bigint \
+                     where not exists (select 1 from owner where lost) \
+                     on conflict (id) do nothing returning 1) {WRITTEN}",
+                    owner_lost(5)
                 ),
                 &[
                     &fields.id,
@@ -561,7 +602,7 @@ impl Store for PostgresStore {
             )
             .await
             .map_err(database)?;
-        Ok(inserted == 1)
+        Ok(write_of(&written))
     }
 
     async fn sandbox(&self, id: Id) -> Result<Option<SandboxRow>> {
@@ -578,16 +619,21 @@ impl Store for PostgresStore {
             .transpose()
     }
 
-    async fn replace(&self, row: &SandboxRow) -> Result<bool> {
+    async fn replace(&self, row: &SandboxRow) -> Result<Write> {
         let fields = Fields::of(row)?;
-        let updated = self
+        let written = self
             .client()
             .await?
-            .execute(
-                "update compute_sandboxes set metadata = $2, owner = $3, epoch = $4, \
-                 taken = $5, unanswered_epoch = $6, unanswered_stamp = $7, \
-                 landed_epoch = $8, landed_host_epoch = $9, landed_seq = $10, class = $11, \
-                 version = version + 1 where id = $1 and version = $12",
+            .query_one(
+                &format!(
+                    "with {}, written as ( \
+                     update compute_sandboxes set metadata = $2, owner = $3, epoch = $4, \
+                     taken = $5, unanswered_epoch = $6, unanswered_stamp = $7, \
+                     landed_epoch = $8, landed_host_epoch = $9, landed_seq = $10, class = $11, \
+                     version = version + 1 where id = $1 and version = $12 \
+                     and not exists (select 1 from owner where lost) returning 1) {WRITTEN}",
+                    owner_lost(3)
+                ),
                 &[
                     &fields.id,
                     &fields.metadata,
@@ -605,7 +651,7 @@ impl Store for PostgresStore {
             )
             .await
             .map_err(database)?;
-        Ok(updated == 1)
+        Ok(write_of(&written))
     }
 
     async fn delete(&self, id: Id, version: u64) -> Result<bool> {
@@ -679,5 +725,19 @@ impl Store for PostgresStore {
             .await
             .map_err(database)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_attempt_round_trips_through_a_bigint() {
+        for attempt in [0, 1, u64::MAX / 2, u64::MAX / 2 + 1, u64::MAX] {
+            assert_eq!(super::nonce_of(super::nonce(attempt)), attempt);
+        }
+        assert!(
+            super::nonce(u64::MAX) < 0,
+            "the upper half is stored, not refused"
+        );
     }
 }

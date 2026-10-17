@@ -266,6 +266,13 @@ pub trait Store: Send + Sync + 'static {
         own: OwnerEpoch,
     ) -> impl Future<Output = Result<Owned<Option<Claimed>>, EngineError>> + Send;
 
+    /// The length of the disk in the stored copy, `None` if nothing is
+    /// stored.
+    fn disk_len(&self, id: Id) -> impl Future<Output = Result<Option<u64>, EngineError>> + Send {
+        let _ = id;
+        std::future::ready(unconfigured("disk_len"))
+    }
+
     /// The chunk store that remote memory images page in from, if this store
     /// keeps memory as chunks, and the host's transfer lanes, which the
     /// agent's own fetches from it share with the store's.
@@ -625,6 +632,16 @@ impl Store for Directory {
                 receipt: Receipt(blake3::hash(listed.as_bytes()).to_hex().to_string()),
                 memory,
             })))
+        })
+        .await
+    }
+
+    async fn disk_len(&self, id: Id) -> Result<Option<u64>, EngineError> {
+        let disk = self.dir(id).join("disk");
+        blocking("disk_len", move || match fs::metadata(&disk) {
+            Ok(metadata) => Ok(Some(metadata.len())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
         })
         .await
     }

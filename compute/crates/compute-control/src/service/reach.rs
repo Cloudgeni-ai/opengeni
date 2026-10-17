@@ -8,7 +8,7 @@ use compute_protocol::host::{ErrorCode, Id, PriorityName, Request};
 
 use super::{Asked, Failure, Service, host_failure};
 use crate::hosts::Answered;
-use crate::store::{SandboxRow, Store, replace};
+use crate::store::{SandboxRow, Store, Write, replace};
 use crate::view::Target;
 
 /// How long a host may take to wake a sandbox and answer.
@@ -180,8 +180,24 @@ impl<S: Store> Service<S> {
             row.ownership = row.ownership.give(target.host).set;
             row.sends.send(row.ownership.epoch, target.seq);
             row.class = Some(target.class.clone());
-            if !replace(&*self.store, &mut row).await? {
-                return Ok(());
+            match replace(&*self.store, &mut row).await? {
+                Write::Done => {}
+                Write::Conflict => return Ok(()),
+                // Given up on since it was placed: elsewhere, unless it
+                // was asked for there.
+                Write::OwnerLost if on.is_none() => {
+                    exclude.push(target.host);
+                    match self.store.sandbox(row.id).await? {
+                        Some(now) => row = now,
+                        None => return Ok(()),
+                    }
+                    continue;
+                }
+                Write::OwnerLost => {
+                    return Err(Failure::Unavailable(
+                        "the host asked for was given up on".into(),
+                    ));
+                }
             }
             let Some(adopted) = self.send_adopt(&row, &target, tries).await? else {
                 return Ok(());

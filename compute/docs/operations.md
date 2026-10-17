@@ -20,15 +20,17 @@ and what we chose not to build.
   storage. A directory is for tests and single machines: the agent warns at
   start, and an archive there is lost with the host. Production hosts use
   `gs://`, `az://` or `s3://`.
-- **Disk headroom for saves is the deployment's job.** The agent does not
-  yet book disk for the saves it admits (the admission in
-  [ADR 14](adr/0014-requests-limits-and-admission.md) is being built), and
-  guest disk growth and pages written during a wake from object storage
-  will not be booked even then. A full disk does not lose memory: a save
-  that cannot write fails and is tried again later, and a wake from object
-  storage whose local writes fail waits, shown as stalled, and continues
-  once there is room. Size state volumes for the sandboxes placed on them
-  and alert on free space early, for example below 20 %.
+- **Size state volumes for what is placed on them.** The agent books local
+  disk before anything writes: saves, guest disk growth, wakes from object
+  storage, new sandboxes' first files, ready-sandbox fills and template
+  builds ([ADR 14](adr/0014-requests-limits-and-admission.md)). What it
+  cannot book waits or is refused with `host_full`, so a volume too small
+  for its sandboxes shows as refused wakes and creates, not as lost data.
+  Bookings are worst cases (a disk's full length less what it holds
+  alone), so a host of many large, mostly empty disks fits fewer sandboxes
+  than its free space suggests. Writes outside the agent (logs, other
+  programs on the volume) are not booked: keep `--disk-reserve-mib` above
+  them and alert on free space early, for example below 20 %.
 - **Encryption is the volume's and the store's.** Chunks are stored raw or
   compressed, not encrypted by us, and a host's state volume holds disks and
   memory images. Check that every state volume and the bucket are encrypted
@@ -65,6 +67,45 @@ and what we chose not to build.
   manifest cannot be read, by design: deleting around an unreadable entry
   could take chunks it names. Alert when no sweep has succeeded for two
   days; its error names the key that stopped it.
+
+## Observing
+
+What the agent reports is in [ADR 16](adr/0016-observability.md).
+
+- **Run a collector next to each host.** Pass `--otlp-endpoint
+  http://127.0.0.1:4318` to send events as OTLP log records and metrics
+  every ten seconds (`--otlp-metrics-every`); add `--otlp-header
+  name=value` for a remote collector that needs a token. Without it,
+  events go only to the agent's log, one JSON line each under the
+  `compute_event` target, which the journal keeps. `--no-journal-events`
+  turns that copy off once a collector takes them.
+- **Run the canary** with `--canary-every 5m` and, if the guest image
+  serves a port, `--canary-port`. It costs one 128 MiB sandbox kept awake
+  and one created and removed per round, and a little store traffic. Its
+  two sandboxes show in status like any other; their ids start with
+  `ca4a79`, then 64 bits the host made up at random the first time and
+  keeps in `canary-id` in its state root, so hosts sharing a store never
+  touch each other's canary.
+- **Alert on these:**
+  - any increase of `compute.alarm.count`. Each occurrence also writes a
+    `compute.alarm` event naming the sandbox (or the stored object's key),
+    so group alerts on that.
+  - `compute.canary.count` with outcome `failed` or `timed_out`, and a
+    `compute.canary.last_run` older than one rotation plus a period for
+    any path, which also catches an agent that died or hangs. A rotation
+    is four periods (three on a host without a store), since each run
+    takes the next path, so with `--canary-every 5m` that is 25 minutes.
+  - `compute.sample.age` above a minute: the agent's loop is stuck.
+  - `compute.step.oldest_age` above the step's usual time, for example
+    ten minutes for an archive.
+  - `compute.sandbox.unhealthy` above zero: sandboxes broken, blocked or
+    unsavable need a person.
+  - any increase of `compute.export.dropped`: the collector is slow, away
+    or refusing; events are still in the journal.
+- **Find a slow sandbox** by querying `compute.step` and `compute.request`
+  events for its `compute.sandbox.id`. Steps carry time per phase, bytes,
+  cause and the host-side pressure the sandbox saw since its previous
+  event. A caller that sends `traceparent` finds them under its own trace.
 
 ## Upgrades
 
@@ -133,6 +174,16 @@ and what we chose not to build.
   disk live only in object storage. The final measurements report agent
   memory and open files per archived sandbox; placement must count records,
   not only running VMs.
+- **The agent's processors come out of the sandboxes'.** The agent runs a
+  quarter of the host's processors, from 2 to 8, as async workers, and
+  compresses as many chunks at once for object storage; blocking threads,
+  which mostly wait on local disk, are 64 more than that. Archiving is the
+  agent's only long processor-bound work, so `--compress-threads` sets how
+  fast idle sandboxes reach object storage against how much processor
+  time their neighbours lose (see the agent threads measurement in
+  [measurements](measurements.md)). Raise it where saved sandboxes wait
+  long for their archive and local disk runs short; `--worker-threads` and
+  `--blocking-threads` rarely need changing.
 - **Busy is busy.** A sandbox that keeps computing stays awake, whether it
   builds code or mines coins. Sleep policy does not decide who pays: usage
   for billing and account budgets belongs to the layer above.

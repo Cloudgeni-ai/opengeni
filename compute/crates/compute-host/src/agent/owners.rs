@@ -64,12 +64,14 @@ impl Command {
             | Self::Unhold { id, .. }
             | Self::Acquire { id, .. }
             | Self::Check { id, .. } => Some(*id),
+            Self::Traced(_, command) => command.sandbox(),
             Self::Release { .. }
             | Self::Status { .. }
             | Self::Inventory { .. }
             | Self::Adopt { .. }
             | Self::HandOff { .. }
             | Self::Reconcile { .. }
+            | Self::Inspect { .. }
             | Self::Owned { .. } => None,
         }
     }
@@ -80,7 +82,6 @@ impl Command {
             Self::Create { reply, .. }
             | Self::Remove { reply, .. }
             | Self::Sleep { reply, .. }
-            | Self::Hold { reply, .. }
             | Self::Unhold { reply, .. }
             | Self::Check { reply, .. }
             | Self::Adopt { reply, .. }
@@ -93,9 +94,16 @@ impl Command {
                     let _ = reply.send(Err(error));
                 }
             }
+            Self::Hold { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
             Self::Acquire { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
+            Self::Inspect { reply, .. } => {
+                let _ = reply.send(None);
+            }
+            Self::Traced(_, command) => command.refuse(error),
             Self::Release { .. }
             | Self::Status { .. }
             | Self::Inventory { .. }
@@ -108,6 +116,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Carries out a request only a host in a fleet gets.
     pub(super) fn on_fleet_command(&mut self, command: Command) {
         match command {
+            Command::Adopt {
+                id,
+                config,
+                owner,
+                reply,
+            } => self.adopt(id, config, owner, reply),
+            Command::HandOff { id, owner, reply } => self.hand_off(id, owner, reply),
+            Command::Reconcile { rulings, reply } => self.reconcile(rulings, reply),
             Command::Owned {
                 owner,
                 admission,
@@ -396,18 +412,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Hands sandbox `id`, held under `owner`, off; see
     /// [`crate::protocol::Request::HandOff`].
+    ///
+    /// It is sent unfenced, so it keeps the barrier [`Self::owned`] keeps:
+    /// while a create, adopt or change of owner may yet land, or a removal
+    /// that would delete the store's copy runs, it is answered busy, never
+    /// "not found", which the service could take as final. It joins only a
+    /// removal that hands the sandbox off.
     pub(super) fn hand_off(&mut self, id: Id, owner: OwnerEpoch, reply: Reply<()>) {
         if self.blocked.contains_key(&id.0) {
             let _ = reply.send(Err(self.blocked_error(id)));
             return;
         }
-        if let Some(removers) = self.destroying.get_mut(&id.0) {
-            // Already going: answered once it is gone.
-            removers.push(reply);
+        if self.settling(id) {
+            let _ = reply.send(Err(HostError::Busy(id)));
             return;
         }
         let Some(record) = self.records.get(id) else {
-            let _ = reply.send(Err(if self.preparing.contains(&id.0) {
+            let _ = reply.send(Err(if self.destroying.contains_key(&id.0) {
                 HostError::Busy(id)
             } else {
                 HostError::NotFound(id)
@@ -427,6 +448,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }));
             return;
         }
+        if let Some(removers) = self.destroying.get_mut(&id.0) {
+            // Already going: a hand-off is answered once it is gone; a
+            // removal that deletes the store's copy is not one.
+            if self.handing_away.contains(&id.0) {
+                removers.push(reply);
+            } else {
+                let _ = reply.send(Err(HostError::Busy(id)));
+            }
+            return;
+        }
         if !self.store.is_configured() {
             let _ = reply.send(Err(HostError::Invalid(
                 "this host has no store to hand sandboxes off through".into(),
@@ -438,7 +469,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         };
         if slot.destroy {
-            slot.removers.push(reply);
+            if slot.hand_off || record.handed_off {
+                slot.removers.push(reply);
+            } else {
+                let _ = reply.send(Err(HostError::Busy(id)));
+            }
             return;
         }
         if let Some(waiting) = self.handing_off.get_mut(&id.0) {

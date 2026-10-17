@@ -189,6 +189,15 @@ impl View {
             .map(|known| known.target.clone())
     }
 
+    /// The name of host `host`, whatever its state.
+    #[must_use]
+    pub fn name(&self, host: HostId) -> Option<String> {
+        self.read()
+            .hosts
+            .get(&host)
+            .map(|known| known.target.name.clone())
+    }
+
     /// The host named `name`.
     #[must_use]
     pub fn named(&self, name: &str) -> Option<Known> {

@@ -10,7 +10,7 @@ use compute_fleet::{HostEpoch, HostId, HostState};
 use compute_protocol::fleet::{Register, Renew, Report, Ruling};
 use compute_protocol::host::Id;
 
-use super::{Admission, Admits, HostRow, Result, SandboxRow, Store, admits, rule};
+use super::{Admission, Admits, HostRow, Result, SandboxRow, Store, Write, admits, rule};
 
 #[derive(Debug)]
 struct Host {
@@ -44,6 +44,14 @@ impl Inner {
             && row.state != HostState::Lost
             && names.contains(&row.info.name))
         .then_some(row)
+    }
+
+    /// Whether `row` names as owner a host given up on.
+    fn owner_lost(&self, row: &SandboxRow) -> bool {
+        row.ownership
+            .owner
+            .and_then(|owner| self.hosts.get(&owner))
+            .is_some_and(|host| host.row.state == HostState::Lost)
     }
 }
 
@@ -236,30 +244,36 @@ impl MemoryStore {
         taken.then(|| MemoryLead(Arc::clone(&self.leader)))
     }
 
-    fn insert_now(&self, row: &SandboxRow) -> bool {
+    fn insert_now(&self, row: &SandboxRow) -> Write {
         let mut inner = self.lock();
+        if inner.owner_lost(row) {
+            return Write::OwnerLost;
+        }
         if inner.sandboxes.contains_key(&row.id) {
-            return false;
+            return Write::Conflict;
         }
         inner.sandboxes.insert(row.id, row.clone());
-        true
+        Write::Done
     }
 
     fn sandbox_now(&self, id: Id) -> Option<SandboxRow> {
         self.lock().sandboxes.get(&id).cloned()
     }
 
-    fn replace_now(&self, row: &SandboxRow) -> bool {
+    fn replace_now(&self, row: &SandboxRow) -> Write {
         let mut inner = self.lock();
+        if inner.owner_lost(row) {
+            return Write::OwnerLost;
+        }
         let Some(stored) = inner.sandboxes.get_mut(&row.id) else {
-            return false;
+            return Write::Conflict;
         };
         if stored.version != row.version {
-            return false;
+            return Write::Conflict;
         }
         *stored = row.clone();
         stored.version += 1;
-        true
+        Write::Done
     }
 
     fn delete_now(&self, id: Id, version: u64) -> bool {
@@ -361,7 +375,7 @@ impl Store for MemoryStore {
         ready(true)
     }
 
-    fn insert(&self, row: &SandboxRow) -> impl Future<Output = Result<bool>> + Send {
+    fn insert(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send {
         ready(Ok(self.insert_now(row)))
     }
 
@@ -369,7 +383,7 @@ impl Store for MemoryStore {
         ready(Ok(self.sandbox_now(id)))
     }
 
-    fn replace(&self, row: &SandboxRow) -> impl Future<Output = Result<bool>> + Send {
+    fn replace(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send {
         ready(Ok(self.replace_now(row)))
     }
 

@@ -130,6 +130,8 @@ async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> 
         },
         about: compute_host::protocol::About::default(),
         lease: None,
+        observer: compute_host::observe::Observer::default(),
+        summary_every: HostConfig::SUMMARY_EVERY,
     };
     let socket = root.join("agent.sock");
     let _ = std::fs::remove_file(&socket);

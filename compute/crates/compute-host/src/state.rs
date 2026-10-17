@@ -94,6 +94,11 @@ pub(crate) struct Allocation {
     pub gid: u32,
     /// Its link to the host, when it is networked.
     pub link: Option<LinkAddresses>,
+    /// Its disk's length, from when its first files were written. A disk
+    /// keeps its length, in object storage too, whatever base image the
+    /// host has since; unknown for a record written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
 }
 
 /// Everything the host keeps about one sandbox across restarts.
@@ -274,6 +279,7 @@ pub(crate) struct Change {
     next_save: bool,
     handed_off: bool,
     owner: Option<OwnerEpoch>,
+    disk_bytes: Option<u64>,
 }
 
 impl Change {
@@ -348,6 +354,13 @@ impl Change {
         self
     }
 
+    /// Records the disk's length where the record does not know it yet,
+    /// as for one written before it was kept; a known length never changes.
+    pub fn disk_bytes(mut self, bytes: u64) -> Self {
+        self.disk_bytes = Some(bytes);
+        self
+    }
+
     fn apply_to(self, record: &mut Record) {
         if let Some(disk) = self.disk {
             record.disk = disk;
@@ -377,6 +390,9 @@ impl Change {
         record.handed_off |= self.handed_off;
         if let Some(owner) = self.owner {
             record.owner_epoch = owner.0;
+        }
+        if let Some(bytes) = self.disk_bytes {
+            record.allocation.disk_bytes.get_or_insert(bytes);
         }
     }
 }

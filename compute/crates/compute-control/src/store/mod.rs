@@ -221,15 +221,17 @@ pub trait Store: Send + Sync + 'static {
     fn leads(&self, lead: &mut Self::Lead) -> impl Future<Output = bool> + Send;
 
     /// Inserts a new sandbox, at the version it carries. False if one with
-    /// its id exists.
-    fn insert(&self, row: &SandboxRow) -> impl Future<Output = Result<bool>> + Send;
+    /// its id exists. Refused if it names an owner the service has given
+    /// up on; see [`Write::OwnerLost`].
+    fn insert(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send;
 
     /// One sandbox.
     fn sandbox(&self, id: Id) -> impl Future<Output = Result<Option<SandboxRow>>> + Send;
 
     /// Replaces a sandbox's row with `row`, raising its version by one, on
-    /// condition that it is still at `row.version`.
-    fn replace(&self, row: &SandboxRow) -> impl Future<Output = Result<bool>> + Send;
+    /// condition that it is still at `row.version` and does not name an
+    /// owner the service has given up on.
+    fn replace(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send;
 
     /// Deletes a sandbox's row on condition that it is at `version`.
     fn delete(&self, id: Id, version: u64) -> impl Future<Output = Result<bool>> + Send;
@@ -251,11 +253,33 @@ pub trait Store: Send + Sync + 'static {
     fn add_key(&self, digest: &str, team: &str) -> impl Future<Output = Result<()>> + Send;
 }
 
+/// How a conditional write of a sandbox's row went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Write {
+    Done,
+    /// Someone wrote it since it was read, or, for an insert, it exists.
+    Conflict,
+    /// It names as owner a host the service has given up on. Giving up
+    /// clears the owner of every sandbox the host owns in one transaction,
+    /// and this check is ordered with it, so no sandbox is left owned by a
+    /// host after it was given up on.
+    OwnerLost,
+}
+
+impl Write {
+    /// Whether it was written.
+    #[must_use]
+    pub fn done(self) -> bool {
+        self == Self::Done
+    }
+}
+
 /// Writes `row` with its version raised, if no one wrote it since it was
-/// read; on success `row` holds the version written.
-pub async fn replace<S: Store>(store: &S, row: &mut SandboxRow) -> Result<bool> {
+/// read and its owner, if any, is not given up on; when written, `row`
+/// holds the version written.
+pub async fn replace<S: Store>(store: &S, row: &mut SandboxRow) -> Result<Write> {
     let written = store.replace(row).await?;
-    if written {
+    if written.done() {
         row.version += 1;
     }
     Ok(written)

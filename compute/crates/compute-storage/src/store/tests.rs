@@ -332,10 +332,55 @@ async fn quarantined(backend: &InMemory) -> Vec<Bytes> {
     found
 }
 
+/// What a [`QuarantineWatch`] was told: keys found bad, and keys
+/// copied to quarantine.
+#[derive(Debug, Default)]
+struct Seen {
+    bad: std::sync::Mutex<Vec<String>>,
+    kept: std::sync::Mutex<Vec<String>>,
+}
+
+impl QuarantineWatch for Seen {
+    fn verification_failed(&self, key: &str, _why: &str) {
+        self.bad.lock().unwrap().push(key.to_owned());
+    }
+
+    fn quarantined(&self, key: &str) {
+        self.kept.lock().unwrap().push(key.to_owned());
+    }
+}
+
+#[tokio::test]
+async fn a_manifest_bad_on_every_read_is_reported_and_quarantined() {
+    let backend = Arc::new(InMemory::new());
+    let seen = Arc::new(Seen::default());
+    let store =
+        ChunkStore::new(backend.clone(), Path::from("tenant/test")).with_watch(seen.clone());
+    let digest = blake3::hash(b"the manifest named").to_hex().to_string();
+    let key = ChunkStore::manifest_key(&digest);
+    let bad = Bytes::from_static(b"other bytes");
+    backend
+        .put(&store.path(&key), bad.clone().into())
+        .await
+        .unwrap();
+    let error = store.get_manifest(&digest).await.unwrap_err();
+    assert!(matches!(error, Error::Integrity), "{error}");
+    assert_eq!(quarantined(&backend).await, vec![bad]);
+    assert_eq!(*seen.bad.lock().unwrap(), vec![key.clone()]);
+    assert_eq!(*seen.kept.lock().unwrap(), vec![key]);
+
+    // A manifest that is not there is no damage.
+    let missing = blake3::hash(b"never stored").to_hex().to_string();
+    assert!(store.get_manifest(&missing).await.is_err());
+    assert_eq!(seen.bad.lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn truncated_and_corrupt_chunks_are_rejected_quarantined_and_repaired() {
     let backend = Arc::new(InMemory::new());
-    let store = ChunkStore::new(backend.clone(), Path::from("tenant/test"));
+    let seen = Arc::new(Seen::default());
+    let store =
+        ChunkStore::new(backend.clone(), Path::from("tenant/test")).with_watch(seen.clone());
     let chunk = EncodedChunk::encode(&vec![7; 65536], 1).unwrap();
     let path = store.path(&chunk.object_key());
     let good = Bytes::from(chunk.bytes.clone());
@@ -366,6 +411,11 @@ async fn truncated_and_corrupt_chunks_are_rejected_quarantined_and_repaired() {
             vec![7; 65536]
         );
     }
+    // Each bad copy was reported by its key twice: when a read found it,
+    // and when the repairing upload found it still there; each time a
+    // copy was kept.
+    assert_eq!(*seen.bad.lock().unwrap(), vec![chunk.object_key(); 4]);
+    assert_eq!(*seen.kept.lock().unwrap(), vec![chunk.object_key(); 4]);
 }
 
 #[tokio::test]
@@ -397,6 +447,7 @@ async fn gcs_checksums_prove_a_chunk_without_reading_it() {
         uploader: Uploader::Gcs(gcs(&fake)),
         freshness: Freshness::DEFAULT,
         clock: Clock::system(),
+        watch: None,
     };
     let chunk = EncodedChunk::encode(&[9; 16384], 1).unwrap();
     assert!(!store.has_chunk(&chunk.reference).await.unwrap());

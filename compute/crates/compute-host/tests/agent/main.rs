@@ -28,7 +28,9 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep};
 
 mod admission;
+mod disk_lengths;
 mod fleet;
+mod observe;
 mod pool;
 mod ready;
 mod requests;
@@ -129,6 +131,15 @@ struct World {
     /// Every traffic reading: which VM, and when, so a test can line up
     /// with the agent's sampling.
     readings: Mutex<Vec<(String, Instant)>>,
+    /// Guarantees given to VMs after they started: which VM, its memory
+    /// request in MiB and its processor weight.
+    guarantees: Mutex<Vec<(String, u32, u16)>>,
+    /// While set, no VM can be given new guarantees.
+    refuse_guarantees: AtomicBool,
+    /// Each VM started: its name and the memory limit it started under.
+    started_limits: Mutex<Vec<(String, Option<u64>)>>,
+    /// Memory limits set on VMs after they started.
+    limits_set: Mutex<Vec<(String, Option<u64>)>>,
 }
 
 /// What a fake VM process is, independent of any agent's handle to it.
@@ -223,6 +234,11 @@ impl Meter {
 impl Fake {
     fn launch(&self, spec: &VmSpec, memory: String) -> FakeVm {
         let name = spec.name.clone();
+        self.world
+            .started_limits
+            .lock()
+            .unwrap()
+            .push((name.clone(), spec.memory_limit));
         if !self.world.live.lock().unwrap().insert(name.clone()) {
             self.world.violation(format!("two VMs at once for {name}"));
         }
@@ -710,6 +726,36 @@ impl Engine for Fake {
         Ok(100 << 20)
     }
 
+    fn set_guarantees(
+        &self,
+        vm: &FakeVm,
+        memory_request_mib: u32,
+        cpu_weight: u16,
+    ) -> Result<(), EngineError> {
+        if self.world.refuse_guarantees.load(Ordering::SeqCst) {
+            return Err(EngineError::new(
+                ErrorKind::Transient,
+                "set_guarantees",
+                "cpu.weight not writable",
+            ));
+        }
+        self.world.guarantees.lock().unwrap().push((
+            vm.name.clone(),
+            memory_request_mib,
+            cpu_weight,
+        ));
+        Ok(())
+    }
+
+    fn set_memory_limit(&self, vm: &FakeVm, bytes: Option<u64>) -> Result<(), EngineError> {
+        self.world
+            .limits_set
+            .lock()
+            .unwrap()
+            .push((vm.name.clone(), bytes));
+        Ok(())
+    }
+
     fn cpu_time(&self, vm: &FakeVm) -> Result<Duration, EngineError> {
         if self.world.unreadable_cpu.load(Ordering::SeqCst) {
             return Err(EngineError::new(
@@ -802,6 +848,8 @@ impl Lab {
             pager: PagerConfig::new(root.join("no-pager")),
             about: compute_host::protocol::About::default(),
             lease: None,
+            observer: compute_host::observe::Observer::default(),
+            summary_every: HostConfig::SUMMARY_EVERY,
         }
     }
 

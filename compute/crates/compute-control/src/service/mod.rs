@@ -22,7 +22,7 @@ use compute_protocol::host::{ErrorCode, Id, Reply, Request, SandboxConfig};
 use compute_storage::store::ChunkStore;
 
 use crate::hosts::{Answered, Hosts};
-use crate::store::{SandboxRow, Spec, Store, StoreError, replace};
+use crate::store::{SandboxRow, Spec, Store, StoreError, Write, replace};
 use crate::view::{Target, View, shape_key};
 
 pub use moves::Drained;
@@ -258,8 +258,14 @@ impl<S: Store> Service<S> {
                 Next::Clear(change) => row.ownership = change.set,
                 Next::Nothing | Next::PlaceElsewhere => {}
             }
-            if (row.ownership, row.sends) == before || replace(&*self.store, &mut row).await? {
+            if (row.ownership, row.sends) == before {
                 return Ok((next, Some(row)));
+            }
+            match replace(&*self.store, &mut row).await? {
+                Write::Done => return Ok((next, Some(row))),
+                // Written meanwhile, or about to be given to a host given
+                // up on meanwhile: the rules run again on the row as it is.
+                Write::Conflict | Write::OwnerLost => {}
             }
         }
     }
@@ -273,46 +279,52 @@ impl<S: Store> Service<S> {
         spec: Spec,
         metadata: BTreeMap<String, String>,
     ) -> Result<SandboxRow, Failure> {
-        spec.config.validate().map_err(Failure::Invalid)?;
-        let id = new_id()?;
-        let shape = shape_key(
-            &spec.image,
-            u32::from(spec.config.vcpus),
-            spec.config.memory_mib,
-        );
-        let demand = self.demand(&spec.config, Prefer::ReadyClone(shape));
-        let mut row = SandboxRow {
-            id,
-            team: team.to_owned(),
-            spec,
-            metadata,
-            ownership: Ownership::created(HostId(0)),
-            sends: compute_fleet::Sends::default(),
-            class: None,
-            created_ms: now_ms(),
-            version: 0,
-        };
+        let (mut row, demand) = self.new_row(team, spec, metadata)?;
+        let id = row.id;
         let mut exclude = Vec::new();
+        let mut inserted = false;
+        // The last refusal of a host that holds nothing of it.
+        let mut refused = None;
         for tries in 1..=self.settings.max_tries {
-            let target = self.place(&demand, &exclude)?;
-            row.ownership = if tries == 1 {
-                Ownership::created(target.host)
-            } else {
+            let target = match self.place(&demand, &exclude) {
+                Ok(target) => target,
+                Err(failure) => {
+                    self.forget_if_refused(&row, refused.as_ref()).await?;
+                    return Err(failure);
+                }
+            };
+            row.ownership = if inserted {
                 // The host before it refused outright and holds nothing.
                 row.ownership.give(target.host).set
+            } else {
+                Ownership::created(target.host)
             };
             row.sends.send(row.ownership.epoch, target.seq);
             row.class = Some(target.class.clone());
-            let written = if tries == 1 {
-                self.store.insert(&row).await?
-            } else {
+            let written = if inserted {
                 replace(&*self.store, &mut row).await?
+            } else {
+                self.store.insert(&row).await?
             };
-            if !written {
-                return Err(Failure::Unknown {
-                    id,
-                    why: "it changed while being created".into(),
-                });
+            match written {
+                Write::Done => inserted = true,
+                // Given up on since it was placed: place it elsewhere,
+                // from the row as stored.
+                Write::OwnerLost => {
+                    exclude.push(target.host);
+                    if inserted {
+                        row = self.store.sandbox(id).await?.ok_or(Failure::NotFound)?;
+                    } else {
+                        row.sends = compute_fleet::Sends::default();
+                    }
+                    continue;
+                }
+                Write::Conflict => {
+                    return Err(Failure::Unknown {
+                        id,
+                        why: "it changed while being created".into(),
+                    });
+                }
             }
             let asked = Asked {
                 op: Op::Create,
@@ -323,37 +335,79 @@ impl<S: Store> Service<S> {
                 id,
                 config: row.spec.config.clone(),
             };
-            let answered = match self
+            let answered = self
                 .hosts
                 .call(&target, Some(asked.epoch), &request, CREATE_WAIT)
                 .await
-            {
-                Ok(answered) => answered,
-                Err(error) => {
-                    return Err(Failure::Unknown {
-                        id,
-                        why: error.to_string(),
-                    });
-                }
-            };
+                .map_err(|error| Failure::Unknown {
+                    id,
+                    why: error.to_string(),
+                })?;
             let (next, now) = self.settle(id, asked, &answered, tries).await?;
             row = now.ok_or(Failure::NotFound)?;
             match next {
                 _ if answered.outcome() == Outcome::Done => return Ok(row),
-                Next::PlaceElsewhere => exclude.push(target.host),
+                Next::PlaceElsewhere => {
+                    exclude.push(target.host);
+                    refused = Some(answered);
+                }
                 _ => {
-                    self.forget_refused(&row, &answered).await?;
+                    self.forget_if_refused(&row, Some(&answered)).await?;
                     return Err(host_failure(&answered));
                 }
             }
         }
+        self.forget_if_refused(&row, refused.as_ref()).await?;
         Err(Failure::NoCapacity)
+    }
+
+    /// A new sandbox's row, not yet placed, and what it asks of a host.
+    fn new_row(
+        &self,
+        team: &str,
+        spec: Spec,
+        metadata: BTreeMap<String, String>,
+    ) -> Result<(SandboxRow, Demand), Failure> {
+        spec.config.validate().map_err(Failure::Invalid)?;
+        // Hosts start every sandbox from their one base image until hosts
+        // can fetch images; a create naming another must not get it.
+        if spec.image != self.settings.image {
+            return Err(Failure::Invalid(format!(
+                "no such image: {} (this fleet has only {})",
+                spec.image, self.settings.image
+            )));
+        }
+        let shape = shape_key(
+            &spec.image,
+            u32::from(spec.config.vcpus),
+            spec.config.memory_mib,
+        );
+        let demand = self.demand(&spec.config, Prefer::ReadyClone(shape));
+        let row = SandboxRow {
+            id: new_id()?,
+            team: team.to_owned(),
+            spec,
+            metadata,
+            ownership: Ownership::created(HostId(0)),
+            sends: compute_fleet::Sends::default(),
+            class: None,
+            created_ms: now_ms(),
+            version: 0,
+        };
+        Ok((row, demand))
     }
 
     /// Deletes the row of a sandbox whose create its owner refused
     /// outright: that host holds nothing of it, and no other create was
     /// sent under its epoch.
-    async fn forget_refused(&self, row: &SandboxRow, answered: &Answered) -> Result<(), Failure> {
+    async fn forget_if_refused(
+        &self,
+        row: &SandboxRow,
+        answered: Option<&Answered>,
+    ) -> Result<(), Failure> {
+        let Some(answered) = answered else {
+            return Ok(());
+        };
         if answered.outcome() == Outcome::Refused && row.sends.unanswered.is_none() {
             self.store.delete(row.id, row.version).await?;
         }
@@ -393,7 +447,7 @@ impl<S: Store> Service<S> {
             let Some(host) = row.ownership.owner else {
                 let change = row.ownership.clear();
                 row.ownership = change.set;
-                if !replace(&*self.store, &mut row).await? {
+                if !replace(&*self.store, &mut row).await?.done() {
                     continue;
                 }
                 if let Some(archive) = &self.archive {

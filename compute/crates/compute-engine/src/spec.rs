@@ -58,6 +58,12 @@ pub struct VmSpec {
     /// relative to other VMs: its cgroup's `cpu.weight`, 1 to 10000, where
     /// 100 is one processor's worth. `vcpus` stays the ceiling.
     pub cpu_weight: u16,
+    /// Host memory in bytes the VM may hold at most, VMM included: its
+    /// cgroup's `memory.max`. A VM that needs more is ended by the kernel
+    /// rather than take memory the host never set aside for it. `None` for
+    /// no limit beyond its guest memory; see [`crate::Engine::set_memory_limit`]
+    /// to change it later.
+    pub memory_limit: Option<u64>,
     /// Uncompressed guest kernel.
     pub kernel: PathBuf,
     /// Kernel command line.

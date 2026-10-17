@@ -440,8 +440,8 @@ async fn a_request_that_waited_past_its_admission_does_nothing() {
     lab.assert_clean();
 }
 
-/// A store whose claims wait until the test lets them go, so an adopt
-/// stays under way for as long as the test needs.
+/// A store whose claims each take a permit for good, so an adopt stays
+/// under way until the test adds one.
 struct Gated {
     inner: Directory,
     claims: Arc<Semaphore>,
@@ -489,7 +489,7 @@ impl Store for Gated {
     ) -> impl Future<Output = Result<Owned<Option<Claimed>>, EngineError>> + Send {
         let claims = Arc::clone(&self.claims);
         async move {
-            let _go = claims.acquire().await;
+            claims.acquire().await.expect("never closed").forget();
             self.inner.claim(id, own).await
         }
     }
@@ -615,4 +615,153 @@ async fn a_host_whose_lease_ran_out_decides_nothing_on_events_or_after_a_restart
     gate.set(boot_now() + Duration::from_secs(60));
     lab.wait_level(sandbox, LevelName::Paused).await;
     lab.assert_clean();
+}
+
+/// A hand-off sent while a change of owner is still being written finds
+/// the host about to hold that ownership: it is told to try again, never
+/// that the sandbox is not here, which the service could take as final.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hand_off_during_a_change_of_owner_is_never_answered_not_found() {
+    let (one, _two, shelf) = hosts().await;
+    let sandbox = id(25);
+    one.create(sandbox, NEVER).await;
+    // A sandbox boots on its first use.
+    one.run(sandbox, &["set first"]).await;
+    one.sleep_to(sandbox, LevelName::Paused).await;
+    one.wait_level(sandbox, LevelName::Paused).await;
+    let later = OwnerEpoch(2);
+    // Sent in order on one channel: the create, which changes the owner,
+    // then the hand-off under the new owner.
+    let owned = one.handle.owned(later);
+    let (created, handed) = tokio::join!(
+        owned.create(sandbox, config(NEVER)),
+        one.handle.hand_off(sandbox, later),
+    );
+    created.unwrap();
+    assert!(
+        matches!(handed, Ok(()) | Err(HostError::Busy(_))),
+        "{handed:?}"
+    );
+    if handed.is_err() {
+        one.handle.hand_off(sandbox, later).await.unwrap();
+    }
+    assert_eq!(one.status().await.sandboxes, Vec::new());
+    assert!(shelf.join(sandbox.to_string()).exists());
+    one.assert_clean();
+}
+
+/// A hand-off while the sandbox is being removed, which deletes the
+/// store's copy, is told to try again: answered done, it would tell the
+/// service the store still holds the sandbox.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hand_off_during_a_removal_is_told_to_try_again() {
+    let root = Lab::root();
+    let shelf = root.join("shelf");
+    let slow_stop = Delays {
+        stop: Duration::from_millis(1500),
+        ..Delays::default()
+    };
+    let config = Lab::config(&root, HostPolicy::default());
+    let one = Lab::launch(
+        root,
+        Arc::default(),
+        slow_stop,
+        config,
+        Directory::new(&shelf),
+    )
+    .await;
+    let sandbox = id(27);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set first"]).await;
+    one.sleep_to(sandbox, LevelName::Paused).await;
+    one.wait_level(sandbox, LevelName::Paused).await;
+    let removing = tokio::spawn({
+        let handle = one.handle.clone();
+        async move { handle.remove(sandbox, None).await }
+    });
+    let mut busy = 0;
+    loop {
+        match hand_off(&one, sandbox, 1).await {
+            Reply::Error {
+                code: ErrorCode::Busy,
+                ..
+            } => busy += 1,
+            // Gone: the removal is over, or ends at once.
+            Reply::Error {
+                code: ErrorCode::NotFound,
+                ..
+            } => break,
+            other => panic!("a hand-off during a removal: {other:?}"),
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::timeout(Duration::from_secs(5), removing)
+        .await
+        .expect("the removal ended with the sandbox gone")
+        .unwrap()
+        .unwrap();
+    assert!(busy > 0, "the removal was never seen under way");
+    one.assert_clean();
+}
+
+/// An adopt under a later ownership removes the earlier one's copy first.
+/// A hand-off meanwhile, under either ownership, must not join that
+/// removal: it would be answered done while the sandbox is about to be
+/// this host's again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hand_off_during_an_adopts_removal_is_told_to_try_again() {
+    let root = Lab::root();
+    let shelf = root.join("shelf");
+    let one = Lab::start_stored(root, Arc::default(), Directory::new(&shelf)).await;
+    let sandbox = id(26);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set moved"]).await;
+    one.sleep_to(sandbox, LevelName::Archived).await;
+    one.wait_level(sandbox, LevelName::Archived).await;
+    assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+
+    let claims = Arc::new(Semaphore::new(1));
+    let gated = Gated {
+        inner: Directory::new(&shelf),
+        claims: Arc::clone(&claims),
+    };
+    let two_root = Lab::root();
+    let slow_stop = Delays {
+        stop: Duration::from_millis(1500),
+        ..Delays::default()
+    };
+    let config_two = Lab::config(&two_root, HostPolicy::default());
+    let two = Lab::launch(two_root, Arc::default(), slow_stop, config_two, gated).await;
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert_eq!(two.run(sandbox, &["get"]).await, ["moved"]);
+
+    let adopting = tokio::spawn({
+        let owned = two.handle.owned(OwnerEpoch(3));
+        async move { owned.adopt(sandbox, config(NEVER), OwnerEpoch(3)).await }
+    });
+    // Until the adopt is let claim the store's copy, it is still under
+    // way: the earlier copy's removal, then the claim.
+    // One under the ownership being replaced is stale; one under the new
+    // ownership must try again, never be told the sandbox is gone.
+    for _ in 0..10 {
+        let earlier = code(&hand_off(&two, sandbox, 2).await);
+        assert!(
+            matches!(earlier, Some(ErrorCode::Busy | ErrorCode::Stale)),
+            "a hand-off under ownership 2: {earlier:?}"
+        );
+        assert_eq!(
+            code(&hand_off(&two, sandbox, 3).await),
+            Some(ErrorCode::Busy),
+            "a hand-off under ownership 3"
+        );
+        sleep(Duration::from_millis(200)).await;
+    }
+    assert!(!adopting.is_finished());
+    claims.add_permits(1);
+    adopting.await.unwrap().unwrap();
+    let adopted = two.current(sandbox).await;
+    assert_eq!(adopted.owner_epoch, 3);
+    assert_eq!(two.run(sandbox, &["get"]).await, ["moved"]);
+    one.assert_clean();
+    two.assert_clean();
 }

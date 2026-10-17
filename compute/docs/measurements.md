@@ -157,6 +157,67 @@ agent's lifetime; they now expire 60 s after arrival, which took the
 agent's memory 100 s after the last remote wake and removal from 279 MiB
 to 54 MiB.
 
+## Observability overhead
+
+What [ADR 16](adr/0016-observability.md) costs the agent, measured on
+2026-10-17 on an Azure Standard_E32ds_v5 (32 vCPUs, nested, `nested`
+memory profile, westeurope) with 1,000 sandboxes of 128 MiB running and
+one wake per second. Each phase restarted the agent (the VMs kept
+running), let it settle for 90 s and then read its processor time and
+memory over 240 s, in the order baseline, observability with events
+journaled only, observability exporting to an OpenTelemetry Collector on
+the same host, and baseline again. The baseline is the lab branch the
+observability work started from. No canary ran.
+
+| Phase | Processor, % of one core | Resident at end | Anonymous at end |
+| --- | --- | --- | --- |
+| Baseline | 10.33 | 38.3 MiB | 29.5 MiB |
+| Journal only | 10.26 | 38.6 MiB | 29.9 MiB |
+| Exporting | 10.29 | 40.2 MiB | 30.3 MiB |
+| Baseline again | 10.23 | 37.6 MiB | 29.0 MiB |
+
+Processor time with observability is within the baselines' own spread
+(0.1% of a core between the two here, 0.14% across both runs below), so
+this method does not resolve its cost, and whether it is under ADR 16's
+0.1% target is unresolved at this precision. An earlier run of the same
+method, on the build before each sample read `memory.stat` in one pass,
+measured 0.16% (journal only) and 0.20% (exporting) of a core above the
+mean of its baselines (10.20 and 10.23). A profile of that build (perf at
+499 Hz over 120 s, with export on) put 84% of the agent's samples in
+system calls reading cgroup and `/proc` files, which the baseline's
+per-VM sampling already does, and under 0.1% of them in the
+observability code's own functions; that bounds those functions, not
+the work they add inside shared code. The one addition it pointed to
+was a second scan of each VM's `memory.stat` for `pgmajfault`, every
+second, which the one pass removed.
+
+Exporting held 1.1 MiB more anonymous memory than the mean of the
+baselines, within ADR 16's 2 MiB target, and 1.2 MiB more file-backed
+pages, the binary's code for HTTP and TLS; counting those, the resident
+set grew 2.3 MiB, a little over it. Journaling only held 0.6 MiB more
+anonymous memory. Events journaled took 85 KB of log per 240 s, about
+30 MB a day at this rate.
+
+The same method on a GCP n2-highmem-32 (32 vCPUs, Intel Xeon at 2.8 GHz,
+nested, `nested` memory profile, europe-west4) with 1,000 sandboxes of
+128 MiB running, on the final build:
+
+| Phase | Processor, % of one core | Resident at end | Anonymous at end |
+| --- | --- | --- | --- |
+| Baseline | 14.46 | 36.1 MiB | 27.5 MiB |
+| Journal only | 15.05 | 37.2 MiB | 28.3 MiB |
+| Exporting | 14.67 | 39.8 MiB | 29.7 MiB |
+| Baseline again | 14.91 | 38.0 MiB | 29.3 MiB |
+
+The baseline itself costs more here, and its two runs differ by 0.45% of
+a core, so this host resolves the observability cost even less well:
+journaling only measured 0.36% of a core above the mean of the baselines
+(above both of them) and exporting 0.01% below it; both differences are
+smaller than that spread. Exporting held 1.3 MiB more anonymous memory
+than the mean of the baselines and 2.7 MiB more resident memory;
+journaling only held about the same as the baselines. The journal grew
+85 KB per 240 s, as on Azure.
+
 ## Cost per sleeping sandbox
 
 Illustrative estimates of the main resources a sleeping sandbox holds,
@@ -246,3 +307,121 @@ seed 247, and letting the sleep hook skip the freeze does so at seed 1.
 Making every registration copy a new attempt fails the lease's unit test
 for a registration answered after copies were sent again, and the
 simulation then never sees such an answer count.
+## Admission gaps (2026-10-17)
+
+Measured on 2026-10-17 on branch `feat/compute-gaps`, on one Azure
+Standard_D32ds_v5 in swedencentral: 32 vCPUs and 128 GiB, a VM with nested
+virtualization, its local temporary disk as XFS for the state root, and
+Azure Blob storage in the same region. Host kernel 7.0, guest kernel
+6.18.54, Firecracker v1.17.0 under its jailer. The smoke guest image, as in
+the gate.
+
+### Huge pages and free page reporting
+
+A 1 vCPU, 2 GiB sandbox on the nested profile; its guest touched 1.5 GiB
+and exited, and the host's huge-page pool was read from `/proc/meminfo`:
+
+| VM | Before | Guest holding 1.5 GiB | 2 s after it freed it | 30 s after |
+| --- | --- | --- | --- | --- |
+| Booted | 182 MiB | 1724 MiB | 1582 MiB | 232 MiB |
+| Restored from Saved | 152 MiB | 1522 MiB | | 226 MiB |
+
+Firecracker maps guest memory as private anonymous huge pages in both
+cases, so a range the guest reports free frees the whole huge pages inside
+it. A balloon of 1500 MiB on the same VM, with the guest's memory full of
+tmpfs data and page cache, took the guest's free memory from 868 to 56 MiB
+and returned nothing to the pool (1716 MiB before, 1738 MiB after): it gives
+back 4 KiB pages, and a huge page is freed only whole.
+
+### Ready sandboxes and their fill booking
+
+Four ready sandboxes of 1 vCPU and 512 MiB, 10 s after they were filled,
+next to the non-zero part of their template's memory image (what a fill
+books, with 64 MiB more):
+
+| Profile | Template footprint | Each ready sandbox holds |
+| --- | --- | --- |
+| Bare metal | 131 MiB | 43 MiB |
+| Nested | 145 MiB | 149 MiB (huge pages) |
+
+On bare metal a restored guest maps its image and holds only what it
+touches; with huge pages the pager fills what the guest touched before the
+snapshot, rounded to whole huge pages. Either way a ready sandbox holds
+less than footprint plus 64 MiB; nested hosts book fills whole anyway.
+
+### Agent threads
+
+The agent's async workers, blocking threads and concurrent compressions at
+four settings, on the nested profile with Azure Blob storage. Each run
+created 40 sandboxes of 1 vCPU and 512 MiB, wrote 96 MiB of random data and
+92 MiB of text into each one's `/tmp`, put all 40 to sleep at Remote at
+once, then woke them all at once and read the text back
+(`compute-host bench --count 40 --level remote`). Agent processor time is
+the agent process's user and system time over the whole run, so it
+includes the creates and wakes; its average is that time over the run's
+wall time.
+
+| Workers, blocking, compressions | All 40 at Remote | Each at Remote, p50 | Remote wake, first byte p50 / p90 | Agent processor time | Processors on average | Agent threads at most |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2, 66, 2 | 238 s | 146 s | 8.7 s / 9.0 s | 549 s | 2.2 | 73 |
+| 4, 68, 4 | 152 s | 97 s | 5.0 s / 5.2 s | 576 s | 3.5 | 77 |
+| 8, 72, 8 (the default on this host) | 110 s | 71 s | 3.1 s / 3.2 s | 614 s | 5.1 | 87 |
+| 32, 512, 512 (the previous default) | 44 s | 33 s | 2.3 s / 2.4 s | 816 s | 15.0 | 561 |
+
+Archiving is processor-bound: hashing and compressing each chunk, so the
+number of compressions at once sets how fast sandboxes reach Remote. The
+previous default archived 40 sandboxes in a third of the time by taking
+half the host's processors from its sandboxes for most of a minute, and
+spent a third more processor time doing it. The default keeps the agent
+near a sixth of this host while a mass wake still reaches its first byte
+in about 3 s. Archiving happens after a sandbox has been idle for minutes,
+so a slower archive costs local disk for longer, not a user's wait;
+`--compress-threads` raises it on hosts whose archives fall behind.
+
+### Noisy neighbours
+
+What the agent sets to keep sandboxes apart: each VM's cgroup gets
+`cpu.weight` 100 per processor requested (`cpu_request_millis`, all its
+vCPUs unless set lower), `memory.low` at its memory request and no swap.
+It sets no limit on disk or network bandwidth and no processor ceiling
+beyond the VM's vCPU count.
+
+One busy sandbox next to one other, on the same host as above with
+networking on: a victim of 1 vCPU and 2 GiB measured alone, then again
+3 s after an aggressor of 4 vCPUs and 4 GiB started a 45 s load. Each
+number is the victim's, higher is better.
+
+| What the aggressor ran | Victim's probe | Alone | Next to the aggressor |
+| --- | --- | --- | --- |
+| 4 processes spinning | `openssl speed sha256`, 16 KiB blocks | 1454 MB/s | 1448 MB/s |
+| 4 processes copying 512 MiB buffers | copying a 512 MiB buffer 8 times in Python | 1.81 GB/s | 1.80 GB/s |
+| `fio` random 64 KiB reads and writes, direct, 4 jobs at depth 64 | `fio` 4 KiB random reads, direct, depth 32 | 125,574 IOPS | 122,985 IOPS |
+| the same | `fio` 1 MiB sequential writes, direct, depth 16 | 1382 MiB/s | 3819 MiB/s |
+| 8 loops downloading a 1 GiB blob from the same region | downloading the same blob | 206 MiB/s | 199 MiB/s |
+
+A single 4-vCPU sandbox cannot saturate this 32-vCPU host's processors or
+memory bandwidth, and both sandboxes' disks are files on the host, so a
+guest's direct I/O still goes through the host's page cache: the files fit
+in it, and the sequential-write numbers vary with the host's writeback, not
+with the neighbour. The network loop shared the host's link and lost 3 %.
+A sandbox that writes more than the host caches, or saturates the link,
+would slow its neighbours, since neither has a per-sandbox limit.
+
+Processors are where neighbours collide first, so the weights were
+measured with 16 aggressors of 4 vCPUs each spinning on every vCPU, twice
+the host's processors, the host 99 % busy during each probe:
+
+| Victim | Aggressors' request each | Alone | Next to the aggressors | Share of alone |
+| --- | --- | --- | --- | --- |
+| 4 vCPU, weight 400 | 4000 millis, weight 400 | 5812 MB/s | 2561 MB/s | 44 % |
+| 4 vCPU, weight 400 | 1000 millis, weight 100 | 5815 MB/s | 5338 MB/s | 92 % |
+| 1 vCPU, weight 100 | 4000 millis, weight 400 | 1456 MB/s | 671 MB/s | 46 % |
+
+With equal requests per vCPU the victim gets close to its weighted share:
+400 of 6800 weight is 1.9 of the host's 32 processors, 47 % of its 4 (and
+49 % for the 1-vCPU victim). Sandboxes that request less than
+their vCPUs give way: against aggressors requesting a quarter of theirs,
+the victim kept 92 % of its speed. A processor request is a guarantee
+under contention, not a cap, so a sandbox requesting little still runs at
+full speed on an idle host.
+
