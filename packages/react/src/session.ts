@@ -30,6 +30,8 @@ export type {
 } from "./embedded-session-client";
 
 export { useSession, isTitleEvent } from "./hooks/use-session";
+export { useRetainedReads } from "./hooks/shared-query";
+export { readClientConfig } from "./lib/client-config-read";
 export { useSessionConversation } from "./hooks/use-session-conversation";
 export { useNewConversation } from "./hooks/use-new-conversation";
 export type {

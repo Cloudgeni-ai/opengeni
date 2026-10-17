@@ -1,3 +1,4 @@
+import { observedSessionSequence, SESSION_SEQUENCE_HEADER } from "./session-sequence";
 import type { OpenGeniEmbeddingClient } from "./embedding-client";
 import { OpenGeniApiError, OpenGeniSetupError } from "./errors";
 import { chatDefaults, type Chats } from "./chats";
@@ -664,8 +665,16 @@ export function createSessionProxyHandler(
       // Unknown additive query parameters on allowlisted reads pass through, so a
       // newer browser SDK keeps working; the route and method allowlist is exact.
       const query = Object.fromEntries(url.searchParams);
-      const read = async (path: string) =>
-        json(await client.requestJson("GET", path, undefined, query, call));
+      const read = async (path: string) => {
+        const body = await client.requestJson("GET", path, undefined, query, call);
+        // Keep the projection's read-consistency sequence for the browser hooks.
+        const sequence = observedSessionSequence(body);
+        return json(
+          body,
+          200,
+          sequence === undefined ? {} : { [SESSION_SEQUENCE_HEADER]: String(sequence) },
+        );
+      };
       const [root, ...rest] = segments;
       if (root === "config") {
         if (rest.length === 1 && rest[0] === "client" && method === "GET") {

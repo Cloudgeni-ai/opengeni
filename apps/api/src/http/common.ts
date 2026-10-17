@@ -14,7 +14,26 @@ export async function assertSessionExists(
   workspaceId: string,
   sessionId: string,
 ): Promise<void> {
-  if (!(await getSession(db, workspaceId, sessionId))) {
+  await requireSessionSequence(db, workspaceId, sessionId);
+}
+
+/**
+ * Response header naming the session event sequence a read reflects. The
+ * session row is read BEFORE the projection, so every event at or below this
+ * sequence was committed before the projection was read: a client that loaded
+ * the event log separately refreshes the projection only for a later event.
+ */
+export const SESSION_SEQUENCE_HEADER = "X-OpenGeni-Session-Sequence";
+
+/** 404 unless the session exists; otherwise its current event sequence. */
+export async function requireSessionSequence(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<number> {
+  const session = await getSession(db, workspaceId, sessionId);
+  if (!session) {
     throw new HTTPException(404, { message: "session not found" });
   }
+  return session.lastSequence;
 }

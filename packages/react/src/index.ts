@@ -82,6 +82,8 @@ export type {
 
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";
+export { useRetainedReads } from "./hooks/shared-query";
+export { readClientConfig } from "./lib/client-config-read";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export {
   SESSION_EVENT_BROWSER_MAX_BYTES,
