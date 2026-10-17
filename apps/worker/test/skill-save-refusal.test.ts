@@ -75,6 +75,8 @@ async function skillSaveFixture(
     skillScope: SkillScope;
     learning: "personal" | "workspace";
     modes?: { personal?: Mode; workspace?: Mode };
+    /** Whether a verified person started the chat's turn (true by default). */
+    person?: boolean;
   },
 ) {
   const suffix = crypto.randomUUID();
@@ -133,8 +135,9 @@ async function skillSaveFixture(
     workspaceId,
     // A chat using personal memory saves what it learns only for its person,
     // like a private chat.
-    ...(input.learning === "personal"
-      ? { memoryScope: "user" as const, createdBy: { kind: "subject" as const, subjectId } }
+    ...(input.learning === "personal" ? { memoryScope: "user" as const } : {}),
+    ...(input.learning === "personal" || input.person !== false
+      ? { createdBy: { kind: "subject" as const, subjectId } }
       : {}),
     initialMessage: "Update the notes Skill",
     resources: [],
@@ -212,9 +215,13 @@ async function skillSaveFixture(
 }
 
 describe("skill_save refusals", () => {
-  test("a personal Skill edited from a workspace-learning chat is refused with its reason", async () => {
+  test("a personal Skill edited from a shared chat with no person to save for is refused with its reason", async () => {
     if (!app || !shared) return;
-    const fixture = await skillSaveFixture(app.db, { skillScope: "user", learning: "workspace" });
+    const fixture = await skillSaveFixture(app.db, {
+      skillScope: "user",
+      learning: "workspace",
+      person: false,
+    });
     const result = await fixture.editNotes();
 
     expect(result.isError).toBe(true);
@@ -249,6 +256,36 @@ describe("skill_save refusals", () => {
       reason: "learning_off",
       skillId: fixture.skillId,
     });
+    expect((await fixture.readNotes())?.revisionId).toBe(fixture.saved.revisionId);
+  }, 120_000);
+});
+
+describe("the person's own personal Skill from a shared chat", () => {
+  test("publishes when the chat and the person are both Automatic", async () => {
+    if (!app || !shared) return;
+    const fixture = await skillSaveFixture(app.db, {
+      skillScope: "user",
+      learning: "workspace",
+      modes: { personal: "automatic", workspace: "automatic" },
+    });
+    const result = await fixture.editNotes();
+    expect(result.isError, JSON.stringify(result.content)).toBe(false);
+    expect(result.structuredContent.outcome).toBe("applied");
+    const after = await fixture.readNotes();
+    expect(after?.scope).toBe("user");
+    expect(after?.revisionId).not.toBe(fixture.saved.revisionId);
+  }, 120_000);
+
+  test("the person's own Review first leaves a pending proposal", async () => {
+    if (!app || !shared) return;
+    const fixture = await skillSaveFixture(app.db, {
+      skillScope: "user",
+      learning: "workspace",
+      modes: { personal: "review_first", workspace: "automatic" },
+    });
+    const result = await fixture.editNotes();
+    expect(result.isError, JSON.stringify(result.content)).toBe(false);
+    expect(result.structuredContent.outcome).toBe("pending");
     expect((await fixture.readNotes())?.revisionId).toBe(fixture.saved.revisionId);
   }, 120_000);
 });
@@ -357,11 +394,12 @@ describe("explicit workspace Skill destination from a chat that learns for its p
     ).rejects.toThrow("Skill scope differs from the requested scope");
   }, 120_000);
 
-  test("a shared chat cannot choose a personal destination", async () => {
+  test("a shared chat without a person cannot choose a personal destination", async () => {
     if (!app || !shared) return;
     const fixture = await skillSaveFixture(app.db, {
       skillScope: "workspace",
       learning: "workspace",
+      person: false,
     });
     const skillId = crypto.randomUUID();
     await expect(

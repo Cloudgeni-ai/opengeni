@@ -340,15 +340,18 @@ the snapshot or earlier model context. Newly accepted turns use the shared chat'
 current destination. A genuinely incompatible retained scope fails at startup
 with an explanation to send a new message; Retry cannot reopen that same turn.
 
-A chat that learns for its person can still explicitly save to the workspace.
-Saving a workspace instruction, changing an existing workspace Skill by its id,
-or creating a Skill with scope `workspace` is that explicit choice (permanently
-deleting a workspace Skill is not); Knowledge and other Skills keep the Personal
-destination. Such a change is governed by the
-stricter of the chat's own mode and the workspace's mode for that category, as
-of acceptance: Off refuses it, and Review first leaves a pending proposal in
-workspace review. A shared chat cannot choose a Personal destination or change a
-personal Skill.
+An agent saves to the destination it explicitly chooses, beyond its chat's
+default. From a chat that learns for its person, saving a workspace instruction,
+changing an existing workspace Skill or Knowledge entry by its id, or creating a
+Skill or entry with scope `workspace` reaches the workspace. From a shared chat,
+changing the initiating person's own personal Skill by its id, or creating a
+Skill with scope `user`, reaches that person. Such a change is governed by the
+stricter of the chat's own mode and the destination owner's mode (the workspace's
+or the person's) for that category, as of acceptance: Off refuses it, and Review
+first leaves a pending proposal in that owner's review. Work with no verified
+initiating person cannot choose a personal destination, nobody else's personal
+Skill is reachable, permanent Skill deletion stays within the chat's own scope,
+and shared Knowledge still cannot point at private evidence.
 
 Only-me chats in a shared workspace can be scheduled as existing-session targets.
 A selected personal connector source creates an owner-only session for each run,
