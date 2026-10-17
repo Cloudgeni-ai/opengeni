@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
+import { sqlParameterLiteral } from "./helpers/sql-literal";
 import {
   bootstrapWorkspace,
   createDb,
@@ -107,11 +108,10 @@ test("effective session policy reads recent history only, however long the sessi
         await tx.execute(sql.raw(`prepare effective_policy_plan as ${query.sql}`));
         let plan: unknown;
         try {
-          const literal = (value: unknown) => `'${String(value).replaceAll("'", "''")}'`;
           const explained = await tx.execute(
             sql.raw(
               `explain (analyze, buffers, format json) execute effective_policy_plan(${query.params
-                .map(literal)
+                .map(sqlParameterLiteral)
                 .join(", ")})`,
             ),
           );
