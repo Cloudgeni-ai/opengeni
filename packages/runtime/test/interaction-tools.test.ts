@@ -935,6 +935,42 @@ describe("interaction attempt tools", () => {
     });
   });
 
+  test("a browser that failed to start reports why instead of a failed session", async () => {
+    const failedId = randomUUID();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: "0", sessions: [] }) as never,
+        createBrowserSession: async () =>
+          ({
+            session: { id: failedId, lifecycle: "failed", failureCode: "unsupported" },
+            operation: {
+              state: "failed",
+              error: {
+                code: "unsupported",
+                message: "No Google Chrome or Chromium is installed on this machine.",
+                retryable: false,
+              },
+            },
+          }) as never,
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:control"],
+    });
+
+    const result = await definitions[0]!.execute(
+      { mode: "new", initialUrl: "https://example.com/" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(result.isError).toBe(true);
+    const text = JSON.stringify(result.structuredContent);
+    expect(text).toContain(
+      `BrowserSession ${failedId} did not start: No Google Chrome or Chromium is installed`,
+    );
+    expect(text).toContain("unsupported");
+  });
+
   test("opens attached browsers headed and forwards the selected network route", async () => {
     let createRequest: Record<string, unknown> | null = null;
     const definitions = createInteractionAttemptToolDefinitions({

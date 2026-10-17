@@ -64,6 +64,7 @@ import {
   type BrowserScreenshotOptions,
 } from "./media";
 import {
+  AgentBrowserCommandError,
   AgentBrowserJsonRunner,
   assertAgentBrowserSocketPath,
   browserProfileCryptoPolicy,
@@ -1440,11 +1441,15 @@ export class BrowserSupervisor {
    * is not one this launch's authority carries forward, refuses the launch;
    * the launch never falls back to anything else. */
   private async buildRuntime(options: ValidatedBrowserSupervisorSessionOptions): Promise<Runtime> {
-    return await this.withOwnedWorkingDirectory(
-      "launch",
-      options,
-      async () => await this.buildOwnedRuntime(options),
-    );
+    try {
+      return await this.withOwnedWorkingDirectory(
+        "launch",
+        options,
+        async () => await this.buildOwnedRuntime(options),
+      );
+    } catch (error) {
+      throw browserLaunchFailure(error);
+    }
   }
 
   private async buildOwnedRuntime(
@@ -3630,6 +3635,27 @@ function launchFailureCode(error: unknown): string {
   if (error instanceof AggregateError) return "cleanup_failed";
   const code = (error as { code?: unknown } | null)?.code;
   return boundedFailureCode(typeof code === "string" ? code : "internal");
+}
+
+const BROWSER_LAUNCH_REASON_MAX_CHARS = 1_000;
+
+/** A browser that cannot start says why, so the caller can act on it instead
+ * of retrying an opaque failure. The driver's own launch message (a missing
+ * Chrome, a crash on startup with its stderr) is already bounded to one line;
+ * every other failure keeps its original type and contract. */
+export function browserLaunchFailure(error: unknown): unknown {
+  if (!(error instanceof AgentBrowserCommandError) || !error.driverMessage) return error;
+  if (/^Chrome not found\b/u.test(error.driverMessage)) {
+    return new InteractionDefiniteDriverError(
+      "unsupported",
+      "No Google Chrome or Chromium is installed on this machine, so a browser cannot start here. Install Google Chrome on it, or open the browser on another placement.",
+    );
+  }
+  const reason = error.driverMessage.slice(0, BROWSER_LAUNCH_REASON_MAX_CHARS);
+  return new InteractionDefiniteDriverError(
+    "driver_failed",
+    `The browser could not start on this machine: ${reason}`,
+  );
 }
 
 function boundedPositiveInteger(value: number, label: string): number {
