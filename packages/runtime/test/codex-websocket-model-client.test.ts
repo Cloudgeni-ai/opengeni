@@ -10,7 +10,15 @@ import {
 } from "@opengeni/codex";
 import OpenAI from "openai";
 import { ReplayableJsonOpenAI } from "../src/replayable-json-body";
-import { isModelSocketTransportError } from "@opengeni/network/responses-websocket";
+import {
+  isModelSocketTransportError,
+  responsesTransport,
+  OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
+  createResponsesTurn,
+  withResponsesConversation,
+} from "@opengeni/network/responses-websocket";
+import { instrumentedModelFetch } from "../src/model-provider-client";
+import { withModelTransportStartedObserver } from "../src/model-preparation-diagnostics";
 
 class FakeSocket implements CodexWebSocketLike {
   readyState = 0;
@@ -34,6 +42,71 @@ class FakeSocket implements CodexWebSocketLike {
     this.onclose?.({ code: 1000 });
   }
 }
+
+test.each([false, true])(
+  "generic continuation retry rechecks dispatch admission (refused=%s)",
+  async (refused) => {
+    let socket!: FakeSocket;
+    let admissions = 0;
+    const refusal = new Error("dispatch revoked");
+    const transport = responsesTransport(
+      async () => {
+        throw new Error("unexpected HTTP");
+      },
+      {
+        endpoint: OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
+        createSocket: () => {
+          socket = new FakeSocket();
+          queueMicrotask(() => socket.open());
+          return socket;
+        },
+      },
+    );
+    const fetch = instrumentedModelFetch("openai", transport as typeof globalThis.fetch);
+    const turn = createResponsesTurn("generic-chat");
+    const user = { role: "user", content: "hi" };
+    const send = (input: unknown[]) =>
+      withResponsesConversation(turn, () =>
+        withModelTransportStartedObserver(
+          async () => {
+            admissions++;
+            if (refused && admissions === 3) throw refusal;
+          },
+          () =>
+            fetch("https://api.openai.com/v1/responses", {
+              method: "POST",
+              body: JSON.stringify({ model: "m", input, stream: true }),
+            }),
+        ),
+      );
+    const first = send([user]);
+    for (let i = 0; i < 100 && !socket?.sent.length; i++) await Bun.sleep(1);
+    socket.emit({ type: "response.completed", response: { id: "first" } });
+    await (await first).text();
+    const second = send([user, { role: "user", content: "next" }]);
+    const outcome = second.then(
+      (response) => response,
+      (error: unknown) => error,
+    );
+    for (let i = 0; i < 100 && socket.sent.length < 2; i++) await Bun.sleep(1);
+    socket.emit({
+      type: "error",
+      status: 400,
+      error: { code: "previous_response_not_found", param: "previous_response_id" },
+    });
+    for (let i = 0; i < 100 && admissions < 3; i++) await Bun.sleep(1);
+    expect(admissions).toBe(3);
+    if (refused) {
+      expect(await outcome).toBe(refusal);
+      expect(socket.sent).toHaveLength(2);
+    } else {
+      expect(socket.sent).toHaveLength(3);
+      expect(socket.sent[2]).not.toHaveProperty("previous_response_id");
+      socket.emit({ type: "response.completed", response: { id: "second" } });
+      await (await second).text();
+    }
+  },
+);
 
 test.each(["headers", "idle"])(
   "Codex %s timeout retains socket evidence through the SDK",

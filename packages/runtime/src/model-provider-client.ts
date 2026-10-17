@@ -17,6 +17,7 @@ import {
 import {
   responsesTransport,
   OPENAI_RESPONSES_WEBSOCKET_ENDPOINT,
+  withResponsesContinuationAdmission,
 } from "@opengeni/network/responses-websocket";
 import {
   XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
@@ -576,7 +577,19 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
       await current.admit();
       let response: Response;
       try {
-        response = await inner(input, requestInit);
+        response = await withResponsesContinuationAdmission(
+          async (replacementSignal) => {
+            replacementSignal.throwIfAborted();
+            requestInit?.signal?.throwIfAborted();
+            // OpenAI/Azure have no subscription custody lane, but every physical
+            // continuation retry still crosses the ordinary dispatch checkpoint.
+            await recordModelTransportStarted();
+            replacementSignal.throwIfAborted();
+            requestInit?.signal?.throwIfAborted();
+            recordModelTransportDispatched(performance.now());
+          },
+          () => inner(input, requestInit),
+        );
       } catch (error) {
         await current.failed();
         throw error;

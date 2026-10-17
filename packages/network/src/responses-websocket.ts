@@ -3,7 +3,7 @@
 // failure evidence and diagnostics are identical for every adapter.
 // HTTP keeps its existing connection reuse when a socket cannot carry a call.
 
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncLocalStorage, AsyncResource } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -256,6 +256,9 @@ export function withResponsesContinuationAdmission<T>(
   admit: (signal: AbortSignal) => Promise<void>,
   fn: () => T,
 ): T {
+  // A provider custody owner outside the generic checkpoint wrapper remains
+  // responsible for settlement and re-admission of the physical request.
+  if (continuationAdmission.getStore()) return fn();
   return continuationAdmission.run(admit, fn);
 }
 
@@ -1027,7 +1030,9 @@ export function responsesTransport(
           // The reader already cancelled.
         }
       };
-      const onAbort = () => finish(signal?.reason ?? new Error("Model request aborted"));
+      const onAbort = AsyncResource.bind(() =>
+        finish(signal?.reason ?? new Error("Model request aborted")),
+      );
       signal?.addEventListener("abort", onAbort, { once: true });
 
       const stream = new ReadableStream<Uint8Array>({
@@ -1086,11 +1091,13 @@ export function responsesTransport(
         }
       };
 
-      active.onClose = (error) => {
+      active.onClose = AsyncResource.bind((error: Error) => {
         // The socket closed while this response was still streaming.
         finish(error);
-      };
-      active.onEvent = (event) => {
+      });
+      // A socket outlives turns. Its emitter's context belongs to the opener,
+      // never to a later request's custody, cancellation or dispatch checkpoint.
+      active.onEvent = AsyncResource.bind((event: Record<string, unknown>) => {
         if (finished) return;
         const type = typeof event.type === "string" ? event.type : "";
         const eventHeaders = endpoint.eventHeaders?.(event);
@@ -1214,7 +1221,7 @@ export function responsesTransport(
               response.error == null,
           );
         }
-      };
+      });
 
       sendMessage(
         continued === null || !fullInput || !chain
