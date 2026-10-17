@@ -1702,9 +1702,9 @@ cannot be bypassed. These measurements keep that decision testable without
 blocking a turn or sending a different prefix to the provider.
 
 Azure API-key credentials use the `api-key` header for both HTTP and WebSocket
-requests; Entra tokens and explicit caller-owned Authorization headers remain
-bearer authentication. This avoids Azure deployments redirecting bearer-key
-upgrades to a credential-bearing query URL. The socket transport never follows
+requests; Entra tokens retain bearer authentication and explicit caller-owned
+Authorization headers remain unchanged. This avoids Azure deployments redirecting
+bearer-key upgrades to a credential-bearing query URL. The socket transport never follows
 redirects: a 3xx upgrade refusal selects the existing HTTP path for that turn,
 just like a 4xx refusal other than 429. Rate limits, server errors, and connection
 failures retain the existing retry budget. A new turn can try WebSocket again.
