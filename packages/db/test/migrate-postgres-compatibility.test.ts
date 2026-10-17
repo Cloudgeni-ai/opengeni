@@ -7,6 +7,8 @@ import { migrationSqlForServer } from "../src/migration-postgres-compatibility";
 
 const fence = "0345_tenant_scoped_session_tenancy_fence.sql";
 const pools = "0598_claude_subscription_account_pools.sql";
+const adminPolicies = "0807_subscription_rls_admin_once_per_statement.sql";
+const adminSource = await readFile(new URL(`../drizzle/${adminPolicies}`, import.meta.url), "utf8");
 const sources = new Map(
   await Promise.all(
     [fence, pools].map(
@@ -34,6 +36,37 @@ function connection(version: string) {
 }
 
 describe("immutable historical PostgreSQL catalog compatibility", () => {
+  test("0807 keeps its published identity and stabilizes only policy deparsing on every server", async () => {
+    expect(createHash("sha256").update(adminSource).digest("hex")).toBe(
+      "8324f591dbb4f0db717d0f72f272937dc2ab1db51997304cc4454bec12d59579",
+    );
+    for (const version of ["160011", "170007", "180000"]) {
+      const executable = await migrationSqlForServer(
+        connection(version).sql,
+        adminPolicies,
+        adminSource,
+      );
+      expect(executable).toContain("pg_catalog.format('%I, pg_catalog', data_schema)");
+      expect(executable).toContain("set_config('search_path', caller_search_path, true)");
+      expect(
+        executable
+          .replace("\n  caller_search_path text := pg_catalog.current_setting('search_path');", "")
+          .replace(
+            "  PERFORM pg_catalog.set_config('search_path', pg_catalog.format('%I, pg_catalog', data_schema), true);\n",
+            "",
+          )
+          .replace(
+            "  PERFORM pg_catalog.set_config('search_path', caller_search_path, true);\n",
+            "",
+          ),
+      ).toBe(adminSource);
+      const db = connection(version);
+      await expect(executeMigrationFile(db.sql, adminPolicies, adminSource + "\n")).rejects.toThrow(
+        "immutable deployed source",
+      );
+      expect(db.statements).toEqual([]);
+    }
+  });
   test("deployed migration bytes retain their original release-schema identities", () => {
     expect(createHash("sha256").update(sources.get(fence)!).digest("hex")).toBe(
       "6661f19636089871c25d6496d2baa14b502cc875b01c3e5a4ce2869e8c046f97",

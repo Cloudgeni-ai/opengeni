@@ -2274,6 +2274,8 @@ at execution of historical 0345/0598. It changes only their constraint-catalog
 reads, not published SQL bytes, ledger names, release hashes, or schema guards;
 older servers execute the original source. Already-applied migrations stay
 skipped. See [migration compatibility](migrations-expand-contract.md#historical-server-compatibility).
+The same hash-pinned adapter stabilizes 0807 policy deparsing for dedicated
+schemas without changing its exact helper matcher or published SQL history.
 
 Postgres owns file access/liveness; fork screenshots require ancestry and copied receipts, preserving RLS.
 Storage endpoints and signed URLs are transport details; keep URLs, object keys,
