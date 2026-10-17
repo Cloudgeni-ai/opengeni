@@ -5892,6 +5892,53 @@ describe("useAvailableModels", () => {
     expect(hook.result.current.defaultModel).toBe("workspace-default");
     await hook.unmount();
   });
+  test("readers of one workspace catalog share one catalog and config read", async () => {
+    const calls: string[] = [];
+    const client = fakeClient({
+      getWorkspaceModelCatalog: async (workspaceId) => {
+        calls.push(`catalog:${workspaceId}`);
+        return { models: [] } as never;
+      },
+      getClientConfig: async (options) => {
+        calls.push(`config:${options?.workspaceId}`);
+        return { models: [], defaultModel: "workspace-default" } as never;
+      },
+    });
+    const hook = await renderHook(
+      () => [
+        useWorkspaceModelCatalog({ client, workspaceId: WORKSPACE_ID }),
+        useWorkspaceModelCatalog({ client, workspaceId: WORKSPACE_ID }),
+      ],
+      undefined,
+    );
+    await flush();
+    expect(calls).toEqual([`catalog:${WORKSPACE_ID}`, `config:${WORKSPACE_ID}`]);
+    expect(hook.result.current.map((catalog) => catalog.defaultModel)).toEqual([
+      "workspace-default",
+      "workspace-default",
+    ]);
+    await hook.unmount();
+  });
+  test("readers of the deployment model list share one config read", async () => {
+    let calls = 0;
+    const client = fakeClient({
+      getClientConfig: async () => {
+        calls += 1;
+        return { models: [], defaultModel: "deployment-default" } as never;
+      },
+    });
+    const hook = await renderHook(
+      () => [useAvailableModels({ client }), useAvailableModels({ client })],
+      undefined,
+    );
+    await flush();
+    expect(calls).toBe(1);
+    expect(hook.result.current.map((models) => models.defaultModel)).toEqual([
+      "deployment-default",
+      "deployment-default",
+    ]);
+    await hook.unmount();
+  });
   test("returns the host-exposed models and the default model from getClientConfig", async () => {
     let calls = 0;
     const client = fakeClient({

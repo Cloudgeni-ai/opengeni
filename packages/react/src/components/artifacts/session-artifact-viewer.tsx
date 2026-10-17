@@ -3,6 +3,7 @@ import { createEditableArtifactReplicaId } from "@opengeni/sdk/editable-artifact
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { cn } from "../../lib/cn";
+import { joinClientConfigRead } from "../../lib/client-config-read";
 import { useOpenGeni, type ClientOverride } from "../../session-context";
 import {
   ArtifactLabelsProvider,
@@ -221,7 +222,7 @@ function EditableBody({
   useEffect(() => {
     let live = true;
     setConfigState(null);
-    client.getClientConfig().then(
+    joinClientConfigRead(client).then(
       (value) =>
         live &&
         setConfigState({

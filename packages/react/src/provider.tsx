@@ -11,6 +11,7 @@ import { usePageLiveActivity } from "./hooks/internal";
 import { retainSharedQueries } from "./hooks/shared-query";
 import { OpenGeniContext } from "./session-context";
 import { ErrorMessageContext, type ErrorMessageFormatter } from "./lib/error-message";
+import { joinClientConfigRead } from "./lib/client-config-read";
 import {
   OpenGeniMessagesProvider,
   useOpenGeniText,
@@ -112,7 +113,9 @@ export function OpenGeniProvider({
   const strictContract = reloadOnApiContractChange;
   const verifyApiContract = useCallback(async (): Promise<void> => {
     try {
-      const config = await client.getClientConfig();
+      // Joins a config read already in flight (the conversation flags read the
+      // same endpoint on mount) instead of sending a second request.
+      const config = await joinClientConfigRead(client);
       if (strictContract && config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
         throw new OpenGeniApiContractMismatchError(
           OPENGENI_API_CONTRACT_REVISION,

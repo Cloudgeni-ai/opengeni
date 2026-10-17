@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SessionClientLike } from "../client";
 import { OpenGeniProvider } from "../provider";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { joinClientConfigRead } from "../lib/client-config-read";
 
 /** Request headers for every proxy call: static, or computed per request. */
 export type SessionProxyHeaders = Record<string, string> | (() => Record<string, string>);
@@ -119,7 +120,7 @@ export function SessionProxyScope({
     }
     let active = true;
     setState({ status: "loading" });
-    client.getClientConfig().then(
+    joinClientConfigRead(client).then(
       (config) => {
         if (!active) return;
         setState(
