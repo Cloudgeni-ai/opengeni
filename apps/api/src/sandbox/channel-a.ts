@@ -556,6 +556,81 @@ export async function withChannelARead<T>(
 }
 
 /**
+ * Reach the Connected Machine a browser or Desktop controller was started on
+ * after the task that started it moved elsewhere, only to end that
+ * controller. The task no longer routes there, so normal Channel-A routing
+ * cannot reach it, yet its processes keep running on that machine until they
+ * are ended. Ending needs the same access as any end (see
+ * `channelAMachineAuthority`): the owner's access to the machine, not a
+ * per-chat permission. The session addresses the enrollment itself (epoch 0),
+ * never the task's current route. Returns `reached: false` when that access
+ * no longer reaches a live machine; nothing is attempted then.
+ */
+export async function withFormerConnectedMachine<T>(
+  services: ChannelAServices,
+  ctx: ChannelAContext & { operation: "browser.end" | "computer.end" },
+  sandboxId: string,
+  fn: (session: ChannelASession) => Promise<T>,
+): Promise<{ reached: true; value: T } | { reached: false }> {
+  const { db, settings, bus } = services;
+  const authority = await channelAMachineAuthority(db, ctx);
+  const sandbox = await getSandbox(
+    db,
+    { accountId: ctx.accountId, workspaceId: ctx.workspaceId, subjectId: authority.subjectId },
+    sandboxId,
+  );
+  if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) return { reached: false };
+  const enrollment = await resolveChannelAMachineConnection(
+    db,
+    {
+      accountId: ctx.accountId,
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.session.id,
+      machineWorkspaceId: sandbox.workspaceId,
+      enrollmentId: sandbox.enrollmentId,
+    },
+    authority,
+  );
+  if (
+    !enrollment ||
+    enrollment.status !== "active" ||
+    !enrollment.connectionInstanceId ||
+    !enrollment.workspaceRoot
+  ) {
+    return { reached: false };
+  }
+  ctx.waitSignal?.throwIfAborted();
+  const built = await buildSelfhostedBackendSession({
+    workspaceId: sandbox.workspaceId,
+    agentId: sandbox.enrollmentId,
+    connectionInstanceId: enrollment.connectionInstanceId,
+    workspaceRoot: enrollment.workspaceRoot,
+    relay: relayConfigFromSettings(settings),
+    controlRpcFactory: () => new NatsControlRpc(async () => bus.getRequestConnection()),
+    // The controller generation is the physical fence. Epoch 0 addresses the
+    // enrollment itself instead of the task's (changed) routing epoch.
+    epoch: 0,
+    timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
+    execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
+    operationResourcePolicy: enrollment.operationPolicy,
+    operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
+    operationCpuQuotaSupported: enrollment.agentCapabilities.operationCpuQuota === true,
+    transactionalFsWriteSupported: enrollment.agentCapabilities.transactionalFsWrite === true,
+    browserControlHttpSupported: enrollment.agentCapabilities.browserControlHttp === true,
+    ...(settings.agentOpStreamEnabled === true &&
+    enrollment.opStream === true &&
+    bus.getOpStreamConnection
+      ? {
+          opStream: {
+            transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
+          },
+        }
+      : {}),
+  });
+  return { reached: true, value: await fn(built.session as ChannelASession) };
+}
+
+/**
  * Whose access this request uses to reach a Connected Machine. A person uses
  * their own. An agent acts for the person who started its turn (as swap and
  * run_on do), so the machines that person can use stay usable from browser,
