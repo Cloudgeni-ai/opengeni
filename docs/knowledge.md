@@ -333,6 +333,13 @@ Scheduled work resolves against its accepted
 run time. Child work and recovery preserve their accepted producer policy; changing
 settings affects subsequent accepted work, not an already running turn.
 
+Sharing a private chat preserves the accepted turn's Personal destination for
+that same verified initiating human, including tool operations, provider failover
+and human Retry. It does not promote Personal writes into the workspace or rewrite
+the snapshot or earlier model context. Newly accepted turns use the shared chat's
+current destination. A genuinely incompatible retained scope fails at startup
+with an explanation to send a new message; Retry cannot reopen that same turn.
+
 Only-me chats in a shared workspace can be scheduled as existing-session targets.
 A selected personal connector source creates an owner-only session for each run,
 using its frozen owning-human revision authority and the existing private-create
