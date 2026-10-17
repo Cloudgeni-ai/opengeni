@@ -193,9 +193,15 @@ over-limit people remain; new additions fail. Previously reserved invitations
 may still be accepted without increasing seat usage. Unlimited and no-row
 organizations are uncapped.
 
-SQLSTATE `P0S01` maps through `rethrowMembershipError` to HTTP 402:
-`{ error: "seat_limit_reached", message, action: { type: "upgrade", href:
-"/billing" } }`.
+SQLSTATE `P0S01` maps through `rethrowMembershipError` and the common error
+middleware to HTTP 402 using `ErrorEnvelope`:
+`{ error: { status: 402, code: "seat_limit_reached", message, retryable: false,
+requestId, details: { action: { type: "upgrade", href: "/billing" } } } }`.
+The message is "Organization seat limit reached. Upgrade your plan to add people."
+The SDK exposes `code`, `details.action` and the request reference on
+`OpenGeniApiError`; this is a known, non-retryable refusal, not an unknown outcome.
+The people UI also recognizes the historical flat refusal and a generic 402
+when the verified plan's seat usage is at its limit.
 
 ## Billing/UI contract
 

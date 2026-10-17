@@ -787,6 +787,8 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "allowance_exhausted",
     /** The task's root usage limit is reached; details carry SessionUsageLimitReachedRefusal fields. */
     "session_usage_limit_reached",
+    /** Organization seats are full; details.action points to the plan upgrade flow. */
+    "seat_limit_reached",
     "unauthenticated",
     "forbidden",
     "not_found",

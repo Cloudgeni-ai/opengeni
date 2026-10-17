@@ -698,7 +698,14 @@ export function OrganizationDirectoryProvider({
           failed.push({
             email,
             message: failure(error, "The invitation list changed. Check it and try again.").message,
-            ...(isSeatLimitError(error) ? { seatLimitReached: true } : {}),
+            ...(isSeatLimitError(
+              error,
+              planState.ownerKey === identityKey && planState.plan
+                ? { ...planState.plan, seatsUsed: planState.plan.seatsUsed + sent.length }
+                : null,
+            )
+              ? { seatLimitReached: true }
+              : {}),
           });
         }
       }
@@ -729,6 +736,7 @@ export function OrganizationDirectoryProvider({
       loadInvitations,
       owns,
       ownsIdentity,
+      planState,
       settle,
     ],
   );
