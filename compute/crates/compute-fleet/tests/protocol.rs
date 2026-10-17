@@ -29,10 +29,10 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::time::Duration;
 
 use compute_fleet::{
-    At, Capacity, ClassId, Demand, Expiry, Fence, Fleet, Found, Guard, GuardAction, HostEpoch,
-    HostId, HostInfo, HostLease, HostState, LeaseRecord, LeaseTerms, Listed, Mutation, Observed,
-    OwnerEpoch, Ownership, Prefer, Renewal, Rng, SandboxId, Stamp, Verdict, ZoneId, fence,
-    reconcile,
+    AnsweredAt, At, Capacity, ClassId, Demand, Expiry, Fence, Fleet, Found, Guard, GuardAction,
+    HostEpoch, HostId, HostInfo, HostLease, HostState, LeaseRecord, LeaseTerms, Listed, Mutation,
+    Next, Observed, Op, Outcome, OwnerEpoch, Ownership, Prefer, Renewal, Rng, SandboxId, Sends,
+    Stamp, Verdict, ZoneId, answered, fence, reconcile,
 };
 
 const TERMS: LeaseTerms = LeaseTerms::RECOMMENDED;
@@ -210,12 +210,16 @@ enum Answer {
     Expired,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Op {
-    Create,
-    Wake,
-    Adopt,
-    Release,
+impl Answer {
+    /// What the answer means for ownership.
+    const fn outcome(self) -> Outcome {
+        match self {
+            Self::Ok => Outcome::Done,
+            Self::Full | Self::Unavailable | Self::Expired => Outcome::Refused,
+            Self::NotFound => Outcome::NotFound,
+            Self::Stale | Self::NoArchive | Self::Busy => Outcome::Other,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -384,12 +388,8 @@ struct Sim {
     faults: bool,
     /// Sandboxes whose create the service saw succeed.
     confirmed: BTreeSet<SandboxId>,
-    /// The create or adopt last sent for each sandbox and not answered
-    /// yet: its epoch and stamp.
-    requested: BTreeMap<SandboxId, (OwnerEpoch, u64)>,
-    /// The epoch of each sandbox's last create or adopt the service heard
-    /// had landed, and the registration and renewal it was answered at.
-    landed: BTreeMap<SandboxId, (OwnerEpoch, Answered)>,
+    /// What the service kept of each sandbox's creates and adopts.
+    sends: BTreeMap<SandboxId, Sends>,
     ghost: Ghost,
     stats: Stats,
     /// What happened to the sandbox `FLEET_SIM_TRACE` names, and to every
@@ -484,8 +484,7 @@ impl Sim {
             next_sandbox: 1,
             faults: true,
             confirmed: BTreeSet::new(),
-            requested: BTreeMap::new(),
-            landed: BTreeMap::new(),
+            sends: BTreeMap::new(),
             ghost: Ghost::default(),
             stats: Stats::default(),
             trace: std::env::var("FLEET_SIM_TRACE")
@@ -582,7 +581,10 @@ impl Sim {
                 host_epoch,
                 seq,
                 tries,
-            } => self.service_answer(host, op, id, epoch, answer, (host_epoch, seq), tries),
+            } => {
+                let at = AnsweredAt { host_epoch, seq };
+                self.service_answer(host, op, id, epoch, answer, at, tries);
+            }
             Event::ArchiveReads {
                 host,
                 incarnation,
@@ -927,7 +929,7 @@ impl Sim {
                 Op::Create => self.host_create(index, id, epoch),
                 Op::Wake => self.host_wake(index, id, epoch),
                 Op::Adopt => self.host_adopt(index, id, epoch),
-                Op::Release => match self.host_release(index, id, epoch) {
+                Op::HandOff => match self.host_release(index, id, epoch) {
                     Some(answer) => answer,
                     None => return,
                 },
@@ -1110,7 +1112,7 @@ impl Sim {
             index,
             Event::Answered {
                 host: index,
-                op: Op::Release,
+                op: Op::HandOff,
                 id,
                 epoch: local.epoch,
                 answer: Answer::Ok,
@@ -1592,7 +1594,7 @@ impl Sim {
         if let Some(row) = self.rows.get(&id).copied()
             && let Some(owner) = row.owner
         {
-            self.request(owner, Op::Release, id, row.epoch, 0);
+            self.request(owner, Op::HandOff, id, row.epoch, 0);
         }
     }
 
@@ -1604,8 +1606,8 @@ impl Sim {
         else {
             return;
         };
-        if matches!(op, Op::Create | Op::Adopt) {
-            self.requested.insert(id, (epoch, stamp));
+        if op.takes() {
+            self.sends.entry(id).or_default().send(epoch, stamp);
         }
         self.send(
             index,
@@ -1649,65 +1651,46 @@ impl Sim {
         id: SandboxId,
         epoch: OwnerEpoch,
         answer: Answer,
-        answered: Answered,
+        at: AnsweredAt,
         tries: u32,
     ) {
-        let seq = answered.1;
         let host_id = self.hosts[host].id;
         let Some(row) = self.rows.get(&id).copied() else {
             return;
         };
-        let still = row.owner == Some(host_id) && row.epoch == epoch;
-        if matches!(op, Op::Create | Op::Adopt)
-            && self
-                .requested
-                .get(&id)
-                .is_some_and(|&(sent, _)| sent == epoch)
-        {
-            // Answered: it can no longer land later.
-            self.requested.remove(&id);
-        }
-        if matches!(op, Op::Create | Op::Adopt) && answer == Answer::Ok && still {
-            self.landed.insert(id, (epoch, answered));
-        }
-        // That the host holds nothing under this epoch is final only once
-        // no create or adopt for it can still reach the host, and once the
-        // host said so after every one that landed: an answer given before
-        // one landed can arrive after it.
-        let settled = self
-            .requested
-            .get(&id)
-            .is_none_or(|&(sent, stamp)| sent != epoch || TERMS.settles(stamp, seq))
-            && self
-                .landed
-                .get(&id)
-                .is_none_or(|&(at, landed)| at != epoch || later(answered, landed));
         if op == Op::Create && answer == Answer::Ok {
             self.confirmed.insert(id);
         }
-        match (op, answer) {
-            // The host holds nothing of it: give it to another.
-            (Op::Create | Op::Adopt, Answer::Full | Answer::Unavailable | Answer::Expired)
-                if still && tries < 3 =>
-            {
-                self.place_and_send(id, Some(row), op, tries + 1);
+        let archived = self.objects.contains_key(&id);
+        let next = answered(
+            self.sends.entry(id).or_default(),
+            TERMS,
+            (op, host_id, epoch),
+            answer.outcome(),
+            at,
+            row,
+            archived,
+            (tries, 3),
+        );
+        match next {
+            Next::Nothing => {}
+            Next::PlaceElsewhere => self.place_and_send(id, Some(row), op, tries + 1),
+            // The host holds nothing of it under this epoch: it finished a
+            // hand-off the service has not heard of yet, or its copy is
+            // behind. Adopt the archive there under a new epoch, so that a
+            // late answer about the old one cannot touch the new.
+            Next::AdoptHere(change) => {
+                self.set_row(id, change.set, "given back: not found");
+                self.request(host_id, Op::Adopt, id, change.set.epoch, tries);
             }
-            // The host holds nothing of it under this epoch: it finished
-            // a release the service has not heard of yet, or its copy is
-            // behind. Adopt the archive there under a new epoch, so that
-            // a late answer about the old one cannot touch the new.
-            (Op::Wake, Answer::NotFound) if still && settled && self.objects.contains_key(&id) => {
-                let set = row.give(host_id).set;
-                self.set_row(id, set, "given back: not found");
-                self.request(host_id, Op::Adopt, id, set.epoch, tries);
+            Next::Clear(change) => {
+                let why = if answer == Answer::Ok {
+                    "cleared: handed off"
+                } else {
+                    "cleared: not found"
+                };
+                self.set_row(id, change.set, why);
             }
-            (Op::Release, Answer::Ok) if still => {
-                self.set_row(id, row.clear().set, "cleared: released");
-            }
-            (Op::Release, Answer::NotFound) if still && settled => {
-                self.set_row(id, row.clear().set, "cleared: not found");
-            }
-            _ => {}
         }
     }
 
@@ -1783,23 +1766,6 @@ impl Sim {
                 self.agent_starts(index);
             }
         }
-    }
-}
-
-/// The registration a host answered under and its last renewal then.
-type Answered = (Option<HostEpoch>, u64);
-
-/// Whether the host gave `answer` after `than`: under a later registration,
-/// or at a later renewal of the same one. Answers between two renewals do
-/// not order.
-fn later(answer: Answered, than: Answered) -> bool {
-    match (answer.0, than.0) {
-        (Some(answer_epoch), Some(than_epoch)) if answer_epoch != than_epoch => {
-            answer_epoch > than_epoch
-        }
-        (Some(_), None) => true,
-        (None, _) => false,
-        _ => answer.1 > than.1,
     }
 }
 

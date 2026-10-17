@@ -19,9 +19,12 @@
 //! - [`reconcile`]: what a host that registers keeps, gets back and drops.
 //! - [`fence`]: whether a host may publish an archive over the pointer it
 //!   found, by the pointer's [`Stamp`].
+//! - [`answered`]: what the service does with a host's answer to a
+//!   request about one sandbox, by what it kept of its sends ([`Sends`]).
 //! - [`Fleet`]: the capacity view placement reads, and [`Fleet::place`].
 //! - [`ScalePolicy`]: how many hosts a host group should have.
 
+mod answers;
 mod fence;
 mod guard;
 mod ids;
@@ -31,6 +34,7 @@ mod place;
 mod rng;
 mod scale;
 
+pub use answers::{AnsweredAt, Next, Op, Outcome, Sends, answered};
 pub use compute_core::{At, SandboxId};
 pub use fence::{Fence, Found, Mutation, Stamp, fence};
 pub use guard::{Guard, GuardAction, GuardStep, Observed, Vms};
