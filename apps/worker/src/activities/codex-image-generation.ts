@@ -23,6 +23,7 @@ import type { Settings } from "@opengeni/config";
 import type { ObjectStorage } from "@opengeni/storage";
 import type { GeneratedImageReceipt } from "./generated-images";
 import { CodexCredentialLeaseLostError } from "./agent-turn/credential-leases";
+import { runAuxiliaryProviderDispatch } from "./auxiliary-provider-dispatch";
 import { findCodexCreditPolicyError } from "./agent-turn/codex-credit-policy";
 import {
   executeImageGenerationOperation,
@@ -70,7 +71,10 @@ export async function executeCodexImageGeneration(
   > = {
     ...input.codexContext,
     beforeProviderDispatch: async (request) => {
-      await input.codexContext.beforeProviderDispatch?.(request);
+      // The turn's own dispatch checks, for a separate (image) provider call.
+      await runAuxiliaryProviderDispatch(() =>
+        input.codexContext.beforeProviderDispatch?.(request),
+      );
       providerDispatchAdmitted = true;
     },
     onProviderRequestSettled: async (request) => {
@@ -231,7 +235,8 @@ export async function executeCoreCodexImageGeneration(
           await preDispatch(async () => {
             if (!request || pendingRequest || uncertain)
               throw new Error("Image request predecessor is unsettled");
-            await input.assertCreditAdmission();
+            // The turn's own dispatch checks, for a separate (image) provider call.
+            await runAuxiliaryProviderDispatch(() => input.assertCreditAdmission());
             await input.assertChatLease();
             if (!(await renew(input.db, scope, ref))) {
               throw new CodexCredentialLeaseLostError("not_found");

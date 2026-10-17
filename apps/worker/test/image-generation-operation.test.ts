@@ -9,6 +9,7 @@ import {
   type ImageGenerationOperationPorts,
 } from "../src/activities/image-generation-operation";
 import { executeCodexImageGeneration } from "../src/activities/codex-image-generation";
+import { isAuxiliaryProviderDispatch } from "../src/activities/auxiliary-provider-dispatch";
 import { CodexIncludedUsageExhaustedError } from "../src/activities/agent-turn/codex-credit-policy";
 import type { GeneratedImageReceipt } from "../src/activities/generated-images";
 
@@ -476,4 +477,44 @@ test("a Codex credit-policy refusal before image dispatch leaves the operation r
     expect(resets).toBe(1);
     expect(unknown).toBe(0);
   }
+});
+
+test("an image request runs the turn's dispatch checks as an auxiliary dispatch", async () => {
+  // The turn's checks also feed the main stream's call timing; an image is a
+  // separate provider call and must not open the next main call's timing.
+  const observed: boolean[] = [];
+  const failure = new Error("stop after dispatch checks");
+  const baseInput = executionInput({ count: 0 });
+  await expect(
+    executeCodexImageGeneration(
+      {
+        ...baseInput,
+        credentialId: "77777777-7777-4777-8777-777777777777",
+        codexContext: {
+          clientVersion: "test",
+          getToken: async () => ({
+            accessToken: "token",
+            chatgptAccountId: null,
+            isFedramp: false,
+          }),
+          refresh: async () => {
+            throw new Error("no refresh expected");
+          },
+          beforeProviderDispatch: async () => {
+            observed.push(isAuxiliaryProviderDispatch());
+            throw failure;
+          },
+        },
+        generateImage: async ({ context }) => {
+          await context.beforeProviderDispatch?.({ requestId: "image", transportAttempt: 1 });
+          throw new Error("unreachable");
+        },
+      },
+      operationPorts({
+        resetBeforeProviderDispatch: async () => ({ status: "prepared" }) as never,
+      }),
+    ),
+  ).rejects.toBe(failure);
+  expect(observed).toEqual([true]);
+  expect(isAuxiliaryProviderDispatch()).toBe(false);
 });

@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { withClaudeConnectionCredential } from "@opengeni/config";
 import {
   getSessionAuthorityProjection,
@@ -140,18 +139,10 @@ import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environmen
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
-
-/**
- * Set while a session-title request runs the main context's dispatch checks.
- * The title request is a separate model call, so the main stream's dispatch
- * observer (latency metrics and per-call timing) ignores it.
- */
-const sessionTitleDispatch = new AsyncLocalStorage<true>();
-
-/** Whether the current provider dispatch belongs to a session-title request. */
-export function isSessionTitleDispatch(): boolean {
-  return sessionTitleDispatch.getStore() === true;
-}
+import {
+  isAuxiliaryProviderDispatch,
+  runAuxiliaryProviderDispatch,
+} from "../auxiliary-provider-dispatch";
 
 /**
  * Retain subscription credential/account authority for the title sidecar
@@ -177,7 +168,7 @@ export function sessionTitleCodexRequestContext(
           beforeProviderDispatch: async (
             request: Parameters<NonNullable<CodexRequestContext["beforeProviderDispatch"]>>[0],
           ) => {
-            if (mainChecks) await sessionTitleDispatch.run(true, () => mainChecks());
+            if (mainChecks) await runAuxiliaryProviderDispatch(() => mainChecks());
             if (request) await requests.reserve(request);
           },
           onProviderRequestSettled: requests.observe,
@@ -186,7 +177,7 @@ export function sessionTitleCodexRequestContext(
         ? {
             beforeProviderDispatch: (
               request: Parameters<NonNullable<CodexRequestContext["beforeProviderDispatch"]>>[0],
-            ) => sessionTitleDispatch.run(true, () => mainChecks(request)),
+            ) => runAuxiliaryProviderDispatch(() => mainChecks(request)),
           }
         : {}),
     ...(context.responseTimeoutPolicy
@@ -489,7 +480,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     });
     // Diagnostic only: a timing observer can never fence or fail a request.
     const observeProviderDispatch = () => {
-      if (isSessionTitleDispatch()) return;
+      // Titles and generated images run these checks too, but are separate calls.
+      if (isAuxiliaryProviderDispatch()) return;
       try {
         eventing.providerDispatchObserver?.();
       } catch {

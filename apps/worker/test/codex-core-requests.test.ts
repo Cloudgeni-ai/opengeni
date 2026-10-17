@@ -9,10 +9,8 @@ import {
   createCoreCodexRequests,
   providerRequestIdPrefix,
 } from "../src/activities/agent-turn/codex-core-requests";
-import {
-  isSessionTitleDispatch,
-  sessionTitleCodexRequestContext,
-} from "../src/activities/agent-turn/run";
+import { sessionTitleCodexRequestContext } from "../src/activities/agent-turn/run";
+import { isAuxiliaryProviderDispatch } from "../src/activities/auxiliary-provider-dispatch";
 
 const request = { requestId: "r1", transportAttempt: 1 };
 function fixture() {
@@ -224,7 +222,7 @@ test("title dispatches run the main checks without counting as a main-stream dis
     },
     resolveModel: (value) => value,
     beforeProviderDispatch: async () => {
-      observed.push(isSessionTitleDispatch());
+      observed.push(isAuxiliaryProviderDispatch());
     },
   };
   const title = fixture();
@@ -236,7 +234,7 @@ test("title dispatches run the main checks without counting as a main-stream dis
   }
   await main.beforeProviderDispatch!(request);
   expect(observed).toEqual([true, true, false]);
-  expect(isSessionTitleDispatch()).toBe(false);
+  expect(isAuxiliaryProviderDispatch()).toBe(false);
 });
 
 test("model request IDs do not repeat across turns that share a Temporal activity ID", () => {
