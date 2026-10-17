@@ -99,6 +99,8 @@ const subscriptionCoreMigrations = [
   // Policies and the disconnect routine over the shared connection table and
   // owner-capability helper from withheld 0642/0645/0707.
   "0777_workspace_admin_subscription_connections.sql",
+  // Reclaims and triggers on the runtime capability table from withheld 0642.
+  "0807_subscription_rls_admin_once_per_statement.sql",
 ] as const;
 // The drained Claude cutover moves the very pools this test characterizes, so
 // it stays recorded as applied and never runs here.
