@@ -67,11 +67,12 @@ for activity ([3](0003-activity-idle-and-sleep-levels.md)).
   host pushed it deeper than its own settings, a request when someone
   asked for that level, and idle otherwise. Every step while the agent
   takes back what it found at start is recovery. A sleep consumes the
-  request that asked for it, so the next wake needs a reason of its own.
+  request to wake that came before it, so the next wake needs a reason of
+  its own; a wake consumes the request to sleep.
 - **Trace context.** Any request may carry `traceparent` beside its own
   fields. One that is not valid is ignored. The request's event carries
-  the trace, and so does the step it caused: the wake it asked for, or the
-  sleep to the level it asked for. No spans are made.
+  the trace, and so do the steps it caused: the wake it asked for, or each
+  step of a sleep down to the level it asked for. No spans are made.
 - **Requests.** A request's event is written after its reply. A client
   that hangs up before its reply gets an event with result `hung_up` and
   is not counted. A `connect` writes its request event when the stream is

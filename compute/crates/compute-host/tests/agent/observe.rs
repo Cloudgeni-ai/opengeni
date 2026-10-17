@@ -11,8 +11,8 @@ use compute_host::observe::{
     Alarm, CanaryOutcome, CanaryPath, Event, ObserveConfig, Observer, RequestKind, Severity,
     TraceContext, Value,
 };
-use compute_host::{HostAgent, NoStore};
 use compute_host::protocol::{Id, LevelName, PriorityName, Reply, Request};
+use compute_host::{HostAgent, NoStore};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -147,18 +147,48 @@ async fn a_traced_wake_and_the_step_it_caused_share_the_trace() {
         .unwrap();
     assert_eq!(create.trace, None, "only traced requests carry a trace");
 
-    // A sleep it asks for is caused by the request, untraced.
-    assert_eq!(lab.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+    // A traced sleep: every step down to the level it asked for carries
+    // the trace; a later wake nobody traced does not.
+    let sleep = Request::Sleep {
+        id: sandbox,
+        generation: None,
+        level: LevelName::Saved,
+    };
+    assert_eq!(traced(&lab, &sleep).await, Reply::Done);
     let seen = until(&mut events, |event| {
-        is(event, "compute.step", "compute.step", "pause")
+        is(event, "compute.step", "compute.step", "save")
     })
     .await;
-    let pause = seen.last().unwrap();
-    assert_eq!(text(pause, "compute.cause"), Some("request"));
-    assert_eq!(pause.trace, None);
+    for step in ["pause", "save"] {
+        let event = seen
+            .iter()
+            .find(|event| is(event, "compute.step", "compute.step", step))
+            .unwrap();
+        assert_eq!(text(event, "compute.cause"), Some("request"), "{step}");
+        assert_eq!(event.trace, Some(trace), "{step}");
+    }
+    let pause = seen
+        .iter()
+        .find(|event| is(event, "compute.step", "compute.step", "pause"))
+        .unwrap();
     assert_eq!(text(pause, "compute.level.before"), Some("running"));
     assert_eq!(text(pause, "compute.level.after"), Some("paused"));
-    assert_eq!(observer.metrics().requests(RequestKind::Wake, None), 1);
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    assert!(matches!(lab.wake(sandbox).await, Reply::Woken { .. }));
+    let seen = until(&mut events, |event| {
+        is(event, "compute.request", "compute.request", "wake")
+    })
+    .await;
+    let wake = seen
+        .iter()
+        .find(|event| {
+            event.name == "compute.step" && text(event, "compute.level.after") == Some("running")
+        })
+        .expect("a step woke it");
+    assert_eq!(text(wake, "compute.cause"), Some("request"));
+    assert_eq!(wake.trace, None);
+    assert_eq!(seen.last().unwrap().trace, None);
+    assert_eq!(observer.metrics().requests(RequestKind::Wake, None), 2);
     lab.assert_clean();
 }
 
@@ -337,14 +367,26 @@ async fn the_canary_reports_every_path() {
     assert!(text(remote, "compute.error").is_some(), "{remote:#?}");
     let restore = &reported[1];
     assert!(int(restore, "compute.wake_us").is_some());
-    assert!(int(restore, "compute.connect_us").is_some(), "the guest answered");
+    assert!(
+        int(restore, "compute.connect_us").is_some(),
+        "the guest answered"
+    );
     assert!(int(restore, "compute.op.id").is_some(), "a wake step ran");
     assert_eq!(
         text(restore, "compute.sandbox.id"),
         Some(canary::SANDBOX.to_string().as_str())
     );
     let metrics = observer.metrics();
-    assert_eq!(metrics.canary_runs(CanaryPath::Resume, CanaryOutcome::Ok), 2);
-    assert_eq!(metrics.canary_runs(CanaryPath::Remote, CanaryOutcome::Failed), 1);
-    assert_eq!(metrics.canary_runs(CanaryPath::Create, CanaryOutcome::Ok), 1);
+    assert_eq!(
+        metrics.canary_runs(CanaryPath::Resume, CanaryOutcome::Ok),
+        2
+    );
+    assert_eq!(
+        metrics.canary_runs(CanaryPath::Remote, CanaryOutcome::Failed),
+        1
+    );
+    assert_eq!(
+        metrics.canary_runs(CanaryPath::Create, CanaryOutcome::Ok),
+        1
+    );
 }

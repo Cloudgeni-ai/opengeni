@@ -328,7 +328,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 "this host cannot compress memory; ask for saved instead".into(),
             ));
         }
-        self.note_ask(id);
+        let trace = self.trace;
+        if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.sleep_asked = Some(Why {
+                cause: Cause::Request,
+                trace,
+            });
+        }
         self.input(Input::Sleep {
             sandbox: id.0,
             level,

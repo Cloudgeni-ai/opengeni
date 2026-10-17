@@ -597,8 +597,12 @@ struct Slot<V> {
     reported: Option<(u64, MemoryStats)>,
     /// When the sandbox last reported what it went through awake.
     summarized: Instant,
-    /// The latest request about it since its last sleep step began.
+    /// The latest request to wake or hold it since its last sleep step
+    /// began.
     asked: Option<observe::Why>,
+    /// The latest request to sleep since its last wake step began: every
+    /// step down to the level it asked for carries its trace.
+    sleep_asked: Option<observe::Why>,
     /// The wake step started since its last sleep step began, if any.
     woke_by: Option<OpId>,
     /// The last step that failed and has not succeeded since, with its
@@ -1057,6 +1061,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 reported: None,
                 summarized: Instant::now(),
                 asked: None,
+                sleep_asked: None,
                 woke_by: None,
                 failed: None,
                 holds,

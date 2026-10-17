@@ -121,15 +121,23 @@ fn with_state(event: Event, when: &'static str, state: Option<State>) -> Event {
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Why `step` starts as `op` for `id` now. A sleep step consumes the
-    /// request that asked for it, so the next wake needs a new reason.
+    /// request to wake that came before it, so the next wake needs a new
+    /// reason, and a wake step the request to sleep.
     pub(super) fn why(&mut self, id: Id, op: OpId, step: Step) -> Why {
         let view = self.core.sandbox(id.0);
         let slot = self.slots.get_mut(&id.0);
-        let asked = slot.as_ref().and_then(|slot| slot.asked);
+        let asked = slot.as_ref().and_then(|slot| {
+            if step.wakes() {
+                slot.asked
+            } else {
+                slot.sleep_asked
+            }
+        });
         let why = cause(step, view.as_ref(), asked, self.recovering);
         if let Some(slot) = slot {
             if step.wakes() {
                 slot.woke_by = Some(op);
+                slot.sleep_asked = None;
             } else {
                 slot.asked = None;
                 slot.woke_by = None;
