@@ -79,8 +79,11 @@ bun bench.ts summarize ~/results/*.jsonl
 ```
 
 Rate searches take `P99_LIMIT_MS` (default 1000) for states whose unloaded
-p99 is already above half a second, and `STEP_SECONDS`, `WARMUP_SECONDS`
-and `REFINEMENTS`. Ours opens one TCP connection per request through the
+p99 is already above half a second, and `STEP_SECONDS`, `WARMUP_SECONDS`,
+`REFINEMENTS`, `REPEATS` (each rate offered that many times, each with its
+own arrivals) and `SEED`. The reported runs used a fixed ladder around a
+first search's limit with `REFINEMENTS=0` and `REPEATS=3` (2 for running
+and paused). Ours opens one TCP connection per request through the
 relay, so above a few hundred a second the client needs a wider port
 range: `sysctl -w net.ipv4.ip_local_port_range="1024 65535"
 net.ipv4.tcp_tw_reuse=1`.

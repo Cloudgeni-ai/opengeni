@@ -507,22 +507,28 @@ state, 2.04 to 2.49 s.
 
 ### Sustained activations
 
-Open-loop Poisson arrivals, each picking a resting sandbox at random,
-running `echo` in it and putting it back to rest, stepped up a ladder as
-in `benchmark.md` (60-second steps, the first 10 seconds discarded, then
-three halvings of the gap after the first step that fails). A step holds
-when nothing failed and p99, from each arrival's scheduled time, is under
-the bound. The result is the highest rate that held; one host (theirs: one
+Open-loop arrivals, each picking a resting sandbox at random, running
+`echo` in it and putting it back to rest, as in `benchmark.md`: 60-second
+steps with the first 10 seconds discarded and at least 40 measured
+arrivals, every window carrying exactly the offered load. A first search
+per state found the limit; the reported search then offered a fixed
+ladder around it, each rate three times for the slow states and twice for
+the fast ones, each time with its own arrivals. A rate holds when every
+repeat had no failed activation, every sandbox went back to rest, and p99
+from the scheduled time stayed under the bound. One host (theirs: one
 sandbox node) does all of it.
 
-| Resting state | N | Bound | Sustained | p50/p99 there | First failure |
+| Resting state | N | Bound | Sustained | Worst repeat there, p50/p99 | Next rate up |
 | --- | --- | --- | --- | --- | --- |
-| Ours, running | 40 | 1 s | at least 300/s | 7.8/15 ms | 500/s client-limited (p99 19 ms) |
-| Agent Sandbox, running | 40 | 1 s | at least 500/s | 5.3/11 ms | 1000/s client-limited (p99 53 ms) |
-| Ours, paused | 40 | 1 s | 75/s | 7.9/15 ms | errors from 82/s: `host_full` admission |
-| Ours, saved (local disk) | 300 | 1 s | 0.9/s | 181/910 ms | 1/s: p99 1.09 s |
-| Ours, remote (object storage only) | 150 | 3 s | 0.8/s | 665 ms/1.06 s | 0.9/s: p99 3.25 s |
-| Agent Sandbox, Pod Snapshot | 60 | 8 s | 0.4/s | 2.6/5.2 s | 0.5/s: p99 9.3 s |
+| Ours, running | 40 | 1 s | at least 300/s | 8.1/16 ms | 500/s client-limited: no errors, p99 21 ms |
+| Agent Sandbox, running | 40 | 1 s | at least 500/s | 6.0/13 ms | 1000/s client-limited: no errors, p99 64 ms |
+| Ours, paused | 40 | 1 s | 80/s | 8.2/15 ms | 90/s: 8 `host_full` errors |
+| Ours, saved (local disk) | 300 | 1 s | 0.8/s | 170/751 ms | 0.9/s: p99 1.07 s in the second repeat |
+| Ours, remote (object storage only) | 150 | 3 s | 0.4/s | 643 ms/1.14 s | 0.5/s: p99 3.1 s in the first repeat |
+| Agent Sandbox, Pod Snapshot | 60 | 8 s | 0.5/s | 4.6/7.5 s | 0.6/s: p99 8.8 s in the second repeat |
+
+Each held repeat measured 40 to 25,000 arrivals; at 40, p99 is the
+slowest of them, so one slow activation fails a repeat.
 
 Per host, per host vCPU and per dollar-hour of on-demand host time
 (europe-north1 list prices read from the Cloud Billing catalog on the
@@ -532,27 +538,27 @@ zonal cluster fee, $0.329 an hour, are a fixed cost per cluster):
 
 | Resting state | Per host | Per vCPU | Per $1/h of host | Including the cluster's fixed cost |
 | --- | --- | --- | --- | --- |
-| Ours, paused | 75/s | 4.7/s | 78/s | |
-| Ours, saved | 0.9/s | 0.056/s | 0.94/s | |
-| Ours, remote | 0.8/s | 0.050/s | 0.83/s | |
-| Agent Sandbox, Pod Snapshot | 0.4/s | 0.025/s | 0.45/s | 0.33/s with one sandbox node |
+| Ours, paused | 80/s | 5.0/s | 83/s | |
+| Ours, saved | 0.8/s | 0.050/s | 0.83/s | |
+| Ours, remote | 0.4/s | 0.025/s | 0.42/s | |
+| Agent Sandbox, Pod Snapshot | 0.5/s | 0.031/s | 0.56/s | 0.41/s with one sandbox node |
 
 - **Running** is the command path alone, and both systems went past
-  what 40 sandboxes let the client offer: a step counts as client-limited
-  when an arrival finds every sandbox busy. At 500/s ours had no errors
-  and p50/p99 9.0/19 ms, but 10 of about 25,000 arrivals found no free
-  sandbox; theirs held with 5.3/11 ms. At 1000/s theirs had 608 such
-  arrivals and p99 53 ms. So both run commands in running sandboxes at
-  500 a second or more on one host, theirs a few milliseconds faster
-  under load; ours pays one TCP connection per request through the lab
-  relay, theirs reuses HTTP connections.
+  what 40 sandboxes let the client offer: a step is client-limited when
+  an arrival finds every sandbox busy and nothing failed. At 500/s ours
+  had no errors and p50/p99 9.3/21 ms, but 35 of 25,000 arrivals found no
+  free sandbox; theirs held twice with 6.0/13 ms. At 1000/s theirs had
+  1,638 such arrivals and p99 64 ms. Both run commands in running
+  sandboxes at 300 to 500 a second or more on one host, theirs a few
+  milliseconds faster under load. Ours pays one TCP connection per
+  request through the lab relay; theirs reuses HTTP connections.
 - **Paused** stops at the host agent's disk admission, not at the
   hardware: a running sandbox books room for its next save and for its
   disk to grow (about 9.3 GB here), a paused one only for its save (about
   4.65 GB). When a sandbox pauses, what it no longer books stays booked
   until the agent's next disk reading, once a second, since only a reading
   shows what the VM wrote. Each wake-and-pause therefore holds about
-  4.65 GB for up to a second; at 82 a second that, with the 40 sandboxes'
+  4.65 GB for up to a second; at 90 a second that, with the 40 sandboxes'
   own bookings, passed the 733 GB the disk had free, though the disk was
   3 % used. The processor was not the limit: p99 was still 15 ms.
 - **Saved** is bounded by the local disks. Each activation reads the
@@ -562,21 +568,29 @@ zonal cluster fee, $0.329 an hour, are a fixed cost per cluster):
   saves queued behind wakes. The 48 GiB of huge pages in the nested
   profile leave about 13 GB for the page cache, too little to keep 300
   images cached, so every wake reads from disk; a host with fewer huge
-  pages would serve repeat wakes from memory. At 1/s one search failed
-  (p99 1.09 s) and a separate, shorter run held (p99 486 ms), so the knee
-  is about 1/s.
+  pages would serve repeat wakes from memory.
 - **Remote** is the counterpart of a Pod Snapshot: each activation
   fetches the sandbox from object storage, and putting it back to rest
-  saves and uploads it again. One host holds 0.8 a second with p99 just
-  over 1 s, twice Pod Snapshot's rate on a node at a fifth of its p99.
-  The bound is 3 s, twice the state program's unloaded p99 of 1.07 s
-  rounded up. The step at 0.8/s measured only 26 arrivals (40 expected;
-  Poisson chance), so its p99 is its slowest one.
-- **Pod Snapshot** on one sandbox node holds 0.4 restores a second, each
-  followed by a new snapshot when the sandbox goes back to rest. The
-  bound is 8 s, twice the state program's unloaded p99 of 3.69 s rounded
-  up; with 7 s (from `echo` alone) the steps fall the same way, since
-  they held at 5.5 and 5.2 s and failed at 9.3 s.
+  saves and uploads it again. One host holds 0.4 a second against a 3 s
+  bound (twice the state program's unloaded p99 of 1.07 s, rounded up),
+  with p50 0.6 to 0.7 s and p99 at most 1.14 s. At 0.5/s 39 of the first
+  repeat's 40 activations took at most 1.1 s; one took 3.1 s, of which a
+  fetch from object storage was 2.6 s (it is usually 0.5 s), while about
+  fifteen re-uploads of other sandboxes were in flight. Because each
+  state is judged against its own unloaded p99, ours is held to a bound
+  less than half of Pod Snapshot's: against their 8 s, every remote step
+  we ran held, up to 1/s in the first search (p99 3.4 s), so at an equal
+  bound our remote rate is above 1/s per host, where theirs is 0.5/s per
+  node; that higher limit was not searched for.
+- **Pod Snapshot** on one sandbox node holds 0.5 restores a second, each
+  followed by a new snapshot when the sandbox goes back to rest, with p50
+  rising from about 2.7 s at 0.3/s to 4.6 s at 0.5/s. The bound is 8 s, twice
+  the state program's unloaded p99 of 3.69 s rounded up.
+
+A first, single-repeat search with unconditioned Poisson arrivals had put
+Pod Snapshot at 0.4/s and our saved and remote levels at 0.9 and 0.8/s;
+its steps carried from 0.52 to 1.2 times their nominal load by chance,
+which the method now rules out.
 
 Caveats: our host is a nested VM, which costs every VM exit; a metal
 host was not available in the region (no C3 metal quota). The nested
@@ -584,5 +598,5 @@ profile's huge pages are sized for density, not for the saved rate. The
 lab host's 256 GB swap file was removed before these runs, which raised
 the agent's disk budget. Every rate search first waits two minutes after
 putting its N sandboxes to rest, so their writes and uploads are done.
-The client tuned its local port range for ours (one TCP connection per
+The client widened its local port range for ours (one TCP connection per
 request through the lab's relay; in production the socket is local).
