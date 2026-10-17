@@ -2,7 +2,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 // Pin the source we tested, including fixes newer than the published SDK.
-export const cuaSourceRevision = "e35fae2d24e53a4a88bd80dbac481878d78c4c81";
+export const cuaSourceRevision = "8b181bef9535ac6d9a19ead1ffae3ceb4d6cd7db";
 const repository = "https://github.com/Cloudgeni-ai/cua.git";
 
 export async function buildCuaWorker(architecture: string): Promise<string> {
