@@ -21,9 +21,9 @@ use crate::observe::{Alarm, Cause, alarm_event};
 use crate::pool::{Loaning, Template};
 use crate::protocol::Id;
 use crate::restore_notice::ask_commands;
-use crate::state::{Change, Fence, Record, Records};
+use crate::state::{Change, Disk, Fence, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory, Report};
-use crate::store::Store;
+use crate::store::{Owned, Store};
 
 use super::holds::Closing;
 use super::observe::Why;
@@ -43,6 +43,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 reply,
                 stale,
             } => self.prepared(id, ordinal, result, reply, stale.as_ref()),
+            Event::OwnerTaken { id, result, reply } => self.owner_taken(id, result, reply),
             Event::StepDone {
                 id,
                 op,
@@ -150,11 +151,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let size = self.record_size(&record);
         self.insert(id, paths, spec);
         // A new sandbox is a saved one: a disk, with a memory image when it
-        // started from a template. Its first wake boots or restores it,
-        // under the same admission limits as any wake.
+        // started from a template. An adopted one is in the store alone.
+        // Its first wake boots, restores or fetches it, under the same
+        // admission limits as any wake.
+        let (level, durability) = match record.disk {
+            Disk::Local => (Level::Saved, Durability::Local),
+            Disk::Remote => (Level::Remote, Durability::Remote),
+        };
         self.input(Input::Add {
             sandbox: id.0,
-            state: State::new(Level::Saved, Durability::Local, record.image),
+            state: State::new(level, durability, record.image),
             policy,
             size,
             last_activity: self.now(),
@@ -202,6 +208,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         for remover in self.destroying.remove(&id.0).unwrap_or_default() {
             let _ = remover.send(result.clone());
         }
+        self.handing_away.remove(&id.0);
+        self.dropped(id, result);
         self.spare_gone(host, result.is_ok());
     }
 
@@ -591,7 +599,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             outcome,
         };
         let activity = busy.then_some(Input::Busy { sandbox: id.0 });
-        self.inputs(std::iter::once(finished).chain(activity));
+        // A step that found a later owner holding the sandbox began its
+        // removal, which leaves the store's copy.
+        let dropped = !destroy
+            && self.slots.contains_key(&id.0)
+            && self.records.get(id).is_some_and(|record| record.handed_off);
+        let remove = dropped.then_some(Input::Remove { sandbox: id.0 });
+        self.inputs(std::iter::once(finished).chain(activity).chain(remove));
         if let Some(running) = finished_step {
             self.step_event(id, &running, outcome, &mut report);
         }
@@ -601,6 +615,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         } else {
             self.settle(id);
+            self.continue_hand_off(id);
         }
     }
 
@@ -739,14 +754,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if let Some(live) = &live {
             live.stopping.store(true, Ordering::Release);
         }
-        let removers = std::mem::take(&mut slot.removers);
+        let mut removers = std::mem::take(&mut slot.removers);
+        // A hand-off under way ends with the sandbox, however it goes.
+        removers.extend(self.handing_off.remove(&id.0).unwrap_or_default());
         if let Some(record) = self.records.get(id) {
             let closing = slot.holds.close();
-            self.remove_recorded(
+            self.remove_recorded_as(
                 &record,
                 live.map(|live| (live.vm, live.memory)),
                 removers,
                 Some(closing),
+                slot.hand_off,
             );
         } else {
             tracing::error!(%id, "removing a sandbox without a record");
@@ -766,8 +784,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         removers: Vec<Reply<()>>,
         holds: Option<Closing>,
     ) {
+        self.remove_recorded_as(record, vm, removers, holds, false);
+    }
+
+    /// [`Self::remove_recorded`], keeping the store's copy if `hand_off`.
+    fn remove_recorded_as(
+        &mut self,
+        record: &Record,
+        vm: Option<(E::Vm, LiveMemory)>,
+        removers: Vec<Reply<()>>,
+        holds: Option<Closing>,
+        hand_off: bool,
+    ) {
         let (id, host) = (record.id, record.host());
         self.destroying.insert(id.0, removers);
+        if hand_off || record.handed_off {
+            self.handing_away.insert(id.0);
+        }
         let paths = Paths::of(&self.root, record);
         let spec = vm_spec(record, &paths, &self.images);
         let engine = Arc::clone(&self.engine);
@@ -787,6 +820,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 net,
                 id,
                 host,
+                hand_off,
             };
             let result = removal.run(fence, vm, &spec, &paths.dir).await;
             if let Err(error) = &result {
@@ -944,6 +978,8 @@ struct Removal<'a, E, S> {
     id: Id,
     /// The name its network was made under.
     host: Id,
+    /// It is handed off: the store's copy stays for its next owner.
+    hand_off: bool,
 }
 
 impl<E: Engine, S: Store> Removal<'_, E, S> {
@@ -959,10 +995,12 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
         dir: &Path,
     ) -> Result<(), HostError> {
         let id = self.id;
-        let record = self
-            .records
-            .commit(id, fence, Change::new().removing())
-            .await?;
+        let begun = if self.hand_off {
+            Change::new().handed_off()
+        } else {
+            Change::new().removing()
+        };
+        let record = self.records.commit(id, fence, begun).await?;
         let stopped = match vm {
             Some((vm, memory)) => {
                 memory.ending();
@@ -991,10 +1029,18 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
                 .map_err(|error| HostError::Io(error.to_string()))?
                 .map_err(|error| HostError::Io(error.to_string()))?;
         }
-        self.store
-            .delete(id)
-            .await
-            .map_err(|error| HostError::Io(error.to_string()))?;
+        // A sandbox handed to another owner keeps its stored copy; one a
+        // later owner took meanwhile does too.
+        if !record.handed_off {
+            let deleted = self
+                .store
+                .delete(id, record.owner())
+                .await
+                .map_err(|error| HostError::Io(error.to_string()))?;
+            if let Owned::Fenced { by } = deleted {
+                tracing::warn!(%id, own = %record.owner(), %by, "a later owner holds the stored copy; it stays");
+            }
+        }
         self.records.remove(id, record.fence()).await?;
         // The pager of a VM that ended on its own may still be writing its
         // last file here; a moment later the directory is quiet.

@@ -27,23 +27,26 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
 
+use crate::fleet::{Admission, LeaseGate};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
 use crate::observe::{Observer, TraceContext};
-use crate::pool::{Built, Lender, Loaning, Pool, PoolConfig, Shape, Sources, Template, Uses};
+use crate::pool::{Built, Held, Lender, Loaning, Pool, PoolConfig, Shape, Sources, Template, Uses};
 
 use crate::protocol::{About, HostStatus, Id, ImageId, SandboxConfig, StepStats};
 use crate::rootfs::{Cache, Missing};
-use crate::state::{Record, Records, StateError, claim_host, unix_ms_now};
+use crate::state::{Record, Records, StateError, Stray, claim_host, unix_ms_now};
 use crate::step::{After, Live, Report};
-use crate::store::Store;
+use crate::store::{OwnerEpoch, Store};
+use compute_protocol::fleet::Verdict;
 
 mod disk;
 mod fetch;
 mod handle;
 mod holds;
 mod observe;
+mod owners;
 mod ready;
 mod recover;
 mod requests;
@@ -131,6 +134,13 @@ pub struct HostConfig {
     /// What the host runs, as status reports it. The runtime is the
     /// engine's; whatever is set here is replaced.
     pub about: About,
+    /// On a host in a fleet, the lease it holds (see [`crate::fleet`]):
+    /// while it has run out the agent decides nothing of its own (no
+    /// sleeping, no ready sandboxes, no template builds) and serves its
+    /// own tools only their status, since the guard keeps the VMs frozen
+    /// and the fleet service may be handing its sandboxes to others.
+    /// `None` on a host on its own.
+    pub lease: Option<LeaseGate>,
     /// Where the host's events and metrics go (see [`crate::observe`]).
     pub observer: Observer,
     /// How long a sandbox stays awake before it reports what it went
@@ -320,6 +330,36 @@ pub enum HostError {
     /// The host agent has shut down.
     #[error("the host agent stopped")]
     Stopped,
+    /// The request names an earlier ownership of the sandbox than the one
+    /// this host holds.
+    #[error("sandbox {id} is held under owner epoch {held}, not {asked}")]
+    Superseded {
+        /// The sandbox.
+        id: Id,
+        /// The owner epoch held.
+        held: u64,
+        /// The owner epoch the request names.
+        asked: u64,
+    },
+    /// An adopt found no copy of the sandbox in the store.
+    #[error("the store holds no copy of sandbox {0}")]
+    NoCopy(Id),
+    /// A hand-off was asked of a sandbox that is awake or held awake.
+    #[error("sandbox {0} is awake; it is handed off only while it sleeps")]
+    Awake(Id),
+    /// The sandbox is being handed off and takes no wake.
+    #[error("sandbox {0} is being handed off")]
+    HandingOff(Id),
+    /// The host's lease from the fleet service has run out: it runs
+    /// nothing until it is renewed.
+    #[error("this host's lease from the fleet service has run out")]
+    LeaseLapsed,
+    /// A request from the fleet service waited in the agent until the
+    /// lease no longer admitted it: it was sent under a registration this
+    /// host no longer holds or too many renewals ago, or the lease ran
+    /// out.
+    #[error("the request is no longer admitted under this host's lease")]
+    NotAdmitted,
 }
 
 impl From<StateError> for HostError {
@@ -336,6 +376,7 @@ impl From<StateError> for HostError {
             },
             StateError::NotFound(id) => Self::NotFound(id),
             StateError::Exists(id) => Self::Exists(id),
+            StateError::Superseded { id, held, asked } => Self::Superseded { id, held, asked },
             other => Self::Io(other.to_string()),
         }
     }
@@ -387,7 +428,40 @@ enum Command {
     Create {
         id: Id,
         config: SandboxConfig,
+        /// The ownership it is created under.
+        owner: OwnerEpoch,
         reply: Reply<()>,
+    },
+    /// See [`crate::protocol::Request::Adopt`].
+    Adopt {
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+    },
+    /// See [`crate::protocol::Request::HandOff`].
+    HandOff {
+        id: Id,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+    },
+    /// The fleet service's rulings on the sandboxes the host listed when
+    /// it registered.
+    Reconcile {
+        rulings: Vec<(Id, Verdict)>,
+        reply: Reply<()>,
+    },
+    /// `command`, sent for the ownership of its sandbox under `owner`, and
+    /// carried out only while `admission` still holds.
+    Owned {
+        owner: OwnerEpoch,
+        admission: Option<Admission>,
+        command: Box<Command>,
+    },
+    /// What the host holds, for a registration: answered once no create,
+    /// adopt or change of owner is under way, or with how many are.
+    Inventory {
+        reply: oneshot::Sender<Result<HostStatus, usize>>,
     },
     Remove {
         id: Id,
@@ -457,6 +531,12 @@ enum Command {
 
 #[derive(Debug)]
 enum Event<V> {
+    /// A change of owner of `id` landed or failed; `reply` waits for it.
+    OwnerTaken {
+        id: Id,
+        result: Result<(), HostError>,
+        reply: Reply<()>,
+    },
     Prepared {
         id: Id,
         ordinal: u32,
@@ -635,6 +715,8 @@ struct Slot<V> {
     failed: Option<(Step, String)>,
     /// Its named holds, kept on disk.
     holds: holds::Holds,
+    /// Its removal hands it off: it keeps the store's copy.
+    hand_off: bool,
 }
 
 /// A request waiting for a sandbox to run.
@@ -667,9 +749,28 @@ pub struct Handle {
     commands: mpsc::UnboundedSender<Command>,
     holds: Arc<AtomicU64>,
     stream_idle: Duration,
+    /// Who sends through it; see [`Handle::owned`] and
+    /// [`Handle::local_to_fleet`].
+    origin: Origin,
+    /// The host's lease in a fleet, which the host's own tools wait on.
+    lease: Option<LeaseGate>,
     observer: Observer,
     /// Trace context every command carries, if any.
     trace: Option<TraceContext>,
+}
+
+/// Who sends requests through a [`Handle`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    /// The host's own tools, on a host outside a fleet.
+    Local,
+    /// The host's own tools, on a host in a fleet: they create, adopt and
+    /// hand off nothing, since only the fleet service tracks sandboxes.
+    LocalToFleet,
+    /// The fleet service, for the ownership under this owner epoch of the
+    /// sandbox each request is about, under the admission its listener
+    /// gave the request, if it came through one.
+    Fleet(OwnerEpoch, Option<Admission>),
 }
 
 /// Keeps a sandbox awake while it lives. Dropping it lets the sandbox go
@@ -720,11 +821,16 @@ pub struct HostAgent<E: Engine, S: Store> {
     origin: Instant,
     slots: HashMap<SandboxId, Slot<E::Vm>>,
     preparing: HashSet<SandboxId>,
+    /// Changes of owner under way, by sandbox (see [`owners`]).
+    owning: HashMap<SandboxId, usize>,
     ordinals: BTreeSet<u32>,
     /// Sandboxes on disk the host does not manage, with why: their ids are
     /// refused and their files and VMs left alone.
     blocked: BTreeMap<SandboxId, String>,
     destroying: HashMap<SandboxId, Vec<Reply<()>>>,
+    /// Those of `destroying` that hand their sandbox off, keeping the
+    /// store's copy for its next owner.
+    handing_away: HashSet<SandboxId>,
     /// Blocked sandboxes whose record is gone but whose files a removal
     /// could not finish deleting, with the ordinal they still hold if
     /// known. Removing one again retries.
@@ -768,6 +874,10 @@ pub struct HostAgent<E: Engine, S: Store> {
     memory_policy: Option<MemoryPolicy>,
     /// Ready sandboxes, kept for creates to claim (see [`ready`]).
     ready: ready::Ready<E::Vm>,
+    /// Hand-offs under way (see [`owners`]).
+    handing_off: owners::HandOffs,
+    /// Adopts that wait for an earlier ownership's copy to go.
+    then_adopt: owners::Adopts,
     guest_ports: Arc<[GuestPort]>,
     restore_notice_port: Option<u32>,
     #[cfg(target_os = "linux")]
@@ -788,6 +898,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     pager: PagerConfig,
     /// What the host runs, as status reports it.
     about: About,
+    /// The lease this host holds in a fleet; see [`HostConfig::lease`].
+    lease: Option<LeaseGate>,
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
     commands_tx: mpsc::WeakUnboundedSender<Command>,
@@ -803,6 +915,22 @@ pub struct HostAgent<E: Engine, S: Store> {
 /// Checks that this host's settings fit every recorded sandbox: a sandbox
 /// keeps the user and addresses it was given, and new ones are handed out
 /// by today's settings, which therefore must agree.
+/// Checks `config` and takes over its state root: its lock, then its
+/// records, which must fit the host's images.
+async fn open_root(config: &HostConfig) -> Result<(Host, Records, Vec<Stray>, Images), HostError> {
+    let core =
+        Host::new(config.policy).map_err(|error| HostError::Invalid(format!("{error:?}")))?;
+    check_config(config).map_err(HostError::Invalid)?;
+    let host_lock = match config.host_lock.clone() {
+        Some(path) => Some(claim(path, config.root.clone()).await?),
+        None => None,
+    };
+    let (records, strays) = Records::open(config.root.clone(), HANDOVER, host_lock).await?;
+    let images = host_images(config);
+    check_fit(&images, &records)?;
+    Ok((core, records, strays, images))
+}
+
 fn check_fit(images: &Images, records: &Records) -> Result<(), HostError> {
     let misfits: Vec<String> = records
         .all()
@@ -936,16 +1064,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         engine: E,
         store: S,
     ) -> Result<(Handle, JoinHandle<()>), HostError> {
-        let core =
-            Host::new(config.policy).map_err(|error| HostError::Invalid(format!("{error:?}")))?;
-        check_config(&config).map_err(HostError::Invalid)?;
-        let host_lock = match config.host_lock.clone() {
-            Some(path) => Some(claim(path, config.root.clone()).await?),
-            None => None,
-        };
-        let (records, strays) = Records::open(config.root.clone(), HANDOVER, host_lock).await?;
-        let images = host_images(&config);
-        check_fit(&images, &records)?;
+        let (core, records, strays, images) = open_root(&config).await?;
         let net = prepare_network(config.network.clone()).await?;
         let (commands_tx, commands) = mpsc::unbounded_channel();
         let (events_tx, events) = mpsc::unbounded_channel();
@@ -963,10 +1082,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             held,
             ready,
         } = Warm::start(&engine, &config, &rootfs, &images).await;
-        let about = About {
-            runtime: engine.runtime().to_owned(),
-            ..config.about
-        };
+        let runtime = engine.runtime().to_owned();
         let mut agent = Self {
             engine: Arc::new(engine),
             #[cfg(target_os = "linux")]
@@ -986,14 +1102,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             warm,
             memory_policy: config.policy.memory,
             ready: ready::Ready::new(ready),
+            handing_off: HashMap::new(),
+            then_adopt: HashMap::new(),
             pager: config.pager,
             core,
             origin: Instant::now(),
             slots: HashMap::new(),
             preparing: HashSet::new(),
+            owning: HashMap::new(),
             ordinals: BTreeSet::new(),
             blocked: BTreeMap::new(),
             destroying: HashMap::new(),
+            handing_away: HashSet::new(),
             leftovers: HashMap::new(),
             hosts: HashMap::new(),
             unknown_ordinals: BTreeSet::new(),
@@ -1019,23 +1139,39 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             reserve_whole,
             save_copies,
             allocation_unit,
-            about,
+            about: About {
+                runtime,
+                ..config.about
+            },
+            lease: config.lease,
             commands_tx: commands_tx.downgrade(),
             observer: config.observer,
             summary_every: config.summary_every,
             recovering: true,
             trace: None,
         };
-        agent.hold_builds(held);
-        agent.recover(strays).await;
+        // Boxed: recovery's future is large, and every caller awaits this one.
+        Box::pin(agent.begin(held, strays, warm_shapes)).await;
+        let handle = Handle::new(
+            commands_tx,
+            config.stream_idle,
+            agent.lease.clone(),
+            agent.observer.clone(),
+        );
+        Ok((handle, tokio::spawn(agent.run())))
+    }
+
+    /// Takes back what an earlier agent left, then takes a first reading
+    /// and starts the templates.
+    async fn begin(&mut self, held: Vec<Held>, strays: Vec<Stray>, shapes: Vec<Shape>) {
+        self.hold_builds(held);
+        self.recover(strays).await;
         // Admission refuses what needs disk until it has a reading, and
         // spare VMs wait for a memory reading too, so one is taken before
         // any build starts or request is served.
-        agent.sample();
-        agent.recovering = false;
-        agent.start_templates(warm_shapes);
-        let handle = Handle::new(commands_tx, config.stream_idle, agent.observer.clone());
-        Ok((handle, tokio::spawn(agent.run())))
+        self.sample();
+        self.recovering = false;
+        self.start_templates(shapes);
     }
 
     /// Refuses while some ordinal is unknown: any ordinal that looks free
@@ -1100,6 +1236,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 destroy: false,
                 removers: Vec::new(),
                 waiters: Vec::new(),
+                hand_off: false,
                 deferred: None,
                 activity: None,
                 stats: None,
@@ -1166,22 +1303,31 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.root.clone(),
             self.shutdown.clone(),
         ));
+        let lease = self.lease.clone();
         loop {
             let deadline = self
                 .core
                 .next_deadline()
                 .map(|at| self.origin + at.since_origin().saturating_sub(CLOCK_BASE));
+            // While the lease has run out, time decides nothing: the VMs
+            // are frozen, and the service may be giving their sandboxes to
+            // other hosts. Events and requests still come in, so the
+            // service's rulings can be carried out; the core decides
+            // nothing of its own on them either (see `inputs`).
+            let acting = self.may_act();
             tokio::select! {
                 biased;
                 // First, so a steady stream of events and requests cannot
                 // starve it: it is ready at most once per interval.
-                _ = sample.tick() => self.sample(),
+                _ = sample.tick(), if acting => self.sample(),
                 Some(event) = self.events.recv() => self.on_event(event),
                 command = self.commands.recv() => match command {
                     Some(command) => self.on_command(command),
                     None => break,
                 },
-                () = sleep_until_some(deadline) => self.input(Input::Tick),
+                () = sleep_until_some(deadline), if acting => self.input(Input::Tick),
+                // Renewed, the core reconsiders every sandbox.
+                () = lease_changed(lease.as_ref()) => self.input(Input::Tick),
             }
         }
         tracing::info!("every handle dropped; host agent stopping, VMs keep running");
@@ -1195,6 +1341,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     fn now(&self) -> At {
         At::from_duration(CLOCK_BASE + self.origin.elapsed())
+    }
+
+    /// Whether the agent may decide anything of its own now: always, except
+    /// on a host in a fleet whose lease has run out.
+    fn may_act(&self) -> bool {
+        self.lease.as_ref().is_none_or(LeaseGate::is_open)
     }
 
     /// `at` in milliseconds since the Unix epoch.
@@ -1216,7 +1368,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Feeds inputs observed together to the core, which decides once after
     /// all of them.
+    /// On a host in a fleet whose lease has run out the core is suspended
+    /// ([`Host::suspend`]): it takes the inputs in and carries out removals,
+    /// but nothing it would decide of its own, such as pausing a sandbox
+    /// that went idle, starts until the lease is renewed.
     fn inputs(&mut self, inputs: impl IntoIterator<Item = Input>) {
+        let acting = self.may_act();
+        if acting == self.core.is_suspended() {
+            self.core.suspend(!acting);
+        }
         let now = self.now();
         let mut actions = std::mem::take(&mut self.actions);
         self.core.handle_all(now, inputs, &mut actions);
@@ -1224,6 +1384,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.execute(action);
         }
         self.actions = actions;
+    }
+}
+
+/// Returns when `lease` may have opened or closed; never without one.
+async fn lease_changed(lease: Option<&LeaseGate>) {
+    match lease {
+        Some(lease) => lease.changed().await,
+        None => std::future::pending().await,
     }
 }
 

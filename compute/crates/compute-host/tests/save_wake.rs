@@ -129,6 +129,7 @@ async fn restart<S: Store>(lab: &Path, name: &str, first_uid: u32, store: S) -> 
             record_for: RECORD_FOR,
         },
         about: compute_host::protocol::About::default(),
+        lease: None,
         observer: compute_host::observe::Observer::default(),
         summary_every: HostConfig::SUMMARY_EVERY,
     };

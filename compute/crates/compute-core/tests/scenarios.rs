@@ -519,6 +519,38 @@ fn holds_keep_a_sandbox_awake_and_their_expiry_counts_as_activity() {
     assert_eq!(only_start(&rig.tick_at_deadline()).0, Step::Pause);
 }
 
+/// A suspended host, as one in a fleet whose lease ran out, starts
+/// nothing of its own: inputs long after its sandboxes went idle pause
+/// none of them, while a removal still goes ahead. Resumed, it pauses the
+/// idle one at the next input.
+#[test]
+fn a_suspended_host_decides_nothing_of_its_own_but_still_removes() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, State::RUNNING, recommended());
+    rig.add(2, State::RUNNING, recommended());
+    rig.host.suspend(true);
+    assert!(rig.host.is_suspended());
+    rig.at(secs(500));
+    // An unrelated release, then a tick, long after both went idle.
+    assert_nothing_started(&rig.send(Input::Release {
+        sandbox: SandboxId(2),
+        hold: HoldId(9),
+    }));
+    assert_nothing_started(&rig.send(Input::Tick));
+    assert_eq!(rig.state(1).level, Level::Running);
+    let removed = rig.send(Input::Remove {
+        sandbox: SandboxId(2),
+    });
+    assert!(
+        removed.iter().any(
+            |action| matches!(action, Action::Destroy { sandbox } if *sandbox == SandboxId(2))
+        ),
+        "{removed:?}"
+    );
+    rig.host.suspend(false);
+    assert_eq!(only_start(&rig.send(Input::Tick)).0, Step::Pause);
+}
+
 #[test]
 fn releasing_the_last_hold_starts_the_idle_clock() {
     let mut rig = Rig::new(HostPolicy::default());

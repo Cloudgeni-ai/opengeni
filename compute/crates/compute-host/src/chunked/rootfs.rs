@@ -6,7 +6,10 @@
 //! keeps it from sweeps (a sweep already reads such a copy). Like an
 //! archive, a store begins its pointer before it stores anything and
 //! publishes only if no sweep took stock meanwhile; otherwise it starts
-//! again. A fetch checks every chunk, then the whole file against the id.
+//! again. An image belongs to no host: every store of it uses the same
+//! [`IMAGE_STAMP`], so the second store of an image finds it done and
+//! uploads nothing. A fetch checks every chunk, then the whole file
+//! against the id.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -14,9 +17,19 @@ use std::path::Path;
 
 use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_storage::Error as StorageError;
+use compute_storage::store::Begun;
 
-use super::{Chunked, HEAD_VERSION, Head, parse_head, storage_error};
+use super::{Chunked, HEAD_VERSION, Head, OwnerEpoch, Stamp, parse_head, storage_error};
 use crate::protocol::ImageId;
+
+/// The stamp every image pointer is published under. Images are named by
+/// their content and never change, so no owner fences them: one stamp
+/// lets a store tell a stored image (done) from one still in flight
+/// (the empty pointer under number 0, which it may publish over).
+const IMAGE_STAMP: Stamp = Stamp {
+    epoch: OwnerEpoch::FIRST,
+    save: 1,
+};
 
 /// The pointer that keeps the image `image`.
 #[must_use]
@@ -49,11 +62,23 @@ impl Chunked {
         const OP: &str = "store image";
         let digest = file_id(path).await?;
         for _ in 0..TRIES {
-            let publication = self
+            let publication = match self
                 .chunks
-                .begin(&rootfs_pointer(digest))
+                .begin(&rootfs_pointer(digest), IMAGE_STAMP)
                 .await
-                .map_err(|error| storage_error(OP, error))?;
+                .map_err(|error| storage_error(OP, error))?
+            {
+                Begun::Publish(publication) => publication,
+                // Stored already, by this host or another.
+                Begun::Stored(_) => return Ok(digest),
+                Begun::Outdated | Begun::Deleted => {
+                    return Err(EngineError::new(
+                        ErrorKind::Fatal,
+                        OP,
+                        "the image pointer is not one this store writes",
+                    ));
+                }
+            };
             let disk = self
                 .put_file(
                     path,

@@ -22,9 +22,8 @@ mod remote;
 #[cfg(test)]
 mod tests;
 
-use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -32,7 +31,7 @@ use std::time::{Duration, Instant};
 use compute_core::{Failure, Outcome, Step};
 use compute_engine::{
     CancellationToken, Completion, Engine, EngineError, ErrorKind, MemoryProfile, MemorySource,
-    MemoryStats, Readable, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
+    MemoryStats, Readable, RestoreFiles, SnapshotKind, VmSpec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -70,9 +69,19 @@ const PREFETCH_LIMIT: Duration = Duration::from_secs(5);
 /// tries.
 const SETTLE_RETRY: (Duration, Duration) = (Duration::from_millis(50), Duration::from_secs(5));
 
+mod files;
 mod learned;
 mod live;
 
+#[cfg(target_os = "linux")]
+pub(crate) use files::reconnect_paging;
+use files::{
+    archive_receipt, diff_files, drop_snapshot, link, paged_marker, pager_control, pager_dir,
+    pager_learned, wake_profile,
+};
+pub(crate) use files::{
+    clear_local, images_of, mark_archived, paged, recover_images, take_written,
+};
 pub(crate) use live::{Base, DiskWatch, LiveMemory, Reconnected};
 
 /// A VM process the host owns.
@@ -205,88 +214,6 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
     tokio::task::spawn_blocking(work)
         .await
         .map_err(io::Error::other)
-}
-
-/// The sandbox's memory images.
-pub(crate) fn images_of(paths: &Paths) -> Images {
-    Images::new(paths.dir.join("images"))
-}
-
-/// The learned order the guest touches memory after a wake.
-fn wake_profile(paths: &Paths) -> PathBuf {
-    paths.dir.join("wake-profile.json")
-}
-
-/// Names the stored copy the record's `archived` flag refers to.
-fn archive_receipt(paths: &Paths) -> PathBuf {
-    paths.dir.join("archive.json")
-}
-
-/// Present while the sandbox's VM may have its memory served by a pager,
-/// naming that pager's launch (see [`crate::paging::tag`]).
-fn paged_marker(paths: &Paths) -> PathBuf {
-    paths.dir.join("paged")
-}
-
-/// The directory the sandbox's pager writes in, as its VM's user.
-fn pager_dir(paths: &Paths) -> PathBuf {
-    paths.dir.join("pager")
-}
-
-/// Where the sandbox's pager listens for the agent.
-fn pager_control(paths: &Paths) -> PathBuf {
-    pager_dir(paths).join("sock")
-}
-
-/// Where the sandbox's pager writes the order it learned, until the agent
-/// takes it into [`wake_profile`].
-fn pager_learned(paths: &Paths) -> PathBuf {
-    pager_dir(paths).join("learned.json")
-}
-
-/// Whether the sandbox's last VM may have had its memory served by a
-/// pager.
-pub(crate) fn paged(paths: &Paths) -> bool {
-    paged_marker(paths).exists()
-}
-
-/// Reconnects to the pager of a VM found running after an agent restart;
-/// see [`Paging::reconnect`]. What the VM's memory was based on is not
-/// known any more.
-#[cfg(target_os = "linux")]
-pub(crate) async fn reconnect_paging(
-    paths: &Paths,
-    fetcher: Option<&Arc<Fetcher>>,
-) -> Result<Option<Reconnected>, EngineError> {
-    let paging = Paging::reconnect(
-        &paged_marker(paths),
-        &pager_control(paths),
-        images_of(paths),
-        fetcher.cloned(),
-    )
-    .await?;
-    Ok(paging.map(|paging| Reconnected { paging }))
-}
-
-/// The files a diff snapshot is written to, inside the jail.
-fn diff_files(paths: &Paths) -> SnapshotFiles {
-    SnapshotFiles {
-        state: paths.in_jail("save.state"),
-        memory: paths.in_jail("save.mem"),
-    }
-}
-
-/// Makes the sandbox's images consistent after a host restart and reports
-/// whether a good current image exists, or why not. An error means they
-/// could not be checked, which proves nothing about them.
-pub(crate) fn recover_images(paths: &Paths) -> io::Result<crate::image::Recovered> {
-    images_of(paths).recover()
-}
-
-/// Points `link` at `target` with a hard link, replacing what was there.
-fn link(target: &Path, link: &Path) -> io::Result<()> {
-    remove_if_present(link)?;
-    fs::hard_link(target, link)
 }
 
 impl<E: Engine, S: Store> Job<E, S> {
@@ -1263,51 +1190,4 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
         }
     }
-}
-
-/// Moves the snapshot files a VMM wrote in its jail into `scratch`, a
-/// directory only the host can reach, and checks each is a plain file of
-/// its own. A renamed link stays a link, so the check sees what the VMM
-/// left, and nothing jailed can swap it afterwards.
-pub(crate) fn take_written(files: &SnapshotFiles, scratch: &Path) -> io::Result<SnapshotFiles> {
-    match fs::remove_dir_all(scratch) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-        _ => {}
-    }
-    fs::create_dir(scratch)?;
-    let taken = SnapshotFiles {
-        state: scratch.join("save.state"),
-        memory: scratch.join("save.mem"),
-    };
-    for (written, moved) in [(&files.state, &taken.state), (&files.memory, &taken.memory)] {
-        fs::rename(written, moved)?;
-        compute_engine::confined::check_written(moved)?;
-    }
-    Ok(taken)
-}
-
-/// Deletes the sandbox's local disk, memory images and snapshot files.
-pub(crate) async fn clear_local(paths: &Paths) -> io::Result<()> {
-    let paths = paths.clone();
-    blocking(move || {
-        remove_if_present(&paths.disk)?;
-        remove_if_present(&paths.snapshot.state)?;
-        remove_if_present(&paths.snapshot.memory)?;
-        remove_if_present(&paged_marker(&paths))?;
-        images_of(&paths).clear()
-    })
-    .await
-    .and_then(|removed| removed)
-}
-
-fn drop_snapshot(paths: &Paths) {
-    let _ = remove_if_present(&paths.snapshot.state);
-    let _ = remove_if_present(&paths.snapshot.memory);
-    let _ = remove_if_present(&paged_marker(paths));
-    let _ = remove_if_present(&pager_control(paths).with_extension("done"));
-    let _ = remove_if_present(&archive_receipt(paths));
-    let files = diff_files(paths);
-    let _ = remove_if_present(&files.state);
-    let _ = remove_if_present(&files.memory);
-    let _ = images_of(paths).clear();
 }

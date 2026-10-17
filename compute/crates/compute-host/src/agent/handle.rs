@@ -11,10 +11,13 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep};
 
+use compute_protocol::fleet::Verdict;
+
+use super::{Command, Handle, HostError, Lease, Origin, ReleaseOnDrop};
+use crate::fleet::{Admission, LeaseGate};
 use crate::observe::{Observer, TraceContext};
 use crate::protocol::{HostStatus, Id, SandboxConfig};
-
-use super::{Command, Handle, HostError, Lease, ReleaseOnDrop};
+use crate::store::OwnerEpoch;
 
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
@@ -31,12 +34,15 @@ impl Handle {
     pub(super) fn new(
         commands: mpsc::UnboundedSender<Command>,
         stream_idle: Duration,
+        lease: Option<LeaseGate>,
         observer: Observer,
     ) -> Self {
         Self {
             commands,
             holds: Arc::new(AtomicU64::new(1)),
             stream_idle,
+            origin: Origin::Local,
+            lease,
             observer,
             trace: None,
         }
@@ -47,13 +53,163 @@ impl Handle {
         make: impl FnOnce(oneshot::Sender<T>) -> Command,
     ) -> Result<T, HostError> {
         let (reply, answer) = oneshot::channel();
-        let command = match self.trace {
-            Some(trace) => Command::Traced(trace, Box::new(make(reply))),
-            None => make(reply),
+        let command = match self.origin {
+            Origin::Fleet(owner, admission) => Command::Owned {
+                owner,
+                admission,
+                command: Box::new(make(reply)),
+            },
+            Origin::Local | Origin::LocalToFleet => make(reply),
         };
+        // The host's own tools on a host in a fleet get only its status
+        // while its lease has run out: anything else could start a VM the
+        // guard keeps frozen.
+        if self.origin == Origin::LocalToFleet
+            && self.lease.as_ref().is_some_and(|lease| !lease.is_open())
+            && !matches!(command, Command::Status { .. } | Command::Release { .. })
+        {
+            command.refuse(HostError::LeaseLapsed);
+            return answer.await.map_err(|_| HostError::Stopped);
+        }
+        self.send(command)?;
+        answer.await.map_err(|_| HostError::Stopped)
+    }
+
+    /// Sends `command`, carrying the handle's trace if it has one.
+    fn send(&self, command: Command) -> Result<(), HostError> {
+        let command = match self.trace {
+            Some(trace) => Command::Traced(trace, Box::new(command)),
+            None => command,
+        };
+        self.commands.send(command).map_err(|_| HostError::Stopped)
+    }
+
+    /// A handle for the fleet service's requests about the ownership of a
+    /// sandbox under `owner`: the agent carries each out only while this
+    /// host holds that ownership (see [`crate::protocol::Request::Adopt`]).
+    #[must_use]
+    pub fn owned(&self, owner: OwnerEpoch) -> Self {
+        Self {
+            origin: Origin::Fleet(owner, None),
+            ..self.clone()
+        }
+    }
+
+    /// Like [`Handle::owned`], for a request the fleet listener admitted
+    /// under `admission`: the agent carries it out only while the lease
+    /// would still admit it ([`LeaseGate::admits`]).
+    #[must_use]
+    pub fn admitted(&self, owner: OwnerEpoch, admission: Admission) -> Self {
+        Self {
+            origin: Origin::Fleet(owner, Some(admission)),
+            ..self.clone()
+        }
+    }
+
+    /// What the host holds, for the renewer's registration. `Err` counts
+    /// the creates, adopts and changes of owner still under way.
+    pub async fn inventory(&self) -> Result<Result<HostStatus, usize>, HostError> {
+        let (reply, answer) = oneshot::channel();
         self.commands
-            .send(command)
+            .send(Command::Inventory { reply })
             .map_err(|_| HostError::Stopped)?;
+        answer.await.map_err(|_| HostError::Stopped)
+    }
+
+    /// A handle for the host's own tools on a host in a fleet, which
+    /// create, adopt and hand off nothing: only the fleet service knows
+    /// which sandboxes a fleet has, and where.
+    #[must_use]
+    pub fn local_to_fleet(&self) -> Self {
+        Self {
+            origin: Origin::LocalToFleet,
+            ..self.clone()
+        }
+    }
+
+    /// Refuses what only the fleet service asks of a host in a fleet.
+    fn fleet_only(&self, what: &str) -> Result<(), HostError> {
+        if self.origin == Origin::LocalToFleet {
+            return Err(HostError::Invalid(format!(
+                "this host is in a fleet: only the fleet service may {what} sandboxes"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Creates a sandbox. It costs only disk until first needed.
+    pub async fn create(&self, id: Id, config: SandboxConfig) -> Result<(), HostError> {
+        self.fleet_only("create")?;
+        let owner = match self.origin {
+            Origin::Fleet(owner, _) => owner,
+            Origin::Local | Origin::LocalToFleet => OwnerEpoch::FIRST,
+        };
+        self.ask(|reply| Command::Create {
+            id,
+            config,
+            owner,
+            reply,
+        })
+        .await?
+    }
+
+    /// Takes a sandbox over from the store's latest copy as its owner under
+    /// `owner`; see [`crate::protocol::Request::Adopt`].
+    pub async fn adopt(
+        &self,
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+    ) -> Result<(), HostError> {
+        self.fleet_only("adopt")?;
+        self.send_naming_owner(|reply| Command::Adopt {
+            id,
+            config,
+            owner,
+            reply,
+        })
+        .await?
+    }
+
+    /// Hands a sandbox held under `owner` off, and returns once this host
+    /// no longer has it; see [`crate::protocol::Request::HandOff`].
+    pub async fn hand_off(&self, id: Id, owner: OwnerEpoch) -> Result<(), HostError> {
+        self.fleet_only("hand off")?;
+        self.send_naming_owner(|reply| Command::HandOff { id, owner, reply })
+            .await?
+    }
+
+    /// Takes in the fleet service's rulings on the sandboxes the host
+    /// listed when it registered, and returns once every sandbox the
+    /// rulings do not keep is gone (see [`compute_protocol::fleet::Registered`]).
+    /// The renewer sends these itself, under the registration they answer,
+    /// so they carry no admission.
+    pub async fn reconcile(&self, rulings: Vec<(Id, Verdict)>) -> Result<(), HostError> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::Reconcile { rulings, reply })?;
+        answer.await.map_err(|_| HostError::Stopped)?
+    }
+
+    /// Sends a request that names its owner epoch itself. One the fleet
+    /// listener admitted still carries its admission, and the agent carries
+    /// it out only while the lease would still admit it, as for every other
+    /// request the listener admits ([`Handle::admitted`]): an adopt or
+    /// hand-off that waited past a renewal window, or across a new
+    /// registration, does nothing.
+    async fn send_naming_owner<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<T>) -> Command,
+    ) -> Result<T, HostError> {
+        let (reply, answer) = oneshot::channel();
+        let command = match self.origin {
+            Origin::Fleet(owner, Some(admission)) => Command::Owned {
+                owner,
+                admission: Some(admission),
+                command: Box::new(make(reply)),
+            },
+            Origin::Fleet(_, None) | Origin::Local | Origin::LocalToFleet => make(reply),
+        };
+        self.send(command)?;
         answer.await.map_err(|_| HostError::Stopped)
     }
 
@@ -73,15 +229,10 @@ impl Handle {
         &self.observer
     }
 
-    /// Creates a sandbox. It costs only disk until first needed.
-    pub async fn create(&self, id: Id, config: SandboxConfig) -> Result<(), HostError> {
-        self.ask(|reply| Command::Create { id, config, reply })
-            .await?
-    }
-
     /// Deletes a sandbox and everything it stores, waiting until it is gone.
     /// With a `generation`, only while the sandbox is still at it.
     pub async fn remove(&self, id: Id, generation: Option<u64>) -> Result<(), HostError> {
+        self.fleet_only("remove")?;
         self.ask(|reply| Command::Remove {
             id,
             generation,

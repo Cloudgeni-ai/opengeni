@@ -14,9 +14,11 @@ Opengeni does not use this yet.
 | Host agent: jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite | on `feat/compute-lab` |
 | Templates and a ready pool for new sandboxes | on `feat/compute-lab` |
 | Admission with requests and limits, memory guarantees for running VMs | on `feat/compute-lab` |
+| Fleet decisions: placement, host leases with a safety budget, the VM guard, fences on every archive write, recovery and moves, with a seeded simulation of the whole protocol | on `feat/compute-fleet` |
+| A host in a fleet: registering and renewing over mutual TLS, the guard service, owner epochs on every request, adopt, hand-off and reconcile, no decisions while the lease has run out | on `feat/compute-fleet` |
 | Observability: wide events, bounded metrics, zero alarms, per-sandbox host pressure, a canary, an OTLP exporter | on `feat/compute-lab` |
 | Sandbox images from OCI images, with our init and E2B's envd in every guest | on `feat/compute-e2b` |
-| Control plane (placement, moves between hosts, autoscaling), Opengeni integration | planned |
+| The fleet service (Postgres store, public API, proxy), multi-host runs, autoscaling, Opengeni integration | in progress |
 
 Decisions and their reasons are in [docs/adr](docs/adr/README.md). Numbers
 below are observations from our lab runs, with workloads and hosts in
@@ -275,13 +277,15 @@ base image, as before.
 | --- | --- |
 | `crates/compute-core` | Pure decisions: levels, sleep policy, each sandbox's state machine, memory pressure. No I/O, clock or randomness. |
 | `crates/compute-engine` | VM operations (boot, pause, resume, compress, snapshot, restore, stop) behind one trait; Firecracker with its jailer, cgroups. |
-| `crates/compute-host` | The agent: API, records, steps, images, archives, network, activity, templates. |
+| `crates/compute-host` | The agent: API, records, steps, images, archives, network, activity, templates, and a host's part in a fleet (lease, guard, listener). |
 | `crates/compute-host/src/observe` | What the agent reports: wide events, metrics, the canary and the OTLP/HTTP exporter ([ADR 16](docs/adr/0016-observability.md)). |
 | `crates/compute-guest` | The guest's init (PID 1): mounts, network, hostname, envd kept running, the image's command, clean shutdown, and the host's vsock ports. |
 | `crates/compute-image` | Turns an OCI image into a sandbox image: pull, checked layers, our init and envd added, an ext4 file. Run as `compute-host build-image`. |
 | `guest/` | Builds the guest's files: compute-guest, envd from a pinned E2B commit, and a static bash. |
 | `crates/compute-pager` | The userfaultfd pager, with a pure, separately tested memory-layout core. |
-| `crates/compute-storage` | Content-addressed chunks, manifests and stores. |
+| `crates/compute-storage` | Content-addressed chunks, manifests and stores; archive pointers stamped with their owner. |
+| `crates/compute-fleet` | Pure fleet decisions: placement, host leases, the guard that stops a cut-off host's VMs, the fence rule for archive writes, recovery and moves. No I/O, clock or randomness. |
+| `crates/compute-protocol` | The wire forms: the host agent's API and the fleet service's host API. |
 | `crates/archcheck` | Structure rules from `ARCHITECTURE.toml`, run as `cargo arch`. |
 | `smoke/` | End-to-end scenarios against a real agent, real VMs and a real guest. |
 | `lab/` | Measurement scripts used to size the design. Not production code. |
@@ -349,6 +353,11 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
   of 600 events (delays, failures, crashes, removals, memory pressure) against
   a fake engine and checks the core against an independent model after every
   input.
+- `crates/compute-fleet/tests/protocol.rs` runs the whole fleet protocol,
+  seeded, with the crate's own decisions under clock drift, partitions,
+  lost and late messages, stalls, restarts, suspends, power losses and
+  leader failovers, and checks that no sandbox ever runs on two hosts
+  (`FLEET_SIM_SEEDS` sets how many seeds; it runs on any platform).
 - Record writes are crash-tested at every boundary (staged, renamed, synced).
 - Tests with real Firecracker run as root on a host prepared by
   `lab/host-setup.sh`, only when `COMPUTE_TEST_LAB` names it:

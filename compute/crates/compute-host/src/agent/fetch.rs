@@ -13,7 +13,7 @@ use compute_engine::{Engine, EngineError};
 
 use crate::protocol::{Id, ImageId, SandboxConfig};
 use crate::rootfs::Missing;
-use crate::store::Store;
+use crate::store::{OwnerEpoch, Store};
 
 use super::{Event, HostAgent, HostError, Reply};
 
@@ -25,7 +25,7 @@ const FETCH_INODES: u64 = 2;
 pub(super) struct Fetch {
     /// The name its write is booked under with the core.
     key: Id,
-    waiting: Vec<(Id, SandboxConfig, Reply<()>)>,
+    waiting: Vec<(Id, SandboxConfig, OwnerEpoch, Reply<()>)>,
 }
 
 impl Fetch {
@@ -42,11 +42,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         image: ImageId,
         id: Id,
         config: SandboxConfig,
+        owner: OwnerEpoch,
         reply: Reply<()>,
     ) {
         self.preparing.insert(id.0);
         if let Some(fetch) = self.fetching.get_mut(&image) {
-            fetch.waiting.push((id, config, reply));
+            fetch.waiting.push((id, config, owner, reply));
             return;
         }
         let key = self.spare_name();
@@ -54,7 +55,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             image,
             Fetch {
                 key,
-                waiting: vec![(id, config, reply)],
+                waiting: vec![(id, config, owner, reply)],
             },
         );
         let (store, events) = (Arc::clone(&self.store), self.events_tx.clone());
@@ -125,11 +126,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if let Err(error) = result {
             tracing::warn!(%image, %error, "creates naming an image could not have it");
         }
-        for (id, config, reply) in fetch.waiting {
+        for (id, config, owner, reply) in fetch.waiting {
             self.preparing.remove(&id.0);
             match result {
                 // Just fetched, it counts as used now, so it is kept.
-                Ok(()) if self.rootfs.has(image) => self.create_fresh(id, config, reply),
+                Ok(()) if self.rootfs.has(image) => self.create_fresh(id, config, owner, reply),
                 Ok(()) => {
                     let missing = Missing::Failed {
                         image,

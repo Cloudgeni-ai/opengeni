@@ -58,13 +58,25 @@ would delete a chunk the new copy needs, after its local copy may be gone.
   unchanged. A sweep that deletes is refused before it stores any pointer
   on a store without deletes on condition, which today means anything but
   GCS.
-- Stamped pointers live under `pointers/v2`. An agent will not start on,
-  and a sweep will not run over, a store that still holds `pointers/v1`:
-  their copies would look absent and a sweep would delete what they name.
-  Only lab stores ever held them, so there is no migration; such a store
-  is emptied or a new prefix used.
+- Stamped pointers live under `pointers/v3`: after the write stamp comes
+  the owner stamp ([18](0018-the-fleet-service-leases-and-fences.md)). An
+  agent will not start on, and a sweep will not run over, a store that
+  still holds `pointers/v1` or `pointers/v2`: their copies would look
+  absent and a sweep would delete what they name. Only lab stores ever
+  held them, so there is no migration; such a store is emptied or a new
+  prefix used.
+- Deleting a sandbox leaves a tombstone, an empty pointer under its
+  owner's stamp that no later archive publishes over. A sweep never
+  stores a tombstone again, and never deletes one: the age of an object
+  says nothing about how long a write can be held up in flight, and a
+  first archive's write that found the tombstone gone would start a copy
+  of the deleted sandbox. Tombstones are a few hundred bytes each.
 - Forgetting a memory image also drops its working-set pack, which holds
-  memory pages; a copy without memory names no pack.
+  memory pages; a copy without memory names no pack. The forget carries a
+  change number of its own, as an archive does
+  ([18](0018-the-fleet-service-leases-and-fences.md)): tried again after
+  its answer was lost it finds itself done, and an archive begun before it
+  can no longer land over it.
 - Anything a sweep cannot read stops it before it deletes anything; only a
   damaged working-set pack does not, since a wake without it is slower.
 - Without `--delete` a sweep only reports what it would delete, and writes

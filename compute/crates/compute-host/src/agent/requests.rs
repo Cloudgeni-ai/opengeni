@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use compute_core::{Durability, HoldId, Input, Level, Priority, Resource, Step};
+use compute_core::{Durability, HoldId, Input, Level, Priority, Resource, SandboxId, Step};
 use compute_engine::Engine;
 
 use crate::layout::{Images, Paths, sync_parent};
@@ -18,11 +18,11 @@ use crate::protocol::{
 use crate::rootfs::Missing;
 use crate::state::{Identity, Record, check_generation};
 use crate::step::images_of;
-use crate::store::Store;
+use crate::store::{OwnerEpoch, Store};
 
 use super::holds::{Write, hold_id};
 use super::observe::Why;
-use super::{Command, Event, HostAgent, HostError, Reply, Waiter, Woke, unix_ms_now};
+use super::{Command, Event, HostAgent, HostError, Reply, Slot, Waiter, Woke, unix_ms_now};
 
 /// Replies to `reply` once the write in `outcome` has made a change
 /// durable, or with why the change was refused or could not be kept.
@@ -67,12 +67,22 @@ pub(super) fn new_files(
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn on_command(&mut self, command: Command) {
         match command {
+            Command::Create {
+                id,
+                config,
+                owner,
+                reply,
+            } => self.create(id, config, owner, reply),
+            command @ (Command::Adopt { .. }
+            | Command::HandOff { .. }
+            | Command::Reconcile { .. }
+            | Command::Owned { .. }
+            | Command::Inventory { .. }) => self.on_fleet_command(command),
             Command::Traced(trace, command) => {
                 self.trace = Some(trace);
                 self.on_command(*command);
                 self.trace = None;
             }
-            Command::Create { id, config, reply } => self.create(id, config, reply),
             Command::Remove {
                 id,
                 generation,
@@ -111,6 +121,26 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     .and_then(|()| self.request_sleep(id, level));
                 let _ = reply.send(result);
             }
+            command @ (Command::Hold { .. }
+            | Command::Unhold { .. }
+            | Command::Acquire { .. }
+            | Command::Release { .. }) => self.on_hold_command(command),
+            Command::Status { reply } => {
+                let _ = reply.send(self.status());
+            }
+            Command::Inspect { id, reply } => {
+                let _ = reply.send(
+                    self.core
+                        .sandbox(id.0)
+                        .map(|view| (view.state.level, view.step)),
+                );
+            }
+        }
+    }
+
+    /// Holds taken, ended, acquired and released.
+    fn on_hold_command(&mut self, command: Command) {
+        match command {
             Command::Hold {
                 id,
                 generation,
@@ -150,16 +180,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     });
                 }
             }
-            Command::Status { reply } => {
-                let _ = reply.send(self.status());
-            }
-            Command::Inspect { id, reply } => {
-                let _ = reply.send(
-                    self.core
-                        .sandbox(id.0)
-                        .map(|view| (view.state.level, view.step)),
-                );
-            }
+            _ => unreachable!("not a hold command"),
         }
     }
 
@@ -220,6 +241,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         priority: Priority,
     ) -> Result<(), HostError> {
         self.check(id, generation)?;
+        self.not_handing_off(id)?;
         if !self.slots.contains_key(&id.0) {
             return Err(HostError::NotFound(id));
         }
@@ -259,7 +281,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         priority: Priority,
         reply: Reply<Woke>,
     ) {
-        if let Err(error) = self.check(id, generation) {
+        if let Err(error) = self
+            .check(id, generation)
+            .and_then(|()| self.not_handing_off(id))
+        {
             let _ = reply.send(Err(error));
             return;
         }
@@ -355,6 +380,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if self.slots.get(&id.0).is_none_or(|slot| slot.destroy) {
             return Err(HostError::NotFound(id));
         }
+        self.not_handing_off(id)?;
         let until = ttl.map(|ttl| self.now() + ttl);
         self.note_ask(id);
         self.input(Input::Hold {
@@ -372,7 +398,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// The refusal of a request for blocked sandbox `id`.
-    fn blocked_error(&self, id: Id) -> HostError {
+    pub(super) fn blocked_error(&self, id: Id) -> HostError {
         HostError::Blocked {
             id,
             reason: self.blocked.get(&id.0).cloned().unwrap_or_default(),
@@ -428,7 +454,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Refuses a new sandbox `id` of `config` that cannot be created here.
-    fn can_create(&self, id: Id, config: &SandboxConfig) -> Result<(), HostError> {
+    pub(super) fn can_create(&self, id: Id, config: &SandboxConfig) -> Result<(), HostError> {
         let policy = self.sleep_policy(config).map_err(HostError::Invalid)?;
         if policy.rules().archive_after.is_some() && !self.store.is_configured() {
             return Err(HostError::Invalid(
@@ -451,16 +477,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         Ok(())
     }
 
-    pub(super) fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
-        self.create_from(id, config, reply, true);
+    pub(super) fn create(
+        &mut self,
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+    ) {
+        self.create_from(id, config, owner, reply, true);
     }
 
     /// Creates sandbox `id`, from a ready sandbox if `ready` and there is
-    /// one.
+    /// one, for the ownership under `owner`.
     pub(super) fn create_from(
         &mut self,
         id: Id,
         config: SandboxConfig,
+        owner: OwnerEpoch,
         reply: Reply<()>,
         ready: bool,
     ) {
@@ -474,21 +507,27 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         self.template_used(Shape::of(&config));
         let unclaimed = if ready {
-            self.claim(id, config, reply)
+            self.claim(id, config, owner, reply)
         } else {
             Some((config, reply))
         };
         let Some((config, reply)) = unclaimed else {
             return;
         };
-        self.create_fresh(id, config, reply);
+        self.create_fresh(id, config, owner, reply);
     }
 
     /// Creates sandbox `id` from its shape's template, or cold, once the
     /// host has its image.
-    pub(super) fn create_fresh(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
+    pub(super) fn create_fresh(
+        &mut self,
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+    ) {
         if let Some(image) = config.image.filter(|image| !self.rootfs.has(*image)) {
-            self.create_after_fetch(image, id, config, reply);
+            self.create_after_fetch(image, id, config, owner, reply);
             return;
         }
         let shape = Shape::of(&config);
@@ -521,11 +560,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         };
         self.input(Input::Writes { key: id.0, disk });
-        self.prepare(
-            Record::new(id, ordinal, allocation, config),
-            template,
-            reply,
-        );
+        let mut record = Record::new(id, ordinal, allocation, config);
+        record.owner_epoch = owner.0;
+        self.prepare(record, template, reply);
     }
 
     /// Makes the files of the new sandbox `record` describes in the
@@ -635,40 +672,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut sandboxes: Vec<SandboxStatus> = self
             .slots
             .iter()
-            .filter_map(|(id, slot)| {
-                let view = self.core.sandbox(*id)?;
-                let record = self.records.get(Id(*id));
-                Some(SandboxStatus {
-                    id: Id(*id),
-                    generation: record.as_ref().map_or(0, |record| record.generation),
-                    revision: record.as_ref().map_or(0, |record| record.revision),
-                    level: view.state.level.into(),
-                    durability: view.state.durability.into(),
-                    backed_up_ms: record.as_ref().and_then(|record| record.backed_up_ms),
-                    memory_saved: view.state.keeps_programs(),
-                    step: view.step.map(|step| step_name(step).to_owned()),
-                    holds: view.holds,
-                    launches: slot.launches,
-                    resident_bytes: slot
-                        .vm
-                        .as_ref()
-                        .and_then(|live| self.engine.resident_bytes(&live.vm).ok()),
-                    unsavable: view.unsavable,
-                    broken: view.broken,
-                    waiting_for_room: self.core.room_needed(*id),
-                    paused_for_memory: view.paused_for_memory,
-                    balloon_bytes: (view.balloon > 0).then_some(view.balloon),
-                    memory: slot
-                        .vm
-                        .as_ref()
-                        .and_then(|live| self.engine.memory_stats(&live.vm).ok())
-                        .map(MemoryStatus::from),
-                    failed_step: slot.failed.as_ref().map(|(step, error)| FailedStep {
-                        step: step_name(*step).to_owned(),
-                        error: error.clone(),
-                    }),
-                })
-            })
+            .filter_map(|(id, slot)| self.sandbox_status(*id, slot))
             .collect();
         sandboxes.sort_by_key(|sandbox| sandbox.id);
         let steps = Step::ALL
@@ -733,4 +737,47 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             about: self.about.clone(),
         }
     }
+    /// One sandbox's state, as status reports it.
+    fn sandbox_status(&self, id: SandboxId, slot: &Slot<E::Vm>) -> Option<SandboxStatus> {
+        let view = self.core.sandbox(id)?;
+        let record = self.records.get(Id(id));
+        Some(SandboxStatus {
+            id: Id(id),
+            generation: record.as_ref().map_or(0, |record| record.generation),
+            owner_epoch: record
+                .as_ref()
+                .map_or(OwnerEpoch::FIRST.0, |record| record.owner_epoch),
+            revision: record.as_ref().map_or(0, |record| record.revision),
+            level: view.state.level.into(),
+            durability: view.state.durability.into(),
+            backed_up_ms: record.as_ref().and_then(|record| record.backed_up_ms),
+            memory_saved: view.state.keeps_programs(),
+            step: view.step.map(|step| step_name(step).to_owned()),
+            holds: view.holds,
+            launches: slot.launches,
+            resident_bytes: slot
+                .vm
+                .as_ref()
+                .and_then(|live| self.engine.resident_bytes(&live.vm).ok()),
+            unsavable: view.unsavable,
+            broken: view.broken,
+            waiting_for_room: self.core.room_needed(id),
+            paused_for_memory: view.paused_for_memory,
+            balloon_bytes: (view.balloon > 0).then_some(view.balloon),
+            memory: slot
+                .vm
+                .as_ref()
+                .and_then(|live| self.engine.memory_stats(&live.vm).ok())
+                .map(memory_status),
+            failed_step: slot.failed.as_ref().map(|(step, error)| FailedStep {
+                step: step_name(*step).to_owned(),
+                error: error.clone(),
+            }),
+        })
+    }
+}
+
+/// What the API reports of a VM cgroup's memory counters.
+fn memory_status(stats: compute_engine::MemoryStats) -> MemoryStatus {
+    MemoryStatus::new(stats.zswpout, stats.zswpin, stats.pressure_some_avg10)
 }

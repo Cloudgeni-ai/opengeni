@@ -20,18 +20,23 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 compute-core = { path = "../compute-core" }
 compute-engine = { path = "../compute-engine" }
+compute-fleet = { path = "../compute-fleet" }
 compute-image = { path = "../compute-image" }
 compute-pager = { path = "../compute-pager" }
+compute-protocol = { path = "../compute-protocol" }
 compute-storage = { path = "../compute-storage" }
 futures = "0.3"
+getrandom = { version = "0.3", features = ["std"] }
 object_store = { version = "0.12.4", features = ["aws", "azure", "gcp"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
-rustix = { version = "1", features = ["event", "fs", "param", "process", "thread"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-manual-roots", "rustls-tls-native-roots"] }
+rustix = { version = "1", features = ["event", "fs", "param", "process", "thread", "time"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 memmap2 = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -49,6 +54,7 @@ bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+rcgen = "0.13"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 

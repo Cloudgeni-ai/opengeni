@@ -322,6 +322,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// without that room it waits as after a failed build, and sandboxes
     /// boot cold meanwhile.
     fn build_template(&mut self, shape: Shape) {
+        if !self.may_act() {
+            // Asked for again by the next create or refill once the lease
+            // is renewed.
+            if let Some(warm) = &mut self.warm {
+                warm.pool.unwant(shape);
+            }
+            return;
+        }
         let Some((sources, ready_port, ready_timeout)) = self.warm.as_ref().map(|warm| {
             (
                 Arc::clone(&warm.sources),

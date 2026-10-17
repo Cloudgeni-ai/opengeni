@@ -113,13 +113,17 @@ pub enum RequestKind {
     Release,
     #[allow(missing_docs)]
     Status,
+    /// From the fleet service: take a sandbox over from the store.
+    Adopt,
+    /// From the fleet service: hand a sandbox off to the next host.
+    HandOff,
     /// A request that could not be read.
     Invalid,
 }
 
 impl RequestKind {
     /// Every kind.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
         Self::Create,
         Self::Remove,
         Self::Touch,
@@ -129,6 +133,8 @@ impl RequestKind {
         Self::Hold,
         Self::Release,
         Self::Status,
+        Self::Adopt,
+        Self::HandOff,
         Self::Invalid,
     ];
 
@@ -145,6 +151,8 @@ impl RequestKind {
             Self::Hold => "hold",
             Self::Release => "release",
             Self::Status => "status",
+            Self::Adopt => "adopt",
+            Self::HandOff => "hand_off",
             Self::Invalid => "invalid",
         }
     }
@@ -152,7 +160,7 @@ impl RequestKind {
 
 /// Every error a request can end with, in [`result_name`] order after
 /// success.
-const ERROR_CODES: [ErrorCode; 11] = [
+const ERROR_CODES: [ErrorCode; 13] = [
     ErrorCode::Invalid,
     ErrorCode::NotFound,
     ErrorCode::Exists,
@@ -163,6 +171,8 @@ const ERROR_CODES: [ErrorCode; 11] = [
     ErrorCode::Stale,
     ErrorCode::Unreachable,
     ErrorCode::HostFull,
+    ErrorCode::Unavailable,
+    ErrorCode::Expired,
     ErrorCode::Internal,
 ];
 const RESULTS: usize = ERROR_CODES.len() + 1;
@@ -183,6 +193,8 @@ pub fn result_name(result: Option<ErrorCode>) -> &'static str {
         Some(ErrorCode::Stale) => "stale",
         Some(ErrorCode::Unreachable) => "unreachable",
         Some(ErrorCode::HostFull) => "host_full",
+        Some(ErrorCode::Unavailable) => "unavailable",
+        Some(ErrorCode::Expired) => "expired",
         Some(ErrorCode::Internal) => "internal",
     }
 }
