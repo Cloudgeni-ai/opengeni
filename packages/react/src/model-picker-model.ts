@@ -120,6 +120,8 @@ export function billingClassForMissingSelection(modelId: string): PickerBillingC
   if (modelId.startsWith("workspace-anthropic/")) return "byok";
   if (modelId.startsWith("organization-claude-subscription/")) return "claude_subscription";
   if (modelId.startsWith("organization-anthropic/")) return "organization_byok";
+  // Every organization Azure OpenAI id is an organization-paid deployment.
+  if (modelId.startsWith("organization-azure-openai/")) return "organization_byok";
   if (modelId.startsWith("workspace-gateway/")) return "byok";
   if (modelId.startsWith("workspace-openrouter/")) return "byok";
   if (modelId.startsWith("workspace-opper/")) return "byok";
