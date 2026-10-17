@@ -10,11 +10,16 @@
 //! a time leads: it gives up on hosts whose renewals stopped and grows the
 //! host group ([`leader`], [`group`]). Replicas keep no state of their
 //! own, so any of them serves any request.
+//!
+//! A replica may also serve E2B's API and sandbox traffic on a listener of
+//! its own ([`e2b`]), so clients built for E2B use the fleet unchanged.
 
 pub mod api;
+pub mod e2b;
 pub mod group;
 pub mod hostapi;
 pub mod hosts;
+pub mod keys;
 pub mod leader;
 pub mod service;
 pub mod store;
@@ -54,6 +59,9 @@ pub struct Config {
     pub scaling: Option<Scaling>,
     /// Seeds placement's random choices.
     pub seed: u64,
+    /// Where the E2B front door listens, and how it runs; `None` for no
+    /// front door.
+    pub e2b: Option<(SocketAddr, e2b::Settings)>,
 }
 
 /// A running replica; dropping it stops it.
@@ -63,6 +71,8 @@ pub struct Running<S> {
     pub api: SocketAddr,
     /// Where hosts reach it.
     pub hosts: SocketAddr,
+    /// Where its E2B front door listens, if it has one.
+    pub e2b: Option<SocketAddr>,
     pub service: Arc<Service<S>>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -100,7 +110,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
     let acceptor = TlsAcceptor::from(Arc::clone(&config.tls.server));
     let host_router = hostapi::router(Arc::clone(&store), terms);
     let api_router = api::router(Arc::clone(&service), config.operator);
-    let tasks = vec![
+    let mut tasks = vec![
         tokio::spawn(view::follow(Arc::clone(&view), Arc::clone(&store))),
         tokio::spawn(leader::lead(
             Arc::clone(&store),
@@ -115,9 +125,28 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
             }
         }),
     ];
+    let e2b = match config.e2b {
+        Some((address, settings)) => {
+            let listener = TcpListener::bind(address)
+                .await
+                .with_context(|| format!("listening for E2B callers on {address}"))?;
+            let bound = listener.local_addr()?;
+            let front = e2b::Front::new(Arc::clone(&service), settings);
+            let router = e2b::router(Arc::clone(&front));
+            tasks.push(tokio::spawn(e2b::ops::sweep(front)));
+            tasks.push(tokio::spawn(async move {
+                if let Err(error) = axum::serve(listener, router).await {
+                    tracing::error!(%error, "the E2B front door stopped");
+                }
+            }));
+            Some(bound)
+        }
+        None => None,
+    };
     Ok(Running {
         api,
         hosts,
+        e2b,
         service,
         tasks,
     })

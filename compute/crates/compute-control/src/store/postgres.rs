@@ -16,8 +16,10 @@ use tokio_postgres::Row;
 use tokio_postgres::types::Json;
 
 use super::{
-    Admission, Admits, HostRow, Result, SandboxRow, Spec, Store, StoreError, Write, admits, rule,
+    Admission, Admits, HostRow, LifecycleRow, Result, SandboxRow, Spec, Store, StoreError, Write,
+    admits, rule,
 };
+use crate::e2b::lifecycle::Record;
 
 /// The tables, created if missing. Replicas starting together take turns
 /// through a transaction-scoped advisory lock.
@@ -64,6 +66,15 @@ create index if not exists compute_sandboxes_team on compute_sandboxes (team, cr
 create index if not exists compute_sandboxes_metadata on compute_sandboxes
     using gin (metadata jsonb_path_ops);
 create table if not exists compute_keys (digest text primary key, team text not null);
+create table if not exists compute_lifecycles (
+    id text primary key,
+    team text not null,
+    record jsonb not null,
+    due_ms bigint not null,
+    version bigint not null
+);
+create index if not exists compute_lifecycles_team on compute_lifecycles (team);
+create index if not exists compute_lifecycles_due on compute_lifecycles (due_ms);
 commit;
 ";
 
@@ -73,6 +84,8 @@ const LEADER_LOCK: i64 = 7_231_402;
 const SANDBOX_COLUMNS: &str = "id, team, spec, metadata, owner, epoch, taken, \
      unanswered_epoch, unanswered_stamp, landed_epoch, landed_host_epoch, landed_seq, \
      class, created_ms, version";
+
+const LIFECYCLE_COLUMNS: &str = "id, team, record, version";
 
 const HOST_COLUMNS: &str = "id, info, epoch, state, renewals, seq, capacity, changed";
 
@@ -128,6 +141,22 @@ fn big(value: u64) -> Result<i64> {
 /// A `bigint` back as a `u64`.
 fn small(value: i64) -> Result<u64> {
     u64::try_from(value).map_err(corrupt)
+}
+
+/// When a lifecycle is due, as a `bigint`: never is the largest one.
+fn due(record: &Record) -> i64 {
+    i64::try_from(record.due_ms()).unwrap_or(i64::MAX)
+}
+
+fn lifecycle_row(row: &Row) -> Result<LifecycleRow> {
+    let id: String = row.get(0);
+    let Json(record): Json<Record> = row.try_get(2).map_err(corrupt)?;
+    Ok(LifecycleRow {
+        id: Id::from_str(&id).map_err(corrupt)?,
+        team: row.get(1),
+        record,
+        version: small(row.get(3))?,
+    })
 }
 
 /// A registration attempt, a nonce over all of `u64`, as the `bigint` of the
@@ -725,6 +754,106 @@ impl Store for PostgresStore {
             .await
             .map_err(database)?;
         Ok(())
+    }
+
+    async fn insert_lifecycle(&self, row: &LifecycleRow) -> Result<bool> {
+        let written = self
+            .client()
+            .await?
+            .execute(
+                "insert into compute_lifecycles (id, team, record, due_ms, version) \
+                 values ($1, $2, $3, $4, $5) on conflict (id) do nothing",
+                &[
+                    &row.id.to_string(),
+                    &row.team,
+                    &Json(&row.record),
+                    &due(&row.record),
+                    &big(row.version)?,
+                ],
+            )
+            .await
+            .map_err(database)?;
+        Ok(written == 1)
+    }
+
+    async fn lifecycle(&self, id: Id) -> Result<Option<LifecycleRow>> {
+        self.client()
+            .await?
+            .query_opt(
+                &format!("select {LIFECYCLE_COLUMNS} from compute_lifecycles where id = $1"),
+                &[&id.to_string()],
+            )
+            .await
+            .map_err(database)?
+            .as_ref()
+            .map(lifecycle_row)
+            .transpose()
+    }
+
+    async fn replace_lifecycle(&self, row: &LifecycleRow) -> Result<bool> {
+        let written = self
+            .client()
+            .await?
+            .execute(
+                "update compute_lifecycles set record = $2, due_ms = $3, version = version + 1 \
+                 where id = $1 and version = $4",
+                &[
+                    &row.id.to_string(),
+                    &Json(&row.record),
+                    &due(&row.record),
+                    &big(row.version)?,
+                ],
+            )
+            .await
+            .map_err(database)?;
+        Ok(written == 1)
+    }
+
+    async fn delete_lifecycle(&self, id: Id, version: u64) -> Result<bool> {
+        let deleted = self
+            .client()
+            .await?
+            .execute(
+                "delete from compute_lifecycles where id = $1 and version = $2",
+                &[&id.to_string(), &big(version)?],
+            )
+            .await
+            .map_err(database)?;
+        Ok(deleted == 1)
+    }
+
+    async fn lifecycles(&self, team: &str) -> Result<Vec<LifecycleRow>> {
+        self.client()
+            .await?
+            .query(
+                &format!(
+                    "select {LIFECYCLE_COLUMNS} from compute_lifecycles where team = $1 order by id"
+                ),
+                &[&team],
+            )
+            .await
+            .map_err(database)?
+            .iter()
+            .map(lifecycle_row)
+            .collect()
+    }
+
+    async fn lifecycles_due(&self, now_ms: u64, limit: usize) -> Result<Vec<LifecycleRow>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.client()
+            .await?
+            .query(
+                &format!(
+                    "select {LIFECYCLE_COLUMNS} from compute_lifecycles where due_ms <= $1 \
+                     order by due_ms limit $2"
+                ),
+                &[&i64::try_from(now_ms).unwrap_or(i64::MAX), &limit],
+            )
+            .await
+            .map_err(database)?
+            .iter()
+            .map(lifecycle_row)
+            .collect()
     }
 }
 

@@ -1,5 +1,5 @@
 //! The service's store: hosts and their leases, sandboxes and their owners,
-//! and API keys
+//! API keys, and the E2B lifecycle of sandboxes created through the E2B API
 //! ([ADR 18](../../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
 //!
 //! Every write is conditional: a renewal on the registration it renews, a
@@ -22,6 +22,8 @@ use compute_protocol::fleet::Verdict as Wire;
 use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Report, Ruling};
 use compute_protocol::host::{Id, SandboxConfig};
 use serde::{Deserialize, Serialize};
+
+use crate::e2b::lifecycle::Record;
 
 pub use memory::MemoryStore;
 pub use postgres::{PostgresLead, PostgresStore};
@@ -93,6 +95,19 @@ pub struct SandboxRow {
 }
 
 /// The answer to a registration attempt.
+/// A sandbox's E2B lifecycle as the store holds it (see
+/// [`crate::e2b::lifecycle`]), beside its fleet row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LifecycleRow {
+    pub id: Id,
+    /// Whose it is, as in its fleet row.
+    pub team: String,
+    pub record: Record,
+    /// Raised by every write; each write is conditional on the version its
+    /// writer read.
+    pub version: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Admission {
     /// Registered under `epoch`, with a ruling on each sandbox it listed.
@@ -251,6 +266,32 @@ pub trait Store: Send + Sync + 'static {
 
     /// Adds an API key, by its digest, for `team`.
     fn add_key(&self, digest: &str, team: &str) -> impl Future<Output = Result<()>> + Send;
+
+    /// Inserts a sandbox's E2B lifecycle at the version it carries. False
+    /// if one with its id exists.
+    fn insert_lifecycle(&self, row: &LifecycleRow) -> impl Future<Output = Result<bool>> + Send;
+
+    /// One sandbox's E2B lifecycle.
+    fn lifecycle(&self, id: Id) -> impl Future<Output = Result<Option<LifecycleRow>>> + Send;
+
+    /// Replaces a sandbox's E2B lifecycle with `row`, raising its version by
+    /// one, on condition that it is still at `row.version`.
+    fn replace_lifecycle(&self, row: &LifecycleRow) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Deletes a sandbox's E2B lifecycle on condition that it is at
+    /// `version`.
+    fn delete_lifecycle(&self, id: Id, version: u64) -> impl Future<Output = Result<bool>> + Send;
+
+    /// A team's E2B lifecycles.
+    fn lifecycles(&self, team: &str) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send;
+
+    /// At most `limit` E2B lifecycles due by `now_ms` (see
+    /// [`Record::due_ms`]), soonest first.
+    fn lifecycles_due(
+        &self,
+        now_ms: u64,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send;
 }
 
 /// How a conditional write of a sandbox's row went.
@@ -280,6 +321,16 @@ impl Write {
 pub async fn replace<S: Store>(store: &S, row: &mut SandboxRow) -> Result<Write> {
     let written = store.replace(row).await?;
     if written.done() {
+        row.version += 1;
+    }
+    Ok(written)
+}
+
+/// Writes `row` with its version raised, if no one wrote it since it was
+/// read; when written, `row` holds the version written.
+pub async fn replace_lifecycle<S: Store>(store: &S, row: &mut LifecycleRow) -> Result<bool> {
+    let written = store.replace_lifecycle(row).await?;
+    if written {
         row.version += 1;
     }
     Ok(written)

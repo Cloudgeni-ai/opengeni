@@ -240,6 +240,7 @@ impl Fleet {
                 operator: "operator".into(),
                 scaling,
                 seed: 7,
+                e2b: None,
             },
         )
         .await
@@ -366,6 +367,18 @@ pub enum Act {
 /// Decides each request; [`Act::Ordinary`] for all by default.
 pub type Behaviour = Arc<dyn Fn(&Envelope) -> Act + Send + Sync>;
 
+/// The rest of a connect's connection, past the host's answer: the guest
+/// port's side of the stream.
+pub type GuestStream = BufReader<tokio_rustls::server::TlsStream<TcpStream>>;
+
+/// Plays the guest's side of each connect to a sandbox and port; without
+/// one, every guest port echoes.
+pub type Guest = Arc<
+    dyn Fn(Id, u32, GuestStream) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// A request a fake host received, and whether its caller kept its side of
 /// the connection open until the answer.
 #[derive(Clone, Debug)]
@@ -391,6 +404,7 @@ struct HostInner {
     saves: AtomicU64,
     seen: Mutex<Vec<Seen>>,
     behaviour: Mutex<Behaviour>,
+    guest: Mutex<Option<Guest>>,
     renewing: AtomicBool,
     /// Whether it checks that callers keep their side open.
     check_open: AtomicBool,
@@ -438,6 +452,7 @@ impl FakeHost {
             saves: AtomicU64::new(0),
             seen: Mutex::new(Vec::new()),
             behaviour: Mutex::new(Arc::new(|_| Act::Ordinary)),
+            guest: Mutex::new(None),
             renewing: AtomicBool::new(true),
             check_open: AtomicBool::new(false),
             attempt: AtomicU64::new(u64::from_le_bytes(random) >> 1),
@@ -487,6 +502,11 @@ impl FakeHost {
     /// Has it decide requests by `behaviour`.
     pub fn behave(&self, behaviour: impl Fn(&Envelope) -> Act + Send + Sync + 'static) {
         *self.inner.behaviour.lock().unwrap() = Arc::new(behaviour);
+    }
+
+    /// Plays the guest's side of connects with `guest`.
+    pub fn guest(&self, guest: Guest) {
+        *self.inner.guest.lock().unwrap() = Some(guest);
     }
 
     /// Has it check, before each answer, that the caller still has its
@@ -712,9 +732,14 @@ async fn answer(
     }
     let _ = stream.get_mut().flush().await;
     if matches!(reply, Reply::Connected { .. }) {
-        // The guest port echoes.
-        let (mut read, mut write) = tokio::io::split(stream);
-        let _ = tokio::io::copy(&mut read, &mut write).await;
+        let guest = inner.guest.lock().unwrap().clone();
+        if let (Some(guest), Request::Connect { id, port, .. }) = (guest, &envelope.request) {
+            guest(*id, *port, stream).await;
+        } else {
+            // The guest port echoes.
+            let (mut read, mut write) = tokio::io::split(stream);
+            let _ = tokio::io::copy(&mut read, &mut write).await;
+        }
     }
 }
 
