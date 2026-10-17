@@ -98,6 +98,70 @@ function sameLearningActor(left: AgentLearningActor, right: AgentLearningActor):
   );
 }
 
+type FrozenLearningPolicy = Awaited<ReturnType<typeof freezeAgentLearningPolicy>>;
+
+/**
+ * An agent's learning policy is frozen once per accepted turn (a durable
+ * snapshot that never changes afterwards), and this request path only uses it
+ * after the live-attempt check above has refused stale and interrupted
+ * attempts. Re-reading it on every agent request took row locks on the
+ * session, turn and attempt for an answer that cannot change, so remember the
+ * verified answer per exact attempt. Liveness is still checked on every
+ * request; only the immutable policy read is reused.
+ */
+const FROZEN_LEARNING_LIMIT = 4_096;
+const FROZEN_LEARNING_TTL_MS = 15 * 60_000;
+const frozenLearningByDatabase = new WeakMap<
+  object,
+  Map<string, { expiresAt: number; policy: FrozenLearningPolicy }>
+>();
+
+function frozenLearningKey(grant: AccessGrant, actor: AgentLearningActor): string {
+  return [
+    grant.accountId,
+    grant.workspaceId,
+    actor.sessionId,
+    actor.turnId,
+    actor.attemptId,
+    actor.executionGeneration,
+  ].join(":");
+}
+
+function frozenLearningCache(database: object) {
+  let cache = frozenLearningByDatabase.get(database);
+  if (!cache) {
+    cache = new Map();
+    frozenLearningByDatabase.set(database, cache);
+  }
+  return cache;
+}
+
+function rememberedLearning(
+  database: object,
+  key: string,
+  now = Date.now(),
+): FrozenLearningPolicy | null {
+  const cache = frozenLearningCache(database);
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= now) {
+    cache.delete(key);
+    return null;
+  }
+  return entry.policy;
+}
+
+function rememberLearning(database: object, key: string, policy: FrozenLearningPolicy): void {
+  const cache = frozenLearningCache(database);
+  cache.delete(key);
+  if (cache.size >= FROZEN_LEARNING_LIMIT) {
+    // Map iteration is insertion order: evict the oldest remembered attempt.
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(key, { expiresAt: Date.now() + FROZEN_LEARNING_TTL_MS, policy });
+}
+
 export async function withAccessGrantSessionRlsContext<T>(
   deps: Pick<ApiRouteDeps, "db">,
   grant: AccessGrant,
@@ -123,10 +187,13 @@ export async function withAccessGrantSessionRlsContext<T>(
     // takes verbatim from the grant's claims. Read it for the claimed attempt
     // while the liveness check runs; it is used only once that check passes
     // and names the same attempt, and is otherwise read again for the actor.
+    // A policy already verified for the claimed attempt needs no read at all.
     const claimed = claimedLearningActor(grant, callerSessionId);
+    const claimedKey = claimed ? frozenLearningKey(grant, claimed) : null;
+    const remembered = claimedKey ? rememberedLearning(deps.db, claimedKey) : null;
     const [actor, speculative] = await alongsideAuthorization(
       requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId),
-      async () => (claimed ? await freezeLearning(claimed) : null),
+      async () => remembered ?? (claimed ? await freezeLearning(claimed) : null),
     );
     const verified: AgentLearningActor = {
       kind: "agent",
@@ -135,10 +202,12 @@ export async function withAccessGrantSessionRlsContext<T>(
       attemptId: actor.attemptId,
       executionGeneration: actor.executionGeneration,
     };
+    const verifiedKey = frozenLearningKey(grant, verified);
     const learning =
       claimed && speculative && sameLearningActor(claimed, verified)
         ? speculative
-        : await freezeLearning(verified);
+        : (rememberedLearning(deps.db, verifiedKey) ?? (await freezeLearning(verified)));
+    rememberLearning(deps.db, verifiedKey, learning);
     return await withCreditDebitAttribution(
       {
         kind: "turn",
