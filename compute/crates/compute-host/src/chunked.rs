@@ -39,7 +39,7 @@ use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_storage::Error as StorageError;
 use compute_storage::chunk::{ChunkRef, EncodedChunk};
 use compute_storage::manifest::{DiskManifest, ExtentSource};
-use compute_storage::store::ChunkStore;
+use compute_storage::store::{Begun, ChunkStore, Publication, Rewrite};
 pub use compute_storage::sweep::Report;
 use futures::{StreamExt as _, stream};
 use serde::{Deserialize, Serialize};
@@ -49,7 +49,10 @@ pub use crate::image::CHUNK_BYTES;
 use crate::image::{Hash, ZERO, chunk_count, chunk_range, hash_chunks};
 use crate::lanes::Lanes;
 use crate::protocol::Id;
-use crate::store::{Archive, FetchInto, FetchedMemory, Prefilled, Receipt, SavedFiles, Store};
+use crate::store::{
+    Archive, Claimed, FetchInto, FetchedMemory, Owned, OwnerEpoch, Prefilled, Receipt, SavedFiles,
+    Stamp, Store,
+};
 use crate::threads::Threads;
 use crate::working_set::{self, WakeProfile};
 
@@ -284,6 +287,27 @@ impl Chunked {
             }
         }
         Ok(names)
+    }
+
+    /// Begins an archive of `save`, checking the owner on the version its
+    /// publication will be conditional on, or says what it comes to
+    /// without one.
+    async fn begin(
+        &self,
+        id: Id,
+        save: Stamp,
+    ) -> Result<Result<Publication, Archive>, EngineError> {
+        const OP: &str = "archive";
+        let name = id.to_string();
+        match self.chunks.begin(&name, save).await {
+            Ok(Begun::Publish(publication)) => Ok(Ok(publication)),
+            // An earlier try of this very save, whose answer was lost.
+            Ok(Begun::Stored(bytes)) => Ok(Err(Archive::Stored(receipt_of(&bytes)))),
+            Ok(Begun::Outdated) => Ok(Err(Archive::Outdated)),
+            Ok(Begun::Deleted) => Ok(Err(Archive::Deleted)),
+            Err(StorageError::Fenced { by }) => Ok(Err(Archive::Fenced { by })),
+            Err(error) => Err(storage_error(OP, error)),
+        }
     }
 
     async fn head(&self, operation: &'static str, id: Id) -> Result<Option<Head>, EngineError> {
@@ -557,6 +581,7 @@ impl Store for Chunked {
     async fn archive(
         &self,
         id: Id,
+        save: Stamp,
         files: &SavedFiles,
         cancel: &CancellationToken,
     ) -> Result<Archive, EngineError> {
@@ -567,11 +592,10 @@ impl Store for Chunked {
         // Begun before the store is looked at: a sweep that takes stock
         // before this archive publishes stops it from publishing, so it
         // never names what that sweep deletes.
-        let publication = self
-            .chunks
-            .begin(&id.to_string())
-            .await
-            .map_err(|error| storage_error(OP, error))?;
+        let publication = match self.begin(id, save).await? {
+            Ok(publication) => publication,
+            Err(settled) => return Ok(settled),
+        };
         let earlier = match self.head(OP, id).await {
             Ok(head) => head,
             Err(error) => {
@@ -648,7 +672,9 @@ impl Store for Chunked {
         };
         let bytes = serde_json::to_vec(&head)
             .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
-        let receipt = Receipt(blake3::hash(&bytes).to_hex().to_string());
+        let receipt = receipt_of(&bytes);
+        // Refused when the pointer changed since this archive began: the
+        // next archive begins again and checks the owner anew.
         self.chunks
             .publish(publication, bytes)
             .await
@@ -761,11 +787,28 @@ impl Store for Chunked {
         memory
     }
 
-    async fn delete(&self, id: Id) -> Result<(), EngineError> {
-        self.chunks
-            .delete_pointer(&id.to_string())
-            .await
-            .map_err(|error| storage_error("delete", error))
+    async fn delete(&self, id: Id, own: OwnerEpoch) -> Result<Owned<()>, EngineError> {
+        match self.chunks.delete_pointer(&id.to_string(), own).await {
+            Ok(()) => Ok(Owned::Done(())),
+            Err(StorageError::Fenced { by }) => Ok(Owned::Fenced { by }),
+            Err(error) => Err(storage_error("delete", error)),
+        }
+    }
+
+    async fn claim(&self, id: Id, own: OwnerEpoch) -> Result<Owned<Option<Claimed>>, EngineError> {
+        const OP: &str = "claim";
+        let (stamp, bytes) = match self.chunks.claim(&id.to_string(), own).await {
+            Ok(Some(claimed)) => claimed,
+            Ok(None) => return Ok(Owned::Done(None)),
+            Err(StorageError::Fenced { by }) => return Ok(Owned::Fenced { by }),
+            Err(error) => return Err(storage_error(OP, error)),
+        };
+        let head = parse_head(OP, &bytes)?;
+        Ok(Owned::Done(Some(Claimed {
+            save: stamp.save,
+            receipt: receipt_of(&bytes),
+            memory: head.memory.is_some(),
+        })))
     }
 
     async fn disk_len(&self, id: Id) -> Result<Option<u64>, EngineError> {
@@ -786,25 +829,38 @@ impl Store for Chunked {
     /// finds nothing names them. The new pointer lands only on the version
     /// read, so a write held up past a newer copy never replaces it; a
     /// sweep's fence meanwhile means reading it again.
-    async fn forget_memory(&self, id: Id) -> Result<Option<Receipt>, EngineError> {
+    ///
+    /// It is stored under `change` even when the copy names no memory
+    /// already: an earlier archive whose upload is still in flight is
+    /// conditional on the version read here, and only a new version stops
+    /// it from landing afterwards with the memory this forgets.
+    async fn forget_memory(
+        &self,
+        id: Id,
+        change: Stamp,
+    ) -> Result<Owned<Option<Receipt>>, EngineError> {
         const OP: &str = "forget";
         /// Reads before giving up for now: each fence a sweep stored since
         /// the read costs one.
         const TRIES: usize = 3;
         let name = id.to_string();
         for _ in 0..TRIES {
-            let Some((stored, change)) = self
-                .chunks
-                .read_for_change(&name)
-                .await
-                .map_err(|error| storage_error(OP, error))?
-            else {
-                return Ok(None);
+            let (stored, change) = match self.chunks.read_for_change(&name, change).await {
+                Ok(Rewrite::Change(stored, publication)) => (stored, publication),
+                // An earlier try of this very change, whose answer was lost.
+                Ok(Rewrite::Done(stored)) => return Ok(Owned::Done(Some(receipt_of(&stored)))),
+                Ok(Rewrite::Outdated) => {
+                    return Err(EngineError::new(
+                        ErrorKind::Transient,
+                        OP,
+                        "the store holds a later change of this sandbox",
+                    ));
+                }
+                Ok(Rewrite::Nothing) => return Ok(Owned::Done(None)),
+                Err(StorageError::Fenced { by }) => return Ok(Owned::Fenced { by }),
+                Err(error) => return Err(storage_error(OP, error)),
             };
             let head = parse_head(OP, &stored)?;
-            if head.memory.is_none() && head.pack.is_none() {
-                return Ok(Some(Receipt(blake3::hash(&stored).to_hex().to_string())));
-            }
             let head = Head {
                 memory: None,
                 pack: None,
@@ -812,9 +868,9 @@ impl Store for Chunked {
             };
             let bytes = serde_json::to_vec(&head)
                 .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
-            let receipt = Receipt(blake3::hash(&bytes).to_hex().to_string());
+            let receipt = receipt_of(&bytes);
             match self.chunks.publish(change, bytes).await {
-                Ok(()) => return Ok(Some(receipt)),
+                Ok(()) => return Ok(Owned::Done(Some(receipt))),
                 Err(StorageError::Superseded) => {}
                 Err(error) => return Err(storage_error(OP, error)),
             }
@@ -867,6 +923,11 @@ pub(crate) fn hash_from_hex(hex: &str) -> Result<Hash, ()> {
     Ok(hash)
 }
 
+/// The receipt naming the copy a pointer holding `bytes` names.
+fn receipt_of(bytes: &[u8]) -> Receipt {
+    Receipt(blake3::hash(bytes).to_hex().to_string())
+}
+
 /// How a storage failure affects the sandbox.
 fn storage_error(operation: &'static str, error: StorageError) -> EngineError {
     let kind = match &error {
@@ -877,10 +938,12 @@ fn storage_error(operation: &'static str, error: StorageError) -> EngineError {
         | StorageError::Superseded => ErrorKind::Transient,
         // A stored copy that fails its checks will fail them again: the store
         // already retried the read and quarantined the object.
+        // A later owner holds the copy: nothing this host does changes it.
         StorageError::Integrity
         | StorageError::Truncated { .. }
         | StorageError::Invalid(_)
         | StorageError::Unsupported(_)
+        | StorageError::Fenced { .. }
         | StorageError::Json(_) => ErrorKind::Fatal,
     };
     EngineError::caused_by(kind, operation, error)

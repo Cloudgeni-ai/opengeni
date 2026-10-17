@@ -499,6 +499,8 @@ pub struct Host {
     /// Bookings that steps finished since that reading gave up: what they
     /// wrote shows only in the next one.
     disk_spent: DiskSpace,
+    /// Whether it decides nothing of its own; see [`Host::suspend`].
+    suspended: bool,
     /// Local disk that work outside any step may still write; see
     /// [`Input::Writes`].
     writes: HashMap<SandboxId, DiskSpace>,
@@ -536,9 +538,33 @@ impl Host {
             disk: None,
             disk_fresh: false,
             disk_spent: DiskSpace::default(),
+            suspended: false,
             writes: HashMap::new(),
             removed_disk: HashMap::new(),
         })
+    }
+
+    /// Stops or resumes the host's own decisions, as when a host in a
+    /// fleet loses its lease and its VMs are frozen. While suspended it
+    /// still takes in every input, and carries out what was asked of it
+    /// alone: removals, cancellations and the bookkeeping of steps already
+    /// under way. It starts no step, balloon change or loan, and neither
+    /// time nor memory or disk pressure deepens any sandbox's sleep. Once
+    /// resumed it reconsiders every sandbox at the next input.
+    pub fn suspend(&mut self, suspended: bool) {
+        if self.suspended && !suspended {
+            let ids: Vec<SandboxId> = self.sandboxes.keys().copied().collect();
+            for id in ids {
+                self.mark(id);
+            }
+        }
+        self.suspended = suspended;
+    }
+
+    /// Whether it is suspended; see [`Host::suspend`].
+    #[must_use]
+    pub fn is_suspended(&self) -> bool {
+        self.suspended
     }
 
     /// Applies `input` at time `now` and appends the resulting actions.
@@ -559,6 +585,10 @@ impl Host {
     ) {
         for input in inputs {
             self.apply(now, input, out);
+        }
+        if self.suspended {
+            self.reconcile_dirty(now, out);
+            return;
         }
         self.fire_timers(now);
         self.reconcile_dirty(now, out);
@@ -1086,7 +1116,9 @@ impl Host {
             }
             slot.queued = wanted;
         }
-        if let Some(bytes) = slot.balloon_due(now) {
+        if !self.suspended
+            && let Some(bytes) = slot.balloon_due(now)
+        {
             let request = BalloonRequest(self.next_balloon);
             self.next_balloon += 1;
             slot.balloon_request = request;

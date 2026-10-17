@@ -130,6 +130,78 @@ fn writes_apply_only_against_the_current_fence() {
     ));
 }
 
+/// Two owner changes checked against the same record can land in either
+/// order; the later epoch stays whichever lands last.
+#[test]
+fn an_owner_epoch_never_moves_backwards() {
+    let sandbox = id(7);
+    let record = Record::new(sandbox, 3, allocation(), config());
+    let third = apply(
+        sandbox,
+        Some(&record),
+        record.fence(),
+        Change::new().owner(OwnerEpoch(3)),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(third.owner_epoch, 3);
+    assert_eq!(
+        apply(
+            sandbox,
+            Some(&third),
+            third.fence(),
+            Change::new().owner(OwnerEpoch(2)),
+        ),
+        Err(StateError::Superseded {
+            id: sandbox,
+            held: 3,
+            asked: 2,
+        }),
+        "the transition to 2 that lands after 3 is refused"
+    );
+    assert_eq!(
+        apply(
+            sandbox,
+            Some(&third),
+            third.fence(),
+            Change::new().owner(OwnerEpoch(3)),
+        ),
+        Ok(None),
+        "the same epoch again changes nothing"
+    );
+}
+
+#[tokio::test]
+async fn amends_that_land_in_reverse_order_keep_the_later_owner() {
+    let root = temp_root("owner-order");
+    let (records, _) = Records::open(root.path().into(), Duration::ZERO, None)
+        .await
+        .unwrap();
+    let record = fresh(root.path(), 9, 1);
+    let sandbox = record.id;
+    records.insert(record).await.unwrap();
+    let later = records
+        .amend(sandbox, Change::new().owner(OwnerEpoch(3)))
+        .await
+        .unwrap();
+    assert_eq!(later.owner_epoch, 3);
+    let earlier = records
+        .amend(sandbox, Change::new().owner(OwnerEpoch(2)))
+        .await;
+    assert!(
+        matches!(
+            earlier,
+            Err(StateError::Superseded {
+                held: 3,
+                asked: 2,
+                ..
+            })
+        ),
+        "{earlier:?}"
+    );
+    assert_eq!(records.get(sandbox).unwrap().owner_epoch, 3);
+}
+
 #[test]
 fn last_use_never_moves_backwards() {
     let mut record = Record::new(id(1), 0, allocation(), config());
