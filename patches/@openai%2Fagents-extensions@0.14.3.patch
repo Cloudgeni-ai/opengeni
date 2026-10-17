@@ -1,6 +1,3 @@
-diff --git a/packages/runtime/node_modules/@openai/agents-extensions/.bun-tag-9a6b1f94568a6d97 b/.bun-tag-9a6b1f94568a6d97
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/sandbox/blaxel/sandbox.d.ts b/dist/sandbox/blaxel/sandbox.d.ts
 index e2dccf6b67a01d9c7f9f6d12d9716ed3a36241f8..a5027031e230f862c34a1a284e86ab34bb050e09 100644
 --- a/dist/sandbox/blaxel/sandbox.d.ts
@@ -244,7 +241,7 @@ index 8d02fff468300317388d5f4dc2b9d9bdafd72abe..f7eb5c982b6585b4e5a7c70b42d50d21
  }
  export {};
 diff --git a/dist/sandbox/e2b/sandbox.js b/dist/sandbox/e2b/sandbox.js
-index a383d0a56ab09709dfdf20984a483940a34060b7..cd5964aaa95eac5d94033d945025e60b7a9001b5 100644
+index a383d0a56ab09709dfdf20984a483940a34060b7..129c266435a5f169017a88580421d2e7018adb9e 100644
 --- a/dist/sandbox/e2b/sandbox.js
 +++ b/dist/sandbox/e2b/sandbox.js
 @@ -43,6 +43,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
@@ -263,7 +260,74 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..cd5964aaa95eac5d94033d945025e60b
          this.state.pauseOnExitSupported = canPauseE2BSandbox(args.sandbox);
      }
      supportsPty() {
-@@ -251,7 +253,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+@@ -84,7 +86,15 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+             });
+         }
+         const start = Date.now();
+-        const command = (0, shared_1.shellCommandForPty)(args);
++        // E2B's PTY always runs an interactive login bash, which echoes what
++        // is typed into it and goes on running once a typed command ends.
++        // The command is staged in a file instead, and one short line typed
++        // runs it and exits the shell with its status, so the PTY ends when
++        // the command does.
++        const scriptPath = `/tmp/agents-pty-${globalThis.crypto.randomUUID()}.sh`;
++        const script = (0, shared_1.shellQuote)(scriptPath);
++        await this.sandbox.files.write(scriptPath, `rm -f -- ${script}\nexec ${(0, shared_1.shellCommandForPty)(args)}\n`);
++        const command = `/bin/sh ${script}; exit`;
+         const entry = (0, shared_1.createPtyProcessEntry)({ tty: true });
+         const timeoutMs = typeof this.state.commandTimeoutMs === 'number'
+             ? this.state.commandTimeoutMs
+@@ -179,21 +189,38 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+     }
+     async prepareWorkspaceRoot() {
+         const root = this.state.manifest.root;
+-        await this.ensureDirectory(root);
+-        const result = await this.sandbox.commands.run(`mkdir -p -- ${(0, shared_1.shellQuote)(root)}`, {
++        const quoted = (0, shared_1.shellQuote)(root);
++        // Commands run as the sandbox's default user, which need not own the
++        // image's workspace root: an image may ship it owned by root. Create
++        // the root, and if the default user cannot write it, hand it to that
++        // user as root.
++        const probe = await this.runCommandForStatus(`mkdir -p -- ${quoted} 2>/dev/null; if [ -d ${quoted} ] && [ -w ${quoted} ]; then echo writable; else echo "owner $(id -u):$(id -g)"; fi`, {
+             cwd: '/',
+             envs: this.state.environment,
+         });
+-        if ((result.exitCode ?? 1) !== 0) {
+-            throw new sandbox_1.SandboxProviderError('E2BSandboxClient failed to prepare the workspace root.', {
+-                provider: 'e2b',
+-                operation: 'prepare workspace root',
+-                sandboxId: this.state.sandboxId,
+-                root,
+-                stderr: result.stderr ?? '',
+-                stdout: result.stdout ?? '',
+-            });
++        const answer = (probe.stdout ?? '').trim();
++        if ((probe.exitCode ?? 1) === 0 && answer === 'writable') {
++            return;
+         }
++        const owner = (probe.exitCode ?? 1) === 0 ? /^owner (\d+):(\d+)$/.exec(answer) : null;
++        const result = owner
++            ? await this.runCommandForStatus(`mkdir -p -- ${quoted} && chown -- ${owner[1]}:${owner[2]} ${quoted}`, {
++                cwd: '/',
++                envs: this.state.environment,
++                user: 'root',
++            })
++            : probe;
++        if (owner && (result.exitCode ?? 1) === 0) {
++            return;
++        }
++        throw new sandbox_1.SandboxProviderError('E2BSandboxClient failed to prepare the workspace root.', {
++            provider: 'e2b',
++            operation: 'prepare workspace root',
++            sandboxId: this.state.sandboxId,
++            root,
++            stderr: result.stderr ?? result.error ?? '',
++            stdout: result.stdout ?? '',
++        });
+     }
+     async persistWorkspace() {
+         if (this.state.workspacePersistence === 'snapshot') {
+@@ -251,7 +278,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
          return this.state.manifest.ephemeralPersistencePaths().size > 0;
      }
      async replaceSandboxFromSnapshot(snapshotId) {
@@ -272,7 +336,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..cd5964aaa95eac5d94033d945025e60b
          const previousSandbox = this.sandbox;
          let sandbox;
          try {
-@@ -542,11 +544,12 @@ class E2BSandboxClient {
+@@ -542,11 +569,12 @@ class E2BSandboxClient {
              };
              validateOptions(resolvedOptions);
              (0, shared_1.assertSandboxManifestMetadataSupported)('E2BSandboxClient', manifest, shared_1.SANDBOX_MANIFEST_METADATA_SUPPORT);
@@ -286,7 +350,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..cd5964aaa95eac5d94033d945025e60b
                  concurrencyLimits: createArgs.concurrencyLimits,
                  archiveLimits: createArgs.archiveLimits,
                  state: {
-@@ -616,9 +619,9 @@ class E2BSandboxClient {
+@@ -616,9 +644,9 @@ class E2BSandboxClient {
              pauseOnExitSupported: (0, shared_1.readOptionalBoolean)(state, 'pauseOnExitSupported') ?? false,
          };
      }
@@ -298,7 +362,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..cd5964aaa95eac5d94033d945025e60b
          const connect = Sandbox.connect ?? Sandbox.resume;
          if (connect) {
              try {
-@@ -626,6 +629,7 @@ class E2BSandboxClient {
+@@ -626,6 +654,7 @@ class E2BSandboxClient {
                  return new E2BSandboxSession({
                      state,
                      sandbox,
@@ -306,7 +370,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..cd5964aaa95eac5d94033d945025e60b
                      archiveLimits: this.options.archiveLimits,
                  });
              }
-@@ -635,9 +639,15 @@ class E2BSandboxClient {
+@@ -635,9 +664,15 @@ class E2BSandboxClient {
                      provider: 'e2b',
                      details: { sandboxId: state.sandboxId },
                  });
@@ -322,7 +386,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..cd5964aaa95eac5d94033d945025e60b
          const manifest = state.manifest;
          const session = await this.create((0, shared_1.manifestWithMaterializedEnvironmentReferences)(manifest, state.environment), {
              ...stateToCreateOptions(state),
-@@ -646,6 +656,9 @@ class E2BSandboxClient {
+@@ -646,6 +681,9 @@ class E2BSandboxClient {
          session.state.manifest = manifest;
          return session;
      }
@@ -332,7 +396,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..cd5964aaa95eac5d94033d945025e60b
  }
  exports.E2BSandboxClient = E2BSandboxClient;
  function validateOptions(options) {
-@@ -714,7 +727,7 @@ function e2bReconnectOptions(state) {
+@@ -714,7 +752,7 @@ function e2bReconnectOptions(state) {
  function canPauseE2BSandbox(sandbox) {
      return typeof sandbox.pause === 'function';
  }
@@ -341,7 +405,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..cd5964aaa95eac5d94033d945025e60b
      const moduleName = sandboxType === 'e2b_code_interpreter' ? '@e2b/code-interpreter' : 'e2b';
      try {
          const Sandbox = sandboxType === 'e2b_code_interpreter'
-@@ -723,25 +736,44 @@ async function loadE2BSandboxClass(sandboxType) {
+@@ -723,25 +761,44 @@ async function loadE2BSandboxClass(sandboxType) {
          if (!Sandbox) {
              throw new Error(`Missing Sandbox export from ${moduleName}.`);
          }
@@ -392,7 +456,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..cd5964aaa95eac5d94033d945025e60b
      const createOptions = {};
      if (typeof options.timeout === 'number') {
 diff --git a/dist/sandbox/e2b/sandbox.mjs b/dist/sandbox/e2b/sandbox.mjs
-index 6453de1e106fddcfe030beabf0056122dbe18566..433dd5fc004c66cdaba7338978ebea7050c78ab6 100644
+index 6453de1e106fddcfe030beabf0056122dbe18566..62aec2ec04d69a81093fa80c8d2e191ff8a7dde8 100644
 --- a/dist/sandbox/e2b/sandbox.mjs
 +++ b/dist/sandbox/e2b/sandbox.mjs
 @@ -7,6 +7,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
@@ -411,7 +475,74 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..433dd5fc004c66cdaba7338978ebea70
          this.state.pauseOnExitSupported = canPauseE2BSandbox(args.sandbox);
      }
      supportsPty() {
-@@ -215,7 +217,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+@@ -48,7 +50,15 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+             });
+         }
+         const start = Date.now();
+-        const command = shellCommandForPty(args);
++        // E2B's PTY always runs an interactive login bash, which echoes what
++        // is typed into it and goes on running once a typed command ends.
++        // The command is staged in a file instead, and one short line typed
++        // runs it and exits the shell with its status, so the PTY ends when
++        // the command does.
++        const scriptPath = `/tmp/agents-pty-${globalThis.crypto.randomUUID()}.sh`;
++        const script = shellQuote(scriptPath);
++        await this.sandbox.files.write(scriptPath, `rm -f -- ${script}\nexec ${shellCommandForPty(args)}\n`);
++        const command = `/bin/sh ${script}; exit`;
+         const entry = createPtyProcessEntry({ tty: true });
+         const timeoutMs = typeof this.state.commandTimeoutMs === 'number'
+             ? this.state.commandTimeoutMs
+@@ -143,21 +153,38 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+     }
+     async prepareWorkspaceRoot() {
+         const root = this.state.manifest.root;
+-        await this.ensureDirectory(root);
+-        const result = await this.sandbox.commands.run(`mkdir -p -- ${shellQuote(root)}`, {
++        const quoted = shellQuote(root);
++        // Commands run as the sandbox's default user, which need not own the
++        // image's workspace root: an image may ship it owned by root. Create
++        // the root, and if the default user cannot write it, hand it to that
++        // user as root.
++        const probe = await this.runCommandForStatus(`mkdir -p -- ${quoted} 2>/dev/null; if [ -d ${quoted} ] && [ -w ${quoted} ]; then echo writable; else echo "owner $(id -u):$(id -g)"; fi`, {
+             cwd: '/',
+             envs: this.state.environment,
+         });
+-        if ((result.exitCode ?? 1) !== 0) {
+-            throw new SandboxProviderError('E2BSandboxClient failed to prepare the workspace root.', {
+-                provider: 'e2b',
+-                operation: 'prepare workspace root',
+-                sandboxId: this.state.sandboxId,
+-                root,
+-                stderr: result.stderr ?? '',
+-                stdout: result.stdout ?? '',
+-            });
++        const answer = (probe.stdout ?? '').trim();
++        if ((probe.exitCode ?? 1) === 0 && answer === 'writable') {
++            return;
+         }
++        const owner = (probe.exitCode ?? 1) === 0 ? /^owner (\d+):(\d+)$/.exec(answer) : null;
++        const result = owner
++            ? await this.runCommandForStatus(`mkdir -p -- ${quoted} && chown -- ${owner[1]}:${owner[2]} ${quoted}`, {
++                cwd: '/',
++                envs: this.state.environment,
++                user: 'root',
++            })
++            : probe;
++        if (owner && (result.exitCode ?? 1) === 0) {
++            return;
++        }
++        throw new SandboxProviderError('E2BSandboxClient failed to prepare the workspace root.', {
++            provider: 'e2b',
++            operation: 'prepare workspace root',
++            sandboxId: this.state.sandboxId,
++            root,
++            stderr: result.stderr ?? result.error ?? '',
++            stdout: result.stdout ?? '',
++        });
+     }
+     async persistWorkspace() {
+         if (this.state.workspacePersistence === 'snapshot') {
+@@ -215,7 +242,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
          return this.state.manifest.ephemeralPersistencePaths().size > 0;
      }
      async replaceSandboxFromSnapshot(snapshotId) {
@@ -420,7 +551,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..433dd5fc004c66cdaba7338978ebea70
          const previousSandbox = this.sandbox;
          let sandbox;
          try {
-@@ -505,11 +507,12 @@ export class E2BSandboxClient {
+@@ -505,11 +532,12 @@ export class E2BSandboxClient {
              };
              validateOptions(resolvedOptions);
              assertSandboxManifestMetadataSupported('E2BSandboxClient', manifest, SANDBOX_MANIFEST_METADATA_SUPPORT);
@@ -434,7 +565,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..433dd5fc004c66cdaba7338978ebea70
                  concurrencyLimits: createArgs.concurrencyLimits,
                  archiveLimits: createArgs.archiveLimits,
                  state: {
-@@ -579,9 +582,9 @@ export class E2BSandboxClient {
+@@ -579,9 +607,9 @@ export class E2BSandboxClient {
              pauseOnExitSupported: readOptionalBoolean(state, 'pauseOnExitSupported') ?? false,
          };
      }
@@ -446,7 +577,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..433dd5fc004c66cdaba7338978ebea70
          const connect = Sandbox.connect ?? Sandbox.resume;
          if (connect) {
              try {
-@@ -589,6 +592,7 @@ export class E2BSandboxClient {
+@@ -589,6 +617,7 @@ export class E2BSandboxClient {
                  return new E2BSandboxSession({
                      state,
                      sandbox,
@@ -454,7 +585,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..433dd5fc004c66cdaba7338978ebea70
                      archiveLimits: this.options.archiveLimits,
                  });
              }
-@@ -598,9 +602,15 @@ export class E2BSandboxClient {
+@@ -598,9 +627,15 @@ export class E2BSandboxClient {
                      provider: 'e2b',
                      details: { sandboxId: state.sandboxId },
                  });
@@ -470,7 +601,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..433dd5fc004c66cdaba7338978ebea70
          const manifest = state.manifest;
          const session = await this.create(manifestWithMaterializedEnvironmentReferences(manifest, state.environment), {
              ...stateToCreateOptions(state),
-@@ -609,6 +619,9 @@ export class E2BSandboxClient {
+@@ -609,6 +644,9 @@ export class E2BSandboxClient {
          session.state.manifest = manifest;
          return session;
      }
@@ -480,7 +611,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..433dd5fc004c66cdaba7338978ebea70
  }
  function validateOptions(options) {
      readE2BWorkspacePersistence(options.workspacePersistence);
-@@ -676,7 +689,7 @@ function e2bReconnectOptions(state) {
+@@ -676,7 +714,7 @@ function e2bReconnectOptions(state) {
  function canPauseE2BSandbox(sandbox) {
      return typeof sandbox.pause === 'function';
  }
@@ -489,7 +620,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..433dd5fc004c66cdaba7338978ebea70
      const moduleName = sandboxType === 'e2b_code_interpreter' ? '@e2b/code-interpreter' : 'e2b';
      try {
          const Sandbox = sandboxType === 'e2b_code_interpreter'
-@@ -685,25 +698,44 @@ async function loadE2BSandboxClass(sandboxType) {
+@@ -685,25 +723,44 @@ async function loadE2BSandboxClass(sandboxType) {
          if (!Sandbox) {
              throw new Error(`Missing Sandbox export from ${moduleName}.`);
          }
