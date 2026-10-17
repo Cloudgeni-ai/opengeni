@@ -87,8 +87,8 @@ function harness(
     },
   );
   let turn = createResponsesTurn("conversation", options.observe, {
-    httpOnly: options.httpOnly,
-    onFallback: options.onFallback,
+    httpOnly: options.httpOnly ?? false,
+    ...(options.onFallback ? { onFallback: options.onFallback } : {}),
   });
   const scoped = options.endpoint?.conversationScoped
     ? transport
