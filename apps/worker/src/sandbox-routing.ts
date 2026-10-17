@@ -1064,6 +1064,7 @@ export function wrapTurnBoxWithRouting(
               outcome: command.outcome,
               exitCode: command.exitCode,
               reason: command.reason,
+              backgroundChildrenStopped: command.backgroundChildrenStopped,
               ...(command.failure ? { failure: command.failure } : {}),
             });
             if (settlement && bus) {
@@ -1374,6 +1375,7 @@ export function wrapLazyTurnBoxWithRouting(
               outcome: command.outcome,
               exitCode: command.exitCode,
               reason: command.reason,
+              backgroundChildrenStopped: command.backgroundChildrenStopped,
               ...(command.failure ? { failure: command.failure } : {}),
             });
             if (settlement && bus) {
@@ -1799,6 +1801,7 @@ export async function establishSelfhostedTurnSession(
         outcome: command.outcome,
         exitCode: command.exitCode,
         reason: command.reason,
+        backgroundChildrenStopped: command.backgroundChildrenStopped,
         ...(command.failure ? { failure: command.failure } : {}),
       });
       if (command.outputReceipt && command.outcome === "exited" && command.exitCode !== null) {

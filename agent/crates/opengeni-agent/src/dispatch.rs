@@ -661,6 +661,7 @@ mod tests {
                 stderr: prost::bytes::Bytes::new(),
                 timed_out: false,
                 duration_ms: 1,
+                background_children_stopped: false,
             })
         }
         async fn fs_read(&self, _req: &v1::FsReadRequest) -> PlatformResult<v1::FsReadResponse> {

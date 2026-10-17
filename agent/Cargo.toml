@@ -44,12 +44,6 @@ thiserror = "2"
 # methods on the `Platform` trait.
 tokio = { version = "1", default-features = false }
 async-trait = "0.1"
-# Cross-platform exec containment: POSIX process groups on Unix and Job Objects
-# on Windows. Unix keeps an unreaped private group anchor until it has terminated
-# ordinary descendants; Windows uses the Job Object kernel handle. A timed-out
-# shell must not leave descendants consuming the machine after its caller is gone.
-command-group = { version = "5.0.1", features = ["with-tokio"] }
-
 # Control-plane transport. async-nats is the official Rust NATS client; the agent
 # claims and subscribes to `agent.<ws>.<id>.connection.<instance>.rpc`, then
 # answers ControlRequests. 0.47+ requires

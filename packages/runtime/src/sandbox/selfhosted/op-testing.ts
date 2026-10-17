@@ -507,6 +507,7 @@ export class FakeOpRunner implements ControlRpc {
       totals,
       failureCode: "",
       failureDetail: {},
+      backgroundChildrenStopped: false,
       ...script.exit,
     };
     frames.push({ opId, seq: seq.toString(), body: { $case: "exit", exit } });
@@ -554,6 +555,7 @@ export function createMockSelfhostedOpStream(input: {
           exitCode: response.exitCode,
           timedOut: response.timedOut,
           durationMs: response.durationMs,
+          backgroundChildrenStopped: response.backgroundChildrenStopped,
         },
       };
     },
@@ -640,6 +642,7 @@ function cancelledStatus(opId: string): OpStatus {
       totals: {},
       failureCode: "",
       failureDetail: {},
+      backgroundChildrenStopped: false,
     },
     lostReason: OpLostReason.OP_LOST_REASON_UNSPECIFIED,
   };

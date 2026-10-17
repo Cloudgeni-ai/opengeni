@@ -3,7 +3,7 @@ import type {
   SessionBackgroundCommandActivity,
   SessionBackgroundCommandReconciliation,
 } from "@opengeni/contracts";
-import { SessionCommandFailure } from "@opengeni/contracts";
+import { SessionCommandFailure, CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, getTableColumns, gte, inArray, sql, type SQL } from "drizzle-orm";
 
@@ -19,6 +19,7 @@ export type ConnectedMachineBackgroundCommandProof = {
   exitCode: number | null;
   reason: string;
   failure?: SessionCommandFailure;
+  backgroundChildrenStopped?: boolean;
   observedAt: Date;
 };
 
@@ -391,6 +392,9 @@ function mapCommand(
     exitCode: row.exitCode ?? null,
     settlementReason: row.settlementReason ?? null,
     ...(failure ? { failure } : {}),
+    ...(row.provider === "connected_machine" && row.backgroundChildrenStopped
+      ? { backgroundChildrenStopped: true as const }
+      : {}),
     startedAt: row.startedAt.toISOString(),
     settledAt: row.settledAt?.toISOString() ?? null,
     completionObservedAt: row.completionObservedAt?.toISOString() ?? null,
@@ -850,6 +854,7 @@ export async function recordConnectedMachineBackgroundCommandProof(
           reconcileProofExitCode: input.proof.exitCode,
           reconcileProofReason: reason,
           runnerFailure: failure,
+          backgroundChildrenStopped: sql`${schema.sessionBackgroundCommands.backgroundChildrenStopped} OR ${input.proof.backgroundChildrenStopped === true}`,
           reconcileProofObservedAt: input.proof.observedAt,
           lastReconcileOutcome: `proof_${input.proof.outcome}`,
           updatedAt: new Date(),
@@ -1212,6 +1217,7 @@ export async function settleConnectedMachineSessionBackgroundCommandWithMutation
     exitCode: number | null;
     reason: string;
     failure?: SessionCommandFailure | undefined;
+    backgroundChildrenStopped?: boolean | undefined;
   },
   mutateTerminal: SessionBackgroundCommandTerminalMutation,
 ): Promise<SessionBackgroundCommand | null> {
@@ -1241,6 +1247,7 @@ export async function settleConnectedMachineSessionBackgroundCommandWithMutation
           exitCode: input.outcome === "exited" ? input.exitCode : null,
           settlementReason: reason,
           runnerFailure: failure,
+          backgroundChildrenStopped: sql`${schema.sessionBackgroundCommands.backgroundChildrenStopped} OR ${input.backgroundChildrenStopped === true}`,
           settledAt,
           reconcileClaimId: null,
           reconcileClaimedAt: null,
@@ -1574,5 +1581,8 @@ export async function readSessionBackgroundCommandOutput(
     terminal,
     completionObservedAt: observed?.completionObservedAt ?? null,
     ...page,
+    ...(terminal && command.backgroundChildrenStopped
+      ? { notice: CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE }
+      : {}),
   };
 }

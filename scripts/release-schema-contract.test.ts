@@ -2345,6 +2345,7 @@ describe("release schema contract", () => {
       "0810_session_events_usage_source_key.sql",
       "0809_session_open_settlement_index.sql",
       "0808_connected_command_exit_locator.sql",
+      "0830_connected_command_child_cleanup.sql",
       "0807_subscription_rls_admin_once_per_statement.sql",
       "0806_session_history_tool_router_index.sql",
       "0805_session_visibility_rls_cost.sql",

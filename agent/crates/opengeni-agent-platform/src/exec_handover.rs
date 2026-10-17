@@ -55,6 +55,7 @@ pub struct OpCgroupHandover {
 
 /// Everything a successor needs to keep owning one contained exec.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // Independent additive lifecycle facts preserve old handovers.
 pub struct ExecHandover {
     /// The stopped anchor that owns the process group and holds the lease.
     pub anchor: ProcHandover,
@@ -66,6 +67,12 @@ pub struct ExecHandover {
     pub running: bool,
     /// Whether the post-exit group kill already ran.
     pub wait_killed_group: bool,
+    /// Positive remaining-child cleanup evidence from the predecessor.
+    #[serde(default)]
+    pub background_children_stopped: bool,
+    /// Whether cleanup was explicitly requested rather than caused by shell exit.
+    #[serde(default)]
+    pub termination_requested: bool,
     /// The write end of the anchor's death lease.
     pub lease_fd: Option<RawFd>,
     /// The command's stdin write end, when the runner still feeds it.

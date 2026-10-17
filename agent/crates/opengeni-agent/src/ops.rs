@@ -208,6 +208,7 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
                     detail: format!("spawn failed: {error}"),
                 }),
                 duration_ms: 0,
+                background_children_stopped: false,
                 stdout: empty_channel(),
                 stderr: empty_channel(),
             });
@@ -511,6 +512,7 @@ pub fn wire_exit(exit: &JobExit) -> v1::OpExit {
         timed_out: false,
         cancelled: false,
         duration_ms: exit.duration_ms,
+        background_children_stopped: exit.background_children_stopped,
         digests: [
             (
                 "stdout".to_string(),
@@ -970,6 +972,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_record_carries_native_child_cleanup_evidence() {
+        let rig = rig();
+        let response = rig
+            .start_exec("cleanup", "sleep 60 >/dev/null 2>&1 & printf done", 1 << 20)
+            .await;
+        assert!(started_status(&response).0);
+        let exit = rig.wait_for_exit_frame().await;
+        assert_eq!(exit.exit_code, 0);
+        assert!(exit.background_children_stopped);
+        assert_eq!(rig.stdout_bytes(), b"done");
+    }
+
+    #[tokio::test]
     async fn cancel_before_start_wins_and_spawns_nothing() {
         let rig = rig();
         let cancel = serve_op_cancel(
@@ -1142,6 +1157,7 @@ mod tests {
                 retained_bytes: 12345,
             }),
             duration_ms: 7,
+            background_children_stopped: false,
             stdout: empty_channel(),
             stderr: empty_channel(),
         };
@@ -1223,6 +1239,7 @@ mod tests {
                     retained_bytes: 12345,
                 }),
                 duration_ms: 7,
+                background_children_stopped: false,
                 stdout: empty_channel(),
                 stderr: empty_channel(),
             },

@@ -23,7 +23,8 @@ import {
   acquireSharedTestDatabase,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
+import { ControlRequest, ControlResponse, ExecResponse } from "@opengeni/agent-proto";
+import { CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
 import type { OpStreamConnection } from "@opengeni/events";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
@@ -82,12 +83,25 @@ function busWithAgent(opts: {
   agentId: string;
   online: boolean;
   hostname?: string;
+  backgroundChildrenStopped?: boolean;
 }): MemoryEventBus {
   const bus = new MemoryEventBus();
   if (!opts.online) {
     return bus;
   }
-  const responder = new MockAgentResponder({ hostname: opts.hostname });
+  const responder = new MockAgentResponder({
+    hostname: opts.hostname,
+    ...(opts.backgroundChildrenStopped
+      ? {
+          exec: () =>
+            ExecResponse.fromPartial({
+              exitCode: 0,
+              stdout: new TextEncoder().encode("done\n"),
+              backgroundChildrenStopped: true,
+            }),
+        }
+      : {}),
+  });
   const stream = createMockSelfhostedOpStream({
     responder,
     workspaceId: opts.workspaceId,
@@ -190,6 +204,7 @@ async function seedFleet(
     online?: boolean;
     hostname?: string;
     sandboxBackend?: "modal" | "none" | "selfhosted";
+    backgroundChildrenStopped?: boolean;
   } = {},
 ) {
   const { accountId, workspaceId } = await freshWorkspace();
@@ -262,6 +277,7 @@ async function seedFleet(
       agentId: enrollment.id,
       online: opts.online ?? true,
       hostname: opts.hostname,
+      backgroundChildrenStopped: opts.backgroundChildrenStopped,
     }) as never,
   };
   return {
@@ -1074,6 +1090,7 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(exec.stdout?.trim()).toBe("runon-vm");
     expect(exec.exitCode).toBe(0);
     expect(exec.timedOut).toBe(false);
+    expect(exec.notice).toBeUndefined();
     expect(exec.deadlineMs).toBe(settings.sandboxSelfhostedExecTimeoutMs);
 
     // The active pointer is UNCHANGED (run_on is a side-channel, not a swap).
@@ -1104,7 +1121,20 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
       kind: "exec",
       cmd: "true",
     });
+
     expect(r.ok).toBe(false);
+  }, 60_000);
+
+  test("run_on appends positive cleanup evidence without contaminating command output", async () => {
+    if (!available) return;
+    const { ctx, services, sandbox } = await seedFleet({ backgroundChildrenStopped: true });
+    const result = await runOnSandbox(services, ctx, sandbox.id, {
+      kind: "exec",
+      cmd: "sleep 60 & printf done",
+    });
+    expect(result.stdout).toBe("done\n");
+    expect(result.stderr).toBe("");
+    expect(result.notice).toBe(CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE);
   }, 60_000);
 
   test("provision: selfhosted -> enrollment instructions; modal -> a named record", async () => {
