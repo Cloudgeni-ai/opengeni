@@ -447,7 +447,7 @@ image by the fabric's OCI image builder; each sandbox had 2 vCPUs and
 | Idle during the session | the agent paused it after its idle delay (2.3 ms), saved it locally (diff snapshot, 238 ms) and archived it (18.4 MB uploaded, 5.4 s) while the model was not calling it |
 | Timeout | E2B's pause at 900 s asks for at least `saved`; the sandbox was already saved and archived, so the agent only released the paused VM (a `drop` step, 21 ms), leaving it `archived` with its local copy kept as a cache |
 | Resume on the next message (Opengeni's provision, `origin: resumed`) | 230 ms seen from the laptop; the restore took 80 ms on the host, from that local copy: memory was served by the pager from local disk (`compute.memory.source` `pager`, not `remote`), so nothing was read from object storage |
-| After the resume | the file still read `hello from the fabric`, the same server process (pid 901) still ran and answered; the first command itself took 91 ms, but its output reached Opengeni about 0.9 s after the resume finished (not broken down further); later tool calls about 0.1 s |
+| After the resume | the file still read `hello from the fabric`, the same server process (pid 901) still ran and answered; the first command itself took 91 ms, but its output reached Opengeni about 0.9 s after the resume finished (not broken down further) |
 
 So this session exercised every level up to `archived`, but its wake read
 only local disk. Waking from object storage, where the pages come from
