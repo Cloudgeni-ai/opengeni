@@ -22,12 +22,18 @@ CONTROL_BIN=target/release/compute-control HOST_BIN=target/release/compute-host 
   GUEST=~/guest-out PROFILE=nested sudo -E conformance/e2b/run.sh
 ```
 
-It needs root, a lab host (`../../lab/host-setup.sh`), node 22, python
-3.10 or later, openssl, and ports 443, 10000, 17443, 18080 and 18443 free on
-127.0.0.1. Names under `e2b.test` resolve to 127.0.0.1 inside the suites
+It needs root, a lab host (`../../lab/host-setup.sh`), python 3.10 or
+later, curl, openssl, and ports 443, 10000, 17443, 18080 and 18443 free on
+127.0.0.1. It sets up the rest itself: node 22 when PATH has none (a
+pinned, checksummed download into `$LAB/tools`), the clients, certificates,
+object storage, the fleet service and the host agent. When something is
+missing or a port is taken it fails; it never skips a suite. The Linux
+gate (run before every merge into lab) runs it.
+
+Names under `e2b.test` resolve to 127.0.0.1 inside the suites
 (`resolve.cjs`); nothing outside the host is reached except the image
-registries and npm. Results, with each suite's measurements, go to
-`$WORK/results` (`/lab/t/e2b-conformance/results`); it prints
+registries, nodejs.org and npm. Results, with each suite's measurements,
+go to `$WORK/results` (`/lab/t/e2b-conformance/results`); it prints
 `CONFORMANCE_PASSED` or `CONFORMANCE_FAILED`.
 
 The clients are pinned to exact versions in `package.json`.

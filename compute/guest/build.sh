@@ -10,9 +10,13 @@
 #
 # None of them is committed; images are built from this directory
 # (`compute-host build-image --guest <OUT>`). Needs cargo with the
-# x86_64-unknown-linux-musl target, musl-gcc, Go (the version envd's
-# go.mod asks for), git and curl. ENVD_SRC may name a checkout of the
-# runtime at the pinned commit to build from instead of fetching it.
+# x86_64-unknown-linux-musl target (added with rustup when missing),
+# musl-gcc, git and curl. Go comes from PATH or /usr/local/go; with none,
+# a pinned, checksummed Go is fetched into TOOLS (~/.cache/compute-guest).
+# Go fetches the version envd's go.mod asks for when its own is older.
+# ENVD_SRC may name a checkout of the runtime at the pinned commit to build
+# from instead of fetching it. envd and bash are built again only when
+# OUT's VERSIONS does not match their pins.
 set -euo pipefail
 
 # envd: E2B's runtime at this commit answers the E2B JS SDK 2.56.0 (envd
@@ -24,17 +28,54 @@ ENVD_VERSION=0.10.0
 BASH_VERSION_PINNED=5.2.37
 BASH_SHA256=9599b22ecd1d5787ad7d3b7bf0c59f312b3396d1e281175dd1f8a4014da621ff
 
+GO_VERSION=1.26.8
+GO_SHA256=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
+
 here=$(cd "$(dirname "$0")" && pwd)
 OUT=$(mkdir -p "${OUT:-$PWD/guest-out}" && cd "${OUT:-$PWD/guest-out}" && pwd)
+TOOLS=${TOOLS:-$HOME/.cache/compute-guest}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 log() { printf '[guest-build %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+fail() { echo "guest-build: $*" >&2; exit 1; }
+versions=$(printf 'envd %s %s\nbash %s\n' "$ENVD_VERSION" "$ENVD_COMMIT" "$BASH_VERSION_PINNED")
+
+for tool in cargo git curl strip; do
+  command -v "$tool" >/dev/null || fail "$tool is not on PATH"
+done
+if command -v rustup >/dev/null &&
+  ! rustup target list --installed | grep -qx x86_64-unknown-linux-musl; then
+  log "adding the x86_64-unknown-linux-musl target"
+  rustup target add x86_64-unknown-linux-musl
+fi
 
 log "compute-guest"
 (cd "$here/.." && cargo build --release --target x86_64-unknown-linux-musl -p compute-guest)
 target=${CARGO_TARGET_DIR:-$here/../target}
 install -m 0755 "$target/x86_64-unknown-linux-musl/release/compute-guest" "$OUT/compute-guest"
 strip "$OUT/compute-guest"
+
+if [ "$(cat "$OUT/VERSIONS" 2>/dev/null)" = "$versions" ] && [ -x "$OUT/envd" ] && [ -x "$OUT/bash" ]; then
+  log "envd and bash are already at their pins"
+  ls -l "$OUT"
+  exit 0
+fi
+rm -f "$OUT/VERSIONS"
+command -v musl-gcc >/dev/null || fail "musl-gcc is not on PATH (Debian and Ubuntu: musl-tools)"
+
+[ -x /usr/local/go/bin/go ] && PATH=$PATH:/usr/local/go/bin
+if ! command -v go >/dev/null; then
+  if [ ! -x "$TOOLS/go-$GO_VERSION/bin/go" ]; then
+    log "fetching Go $GO_VERSION"
+    mkdir -p "$TOOLS"
+    curl -fsSL -o "$work/go.tar.gz" "https://go.dev/dl/go$GO_VERSION.linux-amd64.tar.gz"
+    echo "$GO_SHA256  $work/go.tar.gz" | sha256sum -c --quiet || fail "Go's checksum does not match"
+    rm -rf "$TOOLS/go-$GO_VERSION.part" && mkdir "$TOOLS/go-$GO_VERSION.part"
+    tar -xzf "$work/go.tar.gz" -C "$TOOLS/go-$GO_VERSION.part" --strip-components=1
+    mv "$TOOLS/go-$GO_VERSION.part" "$TOOLS/go-$GO_VERSION"
+  fi
+  PATH=$TOOLS/go-$GO_VERSION/bin:$PATH
+fi
 
 log "envd $ENVD_VERSION at ${ENVD_COMMIT:0:12}"
 src=${ENVD_SRC:-}
@@ -67,6 +108,6 @@ tar -xzf "$work/bash.tar.gz" -C "$work"
 install -m 0755 "$work/bash-$BASH_VERSION_PINNED/bash" "$OUT/bash"
 strip "$OUT/bash"
 
-printf 'envd %s %s\nbash %s\n' "$ENVD_VERSION" "$ENVD_COMMIT" "$BASH_VERSION_PINNED" >"$OUT/VERSIONS"
+echo "$versions" >"$OUT/VERSIONS"
 ls -l "$OUT"
 log "done"

@@ -6,11 +6,17 @@
 # unchanged E2B JS SDK, the E2B client Opengeni uses and the E2B-style
 # smoke scenarios run against the front door. See README.md.
 #
-# Run as root on a lab host (../../lab/host-setup.sh), with node 22 and
-# python 3.10 or later on PATH:
+# Run as root on a lab host (../../lab/host-setup.sh) with python 3.10 or
+# later, curl and openssl:
 #
 #   CONTROL_BIN=target/release/compute-control HOST_BIN=target/release/compute-host \
 #     GUEST=~/guest-out sudo -E conformance/e2b/run.sh
+#
+# The suite sets up what else it needs: node 22 (a pinned, checksummed
+# download into $LAB/tools when PATH has none), the pinned clients from
+# package.json, certificates, object storage, the fleet service and
+# the host agent. When it cannot, or a port it needs is taken, it fails;
+# it never skips a suite.
 #
 # Settings (environment):
 #   LAB        the lab directory: bin/firecracker, bin/jailer, vmlinux (/lab)
@@ -22,6 +28,9 @@
 #   WORK       scratch directory ($LAB/t/e2b-conformance)
 #   RESULTS    where results and measurements go ($WORK/results)
 #   SUITES     which suites run: any of `sdk headers adapter smoke` (all)
+#
+# Nothing is written to the checkout: the clients are installed and run from
+# $WORK/clients.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -34,6 +43,7 @@ SUITES=${SUITES:-sdk headers adapter smoke}
 : "${CONTROL_BIN:?set CONTROL_BIN to compute-control}"
 HOST_BIN=$(realpath "$HOST_BIN")
 CONTROL_BIN=$(realpath "$CONTROL_BIN")
+GUEST=$(realpath "$GUEST")
 
 DOMAIN=e2b.test
 CGROUP=/sys/fs/cgroup/compute-e2b
@@ -43,6 +53,30 @@ FLEET_LISTEN=127.0.0.1:17443
 FRONT=127.0.0.1:443
 SANDBOX_IMAGE=ghcr.io/cloudgeni-ai/opengeni-sandbox:0.20.0
 MINIMAL_IMAGE=busybox:1.37
+NODE_VERSION=22.20.0
+NODE_SHA256=00bbd05e306ea68b6e13e17360d0e2f680b493ef95f2fea1c4296ff7437530bc
+
+fail() { echo "conformance: $*" >&2; exit 1; }
+
+# What the suite cannot set up itself.
+[[ $EUID == 0 ]] || fail "run as root"
+for tool in curl openssl python3 tar; do
+  command -v "$tool" > /dev/null || fail "$tool is not on PATH"
+done
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' || fail "python 3.10 or later is needed"
+for file in bin/firecracker bin/jailer vmlinux; do
+  [[ -e $LAB/$file ]] || fail "$LAB/$file is missing; set LAB to the lab directory"
+done
+for file in "$HOST_BIN" "$CONTROL_BIN" "$GUEST/compute-guest" "$GUEST/envd" "$GUEST/bash"; do
+  [[ -x $file ]] || fail "$file is missing"
+done
+taken() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+for port in "${FRONT##*:}" "${API##*:}" "${HOSTS##*:}" "${FLEET_LISTEN##*:}"; do
+  ! taken "$port" || fail "port $port is taken; stop what holds it"
+done
+if [[ -z ${STORE:-} ]] && taken 10000; then
+  fail "port 10000 is taken; stop what holds it, or set STORE"
+fi
 
 pids=()
 cleanup() {
@@ -65,17 +99,37 @@ trap cleanup EXIT
 say() { printf '== %s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
 rm -rf "$WORK/state" "$WORK/run" "$WORK/azurite"
-mkdir -p "$WORK/tls" "$WORK/run" "$RESULTS"
-cd "$HERE"
+CLIENTS=$WORK/clients
+mkdir -p "$WORK/tls" "$WORK/run" "$RESULTS" "$CLIENTS"
+cp "$HERE"/package.json "$HERE"/*.mjs "$HERE"/*.cjs "$CLIENTS"/
+cd "$CLIENTS"
+
+if ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) == 22 ? 0 : 1)' 2>/dev/null; then
+  node_dir=$LAB/tools/node-v$NODE_VERSION-linux-x64
+  if [[ ! -x $node_dir/bin/node ]]; then
+    say "fetching node $NODE_VERSION"
+    mkdir -p "$LAB/tools"
+    tarball=$(mktemp)
+    curl -fsSL -o "$tarball" "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.xz" ||
+      fail "could not fetch node $NODE_VERSION"
+    echo "$NODE_SHA256  $tarball" | sha256sum -c --quiet || fail "node's checksum does not match"
+    rm -rf "$node_dir.part" && mkdir "$node_dir.part"
+    tar -xJf "$tarball" -C "$node_dir.part" --strip-components=1 && rm -f "$tarball"
+    mv "$node_dir.part" "$node_dir"
+  fi
+  export PATH=$node_dir/bin:$PATH
+fi
 
 say "installing the pinned clients"
-[[ -d node_modules ]] || npm install --no-audit --no-fund --loglevel=error
+# Installed again only when package.json changes.
+pins=$(sha256sum package.json | cut -d' ' -f1)
+if [[ $(cat node_modules/.package-sha256 2>/dev/null) != "$pins" ]]; then
+  rm -rf node_modules package-lock.json
+  npm install --no-audit --no-fund --loglevel=error || fail "could not install the pinned clients"
+  echo "$pins" > node_modules/.package-sha256
+fi
 
 if [[ -z ${STORE:-} ]]; then
-  if (exec 3<>/dev/tcp/127.0.0.1/10000) 2>/dev/null; then
-    echo "port 10000 is taken; stop what holds it, or set STORE" >&2
-    exit 1
-  fi
   say "starting Azurite for object storage"
   node_modules/.bin/azurite-blob --silent --skipApiVersionCheck --location "$WORK/azurite" \
     --blobHost 127.0.0.1 --blobPort 10000 > "$WORK/azurite.log" 2>&1 &
@@ -175,7 +229,7 @@ export E2B_API_KEY=$KEY E2B_DOMAIN=$DOMAIN E2B_API_URL="https://api.$DOMAIN"
 export NODE_EXTRA_CA_CERTS=$WORK/tls/ca.pem CONFORMANCE_DOMAIN=$DOMAIN
 export CONFORMANCE_FLEET_API="http://$API" CONFORMANCE_RESULTS=$RESULTS
 export CONFORMANCE_HOST_STATUS="$HOST_BIN --socket $WORK/run/agent.sock status"
-export NODE_OPTIONS="--require $HERE/resolve.cjs"
+export NODE_OPTIONS="--require $CLIENTS/resolve.cjs"
 
 failed=0
 for suite in $SUITES; do
@@ -185,7 +239,8 @@ for suite in $SUITES; do
     headers) E2B_SANDBOX_URL="https://api.$DOMAIN" CONFORMANCE_PART=headers node sdk.mjs || failed=1 ;;
     adapter) node adapter.mjs || failed=1 ;;
     smoke)
-      (cd ../../smoke && COMPUTE_SMOKE_TARGET=e2b SSL_CERT_FILE=$WORK/tls/ca.pem \
+      (cd "$HERE/../../smoke" && PYTHONDONTWRITEBYTECODE=1 COMPUTE_SMOKE_TARGET=e2b \
+        SSL_CERT_FILE=$WORK/tls/ca.pem \
         COMPUTE_SMOKE_E2B_ADDRESS=127.0.0.1 COMPUTE_SMOKE_SOCKET=$WORK/run/agent.sock \
         python3 -m compute_smoke run --category ecw) || failed=1 ;;
     *) echo "unknown suite $suite"; failed=1 ;;
