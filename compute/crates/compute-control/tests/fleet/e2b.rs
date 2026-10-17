@@ -506,6 +506,10 @@ async fn traffic_reaches_guest_ports_over_kept_streams() {
         .await;
     assert_eq!(status, 502);
     assert!(body.contains("The sandbox was not found"), "{body}");
+    // A kept stream holds the sandbox awake on its host, so it is dropped
+    // once its idle time is up, with no request needed to notice.
+    tokio::time::sleep(e2b::traffic::IDLE_FOR + Duration::from_millis(300)).await;
+    assert_eq!(door.front.traffic().idle(id.parse().unwrap(), ENVD_PORT), 0);
 }
 
 #[tokio::test]

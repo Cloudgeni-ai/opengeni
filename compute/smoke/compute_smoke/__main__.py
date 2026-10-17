@@ -41,6 +41,9 @@ from compute_smoke.suite import (
 SOCKET_ENV = "COMPUTE_SMOKE_SOCKET"
 GUEST_PORT_ENV = "COMPUTE_SMOKE_GUEST_PORT"
 RESTART_ENV = "COMPUTE_SMOKE_RESTART_AGENT"
+# `e2b` runs the scenarios through an E2B front door instead of the host
+# agent's socket, which is then only observed.
+TARGET_ENV = "COMPUTE_SMOKE_TARGET"
 DEFAULT_SOCKET = "/run/compute-host.sock"
 DEFAULT_GUEST_PORT = 55
 API_SURFACE = "ecw"
@@ -52,6 +55,11 @@ def services_from_environment(required_tools: Iterable[str] = ()) -> SmokeServic
     missing = [tool for tool in required_tools if shutil.which(tool) is None]
     if missing:
         raise MissingToolError(f"required tools are not installed: {', '.join(missing)}")
+    if os.environ.get(TARGET_ENV, "").strip() == "e2b":
+        from compute_smoke.e2b import E2bServices
+
+        socket = os.environ.get(SOCKET_ENV)
+        return E2bServices.from_environment(HostAgent(socket) if socket else None)  # type: ignore[return-value]
     port_text = os.environ.get(GUEST_PORT_ENV, str(DEFAULT_GUEST_PORT))
     try:
         port = int(port_text)

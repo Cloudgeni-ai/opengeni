@@ -62,6 +62,20 @@ Settings, all optional:
 | `COMPUTE_SMOKE_GUEST_PORT` | `55` | The guest service's vsock port |
 | `COMPUTE_SMOKE_RESTART_AGENT` | unset | A shell command that restarts the host agent, keeping its state; the restart scenario needs it |
 | `COMPUTE_SMOKE_SCENARIO_PACKAGES` | `compute_smoke.scenarios` | Comma-separated packages to load scenarios from |
+| `COMPUTE_SMOKE_TARGET` | unset | `e2b` runs the scenarios through an E2B front door instead (below) |
+
+### Through the E2B front door
+
+With `COMPUTE_SMOKE_TARGET=e2b` the `ecw.*` scenarios go through the E2B
+front door, as an E2B client would: E2B's REST API for sandboxes, and envd
+in the guest for commands and files (`compute_smoke/e2b.py`).
+`../conformance/e2b/run.sh` sets this up. It reads `E2B_API_URL`,
+`E2B_API_KEY` and `E2B_DOMAIN`, and optionally
+`COMPUTE_SMOKE_E2B_ADDRESS` (connect there for every name, as when the
+names are not in DNS) and `COMPUTE_SMOKE_E2B_TEMPLATE` (`base`).
+`COMPUTE_SMOKE_SOCKET`, if set, is only used to read the host's view of a
+sandbox's sleep level. envd forgets a process once it ended, so there
+`ecw.process_reattach` checks reattaching to a running process only.
 
 The suite's own tests need no VM:
 

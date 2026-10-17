@@ -3,8 +3,11 @@
 //!
 //! Each request is HTTP/1.1 over a stream to the guest port. Streams are
 //! kept for the next request to the same sandbox and port, at most
-//! [`IDLE_PER_PORT`] of them for [`IDLE_FOR`]. An upgrade (a WebSocket, say)
-//! takes its stream for itself and relays bytes both ways.
+//! [`IDLE_PER_PORT`] of them for [`IDLE_FOR`]. A kept stream is open on
+//! the host, so it holds the sandbox awake like any open stream; that is
+//! why it is kept only briefly, and dropped as soon as that time is up. An
+//! upgrade (a WebSocket, say) takes its stream for itself and relays bytes
+//! both ways.
 //!
 //! A pause or kill cuts a sandbox's traffic: every stream through the
 //! front door ends, and kept streams are dropped. A Connect stream (an
@@ -43,8 +46,9 @@ use crate::store::Store;
 
 /// How many idle streams are kept per sandbox and port.
 pub const IDLE_PER_PORT: usize = 8;
-/// How long an idle stream is kept.
-pub const IDLE_FOR: Duration = Duration::from_secs(60);
+/// How long an idle stream is kept. As short as the hold's grace, since a
+/// kept stream keeps the sandbox awake.
+pub const IDLE_FOR: Duration = HOLD_GRACE;
 /// How long an open stream's hold lives unless renewed.
 const HOLD_TTL: Duration = Duration::from_secs(45);
 /// How often it is renewed.
@@ -144,18 +148,40 @@ impl Lane {
     }
 
     /// Keeps `sender` for the next request, unless the lane was cut since
-    /// `cuts`.
-    fn keep(&self, port: u16, sender: SendRequest<Body>, cuts: u64) {
+    /// `cuts`, and drops it once [`IDLE_FOR`] is up.
+    fn keep(self: &Arc<Self>, port: u16, sender: SendRequest<Body>, cuts: u64) {
         if *self.cuts.borrow() != cuts || sender.is_closed() {
             return;
         }
-        let mut idle = locked(&self.idle);
-        let kept = idle.entry(port).or_default();
-        kept.retain(|(sender, since)| !sender.is_closed() && since.elapsed() <= IDLE_FOR);
-        if kept.len() < IDLE_PER_PORT {
+        {
+            let mut idle = locked(&self.idle);
+            let kept = idle.entry(port).or_default();
+            prune(kept);
+            if kept.len() >= IDLE_PER_PORT {
+                return;
+            }
             kept.push((sender, Instant::now()));
         }
+        let lane = Arc::downgrade(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(IDLE_FOR + Duration::from_millis(50)).await;
+            if let Some(lane) = lane.upgrade() {
+                let mut idle = locked(&lane.idle);
+                if let Some(kept) = idle.get_mut(&port) {
+                    prune(kept);
+                    if kept.is_empty() {
+                        idle.remove(&port);
+                    }
+                }
+            }
+        });
     }
+}
+
+/// Drops the closed streams and those idle too long; dropping one closes
+/// it, which ends its stream on the host.
+fn prune(kept: &mut Vec<Idle>) {
+    kept.retain(|(sender, since)| !sender.is_closed() && since.elapsed() <= IDLE_FOR);
 }
 
 /// E2B's answer for traffic to a sandbox that is not there.
