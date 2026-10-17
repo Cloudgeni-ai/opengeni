@@ -14,7 +14,8 @@ Opengeni does not use this yet.
 | Host agent: jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite | on `feat/compute-lab` |
 | Templates and a ready pool for new sandboxes | on `feat/compute-lab` |
 | Admission with requests and limits, memory guarantees for running VMs | on `feat/compute-lab` |
-| Observability: wide events, bounded metrics, zero alarms, per-sandbox host pressure, a canary, an OTLP exporter | on `feat/compute-observe` |
+| Observability: wide events, bounded metrics, zero alarms, per-sandbox host pressure, a canary, an OTLP exporter | on `feat/compute-lab` |
+| Sandbox images from OCI images, with our init and E2B's envd in every guest | on `feat/compute-e2b` |
 | Control plane (placement, moves between hosts, autoscaling), Opengeni integration | planned |
 
 Decisions and their reasons are in [docs/adr](docs/adr/README.md). Numbers
@@ -258,6 +259,16 @@ id and hostname. A fill books its template's memory footprint and its disk
 copy until it is ready and measured. A shape unused for a week gives up its
 template and ready clones until its next create.
 
+A create may name a sandbox image: any OCI image, built into an ext4 file
+with our init and E2B's envd added, and named by the BLAKE3 digest of the
+file ([guest/README.md](guest/README.md)). A host fetches an image from its
+store the first time a create names it, once however many creates wait,
+booking the disk the fetch may take first, and keeps it under
+`<root>/rootfs/`. Templates and ready clones are per image and shape. An
+image no create used for as long as a template may go unused, and whose
+template is gone, is removed. A create without an image uses the host's
+base image, as before.
+
 ## Code map
 
 | Path | What it owns |
@@ -266,6 +277,9 @@ template and ready clones until its next create.
 | `crates/compute-engine` | VM operations (boot, pause, resume, compress, snapshot, restore, stop) behind one trait; Firecracker with its jailer, cgroups. |
 | `crates/compute-host` | The agent: API, records, steps, images, archives, network, activity, templates. |
 | `crates/compute-host/src/observe` | What the agent reports: wide events, metrics, the canary and the OTLP/HTTP exporter ([ADR 16](docs/adr/0016-observability.md)). |
+| `crates/compute-guest` | The guest's init (PID 1): mounts, network, hostname, envd kept running, the image's command, clean shutdown, and the host's vsock ports. |
+| `crates/compute-image` | Turns an OCI image into a sandbox image: pull, checked layers, our init and envd added, an ext4 file. Run as `compute-host build-image`. |
+| `guest/` | Builds the guest's files: compute-guest, envd from a pinned E2B commit, and a static bash. |
 | `crates/compute-pager` | The userfaultfd pager, with a pure, separately tested memory-layout core. |
 | `crates/compute-storage` | Content-addressed chunks, manifests and stores. |
 | `crates/archcheck` | Structure rules from `ARCHITECTURE.toml`, run as `cargo arch`. |
@@ -359,6 +373,22 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
   paused, saved and woken again (bare metal); `disk` fills a small
   filesystem until wakes are refused for disk and checks that a save it
   cannot hold shows in the status and succeeds once there is room.
+- The guest tests boot real sandbox images with envd. They need the guest's
+  files from `guest/build.sh` and network access to registries:
+
+  ```sh
+  OUT=/lab/guest guest/build.sh
+  sudo env COMPUTE_TEST_LAB=/lab COMPUTE_TEST_GUEST=/lab/guest COMPUTE_TEST_PROFILE=nested \
+    cargo test --release -p compute-host --test guest -- --test-threads 1
+  ```
+
+  They build alpine, busybox and the Opengeni sandbox image, run commands
+  and move files through envd, sleep and wake a sandbox and find its files
+  and environment again, fetch an image from a store once for many creates
+  with its own template, give each sandbox cloned from a template its own
+  environment and token, run the image's command as its user, and shut the
+  guest down cleanly. `COMPUTE_TEST_REQUIRE=lab,guest` makes them fail,
+  not skip, when either is missing.
 - `smoke/` runs SPACE's E2B-style scenarios through one adapter for our API,
   plus our own: sleep levels, concurrent wakes, holds, and an agent restart
   in the middle, with output read on by cursor and live streams ending
@@ -369,8 +399,9 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
 - **A control plane**: placement, moving sandboxes between hosts, recovery
   after losing a host, autoscaling ([ADR 15](docs/adr/0015-placement-and-moves-between-hosts.md)).
 - **The Opengeni integration**.
-- **Comparisons**: an E2B-compatible API and an activations-per-second
-  benchmark, to measure this fabric directly against other sandbox systems.
+- **Comparisons**: an E2B-compatible API in front of the guests' envd, and
+  an activations-per-second benchmark, to measure this fabric directly
+  against other sandbox systems.
 
 ## Credits
 

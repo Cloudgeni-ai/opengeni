@@ -366,3 +366,34 @@ the victim kept 92 % of its speed. A processor request is a guarantee
 under contention, not a cap, so a sandbox requesting little still runs at
 full speed on an idle host.
 
+
+## Sandbox images (2026-10-17)
+
+Measured on 2026-10-17 at `588e229ff` on branch `feat/compute-e2b`, on one
+GCP n2-highmem-32 with nested virtualization in europe-west4-a, `nested`
+memory profile. Each sandbox has 1 vCPU and 512 MiB and runs our init and
+envd. Images were pulled anonymously from Docker Hub and GHCR.
+
+Building an image:
+
+| Image | Content | Layers | Pull | Unpack | ext4 | Id | Total |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| alpine:3.20 | 23 MB | 1 | 0.96 s | 0.10 s | 0.08 s | 3.3 s | 4.4 s |
+| busybox:1.37 | 18 MB | 1 | 0.93 s | 0.07 s | 0.06 s | 3.3 s | 4.4 s |
+| ghcr.io/cloudgeni-ai/opengeni-sandbox:0.20.0 | 1.66 GB | 18 | 9.3 s | 16.8 s | 4.5 s | 3.0 s | 34.3 s |
+
+Each file is 6 GiB and sparse. "Id" is the BLAKE3 digest of the whole
+file, holes read as zeros, so it costs the same for small and large
+images.
+
+From the guest's side:
+
+| Image | Create until envd answers | Wake from Saved until envd answers |
+| --- | --- | --- |
+| alpine:3.20 | 730 ms | 60 ms |
+| busybox:1.37 | 727 ms | 61 ms |
+| opengeni-sandbox:0.20.0 | 745 ms | 49 ms |
+
+A create is a cold boot here: these sandboxes had no template. The first
+create naming an image the host lacked took 3.1 s, from a store on the
+same disk, most of it checking the 6 GiB file against its id.
