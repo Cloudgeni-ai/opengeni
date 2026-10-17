@@ -5,10 +5,10 @@ describe("classifyLearningRefusal", () => {
   test("names the reason a person can act on", () => {
     expect(
       classifyLearningRefusal({
-        destination: "instruction",
-        message: "Workspace instructions require a workspace agent context",
+        destination: "skill",
+        message: "Agents cannot review Skills or install workspace plugins from personal learning",
       }),
-    ).toEqual({ destination: "instruction", reason: "personal_chat" });
+    ).toEqual({ destination: "skill", reason: "personal_chat" });
     expect(
       classifyLearningRefusal({
         destination: "instruction",
@@ -26,7 +26,7 @@ describe("classifyLearningRefusal", () => {
     ).toEqual({ destination: "knowledge", reason: "not_permitted" });
   });
 
-  test("a Skill scope mismatch reads its direction from the targeted Skill", () => {
+  test("a Skill scope mismatch names a personal Skill as such", () => {
     const skillId = crypto.randomUUID();
     const mismatch = (skillScope: "user" | "workspace" | "organization" | null) =>
       classifyLearningRefusal({
@@ -35,13 +35,14 @@ describe("classifyLearningRefusal", () => {
         skillId,
         skillScope,
       });
-    expect(mismatch("workspace")).toEqual({
+    expect(mismatch("user")).toEqual({
       destination: "skill",
-      reason: "personal_chat",
+      reason: "personal_target",
       skillId,
     });
-    expect(mismatch("organization")?.reason).toBe("personal_chat");
-    expect(mismatch("user")?.reason).toBe("personal_target");
+    // A personal-learning chat can change a workspace Skill; an organization
+    // Skill is out of every agent's reach.
+    expect(mismatch("organization")?.reason).toBe("not_permitted");
     expect(mismatch(null)?.reason).toBe("not_permitted");
   });
 
