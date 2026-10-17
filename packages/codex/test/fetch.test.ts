@@ -781,7 +781,8 @@ describe("codexSubscriptionFetch", () => {
     } catch (error) {
       observed = error;
     }
-    expect(String(observed)).toContain("injected partial stream failure");
+    expect(observed).toMatchObject({ code: "invalid_sse_terminal" });
+    expect(String((observed as Error).cause)).toContain("injected partial stream failure");
     expect(calls).toBe(1);
   });
 
@@ -1920,6 +1921,51 @@ describe("codexSubscriptionFetch", () => {
       code: "invalid_sse_terminal",
     });
     expect(isCodexTransportError(observed)).toBe(true);
+    expect(calls).toBe(1);
+  });
+
+  test("streaming caller: a connection lost mid-response fails as invalid_sse_terminal", async () => {
+    const lost = new Error("Codex response WebSocket closed before the response finished (1006)");
+    let calls = 0;
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(async () => {
+        calls += 1;
+        const encoder = new TextEncoder();
+        let sent = false;
+        const body = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            if (!sent) {
+              sent = true;
+              controller.enqueue(
+                encoder.encode('data: {"type":"response.created","response":{"id":"r1"}}\n\n'),
+              );
+              return;
+            }
+            controller.error(lost);
+          },
+        });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      })("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] }),
+      }),
+    );
+
+    let observed: unknown;
+    try {
+      await response.text();
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toMatchObject({
+      status: 502,
+      code: "invalid_sse_terminal",
+    });
+    expect(isCodexTransportError(observed)).toBe(true);
+    expect((observed as Error).cause).toBe(lost);
     expect(calls).toBe(1);
   });
 
