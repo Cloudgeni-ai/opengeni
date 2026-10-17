@@ -97,6 +97,8 @@ pub async fn run(handle: Handle, config: CanaryConfig) {
         let started = Instant::now();
         let ran = tokio::time::timeout(config.timeout, run_path(&handle, &config, path)).await;
         let took = started.elapsed();
+        // A broken canary sandbox is made again from scratch next time.
+        let broken = matches!(ran, Ok(Err(HostError::Broken(_))));
         let result = match ran {
             Ok(Ok(woken)) => Ok(woken),
             Ok(Err(HostError::Stopped)) => return,
@@ -107,8 +109,6 @@ pub async fn run(handle: Handle, config: CanaryConfig) {
             )),
         };
         report(&handle, path, took, &result);
-        // A broken canary sandbox is made again from scratch next time.
-        let broken = matches!(&result, Err((_, error)) if error.contains("broken"));
         if path == CanaryPath::Create || broken {
             let id = if path == CanaryPath::Create {
                 FRESH

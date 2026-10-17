@@ -28,6 +28,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep};
 
 mod admission;
+mod observe;
 mod pool;
 mod ready;
 mod requests;

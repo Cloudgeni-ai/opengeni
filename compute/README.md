@@ -14,7 +14,8 @@ Opengeni does not use this yet.
 | Host agent: jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite | on `feat/compute-lab` |
 | Templates and a ready pool for new sandboxes | on `feat/compute-lab` |
 | Admission with requests and limits, memory guarantees for running VMs | on `feat/compute-lab` |
-| Control plane (placement, moves between hosts, autoscaling), observability, Opengeni integration | planned |
+| Observability: wide events, bounded metrics, zero alarms, per-sandbox host pressure, a canary, an OTLP exporter | on `feat/compute-observe` |
+| Control plane (placement, moves between hosts, autoscaling), Opengeni integration | planned |
 
 Decisions and their reasons are in [docs/adr](docs/adr/README.md). Numbers
 below are observations from our lab runs, with workloads and hosts in
@@ -252,6 +253,7 @@ next create.
 | `crates/compute-core` | Pure decisions: levels, sleep policy, each sandbox's state machine, memory pressure. No I/O, clock or randomness. |
 | `crates/compute-engine` | VM operations (boot, pause, resume, compress, snapshot, restore, stop) behind one trait; Firecracker with its jailer, cgroups. |
 | `crates/compute-host` | The agent: API, records, steps, images, archives, network, activity, templates. |
+| `crates/compute-host/src/observe` | What the agent reports: wide events, metrics, the canary and the OTLP/HTTP exporter ([ADR 16](docs/adr/0016-observability.md)). |
 | `crates/compute-pager` | The userfaultfd pager, with a pure, separately tested memory-layout core. |
 | `crates/compute-storage` | Content-addressed chunks, manifests and stores. |
 | `crates/archcheck` | Structure rules from `ARCHITECTURE.toml`, run as `cargo arch`. |
@@ -296,6 +298,16 @@ VMs' -900, so the host's out-of-memory killer takes VMs before the agent
 that would bring them back, yet the agent stays killable inside its own
 unit. A host that compresses paused VMs needs zswap on; the agent refuses
 to start otherwise.
+
+## Observing a host
+
+Every step, request and stream writes one wide event to the agent's log,
+and with `--otlp-endpoint` the agent sends events and metrics to an
+OpenTelemetry collector over OTLP/HTTP with JSON encoding. Metrics never
+carry a sandbox id. Six alarm counters must stay at zero; each occurrence
+also writes an event naming the sandbox. `--canary-every` runs a canary
+that wakes a small sandbox of the host's own through every path. What to
+alert on is in [docs/operations.md](docs/operations.md#observing).
 
 ## Testing
 
@@ -344,9 +356,6 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
 
 - **A control plane**: placement, moving sandboxes between hosts, recovery
   after losing a host, autoscaling ([ADR 15](docs/adr/0015-placement-and-moves-between-hosts.md)).
-- **Observability**: wide events, bounded-cardinality metrics, zero-alarm
-  safety counters and a canary per host, exported as OpenTelemetry
-  ([ADR 16](docs/adr/0016-observability.md)).
 - **The Opengeni integration**.
 - **Comparisons**: an E2B-compatible API and an activations-per-second
   benchmark, to measure this fabric directly against other sandbox systems.

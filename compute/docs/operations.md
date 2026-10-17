@@ -66,6 +66,41 @@ and what we chose not to build.
   could take chunks it names. Alert when no sweep has succeeded for two
   days; its error names the key that stopped it.
 
+## Observing
+
+What the agent reports is in [ADR 16](adr/0016-observability.md).
+
+- **Run a collector next to each host.** Pass `--otlp-endpoint
+  http://127.0.0.1:4318` to send events as OTLP log records and metrics
+  every ten seconds (`--otlp-metrics-every`); add `--otlp-header
+  name=value` for a remote collector that needs a token. Without it,
+  events go only to the agent's log, one JSON line each under the
+  `compute_event` target, which the journal keeps. `--no-journal-events`
+  turns that copy off once a collector takes them.
+- **Run the canary** with `--canary-every 5m` and, if the guest image
+  serves a port, `--canary-port`. It costs one 128 MiB sandbox kept awake
+  and one created and removed per round, and a little store traffic. Its
+  two sandboxes show in status like any other; their ids start with
+  `ca4a79`.
+- **Alert on these:**
+  - any increase of `compute.alarm.count`. Each occurrence also writes a
+    `compute.alarm` event naming the sandbox (or the stored object's key),
+    so group alerts on that.
+  - `compute.canary.count` with outcome `failed` or `timed_out`, and a
+    `compute.canary.last_run` older than three canary periods for any
+    path, which also catches an agent that died or hangs.
+  - `compute.sample.age` above a minute: the agent's loop is stuck.
+  - `compute.step.oldest_age` above the step's usual time, for example
+    ten minutes for an archive.
+  - `compute.sandbox.unhealthy` above zero: sandboxes broken, blocked or
+    unsavable need a person.
+  - any increase of `compute.export.dropped`: the collector is slow, away
+    or refusing; events are still in the journal.
+- **Find a slow sandbox** by querying `compute.step` and `compute.request`
+  events for its `compute.sandbox.id`. Steps carry time per phase, bytes,
+  cause and the host-side pressure the sandbox saw since its previous
+  event. A caller that sends `traceparent` finds them under its own trace.
+
 ## Upgrades
 
 - **The agent** can be replaced at any time; running VMs keep running
