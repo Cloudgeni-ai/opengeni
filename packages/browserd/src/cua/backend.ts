@@ -13,7 +13,7 @@ import {
   type ComputerBackendClipboard,
 } from "../computer-backend";
 import { callDesktop, Windows, WindowState, type CuaDesktopRuntime } from "./wire";
-import { locate, projectElements } from "./projection";
+import { locate, projectElements, unindexedTextByElement } from "./projection";
 
 type Target = { native: ComputerBackendTarget; pid: number; windowId: number };
 type Frame = {
@@ -339,7 +339,9 @@ export class CuaComputerBackend implements ComputerBackend {
       ...this.args(target),
       include_screenshot: false,
       include_accessibility_tree: true,
-      ...(this.identity.platform !== "windows" ? { tree_format: "elements" } : {}),
+      // Both: the elements carry tokens and frames; the Markdown tree also has
+      // the unindexed text inside rows and cells, which the elements omit.
+      ...(this.identity.platform !== "windows" ? { tree_format: "both" } : {}),
       max_elements: 2000,
       max_depth: 25,
     });
@@ -351,7 +353,11 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
         false,
       );
-    const roots = projectElements(state.elements, this.identity.platform);
+    const roots = projectElements(
+      state.elements,
+      this.identity.platform,
+      unindexedTextByElement(state.tree_markdown),
+    );
     const observation: ComputerBackendObservation = {
       observationId: `${this.session}:${state.snapshot_id}`,
       target: { ...target.native, bounds: state.window_bounds ?? target.native.bounds },

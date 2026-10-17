@@ -55,6 +55,7 @@ export const WindowState = z.object({
   capture_id: z.string().max(256).optional(),
   window_bounds: Rect.optional(),
   elements: z.array(Element).max(2000).default([]),
+  tree_markdown: z.string().max(4_000_000).optional(),
   screenshot_width: id.optional(),
   screenshot_height: id.optional(),
   screenshot_frame_valid: z.boolean().optional(),
