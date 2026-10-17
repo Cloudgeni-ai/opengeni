@@ -468,9 +468,10 @@ export function claudeCoreRequestPreparer(input: {
 }
 
 /**
- * The terminal unknown-outcome failure of a core Claude turn, or null: an
- * earlier or own request whose outcome is unknown is never replayed
- * automatically.
+ * The terminal unknown-outcome failure of a core Claude turn, or null.
+ * Settlement first recovers this attempt's own interrupted request
+ * (`ownInterruptedCoreRequestRecovery`); an earlier unresolved request, or one
+ * still in flight, stays terminal here.
  */
 export function claudeCoreRequestOutcomeUnknown(
   error: unknown,

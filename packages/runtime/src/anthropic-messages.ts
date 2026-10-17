@@ -49,6 +49,15 @@ export class AnthropicProtocolError extends Error {
   readonly code = "anthropic_protocol_error";
 }
 
+/**
+ * The response stream broke before its terminal event: it went silent past
+ * the idle timeout, or the connection ended without `message_stop`. This is
+ * a dropped connection, not a provider answer, so a caller may retry it.
+ */
+export class AnthropicStreamInterruptedError extends Error {
+  readonly code = "anthropic_stream_interrupted";
+}
+
 /** Preserve documented spend proof, without retaining an arbitrary error body. */
 function anthropicSpendLimitCode(error: unknown): string | undefined {
   if (!error || typeof error !== "object" || Array.isArray(error)) return undefined;
@@ -1382,7 +1391,7 @@ export class AnthropicMessagesModel implements Model {
         }
       }
     }
-    throw new AnthropicProtocolError("Claude stream ended without message_stop");
+    throw new AnthropicStreamInterruptedError("Claude stream ended without message_stop");
   }
 }
 
@@ -1503,7 +1512,10 @@ export async function* anthropicSse(
         aborted,
         new Promise<never>((_, reject) => {
           timer = setTimeout(
-            () => reject(new AnthropicProtocolError("Claude stream timed out waiting for data")),
+            () =>
+              reject(
+                new AnthropicStreamInterruptedError("Claude stream timed out waiting for data"),
+              ),
             idleTimeoutMs,
           );
         }),
