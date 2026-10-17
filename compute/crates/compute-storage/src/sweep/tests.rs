@@ -10,7 +10,7 @@ use super::*;
 use crate::chunk::EncodedChunk;
 use crate::fake::{Bucket, Fake, Object, Rng};
 use crate::fresh::{Clock, Freshness};
-use crate::store::unstamped;
+use crate::store::{Begun, TEST_EPOCH, next_save, unstamped};
 
 const SECOND: Duration = Duration::from_secs(1);
 
@@ -55,7 +55,7 @@ async fn old_unnamed_objects_go_and_named_or_recent_ones_stay() {
     for chunk in [&kept, &old, &older] {
         store.put_chunk(chunk).await.unwrap();
     }
-    let publication = store.begin("a").await.unwrap();
+    let publication = store.begin_test("a").await.unwrap();
     store
         .publish(publication, pointer(&[kept.reference.key()]))
         .await
@@ -102,14 +102,16 @@ async fn a_reused_chunk_stored_long_ago_is_stored_again() {
 }
 
 /// An archive's first pointer is an empty one stored when it begins; it
-/// names nothing, reads as no copy, and goes when the sandbox does.
+/// names nothing and reads as no copy. Deleting the sandbox leaves a
+/// tombstone, which no later archive publishes over and a sweep removes
+/// once it is older than the sweep window.
 #[tokio::test(start_paused = true)]
 async fn an_archive_begins_by_storing_an_empty_pointer() {
     let fake = Fake::new(paused_clock());
     let store = ChunkStore::over_fake(&fake, "p");
-    let first = store.begin("a").await.unwrap();
-    let stored = fake.bytes("p/pointers/v2/a").unwrap();
-    assert!(unstamped(&stored).unwrap().is_empty());
+    let first = store.begin_test("a").await.unwrap();
+    let stored = fake.bytes("p/pointers/v3/a").unwrap();
+    assert!(unstamped(&stored).unwrap().1.is_empty());
     assert_eq!(store.get_pointer("a").await.unwrap(), None);
     let looked = sweep(&store, listed_names, true).await.unwrap();
     assert_eq!((looked.pointers, looked.named), (1, 0));
@@ -117,11 +119,30 @@ async fn an_archive_begins_by_storing_an_empty_pointer() {
     let refused = store.publish(first, pointer(&[])).await;
     assert!(matches!(refused, Err(Error::Superseded)), "{refused:?}");
 
-    let again = store.begin("a").await.unwrap();
+    let again = store.begin_test("a").await.unwrap();
     store.publish(again, pointer(&[])).await.unwrap();
     assert_eq!(store.get_pointer("a").await.unwrap(), Some(pointer(&[])));
-    store.delete_pointer("a").await.unwrap();
-    assert!(fake.bytes("p/pointers/v2/a").is_none());
+    store.delete_pointer("a", TEST_EPOCH).await.unwrap();
+    let tombstone = fake.bytes("p/pointers/v3/a").expect("a tombstone");
+    assert!(unstamped(&tombstone).unwrap().1.is_empty());
+    assert_eq!(store.get_pointer("a").await.unwrap(), None);
+    let late = store.begin("a", next_save()).await.unwrap();
+    assert!(matches!(late, Begun::Done), "{late:?}");
+
+    let young = sweep(&store, listed_names, true).await.unwrap();
+    assert_eq!((young.tombstones, young.tombstones_deleted), (1, 0));
+    assert_eq!(
+        fake.bytes("p/pointers/v3/a"),
+        Some(tombstone),
+        "not stored again"
+    );
+    tokio::time::advance(store.freshness().sweep_after() + SECOND).await;
+    let old = sweep(&store, listed_names, true).await.unwrap();
+    assert_eq!(
+        (old.tombstones, old.old_tombstones, old.tombstones_deleted),
+        (1, 1, 1)
+    );
+    assert!(fake.bytes("p/pointers/v3/a").is_none());
 }
 
 /// The race a deadline cannot close: an archive reuses an old chunk, its
@@ -136,11 +157,11 @@ async fn a_publication_held_up_past_a_sweep_never_lands() {
     let reused = chunk(9);
     let key = reused.reference.key();
     store.put_chunk(&reused).await.unwrap();
-    let empty = store.begin("a").await.unwrap();
+    let empty = store.begin_test("a").await.unwrap();
     store.publish(empty, pointer(&[])).await.unwrap();
     // Exactly as old as an archive may reuse without storing it again.
     tokio::time::advance(SIMULATED.refresh_after).await;
-    let publication = store.begin("a").await.unwrap();
+    let publication = store.begin_test("a").await.unwrap();
     assert!(!store.put_chunk(&reused).await.unwrap(), "reused as it is");
     let generation = fake.object(&format!("p/{key}")).unwrap().generation;
 
@@ -166,7 +187,7 @@ async fn a_publication_held_up_past_a_sweep_never_lands() {
         "the pointer names nothing that is gone"
     );
 
-    let again = store.begin("a").await.unwrap();
+    let again = store.begin_test("a").await.unwrap();
     assert!(store.put_chunk(&reused).await.unwrap(), "stored anew");
     assert!(fake.object(&format!("p/{key}")).unwrap().generation > generation);
     store.publish(again, pointer(&[key])).await.unwrap();
@@ -194,11 +215,15 @@ async fn a_change_held_up_past_a_newer_copy_never_lands() {
     let (memory, disk, newer) = (chunk(1), chunk(2), chunk(3));
     store.put_chunk(&memory).await.unwrap();
     store.put_chunk(&disk).await.unwrap();
-    let first = store.begin("a").await.unwrap();
+    let first = store.begin_test("a").await.unwrap();
     let both = pointer(&[memory.reference.key(), disk.reference.key()]);
     store.publish(first, both).await.unwrap();
 
-    let (_, change) = store.read_for_change("a").await.unwrap().unwrap();
+    let (_, change) = store
+        .read_for_change("a", TEST_EPOCH)
+        .await
+        .unwrap()
+        .unwrap();
     *fake.stall.lock().unwrap() = Some(("pointers/", 300 * SECOND));
     let forgetting = tokio::spawn({
         let (store, key) = (store.clone(), disk.reference.key());
@@ -206,7 +231,7 @@ async fn a_change_held_up_past_a_newer_copy_never_lands() {
     });
     give_up_once_held(&fake, forgetting).await;
 
-    let archive = store.begin("a").await.unwrap();
+    let archive = store.begin_test("a").await.unwrap();
     store.put_chunk(&newer).await.unwrap();
     let current = pointer(&[newer.reference.key()]);
     store.publish(archive, current.clone()).await.unwrap();
@@ -227,17 +252,17 @@ async fn a_change_held_up_past_a_newer_copy_never_lands() {
 async fn a_delete_held_up_past_a_newer_copy_never_lands() {
     let fake = Fake::new(paused_clock());
     let store = ChunkStore::over_fake(&fake, "p");
-    let first = store.begin("a").await.unwrap();
+    let first = store.begin_test("a").await.unwrap();
     store.publish(first, pointer(&[])).await.unwrap();
     *fake.stall.lock().unwrap() = Some(("pointers/", 300 * SECOND));
     let deleting = tokio::spawn({
         let store = store.clone();
-        async move { store.delete_pointer("a").await }
+        async move { store.delete_pointer("a", TEST_EPOCH).await }
     });
     give_up_once_held(&fake, deleting).await;
 
     let stored = chunk(4);
-    let again = store.begin("a").await.unwrap();
+    let again = store.begin_test("a").await.unwrap();
     store.put_chunk(&stored).await.unwrap();
     let current = pointer(&[stored.reference.key()]);
     store.publish(again, current.clone()).await.unwrap();
@@ -247,10 +272,9 @@ async fn a_delete_held_up_past_a_newer_copy_never_lands() {
     assert_eq!(store.get_pointer("a").await.unwrap(), Some(current));
 }
 
-/// The same where an entity tag follows the bytes (S3) and deletes carry
-/// no condition: the sandbox is removed again and a new one of the same
-/// name stores exactly the pointer the held-up delete read. That pointer
-/// is a later write with its own stamp, so the delete is still refused.
+/// The same where an entity tag follows the bytes (S3): an archive stores
+/// exactly the pointer the held-up delete read. That pointer is a later
+/// write with its own stamp, so the delete is still refused.
 #[tokio::test(start_paused = true)]
 async fn a_delete_held_up_past_the_same_bytes_stored_again_never_lands() {
     let fake = Fake::new(paused_clock());
@@ -258,18 +282,16 @@ async fn a_delete_held_up_past_the_same_bytes_stored_again_never_lands() {
     let store = ChunkStore::new(Arc::new(Bucket(fake.clone())), Path::from("p"))
         .with_clock(fake.clock.clone());
     let same = pointer(&[]);
-    let first = store.begin("a").await.unwrap();
+    let first = store.begin_test("a").await.unwrap();
     store.publish(first, same.clone()).await.unwrap();
     *fake.stall.lock().unwrap() = Some(("pointers/", 300 * SECOND));
     let deleting = tokio::spawn({
         let store = store.clone();
-        async move { store.delete_pointer("a").await }
+        async move { store.delete_pointer("a", TEST_EPOCH).await }
     });
     give_up_once_held(&fake, deleting).await;
 
-    store.delete_pointer("a").await.unwrap();
-    assert_eq!(store.get_pointer("a").await.unwrap(), None);
-    let again = store.begin("a").await.unwrap();
+    let again = store.begin_test("a").await.unwrap();
     store.publish(again, same.clone()).await.unwrap();
 
     tokio::time::sleep(301 * SECOND).await;
@@ -302,7 +324,7 @@ async fn a_sweep_that_cannot_read_a_pointer_deletes_nothing() {
     let store = ChunkStore::over_fake(&fake, "p");
     store.put_chunk(&chunk(6)).await.unwrap();
     store
-        .put_pointer_unfenced("garbled", b"not json".to_vec())
+        .put_pointer_unfenced("garbled", next_save(), b"not json".to_vec())
         .await
         .unwrap();
     tokio::time::advance(store.freshness().sweep_after() + SECOND).await;
@@ -316,9 +338,9 @@ async fn only_a_store_that_deletes_on_condition_deletes() {
     let backend = Arc::new(InMemory::new());
     let store = ChunkStore::new(backend.clone(), Path::from("p"));
     store.put_chunk(&chunk(7)).await.unwrap();
-    let empty = store.begin("a").await.unwrap();
+    let empty = store.begin_test("a").await.unwrap();
     store.publish(empty, pointer(&[])).await.unwrap();
-    let pointer_path = Path::from("p/pointers/v2/a");
+    let pointer_path = Path::from("p/pointers/v3/a");
     let version = backend.head(&pointer_path).await.unwrap().e_tag;
     // Seen from far enough ahead, the chunk is old.
     let later = SystemTime::now() + 30 * Duration::from_secs(86_400);
@@ -345,8 +367,8 @@ const SIMULATED: Freshness = Freshness {
 fn pointers_stay_whole(objects: &BTreeMap<String, Object>, name: &str) -> bool {
     objects
         .iter()
-        .filter(|(key, _)| key.starts_with("p/pointers/v2/"))
-        .map(|(_, pointer)| unstamped(&pointer.bytes).unwrap())
+        .filter(|(key, _)| key.starts_with("p/pointers/v3/"))
+        .map(|(_, pointer)| unstamped(&pointer.bytes).unwrap().1)
         .filter(|pointer| !pointer.is_empty())
         .all(|pointer| {
             let keys: Vec<String> = serde_json::from_slice(&pointer).unwrap();
@@ -396,10 +418,13 @@ async fn simulate(seed: u64, archives: Freshness, sweeps: Freshness, fenced: boo
             let store = ChunkStore::over_fake(fake, "p")
                 .with_freshness(archives)
                 .with_clock(skewed_clock(skew(&mut rng, archives)));
+            // A deleted sandbox's name is never used again.
+            let mut deletes = [0_u64; 2];
             for _round in 0..8 {
                 tokio::time::sleep(seconds(&mut rng, 30)).await;
-                let name = format!("w{w}s{}", rng.below(2));
-                let publication = store.begin(&name).await.unwrap();
+                let slot = usize::try_from(rng.below(2)).unwrap();
+                let name = format!("w{w}s{slot}d{}", deletes[slot]);
+                let publication = store.begin_test(&name).await.unwrap();
                 let mut keys = Vec::new();
                 for _ in 0..=rng.below(3) {
                     let chunk = &contents[usize::try_from(rng.below(16)).unwrap()];
@@ -412,7 +437,9 @@ async fn simulate(seed: u64, archives: Freshness, sweeps: Freshness, fenced: boo
                 let published = if fenced {
                     store.publish(publication, pointer(&keys)).await
                 } else {
-                    store.put_pointer_unfenced(&name, pointer(&keys)).await
+                    store
+                        .put_pointer_unfenced(&name, next_save(), pointer(&keys))
+                        .await
                 };
                 match published {
                     Ok(()) => {
@@ -428,7 +455,8 @@ async fn simulate(seed: u64, archives: Freshness, sweeps: Freshness, fenced: boo
                     Err(error) => panic!("{error}"),
                 }
                 if rng.below(4) == 0 {
-                    store.delete_pointer(&name).await.unwrap();
+                    store.delete_pointer(&name, TEST_EPOCH).await.unwrap();
+                    deletes[slot] += 1;
                 }
             }
         }

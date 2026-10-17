@@ -345,6 +345,7 @@ dependencies = [
  "blake3",
  "bytes",
  "chrono",
+ "compute-fleet",
  "crc32c",
  "futures",
  "getrandom 0.3.4",

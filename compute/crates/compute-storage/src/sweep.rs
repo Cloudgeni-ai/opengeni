@@ -1,5 +1,6 @@
 //! Deletes the chunks and manifests no pointer names any more: those of
-//! deleted sandboxes, forgotten memory images and replaced copies.
+//! deleted sandboxes, forgotten memory images and replaced copies; and the
+//! tombstones deleted sandboxes left, once older than the same window.
 //!
 //! A sweep reads every pointer, storing it again so no archive begun
 //! earlier can replace it, asks its owner which objects each one names,
@@ -17,7 +18,7 @@ use std::collections::HashSet;
 
 use futures::{StreamExt as _, TryStreamExt as _, stream};
 
-use crate::store::{Area, ChunkStore, Listed, Removal};
+use crate::store::{Area, ChunkStore, Listed, Removal, Stock};
 use crate::{Error, Result};
 
 /// Pointers read at once.
@@ -29,8 +30,14 @@ const DELETES: usize = 32;
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Report {
     /// Pointer objects listed, counting the empty ones that name nothing
-    /// (an archive's start, or a delete where deletes carry no condition).
+    /// (an archive's start) and tombstones.
     pub pointers: usize,
+    /// Tombstones of deleted sandboxes found.
+    pub tombstones: usize,
+    /// Tombstones stored long enough ago to delete.
+    pub old_tombstones: usize,
+    /// Tombstones deleted.
+    pub tombstones_deleted: usize,
     /// Chunks and manifests some pointer names.
     pub named: usize,
     /// Chunks and manifests stored.
@@ -79,26 +86,38 @@ where
         ..Report::default()
     };
     let names = &names;
-    let in_use: Vec<Vec<String>> = stream::iter(pointers)
+    let taken: Vec<(Vec<String>, Option<Listed>)> = stream::iter(pointers)
         .map(|listed| async move {
             // Only a sweep that deletes fences: a look stops no archive.
-            let bytes = if delete {
+            let stock = if delete {
                 store.fence(&listed.key).await?
             } else {
-                let name =
-                    ChunkStore::pointer_name(&listed.key).ok_or(Error::Invalid("pointer key"))?;
-                store.get_pointer(name).await?
+                store.look(&listed.key).await?
             };
-            match bytes {
-                Some(bytes) if !bytes.is_empty() => names(bytes).await,
+            Ok::<_, Error>(match stock {
+                Stock::Holds(bytes) if !bytes.is_empty() => (names(bytes).await?, None),
+                Stock::Tombstone => (Vec::new(), Some(listed)),
                 // Deleted since the listing, so what it named may go, or
                 // the empty pointer of an archive that has not published.
-                _ => Ok(Vec::new()),
-            }
+                Stock::Holds(_) | Stock::Gone => (Vec::new(), None),
+            })
         })
         .buffer_unordered(READS)
         .try_collect()
         .await?;
+    let mut in_use = Vec::with_capacity(taken.len());
+    let mut old_tombstones = Vec::new();
+    for (named, tombstone) in taken {
+        in_use.push(named);
+        if let Some(listed) = tombstone {
+            report.tombstones += 1;
+            // Its time as listed: a sweep never stores a tombstone again.
+            if listed.stored_at < before {
+                old_tombstones.push(listed);
+            }
+        }
+    }
+    report.old_tombstones = old_tombstones.len();
     let in_use: HashSet<String> = in_use.into_iter().flatten().collect();
     report.named = in_use.len();
 
@@ -140,6 +159,19 @@ where
             Removal::Gone => {}
         }
     }
+    let tombstones: Vec<Removal> = stream::iter(old_tombstones)
+        .map(|listed| async move {
+            store
+                .delete_tombstone_if_stored_before(&listed.key, before)
+                .await
+        })
+        .buffer_unordered(DELETES)
+        .try_collect()
+        .await?;
+    report.tombstones_deleted = tombstones
+        .into_iter()
+        .filter(|removal| *removal == Removal::Deleted)
+        .count();
     Ok(report)
 }
 

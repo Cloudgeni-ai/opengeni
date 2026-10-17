@@ -86,7 +86,9 @@ can be built and tested.
   ([7](0007-never-delete-the-only-good-copy.md)), and only by a later
   stamp, checked on the very version the write is conditional on, at every
   attempt and retry: a publish, a claim, forgetting a memory image, a
-  delete (which leaves a tombstone with the stamp). A new owner's first
+  delete (which leaves a tombstone with the stamp; a tombstone is final,
+  so no owner archives over it, and a sweep removes it after the sweep
+  window). A new owner's first
   act is to claim the pointer: it stores it again, unchanged but under its
   epoch, so an archive a former owner began earlier fails its condition,
   reads the pointer again, finds the newer epoch and stops, and the host

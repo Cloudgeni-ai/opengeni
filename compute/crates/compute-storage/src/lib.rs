@@ -33,6 +33,10 @@ pub enum Error {
     /// pointer before it deletes anything (see [`fresh`]).
     #[error("the stored copy changed meanwhile; the change starts again")]
     Superseded,
+    /// A later owner holds the pointer: the sandbox belongs to it, so
+    /// this host may not write it and drops its copy.
+    #[error("a later owner, at epoch {by}, holds this sandbox's copy")]
+    Fenced { by: compute_fleet::OwnerEpoch },
     /// This store cannot do what was asked.
     #[error("unsupported by this store: {0}")]
     Unsupported(&'static str),
@@ -57,6 +61,7 @@ impl Error {
             | Self::Truncated { .. }
             | Self::Json(_)
             | Self::Unsupported(_)
+            | Self::Fenced { .. }
             | Self::Object(object_store::Error::NotFound { .. }) => true,
             Self::Transfer(_) | Self::Superseded | Self::Io(_) | Self::Object(_) => false,
         }
