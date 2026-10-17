@@ -10,6 +10,7 @@ use compute_engine::{Engine, EngineError, ErrorKind, Found, VmSpec};
 use futures::StreamExt;
 
 use crate::layout::{Images, Paths, vm_spec};
+use crate::observe::{Alarm, alarm_event};
 use crate::protocol::{Id, MAX_MEMORY_MIB, SandboxConfig};
 use crate::state::{Change, Disk, Identity, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory, Reconnected};
@@ -618,6 +619,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         Ok(true) => {}
                         Ok(false) => {
                             tracing::warn!(id = %record.id, "recorded memory image is missing; its programs are lost");
+                            for alarm in [Alarm::CopyLost, Alarm::ProgramsLost] {
+                                let what = "the recorded memory image is missing";
+                                let event = alarm_event(what)
+                                    .with("compute.sandbox.id", record.id.to_string());
+                                self.observer.alarm(alarm, event);
+                            }
                             let lost = Change::new().image(false);
                             self.records.commit(record.id, record.fence(), lost).await?;
                             image = false;

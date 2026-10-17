@@ -73,6 +73,15 @@ impl Lanes {
     fn waited_on(&self) -> usize {
         *self.foreground.borrow()
     }
+
+    /// How many foreground transfers are under way, and how many
+    /// background transfers hold a slot.
+    #[must_use]
+    pub fn counts(&self) -> (u64, u64) {
+        let foreground = *self.foreground.borrow();
+        let background = BACKGROUND.saturating_sub(self.background.available_permits());
+        (foreground as u64, background as u64)
+    }
 }
 
 /// Foreground transfers are under way while this lives.

@@ -23,6 +23,7 @@ mod lazy;
 #[cfg(target_os = "linux")]
 mod logs;
 pub mod net;
+pub mod observe;
 #[cfg(target_os = "linux")]
 mod paging;
 mod pool;

@@ -203,6 +203,15 @@ impl Chunked {
         Ok(ChunkStore::from_url(url)?.map(Self::new))
     }
 
+    /// The same store telling `watch` about every object it quarantines.
+    #[must_use]
+    pub fn with_watch(self, watch: Arc<dyn compute_storage::store::QuarantineWatch>) -> Self {
+        Self {
+            chunks: self.chunks.with_watch(watch),
+            ..self
+        }
+    }
+
     /// Refuses a store this release cannot read every copy in; see
     /// [`ChunkStore::refuse_unstamped_pointers`].
     pub async fn refuse_unreadable(&self) -> Result<(), StorageError> {
@@ -483,10 +492,14 @@ impl Chunked {
         }
         let chunk = EncodedChunk::encode(bytes, ZSTD_LEVEL)
             .map_err(|error| storage_error("archive", error))?;
-        self.chunks
+        let stored = self
+            .chunks
             .put_chunk(&chunk)
             .await
             .map_err(|error| storage_error("archive", error))?;
+        if stored {
+            crate::observe::notes::bytes("uploaded", chunk.bytes.len() as u64);
+        }
         Ok(Some(chunk.reference))
     }
 
@@ -698,6 +711,10 @@ impl Store for Chunked {
         // A sandbox waits on all of it: its disk, state and pack.
         let _waited_on = self.lanes.foreground();
         let Some(head) = self.head(OP, id).await? else {
+            crate::observe::notes::alarm(
+                crate::observe::Alarm::CopyLost,
+                &"the store holds no copy of this sandbox",
+            );
             return Err(EngineError::new(
                 ErrorKind::Fatal,
                 OP,

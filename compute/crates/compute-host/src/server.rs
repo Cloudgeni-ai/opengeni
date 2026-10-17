@@ -6,10 +6,11 @@ use std::os::fd::AsFd;
 use std::path::Path;
 use std::pin::pin;
 use std::sync::PoisonError;
-use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed, Ordering::SeqCst};
 use std::time::Duration;
 
 use compute_core::Priority;
+use serde::Deserialize;
 use tokio::io::{
     AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, Interest,
 };
@@ -18,6 +19,7 @@ use tokio::sync::Notify;
 use tokio::time::{Instant, sleep_until};
 
 use crate::agent::{Handle, HostError, Lease};
+use crate::observe::served::{Ended, Served};
 use crate::protocol::{ErrorCode, Id, Reply, Request, step_name};
 
 /// Bytes relayed per read, each way.
@@ -34,6 +36,17 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 /// First and longest pause after accepting a connection fails.
 const ACCEPT_BACKOFF: (Duration, Duration) = (Duration::from_millis(10), Duration::from_secs(1));
+
+/// A request with the caller's W3C trace context, if it sent one. A
+/// `traceparent` that is not valid is ignored, as the W3C recommendation
+/// asks.
+#[derive(Deserialize)]
+struct Envelope {
+    #[serde(default)]
+    traceparent: Option<String>,
+    #[serde(flatten)]
+    request: Request,
+}
 
 /// Accepts connections on `socket` for as long as the agent runs. Fails only
 /// if it cannot listen.
@@ -78,15 +91,26 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
         Ok(Ok(_)) => {}
         Ok(Err(error)) => return Err(error),
     }
-    let request: Request = match serde_json::from_str(&line) {
-        Ok(request) => request,
+    let started = Instant::now();
+    let Envelope {
+        traceparent,
+        request,
+    } = match serde_json::from_str(&line) {
+        Ok(envelope) => envelope,
         Err(error) => {
             let message = format!("bad request: {error}");
             let code = ErrorCode::Invalid;
-            return write_reply(&mut client, &Reply::Error { message, code }).await;
+            let reply = Reply::Error { message, code };
+            let written = write_reply(&mut client, &reply).await;
+            Served::invalid(handle.observer(), started, &reply);
+            return written;
         }
     };
-    let reply = match request {
+    let trace = traceparent.and_then(|text| text.parse().ok());
+    let mut served = Served::new(handle.observer(), &request, trace, started);
+    let traced = handle.traced(trace);
+    let handle = &traced;
+    let request = match request {
         Request::Connect {
             id,
             generation,
@@ -100,8 +124,28 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
                 generation,
                 priority: priority.into(),
             };
-            return serve_connect(client, acquire, port, &wake).await;
+            return serve_connect(client, acquire, port, &wake, served).await;
         }
+        other => other,
+    };
+    let Some(reply) = respond(handle, request, client.get_ref(), &mut served).await else {
+        served.hung_up();
+        return Ok(());
+    };
+    let written = write_reply(&mut client, &reply).await;
+    served.finish(&reply);
+    written
+}
+
+/// Answers every request but `Connect`. `None` means the client hung up
+/// before the answer was ready.
+async fn respond(
+    handle: &Handle,
+    request: Request,
+    client: &UnixStream,
+    served: &mut Served,
+) -> Option<Reply> {
+    Some(match request {
         Request::Create { id, config } => done(handle.create(id, config).await),
         Request::Remove { id, generation } => done(handle.remove(id, generation).await),
         Request::Touch {
@@ -120,17 +164,18 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
             hold,
             ttl_ms,
             priority,
-        } => done(
-            handle
-                .hold(
-                    id,
-                    generation,
-                    &hold,
-                    ttl_ms.map(Duration::from_millis),
-                    priority.into(),
-                )
-                .await,
-        ),
+        } => {
+            let ttl = ttl_ms.map(Duration::from_millis);
+            match (handle.hold_renewing(id, generation, &hold, ttl, priority.into())).await {
+                Ok(renewed) => {
+                    if renewed {
+                        served.only_count();
+                    }
+                    Reply::Done
+                }
+                Err(error) => error_reply(&error),
+            }
+        }
         Request::Release {
             id,
             generation,
@@ -140,26 +185,24 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
             id,
             generation,
             priority,
-        } => match unless_hung_up(
-            client.get_ref(),
-            handle.acquire(id, generation, priority.into()),
-        )
-        .await
-        {
-            Some(Ok(lease)) => Reply::Woken {
-                waited_us: micros(lease.waited()),
-                during: lease.during().map(|step| step_name(step).to_owned()),
-                generation: lease.generation(),
-            },
+        } => match unless_hung_up(client, handle.acquire(id, generation, priority.into())).await {
+            Some(Ok(lease)) => {
+                served.woke(&lease);
+                Reply::Woken {
+                    waited_us: micros(lease.waited()),
+                    during: lease.during().map(|step| step_name(step).to_owned()),
+                    generation: lease.generation(),
+                }
+            }
             Some(Err(error)) => error_reply(&error),
-            None => return Ok(()),
+            None => return None,
         },
         Request::Status => match handle.status().await {
             Ok(status) => Reply::Status(Box::new(status)),
             Err(error) => error_reply(&error),
         },
-    };
-    write_reply(&mut client, &reply).await
+        Request::Connect { .. } => unreachable!("connections are relayed before this"),
+    })
 }
 
 /// How a stream wakes its sandbox again.
@@ -186,12 +229,15 @@ struct Wake<'a> {
 /// Each direction runs on its own, so one side that is slow to read never
 /// stops the other from draining (a guest echoing an upload back while the
 /// client is still sending it), and the idle clock runs beside both.
+///
+/// Returns how it ended, with the bytes it moved to the guest and to the
+/// client.
 async fn relay(
     wake: &Wake<'_>,
     lease: Lease,
     client: impl AsyncRead + AsyncWrite,
     guest: UnixStream,
-) -> io::Result<()> {
+) -> (io::Result<End>, [u64; 2]) {
     let flow = Flow::new(wake, lease);
     let (client_read, client_write) = tokio::io::split(client);
     let (guest_read, guest_write) = guest.into_split();
@@ -199,24 +245,28 @@ async fn relay(
     let mut down = pin!(flow.pump(guest_read, client_write, Hold::WhenMoved));
     let mut watch = pin!(flow.watch(wake.handle.stream_idle()));
     let (mut up_done, mut down_done) = (false, false);
-    while !(up_done && down_done) {
-        tokio::select! {
-            end = &mut up, if !up_done => {
-                end?;
-                up_done = true;
-            }
-            end = &mut down, if !down_done => {
-                // Ended with the VM the sandbox's sleep ended: nothing
-                // the client sends could reach it.
-                if end? == End::Slept {
-                    return Ok(());
+    let ended = async {
+        while !(up_done && down_done) {
+            tokio::select! {
+                end = &mut up, if !up_done => {
+                    end?;
+                    up_done = true;
                 }
-                down_done = true;
+                end = &mut down, if !down_done => {
+                    // Ended with the VM the sandbox's sleep ended: nothing
+                    // the client sends could reach it.
+                    if end? == End::Slept {
+                        return Ok(End::Slept);
+                    }
+                    down_done = true;
+                }
+                () = &mut watch => {}
             }
-            () = &mut watch => {}
         }
+        Ok(End::Finished)
     }
-    Ok(())
+    .await;
+    (ended, flow.moved_bytes())
 }
 
 /// How one direction of a relay ended.
@@ -268,6 +318,8 @@ struct Flow<'a, K: Keeper> {
     delivering: AtomicBool,
     /// Told when they are delivered.
     delivered: Notify,
+    /// Bytes moved to the guest and to the client.
+    bytes: [AtomicU64; 2],
 }
 
 impl<'a, K: Keeper + Sync> Flow<'a, K> {
@@ -279,7 +331,13 @@ impl<'a, K: Keeper + Sync> Flow<'a, K> {
             resumed: Notify::new(),
             delivering: AtomicBool::new(false),
             delivered: Notify::new(),
+            bytes: [AtomicU64::new(0), AtomicU64::new(0)],
         }
+    }
+
+    /// Bytes moved so far to the guest and to the client.
+    fn moved_bytes(&self) -> [u64; 2] {
+        self.bytes.each_ref().map(|bytes| bytes.load(Relaxed))
     }
 
     /// Copies `from` to `to` until `from` ends, keeping the sandbox awake
@@ -317,6 +375,8 @@ impl<'a, K: Keeper + Sync> Flow<'a, K> {
                 self.delivering.store(false, SeqCst);
                 self.delivered.notify_one();
             }
+            let direction = usize::from(hold == Hold::WhenMoved);
+            self.bytes[direction].fetch_add(n as u64, Relaxed);
         }
     }
 
@@ -375,29 +435,58 @@ async fn serve_connect(
     acquire: impl Future<Output = Result<Lease, HostError>>,
     port: u32,
     wake: &Wake<'_>,
+    mut served: Served,
 ) -> io::Result<()> {
     let mut lease = match unless_hung_up(client.get_ref(), acquire).await {
         Some(Ok(lease)) => lease,
-        Some(Err(error)) => return write_reply(&mut client, &error_reply(&error)).await,
-        None => return Ok(()),
+        Some(Err(error)) => return answer(&mut client, served, &error_reply(&error)).await,
+        None => {
+            served.hung_up();
+            return Ok(());
+        }
     };
+    served.woke(&lease);
     let started = Instant::now();
     let connect = lease.connect(port, CONNECT_TIMEOUT);
     let guest = match unless_hung_up(client.get_ref(), connect).await {
         Some(Ok(guest)) => guest,
-        Some(Err(error)) => return write_reply(&mut client, &error_reply(&error)).await,
-        None => return Ok(()),
+        Some(Err(error)) => return answer(&mut client, served, &error_reply(&error)).await,
+        None => {
+            served.hung_up();
+            return Ok(());
+        }
     };
-    write_reply(
-        &mut client,
-        &Reply::Connected {
-            waited_us: micros(lease.waited()),
-            connect_us: micros(started.elapsed()),
-            generation: lease.generation(),
-        },
-    )
-    .await?;
-    relay(wake, lease, client, guest).await
+    let connected = started.elapsed();
+    served.note("compute.connect_us", connected);
+    let reply = Reply::Connected {
+        waited_us: micros(lease.waited()),
+        connect_us: micros(connected),
+        generation: lease.generation(),
+    };
+    let stream = served.stream();
+    if let Err(error) = answer(&mut client, served, &reply).await {
+        stream.closed(Ended::Failed, 0, 0, Some(error.to_string()));
+        return Err(error);
+    }
+    let (ended, [to_guest, to_client]) = relay(wake, lease, client, guest).await;
+    let (how, error) = match &ended {
+        Ok(End::Finished) => (Ended::Finished, None),
+        Ok(End::Slept) => (Ended::Slept, None),
+        Err(error) => (Ended::Failed, Some(error.to_string())),
+    };
+    stream.closed(how, to_guest, to_client, error);
+    ended.map(|_| ())
+}
+
+/// Writes `reply` and tells `served` it was answered.
+async fn answer(
+    client: &mut (impl AsyncWrite + Unpin),
+    served: Served,
+    reply: &Reply,
+) -> io::Result<()> {
+    let written = write_reply(client, reply).await;
+    served.finish(reply);
+    written
 }
 
 fn done(result: Result<(), HostError>) -> Reply {
@@ -611,6 +700,37 @@ mod tests {
             () = &mut watch => unreachable!("the watch never ends"),
         }
         assert_eq!(keeper.held.load(SeqCst), 0);
+    }
+
+    /// A request reads the same with and without a trace context beside
+    /// its fields; a context that is not valid is ignored.
+    #[test]
+    fn a_trace_context_rides_beside_any_request() {
+        let id = Id(compute_core::SandboxId(7));
+        let request = Request::Remove {
+            id,
+            generation: Some(2),
+        };
+        let mut json = serde_json::to_value(&request).unwrap();
+        let plain: Envelope = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(plain.request, request);
+        assert_eq!(plain.traceparent, None);
+        let header = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        json["traceparent"] = header.into();
+        let traced: Envelope = serde_json::from_value(json).unwrap();
+        assert_eq!(traced.request, request);
+        let context: crate::observe::TraceContext = traced.traceparent.unwrap().parse().unwrap();
+        assert_eq!(context.span_hex(), "00f067aa0ba902b7");
+        let status: Envelope =
+            serde_json::from_str(r#"{"op":"status","traceparent":"junk"}"#).unwrap();
+        assert_eq!(status.request, Request::Status);
+        assert!(
+            status
+                .traceparent
+                .unwrap()
+                .parse::<crate::observe::TraceContext>()
+                .is_err()
+        );
     }
 
     const SOON: Duration = Duration::from_millis(200);

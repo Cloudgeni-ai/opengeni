@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use compute_core::{Failure, Outcome, Step};
 use compute_engine::{
     CancellationToken, Completion, Engine, EngineError, ErrorKind, MemoryProfile, MemorySource,
-    Readable, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
+    MemoryStats, Readable, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +40,8 @@ use crate::image::{Images, Parts, Suspect, Verified};
 use crate::layout::{Paths, link_kernel, remove_durably, remove_if_present, write_atomic};
 #[cfg(target_os = "linux")]
 use crate::lazy::{Fetcher, Hydration};
+use crate::observe::Alarm;
+use crate::observe::notes::{self, Notes};
 #[cfg(target_os = "linux")]
 use crate::paging::Paging;
 use crate::protocol::Id;
@@ -102,11 +104,22 @@ pub(crate) enum After<V> {
 pub(crate) struct Ran<V> {
     pub outcome: Outcome,
     pub after: After<V>,
+    pub report: Report,
+}
+
+/// What a step tells about itself besides its outcome.
+#[derive(Debug, Default)]
+pub(crate) struct Report {
     /// VM processes the step started, counting any it ended again before
     /// finishing, such as a restore whose resume failed.
     pub launches: u32,
-    /// What went wrong, when the step failed, for the sandbox's status.
-    pub error: Option<String>,
+    /// What it noted; its error only when it failed, for the sandbox's
+    /// status.
+    pub notes: Notes,
+    /// The memory statistics of the VM process it was given, with that
+    /// process's incarnation, read as it began: what the sandbox went
+    /// through while awake.
+    pub reading: Option<(u64, MemoryStats)>,
 }
 
 /// Which stored copy matches the local files. The record says whether an
@@ -155,22 +168,9 @@ pub(crate) struct Job<E: Engine, S> {
     pub last_used_ms: u64,
 }
 
-tokio::task_local! {
-    /// The first error a running step met, kept for its [`Ran::error`]
-    /// without threading it through every early return.
-    static FIRST_ERROR: std::cell::RefCell<Option<String>>;
-}
-
-/// Keeps `error` as the running step's error, unless it already met one.
-fn note_error(error: &dyn std::fmt::Display) {
-    let _ = FIRST_ERROR.try_with(|first| {
-        first.borrow_mut().get_or_insert_with(|| error.to_string());
-    });
-}
-
 fn failure(error: &EngineError) -> Outcome {
     tracing::warn!(%error, "step failed");
-    note_error(error);
+    notes::error(error);
     Outcome::Failed(match error.kind {
         ErrorKind::Transient => Failure::Transient,
         ErrorKind::MemoryLost => Failure::MemoryLost,
@@ -184,7 +184,7 @@ fn io_failure(operation: &'static str, error: io::Error) -> Outcome {
 
 /// What failing to record a step's effect means for the sandbox.
 fn state_failure(error: &StateError) -> Outcome {
-    note_error(error);
+    notes::error(error);
     if let StateError::Io(_) = error {
         tracing::warn!(%error, "step could not record its effect");
         Outcome::Failed(Failure::Transient)
@@ -294,34 +294,50 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// lost the VM's memory leaves no VM process: it is ended before the
     /// step reports, since the core may start a replacement on the same disk
     /// right after.
+    ///
+    /// A step that may end its sandbox's time awake reads the VM's memory
+    /// statistics first; a wake does not, so it is not slowed.
     pub async fn run(mut self, step: Step) -> Ran<E::Vm> {
-        let ((mut outcome, mut after), error) = FIRST_ERROR
-            .scope(std::cell::RefCell::new(None), async {
-                let ran = self.step(step).await;
-                (ran, FIRST_ERROR.with(std::cell::RefCell::take))
+        let reading = if step.wakes() {
+            None
+        } else {
+            self.live.as_ref().and_then(|live| {
+                let stats = self.engine.memory_stats(&live.vm).ok()?;
+                Some((live.incarnation, stats))
             })
-            .await;
-        if outcome == Outcome::Failed(Failure::MemoryLost) {
-            // The memory (and any pager serving it) goes only after the
-            // process.
-            let ended = match after {
-                After::NoVm => None,
-                After::Kept(live) => {
-                    live.stopping.store(true, Ordering::Release);
-                    Some((live.vm, live.memory))
+        };
+        let ((outcome, after), mut notes) = notes::scope(async {
+            let (mut outcome, mut after) = self.step(step).await;
+            if outcome == Outcome::Failed(Failure::MemoryLost) {
+                // The memory (and any pager serving it) goes only after the
+                // process.
+                let ended = match after {
+                    After::NoVm => None,
+                    After::Kept(live) => {
+                        live.stopping.store(true, Ordering::Release);
+                        Some((live.vm, live.memory))
+                    }
+                    After::New(vm, memory) => Some((vm, memory)),
+                };
+                if let Some((vm, memory)) = ended {
+                    outcome = self.end_with_memory(vm, memory, outcome).await;
                 }
-                After::New(vm, memory) => Some((vm, memory)),
-            };
-            if let Some((vm, memory)) = ended {
-                outcome = self.end_with_memory(vm, memory, outcome).await;
+                after = After::NoVm;
             }
-            after = After::NoVm;
+            (outcome, after)
+        })
+        .await;
+        if !matches!(outcome, Outcome::Failed(_)) {
+            notes.error = None;
         }
         Ran {
             outcome,
             after,
-            launches: self.launches,
-            error: error.filter(|_| matches!(outcome, Outcome::Failed(_))),
+            report: Report {
+                launches: self.launches,
+                notes,
+                reading,
+            },
         }
     }
 
@@ -608,6 +624,10 @@ impl<E: Engine, S: Store> Job<E, S> {
             // The core only drops a VM with a current copy; ending this one
             // would lose its running programs.
             tracing::error!(id = %self.id, "no saved copy to fall back on; keeping the VM");
+            notes::alarm(
+                Alarm::OnlyCopyKept,
+                &"no saved copy to fall back on; keeping the VM",
+            );
             return (Outcome::Failed(Failure::Fatal), After::Kept(live));
         }
         live.stopping.store(true, Ordering::Release);
@@ -642,6 +662,14 @@ impl<E: Engine, S: Store> Job<E, S> {
         } else {
             SnapshotKind::Diff
         };
+        notes::detail(
+            "compute.snapshot",
+            if kind == SnapshotKind::Full {
+                "full"
+            } else {
+                "diff"
+            },
+        );
         let files = diff_files(&self.paths);
         // The VMM syncs the disk while it takes the snapshot, so the check
         // that vouches for the disk starts first.
@@ -651,12 +679,12 @@ impl<E: Engine, S: Store> Job<E, S> {
             .await
             .and_then(|begun| begun)
             .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?;
-        let started = Instant::now();
+        notes::phase("prepare");
         // From here on the VM's dirty pages are being reset: any failure
         // leaves its base unknown.
         live.memory.base = Base::Unknown;
         self.engine.snapshot(&live.vm, &files, kind).await?;
-        let snapshot = started.elapsed();
+        notes::phase("snapshot");
         let scratch = self.paths.dir.join("saving");
         let watching = Arc::clone(&live.memory.disk);
         // The runtime of the VMM that wrote the snapshot, which after an
@@ -696,14 +724,8 @@ impl<E: Engine, S: Store> Job<E, S> {
         .await
         .map_err(|error| EngineError::io(OP, error))?
         .map_err(|suspect| suspect_error(OP, suspect))?;
-        tracing::debug!(
-            id = %self.id,
-            ?kind,
-            snapshot_ms = snapshot.as_millis(),
-            merge_ms = started.elapsed().saturating_sub(snapshot).as_millis(),
-            generation = %published.generation(),
-            "memory image saved"
-        );
+        notes::phase("merge");
+        tracing::debug!(id = %self.id, ?kind, generation = %published.generation(), "memory image saved");
         live.memory.base = Base::Image(published.generation());
         Ok(published)
     }
@@ -719,6 +741,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         match checked {
             Ok(Ok(Some(image))) => Ok(image),
             Ok(Ok(None)) => {
+                notes::alarm(Alarm::CopyLost, &"the recorded memory image is missing");
                 let _ = self.commit(Change::new().image(false)).await;
                 Err(Outcome::Failed(Failure::MemoryLost))
             }
@@ -737,13 +760,12 @@ impl<E: Engine, S: Store> Job<E, S> {
         if !self.record.image || self.record.disk != Disk::Local {
             return (Outcome::Failed(Failure::MemoryLost), After::NoVm);
         }
-        let started = Instant::now();
         let images = images_of(&self.paths);
         let image = match self.saved_image(&images).await {
             Ok(image) => image,
             Err(outcome) => return (outcome, After::NoVm),
         };
-        let verified = started.elapsed();
+        notes::phase("verify");
         let paths = self.paths.clone();
         let watch = match blocking(move || DiskWatch::fresh(&paths))
             .await
@@ -761,6 +783,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             MemorySource::Pager(_) if image.meta().remote => "remote",
             MemorySource::Pager(_) => "pager",
         };
+        notes::detail("compute.memory.source", source);
         let files = RestoreFiles {
             state: self.paths.snapshot.state.clone(),
             memory,
@@ -792,7 +815,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 return (outcome, After::NoVm);
             }
         };
-        let loaded = started.elapsed();
+        notes::phase("load");
         let archived = self.record.archived;
         // A restore continues the saved execution: the generation stays.
         let running = Change::new().image(false).archived(false);
@@ -802,12 +825,12 @@ impl<E: Engine, S: Store> Job<E, S> {
                 .await;
             return (outcome, After::NoVm);
         }
-        let committed = started.elapsed();
+        notes::phase("commit");
         #[cfg(target_os = "linux")]
         if let Some(paging) = &live_memory.paging {
             paging.prefetched(PREFETCH_LIMIT).await;
         }
-        let prefetched = started.elapsed();
+        notes::phase("prefetch");
         if let Err(error) = self.engine.resume(&vm).await {
             // The VM ends before the image is reconsidered, so no second
             // process ever runs from the same files.
@@ -823,19 +846,10 @@ impl<E: Engine, S: Store> Job<E, S> {
         // The host's share of a restore is done; the guest's answer is
         // not the limit's concern.
         self.unthrottle();
-        let resumed = started.elapsed();
+        notes::phase("resume");
         let told = self.tell_guest_restored().await;
-        tracing::debug!(
-            id = %self.id,
-            source,
-            verify_ms = verified.as_millis(),
-            load_ms = loaded.saturating_sub(verified).as_millis(),
-            commit_ms = committed.saturating_sub(loaded).as_millis(),
-            prefetch_ms = prefetched.saturating_sub(committed).as_millis(),
-            resume_ms = resumed.saturating_sub(prefetched).as_millis(),
-            notice_ms = started.elapsed().saturating_sub(resumed).as_millis(),
-            "memory image restored"
-        );
+        notes::phase("notice");
+        tracing::debug!(id = %self.id, source, "memory image restored");
         if let Err(outcome) = told {
             return (outcome, After::New(vm, live_memory));
         }
@@ -1071,6 +1085,8 @@ impl<E: Engine, S: Store> Job<E, S> {
             tracing::warn!(id = %self.id, error = %suspect, "memory image unreadable for now; keeping it");
             return;
         }
+        notes::alarm(Alarm::VerificationFailed, suspect);
+        notes::alarm(Alarm::Quarantined, &format!("memory image: {suspect}"));
         if let Ok(Some(generation)) = images.current()
             && let Err(error) = images.quarantine(generation, suspect)
         {
@@ -1223,9 +1239,11 @@ impl<E: Engine, S: Store> Job<E, S> {
             Ok(watch) => watch,
             Err(error) => return (io_failure("boot", error), After::NoVm),
         };
+        notes::phase("prepare");
         match self.engine.boot(&self.spec).await {
             Ok(vm) => {
                 self.launches += 1;
+                notes::phase("launch");
                 self.hold_watch(&vm, &watch).await;
                 let memory = LiveMemory::booted(watch);
                 if pending && self.tell_guest_restored().await.is_err() {

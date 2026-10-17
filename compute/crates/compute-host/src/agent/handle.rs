@@ -1,15 +1,17 @@
 //! Talking to the agent: handles, leases and the requests they send.
 
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use compute_core::{HoldId, Level, Priority, Step};
+use compute_core::{HoldId, Level, OpId, Priority, Step};
 use compute_engine::vsock;
 use tokio::net::UnixStream;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep};
 
+use crate::observe::{Observer, TraceContext};
 use crate::protocol::{HostStatus, Id, SandboxConfig};
 
 use super::{Command, Handle, HostError, Lease, ReleaseOnDrop};
@@ -26,15 +28,49 @@ impl Drop for ReleaseOnDrop {
 }
 
 impl Handle {
+    pub(super) fn new(
+        commands: mpsc::UnboundedSender<Command>,
+        stream_idle: Duration,
+        observer: Observer,
+    ) -> Self {
+        Self {
+            commands,
+            holds: Arc::new(AtomicU64::new(1)),
+            stream_idle,
+            observer,
+            trace: None,
+        }
+    }
+
     async fn ask<T>(
         &self,
         make: impl FnOnce(oneshot::Sender<T>) -> Command,
     ) -> Result<T, HostError> {
         let (reply, answer) = oneshot::channel();
+        let command = match self.trace {
+            Some(trace) => Command::Traced(trace, Box::new(make(reply))),
+            None => make(reply),
+        };
         self.commands
-            .send(make(reply))
+            .send(command)
             .map_err(|_| HostError::Stopped)?;
         answer.await.map_err(|_| HostError::Stopped)
+    }
+
+    /// The same handle, its requests carrying `trace`: the steps they
+    /// cause name the caller's trace on their events.
+    #[must_use]
+    pub fn traced(&self, trace: Option<TraceContext>) -> Self {
+        Self {
+            trace,
+            ..self.clone()
+        }
+    }
+
+    /// Where the host's events and metrics go.
+    #[must_use]
+    pub fn observer(&self) -> &Observer {
+        &self.observer
     }
 
     /// Creates a sandbox. It costs only disk until first needed.
@@ -114,6 +150,7 @@ impl Handle {
             vsock: woke.vsock,
             waited: started.elapsed(),
             during: woke.during,
+            op: woke.op,
             generation: woke.generation,
             pinned: generation.is_some(),
             commands: self.commands.clone(),
@@ -157,6 +194,20 @@ impl Handle {
         ttl: Option<Duration>,
         priority: Priority,
     ) -> Result<(), HostError> {
+        self.hold_renewing(id, generation, name, ttl, priority)
+            .await
+            .map(|_| ())
+    }
+
+    /// Like [`Self::hold`], telling whether the hold was already there.
+    pub(crate) async fn hold_renewing(
+        &self,
+        id: Id,
+        generation: Option<u64>,
+        name: &str,
+        ttl: Option<Duration>,
+        priority: Priority,
+    ) -> Result<bool, HostError> {
         self.ask(|reply| Command::Hold {
             id,
             generation,
@@ -166,6 +217,11 @@ impl Handle {
             reply,
         })
         .await?
+    }
+
+    /// One sandbox's level and the step under way, if the host has it.
+    pub(crate) async fn inspect(&self, id: Id) -> Result<Option<(Level, Option<Step>)>, HostError> {
+        self.ask(|reply| Command::Inspect { id, reply }).await
     }
 
     /// Ends a named hold. Ending one that does not exist does nothing. With
@@ -198,6 +254,13 @@ impl Lease {
     #[must_use]
     pub fn during(&self) -> Option<Step> {
         self.during
+    }
+
+    /// The wake step the request waited for, if one ran: its events carry
+    /// the same operation id.
+    #[must_use]
+    pub fn op(&self) -> Option<OpId> {
+        self.op
     }
 
     /// The execution the lease reaches. It changes only when the sandbox

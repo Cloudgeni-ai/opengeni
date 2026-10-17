@@ -56,9 +56,61 @@ fn per_cpu_pages(zoneinfo: &str) -> u64 {
         .sum()
 }
 
+/// What the host reports about its memory and pressure besides what is
+/// available; each is `None` where the kernel does not report it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HostGauges {
+    /// Bytes zswap holds, compressed (`Zswap` in `/proc/meminfo`).
+    pub zswap_stored: Option<u64>,
+    /// Bytes of memory it holds, before compression (`Zswapped`).
+    pub zswap_original: Option<u64>,
+    /// Free pages in the huge-page pool (`HugePages_Free`).
+    pub huge_pages_free: Option<u64>,
+    /// Total stall microseconds, `some` and `full`, for memory, I/O and
+    /// processors, from `/proc/pressure`.
+    pub pressure: [[Option<u64>; 2]; 3],
+}
+
+/// Reads [`HostGauges`].
+#[must_use]
+pub fn host_gauges() -> HostGauges {
+    let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let pressure = ["memory", "io", "cpu"]
+        .map(|resource| fs::read_to_string(format!("/proc/pressure/{resource}")).ok());
+    parse_gauges(&meminfo, pressure.each_ref().map(Option::as_deref))
+}
+
+/// [`host_gauges`] from the text of `/proc/meminfo` and of each pressure
+/// file, if readable.
+pub(crate) fn parse_gauges(meminfo: &str, pressure: [Option<&str>; 3]) -> HostGauges {
+    let field = |name: &str| -> Option<u64> {
+        let line = meminfo.lines().find_map(|line| line.strip_prefix(name))?;
+        line.strip_prefix(':')?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    };
+    let total = |text: Option<&str>, kind: &str| -> Option<u64> {
+        text?
+            .lines()
+            .find_map(|line| line.strip_prefix(kind)?.strip_prefix(' '))?
+            .split_whitespace()
+            .find_map(|pair| pair.strip_prefix("total="))?
+            .parse()
+            .ok()
+    };
+    HostGauges {
+        zswap_stored: field("Zswap").map(|kib| kib << 10),
+        zswap_original: field("Zswapped").map(|kib| kib << 10),
+        huge_pages_free: field("HugePages_Free"),
+        pressure: pressure.map(|text| [total(text, "some"), total(text, "full")]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{HostGauges, parse, parse_gauges};
 
     const MEMINFO: &str = "MemTotal: 131072000 kB
 MemAvailable:   16777216 kB
@@ -104,5 +156,29 @@ Hugepagesize:       2048 kB
     #[test]
     fn nothing_is_available_when_mem_available_is_zero() {
         assert_eq!(parse("MemAvailable: 0 kB\n", ZONEINFO, false), Some(0));
+    }
+
+    /// Readings the kernel does not give are absent, not zero: a host
+    /// without zswap, or a resource without `full` pressure.
+    #[test]
+    fn host_gauges_are_read_where_the_kernel_reports_them() {
+        let meminfo = "MemTotal: 1000 kB\nZswap:  64 kB\nZswapped: 256 kB\nHugePages_Free: 7\n";
+        let memory = "some avg10=0.00 avg60=0.00 avg300=0.00 total=1500\n\
+                      full avg10=0.00 avg60=0.00 avg300=0.00 total=700\n";
+        let cpu = "some avg10=0.00 avg60=0.00 avg300=0.00 total=99\n";
+        let gauges = parse_gauges(meminfo, [Some(memory), None, Some(cpu)]);
+        assert_eq!(
+            gauges,
+            HostGauges {
+                zswap_stored: Some(64 << 10),
+                zswap_original: Some(256 << 10),
+                huge_pages_free: Some(7),
+                pressure: [[Some(1500), Some(700)], [None, None], [Some(99), None]],
+            }
+        );
+        assert_eq!(
+            parse_gauges("MemTotal: 1 kB\n", [None; 3]),
+            HostGauges::default()
+        );
     }
 }

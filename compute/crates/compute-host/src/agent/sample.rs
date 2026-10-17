@@ -51,7 +51,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if let Some(available) = read_disk(&self.root) {
             batch.push(Input::Disk { available });
         }
+        let resident: Vec<(Level, u64)> = batch
+            .iter()
+            .filter_map(|input| match input {
+                Input::Resident { sandbox, bytes } => {
+                    Some((self.core.sandbox(*sandbox)?.state.level, *bytes))
+                }
+                _ => None,
+            })
+            .collect();
         self.inputs(batch);
+        let gauges = self.gauges(resident.into_iter());
+        self.observer.metrics().set_gauges(&gauges);
+        self.summarize();
         self.retire_unused();
         self.refill();
     }
@@ -158,6 +170,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Warns when a running VM's memory was compressed into zswap between
     /// two samples: only a paused one may be, so this is a defect, and the
     /// sandbox would slow down unnoticed while it pages back in.
+    ///
+    /// The reading is kept for the sandbox's summary (see
+    /// [`HostAgent::summarize`]).
     fn check_uncompressed(&mut self) {
         for (id, slot) in &mut self.slots {
             let running = self
@@ -165,23 +180,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .sandbox(*id)
                 .is_some_and(|view| view.state.level == Level::Running && view.step.is_none());
             let Some(live) = slot.vm.as_ref().filter(|_| running) else {
-                slot.compressed = None;
+                slot.stats = None;
                 continue;
             };
             let Ok(stats) = self.engine.memory_stats(&live.vm) else {
                 continue;
             };
-            if let Some((incarnation, before)) = slot.compressed
+            if let Some((incarnation, before)) = slot.stats
                 && incarnation == live.incarnation
-                && stats.zswpout > before
+                && stats.zswpout > before.zswpout
             {
                 tracing::warn!(
                     sandbox = %crate::protocol::Id(*id),
-                    pages = stats.zswpout - before,
+                    pages = stats.zswpout - before.zswpout,
                     "a running VM's memory was compressed into zswap"
                 );
             }
-            slot.compressed = Some((live.incarnation, stats.zswpout));
+            slot.stats = Some((live.incarnation, stats));
         }
     }
 }

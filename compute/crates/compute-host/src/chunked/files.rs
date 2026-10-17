@@ -156,10 +156,14 @@ impl Chunked {
             Prepared::Known(reference) => Some(reference),
             Prepared::New(chunk) => {
                 let _permit = self.transfers.acquire().await.map_err(transient)?;
-                self.chunks
+                let stored = self
+                    .chunks
                     .put_chunk(&chunk)
                     .await
                     .map_err(|error| storage_error(OP, error))?;
+                if stored {
+                    crate::observe::notes::bytes("uploaded", chunk.bytes.len() as u64);
+                }
                 Some(chunk.reference)
             }
         })
@@ -237,10 +241,12 @@ impl Chunked {
                             if stop.is_cancelled() {
                                 return Ok(());
                             }
-                            chunks
+                            let plain = chunks
                                 .get_chunk(&reference)
                                 .await
-                                .map_err(|error| storage_error(OP, error))?
+                                .map_err(|error| storage_error(OP, error))?;
+                            crate::observe::notes::bytes("fetched", plain.len() as u64);
+                            plain
                         };
                         tokio::task::spawn_blocking(move || {
                             let start = usize::try_from(within).unwrap_or(usize::MAX);

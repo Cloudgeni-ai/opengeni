@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use compute_core::{
     Action, At, BalloonRequest, HoldId, Host, HostPolicy, Input, Level, LoanId, MemoryPolicy, OpId,
-    Outcome, Priority, Resource, SandboxId, Size, SleepPolicy, Step,
+    Outcome, Priority, Resource, SandboxId, Size, SleepPolicy, State, Step,
 };
-use compute_engine::{CancellationToken, Engine, PageSize, VmSpec};
+use compute_engine::{CancellationToken, Engine, MemoryStats, PageSize, VmSpec};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
@@ -30,15 +30,17 @@ use tokio::time::{Instant, sleep_until};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
+use crate::observe::{Observer, TraceContext};
 use crate::pool::{Built, Lender, Loaning, Pool, PoolConfig, Shape, Sources, Template, Uses};
 
 use crate::protocol::{About, HostStatus, Id, SandboxConfig, StepStats};
 use crate::state::{Record, Records, StateError, claim_host, unix_ms_now};
-use crate::step::{After, Live};
+use crate::step::{After, Live, Report};
 use crate::store::Store;
 
 mod handle;
 mod holds;
+mod observe;
 mod ready;
 mod recover;
 mod requests;
@@ -126,11 +128,18 @@ pub struct HostConfig {
     /// What the host runs, as status reports it. The runtime is the
     /// engine's; whatever is set here is replaced.
     pub about: About,
+    /// Where the host's events and metrics go (see [`crate::observe`]).
+    pub observer: Observer,
+    /// How long a sandbox stays awake before it reports what it went
+    /// through since its last step or summary.
+    pub summary_every: Duration,
 }
 
 impl HostConfig {
     /// The default for [`HostConfig::stream_idle`].
     pub const STREAM_IDLE: Duration = Duration::from_secs(10 * 60);
+    /// The default for [`HostConfig::summary_every`].
+    pub const SUMMARY_EVERY: Duration = Duration::from_secs(3600);
 }
 
 /// How VMs whose memory needs a fault handler get one: a pager process of
@@ -391,7 +400,8 @@ enum Command {
         name: String,
         ttl: Option<Duration>,
         priority: Priority,
-        reply: Reply<()>,
+        /// Told whether the hold was already there.
+        reply: Reply<bool>,
     },
     /// Ends a named hold from the API.
     Unhold {
@@ -420,6 +430,14 @@ enum Command {
     Status {
         reply: oneshot::Sender<HostStatus>,
     },
+    /// One sandbox's level and the step under way, if it has one: for the
+    /// canary.
+    Inspect {
+        id: Id,
+        reply: oneshot::Sender<Option<(Level, Option<Step>)>>,
+    },
+    /// A command from a caller that sent trace context.
+    Traced(TraceContext, Box<Command>),
 }
 
 #[derive(Debug)]
@@ -458,10 +476,7 @@ enum Event<V> {
         op: OpId,
         outcome: Outcome,
         after: After<V>,
-        /// VM processes the step started, including ones it ended again.
-        launches: u32,
-        /// What went wrong, when it failed.
-        error: Option<String>,
+        report: Box<Report>,
     },
     /// Work outside any sandbox asks for or gives back a place under a
     /// step limit.
@@ -528,6 +543,10 @@ struct Running {
     step: Step,
     cancel: CancellationToken,
     started: Instant,
+    /// Why it runs.
+    why: observe::Why,
+    /// Where the sandbox's state was when it started.
+    before: Option<State>,
 }
 
 /// The start of one VM's current activity window. Each reading is kept only
@@ -570,9 +589,18 @@ struct Slot<V> {
     deferred: Option<Step>,
     /// Processor use and traffic measured so far, while the VM runs.
     activity: Option<ActivityWindow>,
-    /// The incarnation of the running VM and the pages compressed out of it
-    /// when last sampled running; see [`HostAgent::check_uncompressed`].
-    compressed: Option<(u64, u64)>,
+    /// The incarnation of the running VM and its memory statistics when
+    /// last sampled running; see [`HostAgent::check_uncompressed`].
+    stats: Option<(u64, MemoryStats)>,
+    /// The reading the last event about the sandbox's pressure counted up
+    /// to.
+    reported: Option<(u64, MemoryStats)>,
+    /// When the sandbox last reported what it went through awake.
+    summarized: Instant,
+    /// The latest request about it since its last sleep step began.
+    asked: Option<observe::Why>,
+    /// The wake step started since its last sleep step began, if any.
+    woke_by: Option<OpId>,
     /// The last step that failed and has not succeeded since, with its
     /// error, such as a save that could not be written.
     failed: Option<(Step, String)>,
@@ -587,6 +615,9 @@ struct Waiter {
     generation: Option<u64>,
     /// The step under way when it arrived.
     during: Option<Step>,
+    /// Whether it had to wait for a step: then the wake step that ran, if
+    /// any, is the one it joined.
+    queued: bool,
     reply: Reply<Woke>,
 }
 
@@ -597,6 +628,8 @@ struct Woke {
     during: Option<Step>,
     /// The execution that is running.
     generation: u64,
+    /// The wake step it waited for, if one ran.
+    op: Option<OpId>,
 }
 
 /// Talks to a running host agent. Cheap to clone.
@@ -605,6 +638,9 @@ pub struct Handle {
     commands: mpsc::UnboundedSender<Command>,
     holds: Arc<AtomicU64>,
     stream_idle: Duration,
+    observer: Observer,
+    /// Trace context every command carries, if any.
+    trace: Option<TraceContext>,
 }
 
 /// Keeps a sandbox awake while it lives. Dropping it lets the sandbox go
@@ -617,6 +653,8 @@ pub struct Lease {
     waited: Duration,
     /// The step under way when the wake arrived.
     during: Option<Step>,
+    /// The wake step it waited for, if one ran.
+    op: Option<OpId>,
     /// The execution the lease reaches: the one asked for, if any.
     generation: u64,
     /// Whether the caller asked for that execution. A lease that was not
@@ -715,6 +753,13 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
     commands_tx: mpsc::WeakUnboundedSender<Command>,
+    observer: Observer,
+    summary_every: Duration,
+    /// Whether the agent is still taking over its state root: steps it
+    /// starts meanwhile are for recovery.
+    recovering: bool,
+    /// The trace context of the command being handled, if it carried one.
+    trace: Option<TraceContext>,
 }
 
 /// Checks that this host's settings fit every recorded sandbox: a sandbox
@@ -927,6 +972,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             allocation_unit,
             about,
             commands_tx: commands_tx.downgrade(),
+            observer: config.observer,
+            summary_every: config.summary_every,
+            recovering: true,
+            trace: None,
         };
         agent.hold_builds(held);
         agent.recover(strays).await;
@@ -934,12 +983,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // spare VMs wait for a memory reading too, so one is taken before
         // any build starts or request is served.
         agent.sample();
+        agent.recovering = false;
         agent.start_templates(warm_shapes);
-        let handle = Handle {
-            commands: commands_tx,
-            holds: Arc::new(AtomicU64::new(1)),
-            stream_idle,
-        };
+        let handle = Handle::new(commands_tx, stream_idle, agent.observer.clone());
         Ok((handle, tokio::spawn(agent.run())))
     }
 
@@ -1007,7 +1053,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 waiters: Vec::new(),
                 deferred: None,
                 activity: None,
-                compressed: None,
+                stats: None,
+                reported: None,
+                summarized: Instant::now(),
+                asked: None,
+                woke_by: None,
                 failed: None,
                 holds,
             },

@@ -9,6 +9,7 @@ use compute_core::{Durability, HoldId, Input, Level, Priority, Resource, Step};
 use compute_engine::Engine;
 
 use crate::layout::{Images, Paths, sync_parent};
+use crate::observe::Cause;
 use crate::pool::{Shape, Sources, Start, Template, first_files};
 use crate::protocol::{
     BlockedSandbox, CapacityStatus, DiskStatus, FailedStep, HostStatus, Id, MemoryStatus,
@@ -19,16 +20,18 @@ use crate::step::images_of;
 use crate::store::Store;
 
 use super::holds::{Write, hold_id};
+use super::observe::Why;
 use super::{Command, Event, HostAgent, HostError, Reply, Waiter, Woke, unix_ms_now};
 
 /// Replies to `reply` once the write in `outcome` has made a change
 /// durable, or with why the change was refused or could not be kept.
-fn answer_once_written(outcome: Result<Write, HostError>, reply: Reply<()>) {
+fn answer_once_written<T: Send + 'static>(outcome: Result<(Write, T), HostError>, reply: Reply<T>) {
     match outcome {
-        Ok(write) => {
+        Ok((write, answer)) => {
             tokio::spawn(async move {
                 let result = write
                     .await
+                    .map(|()| answer)
                     .map_err(|error| HostError::Io(format!("keeping the holds failed: {error}")));
                 let _ = reply.send(result);
             });
@@ -63,6 +66,11 @@ pub(super) fn new_files(
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn on_command(&mut self, command: Command) {
         match command {
+            Command::Traced(trace, command) => {
+                self.trace = Some(trace);
+                self.on_command(*command);
+                self.trace = None;
+            }
             Command::Create { id, config, reply } => self.create(id, config, reply),
             Command::Remove {
                 id,
@@ -124,7 +132,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let outcome = self
                     .check(id, generation)
                     .and_then(|()| self.unhold(id, &name));
-                answer_once_written(outcome, reply);
+                answer_once_written(outcome.map(|write| (write, ())), reply);
             }
             Command::Acquire {
                 id,
@@ -144,6 +152,24 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Command::Status { reply } => {
                 let _ = reply.send(self.status());
             }
+            Command::Inspect { id, reply } => {
+                let _ = reply.send(
+                    self.core
+                        .sandbox(id.0)
+                        .map(|view| (view.state.level, view.step)),
+                );
+            }
+        }
+    }
+
+    /// Notes that a request asks about `id`, for the step it causes.
+    fn note_ask(&mut self, id: Id) {
+        let trace = self.trace;
+        if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.asked = Some(Why {
+                cause: Cause::Request,
+                trace,
+            });
         }
     }
 
@@ -196,6 +222,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if !self.slots.contains_key(&id.0) {
             return Err(HostError::NotFound(id));
         }
+        self.note_ask(id);
         self.input(Input::Touch {
             sandbox: id.0,
             priority,
@@ -243,8 +270,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         slot.waiters.push(Waiter {
             generation,
             during,
+            queued: false,
             reply,
         });
+        self.note_ask(id);
         self.input(Input::Hold {
             sandbox: id.0,
             hold,
@@ -252,6 +281,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             priority,
         });
         self.settle(id);
+        // Still waiting: whatever wake runs now is the one it joins.
+        if let Some(waiter) = self
+            .slots
+            .get_mut(&id.0)
+            .and_then(|slot| slot.waiters.last_mut())
+        {
+            waiter.queued = true;
+        }
     }
 
     /// Refuses a request that names an execution the sandbox no longer
@@ -291,6 +328,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 "this host cannot compress memory; ask for saved instead".into(),
             ));
         }
+        self.note_ask(id);
         self.input(Input::Sleep {
             sandbox: id.0,
             level,
@@ -299,18 +337,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Holds sandbox `id` awake for `name`, returning the write that makes
-    /// the hold durable.
+    /// the hold durable, and whether the hold was already there.
     pub(super) fn hold(
         &mut self,
         id: Id,
         name: String,
         ttl: Option<Duration>,
         priority: Priority,
-    ) -> Result<Write, HostError> {
+    ) -> Result<(Write, bool), HostError> {
         if self.slots.get(&id.0).is_none_or(|slot| slot.destroy) {
             return Err(HostError::NotFound(id));
         }
         let until = ttl.map(|ttl| self.now() + ttl);
+        self.note_ask(id);
         self.input(Input::Hold {
             sandbox: id.0,
             hold: hold_id(&name),
@@ -321,8 +360,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let lapses_ms = ttl
             .map(|ttl| now_ms.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)));
         let slot = self.slots.get_mut(&id.0).ok_or(HostError::NotFound(id))?;
-        slot.holds.set(name, lapses_ms);
-        Ok(slot.holds.write(now_ms))
+        let renewed = slot.holds.set(name, lapses_ms);
+        Ok((slot.holds.write(now_ms), renewed))
     }
 
     /// The refusal of a request for blocked sandbox `id`.

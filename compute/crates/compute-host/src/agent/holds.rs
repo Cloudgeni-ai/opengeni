@@ -115,9 +115,10 @@ impl Holds {
             .map(|(name, lapses)| (name.as_str(), *lapses))
     }
 
-    /// Holds `name` until `lapses_ms`, or until released.
-    pub fn set(&mut self, name: String, lapses_ms: Option<u64>) {
-        self.named.insert(name, lapses_ms);
+    /// Holds `name` until `lapses_ms`, or until released. Returns whether
+    /// it was held already.
+    pub fn set(&mut self, name: String, lapses_ms: Option<u64>) -> bool {
+        self.named.insert(name, lapses_ms).is_some()
     }
 
     /// Forgets hold `name`. Returns whether it was held.

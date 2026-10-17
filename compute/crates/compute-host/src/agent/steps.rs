@@ -15,14 +15,16 @@ use tokio::time::{Instant, sleep};
 
 use crate::layout::{Paths, vm_spec};
 use crate::net::Networks;
+use crate::observe::{Alarm, Cause, alarm_event};
 use crate::pool::{Loaning, Template};
 use crate::protocol::Id;
 use crate::restore_notice::ask_commands;
 use crate::state::{Change, Fence, Record, Records};
-use crate::step::{After, Job, Live, LiveMemory};
+use crate::step::{After, Job, Live, LiveMemory, Report};
 use crate::store::Store;
 
 use super::holds::Closing;
+use super::observe::Why;
 use super::{Event, HostAgent, HostError, Leftover, Reply, Running, TEARDOWN_RETRY, Woke};
 
 /// How long a guest may take to say whether commands still run before its
@@ -44,9 +46,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 op,
                 outcome,
                 after,
-                launches,
-                error,
-            } => self.step_done(id, op, (outcome, error), after, launches, false),
+                report,
+            } => self.step_done(id, op, outcome, after, *report, false),
             Event::Loan(Loaning::Borrow {
                 loan,
                 step,
@@ -219,8 +220,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         op,
                         outcome: Outcome::Cancelled,
                         after,
-                        launches: 0,
-                        error: None,
+                        report: Box::default(),
                     });
                 }
             }
@@ -277,6 +277,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let ask = self
             .restore_notice_port
             .filter(|_| self.sleeps_for_idleness(id, step));
+        let why = self.why(id, op, step);
+        let before = self.core.sandbox(id.0).map(|view| view.state);
         let Some(slot) = self.slots.get_mut(&id.0) else {
             tracing::error!(%id, ?step, "step for a sandbox the host does not have");
             let _ = self.events_tx.send(Event::StepDone {
@@ -284,8 +286,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 op,
                 outcome: Outcome::Failed(Failure::Fatal),
                 after: After::NoVm,
-                launches: 0,
-                error: None,
+                report: Box::default(),
             });
             return;
         };
@@ -296,6 +297,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             step,
             cancel: CancellationToken::new(),
             started: Instant::now(),
+            why,
+            before,
         });
         self.stats[step.index()].started += 1;
         if self.tearing_down.contains_key(&id.0) {
@@ -366,9 +369,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.step_done(
                 id,
                 op,
-                (Outcome::Cancelled, None),
+                Outcome::Cancelled,
                 After::Kept(live),
-                0,
+                Report::default(),
                 true,
             );
             return;
@@ -385,8 +388,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 op,
                 outcome: Outcome::Failed(Failure::Fatal),
                 after: After::NoVm,
-                launches: 0,
-                error: None,
+                report: Box::default(),
             });
             return;
         };
@@ -417,8 +419,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 op,
                 outcome: ran.outcome,
                 after: ran.after,
-                launches: ran.launches,
-                error: ran.error,
+                report: Box::new(ran.report),
             });
         });
     }
@@ -462,9 +463,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         &mut self,
         id: Id,
         op: OpId,
-        (outcome, error): (Outcome, Option<String>),
+        outcome: Outcome,
         after: After<E::Vm>,
-        launches: u32,
+        mut report: Report,
         busy: bool,
     ) {
         let fresh = match after {
@@ -474,8 +475,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let mut reap = None;
         let mut destroy = false;
+        let mut finished_step = None;
         if let Some(slot) = self.slots.get_mut(&id.0) {
-            slot.launches += u64::from(launches);
+            slot.launches += u64::from(report.launches);
             if let Some(running) = slot.op.take().filter(|running| running.op == op) {
                 let stats = &mut self.stats[running.step.index()];
                 let micros =
@@ -499,10 +501,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         stats.failed += 1;
                         slot.failed = Some((
                             running.step,
-                            error.unwrap_or_else(|| "no error recorded".to_owned()),
+                            report
+                                .notes
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "no error recorded".to_owned()),
                         ));
                     }
                 }
+                if running.step.wakes() && outcome == Outcome::Done {
+                    // It runs: the request that woke it is answered.
+                    slot.asked = None;
+                    slot.summarized = Instant::now();
+                }
+                finished_step = Some(running);
             }
             match fresh {
                 // A process that already ended on its own only needs its
@@ -539,6 +551,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let activity = busy.then_some(Input::Busy { sandbox: id.0 });
         self.inputs(std::iter::once(finished).chain(activity));
+        if let Some(running) = finished_step {
+            self.step_event(id, &running, outcome, &mut report);
+        }
         if destroy {
             if !self.tearing_down.contains_key(&id.0) {
                 self.destroy_now(id);
@@ -660,6 +675,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         }
         tracing::warn!(%id, "VM process ended on its own; running programs are lost");
+        // Whatever starts it again puts things right.
+        slot.asked = Some(Why::plain(Cause::Recovery));
         if let Some(live) = slot.vm.take() {
             slot.incarnation = None;
             self.reap(id, live);
@@ -789,7 +806,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 memory_saved = state.memory_saved,
                 "state"
             ),
-            Notice::MemoryLost => tracing::warn!(%id, "running programs lost; files kept"),
+            Notice::MemoryLost => {
+                tracing::warn!(%id, "running programs lost; files kept");
+                self.alarm(id, Alarm::ProgramsLost, "running programs lost; files kept");
+            }
             Notice::Retrying { step, failures } => {
                 tracing::warn!(%id, ?step, failures, "step failed; retrying");
             }
@@ -799,6 +819,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             ),
             Notice::Broken => {
                 tracing::error!(%id, "sandbox broken on this host");
+                self.alarm(id, Alarm::Broken, "sandbox broken on this host");
                 self.settle(id);
             }
             Notice::HostFull {
@@ -842,6 +863,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         };
         let generation = self.records.get(id).map(|record| record.generation);
+        let woke_by = slot.woke_by;
         for waiter in slot.waiters.drain(..) {
             let answer = match (waiter.generation, generation) {
                 // It booted afresh since the request: the programs the
@@ -855,11 +877,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     vsock,
                     during: waiter.during,
                     generation: found,
+                    op: woke_by.filter(|_| waiter.queued),
                 }),
                 (_, None) => result.clone().and(Err(HostError::Removed(id))),
             };
             let _ = waiter.reply.send(answer);
         }
+    }
+
+    /// Raises `alarm` for sandbox `id`, with what happened.
+    fn alarm(&self, id: Id, alarm: Alarm, what: &str) {
+        let event = alarm_event(what).with("compute.sandbox.id", id.to_string());
+        self.observer.alarm(alarm, event);
     }
 }
 

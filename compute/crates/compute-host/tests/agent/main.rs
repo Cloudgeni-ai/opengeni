@@ -797,6 +797,8 @@ impl Lab {
             // Fake VMs never start one.
             pager: PagerConfig::new(root.join("no-pager")),
             about: compute_host::protocol::About::default(),
+            observer: compute_host::observe::Observer::default(),
+            summary_every: HostConfig::SUMMARY_EVERY,
         }
     }
 
