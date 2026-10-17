@@ -14,7 +14,8 @@ use std::time::Instant;
 use compute_engine::CancellationToken;
 use compute_host::protocol::Id;
 use compute_host::{
-    CHUNK_BYTES, Chunked, FetchInto, FetchedMemory, JailedFile, SavedFiles, SavedImage, Store,
+    CHUNK_BYTES, Chunked, FetchInto, FetchedMemory, JailedFile, OwnerEpoch, SavedFiles, SavedImage,
+    Stamp, Store,
 };
 use compute_storage::manifest::{DiskManifest, ExtentSource};
 use compute_storage::store::ChunkStore;
@@ -99,8 +100,12 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
         .parse()
         .unwrap();
     let started = Instant::now();
+    let stamp = |save| Stamp {
+        epoch: OwnerEpoch::FIRST,
+        save,
+    };
     let receipt = store
-        .archive(id, &saved, &CancellationToken::new())
+        .archive(id, stamp(1), &saved, &CancellationToken::new())
         .await
         .unwrap()
         .stored()
@@ -108,7 +113,7 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
     let first = started.elapsed();
     let started = Instant::now();
     let again_receipt = store
-        .archive(id, &saved, &CancellationToken::new())
+        .archive(id, stamp(2), &saved, &CancellationToken::new())
         .await
         .unwrap()
         .stored()
@@ -161,7 +166,7 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
         let same = fs::read(original).unwrap() == fs::read(copy).unwrap();
         assert!(same, "{} came back different", original.display());
     }
-    store.delete(id).await.unwrap();
+    store.delete(id, OwnerEpoch::FIRST).await.unwrap();
     eprintln!(
         "{} MiB of data: first archive {first:?}, unchanged archive {again:?}, fetch without memory {fetched_at:?}, paging all memory in {paged_in:?}",
         ((disk_at.len() + memory_at.len() + 1) as u64 * CHUNK_BYTES) >> 20

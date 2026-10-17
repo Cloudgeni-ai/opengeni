@@ -8,6 +8,12 @@
 //! An archive returns a [`Receipt`] naming exactly the copy it stored. The
 //! host deletes its local files only after [`Store::verify`] confirms the
 //! store still holds that copy: the local files may be the only good copy.
+//!
+//! Every write names its owner: the sandbox's owner epoch, raised each time
+//! it changes hands between hosts, and for an archive the owner's number
+//! for the save ([ADR 18](../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+//! A store refuses a write once a later owner holds the copy, so a host the
+//! fleet gave up on can never overwrite what the next one stored.
 
 use std::fmt::Write as _;
 use std::fs::{self, File};
@@ -17,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use compute_engine::{CancellationToken, EngineError, ErrorKind};
+pub use compute_fleet::{OwnerEpoch, Stamp};
 use compute_storage::store::ChunkStore;
 use serde::{Deserialize, Serialize};
 
@@ -88,22 +95,56 @@ pub struct Receipt(pub String);
 /// What an archive came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Archive {
-    /// The copy is durable in the store and named by the receipt.
+    /// The copy is durable in the store and named by the receipt. An
+    /// archive of a save the store already holds, as one whose answer was
+    /// lost and that is tried again, finds it stored.
     Stored(Receipt),
     /// Cancelled before anything was published: the store's earlier copy,
     /// if any, is still the one it names.
     Cancelled,
+    /// The store holds a later save by the same owner, or the sandbox was
+    /// deleted: this one changes nothing.
+    Outdated,
+    /// A later owner holds the copy: the sandbox is no longer this host's.
+    Fenced {
+        /// The owner epoch that holds it.
+        by: OwnerEpoch,
+    },
 }
 
 impl Archive {
-    /// The receipt, unless the archive was cancelled.
+    /// The receipt, unless the archive stored nothing.
     #[must_use]
     pub fn stored(self) -> Option<Receipt> {
         match self {
             Self::Stored(receipt) => Some(receipt),
-            Self::Cancelled => None,
+            Self::Cancelled | Self::Outdated | Self::Fenced { .. } => None,
         }
     }
+}
+
+/// What a write that changes the stored copy came to (see
+/// [`Store::forget_memory`] and [`Store::delete`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Owned<T> {
+    /// It was carried out.
+    Done(T),
+    /// A later owner holds the copy, which stays as that owner stored it.
+    Fenced {
+        /// The owner epoch that holds it.
+        by: OwnerEpoch,
+    },
+}
+
+/// A stored copy a new owner took over (see [`Store::claim`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Claimed {
+    /// The number of the save it holds, which the new owner counts on from.
+    pub save: u64,
+    /// Names the copy, as an archive's receipt does.
+    pub receipt: Receipt,
+    /// Whether it holds a memory image.
+    pub memory: bool,
 }
 
 /// Where a fetch puts what it brings back.
@@ -173,6 +214,10 @@ pub trait Store: Send + Sync + 'static {
     /// Copies `files` to the store, replacing any older copy, and returns
     /// only once the copy is durable.
     ///
+    /// `save` is the owner's epoch and its number for this save, higher
+    /// than any it archived before: the copy replaces only an earlier save
+    /// of the same owner, or one of an earlier owner.
+    ///
     /// `cancel` is checked between pieces of work. Once it is seen, nothing
     /// more is started, nothing is published, and [`Archive::Cancelled`] is
     /// returned after the work already under way has finished, so nothing
@@ -181,6 +226,7 @@ pub trait Store: Send + Sync + 'static {
     fn archive(
         &self,
         id: Id,
+        save: Stamp,
         files: &SavedFiles,
         cancel: &CancellationToken,
     ) -> impl Future<Output = Result<Archive, EngineError>> + Send;
@@ -200,8 +246,23 @@ pub trait Store: Send + Sync + 'static {
         into: &FetchInto,
     ) -> impl Future<Output = Result<FetchedMemory, EngineError>> + Send;
 
-    /// Deletes the stored copy; succeeds when there is none.
-    fn delete(&self, id: Id) -> impl Future<Output = Result<(), EngineError>> + Send;
+    /// Deletes the stored copy as its owner under `own`; succeeds when there
+    /// is none. Refused once a later owner holds it.
+    fn delete(
+        &self,
+        id: Id,
+        own: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<()>, EngineError>> + Send;
+
+    /// Takes the stored copy over as its owner under `own`, a later epoch
+    /// than any that wrote it, so no archive a former owner still has in
+    /// flight can replace it. `None` when there is no copy. Taking over a
+    /// copy this owner already holds changes nothing.
+    fn claim(
+        &self,
+        id: Id,
+        own: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<Option<Claimed>>, EngineError>> + Send;
 
     /// The chunk store that remote memory images page in from, if this store
     /// keeps memory as chunks, and the host's transfer lanes, which the
@@ -210,13 +271,14 @@ pub trait Store: Send + Sync + 'static {
         None
     }
 
-    /// Deletes the memory image from the stored copy and keeps its disk.
-    /// Returns the receipt of what is stored afterwards, `None` if nothing
-    /// is.
+    /// Deletes the memory image from the stored copy and keeps its disk,
+    /// as its owner under `own`. Returns the receipt of what is stored
+    /// afterwards, `None` if nothing is.
     fn forget_memory(
         &self,
         id: Id,
-    ) -> impl Future<Output = Result<Option<Receipt>, EngineError>> + Send;
+        own: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<Option<Receipt>>, EngineError>> + Send;
 }
 
 /// No store: sandboxes never leave the host.
@@ -239,6 +301,7 @@ impl Store for NoStore {
     fn archive(
         &self,
         _: Id,
+        _: Stamp,
         _: &SavedFiles,
         _: &CancellationToken,
     ) -> impl Future<Output = Result<Archive, EngineError>> + Send {
@@ -257,19 +320,35 @@ impl Store for NoStore {
         ready(unconfigured("fetch"))
     }
 
-    fn delete(&self, _: Id) -> impl Future<Output = Result<(), EngineError>> + Send {
-        ready(Ok(()))
+    fn delete(
+        &self,
+        _: Id,
+        _: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<()>, EngineError>> + Send {
+        ready(Ok(Owned::Done(())))
+    }
+
+    fn claim(
+        &self,
+        _: Id,
+        _: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<Option<Claimed>>, EngineError>> + Send {
+        ready(Ok(Owned::Done(None)))
     }
 
     fn forget_memory(
         &self,
         _: Id,
-    ) -> impl Future<Output = Result<Option<Receipt>, EngineError>> + Send {
-        ready(Ok(None))
+        _: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<Option<Receipt>>, EngineError>> + Send {
+        ready(Ok(Owned::Done(None)))
     }
 }
 
 /// A store in a local directory, one subdirectory per sandbox.
+///
+/// It serves one host, so its sandboxes never change hands: it keeps no
+/// owner stamps and refuses no owner. A fleet uses [`crate::chunked`].
 #[derive(Clone, Debug)]
 pub struct Directory {
     root: PathBuf,
@@ -390,6 +469,7 @@ impl Store for Directory {
     async fn archive(
         &self,
         id: Id,
+        _: Stamp,
         files: &SavedFiles,
         cancel: &CancellationToken,
     ) -> Result<Archive, EngineError> {
@@ -512,16 +592,43 @@ impl Store for Directory {
         .await
     }
 
-    async fn delete(&self, id: Id) -> Result<(), EngineError> {
+    async fn delete(&self, id: Id, _: OwnerEpoch) -> Result<Owned<()>, EngineError> {
         let stored = self.dir(id);
         blocking("delete", move || match fs::remove_dir_all(&stored) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
-            _ => Ok(()),
+            _ => Ok(Owned::Done(())),
         })
         .await
     }
 
-    async fn forget_memory(&self, id: Id) -> Result<Option<Receipt>, EngineError> {
+    async fn claim(&self, id: Id, _: OwnerEpoch) -> Result<Owned<Option<Claimed>>, EngineError> {
+        let stored = self.dir(id);
+        blocking("claim", move || {
+            let listed = match fs::read_to_string(stored.join(CONTENTS)) {
+                Ok(listed) => listed,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(Owned::Done(None));
+                }
+                Err(error) => return Err(error),
+            };
+            let memory = listed.lines().any(|line| {
+                line.split_once(' ')
+                    .is_some_and(|(name, _)| name == "memory")
+            });
+            Ok(Owned::Done(Some(Claimed {
+                save: 0,
+                receipt: Receipt(blake3::hash(listed.as_bytes()).to_hex().to_string()),
+                memory,
+            })))
+        })
+        .await
+    }
+
+    async fn forget_memory(
+        &self,
+        id: Id,
+        _: OwnerEpoch,
+    ) -> Result<Owned<Option<Receipt>>, EngineError> {
         let stored = self.dir(id);
         blocking("forget", move || {
             // The device state goes first: without it, what remains of the
@@ -535,14 +642,16 @@ impl Store for Directory {
                 }
             }
             if !stored.exists() {
-                return Ok(None);
+                return Ok(Owned::Done(None));
             }
             sync_file(&stored)?;
             // The copy now holds the same disk without the image: list what
             // is left, under the same `made`, as a new receipt.
             let listed = match fs::read_to_string(stored.join(CONTENTS)) {
                 Ok(listed) => listed,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(Owned::Done(None));
+                }
                 Err(error) => return Err(error),
             };
             let mut kept = String::with_capacity(listed.len());
@@ -554,9 +663,9 @@ impl Store for Directory {
                 }
             }
             crate::layout::write_atomic(&stored.join(CONTENTS), kept.as_bytes())?;
-            Ok(Some(Receipt(
+            Ok(Owned::Done(Some(Receipt(
                 blake3::hash(kept.as_bytes()).to_hex().to_string(),
-            )))
+            ))))
         })
         .await
     }
@@ -565,6 +674,11 @@ impl Store for Directory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SAVE: Stamp = Stamp {
+        epoch: OwnerEpoch::FIRST,
+        save: 1,
+    };
 
     #[tokio::test]
     async fn a_cancelled_directory_archive_keeps_the_earlier_copy() {
@@ -579,7 +693,7 @@ mod tests {
         let store = Directory::new(dir.path().join("store"));
         let id: Id = "00000000000000000000000000000004".parse().unwrap();
         let first = store
-            .archive(id, &files, &CancellationToken::new())
+            .archive(id, SAVE, &files, &CancellationToken::new())
             .await
             .unwrap()
             .stored()
@@ -587,7 +701,7 @@ mod tests {
         fs::write(&disk, b"second").unwrap();
         let cancelled = CancellationToken::new();
         cancelled.cancel();
-        let outcome = store.archive(id, &files, &cancelled).await.unwrap();
+        let outcome = store.archive(id, SAVE, &files, &cancelled).await.unwrap();
         assert_eq!(outcome, Archive::Cancelled);
         assert!(store.verify(id, &first).await.unwrap());
         assert_eq!(fs::read(store.dir(id).join("disk")).unwrap(), b"first");
@@ -618,7 +732,7 @@ mod tests {
         let id: Id = "00000000000000000000000000000006".parse().unwrap();
         let archive = || async {
             store
-                .archive(id, &files, &CancellationToken::new())
+                .archive(id, SAVE, &files, &CancellationToken::new())
                 .await
                 .unwrap()
                 .stored()
@@ -634,7 +748,10 @@ mod tests {
 
         let second = archive().await;
         assert!(store.verify(id, &second).await.unwrap());
-        let disk_only = store.forget_memory(id).await.unwrap().unwrap();
+        let Owned::Done(Some(disk_only)) = store.forget_memory(id, SAVE.epoch).await.unwrap()
+        else {
+            panic!("the disk stays");
+        };
         assert!(!store.verify(id, &second).await.unwrap());
         assert!(store.verify(id, &disk_only).await.unwrap());
     }
@@ -658,7 +775,7 @@ mod tests {
         let store = Directory::new(dir.path().join("store"));
         let id: Id = "00000000000000000000000000000007".parse().unwrap();
         store
-            .archive(id, &files, &CancellationToken::new())
+            .archive(id, SAVE, &files, &CancellationToken::new())
             .await
             .unwrap();
         let into = |name: &str| FetchInto {

@@ -15,7 +15,9 @@ use super::{
 use crate::image::{Parts, Suspect};
 use crate::layout::{remove_if_present, write_atomic};
 use crate::state::{Change, Disk, unix_ms_now};
-use crate::store::{Archive, FetchInto, FetchedMemory, JailedFile, SavedFiles, SavedImage, Store};
+use crate::store::{
+    Archive, FetchInto, FetchedMemory, JailedFile, Owned, OwnerEpoch, SavedFiles, SavedImage, Store,
+};
 
 impl<E: Engine, S: Store> Job<E, S> {
     pub(super) async fn archive(&mut self) -> Outcome {
@@ -79,12 +81,32 @@ impl<E: Engine, S: Store> Job<E, S> {
             }),
             profile: profile.exists().then_some(profile),
         };
+        // A number no other archive of this owner has used, even one cut
+        // short by a crash: recorded before the store sees it.
+        if let Err(error) = self.commit(Change::new().next_save()).await {
+            return state_failure(&error);
+        }
+        let save = self.record.save();
         // The VM stays paused and owned by this step until it returns, and a
         // cancelled archive returns only once nothing is still reading the
         // files, so the disk read here is the disk as it was saved.
-        let receipt = match self.store.archive(self.id, &files, &self.cancel).await {
+        let receipt = match self
+            .store
+            .archive(self.id, save, &files, &self.cancel)
+            .await
+        {
             Ok(Archive::Stored(receipt)) => receipt,
             Ok(Archive::Cancelled) => return Outcome::Cancelled,
+            // Another archive of this owner got further: this one has
+            // nothing to add, and the record stays as it is.
+            Ok(Archive::Outdated) => {
+                return failure(&EngineError::new(
+                    ErrorKind::Transient,
+                    OP,
+                    "the store holds a later save of this sandbox",
+                ));
+            }
+            Ok(Archive::Fenced { by }) => return self.handed_off(OP, by).await,
             Err(error) => return failure(&error),
         };
         let marker = Archived {
@@ -102,6 +124,21 @@ impl<E: Engine, S: Store> Job<E, S> {
             Ok(()) => Outcome::Done,
             Err(error) => state_failure(&error),
         }
+    }
+
+    /// The sandbox belongs to the later owner `by`: removal begins, and
+    /// leaves the store's copy as that owner stored it. Nothing more of it
+    /// runs here.
+    async fn handed_off(&mut self, op: &'static str, by: OwnerEpoch) -> Outcome {
+        tracing::warn!(id = %self.id, own = %self.record.owner(), %by, "a later owner holds the sandbox; dropping this host's copy");
+        if let Err(error) = self.commit(Change::new().handed_off()).await {
+            return state_failure(&error);
+        }
+        failure(&EngineError::new(
+            ErrorKind::Fatal,
+            op,
+            format!("owner epoch {by} holds the sandbox now"),
+        ))
     }
 
     /// Whether the store still holds the copy the archive receipt names.
@@ -287,14 +324,15 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
         // Until the new receipt is written, the old one no longer matches
         // the store, so nothing evicts against a copy in flux.
-        let receipt = match self.store.forget_memory(self.id).await {
-            Ok(Some(receipt)) => receipt,
-            Ok(None) => {
+        let receipt = match self.store.forget_memory(self.id, self.record.owner()).await {
+            Ok(Owned::Done(Some(receipt))) => receipt,
+            Ok(Owned::Done(None)) => {
                 return match self.commit(Change::new().archived(false)).await {
                     Ok(()) => Outcome::Done,
                     Err(error) => state_failure(&error),
                 };
             }
+            Ok(Owned::Fenced { by }) => return self.handed_off(OP, by).await,
             Err(error) => return failure(&error),
         };
         let marker = Archived {

@@ -455,6 +455,68 @@ async fn an_uncertain_eviction_keeps_the_local_copy() {
     assert_eq!(durable.disk, Disk::Remote);
 }
 
+/// Each archive takes a save number of its own, recorded before the store
+/// sees it. Once a later owner claims the stored copy, the next archive
+/// finds the sandbox no longer this host's: its removal begins, and leaves
+/// the copy as the new owner holds it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archive_a_later_owner_fenced_hands_the_sandbox_off() {
+    use compute_storage::store::ChunkStore;
+    use object_store::memory::InMemory;
+    use object_store::path::Path as ObjectPath;
+
+    use crate::chunked::Chunked;
+    use crate::store::{Owned, OwnerEpoch, Stamp, Store as _};
+
+    let sandbox = Sandbox::new().await;
+    let chunks = ChunkStore::new(Arc::new(InMemory::new()), ObjectPath::from("t"));
+    let idle = sandbox.record(Change::new()).await;
+    let ran = sandbox
+        .job(Chunked::new(chunks.clone()), idle, false)
+        .run(Step::Archive)
+        .await;
+    assert_eq!(ran.outcome, Outcome::Done);
+    let archived = sandbox.records.get(sandbox.id).unwrap();
+    assert_eq!((archived.saves, archived.archived), (1, true));
+    let name = sandbox.id.to_string();
+    let first = Stamp {
+        epoch: OwnerEpoch::FIRST,
+        save: 1,
+    };
+    assert_eq!(
+        chunks.get_owned_pointer(&name).await.unwrap().unwrap().0,
+        first
+    );
+
+    let ran = sandbox
+        .job(Chunked::new(chunks.clone()), archived, false)
+        .run(Step::Archive)
+        .await;
+    assert_eq!(ran.outcome, Outcome::Done);
+    let again = sandbox.records.get(sandbox.id).unwrap();
+    assert_eq!(again.saves, 2, "every archive has its own number");
+
+    let next = Chunked::new(chunks.clone());
+    let claimed = next.claim(sandbox.id, OwnerEpoch(2)).await.unwrap();
+    assert!(
+        matches!(claimed, Owned::Done(Some(ref copy)) if copy.save == 2),
+        "{claimed:?}"
+    );
+    let held = chunks.get_owned_pointer(&name).await.unwrap();
+    let ran = sandbox
+        .job(Chunked::new(chunks.clone()), again, false)
+        .run(Step::Archive)
+        .await;
+    assert_eq!(ran.outcome, Outcome::Failed(Failure::Fatal));
+    let dropped = sandbox.records.get(sandbox.id).unwrap();
+    assert!(dropped.removing && dropped.handed_off, "{dropped:?}");
+    assert_eq!(
+        chunks.get_owned_pointer(&name).await.unwrap(),
+        held,
+        "the copy stays"
+    );
+}
+
 /// A refusal alone proves nothing about a sound image: the host may have
 /// run short of memory, or the VMM been killed while loading. So an image
 /// is kept for a retry when the engine reads its runtime, made it under

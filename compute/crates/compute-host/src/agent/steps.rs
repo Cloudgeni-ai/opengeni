@@ -20,7 +20,7 @@ use crate::protocol::Id;
 use crate::restore_notice::ask_commands;
 use crate::state::{Change, Fence, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory};
-use crate::store::Store;
+use crate::store::{Owned, Store};
 
 use super::holds::Closing;
 use super::{Event, HostAgent, HostError, Leftover, Reply, Running, TEARDOWN_RETRY, Woke};
@@ -538,7 +538,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             outcome,
         };
         let activity = busy.then_some(Input::Busy { sandbox: id.0 });
-        self.inputs(std::iter::once(finished).chain(activity));
+        // A step that found a later owner holding the sandbox began its
+        // removal, which leaves the store's copy.
+        let dropped = !destroy
+            && self.slots.contains_key(&id.0)
+            && self.records.get(id).is_some_and(|record| record.handed_off);
+        let remove = dropped.then_some(Input::Remove { sandbox: id.0 });
+        self.inputs(std::iter::once(finished).chain(activity).chain(remove));
         if destroy {
             if !self.tearing_down.contains_key(&id.0) {
                 self.destroy_now(id);
@@ -920,10 +926,18 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
                 .map_err(|error| HostError::Io(error.to_string()))?
                 .map_err(|error| HostError::Io(error.to_string()))?;
         }
-        self.store
-            .delete(id)
-            .await
-            .map_err(|error| HostError::Io(error.to_string()))?;
+        // A sandbox handed to another owner keeps its stored copy; one a
+        // later owner took meanwhile does too.
+        if !record.handed_off {
+            let deleted = self
+                .store
+                .delete(id, record.owner())
+                .await
+                .map_err(|error| HostError::Io(error.to_string()))?;
+            if let Owned::Fenced { by } = deleted {
+                tracing::warn!(%id, own = %record.owner(), %by, "a later owner holds the stored copy; it stays");
+            }
+        }
         self.records.remove(id, record.fence()).await?;
         // The pager of a VM that ended on its own may still be writing its
         // last file here; a moment later the directory is quiet.

@@ -48,6 +48,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use compute_core::SandboxId;
+use compute_fleet::{OwnerEpoch, Stamp};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::{
@@ -146,6 +147,24 @@ pub(crate) struct Record {
     /// still what losing this host would go back to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backed_up_ms: Option<u64>,
+    /// Its owner epoch: which ownership of the sandbox this host holds
+    /// ([ADR 18](../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+    /// The store refuses this host's writes once a later one holds it. A
+    /// host outside a fleet keeps the first.
+    #[serde(default = "first_owner")]
+    pub owner_epoch: u64,
+    /// The number of the last save this owner began archiving, recorded
+    /// before it began, so no two archives of one owner share a number.
+    #[serde(default)]
+    pub saves: u64,
+    /// Its removal leaves the store's copy, which belongs to a later owner
+    /// or was handed on: the host drops only what it has.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handed_off: bool,
+}
+
+fn first_owner() -> u64 {
+    OwnerEpoch::FIRST.0
 }
 
 /// Whether a sandbox's guest knows which sandbox it is.
@@ -183,6 +202,23 @@ impl Record {
             identity: Identity::Known,
             last_used_ms: None,
             backed_up_ms: None,
+            owner_epoch: OwnerEpoch::FIRST.0,
+            saves: 0,
+            handed_off: false,
+        }
+    }
+
+    /// Its owner epoch.
+    pub fn owner(&self) -> OwnerEpoch {
+        OwnerEpoch(self.owner_epoch)
+    }
+
+    /// The stamp of the save an archive about to begin takes, once
+    /// [`Change::next_save`] is committed.
+    pub fn save(&self) -> Stamp {
+        Stamp {
+            epoch: self.owner(),
+            save: self.saves,
         }
     }
 
@@ -222,6 +258,10 @@ impl std::fmt::Display for Fence {
 
 /// What one write changes. Anything not set keeps its value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate change one write may make on its own"
+)]
 pub(crate) struct Change {
     disk: Option<Disk>,
     image: Option<bool>,
@@ -231,6 +271,8 @@ pub(crate) struct Change {
     identity: Option<Identity>,
     last_used_ms: Option<u64>,
     backed_up_ms: Option<u64>,
+    next_save: bool,
+    handed_off: bool,
 }
 
 impl Change {
@@ -284,6 +326,20 @@ impl Change {
         self
     }
 
+    /// Takes the next save number, for an archive about to begin.
+    pub fn next_save(mut self) -> Self {
+        self.next_save = true;
+        self
+    }
+
+    /// The sandbox is no longer this host's: its removal begins and leaves
+    /// the store's copy.
+    pub fn handed_off(mut self) -> Self {
+        self.handed_off = true;
+        self.removing = true;
+        self
+    }
+
     fn apply_to(self, record: &mut Record) {
         if let Some(disk) = self.disk {
             record.disk = disk;
@@ -307,6 +363,10 @@ impl Change {
         if let Some(at) = self.backed_up_ms {
             record.backed_up_ms = Some(record.backed_up_ms.map_or(at, |was| was.max(at)));
         }
+        if self.next_save {
+            record.saves += 1;
+        }
+        record.handed_off |= self.handed_off;
     }
 }
 

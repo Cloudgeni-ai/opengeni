@@ -42,6 +42,6 @@ pub use layout::check_filesystem;
 pub use pool::{Keep, PoolConfig, Shape};
 pub use server::serve;
 pub use store::{
-    Archive, Directory, FetchInto, FetchedMemory, JailedFile, NoStore, Prefilled, Receipt,
-    SavedFiles, SavedImage, Store,
+    Archive, Claimed, Directory, FetchInto, FetchedMemory, JailedFile, NoStore, Owned, OwnerEpoch,
+    Prefilled, Receipt, SavedFiles, SavedImage, Stamp, Store,
 };

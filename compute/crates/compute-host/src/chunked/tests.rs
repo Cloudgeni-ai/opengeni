@@ -41,6 +41,124 @@ fn files(dir: &Path, memory: bool) -> SavedFiles {
     }
 }
 
+/// A save of the first owner later than every one before it.
+fn save() -> Stamp {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SAVES: AtomicU64 = AtomicU64::new(1);
+    Stamp {
+        epoch: OwnerEpoch::FIRST,
+        save: SAVES.fetch_add(1, Ordering::Relaxed),
+    }
+}
+
+fn at(epoch: u64, save: u64) -> Stamp {
+    Stamp {
+        epoch: OwnerEpoch(epoch),
+        save,
+    }
+}
+
+/// A host the fleet gave up on writes nothing once the sandbox's next
+/// owner claimed its copy: no archive, no forgetting, no delete. The new
+/// owner takes over the copy as it was, and goes on from its save number.
+#[tokio::test]
+async fn a_former_owner_writes_nothing_once_a_later_one_claims_the_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let saved = files(dir.path(), true);
+    sparse(saved.disk.path(), CHUNK_BYTES, &[(0, b"disk")]);
+    let image = saved.memory.clone().unwrap();
+    sparse(&image.state, 100, &[(0, b"state")]);
+    sparse(&image.memory, CHUNK_BYTES, &[(9, b"memory")]);
+    let store = Chunked::new(ChunkStore::new(
+        Arc::new(InMemory::new()),
+        ObjectPath::from("t"),
+    ));
+    let sandbox = id("0123456789abcdef0123456789abcde0");
+    let cancel = CancellationToken::new();
+
+    let first = store
+        .archive(sandbox, at(1, 3), &saved, &cancel)
+        .await
+        .unwrap();
+    let Archive::Stored(receipt) = first.clone() else {
+        panic!("{first:?}");
+    };
+    // An archive of the same save, tried again after its answer was lost,
+    // finds it stored; an earlier one finds a later save there.
+    let again = store
+        .archive(sandbox, at(1, 3), &saved, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(again, first);
+    let earlier = store
+        .archive(sandbox, at(1, 2), &saved, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(earlier, Archive::Outdated);
+
+    let Owned::Done(Some(claimed)) = store.claim(sandbox, OwnerEpoch(2)).await.unwrap() else {
+        panic!("a copy to claim");
+    };
+    assert_eq!(
+        claimed,
+        Claimed {
+            save: 3,
+            receipt: receipt.clone(),
+            memory: true,
+        }
+    );
+    assert!(
+        store.verify(sandbox, &receipt).await.unwrap(),
+        "the copy is as it was"
+    );
+    let fenced = Owned::Fenced { by: OwnerEpoch(2) };
+    assert_eq!(
+        store
+            .archive(sandbox, at(1, 4), &saved, &cancel)
+            .await
+            .unwrap(),
+        Archive::Fenced { by: OwnerEpoch(2) }
+    );
+    assert_eq!(
+        store.forget_memory(sandbox, OwnerEpoch(1)).await.unwrap(),
+        fenced
+    );
+    assert_eq!(
+        store.delete(sandbox, OwnerEpoch(1)).await.unwrap(),
+        Owned::Fenced { by: OwnerEpoch(2) }
+    );
+    assert_eq!(
+        store.claim(sandbox, OwnerEpoch(1)).await.unwrap(),
+        Owned::Fenced { by: OwnerEpoch(2) }
+    );
+    assert!(
+        store.verify(sandbox, &receipt).await.unwrap(),
+        "untouched by the former owner"
+    );
+
+    let next = store
+        .archive(sandbox, at(2, 4), &saved, &cancel)
+        .await
+        .unwrap();
+    assert!(matches!(next, Archive::Stored(_)), "{next:?}");
+    assert_eq!(
+        store.delete(sandbox, OwnerEpoch(2)).await.unwrap(),
+        Owned::Done(())
+    );
+    // Deleted for good: a later archive of it stores nothing.
+    assert_eq!(
+        store
+            .archive(sandbox, at(2, 5), &saved, &cancel)
+            .await
+            .unwrap(),
+        Archive::Outdated
+    );
+    assert_eq!(
+        store.claim(sandbox, OwnerEpoch(3)).await.unwrap(),
+        Owned::Done(None)
+    );
+}
+
 async fn objects(backend: &InMemory, prefix: &str) -> usize {
     backend
         .list(Some(&ObjectPath::from(prefix)))
@@ -158,6 +276,7 @@ async fn a_disk_fetched_over_its_base_downloads_only_what_differs() {
     store
         .archive(
             id("00000000000000000000000000000001"),
+            save(),
             &base_files,
             &CancellationToken::new(),
         )
@@ -186,7 +305,7 @@ async fn a_disk_fetched_over_its_base_downloads_only_what_differs() {
     );
     let sandbox = id("00000000000000000000000000000002");
     store
-        .archive(sandbox, &saved, &CancellationToken::new())
+        .archive(sandbox, save(), &saved, &CancellationToken::new())
         .await
         .unwrap()
         .stored()
@@ -251,7 +370,7 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
     let store = Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")));
     let sandbox = id("0123456789abcdef0123456789abcdef");
     let first = store
-        .archive(sandbox, &saved, &CancellationToken::new())
+        .archive(sandbox, save(), &saved, &CancellationToken::new())
         .await
         .unwrap()
         .stored()
@@ -272,7 +391,7 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
         &[(5, b"disk"), (2 * CHUNK_BYTES + 7, b"far")],
     );
     let second = store
-        .archive(sandbox, &saved, &CancellationToken::new())
+        .archive(sandbox, save(), &saved, &CancellationToken::new())
         .await
         .unwrap()
         .stored()
@@ -321,7 +440,7 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
         .count();
     assert_eq!(leftovers, 0, "staging files left behind");
 
-    store.delete(sandbox).await.unwrap();
+    store.delete(sandbox, OwnerEpoch::FIRST).await.unwrap();
     assert!(!store.verify(sandbox, &second).await.unwrap());
     let gone = store.fetch(sandbox, &into).await.unwrap_err();
     assert_eq!(gone.kind, ErrorKind::Fatal);
@@ -370,7 +489,7 @@ async fn a_wake_brings_its_working_set_back_with_the_state() {
     ));
     let sandbox = id("0123456789abcdef0123456789abcdef");
     store
-        .archive(sandbox, &saved, &CancellationToken::new())
+        .archive(sandbox, save(), &saved, &CancellationToken::new())
         .await
         .unwrap()
         .stored()
@@ -448,7 +567,7 @@ async fn a_chunk_map_skips_unchanged_chunks_and_catches_a_changed_image() {
     ));
     let sandbox = id("00000000000000000000000000000002");
     store
-        .archive(sandbox, &saved, &CancellationToken::new())
+        .archive(sandbox, save(), &saved, &CancellationToken::new())
         .await
         .unwrap()
         .stored()
@@ -462,13 +581,13 @@ async fn a_chunk_map_skips_unchanged_chunks_and_catches_a_changed_image() {
     saved.memory.as_mut().unwrap().chunks = Some(Arc::new(stale));
     // ...but a chunk the map says changed is read and must match it.
     let error = store
-        .archive(sandbox, &saved, &CancellationToken::new())
+        .archive(sandbox, save(), &saved, &CancellationToken::new())
         .await
         .unwrap_err();
     assert_eq!(error.kind, ErrorKind::Fatal);
     saved.memory.as_mut().unwrap().chunks = Some(map);
     store
-        .archive(sandbox, &saved, &CancellationToken::new())
+        .archive(sandbox, save(), &saved, &CancellationToken::new())
         .await
         .unwrap()
         .stored()
@@ -486,7 +605,7 @@ async fn a_disk_only_copy_cannot_supply_a_memory_image() {
     ));
     let sandbox = id("00000000000000000000000000000001");
     store
-        .archive(sandbox, &saved, &CancellationToken::new())
+        .archive(sandbox, save(), &saved, &CancellationToken::new())
         .await
         .unwrap()
         .stored()
@@ -524,12 +643,15 @@ async fn a_cancelled_archive_publishes_nothing_and_keeps_the_earlier_copy() {
     cancelled.cancel();
 
     // Nothing stored yet: a cancelled archive writes nothing at all.
-    let outcome = store.archive(sandbox, &saved, &cancelled).await.unwrap();
+    let outcome = store
+        .archive(sandbox, save(), &saved, &cancelled)
+        .await
+        .unwrap();
     assert_eq!(outcome, Archive::Cancelled);
     assert_eq!(objects(&backend, "t").await, 0);
 
     let first = store
-        .archive(sandbox, &saved, &CancellationToken::new())
+        .archive(sandbox, save(), &saved, &CancellationToken::new())
         .await
         .unwrap()
         .stored()
@@ -542,13 +664,16 @@ async fn a_cancelled_archive_publishes_nothing_and_keeps_the_earlier_copy() {
         4 * CHUNK_BYTES,
         &[(3 * CHUNK_BYTES, b"new")],
     );
-    let outcome = store.archive(sandbox, &saved, &cancelled).await.unwrap();
+    let outcome = store
+        .archive(sandbox, save(), &saved, &cancelled)
+        .await
+        .unwrap();
     assert_eq!(outcome, Archive::Cancelled);
     assert_eq!(objects(&backend, "t").await, before);
     assert!(store.verify(sandbox, &first).await.unwrap());
 
     let second = store
-        .archive(sandbox, &saved, &CancellationToken::new())
+        .archive(sandbox, save(), &saved, &CancellationToken::new())
         .await
         .unwrap()
         .stored()
@@ -573,7 +698,7 @@ async fn a_copy_missing_a_chunk_fails_verification_until_archived_again() {
         let saved = saved.clone();
         async move {
             store
-                .archive(sandbox, &saved, &CancellationToken::new())
+                .archive(sandbox, save(), &saved, &CancellationToken::new())
                 .await
                 .unwrap()
                 .stored()
@@ -638,7 +763,7 @@ async fn a_sweep_keeps_what_stored_copies_name() {
     );
     for (sandbox, files) in [(with_memory, &saved), (disk_only, &other)] {
         store
-            .archive(sandbox, files, &CancellationToken::new())
+            .archive(sandbox, save(), files, &CancellationToken::new())
             .await
             .unwrap()
             .stored()
@@ -674,7 +799,10 @@ async fn a_sweep_keeps_what_stored_copies_name() {
     assert_eq!((report.pointers, report.unnamed), (2, 0), "{report:?}");
     assert_eq!(report.named, report.stored);
 
-    store.forget_memory(with_memory).await.unwrap();
+    store
+        .forget_memory(with_memory, OwnerEpoch::FIRST)
+        .await
+        .unwrap();
     let pointer = chunks
         .get_pointer(&with_memory.to_string())
         .await
@@ -695,7 +823,7 @@ async fn a_sweep_keeps_what_stored_copies_name() {
     );
     assert_eq!(forgotten.named + forgotten.unnamed, forgotten.stored);
 
-    store.delete(with_memory).await.unwrap();
+    store.delete(with_memory, OwnerEpoch::FIRST).await.unwrap();
     let shared = ahead.sweep(false).await.unwrap();
     // This store deletes on no condition, so the deleted copy's pointer
     // stays, empty, naming nothing.
@@ -703,7 +831,7 @@ async fn a_sweep_keeps_what_stored_copies_name() {
     assert!(shared.named >= 2, "the shared disk stays: {shared:?}");
     assert_eq!(shared.named + shared.unnamed, shared.stored);
 
-    store.delete(disk_only).await.unwrap();
+    store.delete(disk_only, OwnerEpoch::FIRST).await.unwrap();
     let none = ahead.sweep(false).await.unwrap();
     assert_eq!((none.named, none.unnamed), (0, none.stored));
 }
