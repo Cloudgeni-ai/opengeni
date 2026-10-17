@@ -44,6 +44,8 @@ beforeAll(async () => {
     // The schema stops before 0763 for good (0793 stays marked applied), but
     // the current session adapter names the 0793 Site audience columns.
     await stageSiteSessionAudienceColumns(database.ownerUrl);
+    // Likewise, current event readers project 0810's nullable usage source key.
+    await owner`alter table session_events add column usage_source_key text`;
     await provisionRoles(database.adminUrl, { appPassword: database.appPassword });
   } finally {
     await owner.end();
