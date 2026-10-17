@@ -248,12 +248,19 @@ can be built and tested.
 - **Checkpoints.** A sandbox whose sleep rules set `checkpoint_every_ms`
   is copied to object storage while it runs, so losing its host costs
   only what changed since. The fleet sets it to 10 minutes for every
-  sandbox whose create names no sleep rules. The period counts running
-  time from the later of its newest copy in the store and its last wake,
-  so a sandbox that sleeps and is archived anyway takes none. One with no
-  copy yet gets its first within a minute of running, and one created
-  and never run is archived at once, before its first boot, so the loss
-  of its host never loses the sandbox itself.
+  sandbox whose create names no sleep rules. Protection starts once a
+  copy is in the store, not when it was captured, and the period counts
+  running time from the later of when its newest copy got there and its
+  last wake, so a sandbox that sleeps and is archived anyway takes none.
+  The period is therefore a target, not a bound: losing its host costs a
+  sandbox in use at most the period plus the upload times of its last
+  two checkpoints (the newest copy's capture may be one upload older than
+  its publication, and the next is published one upload after it is
+  taken). One with no copy yet gets its first within a minute of
+  running. One created and never run is archived at once, so it survives
+  its host from then on; a wake meanwhile comes first and cancels that
+  archive, and the sandbox is then protected only once its first
+  checkpoint is in the store.
   - *A coherent bundle.* The step settles a lazily woken VM first (its
     image whole, its pager holding all of it), then pauses the VM, has
     its VMM write the pages changed since its last snapshot, and clones
@@ -263,7 +270,18 @@ can be built and tested.
     changes any more, is uploaded as the owner's next save under the
     same owner stamp and fences as an archive. The guest stands still
     only from the pause to the resume (`compute.paused_us`): the merge
-    and the upload run while it works.
+    and the upload run while it works. A resume the VMM refuses having
+    changed nothing is tried again for up to 30 seconds, cancelled or
+    not; only a VM that cannot be resumed by then, or whose resume may
+    have changed something, ends, and the sandbox goes back to its last
+    saved copy.
+  - *Admitted for its disk.* While the clone shares the disk's blocks,
+    any guest write may take a new one, so a running checkpoint books
+    the disk's whole growth bound. A checkpoint starts only when the
+    host's disk can book that on top of everything else; one that
+    cannot waits, without holding up others, while the host makes room
+    as it does for a refused wake, by evicting idle copies already in
+    object storage.
   - *Still volatile.* The record goes on vouching for no local copy, since
     the VM moves on: the sandbox stays `Running` and `Volatile`. Only its
     `backed_up_ms` moves, to when the bundle was captured, and only once
@@ -281,8 +299,13 @@ can be built and tested.
     save captured after it always carries a higher number.
   - *Use goes on, memory pressure wins.* A request during a checkpoint
     neither waits for it nor cancels it: the guest is paused only while
-    its state is captured. A host that needs the memory cancels it, as it
-    cancels an archive, and the sandbox is checkpointed again once it runs.
+    its state is captured. The guest's own work counts as use from the
+    resume on: the step reads the VM's processor time and traffic for the
+    host agent, which cannot while the step holds the VM, so a guest busy
+    through a long upload is not taken for idle when it ends, and the
+    capture's own work never counts. A host that needs the memory cancels
+    it, as it cancels an archive, and the sandbox is checkpointed again
+    once it runs.
   - *Fenced like an archive.* A checkpoint that finds a later owner in the
     store is refused and drops this host's copy, ending its VM.
   - *Only where extents are shared.* The disk clone needs a state root on

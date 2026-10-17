@@ -30,8 +30,10 @@ pub use reach::Reached;
 
 /// How a fleet sandbox sleeps when its create says nothing: the
 /// recommended ladder, with a checkpoint after every ten minutes it runs,
-/// so losing its host costs a sandbox in use at most that much work. A
-/// host whose files share no extents takes no checkpoints, and says so.
+/// counted from when the last one reached the store: losing its host costs
+/// a sandbox in use at most that much work and the upload times of its
+/// last two checkpoints. A host whose files share no extents takes no
+/// checkpoints, and says so.
 pub const DEFAULT_SLEEP: SleepConfig = SleepConfig {
     checkpoint_every_ms: Some(10 * 60 * 1000),
     ..SleepConfig::RECOMMENDED
