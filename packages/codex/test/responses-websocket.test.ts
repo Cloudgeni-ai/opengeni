@@ -533,7 +533,7 @@ describe("continuing the previous response on a connection", () => {
     expect(socket.sent[0]).not.toHaveProperty("previous_response_id");
     const firstResponse = await complete(socket, first, "resp_1");
     expect(firstResponse.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
-      "websocket; connection=new; input=full",
+      "websocket; connection=new; input=full; handshake_ms=0",
     );
 
     const { pending, sent } = await sendNext(transport, socket, {

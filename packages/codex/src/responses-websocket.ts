@@ -767,7 +767,7 @@ export function codexResponsesTransport(
         resolve(new Response(stream, { status, headers }));
       };
 
-      const send = (message: Record<string, unknown>) => {
+      const sendMessage = (message: Record<string, unknown>) => {
         try {
           active.socket.send(JSON.stringify({ ...message, type: "response.create" }));
         } catch (error) {
@@ -803,7 +803,7 @@ export function codexResponsesTransport(
           // The backend no longer holds the previous response; nothing has
           // reached the caller yet, so send the full request on this socket.
           transport.input = "full";
-          send(payload);
+          sendMessage(payload);
           return;
         }
         if (!started && type === "error" && typeof event.status === "number") {
@@ -839,7 +839,7 @@ export function codexResponsesTransport(
         if (TERMINAL_EVENTS.has(type)) finish();
       };
 
-      send(
+      sendMessage(
         continued === null || !fullInput || !chain
           ? payload
           : {
