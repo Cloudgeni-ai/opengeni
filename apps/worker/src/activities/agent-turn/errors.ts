@@ -1996,7 +1996,7 @@ function baseAgentRunFailurePayload(
   if (isXaiSubscriptionHostedToolContinuationError(error)) {
     return {
       error:
-        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved.",
       code: "xai_hosted_tool_continuation_stalled",
       retryable: false,
     };
@@ -2014,8 +2014,7 @@ function baseAgentRunFailurePayload(
   const xaiStreamTimeout = classifyXaiSubscriptionStreamIdleTimeoutError(error);
   if (xaiStreamTimeout) {
     return {
-      error:
-        "SuperGrok stopped sending valid response events. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+      error: "SuperGrok stopped sending valid response events. Partial output was preserved.",
       code: "xai_response_stream_idle_timeout",
       retryable: false,
       responseObserved: xaiStreamTimeout.responseObserved,
@@ -2096,8 +2095,8 @@ function baseAgentRunFailurePayload(
   if (codexTimeout) {
     return {
       error: codexTimeout.responseObserved
-        ? "The Codex response timed out after streaming began. Observed output was checkpointed; automatic replay is disabled because the upstream operation may still be active."
-        : "The Codex response timed out before any response was observed. Upstream acceptance is unknown, so automatic replay is disabled.",
+        ? "The Codex response timed out after streaming began. Observed output was checkpointed."
+        : "The Codex response timed out before any response was observed.",
       code: "codex_response_timeout",
       retryable: false,
       timeoutClass: codexTimeout.timeoutClass,

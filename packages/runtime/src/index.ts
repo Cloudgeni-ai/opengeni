@@ -15,7 +15,7 @@ export {
   fitCompactionPrefix,
   compactionPrefixCuts,
 } from "./anthropic-compaction";
-export { AnthropicProviderRejection } from "./anthropic-messages";
+export { AnthropicProviderRejection, AnthropicStreamInterruptedError } from "./anthropic-messages";
 export {
   createModelImageSizer,
   type ModelImageSizerOptions,
