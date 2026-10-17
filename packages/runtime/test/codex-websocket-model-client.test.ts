@@ -94,7 +94,10 @@ test.each([false, true])(
       status: 400,
       error: { code: "previous_response_not_found", param: "previous_response_id" },
     });
-    for (let i = 0; i < 100 && admissions < 3; i++) await Bun.sleep(1);
+    for (let i = 0; i < 100; i++) {
+      if (admissions >= 3) break;
+      await Bun.sleep(1);
+    }
     expect(admissions).toBe(3);
     if (refused) {
       expect(await outcome).toBe(refusal);

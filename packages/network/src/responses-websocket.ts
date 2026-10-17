@@ -9,6 +9,10 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { FetchLike } from "./index";
 
+// Capture the module's bootstrap context, not a chat request. Socket I/O and
+// idle timers outlive turns and must not pin the opener's execution context.
+const inConnectionScope = AsyncResource.bind(<T>(operation: () => T): T => operation());
+
 /**
  * Response header naming how this transport carried a Responses request, so
  * the request audit can report it per request. Read with
@@ -608,112 +612,115 @@ export function responsesTransport(
     connection.onClose = null;
     if (connection.closed) return;
     if (connection.idleTimer) clearTimeout(connection.idleTimer);
-    connection.idleTimer = setTimeout(() => retire(connection), idleMs);
+    connection.idleTimer = inConnectionScope(() => setTimeout(() => retire(connection), idleMs));
     (connection.idleTimer as { unref?: () => void }).unref?.();
   };
 
   const connect = (url: string, key: string, slot: string, headers: Record<string, string>) =>
-    new Promise<Connection>((resolve, reject) => {
-      let socket: ModelWebSocketLike;
-      try {
-        socket = createSocket(url, headers);
-      } catch {
-        reject(
-          new ModelSocketTransportError(
-            `${endpoint.label} response WebSocket could not open`,
-            "handshake",
-          ),
-        );
-        return;
-      }
-      const connection: Connection = {
-        key,
-        slot,
-        socket,
-        openedAt: now(),
-        busy: false,
-        closed: false,
-        requests: 0,
-        warmed: false,
-        chain: null,
-        idleTimer: null,
-        onEvent: null,
-        onClose: null,
-      };
-      let opened = false;
-      const timer = setTimeout(() => {
-        if (opened) return;
-        connection.closed = true;
-        try {
-          socket.close();
-        } catch {
-          // Never opened.
-        }
-        reject(
-          new ModelSocketTransportError(
-            `${endpoint.label} response WebSocket handshake timed out`,
-            "handshake",
-          ),
-        );
-      }, connectTimeoutMs);
-      socket.onopen = () => {
-        if (connection.closed) {
-          socket.close();
-          return;
-        }
-        opened = true;
-        clearTimeout(timer);
-        resolve(connection);
-      };
-      socket.onerror = () => {
-        // A close event always follows and settles the state.
-      };
-      socket.onclose = (event) => {
-        clearTimeout(timer);
-        connection.closed = true;
-        if (pool.get(key) === connection) {
-          pool.delete(key);
-          if (slots.get(slot) === key) slots.delete(slot);
-        }
-        if (connection.idleTimer) clearTimeout(connection.idleTimer);
-        if (!opened) {
-          reject(
-            new ModelSocketTransportError(
-              `${endpoint.label} response WebSocket handshake failed (${event?.code ?? "closed"})`,
-              "handshake",
-              socket.handshakeStatus !== undefined &&
-                socket.handshakeStatus >= 400 &&
-                socket.handshakeStatus < 500 &&
-                socket.handshakeStatus !== 429,
-            ),
-          );
-          return;
-        }
-        const onClose = connection.onClose;
-        connection.chain = null;
-        connection.onEvent = null;
-        connection.onClose = null;
-        onClose?.(
-          new ModelSocketTransportError(
-            `${endpoint.label} response WebSocket closed before the response finished (${event?.code ?? "closed"})`,
-            "response",
-          ),
-        );
-      };
-      socket.onmessage = (message) => {
-        const text = eventData(message.data);
-        if (text === null) return;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(text);
-        } catch {
-          return;
-        }
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          connection.onEvent?.(parsed as Record<string, unknown>);
-        }
-      };
-    });
+    inConnectionScope(
+      () =>
+        new Promise<Connection>((resolve, reject) => {
+          let socket: ModelWebSocketLike;
+          try {
+            socket = createSocket(url, headers);
+          } catch {
+            reject(
+              new ModelSocketTransportError(
+                `${endpoint.label} response WebSocket could not open`,
+                "handshake",
+              ),
+            );
+            return;
+          }
+          const connection: Connection = {
+            key,
+            slot,
+            socket,
+            openedAt: now(),
+            busy: false,
+            closed: false,
+            requests: 0,
+            warmed: false,
+            chain: null,
+            idleTimer: null,
+            onEvent: null,
+            onClose: null,
+          };
+          let opened = false;
+          const timer = setTimeout(() => {
+            if (opened) return;
+            connection.closed = true;
+            try {
+              socket.close();
+            } catch {
+              // Never opened.
+            }
+            reject(
+              new ModelSocketTransportError(
+                `${endpoint.label} response WebSocket handshake timed out`,
+                "handshake",
+              ),
+            );
+          }, connectTimeoutMs);
+          socket.onopen = () => {
+            if (connection.closed) {
+              socket.close();
+              return;
+            }
+            opened = true;
+            clearTimeout(timer);
+            resolve(connection);
+          };
+          socket.onerror = () => {
+            // A close event always follows and settles the state.
+          };
+          socket.onclose = (event) => {
+            clearTimeout(timer);
+            connection.closed = true;
+            if (pool.get(key) === connection) {
+              pool.delete(key);
+              if (slots.get(slot) === key) slots.delete(slot);
+            }
+            if (connection.idleTimer) clearTimeout(connection.idleTimer);
+            if (!opened) {
+              reject(
+                new ModelSocketTransportError(
+                  `${endpoint.label} response WebSocket handshake failed (${event?.code ?? "closed"})`,
+                  "handshake",
+                  socket.handshakeStatus !== undefined &&
+                    socket.handshakeStatus >= 400 &&
+                    socket.handshakeStatus < 500 &&
+                    socket.handshakeStatus !== 429,
+                ),
+              );
+              return;
+            }
+            const onClose = connection.onClose;
+            connection.chain = null;
+            connection.onEvent = null;
+            connection.onClose = null;
+            onClose?.(
+              new ModelSocketTransportError(
+                `${endpoint.label} response WebSocket closed before the response finished (${event?.code ?? "closed"})`,
+                "response",
+              ),
+            );
+          };
+          socket.onmessage = (message) => {
+            const text = eventData(message.data);
+            if (text === null) return;
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(text);
+            } catch {
+              return;
+            }
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              connection.onEvent?.(parsed as Record<string, unknown>);
+            }
+          };
+        }),
+    );
 
   const identity = (url: string, headers: HeadersInit | undefined) => {
     const handshake: Record<string, string> = {};

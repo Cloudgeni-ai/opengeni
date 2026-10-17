@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   CODEX_RESPONSES_WEBSOCKET_BETA,
   CODEX_TRANSPORT_HEADER,
@@ -253,6 +254,26 @@ test("socket refusal persists its turn policy before dispatching HTTP", async ()
   release();
   expect((await pending).status).toBe(200);
   expect(httpCalls).toHaveLength(1);
+});
+
+test("persistent socket resources do not inherit the opening request context", async () => {
+  const execution = new AsyncLocalStorage<{ turn: string }>();
+  let socket!: FakeSocket;
+  let openingContext: unknown = "not opened";
+  const transport = codexResponsesTransport(async () => new Response("HTTP"), {
+    createSocket: (url, headers) => {
+      openingContext = execution.getStore();
+      socket = new FakeSocket(url, headers);
+      queueMicrotask(() => socket.open());
+      return socket;
+    },
+  });
+  const pending = execution.run({ turn: "opening-turn" }, () => transport(URL, request()));
+  await nextSend(() => socket);
+  expect(openingContext).toBeUndefined();
+  socket.emit({ type: "response.completed", response: { id: "first" } });
+  await (await pending).text();
+  socket.close();
 });
 
 test("streams a response over one reused connection as SSE with usage headers", async () => {
