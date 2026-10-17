@@ -1213,6 +1213,9 @@ async function createRlsAppRole(
     ),
   );
   await db.execute(
+    dbSql.raw(`GRANT EXECUTE ON FUNCTION public.session_private_actor_visible_keys() TO "${role}"`),
+  );
+  await db.execute(
     dbSql.raw(
       `GRANT EXECUTE ON FUNCTION public.lock_nested_agent_depth_configuration() TO "${role}"`,
     ),
