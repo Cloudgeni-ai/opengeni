@@ -1,4 +1,5 @@
 import { spreadsheetSheetId, type EditableArtifactStableId } from "./spreadsheet-artifact-commands";
+import { fnv1a64 } from "./editable-artifact-binary";
 import {
   canonicalSpreadsheetDateFromMilliseconds,
   canonicalSpreadsheetDateMilliseconds,
@@ -46,8 +47,6 @@ export type SpreadsheetArtifactDimensions = Readonly<{
 }>;
 const UINT32_MAX = 0xffff_ffff;
 const UINT64_MAX = 0xffff_ffff_ffff_ffffn;
-const FNV_OFFSET = 0xcbf29ce484222325n;
-const FNV_PRIME = 0x100000001b3n;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -1188,15 +1187,6 @@ function boundedUtf8(value: string, maximum: number, label: string): Uint8Array 
 
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
-}
-
-function fnv1a64(bytes: Uint8Array): bigint {
-  let hash = FNV_OFFSET;
-  for (const byte of bytes) {
-    hash ^= BigInt(byte);
-    hash = BigInt.asUintN(64, hash * FNV_PRIME);
-  }
-  return hash;
 }
 
 function queryError(message: string): TypeError {
