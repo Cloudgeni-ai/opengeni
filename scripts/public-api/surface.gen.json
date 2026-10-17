@@ -11224,6 +11224,8 @@
         "$.plans[].freeCredit": "boolean!",
         "$.plans[].key": "string!",
         "$.plans[].label": "string!",
+        "$.plans[].legacyStripePriceIds": "array?",
+        "$.plans[].legacyStripePriceIds[]": "string",
         "$.plans[].monthlyCreditMicros": "integer!",
         "$.plans[].monthlyPriceMicros": "integer! null",
         "$.plans[].seatLimit": "integer! null",

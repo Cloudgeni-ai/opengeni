@@ -827,6 +827,55 @@ test("expired invitations do not consume seats and organizations without plans r
   expect((await getBillingBalance(client.db, other.accountId)).plan).toBeNull();
 }, 180_000);
 
+test("catalog setter validates legacy price aliases and rejects ambiguous current/historical prices", async () => {
+  if (!client || !shared) return;
+  const initial = await readSubscriptionPlanCatalog(client.db);
+  const catalog = initial.plans.map((plan) =>
+    plan.key === "pro"
+      ? { ...plan, stripePriceId: "price_pro_new", legacyStripePriceIds: ["price_pro_old"] }
+      : plan.key === "max"
+        ? { ...plan, stripePriceId: "price_max" }
+        : plan,
+  );
+  try {
+    await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(catalog)}, 'catalog-test', 'Allow an old price for existing subscribers')`;
+    expect(
+      (await readSubscriptionPlanCatalog(client.db)).plans.find((plan) => plan.key === "pro")
+        ?.legacyStripePriceIds,
+    ).toEqual(["price_pro_old"]);
+    for (const aliases of [
+      null,
+      "price_old",
+      [null],
+      [2],
+      [""],
+      [" price_old "],
+      ["x".repeat(201)],
+      ["price_max"],
+      ["price_pro_new"],
+      ["price_old", "price_old"],
+      Array.from({ length: 101 }, (_, n) => `price_${n}`),
+    ]) {
+      const invalid = catalog.map((plan) =>
+        plan.key === "pro" ? { ...plan, legacyStripePriceIds: aliases } : plan,
+      );
+      await expectState(async () => {
+        await shared!
+          .admin`select set_subscription_plan_catalog(${shared!.admin.json(invalid)}, 'catalog-test', 'Reject invalid or ambiguous price aliases')`;
+      }, "22023");
+    }
+    const sharedAlias = catalog.map((plan) =>
+      plan.key === "max" ? { ...plan, legacyStripePriceIds: ["price_pro_old"] } : plan,
+    );
+    await expectState(async () => {
+      await shared!
+        .admin`select set_subscription_plan_catalog(${shared!.admin.json(sharedAlias)}, 'catalog-test', 'Reject aliases shared between plans')`;
+    }, "22023");
+  } finally {
+    await shared.admin`select set_subscription_plan_catalog(${shared.admin.json(initial.plans)}, 'catalog-test', 'Restore fixture catalog after alias validation')`;
+  }
+}, 180_000);
+
 test("catalog is owner-only, revisioned and immutable; changing credits only changes future grants", async () => {
   if (!client || !shared) return;
   const { accountId } = await account();

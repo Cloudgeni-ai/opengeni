@@ -37,15 +37,32 @@ export function planSeats(plan: BillingPlanBalance): string {
     : `${plan.seatsUsed} / ${plan.seatLimit} seats used`;
 }
 
-export function isSeatLimitError(error: unknown): boolean {
+export function isSeatLimitError(
+  error: unknown,
+  plan?: Pick<BillingPlanBalance, "seatsUsed" | "seatLimit"> | null,
+): boolean {
   const facts = apiErrorFacts(error);
   if (facts.status !== 402) return false;
-  if (facts.code === "seat_limit_reached") return true;
-  // Membership's existing refusal body uses `error`, not the envelope's `code`.
+  let code = facts.code;
+  // Older membership servers used a flat body; current SDK errors expose code.
   const body = error && typeof error === "object" && "body" in error ? error.body : null;
   try {
-    return typeof body === "string" && JSON.parse(body)?.error === "seat_limit_reached";
+    if (typeof body === "string") {
+      const decoded = JSON.parse(body);
+      const bodyCode =
+        typeof decoded?.error === "string"
+          ? decoded.error
+          : (decoded?.error?.code ?? decoded?.code);
+      if (typeof bodyCode === "string") code ??= bodyCode;
+    }
   } catch {
-    return false;
+    // A status-only refusal can still be explained by the known seat usage.
   }
+  if (code === "seat_limit_reached") return true;
+  return (
+    (code === undefined || code === "payment_required") &&
+    plan != null &&
+    plan.seatLimit !== null &&
+    plan.seatsUsed >= plan.seatLimit
+  );
 }

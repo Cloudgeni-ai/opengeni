@@ -71,7 +71,7 @@ function price(key = "pro"): Stripe.Price {
     active: true,
     currency: "usd",
     billing_scheme: "per_unit",
-    unit_amount: key === "max" ? 20_000 : 2_000,
+    unit_amount: key.startsWith("max") ? 20_000 : 2_000,
     recurring: { interval: "month", interval_count: 1 },
   } as Stripe.Price;
 }
@@ -214,10 +214,15 @@ function fixture(enabled = true) {
     prices: { retrieve: mock(async (priceId: string) => price(priceId.slice(6))) },
     checkout: {
       sessions: {
-        create: mock(async () => ({
-          id: "cs_subscription",
-          url: "https://checkout.stripe.test/session",
-        })),
+        create: mock(
+          async (
+            _input: Stripe.Checkout.SessionCreateParams,
+            _options?: Stripe.RequestOptions,
+          ) => ({
+            id: "cs_subscription",
+            url: "https://checkout.stripe.test/session",
+          }),
+        ),
       },
     },
     subscriptions: {
@@ -237,7 +242,7 @@ function fixture(enabled = true) {
           item.current_period_end = 2500;
           sub.latest_invoice = "in_upgrade";
           invoices.set("in_upgrade", invoice(sub.id, "in_upgrade"));
-          lines.set("in_upgrade", [line("max", 1500, 2500)]);
+          lines.set("in_upgrade", [line(input.items[0]!.price!.slice(6), 1500, 2500)]);
         }
         if (input.cancel_at_period_end !== undefined)
           sub.cancel_at_period_end = input.cancel_at_period_end;
@@ -268,7 +273,7 @@ function fixture(enabled = true) {
         id: "sub_sched",
         current_phase: { start_date: 1000, end_date: 2000 },
       })),
-      update: mock(async () => ({})),
+      update: mock(async (_id: string, _input: Stripe.SubscriptionScheduleUpdateParams) => ({})),
       release: mock(async () => {
         subscriptions.get("sub_main")!.schedule = null;
       }),
@@ -325,6 +330,93 @@ function fixture(enabled = true) {
 }
 
 describe("subscription checkout and catalog", () => {
+  test("legacy subscriptions synchronize at their old amount while checkout and upgrades target only current prices", async () => {
+    const f = fixture();
+    const changed = plans.map((plan) =>
+      plan.stripePriceId && ["pro", "max"].includes(plan.key)
+        ? {
+            ...plan,
+            stripePriceId: `${plan.stripePriceId}_v2`,
+            legacyStripePriceIds: [plan.stripePriceId],
+          }
+        : plan,
+    );
+    f.store.catalog = async () => ({ revision: 4, plans: changed });
+    await f.service.checkout({
+      accountId,
+      customerId: "cus_org",
+      planKey: "pro",
+      idempotencyKey: requestKey,
+      successUrl: "https://app.test/success",
+      cancelUrl: "https://app.test/cancel",
+    });
+    expect(f.stripe.checkout.sessions.create.mock.calls[0]![0]).toMatchObject({
+      line_items: [{ price: "price_pro_v2", quantity: 1 }],
+    });
+    const sub = f.add();
+    await f.service.handleEvent(event("invoice.paid", invoice()));
+    expect(f.state()?.plan_key).toBe("pro");
+    await f.service.upgrade({ accountId, planKey: "max", idempotencyKey: requestKey });
+    expect(f.stripe.subscriptions.update.mock.calls.at(-1)![1]).toMatchObject({
+      items: [{ id: "si_plan", price: "price_max_v2", quantity: 1 }],
+    });
+    expect(sub.items.data[0]!.price.id).toBe("price_max_v2");
+  });
+
+  test("legacy prices may differ from today's price; unknown and mismatched current prices remain rejected", async () => {
+    const f = fixture();
+    f.store.catalog = async () => ({
+      revision: 4,
+      plans: plans.map((plan) =>
+        plan.key === "pro"
+          ? {
+              ...plan,
+              stripePriceId: "price_pro_v2",
+              legacyStripePriceIds: ["price_pro"],
+              monthlyPriceMicros: 30_000_000,
+            }
+          : plan,
+      ),
+    });
+    const sub = f.add();
+    await f.service.handleEvent(event("invoice.paid", invoice()));
+    expect(f.replace).toHaveBeenCalledTimes(1);
+    sub.items.data[0]!.price.id = "price_unknown";
+    await expect(f.service.handleEvent(event("invoice.paid", invoice()))).rejects.toThrow(
+      "not in the self-service catalog",
+    );
+    sub.items.data[0]!.price.id = "price_pro_v2";
+    await expect(f.service.handleEvent(event("invoice.paid", invoice()))).rejects.toThrow(
+      "price does not match catalog",
+    );
+  });
+
+  test("downgrade from a legacy price preserves its current phase and schedules the current target price", async () => {
+    const f = fixture();
+    f.store.catalog = async () => ({
+      revision: 4,
+      plans: plans.map((plan) =>
+        plan.stripePriceId && ["pro", "max"].includes(plan.key)
+          ? {
+              ...plan,
+              stripePriceId: `${plan.stripePriceId}_v2`,
+              legacyStripePriceIds: [plan.stripePriceId],
+            }
+          : plan,
+      ),
+    });
+    const sub = f.add();
+    sub.items.data[0]!.price = price("max");
+    f.setState({ plan_key: "max", stripe_subscription_id: sub.id });
+    await f.service.change({ accountId, planKey: "pro", idempotencyKey: requestKey });
+    expect(f.stripe.subscriptionSchedules.update.mock.calls[0]![1]).toMatchObject({
+      phases: [
+        { items: [{ price: "price_max", quantity: 1 }] },
+        { items: [{ price: "price_pro_v2", quantity: 1 }] },
+      ],
+    });
+  });
+
   test("reuses the customer, enables tax, and isolates subscription metadata from top-ups", async () => {
     const f = fixture();
     await f.service.checkout({
