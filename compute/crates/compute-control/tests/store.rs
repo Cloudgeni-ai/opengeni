@@ -361,7 +361,6 @@ fn lifecycle(team: &str, state: State, end_ms: u64) -> LifecycleRow {
             cpu_count: 1,
             memory_mb: 512,
             changed_ms: 1,
-            check_ms: None,
         },
         version: 0,
     }
@@ -457,4 +456,46 @@ async fn lifecycles<S: Store>(store: S) {
 #[tokio::test]
 async fn e2b_lifecycle_writes_are_conditional_and_due_ones_are_found() {
     each(lifecycles, lifecycles).await;
+}
+
+/// Paused lifecycles come a page at a time, each once, in order of id, and
+/// nothing else does.
+async fn paused_lifecycles<S: Store>(store: S) {
+    let team = format!("team-{:x}", random());
+    let running = lifecycle(&team, State::Running, 5);
+    assert!(store.insert_lifecycle(&running).await.unwrap());
+    let mut more = Vec::new();
+    for _ in 0..5 {
+        let row = lifecycle(&team, State::Paused, 5);
+        assert!(store.insert_lifecycle(&row).await.unwrap());
+        more.push(row.id);
+    }
+    let mut paged = Vec::new();
+    let mut after = None;
+    loop {
+        let page = store.lifecycles_paused(after, 2).await.unwrap();
+        assert!(page.iter().all(|row| row.record.state == State::Paused));
+        after = page.last().map(|row| row.id);
+        paged.extend(page.iter().map(|row| row.id.to_string()));
+        if page.len() < 2 {
+            break;
+        }
+    }
+    let mut sorted = paged.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(paged, sorted, "in order, each once");
+    for id in &more {
+        assert!(paged.contains(&id.to_string()));
+    }
+    assert!(!paged.contains(&running.id.to_string()));
+    assert!(store.delete_lifecycle(running.id, 0).await.unwrap());
+    for id in &more {
+        assert!(store.delete_lifecycle(*id, 0).await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn paused_e2b_lifecycles_are_read_a_page_at_a_time() {
+    each(paused_lifecycles, paused_lifecycles).await;
 }

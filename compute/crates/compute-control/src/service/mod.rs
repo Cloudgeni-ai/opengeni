@@ -26,6 +26,7 @@ use crate::hosts::{Answered, Hosts};
 use crate::store::{SandboxRow, Spec, Store, StoreError, Write, replace};
 use crate::view::{Target, View, shape_key};
 
+pub use holds::Depth;
 pub use moves::Drained;
 pub use reach::Reached;
 

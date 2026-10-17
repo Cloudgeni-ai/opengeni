@@ -227,6 +227,7 @@ impl Door {
         let settings = Settings {
             pause_within: Duration::from_secs(5),
             sweep_every: Duration::from_millis(100),
+            check_paused_every: Duration::from_millis(300),
             ..settings
         };
         let front = Front::new(Arc::clone(&fleet.running.service), settings);
@@ -929,12 +930,12 @@ async fn pause_work_from_before_a_resume_leaves_the_sandbox_running() {
     assert_eq!(detail["state"], "running");
 }
 
-/// A pause leaves one more check of the host for later: a sandbox found
-/// awake then (a wake that started before the pause landed after it, from
-/// a replica that has since stopped, say) is paused again; one found saved
-/// only has the check cleared.
+/// Paused sandboxes' hosts are checked again and again: sandboxes found
+/// awake (woken by calls that started before their pauses and landed
+/// after, from replicas that have stopped since, say) are paused again;
+/// ones kept saved are left alone.
 #[tokio::test]
-async fn a_pause_checks_its_host_again_later_and_pauses_a_sandbox_found_awake() {
+async fn paused_sandboxes_found_awake_are_paused_again() {
     let (fleet, _host, levels, _seen, door) = fleet_with_guest().await;
     let saves = |levels: &Arc<Mutex<Levels>>| {
         let levels = levels.lock().unwrap();
@@ -944,62 +945,36 @@ async fn a_pause_checks_its_host_again_later_and_pauses_a_sandbox_found_awake() 
             .filter(|line| *line == "sleep Saved")
             .count()
     };
-    for awake in [true, false] {
+    let mut ids = Vec::new();
+    for _ in 0..3 {
         let sandbox = door.create(json!({"templateID": "base"})).await;
         let id = sandbox["sandboxID"].as_str().unwrap().to_owned();
-        let sandbox_id: Id = id.parse().unwrap();
         let (status, _) = door
             .post(&format!("/sandboxes/{id}/pause"), json!({}))
             .await;
         assert_eq!(status, 204);
-        let mut row = fleet.store.lifecycle(sandbox_id).await.unwrap().unwrap();
+        ids.push(id.parse::<Id>().unwrap());
+    }
+    // Late wakes land on two of them.
+    let before = saves(&levels);
+    for id in &ids[..2] {
+        levels.lock().unwrap().at.insert(*id, LevelName::Running);
+    }
+    until(
+        Duration::from_secs(10),
+        "the awake ones are paused again",
+        async || {
+            let levels = levels.lock().unwrap();
+            ids.iter().all(|id| levels.at[id] == LevelName::Saved)
+        },
+    )
+    .await;
+    // Over several more checks, nothing else is saved again.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(saves(&levels), before + 2);
+    for id in &ids {
+        let row = fleet.store.lifecycle(*id).await.unwrap().unwrap();
         assert_eq!(row.record.state, e2b::lifecycle::State::Paused);
-        let check = row.record.check_ms.expect("a pause leaves a check");
-        assert!(
-            check > e2b::ops::now_ms() + 60_000,
-            "the check is past the bound"
-        );
-        if awake {
-            levels
-                .lock()
-                .unwrap()
-                .at
-                .insert(sandbox_id, LevelName::Running);
-        }
-        let before = saves(&levels);
-        row.record.check_ms = Some(0);
-        assert!(
-            compute_control::store::replace_lifecycle(&*fleet.store, &mut row)
-                .await
-                .unwrap()
-        );
-        until(Duration::from_secs(10), "the check is done", async || {
-            let record = fleet
-                .store
-                .lifecycle(sandbox_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .record;
-            record.state == e2b::lifecycle::State::Paused
-                && record.check_ms.is_none_or(|check| check > 0)
-                && levels.lock().unwrap().at[&sandbox_id] == LevelName::Saved
-        })
-        .await;
-        assert_eq!(
-            saves(&levels),
-            before + usize::from(awake),
-            "awake: {awake}"
-        );
-        let record = fleet
-            .store
-            .lifecycle(sandbox_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .record;
-        // Paused again, it has a check of its own; found saved, none.
-        assert_eq!(record.check_ms.is_some(), awake);
     }
 }
 

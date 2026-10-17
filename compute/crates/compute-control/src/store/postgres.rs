@@ -867,6 +867,29 @@ impl Store for PostgresStore {
             .map(lifecycle_row)
             .collect()
     }
+
+    async fn lifecycles_paused(
+        &self,
+        after: Option<Id>,
+        limit: usize,
+    ) -> Result<Vec<LifecycleRow>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let after = after.map_or_else(String::new, |id| id.to_string());
+        self.client()
+            .await?
+            .query(
+                &format!(
+                    "select {LIFECYCLE_COLUMNS} from compute_lifecycles where due_ms = $1 \
+                     and id collate \"C\" > $2 order by id collate \"C\" limit $3"
+                ),
+                &[&i64::MAX, &after, &limit],
+            )
+            .await
+            .map_err(database)?
+            .iter()
+            .map(lifecycle_row)
+            .collect()
+    }
 }
 
 #[cfg(test)]

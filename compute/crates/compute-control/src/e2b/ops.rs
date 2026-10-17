@@ -7,7 +7,7 @@
 //! stops between the two leaves a record that is due at once, so another
 //! replica's sweeper finishes the work.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,7 +21,7 @@ use tokio::time::Instant;
 use super::lifecycle::{self, Due, OnConnect, OnPause, OnTimeout, Record, State};
 use super::wire::NewSandbox;
 use super::{Front, Refused};
-use crate::service::{Failure, new_id};
+use crate::service::{Depth, Failure, new_id};
 use crate::store::{LifecycleRow, Spec, Store, replace_lifecycle};
 
 /// How the hold an open stream keeps on its sandbox is named: this, then
@@ -40,10 +40,8 @@ const WAIT_EVERY: Duration = Duration::from_millis(200);
 const SWEEP_BACKOFF: Duration = Duration::from_secs(5);
 /// How many due records the sweeper reads at a time.
 const SWEEP_BATCH: usize = 64;
-/// Past the longest a wake-capable call may take to land, how much longer
-/// a pause waits before it checks the host once more (see
-/// [`lifecycle`]).
-const CHECK_MARGIN: Duration = Duration::from_secs(30);
+/// How many paused records a check of their hosts reads at a time.
+const CHECK_BATCH: usize = 256;
 
 /// The time now in milliseconds since the Unix epoch.
 #[must_use]
@@ -137,7 +135,6 @@ pub async fn create<S: Store>(
         cpu_count: u32::from(template.vcpus),
         memory_mb: template.memory_mib,
         changed_ms: now,
-        check_ms: None,
     };
     let row = LifecycleRow {
         id,
@@ -284,8 +281,6 @@ pub async fn pause<S: Store>(front: &Front<S>, team: &str, id: Id) -> Result<(),
 /// condition that the record is still at the version read before the host
 /// reported the save, so traffic that woke the sandbox meanwhile, and
 /// wrote the record again (see [`fence_wake`]), makes it look again.
-/// `Paused` carries the time of one more check of the host, past the
-/// longest any wake-capable call that started before may take to land.
 async fn finish_pause<S: Store>(
     front: &Front<S>,
     team: &str,
@@ -295,7 +290,6 @@ async fn finish_pause<S: Store>(
     let deadline = Instant::now() + within;
     let mut asked_at: Option<Instant> = None;
     loop {
-        let read_at = Instant::now();
         let mut row = read(front, team, id).await?;
         match row.record.state {
             State::Pausing => {}
@@ -303,16 +297,14 @@ async fn finish_pause<S: Store>(
             State::Running | State::Creating => {
                 // Resumed after another replica finished the pause. A
                 // save this asked for may have come after the resume's
-                // wake, so it is woken again: like any wake, within the
-                // bound a later pause's check allows for.
+                // wake, so it is woken again, and the pause fenced against
+                // it like any wake.
                 if asked_at.is_some() {
-                    let woken = bounded(
-                        front,
-                        read_at,
-                        front.service.wake(team, id, PriorityName::Interactive),
-                    )
-                    .await;
-                    if let Err(refused) = woken.and_then(|woken| woken.map_err(Refused::from)) {
+                    let woken = front
+                        .service
+                        .wake(team, id, PriorityName::Interactive)
+                        .await;
+                    if let Err(refused) = woken.map_err(Refused::from) {
                         tracing::debug!(%id, error = %refused.message, "waking a sandbox resumed during a pause");
                     }
                     fence_wake(front, id).await?;
@@ -340,9 +332,7 @@ async fn finish_pause<S: Store>(
         }
         match front.service.depth(team, id).await {
             Ok(depth) if depth.saved() => {
-                let now = now_ms();
-                row.record.set(State::Paused, now);
-                row.record.check_ms = Some(now.saturating_add(check_after(front)));
+                row.record.set(State::Paused, now_ms());
                 if replace_lifecycle(front.store(), &mut row).await? {
                     return Ok(());
                 }
@@ -365,69 +355,65 @@ async fn finish_pause<S: Store>(
     }
 }
 
-/// How long after a pause completes its host is checked once more: past
-/// the last send of any wake-capable call started before the pause began
-/// (see [`bounded`]), and past the longest its host may still act on it.
-fn check_after<S: Store>(front: &Front<S>) -> u64 {
-    let after = front.service.reach_within() + front.service.request_age() + CHECK_MARGIN;
-    u64::try_from(after.as_millis()).unwrap_or(u64::MAX)
+/// Checks that the hosts of paused sandboxes keep them saved, and pauses
+/// again any found awake: a wake-capable call that started before a pause
+/// may reach its host after the pause completed, from a replica that has
+/// stopped since too. Each host is asked once for all it owns. Pausing
+/// again is conditional on the record read before the host was asked, so
+/// a resume meanwhile wins.
+pub async fn check_paused<S: Store>(front: &Front<S>) {
+    let mut after = None;
+    loop {
+        let paused = match front.store().lifecycles_paused(after, CHECK_BATCH).await {
+            Ok(paused) => paused,
+            Err(error) => {
+                tracing::warn!(%error, "reading paused E2B sandboxes");
+                return;
+            }
+        };
+        let Some(last) = paused.last() else {
+            return;
+        };
+        after = Some(last.id);
+        let full = paused.len() == CHECK_BATCH;
+        let asked: Vec<(String, Id)> = paused
+            .iter()
+            .map(|row| (row.team.clone(), row.id))
+            .collect();
+        let depths: HashMap<Id, Result<Depth, Failure>> =
+            front.service.depths(&asked).await.into_iter().collect();
+        for row in paused {
+            match depths.get(&row.id) {
+                Some(Ok(depth)) if !depth.saved() => {
+                    if let Err(refused) = Box::pin(pause_again(front, row)).await {
+                        tracing::debug!(error = %refused.message, "pausing again a paused sandbox found awake");
+                    }
+                }
+                Some(Err(Failure::NotFound)) => {
+                    if let Err(refused) = gone(front, row.id).await {
+                        tracing::debug!(error = %refused.message, "forgetting a sandbox the fleet no longer has");
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !full {
+            return;
+        }
+    }
 }
 
-/// Runs `call`, which may wake a sandbox (a wake, a connect, a hold), but
-/// only until [`crate::service::Service::reach_within`] past `running_at`:
-/// an instant no later than the read or write that found or made the
-/// sandbox's record `Running`. Any pause that completes after that began
-/// after it, so the call sends nothing later than that pause's check
-/// allows for. Dropping it sends nothing more either.
-///
-/// # Errors
-///
-/// 504 when the bound passes first.
-pub async fn bounded<S: Store, F: Future>(
-    front: &Front<S>,
-    running_at: Instant,
-    call: F,
-) -> Result<F::Output, Refused> {
-    tokio::time::timeout_at(running_at + front.service.reach_within(), call)
-        .await
-        .map_err(|_| Refused::new(504, "the sandbox's host did not answer in time"))
-}
-
-/// The check a pause left: a sandbox its host still keeps saved needs no
-/// more; one found awake (a wake-capable call that started before the
-/// pause landed after it) is paused again. Both writes are conditional on
-/// the version read before the host was asked, so a resume meanwhile wins.
-async fn check_paused<S: Store>(front: &Front<S>, mut row: LifecycleRow) -> Result<(), Refused> {
+/// Pauses again a sandbox recorded paused that its host was found to run.
+async fn pause_again<S: Store>(front: &Front<S>, mut row: LifecycleRow) -> Result<(), Refused> {
+    tracing::info!(id = %row.id, "a paused sandbox was found awake; pausing it again");
     let team = row.team.clone();
-    match front.service.depth(&team, row.id).await {
-        Ok(depth) if depth.saved() => {
-            row.record.check_ms = None;
-            replace_lifecycle(front.store(), &mut row).await?;
-            Ok(())
-        }
-        Ok(_) => {
-            tracing::info!(id = %row.id, "a paused sandbox was found awake; pausing it again");
-            row.record.set(State::Pausing, now_ms());
-            if !replace_lifecycle(front.store(), &mut row).await? {
-                return Ok(());
-            }
-            match Box::pin(finish_pause(
-                front,
-                &team,
-                row.id,
-                front.settings.pause_within,
-            ))
-            .await
-            {
-                Err(refused) if refused.status == 404 => Ok(()),
-                other => other,
-            }
-        }
-        Err(Failure::NotFound) => match gone(front, row.id).await {
-            Err(refused) if refused.status == 404 => Ok(()),
-            other => other,
-        },
-        Err(failure) => Err(failure.into()),
+    row.record.set(State::Pausing, now_ms());
+    if !replace_lifecycle(front.store(), &mut row).await? {
+        return Ok(());
+    }
+    match finish_pause(front, &team, row.id, front.settings.pause_within).await {
+        Err(refused) if refused.status == 404 => Ok(()),
+        other => other,
     }
 }
 
@@ -437,8 +423,8 @@ async fn check_paused<S: Store>(front: &Front<S>, mut row: LifecycleRow) -> Resu
 /// `Pausing`, and a `Pausing` one is written again, so a pause about to
 /// record `Paused` looks at the host again; the sweeper of any replica
 /// then finishes the pause. When this does not run (its caller gone, or
-/// its replica stopped), the pause's own later check of the host repairs
-/// it. Answers whether the sandbox is still recorded running.
+/// its replica stopped), [`check_paused`] finds the sandbox awake later.
+/// Answers whether the sandbox is still recorded running.
 ///
 /// # Errors
 ///
@@ -513,10 +499,6 @@ pub struct Connected {
     pub record: Record,
     /// Whether it was paused and this resumed it.
     pub resumed: bool,
-    /// An instant no later than the read or write that found or made it
-    /// running: what wake-capable calls after it are bounded from (see
-    /// [`bounded`]).
-    pub running_at: Instant,
 }
 
 /// Connects to a team's sandbox: a running one gets a later timeout if
@@ -534,7 +516,6 @@ pub async fn connect<S: Store>(
 ) -> Result<Connected, Refused> {
     let deadline = Instant::now() + front.service.settings().wake_within;
     loop {
-        let read_at = Instant::now();
         let row = read(front, team, id).await?;
         match lifecycle::on_connect(row.record.state) {
             OnConnect::Extend => {
@@ -556,12 +537,10 @@ pub async fn connect<S: Store>(
                 return Ok(Connected {
                     record,
                     resumed: false,
-                    running_at: read_at,
                 });
             }
             OnConnect::Resume => {
                 let mut resumed = false;
-                let running_at = Instant::now();
                 let record = settle(front, team, id, |record, now| {
                     if record.state != State::Paused {
                         return Ok(false);
@@ -575,12 +554,10 @@ pub async fn connect<S: Store>(
                 if !resumed {
                     continue;
                 }
-                bounded(
-                    front,
-                    running_at,
-                    front.service.wake(team, id, PriorityName::Interactive),
-                )
-                .await??;
+                front
+                    .service
+                    .wake(team, id, PriorityName::Interactive)
+                    .await?;
                 // Paused again while it woke: what was asked for is a
                 // running sandbox, so it resumes again.
                 if !fence_wake(front, id).await? {
@@ -589,7 +566,6 @@ pub async fn connect<S: Store>(
                 return Ok(Connected {
                     record,
                     resumed: true,
-                    running_at,
                 });
             }
             OnConnect::Wait => {
@@ -637,13 +613,19 @@ pub async fn set_timeout<S: Store>(
 /// as long as it runs. Every replica runs one; a sandbox two replicas work
 /// on at once ends the same way, since every step is idempotent. Each round
 /// reads every due record, a page at a time, so records it cannot finish
-/// yet (a host away, say) never keep it from later ones.
+/// yet (a host away, say) never keep it from later ones. Between rounds
+/// it checks paused sandboxes' hosts ([`check_paused`]).
 pub async fn sweep<S: Store>(front: Arc<Front<S>>) {
     let mut every = tokio::time::interval(front.settings.sweep_every);
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut check_at = Instant::now() + front.settings.check_paused_every;
     loop {
         every.tick().await;
         sweep_round(&front).await;
+        if Instant::now() >= check_at {
+            check_paused(&front).await;
+            check_at = Instant::now() + front.settings.check_paused_every;
+        }
     }
 }
 
@@ -724,7 +706,6 @@ pub async fn sweep_row<S: Store>(front: &Front<S>, row: LifecycleRow) -> Result<
                 other => other,
             }
         }
-        Due::Check => Box::pin(check_paused(front, row)).await,
     }
 }
 

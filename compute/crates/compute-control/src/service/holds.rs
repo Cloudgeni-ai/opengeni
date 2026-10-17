@@ -2,17 +2,18 @@
 //! deep it sleeps: what the E2B front door needs to keep a sandbox with an
 //! open stream awake, and to know a pause is complete.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
-use compute_fleet::Outcome;
-use compute_protocol::host::{Id, LevelName, PriorityName, Reply, Request};
+use compute_fleet::{HostId, Outcome};
+use compute_protocol::host::{HostStatus, Id, LevelName, PriorityName, Reply, Request};
 
 use super::{Failure, Service, host_failure};
 use crate::store::{SandboxRow, Store};
 use crate::view::Target;
 
 /// How long a host may take to answer a hold, a release or a status.
-pub(super) const ASK_WAIT: Duration = Duration::from_secs(10);
+const ASK_WAIT: Duration = Duration::from_secs(10);
 
 /// Where a sandbox is, as far as sleeping goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,15 +131,53 @@ impl<S: Store> Service<S> {
         let Reply::Status(status) = self.ask(&row, &target, &Request::Status).await? else {
             return Ok(Depth::Unknown);
         };
-        Ok(status
-            .sandboxes
-            .iter()
-            .find(|sandbox| sandbox.id == id)
-            .map_or(Depth::Unknown, |sandbox| Depth::At {
-                level: sandbox.level,
-                busy: sandbox.step.is_some() || sandbox.holds > 0,
-            }))
+        Ok(depth_in(&status, id))
     }
+
+    /// How deep each of these teams' sandboxes sleeps, asking each owner
+    /// host once for all of them it owns. A sandbox gone, or whose host
+    /// cannot be asked, gets that failure.
+    pub async fn depths(&self, sandboxes: &[(String, Id)]) -> Vec<(Id, Result<Depth, Failure>)> {
+        let mut found = Vec::with_capacity(sandboxes.len());
+        let mut owned: HashMap<HostId, Vec<SandboxRow>> = HashMap::new();
+        for (team, id) in sandboxes {
+            match self.get(team, *id).await {
+                Ok(row) => match row.ownership.owner {
+                    Some(host) => owned.entry(host).or_default().push(row),
+                    None => found.push((*id, Ok(Depth::Unowned))),
+                },
+                Err(failure) => found.push((*id, Err(failure))),
+            }
+        }
+        for rows in owned.into_values() {
+            let asked = match self.owner(&rows[0]) {
+                Ok(Some(target)) => self.ask(&rows[0], &target, &Request::Status).await,
+                Ok(None) => Ok(Reply::Done),
+                Err(failure) => Err(failure),
+            };
+            for row in rows {
+                let depth = match &asked {
+                    Ok(Reply::Status(status)) => Ok(depth_in(status, row.id)),
+                    Ok(_) => Ok(Depth::Unknown),
+                    Err(failure) => Err(Failure::Unavailable(failure.to_string())),
+                };
+                found.push((row.id, depth));
+            }
+        }
+        found
+    }
+}
+
+/// How deep sandbox `id` sleeps by its host's status.
+fn depth_in(status: &HostStatus, id: Id) -> Depth {
+    status
+        .sandboxes
+        .iter()
+        .find(|sandbox| sandbox.id == id)
+        .map_or(Depth::Unknown, |sandbox| Depth::At {
+            level: sandbox.level,
+            busy: sandbox.step.is_some() || sandbox.holds > 0,
+        })
 }
 
 #[cfg(test)]

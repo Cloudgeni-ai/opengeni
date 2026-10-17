@@ -294,6 +294,15 @@ pub trait Store: Send + Sync + 'static {
         after: Option<(u64, Id)>,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send;
+
+    /// At most `limit` E2B lifecycles that are never due (the paused
+    /// ones), in order of id, from just after `after`: the id of the last
+    /// one a previous read gave.
+    fn lifecycles_paused(
+        &self,
+        after: Option<Id>,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send;
 }
 
 /// How a conditional write of a sandbox's row went.

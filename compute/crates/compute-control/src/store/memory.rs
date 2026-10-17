@@ -390,6 +390,26 @@ impl MemoryStore {
         due.truncate(limit);
         due
     }
+
+    fn lifecycles_paused_now(&self, after: Option<Id>, limit: usize) -> Vec<LifecycleRow> {
+        // Ids compare as the database compares them: as text.
+        let after = after.map(|id| id.to_string());
+        let mut paused: Vec<LifecycleRow> = self
+            .lock()
+            .lifecycles
+            .values()
+            .filter(|row| row.record.due_ms() == u64::MAX)
+            .filter(|row| {
+                after
+                    .as_ref()
+                    .is_none_or(|after| row.id.to_string() > *after)
+            })
+            .cloned()
+            .collect();
+        paused.sort_by_cached_key(|row| row.id.to_string());
+        paused.truncate(limit);
+        paused
+    }
 }
 
 impl Store for MemoryStore {
@@ -508,5 +528,13 @@ impl Store for MemoryStore {
         limit: usize,
     ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send {
         ready(Ok(self.lifecycles_due_now(now_ms, after, limit)))
+    }
+
+    fn lifecycles_paused(
+        &self,
+        after: Option<Id>,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send {
+        ready(Ok(self.lifecycles_paused_now(after, limit)))
     }
 }

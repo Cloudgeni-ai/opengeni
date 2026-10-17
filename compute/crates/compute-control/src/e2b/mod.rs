@@ -148,6 +148,9 @@ pub struct Settings {
     /// How often each replica looks for due timeouts, and for pauses and
     /// kills a crash cut short.
     pub sweep_every: Duration,
+    /// How often each replica checks that paused sandboxes' hosts keep
+    /// them saved (see [`ops::check_paused`]).
+    pub check_paused_every: Duration,
 }
 
 impl Default for Settings {
@@ -167,6 +170,7 @@ impl Default for Settings {
             envd_version: ENVD_VERSION.into(),
             pause_within: Duration::from_secs(120),
             sweep_every: Duration::from_secs(1),
+            check_paused_every: Duration::from_secs(60),
         }
     }
 }
