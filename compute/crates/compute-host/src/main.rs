@@ -18,7 +18,7 @@ use compute_host::protocol::{
 };
 use compute_host::{
     BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, Keep, NoStore, PagerConfig,
-    PoolConfig, Store, serve,
+    PoolConfig, Store, Threads, serve,
 };
 
 use crate::bench::{BenchArgs, bench, exec};
@@ -283,6 +283,35 @@ struct ServeArgs {
     /// guest memory uses huge pages. The `nested` memory profile implies it.
     #[arg(long)]
     no_compress: bool,
+    /// Async worker threads. Defaults to a quarter of the host's
+    /// processors, from 2 to 8.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    worker_threads: Option<u32>,
+    /// Most threads for blocking work such as file copies and
+    /// compression. Defaults to 64 more than `--compress-threads`.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    blocking_threads: Option<u32>,
+    /// Most chunks compressed at once for object storage, each holding a
+    /// processor. Defaults to a quarter of the host's processors, from 2
+    /// to 8.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    compress_threads: Option<u32>,
+}
+
+impl ServeArgs {
+    /// The thread counts asked for, the host's defaults otherwise.
+    fn threads(&self) -> Threads {
+        let defaults = Threads::for_host();
+        let get = |asked: Option<u32>, default: usize| {
+            asked.map_or(default, |asked| usize::try_from(asked).unwrap_or(default))
+        };
+        let compress = get(self.compress_threads, defaults.compress);
+        Threads {
+            workers: get(self.worker_threads, defaults.workers),
+            blocking: get(self.blocking_threads, compress + 64),
+            compress,
+        }
+    }
 }
 
 /// One rule of [`SleepConfig`], named as on the command line.
@@ -383,12 +412,19 @@ fn main() -> std::process::ExitCode {
     }
     #[cfg(not(target_os = "linux"))]
     let _ = args.next();
+    let cli = Cli::parse();
+    let threads = match &cli.command {
+        Command::Serve(args) => args.threads(),
+        _ => Threads::for_host(),
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads.workers)
+        .max_blocking_threads(threads.blocking)
         .enable_all()
         .build();
     let result = runtime
         .map_err(anyhow::Error::from)
-        .and_then(|runtime| runtime.block_on(agent_main()));
+        .and_then(|runtime| runtime.block_on(agent_main(cli)));
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -398,14 +434,13 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-async fn agent_main() -> anyhow::Result<()> {
+async fn agent_main(cli: Cli) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_writer(std::io::stderr)
         .init();
-    let cli = Cli::parse();
     let client = Client::new(&cli.socket);
     match cli.command {
         Command::Serve(args) => run_serve(*args, cli.socket).await,
@@ -552,6 +587,8 @@ fn pool_config(args: &ServeArgs) -> Option<PoolConfig> {
 
 async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     let pool = pool_config(&args);
+    let threads = args.threads();
+    tracing::info!(?threads, "thread counts");
     let memory_profile = if let Some(profile) = args.memory_profile {
         profile
     } else {
@@ -641,10 +678,22 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         },
         about,
     };
-    let Some(store) = args.store else {
+    run_with_store(config, engine, args.store, threads, socket).await
+}
+
+/// Runs the agent with the store `store` names, if any.
+async fn run_with_store(
+    config: HostConfig,
+    engine: Firecracker,
+    store: Option<String>,
+    threads: Threads,
+    socket: PathBuf,
+) -> anyhow::Result<()> {
+    let Some(store) = store else {
         return run_agent(config, engine, NoStore, socket).await;
     };
     if let Some(chunked) = Chunked::from_url(&store)? {
+        let chunked = chunked.with_compress_threads(threads.compress);
         chunked
             .refuse_unreadable()
             .await

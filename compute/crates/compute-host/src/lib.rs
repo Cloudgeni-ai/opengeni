@@ -33,6 +33,7 @@ mod server;
 mod state;
 mod step;
 mod store;
+mod threads;
 mod working_set;
 
 pub use agent::{BusyRule, Handle, HostAgent, HostConfig, HostError, Lease, PagerConfig};
@@ -46,3 +47,4 @@ pub use store::{
     Archive, Directory, FetchInto, FetchedMemory, JailedFile, NoStore, Prefilled, Receipt,
     SavedFiles, SavedImage, Store,
 };
+pub use threads::Threads;

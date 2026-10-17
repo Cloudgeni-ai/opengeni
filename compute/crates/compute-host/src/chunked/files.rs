@@ -13,6 +13,7 @@ use compute_storage::Error as StorageError;
 use compute_storage::chunk::{ChunkRef, EncodedChunk};
 use compute_storage::manifest::{DiskManifest, Extent, ExtentSource};
 use futures::{StreamExt as _, stream};
+use tokio::sync::Semaphore;
 
 use super::{
     CHUNK_BYTES, Chunked, DOWNLOADS_PER_FILE, Identity, Piece, Seed, UPLOADS_PER_FILE, ZSTD_LEVEL,
@@ -131,7 +132,15 @@ impl Chunked {
     ) -> Result<Option<ChunkRef>, EngineError> {
         const OP: &str = "archive";
         let transient = |error| EngineError::caused_by(ErrorKind::Transient, OP, error);
-        let prepared = match prepare_blocking(file, range.clone(), earlier, expected).await? {
+        let prepared = match prepare_blocking(
+            &self.compress,
+            file,
+            range.clone(),
+            earlier,
+            expected,
+        )
+        .await?
+        {
             Prepared::Known(reference) => {
                 let present = {
                     let _permit = self.transfers.acquire().await.map_err(transient)?;
@@ -146,7 +155,7 @@ impl Chunked {
                     // Gone or cut short since: store these bytes again
                     // rather than name a chunk no copy can be read from.
                     tracing::warn!(chunk = %reference.key(), "stored chunk missing; storing it again");
-                    prepare_blocking(file, range, None, expected).await?
+                    prepare_blocking(&self.compress, file, range, None, expected).await?
                 }
             }
             prepared => prepared,
@@ -321,8 +330,9 @@ fn prepare(
     EncodedChunk::encode(&plain, ZSTD_LEVEL).map(Prepared::New)
 }
 
-/// [`prepare`] on a blocking thread.
+/// [`prepare`] on a blocking thread, once one of `permits` is free.
 async fn prepare_blocking(
+    permits: &Semaphore,
     file: &Arc<File>,
     range: Range<u64>,
     earlier: Option<ChunkRef>,
@@ -330,6 +340,10 @@ async fn prepare_blocking(
 ) -> Result<Prepared, EngineError> {
     const OP: &str = "archive";
     let file = Arc::clone(file);
+    let _permit = permits
+        .acquire()
+        .await
+        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?;
     tokio::task::spawn_blocking(move || prepare(&file, range, earlier.as_ref(), expected))
         .await
         .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?

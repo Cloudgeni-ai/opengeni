@@ -50,6 +50,7 @@ use crate::image::{Hash, ZERO, chunk_count, chunk_range, hash_chunks};
 use crate::lanes::Lanes;
 use crate::protocol::Id;
 use crate::store::{Archive, FetchInto, FetchedMemory, Prefilled, Receipt, SavedFiles, Store};
+use crate::threads::Threads;
 use crate::working_set::{self, WakeProfile};
 
 /// Chunk uploads in flight per file.
@@ -121,6 +122,9 @@ pub struct Chunked {
     seed: Arc<Mutex<Option<Arc<Seed>>>>,
     /// Permits for chunk transfers, shared by every sandbox.
     transfers: Arc<Semaphore>,
+    /// Permits for compressing chunks, shared by every sandbox: each holds
+    /// a processor while it runs.
+    compress: Arc<Semaphore>,
     /// A wake's transfers are foreground: background ones give way.
     lanes: Arc<Lanes>,
 }
@@ -191,8 +195,16 @@ impl Chunked {
             chunks,
             seed: Arc::default(),
             transfers: Arc::new(Semaphore::new(TRANSFERS_PER_HOST)),
+            compress: Arc::new(Semaphore::new(Threads::for_host().compress)),
             lanes: Arc::default(),
         }
+    }
+
+    /// Compresses at most `chunks` chunks at once (at least one).
+    #[must_use]
+    pub fn with_compress_threads(mut self, chunks: usize) -> Self {
+        self.compress = Arc::new(Semaphore::new(chunks.max(1)));
+        self
     }
 
     /// Opens the object storage `url` names: `gs://bucket/prefix`,
