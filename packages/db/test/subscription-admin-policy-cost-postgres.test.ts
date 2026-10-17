@@ -8,6 +8,7 @@ import { encryptEnvironmentValue } from "../src/environment-crypto";
 // Migration 0807: organization-admin subscription policies ask the admin
 // helper once per statement instead of once per row, with the same answers,
 // and turn-scoped runtime capability rows no longer accumulate.
+// Migration 0838: rows left by backends that have exited are reclaimed too.
 
 setDefaultTimeout(180_000);
 const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -157,15 +158,17 @@ describe.skipIf(!realDb)("subscription admin policies", () => {
 
   test("a backend reclaims its capability rows from finished transactions", async () => {
     const accountId = crypto.randomUUID();
+    // Far above any real transaction ID, so no snapshot treats it as ended.
+    const unfinished = "9000000000000000000";
     const reserved = await shared!.admin.reserve();
     try {
       const [backend] = await reserved<{ pid: number }[]>`select pg_backend_pid() as pid`;
       // A row left by an earlier transaction of this backend, and one of
-      // another backend that must be left alone.
+      // another backend's unfinished transaction that must be left alone.
       await reserved`insert into opengeni_private.subscription_runtime_capabilities
         (backend_pid, transaction_id, capability_kind, account_id)
         values (${backend!.pid}, '3'::xid8, 'lifecycle', ${accountId}::uuid),
-          (${backend!.pid + 1_000_000}, '3'::xid8, 'lifecycle', ${accountId}::uuid)`;
+          (${backend!.pid + 1_000_000}, ${unfinished}::xid8, 'lifecycle', ${accountId}::uuid)`;
       // A later transaction of the same backend grants a new capability.
       const [granted] = await reserved<{ transaction: string }[]>`
         insert into opengeni_private.subscription_runtime_capabilities
@@ -178,12 +181,137 @@ describe.skipIf(!realDb)("subscription admin policies", () => {
         where account_id = ${accountId}::uuid order by backend_pid`;
       expect([...rows]).toEqual([
         { pid: backend!.pid, transaction: granted!.transaction },
-        { pid: backend!.pid + 1_000_000, transaction: "3" },
+        { pid: backend!.pid + 1_000_000, transaction: unfinished },
       ]);
     } finally {
       await shared!.admin`delete from opengeni_private.subscription_runtime_capabilities
         where account_id = ${accountId}::uuid`;
       reserved.release();
     }
+  });
+
+  test("a grant reclaims rows of exited backends but never a running transaction's grant", async () => {
+    const accountId = crypto.randomUUID();
+    const exitedPid = 2_000_000_000;
+    const holder = await shared!.admin.reserve();
+    const granter = await shared!.admin.reserve();
+    try {
+      // A transaction that holds its grant and is still running.
+      await holder`begin`;
+      const [held] = await holder<{ pid: number; transaction: string }[]>`
+        insert into opengeni_private.subscription_runtime_capabilities
+          (backend_pid, transaction_id, capability_kind, account_id)
+        values (pg_backend_pid(), pg_current_xact_id(), 'lifecycle', ${accountId}::uuid)
+        returning backend_pid as pid, transaction_id::text as transaction`;
+      // The last grant of a backend that has since disconnected.
+      await shared!.admin`insert into opengeni_private.subscription_runtime_capabilities
+        (backend_pid, transaction_id, capability_kind, account_id)
+        values (${exitedPid}, '3'::xid8, 'lifecycle', ${accountId}::uuid)`;
+
+      // A grant in another backend's READ COMMITTED transaction.
+      await granter`begin isolation level read committed`;
+      await granter`insert into opengeni_private.subscription_runtime_capabilities
+        (backend_pid, transaction_id, capability_kind, account_id)
+        values (pg_backend_pid(), pg_current_xact_id(), 'lifecycle', ${accountId}::uuid)`;
+      await granter`commit`;
+
+      // Read from the running transaction, the only one that sees its grant.
+      const remaining = await holder<{ pid: number }[]>`
+        select backend_pid as pid from opengeni_private.subscription_runtime_capabilities
+        where account_id = ${accountId}::uuid and backend_pid in (${exitedPid}, ${held!.pid})
+        order by backend_pid`;
+      expect(remaining.map((row) => row.pid)).toEqual([held!.pid]);
+      await holder`commit`;
+    } finally {
+      await holder`rollback`.catch(() => undefined);
+      await granter`rollback`.catch(() => undefined);
+      await shared!.admin`delete from opengeni_private.subscription_runtime_capabilities
+        where account_id = ${accountId}::uuid`;
+      holder.release();
+      granter.release();
+    }
+  });
+
+  test("a grant under REPEATABLE READ leaves finished rows to later grants", async () => {
+    const accountId = crypto.randomUUID();
+    const exitedPid = 2_000_000_001;
+    const granter = await shared!.admin.reserve();
+    try {
+      const [backend] = await granter<{ pid: number }[]>`select pg_backend_pid() as pid`;
+      // Seeded under REPEATABLE READ too, so the seeding reclaims nothing.
+      await granter`begin isolation level repeatable read`;
+      await granter`insert into opengeni_private.subscription_runtime_capabilities
+        (backend_pid, transaction_id, capability_kind, account_id)
+        values (${exitedPid}, '3'::xid8, 'lifecycle', ${accountId}::uuid),
+          (${backend!.pid}, '4'::xid8, 'lifecycle', ${accountId}::uuid)`;
+      await granter`commit`;
+      // Removing a row another grant removed concurrently would raise a
+      // serialization failure here, so such a transaction reclaims nothing.
+      await granter`begin isolation level repeatable read`;
+      await granter`insert into opengeni_private.subscription_runtime_capabilities
+        (backend_pid, transaction_id, capability_kind, account_id)
+        values (pg_backend_pid(), pg_current_xact_id(), 'lifecycle', ${accountId}::uuid)`;
+      const [left] = await granter<{ count: number }[]>`
+        select count(*)::int as count from opengeni_private.subscription_runtime_capabilities
+        where account_id = ${accountId}::uuid and transaction_id in ('3'::xid8, '4'::xid8)`;
+      await granter`commit`;
+      expect(left!.count).toBe(2);
+    } finally {
+      await granter`rollback`.catch(() => undefined);
+      await shared!.admin`delete from opengeni_private.subscription_runtime_capabilities
+        where account_id = ${accountId}::uuid`;
+      granter.release();
+    }
+  });
+
+  test("a grant never waits for, or fails on, a row another grant is reclaiming", async () => {
+    const accountId = crypto.randomUUID();
+    const owner = await shared!.admin.reserve();
+    const sweeper = await shared!.admin.reserve();
+    try {
+      const [backend] = await owner<{ pid: number }[]>`select pg_backend_pid() as pid`;
+      // The owner's grant from an earlier, finished transaction.
+      await shared!.admin`insert into opengeni_private.subscription_runtime_capabilities
+        (backend_pid, transaction_id, capability_kind, account_id)
+        values (${backend!.pid}, '3'::xid8, 'lifecycle', ${accountId}::uuid)`;
+      // Another backend's grant reclaims it and keeps its transaction open.
+      await sweeper`begin isolation level read committed`;
+      await sweeper`insert into opengeni_private.subscription_runtime_capabilities
+        (backend_pid, transaction_id, capability_kind, account_id)
+        values (pg_backend_pid(), pg_current_xact_id(), 'lifecycle', ${accountId}::uuid)`;
+      const [claimed] = await shared!.admin<{ locked: boolean }[]>`
+        select exists (
+          select 1 from opengeni_private.subscription_runtime_capabilities
+          where account_id = ${accountId}::uuid and transaction_id = '3'::xid8
+          for update skip locked
+        ) = false as locked`;
+      expect(claimed!.locked).toBe(true);
+
+      // The owner's next grants finish at once under either isolation level.
+      await owner`set statement_timeout = '3s'`;
+      for (const isolation of ["read committed", "repeatable read"] as const) {
+        await owner.unsafe(`begin isolation level ${isolation}`);
+        await owner`insert into opengeni_private.subscription_runtime_capabilities
+          (backend_pid, transaction_id, capability_kind, account_id)
+          values (pg_backend_pid(), pg_current_xact_id(), 'lifecycle', ${accountId}::uuid)`;
+        await owner`commit`;
+      }
+      await sweeper`commit`;
+    } finally {
+      await owner`rollback`.catch(() => undefined);
+      await sweeper`rollback`.catch(() => undefined);
+      await owner`reset statement_timeout`.catch(() => undefined);
+      await shared!.admin`delete from opengeni_private.subscription_runtime_capabilities
+        where account_id = ${accountId}::uuid`;
+      owner.release();
+      sweeper.release();
+    }
+  });
+
+  test("finished rows are found through the transaction index", async () => {
+    const [index] = await shared!.admin<{ definition: string }[]>`
+      select pg_get_indexdef(indexrelid) as definition from pg_index
+      where indexrelid = 'opengeni_private.subscription_runtime_capabilities_transaction_idx'::regclass`;
+    expect(index!.definition).toContain("(transaction_id)");
   });
 });
