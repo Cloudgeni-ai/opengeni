@@ -26,6 +26,14 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
+-- Purge first: this only takes a ROW EXCLUSIVE lock, so live grants keep
+-- inserting while it runs. The trigger and policy changes below take
+-- stronger locks, which are then held only for the short rest of the
+-- transaction. Every transaction older than this snapshot's xmin has
+-- finished.
+DELETE FROM opengeni_private.subscription_runtime_capabilities
+WHERE transaction_id < pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot());
+
 CREATE FUNCTION opengeni_private.reclaim_finished_subscription_runtime_capabilities()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -44,10 +52,6 @@ REVOKE ALL ON FUNCTION opengeni_private.reclaim_finished_subscription_runtime_ca
 CREATE TRIGGER subscription_runtime_capabilities_reclaim_finished
   BEFORE INSERT ON opengeni_private.subscription_runtime_capabilities
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.reclaim_finished_subscription_runtime_capabilities();
-
--- Every transaction older than this snapshot's xmin has finished.
-DELETE FROM opengeni_private.subscription_runtime_capabilities
-WHERE transaction_id < pg_catalog.pg_snapshot_xmin(pg_catalog.pg_current_snapshot());
 
 DO $subscription_admin_policies$
 DECLARE
