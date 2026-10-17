@@ -17,6 +17,7 @@ use crate::protocol::{HostStatus, Id, SandboxConfig};
 use crate::store::OwnerEpoch;
 
 use super::{Command, Handle, HostError, Lease, Origin, ReleaseOnDrop};
+use crate::fleet::LeaseGate;
 
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
@@ -30,12 +31,17 @@ impl Drop for ReleaseOnDrop {
 }
 
 impl Handle {
-    pub(super) fn new(commands: mpsc::UnboundedSender<Command>, stream_idle: Duration) -> Self {
+    pub(super) fn new(
+        commands: mpsc::UnboundedSender<Command>,
+        stream_idle: Duration,
+        lease: Option<LeaseGate>,
+    ) -> Self {
         Self {
             commands,
             holds: Arc::new(AtomicU64::new(1)),
             stream_idle,
             origin: Origin::Local,
+            lease,
         }
     }
 
@@ -51,6 +57,16 @@ impl Handle {
             },
             Origin::Local | Origin::LocalToFleet => make(reply),
         };
+        // The host's own tools on a host in a fleet get only its status
+        // while its lease has run out: anything else could start a VM the
+        // guard keeps frozen.
+        if self.origin == Origin::LocalToFleet
+            && self.lease.as_ref().is_some_and(|lease| !lease.is_open())
+            && !matches!(command, Command::Status { .. } | Command::Release { .. })
+        {
+            command.refuse(HostError::LeaseLapsed);
+            return answer.await.map_err(|_| HostError::Stopped);
+        }
         self.commands
             .send(command)
             .map_err(|_| HostError::Stopped)?;
@@ -154,6 +170,7 @@ impl Handle {
     /// Deletes a sandbox and everything it stores, waiting until it is gone.
     /// With a `generation`, only while the sandbox is still at it.
     pub async fn remove(&self, id: Id, generation: Option<u64>) -> Result<(), HostError> {
+        self.fleet_only("remove")?;
         self.ask(|reply| Command::Remove {
             id,
             generation,

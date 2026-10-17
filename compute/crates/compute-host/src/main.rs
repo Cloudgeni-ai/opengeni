@@ -1,6 +1,7 @@
 //! `compute-host`: run the host agent, or talk to one.
 
 mod bench;
+mod fleet_cli;
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use compute_core::{Admission, DiskPolicy, HostPolicy, MemoryPolicy, Step};
 use compute_engine::MemoryProfile;
 use compute_engine::firecracker::{Firecracker, FirecrackerConfig};
 use compute_host::client::Client;
+use compute_host::fleet::{FleetConfig, Leased, Prepared};
 use compute_host::net::{Ipv4Net, NetworkConfig};
 use compute_host::protocol::{
     About, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig, step_name,
@@ -109,6 +111,10 @@ enum Command {
     },
     /// Create many sandboxes, let them sleep, then wake them all at once.
     Bench(BenchArgs),
+    /// Run the guard of a host in a fleet: it stops the VMs when the
+    /// host's lease runs out, whatever happens to the agent. Run it as a
+    /// service of its own, before the agent.
+    Guard(fleet_cli::GuardArgs),
     /// Delete the chunks and manifests in object storage that no sandbox's
     /// stored copy names any more, on any host. Run on a schedule, such as
     /// daily; safe while agents archive. Without `--delete`, only reports.
@@ -283,6 +289,8 @@ struct ServeArgs {
     /// guest memory uses huge pages. The `nested` memory profile implies it.
     #[arg(long)]
     no_compress: bool,
+    #[command(flatten)]
+    fleet: fleet_cli::FleetArgs,
 }
 
 /// One rule of [`SleepConfig`], named as on the command line.
@@ -408,7 +416,7 @@ async fn agent_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let client = Client::new(&cli.socket);
     match cli.command {
-        Command::Serve(args) => run_serve(*args, cli.socket).await,
+        Command::Serve(args) => Box::pin(run_serve(*args, cli.socket)).await,
         Command::Create {
             id,
             vcpus,
@@ -483,6 +491,10 @@ async fn agent_main() -> anyhow::Result<()> {
         }
         Command::Exec { id, script, port } => exec(&client, id, port, &script).await,
         Command::Bench(args) => bench(&client, &args).await,
+        Command::Guard(args) => {
+            let config = args.config();
+            tokio::task::spawn_blocking(move || compute_host::fleet::run_guard(&config)).await?
+        }
         Command::Sweep { store, delete } => {
             let chunked = Chunked::from_url(&store)?
                 .with_context(|| format!("{store} is not an object storage URL"))?;
@@ -606,6 +618,13 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         args.disk_reserve_inodes,
     )?);
     let about = describe(memory_profile, &args.base_image);
+    let fleet = args.fleet.config(&fleet_cli::Described {
+        root: &args.root,
+        memory_profile: memory_profile.to_string(),
+        cpu_template: compute_engine::Engine::runtime(&engine).to_owned(),
+        memory_bytes: budget,
+    })?;
+    let prepared = fleet.as_ref().map(FleetConfig::prepare).transpose()?;
     let config = HostConfig {
         root: args.root,
         kernel: args.kernel,
@@ -640,21 +659,47 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
             record_for: Duration::from_millis(args.pager_record_ms),
         },
         about,
+        lease: prepared.as_ref().map(|prepared| prepared.gate.clone()),
     };
-    let Some(store) = args.store else {
-        return run_agent(config, engine, NoStore, socket).await;
+    run_with_store(config, engine, args.store, fleet.zip(prepared), socket).await
+}
+
+/// Runs the agent on the store `store` names: none, a bucket or a
+/// directory. A host in a fleet needs a bucket, and archives there only
+/// while it holds its lease.
+async fn run_with_store(
+    config: HostConfig,
+    engine: Firecracker,
+    store: Option<String>,
+    fleet: Option<(FleetConfig, Prepared)>,
+    socket: PathBuf,
+) -> anyhow::Result<()> {
+    let Some(store) = store else {
+        anyhow::ensure!(
+            fleet.is_none(),
+            "a host in a fleet needs a store in object storage"
+        );
+        return run_agent(config, engine, NoStore, socket, None).await;
     };
     if let Some(chunked) = Chunked::from_url(&store)? {
         chunked
             .refuse_unreadable()
             .await
             .with_context(|| format!("opening {store}"))?;
-        return run_agent(config, engine, chunked, socket).await;
+        if let Some((fleet, prepared)) = fleet {
+            let leased = Leased::new(chunked, prepared.gate.clone());
+            return run_agent(config, engine, leased, socket, Some((fleet, prepared))).await;
+        }
+        return run_agent(config, engine, chunked, socket, None).await;
     }
+    anyhow::ensure!(
+        fleet.is_none(),
+        "a host in a fleet needs a store in object storage, which other hosts can reach"
+    );
     // Fine for tests and a single machine, but an archive there does not
     // survive losing this host.
     tracing::warn!(%store, "archives go to a directory on this host, not off it");
-    run_agent(config, engine, Directory::new(store), socket).await
+    run_agent(config, engine, Directory::new(store), socket, None).await
 }
 
 async fn run_agent<S: Store>(
@@ -662,12 +707,27 @@ async fn run_agent<S: Store>(
     engine: Firecracker,
     store: S,
     socket: PathBuf,
+    fleet: Option<(FleetConfig, Prepared)>,
 ) -> anyhow::Result<()> {
     let (handle, agent) = HostAgent::start(config, engine, store).await?;
+    // On a host in a fleet only the service creates, adopts and hands off
+    // sandboxes; the socket serves the host's own tools the rest.
+    let local = if fleet.is_some() {
+        handle.local_to_fleet()
+    } else {
+        handle.clone()
+    };
+    let joined = async {
+        match fleet {
+            Some((fleet, prepared)) => fleet.run(prepared, handle).await,
+            None => std::future::pending().await,
+        }
+    };
     tokio::select! {
-        result = serve(handle, &socket) => result.context("serving")?,
+        result = serve(local, &socket) => result.context("serving")?,
         result = tokio::signal::ctrl_c() => result?,
         result = agent => result?,
+        result = joined => result.context("in the fleet")?,
     }
     Ok(())
 }

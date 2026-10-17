@@ -5,14 +5,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use compute_core::Priority;
+use std::time::Duration;
+
+use compute_core::{HostPolicy, Level, Priority};
+use compute_host::fleet::{LeaseGate, boot_now};
 use compute_host::protocol::{
     ErrorCode, Id, LevelName, Reply, Request, SandboxConfig, SleepConfig,
 };
 use compute_host::{Directory, HostError, OwnerEpoch};
 use compute_protocol::fleet::Verdict;
+use tokio::time::sleep;
 
-use super::{Lab, NEVER, id};
+use super::{Delays, Lab, NEVER, PAUSE_SOON, id};
 
 fn config(sleep: SleepConfig) -> SandboxConfig {
     SandboxConfig {
@@ -281,4 +285,60 @@ async fn an_adopt_without_a_stored_copy_leaves_nothing() {
     );
     assert_eq!(one.status().await.sandboxes, Vec::new());
     assert!(!one.sandbox_dir(sandbox).exists());
+}
+
+/// Once its lease runs out a host's VMs are frozen by its guard, so the
+/// agent takes no decision by time, its own tools only read, and it goes
+/// on where it was once the lease is renewed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_whose_lease_ran_out_decides_nothing_by_time_and_its_tools_only_read() {
+    let gate = LeaseGate::new(boot_now() + Duration::from_secs(60));
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        |config| config.lease = Some(gate.clone()),
+    )
+    .await;
+    let sandbox = id(11);
+    lab.create(sandbox, PAUSE_SOON).await;
+    assert_eq!(lab.run(sandbox, &["set kept"]).await, ["ok"]);
+    let local = lab.handle.local_to_fleet();
+    assert!(local.status().await.is_ok(), "open: the tools work");
+    assert!(
+        matches!(
+            local.remove(sandbox, None).await,
+            Err(HostError::Invalid(_))
+        ),
+        "only the service, which lists the fleet's sandboxes, removes one"
+    );
+
+    gate.set(boot_now());
+    assert!(!gate.is_open());
+    // Well past the idle pause the sandbox would otherwise take.
+    sleep(Duration::from_millis(800)).await;
+    let status = local.status().await.expect("status while lapsed");
+    let held = status
+        .sandboxes
+        .iter()
+        .find(|held| held.id == sandbox)
+        .unwrap();
+    assert_eq!(held.level, LevelName::Running, "no idle pause while lapsed");
+    assert!(held.step.is_none(), "nothing under way: {:?}", held.step);
+    assert!(matches!(
+        local.sleep(sandbox, None, Level::Paused).await,
+        Err(HostError::LeaseLapsed)
+    ));
+    assert!(matches!(
+        local.touch(sandbox, None, Priority::Interactive).await,
+        Err(HostError::LeaseLapsed)
+    ));
+
+    // Renewed, it carries on: the idle sandbox pauses by itself.
+    gate.set(boot_now() + Duration::from_secs(60));
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    assert!(local.sleep(sandbox, None, Level::Saved).await.is_ok());
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    lab.assert_clean();
 }

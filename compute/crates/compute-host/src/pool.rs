@@ -569,6 +569,14 @@ impl Pool {
         build
     }
 
+    /// Takes back a [`Pool::want`] whose build did not start, so the next
+    /// one asks for it again.
+    pub fn unwant(&mut self, shape: Shape) {
+        if matches!(self.entries.get(&shape), Some(Entry::Building)) {
+            self.entries.remove(&shape);
+        }
+    }
+
     /// `shape`'s template, if one is ready.
     pub fn ready(&self, shape: Shape) -> Option<Arc<Template>> {
         match self.entries.get(&shape) {

@@ -70,7 +70,9 @@ pub async fn serve(handle: Handle, socket: &Path) -> io::Result<()> {
     }
 }
 
-async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
+/// Serves the one request on `stream`, and the stream after it for a
+/// connect.
+pub(crate) async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
     let mut client = BufReader::new(stream);
     let mut line = String::new();
     let mut limited = (&mut client).take(MAX_REQUEST);
@@ -473,6 +475,7 @@ fn error_reply(error: &HostError) -> Reply {
             HostError::Unreachable { .. } => ErrorCode::Unreachable,
             HostError::HostFull { .. } => ErrorCode::HostFull,
             HostError::Io(_) | HostError::Stopped => ErrorCode::Internal,
+            HostError::LeaseLapsed => ErrorCode::Unavailable,
         },
     }
 }

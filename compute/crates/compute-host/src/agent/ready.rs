@@ -335,7 +335,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Starts filling ready sandboxes wherever fewer are kept than asked
     /// for, the shape's template is ready, and memory allows.
     pub(super) fn refill(&mut self) {
-        if self.ready.targets.is_empty() || self.ordinals_known().is_err() {
+        if self.ready.targets.is_empty() || self.ordinals_known().is_err() || !self.may_act() {
             return;
         }
         let now = Instant::now();

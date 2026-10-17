@@ -27,6 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
 
+use crate::fleet::LeaseGate;
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
@@ -129,6 +130,13 @@ pub struct HostConfig {
     /// What the host runs, as status reports it. The runtime is the
     /// engine's; whatever is set here is replaced.
     pub about: About,
+    /// On a host in a fleet, the lease it holds (see [`crate::fleet`]):
+    /// while it has run out the agent decides nothing of its own (no
+    /// sleeping, no ready sandboxes, no template builds) and serves its
+    /// own tools only their status, since the guard keeps the VMs frozen
+    /// and the fleet service may be handing its sandboxes to others.
+    /// `None` on a host on its own.
+    pub lease: Option<LeaseGate>,
 }
 
 impl HostConfig {
@@ -330,6 +338,10 @@ pub enum HostError {
     /// The sandbox is being handed off and takes no wake.
     #[error("sandbox {0} is being handed off")]
     HandingOff(Id),
+    /// The host's lease from the fleet service has run out: it runs
+    /// nothing until it is renewed.
+    #[error("this host's lease from the fleet service has run out")]
+    LeaseLapsed,
 }
 
 impl From<StateError> for HostError {
@@ -659,6 +671,8 @@ pub struct Handle {
     /// Who sends through it; see [`Handle::owned`] and
     /// [`Handle::local_to_fleet`].
     origin: Origin,
+    /// The host's lease in a fleet, which the host's own tools wait on.
+    lease: Option<LeaseGate>,
 }
 
 /// Who sends requests through a [`Handle`].
@@ -783,6 +797,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     pager: PagerConfig,
     /// What the host runs, as status reports it.
     about: About,
+    /// The lease this host holds in a fleet; see [`HostConfig::lease`].
+    lease: Option<LeaseGate>,
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
     commands_tx: mpsc::WeakUnboundedSender<Command>,
@@ -999,6 +1015,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             save_copies,
             allocation_unit,
             about,
+            lease: config.lease,
             commands_tx: commands_tx.downgrade(),
         };
         agent.hold_builds(held);
@@ -1009,7 +1026,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         agent.sample();
         agent.start_templates(warm_shapes);
         Ok((
-            Handle::new(commands_tx, stream_idle),
+            Handle::new(commands_tx, stream_idle, agent.lease.clone()),
             tokio::spawn(agent.run()),
         ))
     }
@@ -1121,22 +1138,29 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.root.clone(),
             self.shutdown.clone(),
         ));
+        let lease = self.lease.clone();
         loop {
             let deadline = self
                 .core
                 .next_deadline()
                 .map(|at| self.origin + at.since_origin().saturating_sub(CLOCK_BASE));
+            // While the lease has run out, time decides nothing: the VMs
+            // are frozen, and the service may be giving their sandboxes to
+            // other hosts. Events and requests still come in, so the
+            // service's rulings can be carried out.
+            let acting = self.may_act();
             tokio::select! {
                 biased;
                 // First, so a steady stream of events and requests cannot
                 // starve it: it is ready at most once per interval.
-                _ = sample.tick() => self.sample(),
+                _ = sample.tick(), if acting => self.sample(),
                 Some(event) = self.events.recv() => self.on_event(event),
                 command = self.commands.recv() => match command {
                     Some(command) => self.on_command(command),
                     None => break,
                 },
-                () = sleep_until_some(deadline) => self.input(Input::Tick),
+                () = sleep_until_some(deadline), if acting => self.input(Input::Tick),
+                () = lease_changed(lease.as_ref()) => {}
             }
         }
         tracing::info!("every handle dropped; host agent stopping, VMs keep running");
@@ -1150,6 +1174,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     fn now(&self) -> At {
         At::from_duration(CLOCK_BASE + self.origin.elapsed())
+    }
+
+    /// Whether the agent may decide anything of its own now: always, except
+    /// on a host in a fleet whose lease has run out.
+    fn may_act(&self) -> bool {
+        self.lease.as_ref().is_none_or(LeaseGate::is_open)
     }
 
     /// `at` in milliseconds since the Unix epoch.
@@ -1179,6 +1209,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.execute(action);
         }
         self.actions = actions;
+    }
+}
+
+/// Returns when `lease` may have opened or closed; never without one.
+async fn lease_changed(lease: Option<&LeaseGate>) {
+    match lease {
+        Some(lease) => lease.changed().await,
+        None => std::future::pending().await,
     }
 }
 

@@ -69,7 +69,7 @@ impl Command {
     }
 
     /// Answers the request with `error` instead of carrying it out.
-    fn refuse(self, error: HostError) {
+    pub(super) fn refuse(self, error: HostError) {
         match self {
             Self::Create { reply, .. }
             | Self::Remove { reply, .. }
