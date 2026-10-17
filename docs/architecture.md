@@ -49,6 +49,10 @@ merged refs intersect that ceiling and children cannot widen it. Console Site
 agents use it for the overlap of Site-declared tools and the viewer's permissions.
 Their editable-artifact writes also require immutable create/import provenance
 within the same Site-clamped session tree; read-created session links grant no edits.
+After a worker claims a turn, its session RLS actor carries the canonical
+authority projection's root into preparation and execution. This lets a guest's
+worker read its own frozen attempt policies without a human identity or a
+viewer-cookie impersonation; other Site roots remain outside that audience.
 Published-host continuation normalizes legacy tool-less chats through
 `apps/api/src/site-publishing/agent-session.ts` before admission: the locked
 session update installs only viewer-bound Site data tools, matching permissions

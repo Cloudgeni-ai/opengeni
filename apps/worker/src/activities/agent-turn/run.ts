@@ -610,6 +610,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             },
           },
           subjectId: "service:agent-turn",
+          // The claim and canonical projection above establish this root. Site
+          // guests have no initiating human, so their worker reads need the
+          // same root-scoped audience as native attempt-authorized tool reads.
+          agentRootSessionId: attachmentAuthority.rootSessionId,
           initiatingHumanSubjectId: fileAuthoritySubjectId,
           privateFileOwnerSubjectId:
             learning.defaultScope === "personal" ? learning.subjectId : null,
