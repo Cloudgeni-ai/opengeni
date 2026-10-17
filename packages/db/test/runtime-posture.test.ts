@@ -1871,6 +1871,8 @@ describe("runtime database posture evaluator", () => {
           "UPDATE",
         ]);
         expect(RUNTIME_TABLE_PRIVILEGES.workspace_session_activity_revisions).toEqual([
+          // The xid expand release must not change old replicas' readiness or
+          // finalizer grants. Contract removal belongs to a subsequent release.
           "SELECT",
           "UPDATE",
         ]);

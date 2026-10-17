@@ -490,7 +490,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
                   const query = proxiedQuery.toSQL().sql;
                   if (
                     !changed &&
-                    query.includes('order by "sessions"."updated_at"') &&
+                    query.includes('order by "sessions"."activity_xid"') &&
                     query.includes(" limit ")
                   ) {
                     changed = true;
@@ -544,7 +544,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       channelId: channel.id,
     });
     const [before] =
-      await admin`select activity_revision::text as revision from sessions where id = ${target.id}`;
+      await admin`select activity_xid::text as revision from sessions where id = ${target.id}`;
     // The channel FK runs the same UPDATE channel_id = NULL for a row attached
     // after deleteChannel's preliminary scan. Only the FK statement sees it.
     await withWorkspaceSessionActivityRls(db, workspace.workspaceId, async (tx) => {
@@ -553,12 +553,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       );
     });
     const [after] =
-      await admin`select activity_revision::text as revision, channel_id from sessions where id = ${target.id}`;
+      await admin`select activity_xid::text as revision, channel_id from sessions where id = ${target.id}`;
     expect(after!.channel_id).toBeNull();
     expect(BigInt(after!.revision)).toBeGreaterThan(BigInt(before!.revision));
   }, 60_000);
 
-  test("rejects an old ungated channel delete after activity trigger activation", async () => {
+  test("ungated channel deletion stamps activity through FK detachment", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const channel = await createChannel(db, { ...workspace, name: "Old caller rollback" });
@@ -567,17 +567,14 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       message: "retained filing",
       channelId: channel.id,
     });
-    let failure: unknown;
-    try {
-      await withWorkspaceRls(db, workspace.workspaceId, async (tx) => {
-        await tx.execute(sql`delete from channels where id = ${channel.id}`);
-      });
-    } catch (error) {
-      failure = error;
-    }
-    expect(failure).toBeDefined();
-    const [row] = await admin`select channel_id from sessions where id = ${target.id}`;
-    expect(row!.channel_id).toBe(channel.id);
+    const [before] = await admin`select activity_xid::text xid from sessions where id=${target.id}`;
+    await withWorkspaceRls(db, workspace.workspaceId, async (tx) => {
+      await tx.execute(sql`delete from channels where id = ${channel.id}`);
+    });
+    const [row] =
+      await admin`select channel_id,activity_xid::text xid from sessions where id = ${target.id}`;
+    expect(row!.channel_id).toBeNull();
+    expect(BigInt(row!.xid)).toBeGreaterThan(BigInt(before!.xid));
   }, 60_000);
 
   test("uses a bounded creator-prefix index for sparse creator pages", async () => {
@@ -1655,8 +1652,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const projectCursor = decodeSessionListCursor(firstProjectPage.nextCursor!);
     expect(projectCursor).toMatchObject({ kind: "keyset" });
     const [beforeMove] = await admin<
-      { updated_at: Date; activity_revision: string }[]
-    >`select updated_at, activity_revision::text from sessions where id = ${projectBRow.id}`;
+      { updated_at: Date; activity_xid: string }[]
+    >`select updated_at, activity_xid::text from sessions where id = ${projectBRow.id}`;
     expect(
       await setSessionChannel(db, {
         workspaceId: workspace.workspaceId,
@@ -1665,12 +1662,10 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       }),
     ).toBe(true);
     const [afterMove] = await admin<
-      { updated_at: Date; activity_revision: string }[]
-    >`select updated_at, activity_revision::text from sessions where id = ${projectBRow.id}`;
+      { updated_at: Date; activity_xid: string }[]
+    >`select updated_at, activity_xid::text from sessions where id = ${projectBRow.id}`;
     expect(afterMove!.updated_at.getTime()).toBe(beforeMove!.updated_at.getTime());
-    expect(BigInt(afterMove!.activity_revision)).toBeGreaterThan(
-      BigInt(projectCursor!.kind === "keyset" ? projectCursor!.snapshotRevision : "0"),
-    );
+    expect(BigInt(afterMove!.activity_xid)).toBeGreaterThan(BigInt(beforeMove!.activity_xid));
     const secondProjectPage = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId,
       channelId: projectA.id,
@@ -1738,7 +1733,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       limit: 1,
     });
     expect(page.pinned).toEqual([]);
-    expect(page.sessions.map((row) => row.id)).toEqual([second.id]);
+    // The explicit backdated write is still the newest transaction activity.
+    expect(page.sessions.map((row) => row.id)).toEqual([first.id]);
     expect(page.sessions[0]!.pinned).toBe(false);
     expect(page.nextCursor).toBeTruthy();
 
@@ -1749,7 +1745,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       limit: 1,
       cursor: decoded!,
     });
-    expect(continuation.sessions.map((row) => row.id)).toEqual([first.id]);
+    expect(continuation.sessions.map((row) => row.id)).toEqual([second.id]);
 
     // People are still authorized exclusively through memberships: a user
     // subject with no membership row stays denied.
@@ -2854,20 +2850,30 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         channelId: null,
       }),
     ).toEqual(nameIds([1, 2]));
+    const activityOrder = await admin<{ id: string }[]>`select id from sessions
+      where workspace_id=${workspace.workspaceId} order by activity_xid desc,updated_at desc,id desc`;
     for (const sortBy of ["createdAt", "updatedAt"] as const) {
       expect(await walk({ parentSessionId: null, archiveStatus: "all", sortBy })).toEqual(
-        roots
-          .map((row) => row.id)
-          .sort()
-          .reverse(),
+        sortBy === "updatedAt"
+          ? activityOrder
+              .filter((row) => roots.some((root) => root.id === row.id))
+              .map((row) => row.id)
+          : roots
+              .map((row) => row.id)
+              .sort()
+              .reverse(),
       );
       expect(
         await walk({ parentSessionId: roots[0]!.id, archiveStatus: "archived", sortBy }),
       ).toEqual(
-        children
-          .map((row) => row.id)
-          .sort()
-          .reverse(),
+        sortBy === "updatedAt"
+          ? activityOrder
+              .filter((row) => children.some((child) => child.id === row.id))
+              .map((row) => row.id)
+          : children
+              .map((row) => row.id)
+              .sort()
+              .reverse(),
       );
     }
     const first = await listSessionsForSubject(db, workspace.workspaceId, {

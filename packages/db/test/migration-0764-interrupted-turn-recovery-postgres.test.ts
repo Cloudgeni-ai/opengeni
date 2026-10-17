@@ -30,7 +30,7 @@ import {
 } from "../src/index";
 import { executeMigrationFile, migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
-import { withRestoredSessionActivityRlsContext } from "../src/database";
+import { withLegacySessionActivityRlsContext as withRestoredSessionActivityRlsContext } from "./fixtures/legacy-session-activity";
 import {
   INTERRUPTED_TURN_RETIREMENT_MIGRATION as MIGRATION,
   parseInterruptedTurnRetirementManifest,

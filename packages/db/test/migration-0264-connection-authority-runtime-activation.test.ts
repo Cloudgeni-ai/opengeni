@@ -5,7 +5,7 @@ import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
 import { sql as query } from "drizzle-orm";
 import postgres from "postgres";
 import { createDb, withSessionRlsActorContext } from "../src/index";
-import { withSessionActivityRlsContext } from "../src/database";
+import { withLegacySessionActivityRlsContext as withSessionActivityRlsContext } from "./fixtures/legacy-session-activity";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 
 import { migrate } from "../src/migrate";
