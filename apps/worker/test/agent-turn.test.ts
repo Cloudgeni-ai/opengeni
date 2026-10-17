@@ -6335,10 +6335,10 @@ describe("transient provider error classifier", () => {
     expect(titleXaiContext.onModelRequestEvent).toBeUndefined();
   });
 
-  test("surfaces a stalled hosted-search continuation without unsafe replay", () => {
+  test("classifies a stalled hosted-search continuation as an interrupted stream", () => {
     expect(agentRunFailurePayload(new XaiSubscriptionHostedToolContinuationError())).toEqual({
       error:
-        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+        "SuperGrok stopped responding after its hosted search completed. Partial output was preserved.",
       code: "xai_hosted_tool_continuation_stalled",
       retryable: false,
     });
@@ -6402,7 +6402,7 @@ describe("transient provider error classifier", () => {
     });
   });
 
-  test("surfaces a stalled SuperGrok stream with bounded correlation facts and no replay", () => {
+  test("surfaces a stalled SuperGrok stream with bounded correlation facts", () => {
     expect(
       agentRunFailurePayload(
         new XaiSubscriptionStreamIdleTimeoutError(
@@ -6414,8 +6414,7 @@ describe("transient provider error classifier", () => {
         ),
       ),
     ).toEqual({
-      error:
-        "SuperGrok stopped sending valid response events. Partial output was preserved; automatic replay is disabled because the accepted response may still have provider-side effects.",
+      error: "SuperGrok stopped sending valid response events. Partial output was preserved.",
       code: "xai_response_stream_idle_timeout",
       retryable: false,
       responseObserved: true,

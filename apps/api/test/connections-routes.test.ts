@@ -4939,6 +4939,7 @@ describe("connections routes", () => {
     const redirectHits: string[] = [];
     const tokenBodies: URLSearchParams[] = [];
     const mcpAuthorization: Array<string | null> = [];
+    const mcpMethods: string[] = [];
     const redirectSink = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -4964,6 +4965,7 @@ describe("connections routes", () => {
         }
         if (url.pathname === "/mcp") {
           mcpAuthorization.push(request.headers.get("authorization"));
+          mcpMethods.push(((await request.json()) as { method: string }).method);
           return new Response("", {
             status: 302,
             headers: {
@@ -5002,10 +5004,13 @@ describe("connections routes", () => {
       expect(response.status).toBe(302);
       expect(response.headers.get("location")).toContain("integration_oauth=success");
       expect(response.headers.get("location")).toContain("verification=failed");
-      expect(hits).toEqual(["/token", "/mcp"]);
+      // MCP v2 probes the era before its legacy initialize fallback. Both
+      // requests stay on the original resource; neither may follow the 302.
+      expect(hits).toEqual(["/token", "/mcp", "/mcp"]);
+      expect(mcpMethods).toEqual(["server/discover", "initialize"]);
       expect(tokenBodies).toHaveLength(1);
       expect(tokenBodies[0]!.get("resource")).toBe(`${origin}/mcp`);
-      expect(mcpAuthorization).toEqual(["Bearer mcp-access-token"]);
+      expect(mcpAuthorization).toEqual(["Bearer mcp-access-token", "Bearer mcp-access-token"]);
       expect(redirectHits).toEqual([]);
       const loaded = await loadConnectionCredentialForBroker(client.db, settings, {
         workspaceId: workspace.workspaceId,

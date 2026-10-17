@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { describe, expect, test } from "bun:test";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { findPickerRow, projectPickerRows, sortPickerRows } from "@opengeni/react";
@@ -28,13 +29,13 @@ function catalogModel(id: string): WorkspaceModelCatalogModel {
 describe("workspace model catalog projection", () => {
   test("does not duplicate the same model id in projected rows", () => {
     const rows = sortPickerRows(
-      projectPickerRows([catalogModel("gpt-5.6-sol"), catalogModel("gpt-5.6-terra")]),
+      projectPickerRows(t, [catalogModel("gpt-5.6-sol"), catalogModel("gpt-5.6-terra")]),
     );
     expect(new Set(rows.map((row) => row.id)).size).toBe(2);
   });
 
   test("unknown selection is simply absent — no invented catalog row", () => {
-    const rows = projectPickerRows([catalogModel("gpt-5.6-sol")]);
+    const rows = projectPickerRows(t, [catalogModel("gpt-5.6-sol")]);
     expect(findPickerRow(rows, "legacy-model")).toBeNull();
     expect(findPickerRow(rows, "codex/gpt-5.6-luna")).toBeNull();
     expect(rows.map((row) => row.id)).toEqual(["gpt-5.6-sol"]);

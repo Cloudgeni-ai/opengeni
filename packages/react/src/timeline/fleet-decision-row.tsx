@@ -1,4 +1,5 @@
 import type { FleetDecisionItem } from "./types";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 type RowJsx = typeof import("react/jsx-runtime").jsx;
 type RowJsxs = typeof import("react/jsx-runtime").jsxs;
@@ -22,63 +23,72 @@ function GaugeMark({ className, j, s }: { className: string; j: RowJsx; s: RowJs
   });
 }
 
-const FLEET_ACTUAL_REASON_LABEL: Record<FleetDecisionItem["actualReason"], string> = {
-  lease_reused: "Reused the fenced lease",
-  pin: "Kept the session pin",
-  rotation: "Rotated for capacity",
-  active: "Used the active subscription",
-  all_capped: "All observed subscriptions were capped",
-  allocator_disabled: "The policy-selected subscription was disabled for new allocations",
-  none: "No production candidate was selected",
-};
+const FLEET_ACTUAL_REASON_LABEL = (
+  t: OpenGeniText,
+): Record<FleetDecisionItem["actualReason"], string> => ({
+  lease_reused: t("timeline.fleetDecisionRow.reusedTheFencedLease"),
+  pin: t("timeline.fleetDecisionRow.keptTheSessionPin"),
+  rotation: t("timeline.fleetDecisionRow.rotatedForCapacity"),
+  active: t("timeline.fleetDecisionRow.usedTheActiveSubscription"),
+  all_capped: t("timeline.fleetDecisionRow.allObservedSubscriptionsWereCapped"),
+  allocator_disabled: t("timeline.fleetDecisionRow.thePolicySelectedSubscriptionWas"),
+  none: t("timeline.fleetDecisionRow.noProductionCandidateWasSelected"),
+});
 
-const FLEET_SHADOW_REASON_LABEL: Record<FleetDecisionItem["shadowReason"], string> = {
-  fenced_in_flight: "Kept the fenced in-flight assignment",
-  fenced_candidate_missing: "The fenced assignment was missing from the snapshot",
-  admission_paced: "Admission would have been paced",
-  no_eligible_candidate: "No candidate passed the policy checks",
-  overlay_isolated_empty: "Explicit isolation left no eligible candidate",
-  best_score: "Selected the lowest-pressure candidate",
-  affinity_best: "Session affinity was already best",
-  hysteresis_hold: "Hysteresis avoided a low-value switch",
-};
+const FLEET_SHADOW_REASON_LABEL = (
+  t: OpenGeniText,
+): Record<FleetDecisionItem["shadowReason"], string> => ({
+  fenced_in_flight: t("timeline.fleetDecisionRow.keptTheFencedInFlight"),
+  fenced_candidate_missing: t("timeline.fleetDecisionRow.theFencedAssignmentWasMissing"),
+  admission_paced: t("timeline.fleetDecisionRow.admissionWouldHaveBeenPaced"),
+  no_eligible_candidate: t("timeline.fleetDecisionRow.noCandidatePassedThePolicy"),
+  overlay_isolated_empty: t("timeline.fleetDecisionRow.explicitIsolationLeftNoEligible"),
+  best_score: t("timeline.fleetDecisionRow.selectedTheLowestPressureCandidate"),
+  affinity_best: t("timeline.fleetDecisionRow.sessionAffinityWasAlreadyBest"),
+  hysteresis_hold: t("timeline.fleetDecisionRow.hysteresisAvoidedALowValue"),
+});
 
-const FLEET_COMPARISON_LABEL: Record<FleetDecisionItem["comparison"], string> = {
-  match: "Production and shadow matched",
-  different_candidate: "Shadow preferred another candidate",
-  different_outcome: "Production and shadow outcomes differed",
-  not_comparable_truncated: "Comparison limited by bounded candidate data",
-};
+const FLEET_COMPARISON_LABEL = (
+  t: OpenGeniText,
+): Record<FleetDecisionItem["comparison"], string> => ({
+  match: t("timeline.fleetDecisionRow.productionAndShadowMatched"),
+  different_candidate: t("timeline.fleetDecisionRow.shadowPreferredAnotherCandidate"),
+  different_outcome: t("timeline.fleetDecisionRow.productionAndShadowOutcomesDiffered"),
+  not_comparable_truncated: t("timeline.fleetDecisionRow.comparisonLimitedByBoundedCandidate"),
+});
 
-const FLEET_ADMISSION_REASON_LABEL: Record<FleetDecisionItem["admissionReason"], string> = {
-  fenced_in_flight: "In-flight assignment was fenced",
-  pacing_disabled: "Admission pacing was disabled",
-  capacity_unknown: "Capacity was unknown, so work remained admissible",
-  capacity_available: "Observed capacity was available",
-  work_conserving_borrow: "Idle capacity was borrowed for standard work",
-  manager_priority: "Standard work was paced for queued manager demand",
-  standard_starvation_bound: "The standard-work starvation bound was reached",
-  capacity_saturated: "Observed dynamic capacity was saturated",
-  emergency_fuse: "The emergency fuse blocked new work",
-};
+const FLEET_ADMISSION_REASON_LABEL = (
+  t: OpenGeniText,
+): Record<FleetDecisionItem["admissionReason"], string> => ({
+  fenced_in_flight: t("timeline.fleetDecisionRow.inFlightAssignmentWasFenced"),
+  pacing_disabled: t("timeline.fleetDecisionRow.admissionPacingWasDisabled"),
+  capacity_unknown: t("timeline.fleetDecisionRow.capacityWasUnknownSoWork"),
+  capacity_available: t("timeline.fleetDecisionRow.observedCapacityWasAvailable"),
+  work_conserving_borrow: t("timeline.fleetDecisionRow.idleCapacityWasBorrowedFor"),
+  manager_priority: t("timeline.fleetDecisionRow.standardWorkWasPacedFor"),
+  standard_starvation_bound: t("timeline.fleetDecisionRow.theStandardWorkStarvationBound"),
+  capacity_saturated: t("timeline.fleetDecisionRow.observedDynamicCapacityWasSaturated"),
+  emergency_fuse: t("timeline.fleetDecisionRow.theEmergencyFuseBlockedNew"),
+});
 
-const FLEET_REJECTION_LABEL: Record<
-  Exclude<FleetDecisionItem["scores"][number]["rejectionReason"], null>,
-  string
-> = {
-  allocator_disabled: "Allocator disabled",
-  unavailable: "Unavailable",
-  cooling: "Cooling down",
-  quota_ceiling: "Quota ceiling reached",
-  overlay_isolation: "Outside explicit isolation",
-};
+const FLEET_REJECTION_LABEL = (
+  t: OpenGeniText,
+): Record<Exclude<FleetDecisionItem["scores"][number]["rejectionReason"], null>, string> => ({
+  allocator_disabled: t("timeline.fleetDecisionRow.allocatorDisabled"),
+  unavailable: t("timeline.fleetDecisionRow.unavailable"),
+  cooling: t("timeline.fleetDecisionRow.coolingDown"),
+  quota_ceiling: t("timeline.fleetDecisionRow.quotaCeilingReached"),
+  overlay_isolation: t("timeline.fleetDecisionRow.outsideExplicitIsolation"),
+});
 
-const FLEET_CONFIDENCE_LABEL: Record<FleetDecisionItem["confidence"], string> = {
-  unknown: "Unknown confidence",
-  low: "Low confidence",
-  medium: "Medium confidence",
-  high: "High confidence",
-};
+const FLEET_CONFIDENCE_LABEL = (
+  t: OpenGeniText,
+): Record<FleetDecisionItem["confidence"], string> => ({
+  unknown: t("timeline.fleetDecisionRow.unknownConfidence"),
+  low: t("timeline.fleetDecisionRow.lowConfidence"),
+  medium: t("timeline.fleetDecisionRow.mediumConfidence"),
+  high: t("timeline.fleetDecisionRow.highConfidence"),
+});
 
 export default function FleetDecisionRow({
   item,
@@ -93,6 +103,7 @@ export default function FleetDecisionRow({
   j: RowJsx;
   s: RowJsxs;
 }) {
+  const t = useOpenGeniText();
   const scoreRowsHidden = item.scoreRowsTruncatedCount > 0;
   const scores =
     item.scores.length > 0
@@ -105,7 +116,7 @@ export default function FleetDecisionRow({
                 "h4",
                 {
                   className: "text-og-sm font-medium text-og-fg",
-                  children: "Bounded candidate scores",
+                  children: t("timeline.fleetDecisionRow.boundedCandidateScores"),
                 },
                 "heading",
               ),
@@ -113,8 +124,7 @@ export default function FleetDecisionRow({
                 "p",
                 {
                   className: "mt-0.5 text-og-xs leading-5 text-og-fg-subtle",
-                  children:
-                    "Lower scores rank first. Candidate aliases are temporary and local to this event.",
+                  children: t("timeline.fleetDecisionRow.lowerScoresRankFirstCandidate"),
                 },
                 "description",
               ),
@@ -122,7 +132,7 @@ export default function FleetDecisionRow({
                 "ul",
                 {
                   className: "mt-2 flex min-w-0 flex-col gap-1.5",
-                  "aria-label": "Candidate scores",
+                  "aria-label": t("timeline.fleetDecisionRow.candidateScores"),
                   children: item.scores.map((score) =>
                     s(
                       "li",
@@ -143,10 +153,10 @@ export default function FleetDecisionRow({
                             {
                               className: "min-w-0 text-og-fg-muted sm:flex-1",
                               children: score.eligible
-                                ? "Eligible"
+                                ? t("timeline.fleetDecisionRow.eligible")
                                 : score.rejectionReason
-                                  ? FLEET_REJECTION_LABEL[score.rejectionReason]
-                                  : "Unavailable",
+                                  ? FLEET_REJECTION_LABEL(t)[score.rejectionReason]
+                                  : t("timeline.fleetDecisionRow.unavailable"),
                             },
                             "eligibility",
                           ),
@@ -156,10 +166,10 @@ export default function FleetDecisionRow({
                               className: "font-og-mono text-og-fg-subtle",
                               children: [
                                 "score ",
-                                formatFleetScore(score.total),
+                                formatFleetScore(t, score.total),
                                 " ·",
                                 " ",
-                                FLEET_CONFIDENCE_LABEL[score.confidence],
+                                FLEET_CONFIDENCE_LABEL(t)[score.confidence],
                               ],
                             },
                             "score",
@@ -186,8 +196,10 @@ export default function FleetDecisionRow({
             children: [
               item.truncatedCandidateCount,
               " additional ",
-              item.truncatedCandidateCount === 1 ? "candidate was" : "candidates were",
-              " excluded from this bounded replay record.",
+              item.truncatedCandidateCount === 1
+                ? t("timeline.fleetDecisionRow.candidateWas")
+                : t("timeline.fleetDecisionRow.candidatesWere"),
+              ` ${t("timeline.fleetDecisionRow.excludedFromThisBoundedReplay")}`,
             ],
           },
           "truncated",
@@ -201,8 +213,10 @@ export default function FleetDecisionRow({
           children: [
             item.scoreRowsTruncatedCount,
             " additional ",
-            item.scoreRowsTruncatedCount === 1 ? "score row was" : "score rows were",
-            " hidden by this view’s safety limit.",
+            item.scoreRowsTruncatedCount === 1
+              ? t("timeline.fleetDecisionRow.scoreRowWas")
+              : t("timeline.fleetDecisionRow.scoreRowsWere"),
+            ` ${t("timeline.fleetDecisionRow.hiddenByThisViewS")}`,
           ],
         },
         "hidden",
@@ -211,8 +225,8 @@ export default function FleetDecisionRow({
   return j(ActivityDisclosure, {
     icon: j(GaugeMark, { className: "size-3.5", j, s }),
     iconTone: "muted",
-    title: "Fleet policy shadow",
-    preview: FLEET_COMPARISON_LABEL[item.comparison],
+    title: t("timeline.fleetDecisionRow.fleetPolicyShadow"),
+    preview: FLEET_COMPARISON_LABEL(t)[item.comparison],
     chip: {
       tone: "muted",
       text:
@@ -223,15 +237,14 @@ export default function FleetDecisionRow({
             : "different",
     },
     children: s("section", {
-      "aria-label": "Fleet policy shadow details",
+      "aria-label": t("timeline.fleetDecisionRow.fleetPolicyShadowDetails"),
       className: "flex min-w-0 flex-col gap-3",
       children: [
         j(
           BodyNote,
           {
             tone: "muted",
-            children:
-              "Shadow observation only — it did not change the subscription serving this turn.",
+            children: t("timeline.fleetDecisionRow.shadowObservationOnlyItDid"),
           },
           "observation",
         ),
@@ -243,9 +256,9 @@ export default function FleetDecisionRow({
               j(
                 FleetDetail,
                 {
-                  term: "Production",
-                  value: fleetOutcomeLabel(item.actualOutcome, item.actualCandidateKey),
-                  note: FLEET_ACTUAL_REASON_LABEL[item.actualReason],
+                  term: t("timeline.fleetDecisionRow.production"),
+                  value: fleetOutcomeLabel(t, item.actualOutcome, item.actualCandidateKey),
+                  note: FLEET_ACTUAL_REASON_LABEL(t)[item.actualReason],
                   j,
                   s,
                 },
@@ -254,9 +267,9 @@ export default function FleetDecisionRow({
               j(
                 FleetDetail,
                 {
-                  term: "Shadow policy",
-                  value: fleetOutcomeLabel(item.shadowOutcome, item.shadowCandidateKey),
-                  note: FLEET_SHADOW_REASON_LABEL[item.shadowReason],
+                  term: t("timeline.fleetDecisionRow.shadowPolicy"),
+                  value: fleetOutcomeLabel(t, item.shadowOutcome, item.shadowCandidateKey),
+                  note: FLEET_SHADOW_REASON_LABEL(t)[item.shadowReason],
                   j,
                   s,
                 },
@@ -265,8 +278,8 @@ export default function FleetDecisionRow({
               j(
                 FleetDetail,
                 {
-                  term: "Comparison",
-                  value: FLEET_COMPARISON_LABEL[item.comparison],
+                  term: t("timeline.fleetDecisionRow.comparison"),
+                  value: FLEET_COMPARISON_LABEL(t)[item.comparison],
                   j,
                   s,
                 },
@@ -275,8 +288,8 @@ export default function FleetDecisionRow({
               j(
                 FleetDetail,
                 {
-                  term: "Decision confidence",
-                  value: FLEET_CONFIDENCE_LABEL[item.confidence],
+                  term: t("timeline.fleetDecisionRow.decisionConfidence"),
+                  value: FLEET_CONFIDENCE_LABEL(t)[item.confidence],
                   j,
                   s,
                 },
@@ -285,12 +298,12 @@ export default function FleetDecisionRow({
               j(
                 FleetDetail,
                 {
-                  term: "Admission",
+                  term: t("timeline.fleetDecisionRow.admission"),
                   value:
                     item.admissionOutcome === "admit"
-                      ? "Would admit new work"
-                      : "Would pace new work",
-                  note: FLEET_ADMISSION_REASON_LABEL[item.admissionReason],
+                      ? t("timeline.fleetDecisionRow.wouldAdmitNewWork")
+                      : t("timeline.fleetDecisionRow.wouldPaceNewWork"),
+                  note: FLEET_ADMISSION_REASON_LABEL(t)[item.admissionReason],
                   j,
                   s,
                 },
@@ -299,8 +312,10 @@ export default function FleetDecisionRow({
               j(
                 FleetDetail,
                 {
-                  term: "Observed candidates",
-                  value: `${item.candidateCount} in the bounded replay`,
+                  term: t("timeline.fleetDecisionRow.observedCandidates"),
+                  value: t("timeline.fleetDecisionRow.candidatecountInTheBoundedReplay", {
+                    candidateCount: item.candidateCount,
+                  }),
                   j,
                   s,
                 },
@@ -309,8 +324,10 @@ export default function FleetDecisionRow({
               j(
                 FleetDetail,
                 {
-                  term: "Idle-capacity borrowing",
-                  value: item.borrowedIdleCapacity ? "Borrowed for standard work" : "Not borrowed",
+                  term: t("timeline.fleetDecisionRow.idleCapacityBorrowing"),
+                  value: item.borrowedIdleCapacity
+                    ? t("timeline.fleetDecisionRow.borrowedForStandardWork")
+                    : t("timeline.fleetDecisionRow.notBorrowed"),
                   j,
                   s,
                 },
@@ -319,10 +336,10 @@ export default function FleetDecisionRow({
               j(
                 FleetDetail,
                 {
-                  term: "Named-policy borrowing",
+                  term: t("timeline.fleetDecisionRow.namedPolicyBorrowing"),
                   value: item.borrowedOverlayCapacity
-                    ? "Borrowed outside the preferred group"
-                    : "Not borrowed",
+                    ? t("timeline.fleetDecisionRow.borrowedOutsideThePreferredGroup")
+                    : t("timeline.fleetDecisionRow.notBorrowed"),
                   j,
                   s,
                 },
@@ -331,14 +348,14 @@ export default function FleetDecisionRow({
               j(
                 FleetDetail,
                 {
-                  term: "Stranded capacity",
+                  term: t("timeline.fleetDecisionRow.strandedCapacity"),
                   value:
                     item.strandedEligibleCount === 0
-                      ? "None"
-                      : `${item.strandedEligibleCount} eligible ${item.strandedEligibleCount === 1 ? "candidate" : "candidates"}`,
+                      ? t("timeline.fleetDecisionRow.none")
+                      : t("counts.eligibleCandidates", { count: item.strandedEligibleCount }),
                   note:
                     item.strandedEligibleCount > 0
-                      ? "Capacity excluded by explicit isolation; existing fenced turns are unchanged."
+                      ? t("timeline.fleetDecisionRow.capacityExcludedByExplicitIsolation")
                       : undefined,
                   j,
                   s,
@@ -399,15 +416,17 @@ function FleetDetail({
 }
 
 function fleetOutcomeLabel(
+  t: OpenGeniText,
   outcome: FleetDecisionItem["actualOutcome"] | FleetDecisionItem["shadowOutcome"],
   candidateKey: string | null,
 ): string {
-  if (outcome === "selected" && candidateKey) return `Selected ${candidateKey}`;
-  if (outcome === "waiting") return "Waiting for capacity";
-  if (outcome === "paced") return "Paced before placement";
-  return "No candidate selected";
+  if (outcome === "selected" && candidateKey)
+    return t("timeline.fleetDecisionRow.selectedCandidatekey", { candidateKey });
+  if (outcome === "waiting") return t("timeline.fleetDecisionRow.waitingForCapacity");
+  if (outcome === "paced") return t("timeline.fleetDecisionRow.pacedBeforePlacement");
+  return t("timeline.fleetDecisionRow.noCandidateSelected");
 }
 
-function formatFleetScore(value: number): string {
-  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
+function formatFleetScore(t: OpenGeniText, value: number): string {
+  return new Intl.NumberFormat(t.locale, { maximumFractionDigits: 2 }).format(value);
 }

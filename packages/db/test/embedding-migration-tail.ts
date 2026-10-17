@@ -63,6 +63,9 @@ export const embeddingMigrationTail = [
   // routines require that catalog. Replay both after the withheld guard.
   "0797_subscription_plan_foundation.sql",
   "0798_subscription_plan_maintenance.sql",
+  // Replaces 0797's catalog setter and plan routines; replay after 0797 so the
+  // withheld CREATE FUNCTION does not collide with the newer definition.
+  "0801_subscription_plan_legacy_prices.sql",
   // Reuses the revision guard installed by withheld 0521; its validation
   // follow-up must run after the original promotional-credit routines.
   "0613_model_scoped_promotional_credits.sql",

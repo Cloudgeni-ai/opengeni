@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "@opengeni/react/timeline-model";
+import { createOpenGeniText } from "@opengeni/react/messages";
 import { composerTrailingMode, nativeLoadingPhrases } from "../src/timeline/composer-state";
+
+const t = createOpenGeniText();
 
 const idle = {
   value: "",
@@ -35,13 +38,13 @@ describe("composer trailing action", () => {
 
 describe("native loading phrases", () => {
   test("built-in copy per phase by default", () => {
-    expect(nativeLoadingPhrases([], "preparing")).toBe(GENIE_PREPARING_PHRASES);
-    expect(nativeLoadingPhrases([], "waiting")).toBe(GENIE_WAITING_PHRASES);
+    expect(nativeLoadingPhrases(t, [], "preparing")).toEqual(GENIE_PREPARING_PHRASES(t));
+    expect(nativeLoadingPhrases(t, [], "waiting")).toEqual(GENIE_WAITING_PHRASES(t));
   });
 
   test("a host's phrases replace both phases, as on web", () => {
     const own = ["Looking into it…", "One moment…"];
-    expect(nativeLoadingPhrases(own, "preparing")).toBe(own);
-    expect(nativeLoadingPhrases(own, "waiting")).toBe(own);
+    expect(nativeLoadingPhrases(t, own, "preparing")).toBe(own);
+    expect(nativeLoadingPhrases(t, own, "waiting")).toBe(own);
   });
 });

@@ -90,6 +90,10 @@
       "types": "./src/composer-messages.ts",
       "default": "./src/composer-messages.ts"
     },
+    "./messages": {
+      "types": "./src/messages.ts",
+      "default": "./src/messages.ts"
+    },
     "./sandbox-label-model": {
       "types": "./src/sandbox-label-model.ts",
       "default": "./src/sandbox-label-model.ts"

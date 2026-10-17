@@ -15,7 +15,7 @@ export {
   fitCompactionPrefix,
   compactionPrefixCuts,
 } from "./anthropic-compaction";
-export { AnthropicProviderRejection } from "./anthropic-messages";
+export { AnthropicProviderRejection, AnthropicStreamInterruptedError } from "./anthropic-messages";
 export {
   createModelImageSizer,
   type ModelImageSizerOptions,
@@ -7476,6 +7476,18 @@ export function isMcpTransportConnectivityError(error: unknown): boolean {
     typeof error === "object" &&
     mcpTransportFailureKind(error) === "connectivity_unavailable"
   );
+}
+
+/**
+ * An MCP connectivity failure whose server answered HTTP 503 Service
+ * Unavailable: it is reachable but refusing work for now, as a server does
+ * while it is being deployed or maintained. Callers wait such a server out
+ * for longer than a server that cannot be reached at all.
+ */
+export function isMcpServiceUnavailableError(error: unknown): boolean {
+  if (!isMcpTransportConnectivityError(error)) return false;
+  const inspection = inspectMcpTransportError(error as object);
+  return inspection.statuses.includes(503);
 }
 
 /**

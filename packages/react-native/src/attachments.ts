@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { FileAsset, ResourceRef, SendMessageInput } from "@opengeni/sdk";
 import type { FileAttachmentClientLike } from "@opengeni/react/session";
 import type { NativeCryptoAdapter, NativeFileAdapter, NativePickedFile } from "./adapters";
+import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 
 export type NativeAttachmentStatus = "preparing" | "uploading" | "ready" | "failed";
 
@@ -146,22 +147,25 @@ export async function addNativeFilesForGeneration(input: {
   }, Promise.resolve());
 }
 
-export async function prepareNativeAttachmentUpload(input: {
-  source: NativePickedFile;
-  files: NativeFileAdapter;
-  crypto: NativeCryptoAdapter;
-  timeoutMs?: number | undefined;
-}): Promise<{ bytes: Uint8Array; data: ArrayBuffer; sha256: string }> {
+export async function prepareNativeAttachmentUpload(
+  t: OpenGeniText,
+  input: {
+    source: NativePickedFile;
+    files: NativeFileAdapter;
+    crypto: NativeCryptoAdapter;
+    timeoutMs?: number | undefined;
+  },
+): Promise<{ bytes: Uint8Array; data: ArrayBuffer; sha256: string }> {
   const timeoutMs = input.timeoutMs ?? NATIVE_ATTACHMENT_PREPARATION_TIMEOUT_MS;
   const bytes = await withTimeout(
     input.files.readBytes(input.source),
     timeoutMs,
-    "File preparation timed out. Retry the upload.",
+    t("native.attachments.filePreparationTimedOutRetry"),
   );
   const sha256 = await withTimeout(
     input.crypto.sha256Hex(bytes),
     timeoutMs,
-    "File verification timed out. Retry the upload.",
+    t("native.attachments.fileVerificationTimedOutRetry"),
   );
   // The Opengeni SDK accepts either Uint8Array or ArrayBuffer, but its
   // Uint8Array snapshot uses `new Blob([view])`. React Native's Blob rejects
@@ -197,6 +201,7 @@ export function useNativeFileAttachments(input: {
   files: NativeFileAdapter;
   crypto: NativeCryptoAdapter;
 }): NativeFileAttachmentsResult {
+  const t = useOpenGeniText();
   const [attachments, setAttachments] = useState<NativeAttachment[]>([]);
   const [error, setError] = useState<Error | null>(null);
   const sources = useRef(new Map<string, NativePickedFile>());
@@ -245,7 +250,7 @@ export function useNativeFileAttachments(input: {
         ),
       );
       try {
-        const { data, sha256 } = await prepareNativeAttachmentUpload({
+        const { data, sha256 } = await prepareNativeAttachmentUpload(t, {
           source,
           files: input.files,
           crypto: input.crypto,
@@ -303,7 +308,7 @@ export function useNativeFileAttachments(input: {
         );
       }
     },
-    [input.client, input.crypto, input.files, input.workspaceId],
+    [input.client, input.crypto, input.files, input.workspaceId, t],
   );
 
   const addFilesForGeneration = useCallback(

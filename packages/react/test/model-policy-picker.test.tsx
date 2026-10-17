@@ -13,6 +13,9 @@ import {
   useModelPolicyPickerState,
 } from "../src/components/model-policy-picker";
 import { actRun, registerDom, renderHook } from "./render-hook";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -227,7 +230,7 @@ describe("ModelPolicyPicker", () => {
   );
 
   test("neutral defaults preserve external identities and caller-provided row labels", async () => {
-    const rows = projectClientModelRows([
+    const rows = projectClientModelRows(englishText, [
       { ...MODELS[0]!, id: "deployment/model", source: "opengeni", cost: "credits" },
       { ...MODELS[0]!, id: "external/model", source: "opengeni", provider: "custom" },
       MODELS[1]!,
@@ -277,7 +280,7 @@ describe("ModelPolicyPicker", () => {
   });
 
   test("deployment branding overrides supplied row labels without mutating catalog truth", async () => {
-    const rows = projectClientModelRows([
+    const rows = projectClientModelRows(englishText, [
       {
         ...MODELS[0]!,
         id: "host/example",
@@ -417,7 +420,7 @@ describe("ModelPolicyPicker", () => {
   test.each([false, true])(
     "renders usable Codex first without mutating selection (codexOnly=%s)",
     async (codexOnly) => {
-      const rows = projectClientModelRows([
+      const rows = projectClientModelRows(englishText, [
         { ...MODELS[0]!, id: "free", label: "Free", source: "opengeni", cost: "free" },
         { ...MODELS[0]!, id: "paid", label: "Paid", source: "opengeni", cost: "credits" },
         ...MODELS,
@@ -795,7 +798,7 @@ describe("ModelPolicyPicker", () => {
     async (triggerStyle) => {
       const render = (fundingHint: string) => {
         const props: ModelPolicyPickerProps = {
-          rows: projectClientModelRows(MODELS).map((row) => ({
+          rows: projectClientModelRows(englishText, MODELS).map((row) => ({
             ...row,
             fundingHint,
             catalog: {
@@ -1088,7 +1091,7 @@ describe("ModelPolicyPicker", () => {
           thinkingEffort: "Tenkenivå",
           selected: "Valgt",
           billingHints: {
-            ...defaultModelPolicyPickerMessages.billingHints,
+            ...defaultModelPolicyPickerMessages(englishText).billingHints,
             codex_subscription: "Codex-abonnement",
           },
         }}

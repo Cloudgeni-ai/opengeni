@@ -1,5 +1,6 @@
 import type { OpenGeniClient, OpenGeniLinkTarget } from "@opengeni/sdk";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { type OpenGeniText } from "../messages/runtime";
 
 export type { OpenGeniLinkTarget };
 
@@ -80,7 +81,7 @@ function saveBlob(blob: Blob, filename: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
-function openUrl(url: string): void {
+function openUrl(t: OpenGeniText, url: string): void {
   // A signed download URL is attachment-disposition; an anchor click keeps the
   // page and survives popup blockers after the awaited URL request.
   const link = document.createElement("a");
@@ -110,12 +111,15 @@ function base64Bytes(content: string): Uint8Array<ArrayBuffer> {
  * (see `@opengeni/react/artifacts/*` and `@opengeni/react/sites`), so they stay
  * unavailable until the host resolves them.
  */
-export function sessionLinkResolver(input: {
-  client: SessionLinkClient;
-  workspaceId: string;
-  sessionId: string;
-  sandboxFiles?: boolean;
-}): OpenGeniLinkResolver {
+export function sessionLinkResolver(
+  t: OpenGeniText,
+  input: {
+    client: SessionLinkClient;
+    workspaceId: string;
+    sessionId: string;
+    sandboxFiles?: boolean;
+  },
+): OpenGeniLinkResolver {
   const { client, workspaceId, sessionId } = input;
   return (target) => {
     if (target.kind === "file") {
@@ -126,7 +130,7 @@ export function sessionLinkResolver(input: {
           const { url } = await client.createFileDownloadUrl!(workspaceId, target.fileId, {
             sessionId,
           });
-          openUrl(url);
+          openUrl(t, url);
         },
       };
     }
@@ -140,7 +144,7 @@ export function sessionLinkResolver(input: {
             encoding: "base64",
             maxBytes: SANDBOX_DOWNLOAD_MAX_BYTES,
           });
-          if (file.truncated) throw new Error("File is too large to download here.");
+          if (file.truncated) throw new Error(t("openGeniLinks.fileIsTooLargeTo"));
           const name = file.path.split(/[\\/]/u).at(-1) || "download";
           const bytes =
             file.encoding === "base64"

@@ -921,4 +921,69 @@ describe("changing who can use a Connected Machine in place", () => {
     });
     expect(await preview(org, machine, { target: "workspace" })).toBe("already_target");
   }, 120_000);
+
+  test("a move onto an Only me machine says why it was refused", async () => {
+    const org = await organization();
+    const machine = await workspaceMachine(org);
+    const narrowed = await change(org, machine, { target: "only_me", expectedGeneration: 1 });
+    expect(narrowed.outcome).toBe("changed");
+    const session = await createSession(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      initialMessage: "Busy chat",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: org.owner },
+      subjectId: org.owner,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      visibility: "workspace_shared",
+    } as never);
+    await initializeSessionStartAtomically(client.db, {
+      accountId: org.accountId,
+      workspaceId: org.workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    } as never);
+    const move = (subjectId: string, expectedEpoch: number) =>
+      setActiveSandbox(client.db, {
+        accountId: org.accountId,
+        workspaceId: org.workspaceId,
+        sessionId: session.id,
+        targetSandboxId: machine.sandboxId,
+        expectedEpoch,
+        subjectId,
+      });
+    const [before] = await shared.admin<Array<{ epoch: number }>>`
+      select active_epoch::int as epoch from sessions where id = ${session.id}`;
+
+    // Someone other than the owner is turned down for the machine itself.
+    expect(await move(org.member, before!.epoch)).toEqual({
+      swapped: false,
+      pointer: null,
+      refusal: "not_permitted",
+    });
+
+    // The owner is turned down only while a turn runs, and is told so.
+    await runTurn(org, session.id);
+    expect(await move(org.owner, before!.epoch)).toEqual({
+      swapped: false,
+      pointer: null,
+      refusal: "chat_busy",
+    });
+
+    // A stale epoch is the only refusal that is a lost race.
+    await shared.admin`update sessions set active_turn_id = null where id = ${session.id}`;
+    expect(await move(org.owner, before!.epoch + 7)).toEqual({
+      swapped: false,
+      pointer: null,
+      refusal: "epoch_changed",
+    });
+    const moved = await move(org.owner, before!.epoch);
+    expect(moved.swapped).toBe(true);
+    expect(moved.pointer?.activeSandboxId).toBe(machine.sandboxId);
+  }, 120_000);
 });

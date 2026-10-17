@@ -1,6 +1,7 @@
 import type { Permission } from "@opengeni/sdk";
 import { formatErrorMessage } from "@opengeni/sdk";
 import type { CommandContext, SlashArg, SlashCommand } from "./types";
+import { type OpenGeniText } from "../messages/runtime";
 
 /**
  * Parse a composer value into a command name + the rest. A command is
@@ -121,9 +122,9 @@ export function firstMissingRequiredArg(command: SlashCommand, args: string[]): 
   return null;
 }
 
-function requireSession(ctx: CommandContext): string {
+function requireSession(t: OpenGeniText, ctx: CommandContext): string {
   if (!ctx.sessionId) {
-    throw new Error("No active session yet — start a session first.");
+    throw new Error(t("commands.registry.noActiveSessionYetStart"));
   }
   return ctx.sessionId;
 }
@@ -135,11 +136,11 @@ const hasSession = (ctx: FilterCtx): boolean => ctx.sessionId !== null;
  * palette list, filter, arg-hint footer, and /help all render from this array.
  * Apps concat their own commands via the ChatComposer `commands` prop.
  */
-export const defaultCommands: readonly SlashCommand[] = [
+export const defaultCommands = (t: OpenGeniText): readonly SlashCommand[] => [
   {
     name: "help",
     aliases: ["?"],
-    description: "Show available commands.",
+    description: t("commands.registry.showAvailableCommands"),
     run: (_args, ctx) => {
       ctx.openHelp();
       return { status: "ok" };
@@ -147,7 +148,7 @@ export const defaultCommands: readonly SlashCommand[] = [
   },
   {
     name: "clear-view",
-    description: "Clear the local timeline view (this device only; no server change).",
+    description: t("commands.registry.clearTheLocalTimelineView"),
     run: (_args, ctx) => {
       // clearView() reports whether the host actually wired a view-reset. If it
       // didn't (the console surface has no resettable local timeline), reporting
@@ -157,22 +158,22 @@ export const defaultCommands: readonly SlashCommand[] = [
       if (!cleared) {
         return {
           status: "error",
-          message: "This view can't be cleared here (no local timeline to reset).",
+          message: t("commands.registry.thisViewCanTBe"),
         };
       }
-      return { status: "ok", message: "Local view cleared." };
+      return { status: "ok", message: t("commands.registry.localViewCleared") };
     },
   },
   {
     name: "goal",
-    description: "Pause or resume the session's goal loop.",
+    description: t("commands.registry.pauseOrResumeTheSession"),
     permission: "sessions:control",
     available: hasSession,
     args: [
       { name: "action", required: true, oneOf: ["pause", "resume"], description: "pause | resume" },
     ],
     run: async (args, ctx) => {
-      const sessionId = requireSession(ctx);
+      const sessionId = requireSession(t, ctx);
       const action = args[0];
       if (action !== "pause" && action !== "resume") {
         return { status: "error", message: "Usage: /goal pause | /goal resume" };
@@ -181,22 +182,28 @@ export const defaultCommands: readonly SlashCommand[] = [
         await ctx.client.updateGoal(ctx.workspaceId, sessionId, {
           status: action === "pause" ? "paused" : "active",
         });
-        return { status: "ok", message: action === "pause" ? "Goal paused." : "Goal resumed." };
+        return {
+          status: "ok",
+          message:
+            action === "pause"
+              ? t("commands.registry.goalPaused")
+              : t("commands.registry.goalResumed"),
+        };
       } catch (cause) {
         return {
           status: "error",
-          message: commandErrorMessage(ctx, cause, goalErrorMessage(cause, action)),
+          message: commandErrorMessage(ctx, cause, goalErrorMessage(t, cause, action)),
         };
       }
     },
   },
   {
     name: "compact",
-    description: "Compact the conversation context now.",
+    description: t("commands.registry.compactTheConversationContextNow"),
     permission: "sessions:control",
     available: hasSession,
     run: async (_args, ctx) => {
-      const sessionId = requireSession(ctx);
+      const sessionId = requireSession(t, ctx);
       try {
         const result = await ctx.client.compactSessionContext(ctx.workspaceId, sessionId);
         return { status: "ok", message: result.message };
@@ -207,12 +214,12 @@ export const defaultCommands: readonly SlashCommand[] = [
   },
   {
     name: "clear",
-    description: "Clear the conversation context (destructive; audit-preserved).",
+    description: t("commands.registry.clearTheConversationContextDestructive"),
     permission: "sessions:control",
     danger: true,
     available: hasSession,
     run: async (_args, ctx) => {
-      const sessionId = requireSession(ctx);
+      const sessionId = requireSession(t, ctx);
       const confirmed = await ctx.confirm();
       if (!confirmed) {
         // Canceled: no error, but keep the "/clear" draft so the operator who
@@ -221,11 +228,11 @@ export const defaultCommands: readonly SlashCommand[] = [
       }
       try {
         await ctx.client.clearSessionContext(ctx.workspaceId, sessionId);
-        return { status: "ok", message: "Context cleared." };
+        return { status: "ok", message: t("commands.registry.contextCleared") };
       } catch (cause) {
         return {
           status: "error",
-          message: commandErrorMessage(ctx, cause, clearErrorMessage(cause)),
+          message: commandErrorMessage(ctx, cause, clearErrorMessage(t, cause)),
         };
       }
     },
@@ -252,22 +259,22 @@ function statusCode(cause: unknown): number | undefined {
   return undefined;
 }
 
-function goalErrorMessage(cause: unknown, action: "pause" | "resume"): string {
+function goalErrorMessage(t: OpenGeniText, cause: unknown, action: "pause" | "resume"): string {
   const code = statusCode(cause);
   if (code === 404) {
-    return "This session has no goal to control.";
+    return t("commands.registry.thisSessionHasNoGoal");
   }
   if (code === 409) {
     return action === "resume"
-      ? "Only a paused goal can be resumed."
-      : "Goal is already in a terminal state.";
+      ? t("commands.registry.onlyAPausedGoalCan")
+      : t("commands.registry.goalIsAlreadyInA");
   }
   return formatErrorMessage(cause);
 }
 
-function clearErrorMessage(cause: unknown): string {
+function clearErrorMessage(t: OpenGeniText, cause: unknown): string {
   if (statusCode(cause) === 409) {
-    return "Pause the session and wait for the current inference to settle, then clear context.";
+    return t("commands.registry.pauseTheSessionAndWait");
   }
   return formatErrorMessage(cause);
 }

@@ -17,6 +17,7 @@ import { useClientConfigFlags } from "../hooks/use-client-config-flags";
 import { SessionConversation, type SessionConversationProps } from "./session-conversation";
 import { SessionList, type SessionListLabels, type SessionListProps } from "./session-list";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type OpenGeniChatLabels = SessionListLabels & {
   openChats: string;
@@ -31,14 +32,14 @@ export type OpenGeniChatLabels = SessionListLabels & {
   newChatFinishingUploads?: string | undefined;
 };
 
-const DEFAULT_LABELS: Omit<OpenGeniChatLabels, keyof SessionListLabels> = {
-  openChats: "Open chats",
-  closeChats: "Close chats",
-  newChatPlaceholder: "Ask anything…",
-  newChatTitle: "How can I help?",
-  send: "Send",
-  newChatUnavailable: "New chats are not enabled for this product.",
-};
+const DEFAULT_LABELS = (t: OpenGeniText): Omit<OpenGeniChatLabels, keyof SessionListLabels> => ({
+  openChats: t("openGeniChat.openChats"),
+  closeChats: t("openGeniChat.closeChats"),
+  newChatPlaceholder: t("openGeniChat.askAnything"),
+  newChatTitle: t("openGeniChat.howCanIHelp"),
+  send: t("openGeniChat.send"),
+  newChatUnavailable: t("openGeniChat.newChatsAreNotEnabled"),
+});
 
 /** What the first message carries besides its text. */
 export type OpenGeniChatCreateOptions = NewConversationCreateOptions;
@@ -137,7 +138,8 @@ function Chat({
   theme,
   surface,
 }: Omit<OpenGeniChatProps, "baseUrl" | "headers" | "fetch">) {
-  const labels = { ...DEFAULT_LABELS, ...labelOverrides } as OpenGeniChatLabels;
+  const t = useOpenGeniText();
+  const labels = { ...DEFAULT_LABELS(t), ...labelOverrides } as OpenGeniChatLabels;
   const scope = { client, workspaceId };
   const context = useOpenGeni(scope);
   const [uncontrolled, setUncontrolled] = useState<string | null>(defaultSessionId);

@@ -22,6 +22,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Icon, type NativeIconName } from "./icon";
+import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 
 export interface NativeViewerImage {
   /** A URL the image loads from (signed links are fine). */
@@ -40,12 +41,12 @@ export interface NativeImageViewerLabels {
   shareFailed: string;
 }
 
-const DEFAULT_LABELS: NativeImageViewerLabels = {
-  close: "Close",
-  share: "Share",
+const DEFAULT_LABELS = (t: OpenGeniText): NativeImageViewerLabels => ({
+  close: t("native.timeline.imageViewer.close"),
+  share: t("native.timeline.imageViewer.share"),
   position: (index, count) => `${index + 1} of ${count}`,
-  shareFailed: "Couldn't share this image.",
-};
+  shareFailed: t("native.timeline.imageViewer.couldnTShareThisImage"),
+});
 
 function extensionOf(image: NativeViewerImage): string {
   const fromName = image.filename?.match(/\.([A-Za-z0-9]{2,5})$/u)?.[1];
@@ -102,6 +103,7 @@ function ZoomablePage(props: {
   height: number;
   onZoomChange: (zoomed: boolean) => void;
 }) {
+  const t = useOpenGeniText();
   const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
   const zoomed = useRef(false);
   const lastTap = useRef(0);
@@ -131,7 +133,7 @@ function ZoomablePage(props: {
         accessible
         accessibilityRole="image"
         accessibilityLabel={props.image.alt}
-        accessibilityHint="Double-tap to zoom"
+        accessibilityHint={t("native.timeline.imageViewer.doubleTapToZoom")}
         onPress={(event) => {
           // Double-tap zooms in on that spot, or back out.
           const now = Date.now();
@@ -185,7 +187,8 @@ export function NativeImageViewer(props: {
   onClose: () => void;
   labels?: Partial<NativeImageViewerLabels> | undefined;
 }) {
-  const labels = { ...DEFAULT_LABELS, ...props.labels };
+  const t = useOpenGeniText();
+  const labels = { ...DEFAULT_LABELS(t), ...props.labels };
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const [index, setIndex] = useState(props.index);

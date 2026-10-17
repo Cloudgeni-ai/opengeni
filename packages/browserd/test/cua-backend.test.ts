@@ -221,6 +221,19 @@ describe("CUA desktop boundary", () => {
         (await backend.callNative({ ...native, operationId: crypto.randomUUID() })).outcome,
       ).toBe("completed");
       expect(fixture.calls.filter((call) => call.name === "get_cursor_position")).toHaveLength(2);
+      // Quick cursor motion once per session, and again after CUA revives it.
+      const motions = fixture.calls.filter((call) => call.name === "set_agent_cursor_motion");
+      expect(motions.map((call) => call.args.session)).toEqual([
+        viewerSession,
+        viewerSession,
+        nativeSession,
+        nativeSession,
+      ]);
+      expect(motions[0]!.args).toMatchObject({
+        timing: "fixed",
+        glide_duration_ms: 150,
+        dwell_after_click_ms: 0,
+      });
       refusedSession = nativeSession;
       const computerSessionId = crypto.randomUUID();
       const controllerGeneration = "controller-fixture";

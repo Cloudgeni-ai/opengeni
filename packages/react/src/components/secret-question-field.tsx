@@ -20,6 +20,7 @@ import {
 } from "../human-input-model";
 import { cn } from "../lib/cn";
 import { useSecretsUi } from "../secrets-ui";
+import { useOpenGeniText } from "../messages/runtime";
 
 /** Read and clear one secret field at submit time; the value never enters React state. */
 export type SecretFieldHandle = {
@@ -63,6 +64,7 @@ export function SecretQuestionField({
   register,
   onEdited,
 }: SecretQuestionFieldProps) {
+  const t = useOpenGeniText();
   const spec = question.secret;
   const ui = useSecretsUi();
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -83,7 +85,7 @@ export function SecretQuestionField({
   const canGenerate = secretCanGenerate(spec);
   const autoComplete = secretAutocomplete(spec);
   const inputMode = secretInputMode(spec);
-  const label = secretFieldLabel(spec);
+  const label = secretFieldLabel(t, spec);
   const inputId = `${fieldId}-secret`;
   const usernameId = `${fieldId}-username`;
   const saveToId = `${fieldId}-save-to`;

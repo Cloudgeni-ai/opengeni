@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { describe, expect, test } from "bun:test";
 import { Permission } from "@opengeni/contracts";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
@@ -132,6 +133,7 @@ describe("rail session grouping", () => {
 
   test("pins running sessions above the recency buckets, newest first", () => {
     const grouped = groupSessionsForRail(
+      t,
       [
         railSession({
           id: "old-running",
@@ -159,6 +161,7 @@ describe("rail session grouping", () => {
 
   test("buckets non-running sessions by recency, most-recent first, dropping empty groups", () => {
     const grouped = groupSessionsForRail(
+      t,
       [
         railSession({ id: "today", updatedAt: "2026-06-19T08:00:00.000Z" }),
         railSession({ id: "yesterday", updatedAt: "2026-06-18T08:00:00.000Z" }),
@@ -179,10 +182,10 @@ describe("rail session grouping", () => {
   });
 
   test("relativeTimeLabel reads compactly", () => {
-    expect(relativeTimeLabel("2026-06-19T11:59:50.000Z", NOW)).toBe("now");
-    expect(relativeTimeLabel("2026-06-19T11:30:00.000Z", NOW)).toBe("30m");
-    expect(relativeTimeLabel("2026-06-19T09:00:00.000Z", NOW)).toBe("3h");
-    expect(relativeTimeLabel("2026-06-17T12:00:00.000Z", NOW)).toBe("2d");
+    expect(relativeTimeLabel(t, "2026-06-19T11:59:50.000Z", NOW)).toBe("now");
+    expect(relativeTimeLabel(t, "2026-06-19T11:30:00.000Z", NOW)).toBe("30m");
+    expect(relativeTimeLabel(t, "2026-06-19T09:00:00.000Z", NOW)).toBe("3h");
+    expect(relativeTimeLabel(t, "2026-06-17T12:00:00.000Z", NOW)).toBe("2d");
   });
 
   test("buildRailForest nests spawned children under their in-page parent", () => {
@@ -290,6 +293,7 @@ describe("rail session grouping", () => {
 
   test("breaks activity ties by descending session id in flat and forest orders", () => {
     const flat = groupSessionsForRail(
+      t,
       [
         railSession({ id: "session-a", updatedAt: "2026-06-19T10:00:00.000Z" }),
         railSession({ id: "session-z", updatedAt: "2026-06-19T10:00:00.000Z" }),
@@ -1050,7 +1054,7 @@ describe("organization helpers", () => {
 
   test("derives a label, preferring an account name in grant metadata", () => {
     expect(
-      orgLabel("acc-12345678abc", [
+      orgLabel(t, "acc-12345678abc", [
         {
           accountId: "acc-12345678abc",
           subjectId: "s",
@@ -1059,7 +1063,7 @@ describe("organization helpers", () => {
         },
       ]),
     ).toBe("Acme");
-    expect(orgLabel("acc-12345678abc", [])).toBe("Org acc-1234");
+    expect(orgLabel(t, "acc-12345678abc", [])).toBe("Org acc-1234");
   });
 
   test("lists every org the subject can reach, default first", () => {
@@ -1069,7 +1073,7 @@ describe("organization helpers", () => {
         { accountId: "acc-a", subjectId: "s", role: "admin", permissions: ["billing:read"] },
       ],
     });
-    const orgs = organizationsForSubject(context, [ws("w1", "acc-b"), ws("w2", "acc-a")]);
+    const orgs = organizationsForSubject(t, context, [ws("w1", "acc-b"), ws("w2", "acc-a")]);
     expect(orgs.map((org) => org.accountId)).toEqual(["acc-b", "acc-a"]);
     expect(orgs.find((org) => org.accountId === "acc-a")?.canManage).toBe(true);
   });

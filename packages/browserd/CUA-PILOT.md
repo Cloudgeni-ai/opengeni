@@ -1,8 +1,9 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`e35fae2d24e53a4a88bd80dbac481878d78c4c81`: upstream `cua-driver-rs-v0.36.0`
-(`6d6c734c`) plus two Linux X11 coordinate fixes, including its non-invalidating
+`8b181bef9535ac6d9a19ead1ffae3ceb4d6cd7db`: upstream `cua-driver-rs-v0.36.0`
+(`6d6c734c`) plus two Linux X11 coordinate fixes and a macOS per-action overhead
+fix (a hidden cursor no longer glides; Electron detection no longer spawns `ps`), including its non-invalidating
 preview capture and cursor support. `@trycua/cua-driver` 0.36.0 supplies the private-worker
 transport; the source-built executable performs desktop operations. Windows uses
 the published SDK's native runtime in process. CUA is the default on macOS, on
@@ -107,7 +108,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/e35fae2d24e53a4a88bd80dbac481878d78c4c81/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/8b181bef9535ac6d9a19ead1ffae3ceb4d6cd7db/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.36: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side

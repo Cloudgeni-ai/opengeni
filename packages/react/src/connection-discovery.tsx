@@ -13,6 +13,7 @@ import { ConnectionSkeleton } from "./connection-skeleton";
 import { ConnectionServiceLogo } from "./connection-service-logo";
 import { McpConnectionCard } from "./components/session-mcp-capability-card";
 import { mcpConnectionDiscoveryState } from "./mcp-connection-status";
+import { useOpenGeniText } from "./messages/runtime";
 
 export type ConnectionDiscoveryProps = {
   client: OpenGeniClient;
@@ -41,6 +42,7 @@ function ScopedDiscovery({
   returnUrl,
   onConfigured,
 }: ConnectionDiscoveryProps) {
+  const t = useOpenGeniText();
   const [providers, setProviders] = useState<ConnectProvider[] | null>(null);
   const [accounts, setAccounts] = useState<ConnectAccount[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<ConnectProvider | null>(null);
@@ -121,9 +123,11 @@ function ScopedDiscovery({
   const loading = (!items && !failed) || Boolean(controller && !providers && !providerFailed);
   if (selectedProvider && controller)
     return (
-      <section aria-label={`Connect ${selectedProvider.label}`}>
+      <section
+        aria-label={t("connectionDiscovery.connectLabel", { label: selectedProvider.label })}
+      >
         <button type="button" onClick={() => setSelectedProvider(null)}>
-          Back to connections
+          {t("connectionDiscovery.backToConnections")}
         </button>
         <ConnectionLogo
           name={selectedProvider.label}
@@ -139,13 +143,18 @@ function ScopedDiscovery({
       </section>
     );
   return (
-    <section className="og-connection-discovery" aria-label="Find a connection">
-      <h3>Add a connection</h3>
+    <section
+      className="og-connection-discovery"
+      aria-label={t("connectionDiscovery.findAConnection")}
+    >
+      <h3>{t("connectionDiscovery.addAConnection")}</h3>
       <label>
-        <span className="og-capability-catalog-sr-only">Search services</span>
+        <span className="og-capability-catalog-sr-only">
+          {t("connectionDiscovery.searchServices")}
+        </span>
         <input
           type="search"
-          placeholder="Search services…"
+          placeholder={t("connectionDiscovery.searchServices2")}
           value={query}
           onChange={(event) => {
             setQuery(event.target.value);
@@ -155,9 +164,9 @@ function ScopedDiscovery({
       </label>
       {(providerFailed || failed) && (
         <p role="alert">
-          Some services could not be loaded.{" "}
+          {t("connectionDiscovery.someServicesCouldNotBe")}{" "}
           <button type="button" onClick={() => setReload((value) => value + 1)}>
-            Retry
+            {t("connectionDiscovery.retry")}
           </button>
         </p>
       )}
@@ -177,14 +186,16 @@ function ScopedDiscovery({
                 />
               }
               status={connected ? "added" : "available"}
-              statusLabel={connected ? "Connected" : "Connect"}
+              statusLabel={
+                connected ? t("connectionDiscovery.connected") : t("connectionDiscovery.connect")
+              }
               showStatusLabel
               onOpen={() => setSelectedProvider(provider)}
             />
           );
         })}
         {matches.slice(0, limit).map((item) => {
-          const state = mcpConnectionDiscoveryState(item, connections);
+          const state = mcpConnectionDiscoveryState(t, item, connections);
           return (
             <CapabilityCatalogRow
               key={item.id}
@@ -203,13 +214,15 @@ function ScopedDiscovery({
           );
         })}
 
-        {loading && <ConnectionSkeleton rows={3} label="Loading services" />}
+        {loading && (
+          <ConnectionSkeleton rows={3} label={t("connectionDiscovery.loadingServices")} />
+        )}
         {!loading && !failed && !providerFailed && !matches.length && !providerMatches.length && (
-          <p role="status">No services match your search.</p>
+          <p role="status">{t("connectionDiscovery.noServicesMatchYourSearch")}</p>
         )}
         {matches.length > limit && (
           <button type="button" onClick={() => setLimit((value) => value + 12)}>
-            Show more services
+            {t("connectionDiscovery.showMoreServices")}
           </button>
         )}
       </div>

@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { resolveWorkspaceSessionDefaults } from "@opengeni/contracts";
 import type { DefaultModelSelectionSource, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
@@ -73,9 +74,9 @@ export function defaultModelPickerRows(
       label: catalog.label,
       ...(catalog.shortLabel ? { shortLabel: catalog.shortLabel } : {}),
       billingClass,
-      billingClassLabel: billingClassLabel(billingClass),
+      billingClassLabel: billingClassLabel(t, billingClass),
       selectable: false,
-      unavailableReason: availabilityReasonLabel(catalog.availability.reason) ?? "Unavailable",
+      unavailableReason: availabilityReasonLabel(t, catalog.availability.reason) ?? "Unavailable",
       provider: catalog.provider,
       providerLabel: catalog.providerLabel,
       catalog,
@@ -93,11 +94,11 @@ export function defaultModelSummary(
   const runnable =
     catalog.credentialReadiness.status === "ready" && catalog.availability.selectable;
   return {
-    text: `${catalog.label} · ${payerSummaryForModel(catalog)}`,
+    text: `${catalog.label} · ${payerSummaryForModel(t, catalog)}`,
     unavailable: runnable
       ? null
       : `Can't run right now: ${
-          availabilityReasonLabel(catalog.availability.reason) ?? "Unavailable"
+          availabilityReasonLabel(t, catalog.availability.reason) ?? "Unavailable"
         }`,
   };
 }

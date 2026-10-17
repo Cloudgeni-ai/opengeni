@@ -79,6 +79,7 @@ import {
 } from "./session-attempt-fence";
 export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
 export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
+export { sessionHasToolRouterHistory } from "./session-tool-router-history";
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
@@ -38968,31 +38969,6 @@ export async function installOrReadTurnExecutionPolicyForAttempt(
   );
 }
 
-/** Historical router exposure is a protocol fact, not renewed tool authority. */
-export async function sessionHasToolRouterHistory(
-  db: Database,
-  input: { accountId: string; workspaceId: string; sessionId: string },
-): Promise<boolean> {
-  return withRlsContext(db, input, async (scopedDb) => {
-    const rows = await scopedDb
-      .select({ id: schema.sessionHistoryItems.id })
-      .from(schema.sessionHistoryItems)
-      .where(
-        and(
-          eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-          eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-          sql`(
-          ${schema.sessionHistoryItems.item}->>'type' IN ('tool_search_call', 'tool_search_output')
-          OR (${schema.sessionHistoryItems.item}->>'type' = 'function_call'
-            AND ${schema.sessionHistoryItems.item}->>'name' IN ('tool_search', 'tool_list', 'tool_invoke'))
-        )`,
-        ),
-      )
-      .limit(1);
-    return rows.length > 0;
-  });
-}
-
 /** Persist the current catalog once per logical turn; retries reuse its exact snapshot. */
 export async function ensureSessionSkillCatalog(
   db: Database,
@@ -39907,43 +39883,7 @@ export async function clearDurablePendingSessionToolCalls(
           )
           .for("update");
         if (pending.length === 0) return { accepted: true, cleared: 0 };
-        const history = await tx
-          .select({
-            position: schema.sessionHistoryItems.position,
-            item: schema.sessionHistoryItems.item,
-            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-          })
-          .from(schema.sessionHistoryItems)
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-              eq(schema.sessionHistoryItems.turnId, input.turnId),
-            ),
-          );
-        const decodedHistory = history.map((row) => ({
-          ...row,
-          item: fromPostgresLosslessJson(row.item, row.itemCodecVersion),
-        }));
-        const durableIds = pending
-          .filter((call) => {
-            const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[call.callType];
-            if (!resultType) return false;
-            const durableCall = decodedHistory.find(
-              ({ item }) =>
-                historyItemType(item) === call.callType && historyCallId(item) === call.callId,
-            );
-            return Boolean(
-              durableCall &&
-              decodedHistory.some(
-                ({ item, position }) =>
-                  position > durableCall.position &&
-                  historyItemType(item) === resultType &&
-                  historyCallId(item) === call.callId,
-              ),
-            );
-          })
-          .map((call) => call.id);
+        const durableIds = await durableToolCallPairIdsTx(tx, input, pending);
         if (durableIds.length > 0) {
           await tx
             .delete(schema.sessionPendingToolCalls)
@@ -39952,6 +39892,74 @@ export async function clearDurablePendingSessionToolCalls(
         return { accepted: true, cleared: durableIds.length };
       }),
   );
+}
+
+const DURABLE_TOOL_CALL_SCAN_PAGE = 32;
+
+/**
+ * A pending call is durable once its call item and a later result item are in
+ * the turn's history. The batch being cleared was just appended, so read the
+ * turn newest-first a page at a time and stop as soon as every pending call is
+ * proven: the cost follows the batch, not the whole turn transcript. A result
+ * after any matching call item is a result after the earliest one, so the
+ * newest-first proof is the same predicate as a whole-turn scan. Unproven
+ * calls still read the whole turn before staying pending.
+ */
+async function durableToolCallPairIdsTx(
+  tx: Pick<Database, "select">,
+  scope: { workspaceId: string; sessionId: string; turnId: string },
+  pending: Array<{ id: string; callId: string; callType: string }>,
+): Promise<string[]> {
+  const unproven = new Map<string, { id: string; callType: string; resultType: string }>();
+  for (const call of pending) {
+    const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[call.callType];
+    if (resultType) unproven.set(call.callId, { id: call.id, callType: call.callType, resultType });
+  }
+  // Pending calls whose result item was already seen at a later position.
+  const resultSeen = new Set<string>();
+  const durable: string[] = [];
+  let before: number | null = null;
+  while (unproven.size > 0) {
+    const page = await tx
+      .select({
+        position: schema.sessionHistoryItems.position,
+        item: schema.sessionHistoryItems.item,
+        itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+      })
+      .from(schema.sessionHistoryItems)
+      .where(
+        and(
+          eq(schema.sessionHistoryItems.workspaceId, scope.workspaceId),
+          eq(schema.sessionHistoryItems.sessionId, scope.sessionId),
+          eq(schema.sessionHistoryItems.turnId, scope.turnId),
+          before === null ? undefined : lt(schema.sessionHistoryItems.position, before),
+        ),
+      )
+      .orderBy(desc(schema.sessionHistoryItems.position))
+      .limit(DURABLE_TOOL_CALL_SCAN_PAGE);
+    // Positions are unique per session, so each row is strictly older than
+    // every row already seen.
+    for (const row of page) {
+      const item = fromPostgresLosslessJson(row.item, row.itemCodecVersion) as Record<
+        string,
+        unknown
+      >;
+      const callId = historyCallId(item);
+      const type = historyItemType(item);
+      if (callId === null || type === null) continue;
+      const call = unproven.get(callId);
+      if (!call) continue;
+      if (type === call.callType && resultSeen.has(callId)) {
+        durable.push(call.id);
+        unproven.delete(callId);
+      } else if (type === call.resultType) {
+        resultSeen.add(callId);
+      }
+    }
+    if (page.length < DURABLE_TOOL_CALL_SCAN_PAGE) break;
+    before = page[page.length - 1]!.position;
+  }
+  return durable;
 }
 
 export async function getSessionHistoryItems(
@@ -62599,6 +62607,17 @@ export type ActiveSandboxPointer = {
   workingDir: string | null;
 };
 
+/**
+ * Why a swap did not happen. Only `epoch_changed` is a lost race; the rest are
+ * decisions about the target or the chat that a retry alone will not change.
+ */
+export type ActiveSandboxSwapRefusal =
+  | "epoch_changed"
+  | "chat_busy"
+  | "chat_unavailable"
+  | "not_permitted"
+  | "target_unavailable";
+
 // The INVERSE of readActiveSandbox: every session in a workspace whose ACTIVE
 // SANDBOX resolves to enrollment X AND that has a RUNNING TURN — i.e. "sessions
 // with an active op on machine X". This is the fan-out target set for the
@@ -62695,7 +62714,11 @@ export async function setActiveSandbox(
     // working dir is seeded create-time through this CAS, not the row INSERT.
     workingDir?: string | null;
   },
-): Promise<{ swapped: boolean; pointer: ActiveSandboxPointer | null }> {
+): Promise<{
+  swapped: boolean;
+  pointer: ActiveSandboxPointer | null;
+  refusal?: ActiveSandboxSwapRefusal;
+}> {
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -62718,7 +62741,7 @@ export async function setActiveSandbox(
             ) as authorized`,
           );
           if (authorization?.authorized !== true) {
-            return { swapped: false, pointer: null };
+            return { swapped: false, pointer: null, refusal: "not_permitted" };
           }
           const [target] = await rawRows<{
             value: { scope?: string; enrollmentId?: string | null } | null;
@@ -62730,11 +62753,11 @@ export async function setActiveSandbox(
             ) as value`,
           );
           if (!target?.value) {
-            return { swapped: false, pointer: null };
+            return { swapped: false, pointer: null, refusal: "target_unavailable" };
           }
           if (target.value.scope === "user") {
             if (!target.value.enrollmentId) {
-              return { swapped: false, pointer: null };
+              return { swapped: false, pointer: null, refusal: "target_unavailable" };
             }
             personalEnrollmentId = target.value.enrollmentId;
             if (input.personalMachineAttempt) {
@@ -62749,7 +62772,7 @@ export async function setActiveSandbox(
                 ) as authorized`,
               );
               if (admission?.authorized !== true) {
-                return { swapped: false, pointer: null };
+                return { swapped: false, pointer: null, refusal: "not_permitted" };
               }
             } else {
               const [session] = await scopedDb.execute<{
@@ -62759,8 +62782,14 @@ export async function setActiveSandbox(
                 where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
                 for no key update
               `);
-              if (!session || session.active_turn_id !== null) {
-                return { swapped: false, pointer: null };
+              if (!session) {
+                return { swapped: false, pointer: null, refusal: "chat_unavailable" };
+              }
+              // Consent to use a personal machine travels with the person's next
+              // message, so a turn that is already running has none. The chat
+              // moves once that turn has settled.
+              if (session.active_turn_id !== null) {
+                return { swapped: false, pointer: null, refusal: "chat_busy" };
               }
             }
           }
@@ -62775,14 +62804,14 @@ export async function setActiveSandbox(
           for share
         `);
           if (!target) {
-            return { swapped: false, pointer: null };
+            return { swapped: false, pointer: null, refusal: "target_unavailable" };
           }
           if (target.kind === "selfhosted") {
             // SHARE conflicts with removeEnrollment's UPDATE lock. If removal
             // wins first, this read observes revoked; if attach wins first,
             // removal observes the committed pointer and blocks safely.
             if (!target.enrollment_id) {
-              return { swapped: false, pointer: null };
+              return { swapped: false, pointer: null, refusal: "target_unavailable" };
             }
             const [enrollment] = await scopedDb.execute<{ status: string }>(sql`
             select status
@@ -62791,7 +62820,7 @@ export async function setActiveSandbox(
             for share
           `);
             if (!enrollment || enrollment.status !== "active") {
-              return { swapped: false, pointer: null };
+              return { swapped: false, pointer: null, refusal: "target_unavailable" };
             }
           }
         }
@@ -62812,7 +62841,7 @@ export async function setActiveSandbox(
     `);
       const row = rows[0];
       if (!row) {
-        return { swapped: false, pointer: null };
+        return { swapped: false, pointer: null, refusal: "epoch_changed" };
       }
       if (personalEnrollmentId && input.personalMachineAttempt) {
         const [preUse] = await rawRows<{ authorized: boolean }>(
@@ -73962,8 +73991,11 @@ export type SessionWorkPeek =
   | { kind: "runnable"; admissionFence?: SessionAdmissionFence }
   | {
       kind: "admission-blocked";
-      reason?: "sandbox_setup_outcome_unknown" | "sandbox_setup_recovery_exhausted";
-      ref?: SandboxSetupOutcomeUnknown | SandboxSetupRecoveryExhausted;
+      reason?:
+        | "sandbox_setup_outcome_unknown"
+        | "sandbox_setup_recovery_exhausted"
+        | "recovery_backoff";
+      ref?: SandboxSetupOutcomeUnknown | SandboxSetupRecoveryExhausted | SessionTurnRecoveryRetry;
     }
   | {
       kind: "sandbox-lifecycle-wait";
@@ -74562,6 +74594,32 @@ export async function peekSessionWork(
             .limit(1);
           if (sandboxLifecycleWaitIsPending(lifecycleWait, lease)) {
             return { kind: "sandbox-lifecycle-wait", ref: lifecycleWait };
+          }
+        }
+        const recoveryRetry =
+          turn.status === "recovering" ? sessionTurnRecoveryRetryFromMetadata(turn.metadata) : null;
+        if (
+          recoveryRetry &&
+          (await transactionNow(scopedDb)).getTime() < Date.parse(recoveryRetry.notBefore)
+        ) {
+          // Wakes are hints; this deadline is the authority. A person's new
+          // message is the one thing that ends the backoff early.
+          const [newInput] = await scopedDb
+            .select({ id: schema.sessionEvents.id })
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, workspaceId),
+                eq(schema.sessionEvents.sessionId, sessionId),
+                eq(schema.sessionEvents.type, "user.message"),
+                gt(schema.sessionEvents.sequence, recoveryRetry.afterSequence),
+              ),
+            )
+            .limit(1);
+          if (!newInput) {
+            // Existing workflow releases close on this kind and rely on the
+            // recovery's delayed wake; current ones wait until the deadline.
+            return { kind: "admission-blocked", reason: "recovery_backoff", ref: recoveryRetry };
           }
         }
         return runnable;
@@ -77481,11 +77539,50 @@ function recoveryTurnMetadata(
   lifecycleWait: SandboxLifecycleWait | undefined,
 ): Record<string, unknown> {
   const next = metadataWithoutSandboxLifecycleWait(metadataWithoutTurnDispatchAttempt(metadata));
+  delete next[RECOVERY_RETRY_METADATA_KEY];
   if (lifecycleWait) {
     next[SANDBOX_LIFECYCLE_WAIT_METADATA_KEY] = lifecycleWait;
   }
   return next;
 }
+
+/**
+ * The earliest moment a recovering turn may dispatch its replacement attempt.
+ * Durable on the turn so that every wake (the session's own receipts and
+ * outbox retries included) re-reads the same deadline instead of cutting the
+ * backoff short. Only new user input after `afterSequence` ends it early.
+ */
+const RECOVERY_RETRY_METADATA_KEY = "recoveryRetry";
+
+export type SessionTurnRecoveryRetry = {
+  version: 1;
+  notBefore: string;
+  afterSequence: number;
+};
+
+export function sessionTurnRecoveryRetryFromMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): SessionTurnRecoveryRetry | null {
+  const value = metadata?.[RECOVERY_RETRY_METADATA_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const retry = value as Record<string, unknown>;
+  if (
+    retry.version !== 1 ||
+    typeof retry.notBefore !== "string" ||
+    !Number.isFinite(Date.parse(retry.notBefore)) ||
+    !Number.isSafeInteger(retry.afterSequence)
+  ) {
+    return null;
+  }
+  return {
+    version: 1,
+    notBefore: retry.notBefore,
+    afterSequence: retry.afterSequence as number,
+  };
+}
+
+/** Longest backoff a recovery may request; anything longer is a caller bug. */
+export const SESSION_TURN_RECOVERY_RETRY_MAX_MS = 15 * 60_000;
 
 function providerRecoveryCountFromTurnMetadata(
   metadata: Record<string, unknown> | null | undefined,
@@ -78972,6 +79069,12 @@ export type RequestSessionTurnRecoveryInput = {
   /** Park proven non-dispatch after the existing five-recovery budget. */
   sandboxSetupRecoveryExhausted?: true;
   providerRecoveryCount?: number;
+  /**
+   * Backoff before the replacement attempt may dispatch, measured on the
+   * database clock. Stored on the turn and armed as a delayed workflow wake,
+   * so the session's own wakes cannot shorten it; new user input can.
+   */
+  retryAfterMs?: number;
   /** In-flight calls with call-scoped proof that their command never started. */
   notStartedToolCallIds?: readonly string[];
   /**
@@ -79166,6 +79269,23 @@ export async function requestSessionTurnRecovery(
       ) {
         throw new Error("providerRecoveryCount must be a positive safe integer");
       }
+      if (
+        input.retryAfterMs !== undefined &&
+        (!Number.isFinite(input.retryAfterMs) || input.retryAfterMs < 0)
+      ) {
+        throw new Error("retryAfterMs must be a non-negative number of milliseconds");
+      }
+      // Database clock, like every other wake deadline: the outbox dispatcher
+      // and the admission peek both compare against DB `now()`. The bound
+      // keeps a miscomputed delay from parking a turn indefinitely.
+      const retryAfterMs = Math.min(
+        Math.ceil(input.retryAfterMs ?? 0),
+        SESSION_TURN_RECOVERY_RETRY_MAX_MS,
+      );
+      const retryNotBefore =
+        retryAfterMs > 0
+          ? new Date((await transactionNow(tx as unknown as Database)).getTime() + retryAfterMs)
+          : null;
       if (
         input.sandboxLifecycleWait &&
         (!sandboxLifecycleWaitFromTurnMetadata({
@@ -79364,6 +79484,15 @@ export async function requestSessionTurnRecovery(
             ...(input.persistentModelTransportHttpOnly
               ? { persistentModelTransportHttpOnly: true }
               : {}),
+            ...(retryNotBefore
+              ? {
+                  [RECOVERY_RETRY_METADATA_KEY]: {
+                    version: 1,
+                    notBefore: retryNotBefore.toISOString(),
+                    afterSequence: sequence,
+                  } satisfies SessionTurnRecoveryRetry,
+                }
+              : {}),
             ...(servingTarget ? { turnPendingServingPolicyV1: servingTarget } : {}),
             ...(input.subscriptionLeaseBusy
               ? {
@@ -79449,6 +79578,10 @@ export async function requestSessionTurnRecovery(
         sessionId: input.sessionId,
         temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
         reason: "turn_recovery_requested",
+        // The backstop wake fires when the backoff ends, not immediately: an
+        // immediate wake would end the workflow's backoff hold seconds after
+        // it began and spend the whole recovery budget within a minute.
+        ...(retryNotBefore ? { notBefore: retryNotBefore } : {}),
       });
       return {
         action: "recovering" as const,
@@ -84338,14 +84471,13 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                         .where(
                           and(
                             eq(schema.sessionEvents.workspaceId, workspaceId),
-                            eq(schema.sessionEvents.sessionId, sessionId),
                             eq(schema.sessionEvents.turnId, turnId),
+                            // session_events_usage_source_key_idx: a plain
+                            // column stays indexable under row-level security.
+                            inArray(schema.sessionEvents.usageSourceKey, incomingUsageKeys),
+                            eq(schema.sessionEvents.sessionId, sessionId),
                             eq(schema.sessionEvents.type, "agent.model.usage"),
                             eq(schema.sessionEvents.turnAssociation, "current"),
-                            inArray(
-                              sql<string>`${schema.sessionEvents.payload} ->> 'sourceKey'`,
-                              incomingUsageKeys,
-                            ),
                           ),
                         )
                     : [],

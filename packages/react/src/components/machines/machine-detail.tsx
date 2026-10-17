@@ -36,6 +36,7 @@ import { MetricSparkline } from "./metric-sparkline";
 import { METRICS, METRIC_WINDOWS, pointsFor, WINDOW_LABEL, type MetricWindow } from "./series";
 import { MachineOperationPolicyEditor } from "./machine-operation-policy";
 import type { UpdateMachineOperationPolicyRequest } from "@opengeni/sdk";
+import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
 
 export type MachineDetailProps = {
   machine: MachineView;
@@ -61,22 +62,25 @@ export type MachineDetailProps = {
   className?: string | undefined;
 };
 
-const AUDIENCE: Record<
-  MachineView["scope"],
-  { label: string; description: string; Icon: typeof UserIcon }
-> = {
-  user: { label: "Only me", description: "Only its owner can run chats on it.", Icon: UserIcon },
+const AUDIENCE = (
+  t: OpenGeniText,
+): Record<MachineView["scope"], { label: string; description: string; Icon: typeof UserIcon }> => ({
+  user: {
+    label: t("machines.machineDetail.onlyMe"),
+    description: t("machines.machineDetail.onlyItsOwnerCanRun"),
+    Icon: UserIcon,
+  },
   workspace: {
-    label: "This workspace",
-    description: "Everyone in this workspace can run chats on it.",
+    label: t("machines.machineDetail.thisWorkspace"),
+    description: t("machines.machineDetail.everyoneInThisWorkspaceCan"),
     Icon: UsersIcon,
   },
   organization: {
-    label: "Whole organization",
-    description: "Every workspace in the organization can use it.",
+    label: t("machines.machineDetail.wholeOrganization"),
+    description: t("machines.machineDetail.everyWorkspaceInTheOrganization"),
     Icon: BuildingIcon,
   },
-};
+});
 
 /** Who can use a connected machine. A navigational row when it can change. */
 function MachineAudienceRow({
@@ -86,13 +90,16 @@ function MachineAudienceRow({
   machine: MachineView;
   onChange?: ((machine: MachineView) => void) | undefined;
 }) {
-  const audience = AUDIENCE[machine.scope];
+  const t = useOpenGeniText();
+  const audience = AUDIENCE(t)[machine.scope];
   const changeable = onChange !== undefined && machine.scope !== "organization";
   const content = (
     <>
       <audience.Icon className="size-4 shrink-0 text-og-fg-subtle" aria-hidden />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
-        <span className="text-og-sm font-medium text-og-fg">Who can use it?</span>
+        <span className="text-og-sm font-medium text-og-fg">
+          {t("machines.machineDetail.whoCanUseIt")}
+        </span>
         <span className="text-og-xs text-og-fg-muted">{audience.description}</span>
       </span>
       <span className="shrink-0 text-og-sm text-og-fg-muted">{audience.label}</span>
@@ -108,7 +115,10 @@ function MachineAudienceRow({
       type="button"
       data-machine-audience={machine.scope}
       onClick={() => onChange(machine)}
-      aria-label={`Who can use ${machine.name}: ${audience.label}. Change`}
+      aria-label={t("machines.machineDetail.whoCanUseNameLabel", {
+        name: machine.name,
+        label: audience.label,
+      })}
       className={cn(
         frame,
         "transition-colors hover:bg-og-surface-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/50",
@@ -147,23 +157,26 @@ function MachineAgentPanel({
   onUpdateAgent?: ((machine: MachineView) => void) | undefined;
   updatingAgent?: boolean | undefined;
 }) {
+  const t = useOpenGeniText();
   const authority = machine.connectionAuthority;
   const runtime = machine.runtime;
   if (!runtime && authority.state === "not_applicable") return null;
-  const agent = runtime ? describeAgentRuntime(runtime, now) : null;
+  const agent = runtime ? describeAgentRuntime(t, runtime, now) : null;
   const action =
     agent?.action && machine.enrollmentId && onUpdateAgent && machine.state !== "offline"
       ? agent.action
       : null;
   const connection =
-    authority.state === "not_applicable" ? null : describeAgentConnection(authority);
+    authority.state === "not_applicable" ? null : describeAgentConnection(t, authority);
   const conflict = runnerConflict(authority, now);
-  const conflictAgo = conflict?.lastAt ? formatRelativeTime(conflict.lastAt, new Date(now)) : null;
+  const conflictAgo = conflict?.lastAt
+    ? formatRelativeTime(t, conflict.lastAt, new Date(now))
+    : null;
 
   return (
     <section
       data-machine-agent
-      aria-label="Agent"
+      aria-label={t("machines.machineDetail.agent")}
       className="flex flex-col divide-y divide-og-border rounded-og-lg border border-og-border bg-og-surface-1 shadow-og-sm"
     >
       {agent ? (
@@ -188,7 +201,7 @@ function MachineAgentPanel({
               onClick={() => onUpdateAgent?.(machine)}
               className="inline-flex min-h-9 shrink-0 items-center rounded-og-sm border border-og-border px-3 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/50 disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
             >
-              {updatingAgent ? "Starting…" : action.label}
+              {updatingAgent ? t("machines.machineDetail.starting") : action.label}
             </button>
           ) : null}
         </div>
@@ -213,15 +226,18 @@ function MachineAgentPanel({
                   className="mt-px size-3.5 shrink-0 text-og-status-waiting"
                   aria-hidden
                 />
-                A second copy of the agent is running on this machine. It's kept out, so work isn't
-                affected. Stop the extra copy.
+                {t("machines.machineDetail.aSecondCopyOfThe")}
               </span>
             ) : conflict ? (
               <span data-runner-conflict="past" className="text-og-xs text-og-fg-subtle">
-                Kept out {conflict.count} extra {conflict.count === 1 ? "copy" : "copies"} of the
-                agent
+                {t("machines.machineDetail.keptOutExtraCopiesOf", { count: conflict.count })}
                 {conflictAgo
-                  ? `, most recently ${conflictAgo === "now" ? "just now" : `${conflictAgo} ago`}`
+                  ? t("machines.machineDetail.mostRecentlyValue", {
+                      value:
+                        conflictAgo === "now"
+                          ? t("machines.machineDetail.justNow")
+                          : `${conflictAgo} ago`,
+                    })
                   : ""}
               </span>
             ) : null}
@@ -248,13 +264,14 @@ export function MachineDetail({
   now = Date.now(),
   className,
 }: MachineDetailProps) {
-  const health = deriveHealth(machine.state, machine.metrics, now);
+  const t = useOpenGeniText();
+  const health = deriveHealth(t, machine.state, machine.metrics, now);
   const tone = HEALTH_TOKEN[health.level];
   const latest = machine.metrics;
-  const sampledAgo = latest ? formatRelativeTime(latest.sampledAt, new Date(now)) : null;
+  const sampledAgo = latest ? formatRelativeTime(t, latest.sampledAt, new Date(now)) : null;
 
   // Only render metrics that have a value (GPU is dropped on headless boxes).
-  const visible = METRICS.filter((m) => !(m.key === "gpu" && latest?.gpuUtilPct == null));
+  const visible = METRICS(t).filter((m) => !(m.key === "gpu" && latest?.gpuUtilPct == null));
   // The tile grid tracks the metric count exactly so it never leaves a dead cell.
   const tileCols =
     visible.length >= 5
@@ -271,7 +288,7 @@ export function MachineDetail({
               type="button"
               onClick={onBack}
               className="flex size-7 shrink-0 items-center justify-center rounded-og-sm border border-og-border bg-og-surface-1 text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg"
-              aria-label="Back to machines"
+              aria-label={t("machines.machineDetail.backToMachines")}
             >
               <ArrowLeftIcon className="size-3.5" aria-hidden />
             </button>
@@ -288,12 +305,12 @@ export function MachineDetail({
             <button
               type="button"
               data-remove-machine
-              aria-label={`Remove machine ${machine.name}`}
+              aria-label={t("machines.machineDetail.removeMachineName", { name: machine.name })}
               onClick={() => onRemove(machine)}
               className="inline-flex min-h-9 items-center gap-1.5 rounded-og-sm border border-og-status-failed/40 px-2.5 py-1 font-medium text-og-xs text-og-status-failed transition-colors hover:bg-og-status-failed/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-status-failed/50 pointer-coarse:min-h-11"
             >
               <Trash2Icon className="size-3.5" aria-hidden />
-              <span className="hidden sm:inline">Remove machine</span>
+              <span className="hidden sm:inline">{t("machines.machineDetail.removeMachine")}</span>
             </button>
           ) : null}
           {/* range selector */}
@@ -348,24 +365,26 @@ export function MachineDetail({
             {sampledAgo && (
               <div className="flex flex-col items-end gap-0.5">
                 <span className="text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">
-                  Sampled
+                  {t("machines.machineDetail.sampled")}
                 </span>
                 <span className="flex items-center gap-1 font-og-mono text-og-sm tabular-nums text-og-fg">
                   <RadioIcon
                     className={cn("size-3", health.stale ? "text-og-fg-subtle" : tone.text)}
                     aria-hidden
                   />
-                  {sampledAgo === "now" ? "live" : `${sampledAgo} ago`}
+                  {sampledAgo === "now"
+                    ? t("machines.machineDetail.live")
+                    : t("machines.machineDetail.sampledagoAgo", { sampledAgo })}
                 </span>
               </div>
             )}
             {machine.lastSeenAt && (
               <div className="hidden flex-col items-end gap-0.5 sm:flex">
                 <span className="text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">
-                  Last seen
+                  {t("machines.machineDetail.lastSeen")}
                 </span>
                 <span className="font-og-mono text-og-sm tabular-nums text-og-fg-muted">
-                  {formatRelativeTime(machine.lastSeenAt, new Date(now))}
+                  {formatRelativeTime(t, machine.lastSeenAt, new Date(now))}
                 </span>
               </div>
             )}
@@ -447,7 +466,7 @@ export function MachineDetail({
                 unit={m.unit}
                 color={m.color}
                 thresholds={m.thresholds}
-                rangeLabel={WINDOW_LABEL[window]}
+                rangeLabel={WINDOW_LABEL(t)[window]}
                 height={128}
                 className={cn(loadingSeries && "opacity-50 transition-opacity")}
               />

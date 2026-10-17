@@ -1,9 +1,11 @@
 import type { AuthNeededItem } from "./timeline/types";
 import type { CapabilityCatalogItem } from "@opengeni/sdk";
+import { type OpenGeniText } from "./messages/runtime";
 
 /** Recovery events identify runtime servers/connections, while recommendation
  * events already carry a catalog id. Never guess among same-domain accounts. */
 export function sessionAuthRecommendation(
+  t: OpenGeniText,
   item: AuthNeededItem,
   catalog: CapabilityCatalogItem[],
 ): AuthNeededItem | undefined {
@@ -40,8 +42,8 @@ export function sessionAuthRecommendation(
       source: entry.source,
       action: "connect",
       rationale: personalAccess
-        ? "Review permission to use your personal account in this conversation."
-        : "Reconnect this integration to use its tools in this conversation.",
+        ? t("sessionAuthRecommendation.reviewPermissionToUseYour")
+        : t("sessionAuthRecommendation.reconnectThisIntegrationToUse"),
       requiredVariables: [],
     },
   };

@@ -254,6 +254,7 @@ import {
   observeLifecycleResult,
 } from "../interaction-metrics";
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
+import { retireFormerPlacementControllers } from "../former-placement-retirement";
 import { sanitizeFilename } from "./files";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 import {
@@ -2877,12 +2878,41 @@ export function registerBrowserSessionRoutes(
         expectedControllerGeneration: string | null;
       } | null = null;
       try {
-        const before = await getBrowserSessionControlRecord(deps.db, {
+        let before = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
           workspaceId,
           browserSessionId,
         });
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
+        if (
+          before.session.lifecycle === "lost" &&
+          before.session.failureCode === "source_placement_changed" &&
+          before.session.controller &&
+          before.session.placement?.kind === "connected_machine"
+        ) {
+          // The task moved away, so its route no longer reaches the machine
+          // this browser still runs on. Stop it there first; the end below
+          // then has no controller left to reach.
+          const retirement = await retireFormerPlacementControllers(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            connectedSandboxId: before.session.placement.sandboxId,
+            browserSessionIds: [browserSessionId],
+            computerSessionIds: [],
+            origin,
+            waitSignal: context.req.raw.signal,
+          });
+          if (retirement.remaining.length > 0) {
+            throw new BrowserSessionStateError(
+              "This browser still runs on the Connected Machine its task moved away from, and that machine could not stop it now. Try again when the machine is online.",
+            );
+          }
+          before = await getBrowserSessionControlRecord(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            browserSessionId,
+          });
+        }
         if (before.session.controller) browserAuthorityRoot(deps);
         const prepared = await prepareBrowserSessionEnd(deps.db, {
           accountId: grant.accountId,
@@ -3679,6 +3709,16 @@ export function registerBrowserSessionRoutes(
       connectedSandboxId,
     });
     if (reconciliation.sourcePlacementChanged) {
+      // End what the move left running on the former machine without making
+      // this request wait for it; a failure leaves the binding for `end`.
+      void retireFormerPlacementControllers(channelServices, {
+        grant,
+        sourceSessionId,
+        connectedSandboxId,
+        browserSessionIds: reconciliation.browserSessionIds,
+        computerSessionIds: reconciliation.computerSessionIds,
+        origin: null,
+      });
       throw sourcePlacementChangedApiError("browser_session");
     }
     throw new BrowserSessionStateError(

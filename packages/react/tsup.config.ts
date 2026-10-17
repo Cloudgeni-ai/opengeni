@@ -39,6 +39,7 @@ export default defineConfig({
     "src/model-policy.ts",
     "src/queue-presentation-model.ts",
     "src/composer-messages.ts",
+    "src/messages.ts",
     "src/sandbox-label-model.ts",
     "src/model-picker-model.ts",
     "src/model-mark-paths.ts",

@@ -1516,6 +1516,22 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.session_private_actor_visible_keys()',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.session_private_actor_visible_keys() FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.session_private_actor_visible_keys() TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.transition_session_visibility(uuid,uuid,uuid,text,text,integer,text,text,integer)',
         ${literal(schema)}
       )

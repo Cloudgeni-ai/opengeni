@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { copyTextToClipboard } from "@opengeni/react/clipboard";
 import type { MachineView } from "@opengeni/react/machines";
 import { machineDisplayName, machineScopeLabel } from "@opengeni/react/sandbox-label-model";
@@ -564,7 +565,7 @@ function ConnectedStep({
   useInChat: ConnectMachineDialogProps["useInChat"];
   onClose: () => void;
 }) {
-  const name = machineDisplayName(machine);
+  const name = machineDisplayName(t, machine);
   const Icon = machine.os === "linux" && !machine.hasDisplay ? ServerIcon : LaptopIcon;
   const canUse = Boolean(useInChat?.canUse);
   return (
@@ -589,7 +590,7 @@ function ConnectedStep({
           <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs text-fg-muted">
             <StatusBadge status="connected" variant="dot" />
             <span aria-hidden>·</span>
-            <span data-connected-scope={machine.scope}>{machineScopeLabel(machine.scope)}</span>
+            <span data-connected-scope={machine.scope}>{machineScopeLabel(t, machine.scope)}</span>
           </span>
         </div>
       </div>

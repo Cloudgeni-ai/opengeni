@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import type { MachineView } from "@opengeni/react/machines";
 import { DEFAULT_SESSION_USAGE_LIMIT_LABELS } from "@opengeni/react/usage";
 import type { NewSessionSelectionHistory, Rig } from "@opengeni/sdk";
@@ -515,7 +516,7 @@ export function UsageLimitMenuBody(props: {
     value.kind === "limit" && !parsed.ok && (value.text.trim() || props.showRequiredError)
       ? parsed.error
       : null;
-  const labels = DEFAULT_SESSION_USAGE_LIMIT_LABELS;
+  const labels = DEFAULT_SESSION_USAGE_LIMIT_LABELS(t);
   return (
     <>
       <ComposerMenuHeader title={labels.title} leading={props.leading} />

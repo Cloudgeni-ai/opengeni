@@ -107,6 +107,9 @@ const FRAME_CAPTURE_TIMEOUT_MS = 2_000;
 // Still captures share the target/input queue. Bound the whole read phase so
 // a renderer that stops producing pixels cannot hold it for successive CDP deadlines.
 const SCREENSHOT_CAPTURE_TIMEOUT_MS = 10_000;
+/** Longest a viewport capture waits for the compositor to present a just
+ * changed emulated viewport before publishing what it has. */
+const STALE_SURFACE_SETTLE_MS = 1_500;
 const FRAME_CAPTURE_FAILURE_LIMIT = 3;
 const MAX_FRAME_PROFILES_PER_TARGET = 4;
 const MAX_FRAME_SUBSCRIPTIONS_PER_TARGET = 32;
@@ -259,6 +262,9 @@ type TargetState = {
   /** Node-level CDP calls go to this OOPIF session while one operation acts on
    * a node inside it. Input always goes to the page session. */
   nodeRoute: OopifSession | null;
+  /** Device size this controller emulates on the page, in CSS pixels. A
+   * viewport screenshot of it is exactly this size times its scale factor. */
+  emulatedViewport?: { width: number; height: number; deviceScaleFactor: number } | undefined;
 };
 
 type OopifSession = {
@@ -1122,16 +1128,48 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           scale: 1,
         };
       }
-      const response = await this.screenshotRead(
-        "Page.captureScreenshot",
-        deadline,
-        async (timeoutMs) =>
-          await this.sendTarget<{ data?: unknown }>(state, "Page.captureScreenshot", capture, {
-            timeoutMs,
-          }),
-      );
-      const data = decodeBoundedBase64Image(response.data);
-      const dimensions = imageDimensions(data, normalized.format);
+      const captureOnce = async () => {
+        const response = await this.screenshotRead(
+          "Page.captureScreenshot",
+          deadline,
+          async (timeoutMs) =>
+            await this.sendTarget<{ data?: unknown }>(state, "Page.captureScreenshot", capture, {
+              timeoutMs,
+            }),
+        );
+        const data = decodeBoundedBase64Image(response.data);
+        return { data, dimensions: imageDimensions(data, normalized.format) };
+      };
+      let { data, dimensions } = await captureOnce();
+      // Chromium applies a new device-metrics override asynchronously, so a
+      // capture right after a viewport change can still return the previous
+      // surface. A viewport capture of an emulated device has an exact size;
+      // wait briefly for the compositor instead of publishing the stale frame.
+      const expected = normalized.fullPage ? undefined : state.emulatedViewport;
+      if (expected) {
+        const expectedWidth = Math.round(expected.width * expected.deviceScaleFactor);
+        const expectedHeight = Math.round(expected.height * expected.deviceScaleFactor);
+        const settleDeadline = Math.min(deadline, Date.now() + STALE_SURFACE_SETTLE_MS);
+        let pause = 16;
+        while (
+          (Math.abs(dimensions.width - expectedWidth) > 1 ||
+            Math.abs(dimensions.height - expectedHeight) > 1) &&
+          Date.now() + pause < settleDeadline
+        ) {
+          await delay(pause);
+          pause = Math.min(pause * 2, 200);
+          const refreshed = await this.screenshotRead(
+            "Page.getLayoutMetrics",
+            deadline,
+            async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+          );
+          cssWidth = refreshed.viewport.width;
+          cssHeight = refreshed.viewport.height;
+          scrollX = refreshed.viewport.x;
+          scrollY = refreshed.viewport.y;
+          ({ data, dimensions } = await captureOnce());
+        }
+      }
       return this.imageFrame({
         state,
         sequence: 0,
@@ -3303,6 +3341,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           enabled: action.mobile,
           ...(action.mobile ? { maxTouchPoints: 1 } : {}),
         });
+        state.emulatedViewport = {
+          width: action.width,
+          height: action.height,
+          deviceScaleFactor: action.deviceScaleFactor ?? 1,
+        };
+        // Let the page lay out and present one frame at the new size, so the
+        // next read or capture sees it. Bounded: a throttled page never blocks.
+        await this.sendTarget(
+          state,
+          "Runtime.evaluate",
+          {
+            expression: NEXT_PRESENTED_FRAME_EXPRESSION,
+            awaitPromise: true,
+            returnByValue: true,
+          },
+          { timeoutMs: 1_000 },
+        ).catch(() => undefined);
         return;
       case "click": {
         const node = await this.resolveActionLocator(state, action.locator);
@@ -5808,6 +5863,15 @@ const SETTLE_FINITE_ANIMATIONS_EXPRESSION = `(async () => {
   }
   return true;
 })()`;
+
+/** Resolves after the page has produced the next frame (two animation frames:
+ * the first may already be in flight at the old size), or after 300 ms when
+ * the page does not animate (hidden or throttled). */
+const NEXT_PRESENTED_FRAME_EXPRESSION = `new Promise((resolve) => {
+  const done = () => resolve(true);
+  setTimeout(done, 300);
+  requestAnimationFrame(() => requestAnimationFrame(done));
+})`;
 
 // A child frame's scroll can also move its parent documents, which this frame
 // cannot read, so only top-level frames report positions.

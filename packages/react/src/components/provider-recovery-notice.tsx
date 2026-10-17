@@ -2,6 +2,7 @@ import { Clock3Icon } from "lucide-react";
 
 import { cn } from "../lib/cn";
 import { providerRecoveryRetryingText, type ProviderRecoveryFacts } from "../lib/provider-recovery";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type ProviderRecoveryNoticeProps = {
   /** From `currentProviderRecovery(session, events)`; renders nothing when null. */
@@ -11,11 +12,11 @@ export type ProviderRecoveryNoticeProps = {
   className?: string | undefined;
 };
 
-export const PROVIDER_RECOVERY_NOTICE_DETAIL =
-  "Your message is saved. Opengeni keeps retrying automatically for a few minutes.";
+export const PROVIDER_RECOVERY_NOTICE_DETAIL = (t: OpenGeniText) =>
+  t("providerRecoveryNotice.yourMessageIsSavedOpengeni");
 
-export const SANDBOX_WAIT_NOTICE_DETAIL =
-  "The turn continues automatically as soon as the sandbox is ready.";
+export const SANDBOX_WAIT_NOTICE_DETAIL = (t: OpenGeniText) =>
+  t("providerRecoveryNotice.theTurnContinuesAutomaticallyAs");
 
 /**
  * One calm, live status line while the same turn waits for an automatic retry
@@ -27,12 +28,13 @@ export function ProviderRecoveryNotice({
   detail,
   className,
 }: ProviderRecoveryNoticeProps) {
+  const t = useOpenGeniText();
   if (!recovery) return null;
   const secondary =
     detail === undefined
       ? recovery.sandboxWait
-        ? SANDBOX_WAIT_NOTICE_DETAIL
-        : PROVIDER_RECOVERY_NOTICE_DETAIL
+        ? SANDBOX_WAIT_NOTICE_DETAIL(t)
+        : PROVIDER_RECOVERY_NOTICE_DETAIL(t)
       : detail;
   return (
     <div
@@ -41,7 +43,7 @@ export function ProviderRecoveryNotice({
     >
       <Clock3Icon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
       <div className="min-w-0" role="status" aria-live="polite">
-        <p className="font-medium text-og-fg">{providerRecoveryRetryingText(recovery)}</p>
+        <p className="font-medium text-og-fg">{providerRecoveryRetryingText(t, recovery)}</p>
         {secondary ? <p className="mt-0.5 text-og-xs">{secondary}</p> : null}
       </div>
     </div>

@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import type { AuthNeededItem } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import { machineDisplayName, machineScopeLabel } from "@opengeni/react/sandbox-label-model";
@@ -170,14 +171,14 @@ export function SessionMachineCapabilityCard({
     return [...machines].sort(
       (left, right) =>
         rank(left) - rank(right) ||
-        machineDisplayName(left).localeCompare(machineDisplayName(right)),
+        machineDisplayName(t, left).localeCompare(machineDisplayName(t, right)),
     );
   }, [justConnected, machines]);
 
   const use = useCallback(
     async (machine: MachineView) => {
       if (using !== null) return;
-      const name = machineDisplayName(machine);
+      const name = machineDisplayName(t, machine);
       setUseError(null);
       setOutcome(null);
       const chat = sendContext?.() ?? { blocked: null, awaitingHuman: false, extras: {} };
@@ -234,7 +235,7 @@ export function SessionMachineCapabilityCard({
     : !fleet.canRead
       ? "You don't have access to this workspace's machines."
       : fresh && fleet.canAttach && !fresh.active
-        ? `${machineDisplayName(fresh)} connected. Choose it below to use it here.`
+        ? `${machineDisplayName(t, fresh)} connected. Choose it below to use it here.`
         : reachable.length > 0 && fleet.canAttach
           ? "Choose where this chat runs."
           : reachable.length > 0
@@ -263,7 +264,7 @@ export function SessionMachineCapabilityCard({
           activeMachine
             ? outcome?.sandboxId === activeMachine.sandboxId
               ? outcome.text
-              : `This chat runs on ${machineDisplayName(activeMachine)}`
+              : `This chat runs on ${machineDisplayName(t, activeMachine)}`
             : undefined
         }
         actionLabel="Connect a machine"
@@ -322,7 +323,10 @@ export function SessionMachineCapabilityCard({
                     />
                   ) : null}
                   {chromeMachine ? (
-                    <ChromeStep chrome={chrome} machineName={machineDisplayName(chromeMachine)} />
+                    <ChromeStep
+                      chrome={chrome}
+                      machineName={machineDisplayName(t, chromeMachine)}
+                    />
                   ) : null}
                   {connectAnother ? (
                     <Button
@@ -358,7 +362,7 @@ export function SessionMachineCapabilityCard({
           defaultAllowScreenControl={setupScreenControl}
           onConnected={(machine) => {
             setJustConnected(machine.sandboxId);
-            setAnnouncement(`${machineDisplayName(machine)} connected.`);
+            setAnnouncement(`${machineDisplayName(t, machine)} connected.`);
           }}
           useInChat={{ canUse: fleet.canAttach, onUse: (machine) => void use(machine) }}
         />
@@ -382,13 +386,13 @@ function MachineRow({
   locked: boolean;
   onUse: () => void;
 }) {
-  const name = machineDisplayName(machine);
+  const name = machineDisplayName(t, machine);
   const selectable = isMachineComputeSelectable(machine.state);
   const Icon = machine.os === "linux" && !machine.hasDisplay ? ServerIcon : LaptopIcon;
   const common = {
     leading: <LogoTile icon={<Icon />} />,
     title: name,
-    meta: [stateLabel(machine), machineScopeLabel(machine.scope)],
+    meta: [stateLabel(machine), machineScopeLabel(t, machine.scope)],
   };
   if (machine.active) {
     return (

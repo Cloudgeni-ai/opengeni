@@ -1,4 +1,5 @@
 import type { SecretReferenceLike } from "./secrets-ui";
+import { type OpenGeniText } from "./messages/runtime";
 
 /* Pure (no DOM): shared by the web chips and non-DOM renderers. */
 
@@ -14,12 +15,15 @@ export type SecretReferenceLabel = {
  * the tooltip); an ID reference reads "Secret · field"; `/otp` adds
  * "· one-time code" and `#previous` adds "(previous)".
  */
-export function secretReferenceLabel(reference: SecretReferenceLike): SecretReferenceLabel {
+export function secretReferenceLabel(
+  t: OpenGeniText,
+  reference: SecretReferenceLike,
+): SecretReferenceLabel {
   const target = reference.target;
   let primary: string;
   let field: string | null;
   if (target.form === "id") {
-    primary = "Secret";
+    primary = t("secretReferenceLabel.secret");
     field = target.field;
   } else {
     const segments = target.segments;
@@ -27,7 +31,7 @@ export function secretReferenceLabel(reference: SecretReferenceLike): SecretRefe
       primary = segments[segments.length - 2]!;
       field = segments[segments.length - 1]!;
     } else {
-      primary = segments[0] ?? "Secret";
+      primary = segments[0] ?? t("secretReferenceLabel.secret");
       field = segments[1] ?? null;
     }
   }
@@ -37,7 +41,7 @@ export function secretReferenceLabel(reference: SecretReferenceLike): SecretRefe
   return { primary, suffix };
 }
 
-export function secretReferenceLabelText(reference: SecretReferenceLike): string {
-  const label = secretReferenceLabel(reference);
+export function secretReferenceLabelText(t: OpenGeniText, reference: SecretReferenceLike): string {
+  const label = secretReferenceLabel(t, reference);
   return `${label.primary}${label.suffix}`;
 }

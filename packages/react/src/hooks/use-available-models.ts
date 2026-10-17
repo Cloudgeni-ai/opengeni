@@ -2,7 +2,8 @@ import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useCallback } from "react";
 import { projectPickerRows, sortPickerRows, type PickerModelRow } from "../model-policy";
 import { useOpenGeniClient, type ClientOverride } from "../session-context";
-import { usePolledValue } from "./internal";
+import { useSharedQuery } from "./shared-query";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type UseAvailableModelsOptions = Pick<ClientOverride, "client"> & {
   /** Refresh interval (ms). Off by default — the host model list rarely moves. */
@@ -37,17 +38,18 @@ export type UseWorkspaceModelCatalogResult = {
  * The host-exposed model list for a <ModelPicker>: fetches the deployment's
  * public client config (`GET /v1/config/client`) and surfaces the richer
  * provider-grouped `models` plus the `defaultModel` the picker should preselect.
- * Deployment-scoped, so it only needs the client (no workspace).
+ * Deployment-scoped, so it only needs the client (no workspace). Mounted readers
+ * of one client share one request.
  */
 export function useAvailableModels(
   options: UseAvailableModelsOptions = {},
 ): UseAvailableModelsResult {
   const client = useOpenGeniClient(options);
   const load = useCallback(
-    async (signal?: AbortSignal) => await client.getClientConfig({ signal }),
+    async (signal: AbortSignal) => await client.getClientConfig({ signal }),
     [client],
   );
-  const state = usePolledValue(load, {
+  const state = useSharedQuery(client, ["available-models"], load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
   });
@@ -60,13 +62,18 @@ export function useAvailableModels(
   };
 }
 
-/** Workspace-scoped catalog with selectability and billing-class picker rows. */
+/**
+ * Workspace-scoped catalog with selectability and billing-class picker rows.
+ * Mounted readers of one workspace (the conversation and the new-chat composer)
+ * share one catalog and config request.
+ */
 export function useWorkspaceModelCatalog(
   options: UseWorkspaceModelCatalogOptions,
 ): UseWorkspaceModelCatalogResult {
+  const t = useOpenGeniText();
   const client = useOpenGeniClient(options);
   const load = useCallback(
-    async (signal?: AbortSignal) => {
+    async (signal: AbortSignal) => {
       if (!options.workspaceId) {
         return { models: [], defaultModel: null };
       }
@@ -81,11 +88,11 @@ export function useWorkspaceModelCatalog(
     },
     [client, options.workspaceId],
   );
-  const state = usePolledValue(load, {
+  const state = useSharedQuery(client, ["workspace-model-catalog", options.workspaceId], load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled !== false && Boolean(options.workspaceId),
   });
-  const rows = sortPickerRows(projectPickerRows(state.data?.models ?? []));
+  const rows = sortPickerRows(projectPickerRows(t, state.data?.models ?? []));
   return {
     models: state.data?.models ?? [],
     rows,

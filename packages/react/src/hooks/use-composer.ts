@@ -26,6 +26,7 @@ import {
 import { normalizeError, useErrorMessage } from "../lib/error-message";
 import { notifyObserver as notifyComposerObserver } from "../lib/notify-observer";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type ComposerPolicy = {
   model: string;
@@ -187,7 +188,10 @@ function optimisticSendStorageKey(key: string): string {
   return `${OPTIMISTIC_SEND_STORAGE_PREFIX}${encodeURIComponent(key)}`;
 }
 
-function restoreOptimisticSendOperations(key: string | null): OptimisticSendOperation[] {
+function restoreOptimisticSendOperations(
+  t: OpenGeniText,
+  key: string | null,
+): OptimisticSendOperation[] {
   if (!key) return [];
   let stored = optimisticSendOperations.get(key);
   if (!stored) {
@@ -226,15 +230,16 @@ function restoreOptimisticSendOperations(key: string | null): OptimisticSendOper
         : operation.outcomeUnknown,
     correlationId: restoredCorrelationId(operation.correlationId),
     error: restoredErrorReference(
+      t,
       operation.correlationId,
       hasMcpCredentialUpdates && (operation.state === "sending" || operation.outcomeUnknown)
-        ? composerSubmissionErrorMessage(new ComposerReconciliationRequiredError())
+        ? composerSubmissionErrorMessage(t, new ComposerReconciliationRequiredError())
         : operation.state === "sending"
-          ? "Delivery was interrupted; retry to reconcile this message."
+          ? t("hooks.useComposer.deliveryWasInterruptedRetryTo")
           : operation.outcomeUnknown
-            ? "The request could not be confirmed. Check its status before retrying."
+            ? t("hooks.useComposer.theRequestCouldNotBe")
             : operation.error
-              ? composerSubmissionErrorMessage(new Error(operation.error))
+              ? composerSubmissionErrorMessage(t, new Error(operation.error))
               : undefined,
     ),
     retryable:
@@ -252,12 +257,16 @@ function restoredCorrelationId(value: unknown): string | undefined {
 }
 
 function restoredErrorReference(
+  t: OpenGeniText,
   reference: unknown,
   message: string | undefined,
 ): string | undefined {
   const correlationId = restoredCorrelationId(reference);
-  return message && correlationId && message !== COMPOSER_MODEL_UNAVAILABLE_MESSAGE
-    ? `${message} Reference: ${correlationId}.`
+  return message &&
+    correlationId &&
+    message !== COMPOSER_MODEL_UNAVAILABLE_MESSAGE &&
+    message !== t("lib.format.modelUnavailable")
+    ? t("hooks.useComposer.messageReferenceCorrelationid", { message, correlationId })
     : message;
 }
 
@@ -710,6 +719,7 @@ export function useComposer(
   sessionId: string | null | undefined,
   options: UseComposerOptions = {},
 ): ComposerControllerState {
+  const t = useOpenGeniText();
   const { client, workspaceId, registerSessionReconciler } = useEmbeddedSession(options);
   const formatError = useErrorMessage();
   const durableDrafts = options.draftPersistence !== "disabled";
@@ -719,7 +729,7 @@ export function useComposer(
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${durableDrafts ? "durable" : "disabled"}`;
   const pendingOperationKey = pendingComposerOperationKey(workspaceId, sessionId);
   const initialPendingOperation = restorePendingComposerOperation(pendingOperationKey);
-  const initialOptimisticSends = restoreOptimisticSendOperations(pendingOperationKey);
+  const initialOptimisticSends = restoreOptimisticSendOperations(t, pendingOperationKey);
   const initialShadow =
     initialPendingOperation?.newerShadow ??
     initialOptimisticSends.at(-1)?.newerShadow ??
@@ -743,7 +753,7 @@ export function useComposer(
           clientEventId: initialPendingOperation.input.clientEventId ?? null,
           triggerEventId: null,
           turnId: null,
-          error: "Not confirmed. Retry to check the same direction change.",
+          error: t("hooks.useComposer.notConfirmedRetryToCheck"),
           outcomeUnknown: true,
         }
       : null,
@@ -839,7 +849,7 @@ export function useComposer(
     targetGeneration.current += 1;
     draftReadGeneration.current += 1;
     pendingOperationRef.current = restorePendingComposerOperation(pendingOperationKey);
-    const restoredOptimisticSends = restoreOptimisticSendOperations(pendingOperationKey);
+    const restoredOptimisticSends = restoreOptimisticSendOperations(t, pendingOperationKey);
     optimisticSendsRef.current = restoredOptimisticSends;
     optimisticProcessorBusyRef.current = false;
     optimisticCallbackIdsRef.current = new Set();
@@ -874,7 +884,7 @@ export function useComposer(
             clientEventId: pendingOperationRef.current.input.clientEventId ?? null,
             triggerEventId: null,
             turnId: null,
-            error: "Not confirmed. Retry to check the same direction change.",
+            error: t("hooks.useComposer.notConfirmedRetryToCheck"),
             outcomeUnknown: true,
           }
         : null,
@@ -896,6 +906,7 @@ export function useComposer(
     pendingOperationKey,
     sessionId,
     targetKey,
+    t,
   ]);
   useEffect(
     () => () => {
@@ -1154,7 +1165,7 @@ export function useComposer(
           const timedOut = problem.name === "TimeoutError";
           setDraftReadError(
             timedOut
-              ? new ComposerStateError("Draft sync timed out. Retrying…", { cause })
+              ? new ComposerStateError(t("hooks.useComposer.draftSyncTimedOutRetrying"), { cause })
               : problem,
           );
           if (
@@ -1186,7 +1197,7 @@ export function useComposer(
         }
       }
     },
-    [client, durableDrafts, sessionId, targetKey, workspaceId],
+    [client, durableDrafts, sessionId, targetKey, workspaceId, t],
   );
 
   useEffect(() => {
@@ -1481,8 +1492,12 @@ export function useComposer(
                     outcomeUnknown &&
                       !isOutcomeUnknownError(problem) &&
                       !(problem instanceof ComposerReconciliationRequiredError)
-                      ? `The request could not be confirmed. Check its status before retrying.${problem instanceof OpenGeniApiError && problem.correlationId ? ` Reference: ${problem.correlationId}.` : ""}`
-                      : composerSubmissionErrorMessage(problem),
+                      ? problem instanceof OpenGeniApiError && problem.correlationId
+                        ? t("hooks.useComposer.notConfirmedCheckStatusWithReference", {
+                            reference: problem.correlationId,
+                          })
+                        : t("hooks.useComposer.notConfirmedCheckStatus")
+                      : composerSubmissionErrorMessage(t, problem),
                   ),
                   retryable: outcomeUnknown || composerSubmissionCanRetry(problem),
                   outcomeUnknown,
@@ -1546,7 +1561,7 @@ export function useComposer(
         let expectedDraftRevision: number | undefined;
         if (durableDrafts && operation.draftPayload) {
           if (!(await persistPayload(operation.draftPayload))) {
-            throw new ComposerStateError("The message draft could not be saved before delivery.");
+            throw new ComposerStateError(t("hooks.useComposer.theMessageDraftCouldNot"));
           }
           expectedDraftRevision = draftRef.current?.revision;
         }
@@ -1564,7 +1579,7 @@ export function useComposer(
         let acceptedEvent: SessionEvent | null = null;
         if (durableDrafts) {
           if (!operation.draftPayload || expectedDraftRevision === undefined) {
-            throw new ComposerStateError("The durable composer draft is not ready for delivery.");
+            throw new ComposerStateError(t("hooks.useComposer.theDurableComposerDraftIs"));
           }
           const result = await client
             .submitComposerDraft(workspaceId, sessionId, {
@@ -1684,6 +1699,7 @@ export function useComposer(
     sessionId,
     targetKey,
     workspaceId,
+    t,
   ]);
 
   useEffect(() => {
@@ -1843,7 +1859,7 @@ export function useComposer(
             input.reasoningEffort === undefined ||
             input.latencyMode === undefined
           ) {
-            throw new ComposerStateError("The durable composer draft is not ready for delivery.");
+            throw new ComposerStateError(t("hooks.useComposer.theDurableComposerDraftIs"));
           }
           const result = await client.submitComposerDraft(workspaceId, sessionId, {
             text: input.text,
@@ -1919,7 +1935,7 @@ export function useComposer(
                   clientEventId: pending.input.clientEventId ?? null,
                   triggerEventId: null,
                   turnId: null,
-                  error: "Not confirmed. Retry.",
+                  error: t("hooks.useComposer.notConfirmedRetry"),
                   outcomeUnknown: true,
                 });
               }
@@ -1985,7 +2001,7 @@ export function useComposer(
                 clientEventId: pending.input.clientEventId ?? null,
                 triggerEventId: null,
                 turnId: null,
-                error: "Not confirmed. Retry.",
+                error: t("hooks.useComposer.notConfirmedRetry"),
                 outcomeUnknown: true,
               });
             }
@@ -2011,7 +2027,7 @@ export function useComposer(
         // and submitted byte-for-byte, while file-only sends use the same
         // placeholder for both operations so the server content fence cannot
         // reject its own client.
-        const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT;
+        const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT(t);
         const currentPayload = currentDraftPayload();
         const payload = currentPayload ? { ...currentPayload, text: sendText } : null;
         if (payload && !(await persistPayload(payload))) return false;
@@ -2092,7 +2108,7 @@ export function useComposer(
               clientEventId: operation.input.clientEventId ?? null,
               triggerEventId: null,
               turnId: null,
-              error: "Not confirmed. Retry.",
+              error: t("hooks.useComposer.notConfirmedRetry"),
               outcomeUnknown: true,
             });
           }
@@ -2137,6 +2153,7 @@ export function useComposer(
       value,
       workspaceId,
       loadDraft,
+      t,
     ],
   );
 
@@ -2166,7 +2183,7 @@ export function useComposer(
       ) {
         return false;
       }
-      const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT;
+      const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT(t);
       const clientEventId = generateClientEventId();
       const effectiveControl = effectiveControlRef.current;
       const input = composeSendInput(sendText, clientEventId, extras, {
@@ -2232,6 +2249,7 @@ export function useComposer(
       sending,
       sessionId,
       targetKey,
+      t,
     ],
   );
   const steer = useCallback(async (text?: string) => await dispatch("steer", text), [dispatch]);
@@ -2553,10 +2571,6 @@ export function useComposer(
 
   const addAnnotation = useCallback(
     (annotation: DraftTimelineAnnotation) => {
-      if (annotationsRef.current.length >= 12) {
-        setError(new ComposerStateError("A message can include at most 12 timeline annotations."));
-        return;
-      }
       const next = [...annotationsRef.current, annotation];
       updateAnnotations(next, annotation.id);
     },
@@ -2888,7 +2902,8 @@ export function isComposerDraftEvent(event: Pick<SessionEvent, "type">): boolean
  * the worker's non-whitespace guard accept it. The export name is retained for
  * compatibility now that repositories can ride beside files in `resources`.
  */
-export const FILE_ONLY_MESSAGE_TEXT = "(see attached context)";
+export const FILE_ONLY_MESSAGE_TEXT = (t: OpenGeniText) =>
+  t("hooks.useComposer.seeAttachedContext");
 
 /** Resolve possibly-deferred extras to a concrete bag (function evaluated now). */
 export function resolveSendExtras(

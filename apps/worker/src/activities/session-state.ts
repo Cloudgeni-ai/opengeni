@@ -359,6 +359,9 @@ export function createSessionStateActivities(
         ...(setupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
         ...(setupRecoveryExhausted ? { sandboxSetupRecoveryExhausted: true } : {}),
         ...(providerRecoveryCount !== undefined ? { providerRecoveryCount } : {}),
+        ...(providerRecoveryContinueDelayMs !== undefined
+          ? { retryAfterMs: providerRecoveryContinueDelayMs }
+          : {}),
         detail: {
           code: setupOutcomeUnknown
             ? "sandbox_command_start_outcome_unknown"
@@ -677,6 +680,7 @@ export function createSessionStateActivities(
       attemptId: input.attemptId,
       reason: "mcp_transport_timeout",
       providerRecoveryCount: input.providerRecoveryCount,
+      retryAfterMs: input.continueDelayMs,
       detail: {
         code: "mcp_transport_timeout",
         retryable: true,

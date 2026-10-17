@@ -4,6 +4,7 @@ import { Icon, type NativeIconName } from "../timeline/icon";
 import { ThinkingOrb } from "../timeline/thinking-orb";
 import { fontStyle, useNativeTimelineTheme } from "../timeline/theme";
 import type { NativeRealtimeCall } from "./native-call";
+import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 
 export type OpenGeniNativeCallLabels = {
   connecting: string;
@@ -18,18 +19,18 @@ export type OpenGeniNativeCallLabels = {
   minimize: string;
 };
 
-export const DEFAULT_OPENGENI_NATIVE_CALL_LABELS: OpenGeniNativeCallLabels = {
-  connecting: "Connecting…",
-  live: "Listening",
-  reconnecting: "Reconnecting…",
-  ending: "Ending…",
-  muted: "Muted",
-  mute: "Mute",
-  unmute: "Unmute",
-  speaker: "Speaker",
-  end: "End",
-  minimize: "Back to chat",
-};
+export const DEFAULT_OPENGENI_NATIVE_CALL_LABELS = (t: OpenGeniText): OpenGeniNativeCallLabels => ({
+  connecting: t("native.realtime.callView.connecting"),
+  live: t("native.realtime.callView.listening"),
+  reconnecting: t("native.realtime.callView.reconnecting"),
+  ending: t("native.realtime.callView.ending"),
+  muted: t("native.realtime.callView.muted"),
+  mute: t("native.realtime.callView.mute"),
+  unmute: t("native.realtime.callView.unmute"),
+  speaker: t("native.realtime.callView.speaker"),
+  end: t("native.realtime.callView.end"),
+  minimize: t("native.realtime.callView.backToChat"),
+});
 
 function formatDuration(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
@@ -110,9 +111,10 @@ export function OpenGeniNativeCallView({
   onMinimize?: (() => void) | undefined;
   labels?: Partial<OpenGeniNativeCallLabels> | undefined;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const { colors } = theme;
-  const labels = { ...DEFAULT_OPENGENI_NATIVE_CALL_LABELS, ...labelOverrides };
+  const labels = { ...DEFAULT_OPENGENI_NATIVE_CALL_LABELS(t), ...labelOverrides };
   const duration = useCallDuration(call.phase === "active");
   const status =
     call.phase === "connecting" || call.phase === "idle"

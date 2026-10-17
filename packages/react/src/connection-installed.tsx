@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useOpenGeniText } from "./messages/runtime";
 
 export type ConnectionInstalledItem = {
   id: string;
@@ -14,13 +15,15 @@ export type ConnectionInstalledItem = {
 /** Compact account/service shortcuts. The host supplies authoritative status. */
 export function ConnectionInstalled({
   items,
-  title = "Connected",
+  title: titleProp,
   className = "",
 }: {
   items: ConnectionInstalledItem[];
   title?: string;
   className?: string;
 }) {
+  const t = useOpenGeniText();
+  const title = titleProp === undefined ? t("connectionInstalled.connected") : titleProp;
   if (!items.length) return null;
   return (
     <section aria-label={title} className={`og-connection-installed ${className}`}>
@@ -42,7 +45,9 @@ export function ConnectionInstalled({
             {item.showStatus ? (
               <span className="og-connection-installed-status">{item.status}</span>
             ) : null}
-            {item.needsAttention ? <span aria-label="Needs attention">!</span> : null}
+            {item.needsAttention ? (
+              <span aria-label={t("connectionInstalled.needsAttention")}>!</span>
+            ) : null}
           </button>
         ))}
       </div>

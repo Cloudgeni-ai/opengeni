@@ -414,6 +414,8 @@ export type NoticeItem = {
   id: string;
   tone: "waiting" | "cancelled" | "failed" | "input";
   text: string;
+  /** An approval wait (`session.requiresAction`), independent of its display text. */
+  approval?: true;
   /** Presentation-only evidence that a historical approval wait resumed. */
   resolvedAt?: string;
   /**

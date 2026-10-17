@@ -14,6 +14,7 @@
 //
 // Copy doctrine: human language only. Internal status slugs (requires_action,
 // active, …) never leak into a rendered string.
+import { t } from "@/lib/console-text";
 import { formatRelativeTime } from "@opengeni/react";
 import {
   sessionAdmissionBlocked,
@@ -156,7 +157,7 @@ function SubagentRow({
   // they don't hide behind a color dot in a long list.
   const attention = subagentAttentionHint(node.session, paused);
   const attentionWord = attention?.word ?? null;
-  const hint = attentionWord ?? formatRelativeTime(node.session.updatedAt);
+  const hint = attentionWord ?? formatRelativeTime(t, node.session.updatedAt);
   const hintClass = attentionWord ? cn(STATUS_META[tone].text, "font-medium") : "text-fg-subtle";
   const hintTitle = attention?.title;
   const waitingFor = attention?.waitingFor ?? "";

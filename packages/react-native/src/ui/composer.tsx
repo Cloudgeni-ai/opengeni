@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { Platform, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { AgentIcon } from "./icons";
 import type { AgentTheme } from "./theme";
+import { useOpenGeniText } from "@opengeni/react/messages";
 
 export interface AgentComposerProps {
   theme: AgentTheme;
@@ -57,12 +58,13 @@ export function AgentComposer(props: AgentComposerProps) {
 }
 
 function SendOrStop(props: AgentComposerProps & { size: number }) {
+  const t = useOpenGeniText();
   const { theme, running, value } = props;
   if (running && !value.trim()) {
     return (
       <RoundButton
         background={theme.colors.accent}
-        label="Stop"
+        label={t("native.ui.composer.stop")}
         onPress={props.onStop}
         size={props.size}
       >
@@ -74,7 +76,7 @@ function SendOrStop(props: AgentComposerProps & { size: number }) {
     <RoundButton
       background={theme.colors.accent}
       disabled={!value.trim()}
-      label="Send"
+      label={t("native.ui.composer.send")}
       onPress={props.onSend}
       size={props.size}
     >
@@ -112,6 +114,7 @@ function Input(props: AgentComposerProps & { fontSize: number }) {
 
 /** Calm: floating pill; Liquid Glass on iOS 26. */
 function PillComposer(props: AgentComposerProps) {
+  const t = useOpenGeniText();
   const { theme } = props;
   const glass = Platform.OS === "ios" && isLiquidGlassAvailable();
   const inner = (
@@ -126,7 +129,7 @@ function PillComposer(props: AgentComposerProps) {
     >
       <RoundButton
         background="transparent"
-        label="Add attachment"
+        label={t("native.ui.composer.addAttachment")}
         onPress={props.onAttach}
         size={36}
       >
@@ -136,7 +139,12 @@ function PillComposer(props: AgentComposerProps) {
       {props.value.trim() || props.running ? (
         <SendOrStop {...props} size={36} />
       ) : (
-        <RoundButton background="transparent" label="Dictate" onPress={props.onVoice} size={36}>
+        <RoundButton
+          background="transparent"
+          label={t("native.ui.composer.dictate")}
+          onPress={props.onVoice}
+          size={36}
+        >
           <AgentIcon color={theme.colors.text} name="mic" size={19} />
         </RoundButton>
       )}
@@ -174,6 +182,7 @@ function PillComposer(props: AgentComposerProps) {
 
 /** Workbench: docked bar with a toolbar row for context chips. */
 function BarComposer(props: AgentComposerProps) {
+  const t = useOpenGeniText();
   const { theme } = props;
   return (
     <View
@@ -201,7 +210,7 @@ function BarComposer(props: AgentComposerProps) {
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <RoundButton
           background={theme.colors.surface}
-          label="Add attachment"
+          label={t("native.ui.composer.addAttachment")}
           onPress={props.onAttach}
           size={34}
         >
@@ -209,7 +218,7 @@ function BarComposer(props: AgentComposerProps) {
         </RoundButton>
         <RoundButton
           background={theme.colors.surface}
-          label="Dictate"
+          label={t("native.ui.composer.dictate")}
           onPress={props.onVoice}
           size={34}
         >
@@ -224,6 +233,7 @@ function BarComposer(props: AgentComposerProps) {
 
 /** Field: large field with a dominant voice button. */
 function VoiceComposer(props: AgentComposerProps) {
+  const t = useOpenGeniText();
   const { theme } = props;
   const hasText = props.value.trim().length > 0;
   return (
@@ -253,7 +263,7 @@ function VoiceComposer(props: AgentComposerProps) {
       >
         <RoundButton
           background="transparent"
-          label="Add photo or file"
+          label={t("native.ui.composer.addPhotoOrFile")}
           onPress={props.onAttach}
           size={44}
         >
@@ -266,7 +276,7 @@ function VoiceComposer(props: AgentComposerProps) {
       ) : (
         <RoundButton
           background={theme.colors.accent}
-          label="Talk"
+          label={t("native.ui.composer.talk")}
           onPress={props.onVoice}
           size={56}
         >

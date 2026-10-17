@@ -1,3 +1,4 @@
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -158,9 +159,10 @@ export function OpenGeniNativeSessionView({
   keyboardVerticalOffset = 0,
   testID,
 }: OpenGeniNativeSessionViewProps) {
+  const t = useOpenGeniText();
   const labels = useMemo(
-    () => ({ ...DEFAULT_OPENGENI_NATIVE_LABELS, ...labelOverrides }),
-    [labelOverrides],
+    () => ({ ...DEFAULT_OPENGENI_NATIVE_LABELS(t), ...labelOverrides }),
+    [t, labelOverrides],
   );
   const listRef = useRef<FlatList<TimelineGroup>>(null);
   const followTail = useRef(true);

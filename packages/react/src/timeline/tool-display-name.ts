@@ -8,6 +8,7 @@
  */
 
 import type { ToolDisplayMetadata } from "@opengeni/sdk";
+import { type OpenGeniText } from "../messages/runtime";
 
 /** Leaf tool name after the first `__` server boundary (or the whole name). */
 export function mcpToolLeaf(name: string): string {
@@ -30,8 +31,12 @@ export function toolMatchesLeaf(wireName: string, leaf: string): boolean {
  * connector account is named only when the connector has several ("List
  * issues · alice@example.com"); the connector itself shows as its logo.
  */
-export function toolDisplayName(name: string, display?: ToolDisplayMetadata): string {
-  if (!display && /^[a-f0-9]{64}$/.test(name)) return "Tool call";
+export function toolDisplayName(
+  t: OpenGeniText,
+  name: string,
+  display?: ToolDisplayMetadata,
+): string {
+  if (!display && /^[a-f0-9]{64}$/.test(name)) return t("timeline.toolDisplayName.toolCall");
   // "batch modify messages" → "Modify messages": batching is transport, not the action.
   const phrase = (display?.toolName ?? mcpToolLeaf(name))
     .replace(/[_-]+/g, " ")

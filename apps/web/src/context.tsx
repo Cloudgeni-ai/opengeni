@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
 import {
   beginSocialLoginAnalytics,
@@ -2143,7 +2144,7 @@ export function RootRouteComponent() {
           });
         } else if (handled !== true) {
           toast.error("Failed to start session", {
-            description: composerSubmissionErrorMessage(problem),
+            description: composerSubmissionErrorMessage(t, problem),
           });
         }
       }

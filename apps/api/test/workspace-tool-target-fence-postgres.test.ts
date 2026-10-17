@@ -501,6 +501,9 @@ async function measure(provider: Provider, run: () => Promise<Response>) {
   const body = await response.text();
   const all = [...statements];
   const first = provider.arrivals[0]?.statementsBefore ?? all.length;
+  const initialize = provider.arrivals.find(
+    (arrival) => arrival.request === "POST initialize",
+  )?.statementsBefore;
   const timing = response.headers.get("server-timing") ?? "";
   return {
     status: response.status,
@@ -511,6 +514,8 @@ async function measure(provider: Provider, run: () => Promise<Response>) {
     beforeFirstRequest: first,
     /** Every later boundary and application step: independent of interleaving. */
     afterFirstRequest: all.length - first,
+    /** Compare the same legacy request suffix with/without cached era discovery. */
+    afterInitialize: initialize === undefined ? undefined : all.length - initialize,
     transactions: all.filter((query) => /^\s*begin\b/i.test(query)).length,
     fenceEvaluations: Number(/gw-fence;dur=[\d.]+;desc="(\d+)"/.exec(timing)?.[1] ?? Number.NaN),
   };
@@ -550,8 +555,20 @@ describe("targeted tool fence on PostgreSQL", () => {
           // Budget: main paid 634 to 1411 statements per boundary.
           expect(result.afterFirstRequest / result.physicalRequests.length).toBeLessThan(150);
         }
-        // A cold replica pays exactly what a warm one does after admission.
-        expect(cold.afterFirstRequest).toBe(warm.afterFirstRequest);
+        // The first connection probes the protocol era; later connections to
+        // this endpoint remember its legacy verdict. Every physical request
+        // (including that probe) is fenced and budgeted above. Compare the exact
+        // same initialize-and-later work, not totals for different requests.
+        expect(
+          cold.physicalRequests.filter((request) => request === "POST server/discover"),
+        ).toHaveLength(unrelated === 0 ? 1 : 0);
+        expect(warm.physicalRequests).not.toContain("POST server/discover");
+        expect(
+          cold.physicalRequests.filter((request) => request !== "POST server/discover").sort(),
+        ).toEqual([...warm.physicalRequests].sort());
+        expect(cold.afterInitialize).toBeDefined();
+        expect(cold.afterInitialize).toBe(warm.afterInitialize);
+        expect(warm.afterInitialize).toBe(warm.afterFirstRequest);
         // Resolve: the same boundaries, then one fence before disclosure.
         const resolved = await measure(provider, () => fixture.resolve(replica));
         expect(resolved.status).toBe(200);

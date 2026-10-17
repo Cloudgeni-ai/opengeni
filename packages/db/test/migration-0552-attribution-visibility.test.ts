@@ -424,7 +424,38 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
       exhaustedScheduleRead,
       scopedComputeRead,
     ]);
-    expect(byPolicy([...(await snapshot())])).toEqual(plannedWithVaults);
+    // ...and 0805, which inlines every session_reference_visible() call as
+    // the same EXISTS probe of sessions. Let PostgreSQL deparse the expected
+    // rewrite so formatting matches exactly.
+    const inlineSessionProbe = async (relname: string, expression: unknown) => {
+      if (typeof expression !== "string" || !expression.includes("session_reference_visible("))
+        return expression;
+      const rewritten = expression.replace(
+        /session_reference_visible\(\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)/g,
+        (_match, account: string, workspace: string, session: string) =>
+          `(${relname}.${session} IS NULL OR EXISTS (SELECT 1 FROM sessions session_row` +
+          ` WHERE session_row.account_id = ${relname}.${account}` +
+          ` AND session_row.workspace_id = ${relname}.${workspace}` +
+          ` AND session_row.id = ${relname}.${session}))`,
+      );
+      await owner.unsafe(
+        `CREATE POLICY expected_inline_session_probe ON ${relname} AS RESTRICTIVE USING (${rewritten})`,
+      );
+      const [normalized] = await owner`select pg_get_expr(polqual, polrelid) as qual
+        from pg_policy where polrelid = ${relname}::regclass
+          and polname = 'expected_inline_session_probe'`;
+      await owner.unsafe(`DROP POLICY expected_inline_session_probe ON ${relname}`);
+      return normalized!.qual;
+    };
+    const plannedWithInlineProbe = [];
+    for (const row of plannedWithVaults) {
+      plannedWithInlineProbe.push({
+        ...row,
+        qual: await inlineSessionProbe(row.relname as string, row.qual),
+        check: await inlineSessionProbe(row.relname as string, row.check),
+      });
+    }
+    expect(byPolicy([...(await snapshot())])).toEqual(plannedWithInlineProbe);
     const [backfill] =
       await owned.admin`select attribution from opengeni_private.usage_allowance_attribution_receipts
       where account_id=${accountId} and workspace_id=${workspaceId} and source_kind='turn' and source_id=${String(turn!.id)}`;
@@ -610,7 +641,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     const [closed] =
       await owned.admin`select count(*)::int as count from opengeni_private.usage_allowance_capabilities`;
     expect(closed!.count).toBe(0);
-    expect(byPolicy([...(await snapshot())])).toEqual(plannedWithVaults);
+    expect(byPolicy([...(await snapshot())])).toEqual(plannedWithInlineProbe);
   } finally {
     await appSql?.end();
     await app?.close();

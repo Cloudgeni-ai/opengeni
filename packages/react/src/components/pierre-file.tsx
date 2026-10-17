@@ -14,6 +14,7 @@ import {
   pierreDiffsRevision,
   subscribePierreDiffs,
 } from "../lib/pierre-diffs-loader";
+import { useOpenGeniText } from "../messages/runtime";
 
 /** Pierre `File` props subset we drive — the single-file, syntax-highlighted view
  *  (Shiki), the read counterpart of `PatchDiff`. */
@@ -164,5 +165,6 @@ function PlainFile({ name, contents }: { name: string; contents: string }) {
 }
 
 function FileSkeleton() {
-  return <div className="p-3 text-og-sm text-og-fg-subtle">Loading file…</div>;
+  const t = useOpenGeniText();
+  return <div className="p-3 text-og-sm text-og-fg-subtle">{t("pierreFile.loadingFile")}</div>;
 }

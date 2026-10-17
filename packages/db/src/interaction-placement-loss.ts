@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { type Database, withRlsContext } from "./database";
 import {
   advanceWorkspaceInteractionRevision,
@@ -23,6 +23,175 @@ export type TerminalizeStaleConnectedInteractionPlacementResult = {
   computerSessionIds: string[];
   revision: number;
 };
+
+/** A browser or Desktop that its source task's move left `lost` while its
+ * controller still holds a running generation on the former machine. */
+export type LostConnectedInteractionController = {
+  resource: "browser_session" | "computer_session";
+  resourceId: string;
+  connectedSandboxId: string;
+  controllerGeneration: string;
+  placementInstanceId: string;
+};
+
+/** List the resources a source task's move left `lost` on one Connected
+ * Machine whose controller binding was never released, so their processes can
+ * be ended there. */
+export async function listLostConnectedInteractionControllers(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectedSandboxId: string;
+    browserSessionIds: readonly string[];
+    computerSessionIds: readonly string[];
+  },
+): Promise<LostConnectedInteractionController[]> {
+  if (input.browserSessionIds.length === 0 && input.computerSessionIds.length === 0) return [];
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const controllers: LostConnectedInteractionController[] = [];
+      if (input.browserSessionIds.length > 0) {
+        const rows = await scopedDb
+          .select({
+            id: schema.browserSessions.id,
+            controllerGeneration: schema.browserSessions.controllerGeneration,
+            placementInstanceId: schema.browserSessions.placementInstanceId,
+          })
+          .from(schema.browserSessions)
+          .where(
+            and(
+              eq(schema.browserSessions.accountId, input.accountId),
+              eq(schema.browserSessions.workspaceId, input.workspaceId),
+              inArray(schema.browserSessions.id, [...input.browserSessionIds]),
+              eq(schema.browserSessions.placementKind, "connected_machine"),
+              eq(schema.browserSessions.connectedSandboxId, input.connectedSandboxId),
+              eq(schema.browserSessions.lifecycle, "lost"),
+              eq(schema.browserSessions.failureCode, SOURCE_PLACEMENT_CHANGED),
+              isNotNull(schema.browserSessions.controllerGeneration),
+            ),
+          );
+        for (const row of rows) {
+          if (!row.controllerGeneration) continue;
+          controllers.push({
+            resource: "browser_session",
+            resourceId: row.id,
+            connectedSandboxId: input.connectedSandboxId,
+            controllerGeneration: row.controllerGeneration,
+            placementInstanceId: row.placementInstanceId ?? input.connectedSandboxId,
+          });
+        }
+      }
+      if (input.computerSessionIds.length > 0) {
+        const rows = await scopedDb
+          .select({
+            id: schema.computerSessions.id,
+            controllerGeneration: schema.computerSessions.controllerGeneration,
+            placementInstanceId: schema.computerSessions.placementInstanceId,
+          })
+          .from(schema.computerSessions)
+          .where(
+            and(
+              eq(schema.computerSessions.accountId, input.accountId),
+              eq(schema.computerSessions.workspaceId, input.workspaceId),
+              inArray(schema.computerSessions.id, [...input.computerSessionIds]),
+              eq(schema.computerSessions.placementKind, "connected_machine"),
+              eq(schema.computerSessions.connectedSandboxId, input.connectedSandboxId),
+              eq(schema.computerSessions.lifecycle, "lost"),
+              eq(schema.computerSessions.failureCode, SOURCE_PLACEMENT_CHANGED),
+              isNotNull(schema.computerSessions.controllerGeneration),
+            ),
+          );
+        for (const row of rows) {
+          if (!row.controllerGeneration) continue;
+          controllers.push({
+            resource: "computer_session",
+            resourceId: row.id,
+            connectedSandboxId: input.connectedSandboxId,
+            controllerGeneration: row.controllerGeneration,
+            placementInstanceId: row.placementInstanceId ?? input.connectedSandboxId,
+          });
+        }
+      }
+      return controllers;
+    },
+  );
+}
+
+/** Record that the former machine ended this lost resource's exact controller
+ * generation. The resource stays `lost` with its failure code; only the
+ * binding to processes that no longer exist is released. Returns false when
+ * the row no longer holds that generation. */
+export async function releaseLostConnectedInteractionController(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    resource: LostConnectedInteractionController["resource"];
+    resourceId: string;
+    expectedControllerGeneration: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const now = new Date();
+        const released =
+          input.resource === "browser_session"
+            ? await tx
+                .update(schema.browserSessions)
+                .set({
+                  controllerId: null,
+                  controllerGeneration: null,
+                  placementInstanceId: null,
+                  controllerHeartbeatAt: null,
+                  updatedAt: now,
+                })
+                .where(
+                  and(
+                    eq(schema.browserSessions.workspaceId, input.workspaceId),
+                    eq(schema.browserSessions.id, input.resourceId),
+                    eq(schema.browserSessions.lifecycle, "lost"),
+                    eq(schema.browserSessions.failureCode, SOURCE_PLACEMENT_CHANGED),
+                    eq(
+                      schema.browserSessions.controllerGeneration,
+                      input.expectedControllerGeneration,
+                    ),
+                  ),
+                )
+                .returning({ id: schema.browserSessions.id })
+            : await tx
+                .update(schema.computerSessions)
+                .set({
+                  controllerId: null,
+                  controllerGeneration: null,
+                  placementInstanceId: null,
+                  controllerHeartbeatAt: null,
+                  updatedAt: now,
+                })
+                .where(
+                  and(
+                    eq(schema.computerSessions.workspaceId, input.workspaceId),
+                    eq(schema.computerSessions.id, input.resourceId),
+                    eq(schema.computerSessions.lifecycle, "lost"),
+                    eq(schema.computerSessions.failureCode, SOURCE_PLACEMENT_CHANGED),
+                    eq(
+                      schema.computerSessions.controllerGeneration,
+                      input.expectedControllerGeneration,
+                    ),
+                  ),
+                )
+                .returning({ id: schema.computerSessions.id });
+        if (released.length === 0) return false;
+        await advanceWorkspaceInteractionRevision(tx, input.accountId, input.workspaceId);
+        return true;
+      }),
+  );
+}
 
 /**
  * Reconcile interaction resources after their source task moves away from a

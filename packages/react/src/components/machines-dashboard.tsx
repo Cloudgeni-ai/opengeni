@@ -3,6 +3,7 @@ import { LaptopIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { cn } from "../lib/cn";
 import type { MachineView, MetricSample } from "../types/machines";
 import { MachineCard } from "./machine-card";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type MachinesDashboardProps = {
   machines: MachineView[];
@@ -29,6 +30,7 @@ export type MachinesDashboardProps = {
 };
 
 function EmptyState({ onEnroll }: { onEnroll?: (() => void) | undefined }) {
+  const t = useOpenGeniText();
   return (
     <div
       data-machines-empty
@@ -38,10 +40,11 @@ function EmptyState({ onEnroll }: { onEnroll?: (() => void) | undefined }) {
         <LaptopIcon className="size-5" aria-hidden />
       </span>
       <div className="space-y-1">
-        <p className="text-og-base font-medium text-og-fg">No machines yet</p>
+        <p className="text-og-base font-medium text-og-fg">
+          {t("machinesDashboard.noMachinesYet")}
+        </p>
         <p className="max-w-xs text-og-sm text-og-fg-muted">
-          Connect your own computer to run the agent on it — your files, your terminal, your
-          desktop.
+          {t("machinesDashboard.connectYourOwnComputerTo")}
         </p>
       </div>
       {onEnroll ? (
@@ -52,7 +55,7 @@ function EmptyState({ onEnroll }: { onEnroll?: (() => void) | undefined }) {
           className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium transition-colors hover:bg-og-primary-hover pointer-coarse:min-h-11"
         >
           <PlusIcon className="size-3.5" aria-hidden />
-          Connect a machine
+          {t("machinesDashboard.connectAMachine")}
         </button>
       ) : null}
     </div>
@@ -66,10 +69,11 @@ function Header({
   count: number;
   onEnroll?: (() => void) | undefined;
 }): ReactNode {
+  const t = useOpenGeniText();
   return (
     <div className="flex items-center justify-between gap-3">
       <div className="flex items-baseline gap-2">
-        <h2 className="text-og-base font-semibold text-og-fg">Machines</h2>
+        <h2 className="text-og-base font-semibold text-og-fg">{t("machinesDashboard.machines")}</h2>
         <span className="font-og-mono text-og-xs text-og-fg-subtle">{count}</span>
       </div>
       <div className="flex items-center gap-1.5">
@@ -81,7 +85,7 @@ function Header({
             className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2.5 py-1 text-og-sm font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg pointer-coarse:min-h-11"
           >
             <PlusIcon className="size-3.5" aria-hidden />
-            Connect a machine
+            {t("machinesDashboard.connectAMachine")}
           </button>
         ) : null}
       </div>
@@ -112,6 +116,7 @@ export function MachinesDashboard({
   onRefresh,
   className,
 }: MachinesDashboardProps) {
+  const t = useOpenGeniText();
   const isEmpty = !loading && !error && machines.length === 0;
 
   return (
@@ -123,7 +128,9 @@ export function MachinesDashboard({
           data-machines-error
           className="flex flex-wrap items-center justify-between gap-2 rounded-og-md border border-og-status-failed/30 bg-og-status-failed/10 px-3 py-2 text-og-sm text-og-status-failed"
         >
-          <span>Could not load machines: {error.message}</span>
+          <span>
+            {t("machinesDashboard.couldNotLoadMachinesMessage", { message: error.message })}
+          </span>
           {onRefresh ? (
             <button
               type="button"
@@ -133,7 +140,7 @@ export function MachinesDashboard({
               className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-status-failed/30 px-2 py-1 text-og-xs font-medium transition-colors hover:border-og-status-failed/50 disabled:cursor-not-allowed disabled:opacity-60 pointer-coarse:min-h-11"
             >
               <RefreshCwIcon className={cn("size-3.5", loading && "animate-og-spin")} aria-hidden />
-              {loading ? "Retrying…" : "Retry"}
+              {loading ? t("machinesDashboard.retrying") : t("machinesDashboard.retry")}
             </button>
           ) : null}
         </div>

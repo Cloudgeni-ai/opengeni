@@ -8755,12 +8755,11 @@ export type SessionAuthorizationPort = {
   ): Promise<SessionAuthorizationListScope>;
 };
 
-export const TIMELINE_ANNOTATION_MAX_COUNT = 12;
 export const TIMELINE_ANNOTATION_QUOTE_MAX_BYTES = 16 * 1024;
 export const TIMELINE_ANNOTATION_NOTE_MAX_BYTES = 2 * 1024;
 export const TIMELINE_ANNOTATION_CONTEXT_MAX_BYTES = 512;
 export const TIMELINE_ANNOTATION_LABEL_MAX_BYTES = 256;
-export const TIMELINE_ANNOTATIONS_MAX_BYTES = 64 * 1024;
+export const TIMELINE_ANNOTATIONS_MAX_BYTES = 1024 * 1024;
 
 export const TimelineAnnotationSourceKind = /* @__PURE__ */ defineSchema(() =>
   z.enum(["user_message", "assistant_message", "tool_output"]),
@@ -8889,31 +8888,26 @@ export const TimelineAnnotation = /* @__PURE__ */ defineSchema(() =>
 export type TimelineAnnotation = z.infer<typeof TimelineAnnotation>;
 
 function timelineAnnotationArray<T extends z.ZodTypeAny>(item: T) {
-  return z
-    .array(item)
-    .max(TIMELINE_ANNOTATION_MAX_COUNT)
-    .superRefine((annotations, ctx) => {
-      const ids = new Set<string>();
-      for (let index = 0; index < annotations.length; index += 1) {
-        const id = (annotations[index] as { id?: unknown }).id;
-        if (typeof id === "string" && ids.has(id)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [index, "id"],
-            message: "annotation ids must be unique",
-          });
-        }
-        if (typeof id === "string") ids.add(id);
-      }
-      if (
-        timelineAnnotationUtf8Bytes(JSON.stringify(annotations)) > TIMELINE_ANNOTATIONS_MAX_BYTES
-      ) {
+  return z.array(item).superRefine((annotations, ctx) => {
+    const ids = new Set<string>();
+    for (let index = 0; index < annotations.length; index += 1) {
+      const id = (annotations[index] as { id?: unknown }).id;
+      if (typeof id === "string" && ids.has(id)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `annotations must be at most ${TIMELINE_ANNOTATIONS_MAX_BYTES} UTF-8 bytes`,
+          path: [index, "id"],
+          message: "annotation ids must be unique",
         });
       }
-    });
+      if (typeof id === "string") ids.add(id);
+    }
+    if (timelineAnnotationUtf8Bytes(JSON.stringify(annotations)) > TIMELINE_ANNOTATIONS_MAX_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `annotations must be at most ${TIMELINE_ANNOTATIONS_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
 }
 
 export const DraftTimelineAnnotations = timelineAnnotationArray(DraftTimelineAnnotation);
@@ -20952,6 +20946,7 @@ export const SwapActiveSandboxResponse = /* @__PURE__ */ defineSchema(() =>
         "unsupported_backend_context",
         "transient_establishment",
         "concurrent_swap",
+        "chat_busy",
         "personal_machine_permission_required",
         "personal_machine_not_permitted",
         "recovery_in_progress",

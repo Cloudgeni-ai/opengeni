@@ -3551,6 +3551,93 @@ describe("clean session control plane", () => {
     ).toEqual([{ callId: "old-unresolved" }]);
   });
 
+  test("clearing proves call/result pairs across many history pages and ignores out-of-order results", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "run many tools");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    const identity = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+    };
+    const callItem = (callId: string) => ({
+      type: "function_call",
+      name: "exec_command",
+      callId,
+      arguments: "{}",
+    });
+    const resultItem = (callId: string) => ({
+      type: "function_call_result",
+      callId,
+      output: { type: "text", text: `done ${callId}` },
+    });
+    const calls = ["early", "late", "unanswered", "reversed"];
+    for (const callId of calls) {
+      await registerPendingSessionToolCall(client.db, {
+        ...identity,
+        callId,
+        callType: "function_call",
+        callItem: callItem(callId),
+      });
+      expect(
+        await recordPendingSessionToolCallResult(client.db, {
+          ...identity,
+          callId,
+          resultItem: resultItem(callId),
+        }),
+      ).toEqual({ accepted: true, recorded: true });
+    }
+    const filler = Array.from({ length: 90 }, (_, index) => [
+      { position: 102 + index * 2, item: callItem(`filler-${index}`) },
+      { position: 103 + index * 2, item: resultItem(`filler-${index}`) },
+    ]).flat();
+    expect(
+      await appendSessionHistoryItems(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        expectedExecutionGeneration: turn!.executionGeneration,
+        expectedAttemptId: attemptId,
+        items: [
+          { position: 100, item: callItem("early") },
+          { position: 101, item: resultItem("early") },
+          ...filler,
+          { position: 400, item: callItem("unanswered") },
+          { position: 401, item: resultItem("reversed") },
+          { position: 402, item: callItem("reversed") },
+          { position: 403, item: callItem("late") },
+          { position: 404, item: resultItem("late") },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      await clearDurablePendingSessionToolCalls(client.db, { ...identity, callIds: calls }),
+    ).toEqual({ accepted: true, cleared: 2 });
+    expect(
+      (
+        await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+          db
+            .select({ callId: schema.sessionPendingToolCalls.callId })
+            .from(schema.sessionPendingToolCalls)
+            .where(eq(schema.sessionPendingToolCalls.turnId, turn!.id)),
+        )
+      )
+        .map(({ callId }) => callId)
+        .sort(),
+    ).toEqual(["reversed", "unanswered"]);
+  });
+
   test("recovery consumes compacted completed pairs without reactivating or re-emitting them", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "run and compact");
@@ -7511,6 +7598,21 @@ describe("clean session control plane", () => {
         },
       ],
     });
+
+    // The idempotency key is a trigger-filled plain column, so the lookup is
+    // index-served under row-level security instead of reading the whole turn.
+    const keyed = await shared.admin<Array<{ id: string; usageSourceKey: string | null }>>`
+      select id, usage_source_key as "usageSourceKey" from session_events
+      where workspace_id = ${grant.workspaceId!} and turn_id = ${turn.id}
+        and type = 'agent.model.usage'
+      order by sequence`;
+    expect(keyed.map((row) => row.usageSourceKey)).toEqual([sourceKey, sourceKey, sourceKey]);
+    const [unrelated] = await shared.admin<Array<{ keyed: number; total: number }>>`
+      select count(usage_source_key)::int as keyed, count(*)::int as total from session_events
+      where workspace_id = ${grant.workspaceId!} and session_id = ${session.id}
+        and type <> 'agent.model.usage'`;
+    expect(unrelated!.total).toBeGreaterThan(0);
+    expect(unrelated!.keyed).toBe(0);
   });
 
   test("a completed model call keeps usage truth when its attempt is replaced before signals", async () => {

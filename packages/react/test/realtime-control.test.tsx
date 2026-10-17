@@ -17,6 +17,9 @@ import {
   useSessionRealtime,
 } from "../src/realtime/realtime-control";
 import type { SessionRealtimeController } from "@opengeni/sdk/realtime";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 GlobalRegistrator.register({ url: "https://app.example.test" });
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -132,7 +135,7 @@ describe("ordinary session Codex realtime control", () => {
   test("admits non-cancelled work states when control and Codex are ready", () => {
     for (const sessionStatus of ["idle", "queued", "running", "requires_action"] as const) {
       expect(
-        codexRealtimeAdmissionAllowed({
+        codexRealtimeAdmissionAllowed(englishText, {
           sessionStatus,
           controlState: "active",
           settlement: null,
@@ -149,7 +152,7 @@ describe("ordinary session Codex realtime control", () => {
       { lifecycleActive: true },
     ]) {
       expect(
-        codexRealtimeAdmissionAllowed({
+        codexRealtimeAdmissionAllowed(englishText, {
           sessionStatus: "idle",
           controlState: "active",
           settlement: null,

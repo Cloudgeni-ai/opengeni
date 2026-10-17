@@ -129,7 +129,13 @@ describe("session-only entry", () => {
       true,
     );
     expect(reactSources.some((id) => id.endsWith("/src/hooks/use-new-conversation.ts"))).toBe(true);
-    expect(reactSources.length).toBe(32);
+    // Host-localizable copy: the dependency-free text runtime and its English defaults.
+    expect(reactSources.some((id) => id.endsWith("/src/messages/runtime.tsx"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/messages/en.ts"))).toBe(true);
+    // Shared reads: the model catalog store and the deployment config read.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/shared-query.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/lib/client-config-read.ts"))).toBe(true);
+    expect(reactSources.length).toBe(36);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

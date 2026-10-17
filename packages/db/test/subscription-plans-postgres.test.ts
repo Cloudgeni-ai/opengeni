@@ -481,11 +481,15 @@ test("a state sync before invoice payment keeps spending the already-granted all
 test("renewal expires the prior period without rollover; late ended grants expire immediately", async () => {
   if (!client || !shared) return;
   const { accountId } = await account();
-  const input = await activate(accountId, "pro", 100);
+  // The prior period must still be active while it is spent, or the debit is
+  // correctly PAYG against the top-up. Keep enough headroom for slow runners,
+  // then wait until the period has actually ended before renewing.
+  const input = await activate(accountId, "pro", 3_000);
   await grantPlanCreditPeriod(client.db, input);
   await topup(accountId, 30 * M);
+  expect(Date.now()).toBeLessThan(input.periodEnd.getTime());
   await debit(accountId, 50 * M);
-  await Bun.sleep(120);
+  await Bun.sleep(Math.max(0, input.periodEnd.getTime() - Date.now()) + 50);
   const next = { ...input, periodStart: new Date(), periodEnd: new Date(Date.now() + 3_600_000) };
   await sync(next);
   await grantPlanCreditPeriod(client.db, next);

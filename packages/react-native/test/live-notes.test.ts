@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline, type TimelineGroup } from "@opengeni/react/session";
+import { createOpenGeniText } from "@opengeni/react/messages";
 import { collectLiveNotes, foldedLiveNotes, liveFoldShift } from "../src/timeline/live-notes";
+
+const t = createOpenGeniText();
 
 let sequence = 0;
 
@@ -34,7 +37,7 @@ function note(text: string, messageId: string, turnId = "turn-1"): SessionEvent[
 }
 
 function liveTurn(): TimelineGroup[] {
-  return groupTimeline(buildTimeline(liveTurnEvents()), { readableTurns: true });
+  return groupTimeline(t, buildTimeline(t, liveTurnEvents()), { readableTurns: true });
 }
 
 function workId(groups: TimelineGroup[]): string {
@@ -71,7 +74,8 @@ describe("live progress notes", () => {
 
   test("a settled turn has no live notes to fold", () => {
     const groups = groupTimeline(
-      buildTimeline([...liveTurnEvents(), event("turn.completed", { output: "" }, "turn-1")]),
+      t,
+      buildTimeline(t, [...liveTurnEvents(), event("turn.completed", { output: "" }, "turn-1")]),
       { readableTurns: true },
     );
     expect(collectLiveNotes(groups).notes.size).toBe(0);

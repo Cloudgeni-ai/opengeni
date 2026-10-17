@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // Where a running chat runs. "+" > Runs on shows the session's active machine
 // and live-swaps it to any online machine (the session's own box + the enrolled
@@ -67,8 +68,8 @@ export function useSessionRunsOn(sessionId: string, sandboxBackend: SandboxBacke
   const machines = fleet.machines;
   const activeMachine = machines.find((machine) => machine.active) ?? null;
   const activeName = activeMachine
-    ? machineDisplayName(activeMachine)
-    : sessionSandboxLabel(sandboxBackend);
+    ? machineDisplayName(t, activeMachine)
+    : sessionSandboxLabel(t, sandboxBackend);
   const hasChoices =
     fleet.canAttach && machines.some((machine) => !machine.active && isSelectable(machine));
   return { fleet, machines, activeMachine, activeName, hasChoices, sandboxBackend };
@@ -154,7 +155,7 @@ export function SessionRunsOnMenuBody(props: {
                     .then(setMoveError, () => setMoveError(null))
                     .finally(() => setMovingSandboxId(null));
                 }}
-                label={machineDisplayName(machine)}
+                label={machineDisplayName(t, machine)}
                 meta={
                   machine.state !== "online" && !machine.active
                     ? machineStateLabel(machine.state)
@@ -227,7 +228,7 @@ export function SessionComputeIndicator({
     >
       <SandboxMark kind={machine.kind} backend={sandboxBackend} />
       <span className="shrink-0">on</span>
-      <span className="truncate">{machineDisplayName(machine)}</span>
+      <span className="truncate">{machineDisplayName(t, machine)}</span>
     </span>
   );
 }
