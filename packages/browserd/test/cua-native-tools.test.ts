@@ -52,14 +52,12 @@ test("Windows native admission uses the Windows release schema", async () => {
   await expect(new CuaNativeTools(runtime, "owned", "macos").validate(click)).rejects.toThrow(
     "schema differs",
   );
-  // The Windows driver has no batch tool, so it is never admitted there.
-  await expect(
-    new CuaNativeTools(runtime, "owned", "windows").validate({
-      operationId: randomUUID(),
-      tool: "run_steps",
-      arguments: { steps: [] },
-    }),
-  ).rejects.toThrow("unavailable");
+  // CUA 0.36 gives Windows the batch tool too; it validates against its own schema.
+  await new CuaNativeTools(runtime, "owned", "windows").validate({
+    operationId: randomUUID(),
+    tool: "run_steps",
+    arguments: { steps: [{ tool: "press_key", args: { key: "return" } }] },
+  });
 });
 const command = (): ComputerNativeCommand => ({
   protocolVersion: 1,

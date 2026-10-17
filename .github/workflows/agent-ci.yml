@@ -63,13 +63,6 @@ jobs:
           bun install --frozen-lockfile
       - name: Stage the native Linux worker and transport
         run: bun packages/browserd/scripts/stage-cua-runtime.ts
-      - name: TEMP generate Linux CUA catalog
-        run: bun packages/browserd/scripts/generate-cua-desktop-tools.ts
-      - name: TEMP upload Linux CUA catalog
-        uses: actions/upload-artifact@v4
-        with:
-          name: cua-catalog-${{ matrix.runner }}
-          path: packages/contracts/src/cua-desktop-tools.linux.gen.json
       - name: Verify isolated desktops and compiled packaging
         env:
           OPENGENI_CUA_E2E: "1"
@@ -96,13 +89,6 @@ jobs:
           bun-version-file: .bun-version
       - name: Install
         run: bun install --frozen-lockfile
-      - name: TEMP generate Windows CUA catalog
-        run: bun packages/browserd/scripts/generate-cua-desktop-tools.ts
-      - name: TEMP upload Windows CUA catalog
-        uses: actions/upload-artifact@v4
-        with:
-          name: cua-catalog-windows
-          path: packages/contracts/src/cua-desktop-tools.windows.gen.json
       - name: Drive a real window and verify compiled packaging
         env:
           OPENGENI_CUA_E2E: "1"
