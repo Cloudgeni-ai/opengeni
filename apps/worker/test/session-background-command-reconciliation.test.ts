@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, spyOn } from "bun:test";
 import {
   OpLostReason,
   OpState,
@@ -61,6 +61,38 @@ function rpc(answer: OpStatus) {
 }
 
 describe("Connected Machine background-command reconciliation", () => {
+  test("a push collector relinquishes its existing claim budget even while replay advances", async () => {
+    let reads = 0;
+    const clock = spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(1_000);
+    try {
+      await expect(
+        replayConnectedCommandOutput(
+          {
+            readExisting: async () => {
+              reads++;
+              return {
+                status: "running",
+                opId: "op",
+                stdout: new Uint8Array(),
+                stderr: new Uint8Array(),
+                heals: 0,
+                startRetries: 0,
+                replyBytes: 0,
+                replaySequence: String(reads),
+              };
+            },
+          },
+          "op",
+          true,
+          async () => {},
+          1_000,
+        ),
+      ).rejects.toThrow("claim deadline");
+      expect(reads).toBe(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
   for (const mode of ["empty", "duplicate", "capture-failure", "running"] as const) {
     test(`replay preserves ${mode} boundaries without claiming terminal completion`, async () => {
       let reads = 0;

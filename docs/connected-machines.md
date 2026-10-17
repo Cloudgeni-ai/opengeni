@@ -691,6 +691,9 @@ before settlement, so a terminal read cannot race ahead of the final output.
 Duplicate events cannot steal an active collector's claim. Missed events, older
 agents and lost connections remain covered by reconciliation. Terminal publication
 does not discard retained output; release remains separately retryable after custody.
+Completion collectors have independent ingestion capacity, so even a saturated
+collection queue cannot delay machine heartbeats. A collector yields to reconciliation
+before its existing claim lease expires; this never cancels or time-limits the command.
 
 The session shell capability also preserves an explicit `exec_command.shell`
 selection: Opengeni sends that shell as direct argv, with the requested login or

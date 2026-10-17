@@ -42,10 +42,15 @@ export async function ingestConnectedCommandCompletion(
   if (!command) return;
   if (!reader && !bus?.getOpStreamConnection)
     throw new Error("Connected command output transport unavailable");
+  const claimTtlMs = 5 * 60_000;
+  const controlTimeoutMs = 10_000;
+  // Finish or relinquish collection before the existing claim can be stolen.
+  // Reserve the bounded replay window plus control timeout for the last read.
+  const replayDeadlineAt = Date.now() + claimTtlMs - controlTimeoutMs - 5_000;
   const claim = await claimPushedConnectedCommandCompletion(db, {
     ...command,
     ...identity,
-    claimTtlMs: 5 * 60_000,
+    claimTtlMs,
   });
   if (!claim) return;
   try {
@@ -63,22 +68,30 @@ export async function ingestConnectedCommandCompletion(
           identity.connectionInstanceId,
         ),
         transport: new NatsOpStreamTransport(async () => bus!.getOpStreamConnection!()),
-        controlTimeoutMs: 10_000,
+        controlTimeoutMs,
         retryClock: defaultSelfhostedRetryClock,
         journal: { attachGeneration: () => String(Date.now()), persistSettled: () => {} },
       });
-    const replay = await replayConnectedCommandOutput(client, claim.opId, true, async (frames) => {
-      for (const frame of frames) {
-        const events = await appendSessionCommandOutput(db, {
-          ...command,
-          chunkId: `op-frame:${frame.sequence}`,
-          stream: frame.stream,
-          chunk: frame.chunk,
-        });
-        if (bus && events.length)
-          await bus.publish(command.workspaceId, command.sessionId, events).catch(() => undefined);
-      }
-    });
+    const replay = await replayConnectedCommandOutput(
+      client,
+      claim.opId,
+      true,
+      async (frames) => {
+        for (const frame of frames) {
+          const events = await appendSessionCommandOutput(db, {
+            ...command,
+            chunkId: `op-frame:${frame.sequence}`,
+            stream: frame.stream,
+            chunk: frame.chunk,
+          });
+          if (bus && events.length)
+            await bus
+              .publish(command.workspaceId, command.sessionId, events)
+              .catch(() => undefined);
+        }
+      },
+      replayDeadlineAt,
+    );
     const terminal = replay.status === "completed" ? replay : replay.terminal;
     const receipt =
       replay.outputReceipt ??
@@ -92,6 +105,8 @@ export async function ingestConnectedCommandCompletion(
     });
     const settlement = await settleClaimedConnectedMachineBackgroundCommand(db, { claim });
     if (!settlement.settled) return; // An attached owner may have settled after capture.
+    // Custody checkpoint failure must not suppress the already committed event.
+    if (bus) await bus.publish(command.workspaceId, command.sessionId, settlement.events);
     await recordConnectedCommandOutputConsumption(db, {
       ...command,
       ...identity,
@@ -100,7 +115,6 @@ export async function ingestConnectedCommandCompletion(
     });
     // Final ACK remains the separately retryable custody obligation, never the
     // model's observation. All bytes are durable before terminal fanout.
-    if (bus) await bus.publish(command.workspaceId, command.sessionId, settlement.events);
   } catch (error) {
     await deferConnectedMachineBackgroundCommandReconciliation(db, {
       claim,

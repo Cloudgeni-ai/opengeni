@@ -218,6 +218,41 @@ describe("Connected Machine event ingestion scheduling", () => {
     expect(handled).toEqual(["2"]);
   });
 
+  test("saturating all completion slots never consumes heartbeat/control capacity", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let renew!: () => void;
+    const renewed = new Promise<void>((resolve) => {
+      renew = resolve;
+    });
+    let active = 0;
+    const scheduler = createAgentEventIngestionScheduler(async (payload) => {
+      const event = AgentEvent.decode(payload).event;
+      if (event?.$case === "operationCompleted") {
+        active++;
+        await held;
+      } else if (event?.$case === "heartbeat") renew();
+    });
+    for (let index = 0; index < 33; index++)
+      scheduler.enqueue(
+        AgentEvent.encode({
+          event: {
+            $case: "operationCompleted",
+            operationCompleted: { opId: String(index) },
+          },
+        }).finish(),
+        subjectA,
+      );
+    scheduler.enqueue(heartbeat(1), subjectB);
+    await renewed;
+    expect(active).toBe(32);
+    release();
+    await scheduler.whenIdle();
+    expect(active).toBe(33);
+  });
+
   test("bounds cross-runner database concurrency without serializing every runner", async () => {
     let releaseHandlers!: () => void;
     let fourHandlersStarted!: () => void;

@@ -133,6 +133,34 @@ export function createAgentEventIngestionScheduler(
   handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
   options: { maxConcurrentSubjects?: number; onHeartbeatCoalesced?: () => void } = {},
 ): AgentEventIngestionScheduler {
+  // Data-plane collectors must never consume heartbeat/control admission. Both
+  // lanes reuse the existing concurrency discipline, with independent capacity.
+  const control = createAgentEventIngestionLane(handler, options);
+  const completions = createAgentEventIngestionLane(handler, options);
+  return {
+    enqueue(payload, subject) {
+      let completion = false;
+      try {
+        completion = AgentEvent.decode(payload).event?.$case === "operationCompleted";
+      } catch {
+        /* The control handler owns malformed-event diagnostics. */
+      }
+      (completion ? completions : control).enqueue(payload, subject);
+    },
+    async whenIdle() {
+      await Promise.all([control.whenIdle(), completions.whenIdle()]);
+    },
+    close() {
+      control.close();
+      completions.close();
+    },
+  };
+}
+
+function createAgentEventIngestionLane(
+  handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
+  options: { maxConcurrentSubjects?: number; onHeartbeatCoalesced?: () => void } = {},
+): AgentEventIngestionScheduler {
   const maxConcurrentSubjects = options.maxConcurrentSubjects ?? 32;
   if (!Number.isSafeInteger(maxConcurrentSubjects) || maxConcurrentSubjects <= 0) {
     throw new RangeError("maxConcurrentSubjects must be a positive safe integer");

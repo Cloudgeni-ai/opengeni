@@ -26,9 +26,14 @@ export async function replayConnectedCommandOutput(
   opId: string,
   terminalKnown: boolean,
   capture: Parameters<OpStreamExecClient["readExisting"]>[2],
+  deadlineAt?: number,
 ): Promise<Awaited<ReturnType<OpStreamExecClient["readExisting"]>>> {
   let capturedThrough = 0n;
   while (true) {
+    // Only collector ownership is bounded, never the native command. The push
+    // caller reserves an in-flight read window before its existing claim expires.
+    if (deadlineAt !== undefined && Date.now() >= deadlineAt)
+      throw new Error("Connected command output collector reached its claim deadline");
     const before = capturedThrough;
     const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, capture);
     if (!terminalKnown || replay.status === "completed" || replay.terminal) return replay;
