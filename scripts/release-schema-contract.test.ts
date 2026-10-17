@@ -2325,6 +2325,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0807_subscription_rls_admin_once_per_statement.sql",
       "0806_session_history_tool_router_index.sql",
       "0805_session_visibility_rls_cost.sql",
       "0804_timeline_annotations_validate.sql",
