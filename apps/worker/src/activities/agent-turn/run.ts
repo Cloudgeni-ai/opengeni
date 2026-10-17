@@ -36,6 +36,7 @@ import {
   type SandboxFileDownload,
   type SandboxFileDownloadFailure,
   type CodemodeTokenWriterSession,
+  warmCodexResponsesWebSocket,
 } from "@opengeni/runtime";
 
 import {
@@ -1013,6 +1014,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   };
                 })()
               : null;
+          if (codexContext && runSettings.codexResponsesWebSocketEnabled) {
+            // Open this conversation's Responses WebSocket now, so its
+            // handshake overlaps the rest of turn preparation instead of
+            // delaying the first model response. No model request is sent.
+            void codexRequestStorage.run(codexContext, () =>
+              warmCodexResponsesWebSocket(resolvedModel?.provider.baseUrl),
+            );
+          }
           let xaiCoreAuthorization: XaiCoreRequestAuthorization | null = null;
           if (resolvedModel?.provider.kind === "xai-subscription") {
             const xaiCore = providerTurn.xaiSubscriptionCore;

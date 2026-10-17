@@ -8,8 +8,11 @@ import OpenAI from "openai";
 import { createHash } from "node:crypto";
 import {
   CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
+  CODEX_PROVIDER_BASE_URL,
   codexResponsesTransport,
   codexSubscriptionFetch,
+  warmCodexResponsesConnection,
+  type CodexResponsesTransport,
 } from "@opengeni/codex";
 import {
   XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
@@ -181,12 +184,24 @@ function sdkRetryingModelFetch(maxRetries: number, inner: typeof fetch): typeof 
 const providerClientCache = new Map<string, OpenAI>();
 // One process-wide pool of warm Codex Responses WebSockets, shared by every
 // client that serves the subscription so a conversation keeps its connection.
-let codexWebSocketTransport: typeof globalThis.fetch | undefined;
-function sharedCodexWebSocketTransport(): typeof globalThis.fetch {
+let codexWebSocketTransport: CodexResponsesTransport | undefined;
+function sharedCodexWebSocketTransport(): CodexResponsesTransport {
   codexWebSocketTransport ??= codexResponsesTransport((input, init) =>
     globalThis.fetch(input, init),
-  ) as typeof globalThis.fetch;
+  );
   return codexWebSocketTransport;
+}
+
+/**
+ * Opens the current Codex conversation's Responses WebSocket in the shared
+ * pool ahead of its first model request. Call inside the turn's Codex request
+ * context, only when the Codex WebSocket transport is enabled. Never throws.
+ */
+export async function warmCodexResponsesWebSocket(baseUrl?: string): Promise<void> {
+  await warmCodexResponsesConnection(
+    sharedCodexWebSocketTransport(),
+    baseUrl ?? CODEX_PROVIDER_BASE_URL,
+  );
 }
 
 function canonicalCacheJson(value: unknown): string {
@@ -433,7 +448,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               instrumentedModelFetch(
                 provider.id,
                 settings.codexResponsesWebSocketEnabled
-                  ? sharedCodexWebSocketTransport()
+                  ? (sharedCodexWebSocketTransport() as unknown as typeof globalThis.fetch)
                   : globalThis.fetch,
               ),
             ),
