@@ -27,6 +27,7 @@ import {
   createInteractionAttemptToolDefinitions,
   nativeCuaSchema,
 } from "../src/interaction-tools";
+import { computerObservationText } from "../src/computer-model-text";
 
 const accountId = randomUUID();
 const workspaceId = randomUUID();
@@ -1905,7 +1906,7 @@ describe("interaction attempt tools", () => {
     expect(result.content).toEqual([
       {
         type: "text",
-        text: JSON.stringify({ ...observation, frameId: "captured-frame", capturedFrame }),
+        text: computerObservationText({ ...observation, frameId: "captured-frame", capturedFrame }),
       },
       { type: "image", data: Buffer.from(image).toString("base64"), mimeType: "image/jpeg" },
     ]);
