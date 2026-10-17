@@ -83,12 +83,14 @@ mode = "advisory"
 # its safety argument rests on, where each block is reviewed: the pager's
 # userfaultfd and mmap handling, the engine's pidfd registration, and the
 # host's mappings of sealed memory images (image.rs) and of memory files
-# filling from object storage (lazy.rs).
+# filling from object storage (lazy.rs), and its map of which blocks a guest
+# disk shares with others (disk_growth.rs, one `FS_IOC_FIEMAP` call).
 # Anything else is listed in the baseline until it moves behind one of them.
 [rules.pattern_ratchet.unsafe_code]
 patterns = ['\bunsafe\b']
 allow = [
   "crates/compute-engine/src/firecracker/process.rs",
+  "crates/compute-host/src/disk_growth.rs",
   "crates/compute-host/src/image.rs",
   "crates/compute-host/src/lazy.rs",
   "crates/compute-pager/src/linux.rs",

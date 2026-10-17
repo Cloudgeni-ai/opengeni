@@ -37,6 +37,7 @@ use crate::state::{Record, Records, StateError, claim_host, unix_ms_now};
 use crate::step::{After, Live};
 use crate::store::Store;
 
+mod disk;
 mod handle;
 mod holds;
 mod ready;
@@ -287,9 +288,10 @@ pub enum HostError {
     /// Host storage failed.
     #[error("host I/O failed: {0}")]
     Io(String),
-    /// The host cannot take on the sandbox's memory, or the disk its next
-    /// save may need, now: even ending every idle VM already saved would
-    /// not free enough. Retryable.
+    /// The host cannot take on the sandbox's memory, or the local disk it
+    /// may write (its next save, its disk's growth, its first files), now:
+    /// even ending every idle VM already saved would not free enough.
+    /// Retryable.
     #[error(
         "host full: sandbox {id} needs {needed} {what} and only {free} are free",
         what = shortage(*.resource)
@@ -353,8 +355,8 @@ fn allocation_unit(root: &std::path::Path) -> Result<u64, HostError> {
 fn shortage(resource: Resource) -> &'static str {
     match resource {
         Resource::Memory => "bytes of memory reserved",
-        Resource::Disk => "bytes of disk booked for its next save",
-        Resource::Inodes => "disk inodes booked for its next save",
+        Resource::Disk => "bytes of local disk booked",
+        Resource::Inodes => "local disk inodes booked",
     }
 }
 
@@ -707,6 +709,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Copies of guest memory a save may write at most: one where files
     /// share extents, otherwise also the merged image.
     save_copies: u64,
+    /// The base image's length when the agent started, for when it
+    /// cannot be read later; see [`HostAgent::disk_bound`].
+    base_length: u64,
     /// The bytes the state root's filesystem allocates at a time.
     allocation_unit: u64,
     pager: PagerConfig,
@@ -888,6 +893,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             net,
             images,
             root: config.root,
+            base_length: std::fs::metadata(&config.base_image).map_or(0, |found| found.len()),
             base_image: config.base_image,
             warm,
             memory_policy: config.policy.memory,
@@ -1023,22 +1029,39 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         SleepPolicy::new(rules).map_err(|error| format!("invalid sleep settings: {error}"))
     }
 
-    /// What a sandbox of `config` reserves and may use of host memory, and
-    /// what one save of it may write: the memory that changed, the merged
-    /// image where files cannot share extents, and its device state and
-    /// chunk map.
-    fn size(&self, config: &SandboxConfig) -> Size {
+    /// What a sandbox of `config` whose disk is `disk_bytes` long reserves
+    /// and may use of host memory, and what one save of it may write: the
+    /// memory that changed, the merged image where files cannot share
+    /// extents, and its device state and chunk map; what its disk may grow
+    /// by while it runs; and what a wake from object storage writes
+    /// locally: its disk, the memory image its pager fills, and its device
+    /// state. A disk of unknown length counts as a copy of today's base
+    /// image, as a new sandbox's is.
+    fn size(&self, config: &SandboxConfig, disk_bytes: Option<u64>) -> Size {
         let limit = u64::from(config.memory_mib) << 20;
         let request = if self.reserve_whole {
             limit
         } else {
             u64::from(config.memory_request()) << 20
         };
+        let disk = disk_bytes.map_or_else(
+            || self.disk_bound(),
+            |length| crate::disk_growth::disk_bound(length, self.allocation_unit),
+        );
         Size {
             request,
             limit,
             save: limit * self.save_copies + SAVE_EXTRA,
+            disk,
+            fetch: disk
+                .saturating_add(limit.next_multiple_of(self.allocation_unit.max(1)))
+                .saturating_add(SAVE_EXTRA),
         }
+    }
+
+    /// [`Self::size`] for the sandbox `record` describes.
+    fn record_size(&self, record: &Record) -> Size {
+        self.size(&record.config, record.allocation.disk_bytes)
     }
 
     async fn run(mut self) {

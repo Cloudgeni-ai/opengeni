@@ -169,6 +169,7 @@ impl Sandbox {
             uid: 1_000_000,
             gid: 1_000_000,
             link: None,
+            disk_bytes: None,
         };
         let created = self
             .records

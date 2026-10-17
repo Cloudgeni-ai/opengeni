@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use compute_core::{
-    Action, BalloonRequest, Durability, Failure, Input, Level, Notice, OpId, Outcome, State, Step,
+    Action, BalloonRequest, DiskSpace, Durability, Failure, Input, Level, Notice, OpId, Outcome,
+    State, Step,
 };
 use compute_engine::{CancellationToken, Engine, VmSpec};
 use tokio::time::{Instant, sleep};
@@ -121,6 +122,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         stale: Option<&Arc<Template>>,
     ) {
         self.preparing.remove(&id.0);
+        // What its first files took shows in the next reading.
+        self.input(Input::Writes {
+            key: id.0,
+            disk: DiskSpace::default(),
+        });
         if let Some(template) = stale {
             self.template_stale(template);
         }
@@ -137,7 +143,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let paths = Paths::of(&self.root, &record);
         let spec = vm_spec(&record, &paths, &self.images);
-        let size = self.size(&record.config);
+        let size = self.record_size(&record);
         self.insert(id, paths, spec);
         // A new sandbox is a saved one: a disk, with a memory image when it
         // started from a template. Its first wake boots or restores it,
@@ -171,10 +177,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.leftovers.remove(&id.0);
                 self.hosts.remove(&host.0);
                 // Its VM has ended: its memory is free for others, under
-                // whichever name it was counted.
+                // whichever name it was counted, and what a restart booked
+                // for it on disk shows in the next reading.
                 self.inputs([id, host].map(|name| Input::Unmanaged {
                     sandbox: name.0,
                     bytes: 0,
+                }));
+                self.inputs([id, host].map(|name| Input::Writes {
+                    key: name.0,
+                    disk: DiskSpace::default(),
                 }));
             }
             Err(error) => {
@@ -402,6 +413,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let events = self.events_tx.clone();
         let (spec, paths) = (VmSpec::clone(&slot.spec), Paths::clone(&slot.paths));
         let live = if needs_vm { slot.vm.take() } else { None };
+        // A sandbox paused for memory is known to wait for room before
+        // any step can leave it saved: a restart then still wakes it.
+        let kept =
+            (!step.wakes() && slot.holds.paused_for_memory().is_some()).then(|| slot.holds.flush());
         let mut job = self.job(record, spec, paths, cancel);
         job.live = live;
         job.unthrottle = Some({
@@ -411,6 +426,22 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             })
         });
         tokio::spawn(async move {
+            // Without that kept, the step does not run: it fails for now,
+            // handing back its VM untouched, and is tried again.
+            if let Some(kept) = kept
+                && let Err(error) = kept.await
+            {
+                tracing::warn!(%id, %error, "could not keep that the sandbox waits for memory");
+                let _ = events.send(Event::StepDone {
+                    id,
+                    op,
+                    outcome: Outcome::Failed(Failure::Transient),
+                    after: job.live.take().map_or(After::NoVm, After::Kept),
+                    launches: 0,
+                    error: Some(format!("could not keep that it waits for memory: {error}")),
+                });
+                return;
+            }
             let ran = job.run(step).await;
             let _ = events.send(Event::StepDone {
                 id,
@@ -801,6 +832,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 tracing::error!(%id, "sandbox broken on this host");
                 self.settle(id);
             }
+            Notice::PausedForMemory(bytes) => self.keep_memory_wait(id, bytes),
             Notice::HostFull {
                 resource,
                 needed,

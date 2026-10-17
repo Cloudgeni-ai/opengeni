@@ -391,6 +391,7 @@ fn requests_below_the_limit_pack_more_and_bursts_count() {
         request: 512 * MIB,
         limit: GIB,
         save: GIB,
+        ..Size::default()
     };
     for id in 1..=5 {
         rig.add(id, saved(), size);
@@ -604,6 +605,7 @@ fn a_vm_found_running_counts_its_whole_size_until_measured() {
         request: GIB,
         limit: 4 * GIB,
         save: 4 * GIB,
+        ..Size::default()
     };
     rig.add(1, State::RUNNING, size);
     rig.hold(1);
@@ -814,6 +816,7 @@ impl Sim {
                     request,
                     limit,
                     save: limit,
+                    ..Size::default()
                 };
                 self.sizes.insert(id, size);
                 // Saved, paused with a saved copy, or only in object

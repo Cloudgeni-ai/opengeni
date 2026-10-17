@@ -169,6 +169,9 @@ pub fn jailer_args(spec: &VmSpec, jail: &Jail, launch: &Launch<'_>) -> Vec<OsStr
         "--cgroup",
         format!("cpu.weight={}", spec.cpu_weight.clamp(1, 10_000)).into(),
     );
+    if let Some(limit) = spec.memory_limit {
+        push("--cgroup", format!("memory.max={limit}").into());
+    }
     if let Some(netns) = launch.netns {
         push("--netns", netns.into());
     }
@@ -208,6 +211,7 @@ mod tests {
             memory_mib: 256,
             memory_request_mib: 256,
             cpu_weight: 100,
+            memory_limit: None,
             kernel: format!("{dir}/vmlinux").into(),
             boot_args: String::new(),
             drives: Vec::new(),
@@ -275,6 +279,7 @@ mod tests {
         let mut spec = spec("/srv/vm/firecracker/abc/root", "abc");
         spec.memory_request_mib = 128;
         spec.cpu_weight = 50;
+        spec.memory_limit = Some(1 << 30);
         let jail = Jail::new(&spec).unwrap();
         let args = jailer_args(
             &spec,
@@ -295,7 +300,7 @@ mod tests {
              --chroot-base-dir /srv/vm --cgroup-version 2 --parent-cgroup compute \
              --cgroup memory.zswap.writeback=0 --cgroup memory.zswap.max=0 \
              --cgroup memory.swap.max=0 --cgroup memory.low=134217728 --cgroup cpu.weight=50 \
-             --netns /run/netns/ogc-abc --new-pid-ns \
+             --cgroup memory.max=1073741824 --netns /run/netns/ogc-abc --new-pid-ns \
              -- --api-sock /api.sock"
         );
     }

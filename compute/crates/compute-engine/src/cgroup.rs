@@ -133,6 +133,23 @@ impl Cgroup {
         self.protect_parent()
     }
 
+    /// Sets the group's share of contended processor time (`cpu.weight`,
+    /// 1 to 10000).
+    pub fn set_cpu_weight(&self, weight: u16) -> io::Result<()> {
+        fs::write(
+            self.path.join("cpu.weight"),
+            weight.clamp(1, 10_000).to_string(),
+        )
+    }
+
+    /// Sets the most memory the group may hold (`memory.max`), or no limit
+    /// for `None`. Lowering it below what the group holds makes the kernel
+    /// reclaim from it, or end it.
+    pub fn set_memory_max(&self, bytes: Option<u64>) -> io::Result<()> {
+        let value = bytes.map_or_else(|| "max".to_owned(), |bytes| bytes.to_string());
+        fs::write(self.path.join("memory.max"), value)
+    }
+
     /// Sets the parent group's `memory.low` to the sum of its children's.
     /// A group is protected only as far as its ancestors are, so a parent
     /// left at 0 would protect none of its VMs from the rest of the host.
