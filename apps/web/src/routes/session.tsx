@@ -164,6 +164,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useAppContext } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
+import type { SessionArtifactSourceCache } from "@/lib/session-artifact-discovery";
 import type {
   SessionEditableArtifactSummary,
   SessionEditableArtifactsStatus,
@@ -1528,7 +1529,7 @@ function SessionDock(props: {
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
   // the package now; the app injects durable artifacts and Debug around it.
   // Heavy editor/runtime code stays lazy until the user opens the tab.
-  const artifactRefreshSequence = useMemo(() => {
+  const artifactRefresh = useMemo(() => {
     for (let index = props.events.length - 1; index >= 0; index -= 1) {
       const event = props.events[index];
       if (
@@ -1538,11 +1539,14 @@ function SessionDock(props: {
           event.type === "turn.failed" ||
           event.type === "turn.cancelled")
       ) {
-        return event.sequence;
+        // Tool output re-reads the chat and only sub-sessions with new
+        // activity; the end of a turn re-reads everything once.
+        return { sequence: event.sequence, complete: event.type !== "agent.toolCall.output" };
       }
     }
-    return 0;
+    return { sequence: 0, complete: true };
   }, [props.events]);
+  const artifactRefreshSequence = artifactRefresh.sequence;
   // Tool output may have published a file or Site: let the Artifacts page show
   // its cached rows on the next visit but refetch them.
   useEffect(() => {
@@ -1552,6 +1556,7 @@ function SessionDock(props: {
     workspaceId: props.workspaceId,
     sessionId: props.sessionId,
     refreshSequence: artifactRefreshSequence,
+    completeRefresh: artifactRefresh.complete,
   });
   const expireAfterArtifactMutation = useArtifactCatalogMutationInvalidation(
     context.client,
@@ -1752,6 +1757,8 @@ function useSessionEditableArtifactSummaries(input: {
   workspaceId: string;
   sessionId: string;
   refreshSequence: number;
+  /** Re-read every sub-session instead of only those with new activity. */
+  completeRefresh: boolean;
 }): Readonly<{
   artifacts: readonly SessionEditableArtifactSummary[];
   status: SessionEditableArtifactsStatus;
@@ -1761,6 +1768,12 @@ function useSessionEditableArtifactSummaries(input: {
   const context = useAppContext();
   const authorityKey = `${input.workspaceId}:${input.sessionId}:${context.accessKeyVersion}`;
   const [retrySequence, setRetrySequence] = useState(0);
+  const sourceCache = useRef<{
+    key: string;
+    client: typeof context.client;
+    retrySequence: number;
+    cache: SessionArtifactSourceCache;
+  } | null>(null);
   const [loaded, setLoaded] = useState<{
     key: string;
     client: typeof context.client;
@@ -1770,6 +1783,19 @@ function useSessionEditableArtifactSummaries(input: {
 
   useEffect(() => {
     let current = true;
+    if (
+      input.completeRefresh ||
+      sourceCache.current?.key !== authorityKey ||
+      sourceCache.current.client !== context.client ||
+      sourceCache.current.retrySequence !== retrySequence
+    )
+      sourceCache.current = {
+        key: authorityKey,
+        client: context.client,
+        retrySequence,
+        cache: new Map(),
+      };
+    const cache = sourceCache.current.cache;
     setLoaded((previous) =>
       previous?.key === authorityKey &&
       previous.client === context.client &&
@@ -1792,6 +1818,7 @@ function useSessionEditableArtifactSummaries(input: {
           input.sessionId,
           () => current,
           context.client,
+          cache,
         );
         if (current) {
           setLoaded((previous) => ({
@@ -1826,6 +1853,7 @@ function useSessionEditableArtifactSummaries(input: {
   }, [
     authorityKey,
     context.client,
+    input.completeRefresh,
     input.refreshSequence,
     input.sessionId,
     input.workspaceId,
