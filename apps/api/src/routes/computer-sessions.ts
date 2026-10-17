@@ -104,6 +104,7 @@ import {
   deriveComputerSessionControllerTokens,
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
+import { retireFormerPlacementControllers } from "../former-placement-retirement";
 import { connectedMachineComputerAccessError } from "../connected-machine-computer-access";
 import {
   controllerCacheAllowsHostFetch,
@@ -1020,6 +1021,30 @@ export function registerComputerSessionRoutes(
           computerSessionId,
         });
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
+        if (
+          before.session.lifecycle === "lost" &&
+          before.session.failureCode === "source_placement_changed" &&
+          before.session.controller &&
+          before.session.placement.kind === "connected_machine"
+        ) {
+          // The task moved away, so its route no longer reaches the machine
+          // this Desktop controller still runs on. Stop it there first; the
+          // end below then has no controller left to reach.
+          const retirement = await retireFormerPlacementControllers(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            connectedSandboxId: before.session.placement.sandboxId,
+            browserSessionIds: [],
+            computerSessionIds: [computerSessionId],
+            origin,
+            waitSignal: context.req.raw.signal,
+          });
+          if (retirement.remaining.length > 0) {
+            throw new ComputerSessionStateError(
+              "This computer session still runs on the Connected Machine its task moved away from, and that machine could not stop it now. Try again when the machine is online.",
+            );
+          }
+        }
         if (before.session.controller) controllerAuthorityRoot(deps);
         const prepared = await prepareComputerSessionEnd(deps.db, {
           accountId: grant.accountId,
@@ -1702,6 +1727,16 @@ export function registerComputerSessionRoutes(
       connectedSandboxId,
     });
     if (reconciliation.sourcePlacementChanged) {
+      // End what the move left running on the former machine without making
+      // this request wait for it; a failure leaves the binding for `end`.
+      void retireFormerPlacementControllers(channelServices, {
+        grant,
+        sourceSessionId,
+        connectedSandboxId,
+        browserSessionIds: reconciliation.browserSessionIds,
+        computerSessionIds: reconciliation.computerSessionIds,
+        origin: null,
+      });
       throw sourcePlacementChangedApiError("computer_session");
     }
     throw new ComputerSessionStateError(

@@ -25,11 +25,13 @@ import {
   getComputerSession,
   getComputerSessionControlRecord,
   listComputerSessions,
+  listLostConnectedInteractionControllers,
   MANAGED_BROWSER_SESSION_CAPABILITIES,
   prepareBrowserSessionCreate,
   prepareComputerSessionCreate,
   prepareComputerSessionEnd,
   reapStaleLeaseHolders,
+  releaseLostConnectedInteractionController,
   safeDatabaseErrorFacts,
   setActiveSandbox,
   terminalizeStaleConnectedInteractionPlacement,
@@ -1033,5 +1035,83 @@ describe("durable ComputerSession lifecycle", () => {
         connectedSandboxId: machine.id,
       }),
     ).toMatchObject({ sourcePlacementChanged: true, changed: false });
+
+    // The former machine still runs both controllers until they are ended.
+    const lostControllers = {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      connectedSandboxId: machine.id,
+      browserSessionIds: [browser.session.id],
+      computerSessionIds: [computer.session.id],
+    };
+    expect(await listLostConnectedInteractionControllers(client.db, lostControllers)).toEqual([
+      {
+        resource: "browser_session",
+        resourceId: browser.session.id,
+        connectedSandboxId: machine.id,
+        controllerGeneration: browserController.controllerGeneration,
+        placementInstanceId: machine.id,
+      },
+      {
+        resource: "computer_session",
+        resourceId: computer.session.id,
+        connectedSandboxId: machine.id,
+        controllerGeneration: computerController.controllerGeneration,
+        placementInstanceId: machine.id,
+      },
+    ]);
+    expect(
+      await listLostConnectedInteractionControllers(client.db, {
+        ...lostControllers,
+        connectedSandboxId: crypto.randomUUID(),
+      }),
+    ).toEqual([]);
+    // Only the exact generation the machine ended is released.
+    expect(
+      await releaseLostConnectedInteractionController(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        resource: "browser_session",
+        resourceId: browser.session.id,
+        expectedControllerGeneration: crypto.randomUUID(),
+      }),
+    ).toBe(false);
+    expect(
+      await releaseLostConnectedInteractionController(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        resource: "browser_session",
+        resourceId: browser.session.id,
+        expectedControllerGeneration: browserController.controllerGeneration,
+      }),
+    ).toBe(true);
+    expect(
+      await releaseLostConnectedInteractionController(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        resource: "computer_session",
+        resourceId: computer.session.id,
+        expectedControllerGeneration: computerController.controllerGeneration,
+      }),
+    ).toBe(true);
+    expect(await listLostConnectedInteractionControllers(client.db, lostControllers)).toEqual([]);
+    const releasedBrowser = await getBrowserSession(client.db, {
+      ...scope,
+      browserSessionId: browser.session.id,
+    });
+    expect(releasedBrowser).toMatchObject({
+      lifecycle: "lost",
+      failureCode: "source_placement_changed",
+    });
+    expect(releasedBrowser.controller).toBeNull();
+    const releasedComputer = await getComputerSession(client.db, {
+      ...scope,
+      computerSessionId: computer.session.id,
+    });
+    expect(releasedComputer).toMatchObject({
+      lifecycle: "lost",
+      failureCode: "source_placement_changed",
+    });
+    expect(releasedComputer.controller).toBeNull();
   }, 60_000);
 });
