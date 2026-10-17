@@ -422,7 +422,9 @@ function stripCatalogRoutinePatchLiterals(statement: string): string {
     }
   }
 
-  const assignments = /\b([a-z_]\w*)\s*:=\s*(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\2\s*;/gi;
+  // The literal may be assigned in the body or initialised in DECLARE
+  // (`replacement text := $new$...$new$;`); both bind the same variable.
+  const assignments = /\b([a-z_]\w*)(?:\s+text)?\s*:=\s*(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\2\s*;/gi;
   return statement.replace(assignments, (whole, variable: string, _tag: string) => {
     const outside = statement.replace(whole, `${variable} := NULL;`);
     const use = new RegExp(
