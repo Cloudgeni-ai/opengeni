@@ -51,7 +51,7 @@ beforeAll(async () => {
       if (
         name.endsWith(".sql") &&
         name >= MIGRATION &&
-        name !== "0832_session_activity_xid.sql" &&
+        name !== "0834_session_activity_xid.sql" &&
         name !== "0809_session_open_settlement_index.sql"
       )
         await owner`insert into schema_migrations(name) values (${name})`;

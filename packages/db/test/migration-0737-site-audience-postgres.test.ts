@@ -37,7 +37,7 @@ beforeAll(async () => {
     // of the Site migration whose historical behavior this fixture exercises.
     .filter(
       (file) =>
-        file.endsWith(".sql") && file >= MIGRATION && file !== "0832_session_activity_xid.sql",
+        file.endsWith(".sql") && file >= MIGRATION && file !== "0834_session_activity_xid.sql",
     )
     .sort();
   const staging = postgres(database.ownerUrl, {
