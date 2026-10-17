@@ -283,4 +283,6 @@ export const embeddingMigrationTail = [
   // Rewrites the session-tenancy fence registry and its capability routines
   // from withheld 0345; replay after it.
   "0800_session_tenancy_fence_registry_schema_name.sql",
+  // Cleans and adds a trigger to the shared-core capability table from 0642.
+  "0807_subscription_rls_admin_once_per_statement.sql",
 ];

@@ -4,7 +4,6 @@ import {
   isActivityXidToken,
   normalizeActivityToken,
 } from "./session-activity-xid";
-export { normalizeActivityToken } from "./session-activity-xid";
 export {
   listExhaustedScheduledTasks,
   retireExhaustedScheduledTask,

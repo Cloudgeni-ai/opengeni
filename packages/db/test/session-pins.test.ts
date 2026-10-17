@@ -2837,11 +2837,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       title: string,
       createdAt: string,
       updatedAt: string,
+      writer = db,
     ) => {
       // These are explicit fixture titles, not automatic title candidates. The
       // automatic-title policy cancels the whole UPDATE for an unfenced agent title.
       const persisted = await withWorkspaceSessionActivityRls(
-        db,
+        writer,
         workspace.workspaceId,
         async (scoped) =>
           await scoped.execute<{
@@ -2994,22 +2995,30 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     ).toEqual([roots[1]!.id, ...otherRoots]);
     expect(
       await walk({ parentSessionId: null, archiveStatus: "all", sortBy: "updatedAt" }),
-    ).toEqual([...otherRoots, roots[1]!.id]);
+    ).toEqual([
+      roots[1]!.id,
+      ...activityOrder.filter((row) => otherRoots.includes(row.id)).map((row) => row.id),
+    ]);
     // Oppose id ordering with timestamps inside the same millisecond. Both the
     // cursor and public selected date field must retain all six fractional digits.
     const orderedIds = roots.map((row) => row.id).sort();
     const timestamps = [456, 455, 454, 453].map(
       (fraction) => `2026-03-01T00:00:00.123${fraction}Z`,
     );
-    for (let index = 0; index < orderedIds.length; index++) {
-      const id = orderedIds[index]!;
-      await setSortFixture(
-        id,
-        titles[rows.findIndex((row) => row.id === id)]!,
-        timestamps[index]!,
-        timestamps[index]!,
-      );
-    }
+    // A shared transaction makes xid equal so this specifically probes the
+    // exact timestamp tie-break rather than transaction allocation order.
+    await withWorkspaceSessionActivityRls(db, workspace.workspaceId, async (writer) => {
+      for (let index = 0; index < orderedIds.length; index++) {
+        const id = orderedIds[index]!;
+        await setSortFixture(
+          id,
+          titles[rows.findIndex((row) => row.id === id)]!,
+          timestamps[index]!,
+          timestamps[index]!,
+          writer,
+        );
+      }
+    });
     for (const sortBy of ["createdAt", "updatedAt"] as const) {
       expect(await walk({ parentSessionId: null, archiveStatus: "all", sortBy })).toEqual(
         orderedIds,
