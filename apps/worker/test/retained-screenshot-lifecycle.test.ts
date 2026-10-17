@@ -27,7 +27,9 @@ import {
   compactRetainedScreenshotHistory,
   inlineImagesFromToolResultItem,
   materializeRetainedScreenshotHistory,
+  materializeRetainedScreenshotRunState,
   retainComputerScreenshot,
+  retainedImageUnavailableText,
   retainSessionScreenshot,
   validateComputerScreenshot,
 } from "../src/activities/retained-screenshots";
@@ -997,17 +999,18 @@ describe("retained screenshot lifecycle fences", () => {
       await asMember(participant, () => getFile(db, fixture.workspaceId, prepared.artifactId)),
     ).toBeNull();
 
-    // Lifecycle failures behave exactly as for a readable screenshot.
+    // Lifecycle failures never fail the turn. The owner learns the reason; the
+    // participant keeps the same neutral receipt, so its text never changes.
     const afterExpiry = new Date(Date.now() + 120_000);
-    await expect(
-      asMember(owner, () => materialize(prepared.artifactId, afterExpiry)),
-    ).rejects.toThrow("unavailable: expired");
-    await expect(
-      asMember(participant, () => materialize(prepared.artifactId, afterExpiry)),
-    ).rejects.toThrow("unavailable: expired");
-    await expect(asMember(participant, () => materialize(crypto.randomUUID()))).rejects.toThrow(
-      "unavailable: deleted",
+    const ownExpired = await asMember(owner, () => materialize(prepared.artifactId, afterExpiry));
+    expect(ownExpired[0]?.output).toBe(retainedImageUnavailableText(prepared.artifactId));
+    const participantExpired = await asMember(participant, () =>
+      materialize(prepared.artifactId, afterExpiry),
     );
+    expect(participantExpired[0]?.output).toBe(direct);
+    const missingId = crypto.randomUUID();
+    const participantMissing = await asMember(participant, () => materialize(missingId));
+    expect(participantMissing[0]?.output).toBe(retainedImageUnavailableText(missingId));
   }, 180_000);
 
   test("recovers a truncated screenshot receipt by exact session and tool call", async () => {
@@ -1061,15 +1064,172 @@ describe("retained screenshot lifecycle fences", () => {
     expect(
       String((recoveredOutput[1] as { image?: string }).image).startsWith("data:image/png;base64,"),
     ).toBeTrue();
-    await expect(
+    const unrecoverable = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: memory.storage,
+      workspaceId: other.workspaceId,
+      sessionId: other.sessionId,
+      history: corruptedHistory,
+    });
+    expect(unrecoverable[0]?.output).toEqual([
+      { type: "input_text", text: "Screen capture" },
+      { type: "input_text", text: retainedImageUnavailableText(null) },
+    ]);
+  }, 180_000);
+
+  test("an image that was never stored or is gone never fails the turn and renders stable text", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    // Fill the quota so the next image is refused, exactly as in production.
+    const refused = await retainComputerScreenshot({
+      db,
+      objectStorage: memory.storage,
+      ...fixture,
+      output: {
+        callId: "call-quota",
+        toolOutputId: "call-quota",
+        bytes: PNG,
+        mediaType: "image/png",
+      },
+      retentionMs: 60_000,
+      workspaceQuotaBytes: 1,
+    });
+    expect(refused).toEqual({
+      available: false,
+      artifactId: refused.artifactId,
+      reason: "quota_exceeded",
+    });
+    const stored = (callId: string) =>
+      retainComputerScreenshot({
+        db,
+        objectStorage: memory.storage,
+        ...fixture,
+        output: { callId, toolOutputId: callId, bytes: PNG, mediaType: "image/png" },
+        retentionMs: 60_000,
+        workspaceQuotaBytes: 1024 * 1024,
+      });
+    const expiring = await stored("call-expiring");
+    const missingObject = await stored("call-missing-object");
+    const corrupt = await stored("call-corrupt");
+    if (!expiring.available || !missingObject.available || !corrupt.available) {
+      throw new Error("retain must succeed");
+    }
+    const missingArtifact = await getRetainedScreenshotArtifact(
+      db,
+      fixture.workspaceId,
+      fixture.sessionId,
+      missingObject.artifactId,
+    );
+    const corruptArtifact = await getRetainedScreenshotArtifact(
+      db,
+      fixture.workspaceId,
+      fixture.sessionId,
+      corrupt.artifactId,
+    );
+    await memory.storage.deleteObject(missingArtifact!.file.objectKey);
+    await memory.storage.putObject({
+      key: corruptArtifact!.file.objectKey,
+      contentType: "image/png",
+      body: Uint8Array.of(1, 2, 3),
+      sha256: null,
+    });
+    // A stored receipt whose row no longer exists in this session.
+    const deletedId = crypto.randomUUID();
+    const deleted = { ...expiring, artifactId: deletedId };
+    deleted.retrieval = {
+      ...expiring.retrieval,
+      path: expiring.retrieval.path.replace(expiring.artifactId, deletedId),
+    };
+    const marker = (artifact: unknown) => ({ type: "retained_artifact", artifact });
+    const history = [
+      { type: "function_call_result", callId: "call-quota", output: marker(refused) },
+      {
+        type: "function_call_result",
+        callId: "call-expiring",
+        output: [{ type: "input_image", image: marker(expiring) }],
+      },
+      {
+        type: "function_call_result",
+        callId: "call-missing-object",
+        output: { content: [{ type: "input_image", image: marker(missingObject) }] },
+      },
+      { type: "function_call_result", callId: "call-corrupt", output: marker(corrupt) },
+      { type: "function_call_result", callId: "call-deleted", output: marker(deleted) },
+    ];
+    const afterExpiry = new Date(Date.now() + 120_000);
+    const materialize = (now?: Date) =>
       materializeRetainedScreenshotHistory({
         db,
         objectStorage: memory.storage,
-        workspaceId: other.workspaceId,
-        sessionId: other.sessionId,
-        history: corruptedHistory,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        history,
+        ...(now ? { now } : {}),
+      });
+
+    const live = await materialize();
+    // Pin the exact model-facing bytes.
+    expect(live[0]?.output).toBe(
+      `[Image: retained artifactId=${refused.artifactId}. This image was not stored (the workspace image storage was full), so its contents are not included. Capture or open it again if you still need it.]`,
+    );
+    expect(live[4]?.output).toBe(
+      `[Image: retained artifactId=${deletedId}. This image is no longer available, so its contents are not included. Capture or open it again if you still need it.]`,
+    );
+    expect(live[0]?.output).toBe(
+      retainedImageUnavailableText(refused.artifactId, "quota_exceeded"),
+    );
+    expect(
+      String(((live[1]?.output as unknown[])[0] as { image: string }).image).startsWith(
+        "data:image/png;base64,",
+      ),
+    ).toBeTrue();
+    expect(live[2]?.output).toEqual({
+      content: [
+        {
+          type: "input_text",
+          text: retainedImageUnavailableText(missingObject.artifactId),
+        },
+      ],
+    });
+    expect(live[3]?.output).toBe(retainedImageUnavailableText(corrupt.artifactId));
+    expect(live[4]?.output).toBe(retainedImageUnavailableText(deletedId));
+
+    const expired = await materialize(afterExpiry);
+    expect(expired[1]?.output).toEqual([
+      { type: "input_text", text: retainedImageUnavailableText(expiring.artifactId) },
+    ]);
+    // Once unavailable, every later request carries exactly the same bytes.
+    expect(JSON.stringify(await materialize(afterExpiry))).toBe(JSON.stringify(expired));
+    expect(JSON.stringify(expired[0])).toBe(JSON.stringify(live[0]));
+    expect(JSON.stringify(expired.slice(2))).toBe(JSON.stringify(live.slice(2)));
+
+    // Resume from a serialized RunState takes the same path.
+    const runState = JSON.stringify({ originalInput: history, generatedItems: [] });
+    const resumed = JSON.parse(
+      await materializeRetainedScreenshotRunState({
+        db,
+        objectStorage: memory.storage,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        serialized: runState,
+        now: afterExpiry,
       }),
-    ).rejects.toThrow("cannot be recovered");
+    ) as { originalInput: unknown };
+    expect(JSON.stringify(resumed.originalInput)).toBe(JSON.stringify(expired));
+
+    // Without object storage the turn still proceeds.
+    const noStorage = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: null,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      history: [history[0]!, history[3]!],
+    });
+    expect(noStorage.map((item) => item.output)).toEqual([
+      retainedImageUnavailableText(refused.artifactId, "quota_exceeded"),
+      retainedImageUnavailableText(corrupt.artifactId),
+    ]);
   }, 180_000);
 
   test("FORCE-RLS denies cross-workspace rows while the fixed SECURITY DEFINER claim sees both", async () => {

@@ -73,14 +73,65 @@ export class ScreenshotValidationError extends Error {
   }
 }
 
-export class RetainedScreenshotUnavailableError extends Error {
-  constructor(
-    readonly artifactId: string,
-    readonly reason: RetainedOutputUnavailableReason,
-  ) {
-    super(`Retained screenshot ${artifactId} is unavailable: ${reason}`);
-    this.name = "RetainedScreenshotUnavailableError";
-  }
+/** How one history receipt reaches the model. */
+type MaterializedRetainedImage =
+  | { kind: "image"; dataUrl: string }
+  | { kind: "withheld" }
+  // Recorded unavailable when captured: its receipt reason never changes.
+  | { kind: "not_stored"; reason: NeverStoredRetainedImageReason }
+  // Stored, or possibly stored, and no longer deliverable for any reason.
+  | { kind: "gone" };
+
+/** A legacy receipt whose truncated identity cannot be recovered. */
+const UNRECOVERABLE_RECEIPT = Symbol("unrecoverable retained receipt");
+type UnrecoverableRetainedReceipt = typeof UNRECOVERABLE_RECEIPT;
+
+/**
+ * Unavailable receipts that a later settlement can still make readable: the
+ * artifact row may exist and be reconciled to ready. Every other unavailable
+ * reason means the image was never stored.
+ */
+type RecoverableRetainedImageReason = "pending" | "storage_write_failed";
+type NeverStoredRetainedImageReason = Exclude<
+  RetainedOutputUnavailableReason,
+  RecoverableRetainedImageReason
+>;
+
+function isRecoverableUnavailableReason(
+  reason: RetainedOutputUnavailableReason,
+): reason is RecoverableRetainedImageReason {
+  return reason === "pending" || reason === "storage_write_failed";
+}
+
+const NEVER_STORED_EXPLANATIONS: Record<NeverStoredRetainedImageReason, string> = {
+  quota_exceeded: "the workspace image storage was full",
+  oversized: "it was too large",
+  unsupported: "its format is not supported",
+  invalid_content: "it was not a valid image",
+  missing_storage: "image storage was not configured",
+  not_retained: "it could not be stored",
+  failed: "it could not be stored",
+  expired: "it could not be stored",
+  deleted: "it could not be stored",
+};
+
+/**
+ * Model-facing text for a history image that cannot be delivered. A receipt
+ * recorded unavailable when the image was captured carries its never-changing
+ * reason. Every image that was (or may have been) stored and is no longer
+ * deliverable (expired, deleted, missing or corrupt bytes, never settled)
+ * gets one fixed text, so a later change of cause never changes the bytes an
+ * earlier request already sent.
+ */
+export function retainedImageUnavailableText(
+  artifactId: string | null,
+  neverStoredReason?: NeverStoredRetainedImageReason,
+): string {
+  const subject = artifactId ? `Image: retained artifactId=${artifactId}` : "Image";
+  const status = neverStoredReason
+    ? `This image was not stored (${NEVER_STORED_EXPLANATIONS[neverStoredReason]})`
+    : "This image is no longer available";
+  return `[${subject}. ${status}, so its contents are not included. Capture or open it again if you still need it.]`;
 }
 
 /** Read an intentional image directly at the tool execution boundary. */
@@ -973,8 +1024,12 @@ export function collectRetainedScreenshotRunStateReceipts(
 
 /**
  * Materialize canonical receipts to the exact SDK input_image data URL shape.
- * Missing/deleted/expired/corrupt bytes fail closed; no item is omitted,
- * reordered, rewritten in storage, or converted to text.
+ * An image that cannot be delivered (never stored, expired, deleted, missing
+ * or corrupt bytes, or withheld from this requester) becomes deterministic
+ * text derived only from its artifact id and unavailable reason, so the turn
+ * continues and every later request repeats the same bytes. No item is
+ * omitted, reordered, or rewritten in storage. Only transient infrastructure
+ * errors (database or object-storage I/O) still fail the attempt.
  */
 export async function materializeRetainedScreenshotHistory(input: {
   db: Database;
@@ -998,7 +1053,7 @@ export async function materializeRetainedScreenshotRunState(input: {
 }): Promise<string> {
   const parsed = parseSerializedRunState(input.serialized);
   if (!parsed) return input.serialized;
-  const cache = new Map<string, string | null>();
+  const cache = new Map<string, MaterializedRetainedImage>();
   let changed = false;
   await visitSerializedRunStateItemArraysAsync(parsed, async (items) => {
     const materialized = await materializeRetainedScreenshotHistoryWithCache(
@@ -1022,21 +1077,20 @@ async function materializeRetainedScreenshotHistoryWithCache(
     history: Array<Record<string, unknown>>;
     now?: Date;
   },
-  // A null entry records an image the current requester's file authority withholds.
-  cache: Map<string, string | null>,
+  cache: Map<string, MaterializedRetainedImage>,
 ): Promise<Array<Record<string, unknown>>> {
   const now = input.now ?? new Date();
   const receiptForMarker = async (
     marker: unknown,
     callId: string | null,
-  ): Promise<RetainedArtifactMetadata | null> => {
+  ): Promise<RetainedArtifactMetadata | UnrecoverableRetainedReceipt | null> => {
     if (!isRetainedImageMarker(marker)) return null;
     const receipt = retainedReceipt(marker.artifact);
     if (receipt) return receipt;
     // Older canonical history could truncate the artifact UUID and reason as
     // ordinary text. Recover only from this exact session and an unambiguous
-    // tool call; otherwise fail before constructing a malformed model image.
-    if (!callId) throw new Error("Retained screenshot receipt has no tool call identity");
+    // tool call; otherwise the image is unavailable, never a malformed image.
+    if (!callId) return UNRECOVERABLE_RECEIPT;
     const artifact = await getRetainedScreenshotArtifactForToolCall(
       input.db,
       input.workspaceId,
@@ -1045,88 +1099,110 @@ async function materializeRetainedScreenshotHistoryWithCache(
     );
     if (artifact) return reference(artifact);
     // The exact screenshot may exist with its file withheld from this requester.
-    // Carry only its id; dataUrlForReceipt re-applies the withheld lifecycle checks.
+    // Carry only its id; resolveReceipt applies the same withheld handling.
     const withheldId = await getWithheldRetainedScreenshotArtifactIdForToolCall(
       input.db,
       input.workspaceId,
       input.sessionId,
       callId,
     );
-    if (!withheldId) throw new Error("Retained screenshot receipt cannot be recovered");
+    if (!withheldId) return UNRECOVERABLE_RECEIPT;
     return unavailable(withheldId, "pending");
   };
-  const assertRetainedState = (
-    artifactId: string,
-    state: { status: RetainedScreenshotArtifact["status"]; retentionExpiresAt: Date },
-  ) => {
-    if (state.status !== "ready") {
-      throw new RetainedScreenshotUnavailableError(
-        artifactId,
-        unavailableReasonForStatus(state.status),
-      );
+  const isDeliverable = (state: {
+    status: RetainedScreenshotArtifact["status"];
+    retentionExpiresAt: Date;
+  }) => state.status === "ready" && state.retentionExpiresAt.getTime() > now.getTime();
+  const GONE: MaterializedRetainedImage = { kind: "gone" };
+  const resolveReceipt = async (
+    receipt: RetainedArtifactMetadata,
+  ): Promise<MaterializedRetainedImage> => {
+    // A receipt recorded unavailable for a reason no later settlement can
+    // change was never stored: there is nothing to look up.
+    if (!receipt.available && !isRecoverableUnavailableReason(receipt.reason)) {
+      return { kind: "not_stored", reason: receipt.reason };
     }
-    if (state.retentionExpiresAt.getTime() <= now.getTime()) {
-      throw new RetainedScreenshotUnavailableError(artifactId, "expired");
-    }
-  };
-  /** The image as a data URL, or null when file authority withholds it. */
-  const dataUrlForReceipt = async (receipt: RetainedArtifactMetadata): Promise<string | null> => {
-    let dataUrl = cache.get(receipt.artifactId);
-    if (dataUrl === undefined) {
-      if (!input.objectStorage) {
-        throw new RetainedScreenshotUnavailableError(receipt.artifactId, "missing_storage");
-      }
-      const artifact = await getRetainedScreenshotArtifact(
+    if (!input.objectStorage) return GONE;
+    const artifact = await getRetainedScreenshotArtifact(
+      input.db,
+      input.workspaceId,
+      input.sessionId,
+      receipt.artifactId,
+    );
+    if (!artifact) {
+      // In a shared session another participant's private image keeps its
+      // artifact row but hides its file from this requester. It always
+      // becomes the same neutral receipt, whatever its lifecycle, so the text
+      // never reveals its state and never changes. No bytes, no fetch hint,
+      // and no new access.
+      const withheld = await getWithheldRetainedScreenshotArtifactState(
         input.db,
         input.workspaceId,
         input.sessionId,
         receipt.artifactId,
       );
-      if (!artifact) {
-        // In a shared session another participant's private image keeps its
-        // artifact row but hides its file from this requester. Lifecycle
-        // failures stay exactly as for a readable image; a live image becomes
-        // a neutral receipt instead of failing the whole turn. No bytes, no
-        // fetch hint, and no new access.
-        const withheld = await getWithheldRetainedScreenshotArtifactState(
-          input.db,
-          input.workspaceId,
-          input.sessionId,
-          receipt.artifactId,
-        );
-        if (!withheld) throw new RetainedScreenshotUnavailableError(receipt.artifactId, "deleted");
-        assertRetainedState(receipt.artifactId, withheld);
-        cache.set(receipt.artifactId, null);
-        return null;
-      }
-      assertRetainedState(receipt.artifactId, artifact);
-      const object = await retryWhileMissing(async () =>
-        input.objectStorage!.getObjectBytes(artifact.file.objectKey),
-      );
-      if (!object)
-        throw new RetainedScreenshotUnavailableError(receipt.artifactId, "missing_storage");
-      const bytes = object.bytes;
-      const validated = validateRetainableSessionImage({
-        bytes,
+      if (withheld) return { kind: "withheld" };
+      // No row: a stored image was removed, or one still being stored never settled.
+      return GONE;
+    }
+    if (!isDeliverable(artifact)) return GONE;
+    const object = await retryWhileMissing(async () =>
+      input.objectStorage!.getObjectBytes(artifact.file.objectKey),
+    );
+    if (!object) return GONE;
+    let validated: ValidatedSessionImage;
+    try {
+      validated = validateRetainableSessionImage({
+        bytes: object.bytes,
         declaredMediaType: artifact.mediaType,
       });
-      if (
-        validated.sizeBytes !== artifact.sizeBytes ||
-        validated.sha256 !== artifact.sha256 ||
-        validated.width !== artifact.width ||
-        validated.height !== artifact.height ||
-        (receipt.available &&
-          (receipt.sha256 !== artifact.sha256 || receipt.originalBytes !== artifact.sizeBytes))
-      ) {
-        throw new RetainedScreenshotUnavailableError(receipt.artifactId, "invalid_content");
-      }
-      dataUrl = `data:${validated.mediaType};base64,${Buffer.from(validated.bytes).toString("base64")}`;
-      cache.set(receipt.artifactId, dataUrl);
+    } catch (error) {
+      if (error instanceof ScreenshotValidationError) return GONE;
+      throw error;
     }
-    return dataUrl;
+    if (
+      validated.sizeBytes !== artifact.sizeBytes ||
+      validated.sha256 !== artifact.sha256 ||
+      validated.width !== artifact.width ||
+      validated.height !== artifact.height ||
+      (receipt.available &&
+        (receipt.sha256 !== artifact.sha256 || receipt.originalBytes !== artifact.sizeBytes))
+    ) {
+      return GONE;
+    }
+    return {
+      kind: "image",
+      dataUrl: `data:${validated.mediaType};base64,${Buffer.from(validated.bytes).toString("base64")}`,
+    };
   };
-  const withheldReceiptText = (receipt: RetainedArtifactMetadata) =>
-    requesterUnavailableReceiptText(`Image: retained artifactId=${receipt.artifactId}`, "image");
+  /** The image as a data URL, or the deterministic text that replaces it. */
+  const modelImageForReceipt = async (
+    receipt: RetainedArtifactMetadata | UnrecoverableRetainedReceipt,
+  ): Promise<{ dataUrl: string } | { text: string }> => {
+    if (receipt === UNRECOVERABLE_RECEIPT) {
+      return { text: retainedImageUnavailableText(null) };
+    }
+    let resolved = cache.get(receipt.artifactId);
+    if (resolved === undefined) {
+      resolved = await resolveReceipt(receipt);
+      cache.set(receipt.artifactId, resolved);
+    }
+    switch (resolved.kind) {
+      case "image":
+        return { dataUrl: resolved.dataUrl };
+      case "withheld":
+        return {
+          text: requesterUnavailableReceiptText(
+            `Image: retained artifactId=${receipt.artifactId}`,
+            "image",
+          ),
+        };
+      case "not_stored":
+        return { text: retainedImageUnavailableText(receipt.artifactId, resolved.reason) };
+      case "gone":
+        return { text: retainedImageUnavailableText(receipt.artifactId) };
+    }
+  };
   const materializeEntry = async (entry: unknown, callId: string | null): Promise<unknown> => {
     const image =
       entry && typeof entry === "object" && !Array.isArray(entry)
@@ -1134,9 +1210,11 @@ async function materializeRetainedScreenshotHistoryWithCache(
         : null;
     const receipt = await receiptForMarker(image, callId);
     if (!receipt) return entry;
-    const dataUrl = await dataUrlForReceipt(receipt);
-    if (dataUrl !== null) return { ...(entry as Record<string, unknown>), image: dataUrl };
-    return { type: "input_text", text: withheldReceiptText(receipt) };
+    const resolved = await modelImageForReceipt(receipt);
+    if ("dataUrl" in resolved) {
+      return { ...(entry as Record<string, unknown>), image: resolved.dataUrl };
+    }
+    return { type: "input_text", text: resolved.text };
   };
 
   const materialized: Array<Record<string, unknown>> = [];
@@ -1144,10 +1222,10 @@ async function materializeRetainedScreenshotHistoryWithCache(
     const callId = historyCallId(item);
     const directReceipt = await receiptForMarker(item.output, callId);
     if (directReceipt) {
-      const dataUrl = await dataUrlForReceipt(directReceipt);
+      const resolved = await modelImageForReceipt(directReceipt);
       materialized.push({
         ...item,
-        output: dataUrl ?? withheldReceiptText(directReceipt),
+        output: "dataUrl" in resolved ? resolved.dataUrl : resolved.text,
       });
       continue;
     }
