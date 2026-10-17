@@ -13,6 +13,7 @@ import {
   isSessionEventPersistenceError,
   DatabaseTransactionError,
   SandboxLeaseTransitionError,
+  KnowledgeLearningScopeChangedError,
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
@@ -1837,6 +1838,9 @@ function baseAgentRunFailurePayload(
   maxProviderRecoveryCount?: number;
   providerRecoveryExhaustedReason?: "deadline" | "retry_limit" | "invalid_clock";
 } {
+  if (error instanceof KnowledgeLearningScopeChangedError) {
+    return { error: error.message, code: error.code, retryable: false };
+  }
   if (error instanceof SandboxMaterializationVerificationError) {
     return {
       error: error.message,

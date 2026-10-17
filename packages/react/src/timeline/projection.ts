@@ -14,6 +14,8 @@ import {
   type TimelineAnnotation,
 } from "@opengeni/sdk";
 import fleetDecisionItem from "./fleet-decision-projection";
+import { learningRefusalFromToolOutput } from "@opengeni/sdk/learning-refusal";
+import { learningRefusalText } from "./learning-refusal-copy";
 import {
   allowanceExhaustedMessage,
   parseAllowanceExhaustedRefusal,
@@ -163,6 +165,9 @@ export function buildTimeline(
 ): TimelineItem[] {
   const items: TimelineItem[] = [];
   const allowanceNotices = new Set<string>();
+  // One "not saved" notice per turn for the same refused change, however
+  // often the agent retried it.
+  const learningRefusalNotices = new Set<string>();
   const allowanceNotice = (event: SessionEvent, turnId: string | null) => {
     const refusal = parseAllowanceExhaustedRefusal(event.payload);
     if (!refusal) return null;
@@ -940,6 +945,29 @@ export function buildTimeline(
             text: sourceText,
             label: target.name,
           };
+        }
+        // A refused Skill, instruction, or Knowledge change is told to the
+        // person outside the folded work row, whatever the agent then says.
+        const learningRefusal = learningRefusalFromToolOutput(payload.output);
+        if (learningRefusal) {
+          const key = JSON.stringify([
+            turnId ?? target.turnId,
+            learningRefusal.destination,
+            learningRefusal.reason,
+            learningRefusal.skillId ?? null,
+          ]);
+          if (!learningRefusalNotices.has(key)) {
+            learningRefusalNotices.add(key);
+            closeStreamingTail();
+            items.push({
+              kind: "notice",
+              id: `${event.id}-learning-refusal`,
+              tone: "failed",
+              text: learningRefusalText(t, learningRefusal),
+              learningRefusal,
+              occurredAt: event.occurredAt,
+            });
+          }
         }
         break;
       }
@@ -3166,7 +3194,15 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
     );
     if (first && first !== visibleMessage) visibleMessages.unshift(first);
   }
-  const body = collected.filter((group) => !visibleMessages.includes(group as never));
+  // A change the person asked to keep that was not saved stays in view beside
+  // the answer, whatever the agent said about it.
+  const keptNotices = collected.filter(
+    (group) =>
+      group.kind === "item" && group.item.kind === "notice" && !!group.item.learningRefusal,
+  );
+  const body = collected.filter(
+    (group) => !visibleMessages.includes(group as never) && !keptNotices.includes(group),
+  );
   if (body.length === 0) {
     return;
   }
@@ -3192,7 +3228,7 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
     turnGroup.failureText = turnEnd.failureText;
   }
 
-  groups.splice(startIndex, collectedLength, turnGroup, ...visibleMessages);
+  groups.splice(startIndex, collectedLength, turnGroup, ...keptNotices, ...visibleMessages);
 }
 
 /** Whether the input boundary before a turn includes a person's message. */

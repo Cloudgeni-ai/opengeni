@@ -1,8 +1,15 @@
 import { createHash } from "node:crypto";
 import type { Settings } from "@opengeni/config";
-import { type SkillActor, type SkillScope, type SkillWriteReceipt } from "@opengeni/contracts";
+import {
+  type LearningRefusal,
+  type SkillActor,
+  type SkillScope,
+  type SkillWriteReceipt,
+  withLearningRefusalMeta,
+} from "@opengeni/contracts";
 import {
   assertSkillReadAttempt,
+  classifyLearningRefusal,
   getActiveSessionFunctionToolResults,
   skillReviewResolution,
   installPortableSkill,
@@ -64,11 +71,50 @@ export function skillRefusalMessage(error: SkillLifecycleRefusedError): string {
   return `Nothing was saved: ${error.message}.`;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/**
+ * What an authority refusal of a Skill change means for the person, for the
+ * timeline notice that tells them it was not saved. Null for refusals that
+ * are not a policy decision (a stale edit, invalid files, a transient fence).
+ */
+export async function skillLearningRefusal(
+  error: SkillLifecycleRefusedError,
+  args: unknown,
+  skillScope: (skillId: string) => Promise<SkillScope | null>,
+): Promise<LearningRefusal | null> {
+  if (error.code !== "42501") return null;
+  const requested =
+    args && typeof args === "object" ? (args as { skillId?: unknown }).skillId : undefined;
+  const skillId = typeof requested === "string" && UUID.test(requested) ? requested : undefined;
+  if (error.message === siteClampedAgentMessage("Skills"))
+    return { destination: "skill", reason: "site_agent", ...(skillId ? { skillId } : {}) };
+  let scope: SkillScope | null = null;
+  if (skillId && error.message === "Skill outside accepted learning scope") {
+    try {
+      scope = await skillScope(skillId);
+    } catch {
+      // The notice falls back to the generic refusal.
+    }
+  }
+  return classifyLearningRefusal({
+    destination: "skill",
+    message: error.message,
+    skillId,
+    skillScope: scope,
+  });
+}
+
 /**
  * The lifecycle rolls a refused change back as a whole, so report it as a
- * definite refusal with its reason, not a failure whose outcome is unknown.
+ * definite refusal with its reason, not a failure whose outcome is unknown. An
+ * authority refusal also carries the content-free refusal fact in `_meta`,
+ * which the model never sees, so the person is told it was not saved.
  */
-function withDefiniteSkillRefusals(definition: AttemptToolDefinition): AttemptToolDefinition {
+function withDefiniteSkillRefusals(
+  definition: AttemptToolDefinition,
+  skillScope: (skillId: string) => Promise<SkillScope | null>,
+): AttemptToolDefinition {
   return {
     ...definition,
     execute: async (args, context) => {
@@ -77,13 +123,15 @@ function withDefiniteSkillRefusals(definition: AttemptToolDefinition): AttemptTo
       } catch (error) {
         if (!(error instanceof SkillLifecycleRefusedError)) throw error;
         const message = skillRefusalMessage(error);
-        return {
+        const result = {
           isError: true,
-          content: [{ type: "text", text: message }],
+          content: [{ type: "text" as const, text: message }],
           structuredContent: {
             error: { code: "skill_change_refused", message, retryable: error.retryable },
           },
         };
+        const refusal = await skillLearningRefusal(error, args, skillScope);
+        return refusal ? withLearningRefusalMeta(result, refusal) : result;
       }
     },
   };
@@ -386,7 +434,12 @@ export function createWorkspaceSkillTools(input: {
       filesystem: input.filesystem,
       save,
     }),
-  ].map(withDefiniteSkillRefusals);
+  ].map((definition) =>
+    withDefiniteSkillRefusals(
+      definition,
+      async (skillId) => (await readSkill(input.db, context, skillId))?.scope ?? null,
+    ),
+  );
 }
 
 function registrySkillSource(scope: SkillScope): SkillReadOrigin["source"] {

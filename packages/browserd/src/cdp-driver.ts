@@ -1373,7 +1373,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             error instanceof InteractionDefiniteDriverError
               ? new InteractionOutcomeUnknownDriverError(
                   "outcome_unknown",
-                  `browser action sent input or completed ${completedActions} action(s) before a later failure (${error.code}: ${error.message}); check the current page before continuing and do not replay the completed actions automatically`,
+                  `browser action ${actions.length > 1 ? `#${actionIndex} (${action.type}) ` : ""}failed after it sent input or completed ${completedActions} action(s) (${error.code}: ${error.message}); check the current page before continuing and do not replay the completed actions automatically`,
                 )
               : error,
             requestsBeforeActions,
@@ -4073,13 +4073,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase()),
       );
     }
-    const unique = uniqueEntries(matches);
+    const needle = locator.kind === "role" ? locator.name : locator.text;
+    // "Save" also matches "Save as draft". When exactly one candidate's whole
+    // name is the requested text, that is the element the caller named.
+    const unique =
+      uniqueEntries(matches) ??
+      (needle !== undefined && !(locator.kind === "role" && locator.exact)
+        ? uniqueEntries(matches.filter((entry) => sameAccessibleName(entry.name, needle)))
+        : null);
     if (!unique) {
       throw new InteractionDefiniteDriverError(
         matches.length === 0 ? "locator_not_found" : "locator_ambiguous",
         matches.length === 0
           ? "browser locator found no element"
-          : "browser locator matched multiple elements",
+          : ambiguousLocatorMessage(matches),
       );
     }
     return unique;
@@ -4281,9 +4288,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         (await this.revealFromStickyCover(state, backendDOMNodeId, frameId)) ??
         (await this.revealByHover(state, backendDOMNodeId, frameId, point));
       if (!revealed) {
+        const cover = await this.coveringElement(state, backendDOMNodeId);
         throw new InteractionDefiniteDriverError(
           "invalid_action",
-          "browser element is covered or not pointer-actionable",
+          cover
+            ? `browser element is covered by ${cover} at its center`
+            : "browser element is covered or not pointer-actionable",
           true,
         );
       }
@@ -4330,6 +4340,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private async hitsAtCenter(state: TargetState, backendDOMNodeId: number): Promise<boolean> {
     return (await this.callOnNode(state, backendDOMNodeId, HIT_TEST_FUNCTION, [])) === true;
+  }
+
+  /** A short role-and-label description of what receives pointer input at the
+   * target's center instead of the target, or null when nothing else does. */
+  private async coveringElement(
+    state: TargetState,
+    backendDOMNodeId: number,
+  ): Promise<string | null> {
+    try {
+      const value = await this.callOnNode(state, backendDOMNodeId, COVER_DESCRIPTION_FUNCTION, []);
+      return typeof value === "string" && value ? value.slice(0, 160) : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -5636,6 +5660,35 @@ function uniqueEntries(entries: CdpAccessibilityEntry[]): CdpAccessibilityEntry 
   return byBackend.size === 1 ? [...byBackend.values()][0]! : null;
 }
 
+function sameAccessibleName(name: string | null, requested: string): boolean {
+  const normalize = (value: string) => value.replace(/\s+/gu, " ").trim().toLocaleLowerCase();
+  return name !== null && normalize(name) === normalize(requested);
+}
+
+const AMBIGUOUS_LOCATOR_LISTED_MATCHES = 5;
+
+/** Name the candidates so the caller can act on one ref instead of guessing. */
+function ambiguousLocatorMessage(matches: readonly CdpAccessibilityEntry[]): string {
+  const byBackend = new Map<number, CdpAccessibilityEntry>();
+  for (const entry of matches) {
+    if (entry.backendDOMNodeId !== null && !byBackend.has(entry.backendDOMNodeId))
+      byBackend.set(entry.backendDOMNodeId, entry);
+  }
+  const distinct = [...byBackend.values()];
+  const listed = distinct
+    .slice(0, AMBIGUOUS_LOCATOR_LISTED_MATCHES)
+    .map((entry) => {
+      const name = boundedTargetText(entry.name);
+      return `${entry.role}${name ? ` ${JSON.stringify(name)}` : ""} [${entry.ref}]`;
+    })
+    .join(", ");
+  const more =
+    distinct.length > AMBIGUOUS_LOCATOR_LISTED_MATCHES
+      ? ` and ${distinct.length - AMBIGUOUS_LOCATOR_LISTED_MATCHES} more`
+      : "";
+  return `browser locator matched ${distinct.length} elements: ${listed}${more}; act on one ref or make the locator exact`;
+}
+
 function boundedTargetText(value: string | null): string | null {
   const text = value?.replace(/\s+/gu, " ").trim() ?? "";
   if (!text) return null;
@@ -5899,6 +5952,33 @@ const HIT_TEST_FUNCTION = `function() {
   const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
   const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
   return Boolean(hit && (element === hit || element.contains?.(hit)));
+}`;
+
+// Describes the element on top at the target's centre by its nearest
+// labelled ancestor: role (or tag) and accessible label. Text content is
+// read only from non-editable elements and bounded; input values never are.
+const COVER_DESCRIPTION_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return null;
+  const rect = element.getBoundingClientRect();
+  const root = element.getRootNode();
+  const hitTest = root && typeof root.elementFromPoint === "function" ? root : document;
+  const hit = hitTest.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  if (!hit || hit === element || element.contains(hit) || hit.contains(element)) return null;
+  const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+  let node = hit;
+  for (let depth = 0; node instanceof Element && depth < 6; depth += 1) {
+    const role = node.getAttribute("role");
+    const label = clean(node.getAttribute("aria-label") || node.getAttribute("title"));
+    if (role || label) {
+      const kind = role || node.tagName.toLowerCase();
+      return label ? kind + " " + JSON.stringify(label.slice(0, 80)) : kind;
+    }
+    node = node.parentElement;
+  }
+  const editable = hit.closest("input, textarea, select, [contenteditable]");
+  const text = editable ? "" : clean(hit.textContent).slice(0, 60);
+  return hit.tagName.toLowerCase() + (text ? " " + JSON.stringify(text) : "");
 }`;
 
 // Whether pointer input at the target's centre falls through it to one of its

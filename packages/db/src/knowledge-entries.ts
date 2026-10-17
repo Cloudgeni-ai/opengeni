@@ -27,6 +27,11 @@ import {
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { safeDatabaseErrorFacts } from "./persistence-errors";
+import {
+  isKnowledgeLearningScopeGuardError,
+  KnowledgeLearningScopeChangedError,
+} from "./knowledge-learning-errors";
+export { KnowledgeLearningScopeChangedError } from "./knowledge-learning-errors";
 import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
 import {
   fromPostgresLosslessJson,
@@ -160,6 +165,10 @@ export async function freezeAgentLearningPolicy(db: Database, context: Knowledge
       })
       .passthrough()
       .parse(row?.policy);
+  }).catch((error: unknown) => {
+    if (isKnowledgeLearningScopeGuardError(error))
+      throw new KnowledgeLearningScopeChangedError(error);
+    throw error;
   });
 }
 

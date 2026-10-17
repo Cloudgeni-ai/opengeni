@@ -5,6 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
 import { SITE_NO_ORIGIN_ID } from "@opengeni/contracts/site-session-http";
+import { LEARNING_REFUSAL_META_KEY } from "@opengeni/contracts/learning-refusal";
 import {
   assertNotSiteClampedAgent,
   assertScheduledTaskMutationOwner,
@@ -883,6 +884,20 @@ test("agents started from a Site do not learn or change secrets, members, connec
           name,
           clamped,
         });
+        // A refused learning write tells the person, through the timeline,
+        // that it was not saved; the fact rides in `_meta`, never the text.
+        const learningDestination =
+          name === "instruction_policy_save"
+            ? "instruction"
+            : name.startsWith("knowledge_")
+              ? "knowledge"
+              : null;
+        if (clamped && learningDestination) {
+          expect({ name, refusal: result._meta?.[LEARNING_REFUSAL_META_KEY] }).toEqual({
+            name,
+            refusal: { destination: learningDestination, reason: "site_agent" },
+          });
+        }
       }
     } finally {
       await client.close();
