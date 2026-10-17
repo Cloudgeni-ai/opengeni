@@ -8519,51 +8519,6 @@ export async function getRetainedScreenshotArtifact(
   });
 }
 
-/**
- * Lifecycle state of a session-qualified screenshot whose file row the current
- * file authority hides, such as another member's private image in a shared
- * session. The file foreign key restricts deleting a file while its artifact
- * row exists, so an artifact row without a visible file is an authority
- * exclusion, never a deletion. Returns null when the artifact is absent or its
- * file is readable. Exposes only workspace-visible lifecycle state: no file,
- * object key or bytes, and the authority boundary is unchanged.
- */
-export async function getWithheldRetainedScreenshotArtifactState(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  artifactId: string,
-): Promise<{ status: RetainedScreenshotArtifactStatus; retentionExpiresAt: Date } | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select({
-        status: schema.retainedScreenshotArtifacts.status,
-        retentionExpiresAt: schema.retainedScreenshotArtifacts.retentionExpiresAt,
-      })
-      .from(schema.retainedScreenshotArtifacts)
-      .leftJoin(
-        schema.files,
-        and(
-          eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
-          eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
-        ),
-      )
-      .where(
-        and(
-          retainedScreenshotSessionArtifactPredicate(workspaceId, sessionId, artifactId),
-          isNull(schema.files.id),
-        ),
-      )
-      .limit(1);
-    return row
-      ? {
-          status: row.status as RetainedScreenshotArtifactStatus,
-          retentionExpiresAt: row.retentionExpiresAt,
-        }
-      : null;
-  });
-}
-
 function retainedScreenshotSessionArtifactPredicate(
   workspaceId: string,
   sessionId: string,
@@ -8637,9 +8592,10 @@ export async function getRetainedScreenshotArtifactForToolCall(
 }
 
 /** Recover a legacy damaged receipt's artifact id when its tool call has one
- * exact screenshot in this session whose file the current file authority hides
- * (see getWithheldRetainedScreenshotArtifactState). Returns only the id; the
- * caller still applies the withheld lifecycle checks. */
+ * exact screenshot in this session whose file the current file authority hides.
+ * The file foreign key restricts deleting a file while its artifact row exists,
+ * so such a row is an authority exclusion, never a deletion. Returns only the
+ * id; the caller projects it as a neutral receipt without bytes. */
 export async function getWithheldRetainedScreenshotArtifactIdForToolCall(
   db: Database,
   workspaceId: string,
@@ -8810,10 +8766,18 @@ export async function completeRetainedScreenshotMaintenance(
         !(claim.claimId === null && claim.status === input.outcome)
       )
         return false;
+      // Maintenance runs without an acting subject, which keeps every session
+      // in the workspace visible, including another member's private chat. A
+      // service subject would hide user-private sessions, and with them their
+      // screenshot rows, so expiry could never settle. Only an image held as
+      // a private file needs an actor, and then it acts as that file's owner:
+      // the owner's own private sessions stay visible to it.
+      if (!claim?.owner) return completeRetainedScreenshotMaintenanceInOwnerScope(tx, input);
       return withSessionRlsActorContext(
         {
           subjectId: "service:retained-screenshot-maintenance",
-          privateFileOwnerSubjectId: claim?.owner ?? null,
+          initiatingHumanSubjectId: claim.owner,
+          privateFileOwnerSubjectId: claim.owner,
         },
         () => completeRetainedScreenshotMaintenanceInOwnerScope(tx, input),
       );
