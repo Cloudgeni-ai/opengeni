@@ -1657,8 +1657,8 @@ async function failPreparedBrowserSessionTransition(
     workspaceId: string;
     operationId: string;
     browserSessionId: string;
-    kind: "suspend" | "end";
-    transitionalLifecycle: "suspending" | "ending";
+    kind: "suspend" | "resume" | "end";
+    transitionalLifecycle: "suspending" | "restoring" | "ending";
     restoreLifecycle: BrowserSessionRow["lifecycle"];
     restoreFailureCode?: string | null;
     expectedControllerGeneration?: string | null;
@@ -2410,6 +2410,10 @@ export async function failBrowserSessionResume(
   });
 }
 
+/** Return a browser to suspended when its resume fails before controller
+ * dispatch. Returns null once the operation was dispatched or settled, so the
+ * caller's original error stands and the dispatched path keeps its own
+ * settlement. */
 export async function failBrowserSessionResumePreparation(
   db: Database,
   input: {
@@ -2419,15 +2423,12 @@ export async function failBrowserSessionResumePreparation(
     browserSessionId: string;
     error: InteractionErrorValue;
   },
-): Promise<BrowserSessionMutationResponseValue> {
-  return await failBrowserSessionTransition(db, {
+): Promise<BrowserSessionMutationResponseValue | null> {
+  return await failPreparedBrowserSessionTransition(db, {
     ...input,
-    controllerGeneration: null,
     kind: "resume",
-    expectedLifecycle: "restoring",
-    resultLifecycle: "suspended",
-    state: "failed",
-    clearController: true,
+    transitionalLifecycle: "restoring",
+    restoreLifecycle: "suspended",
   });
 }
 

@@ -21,6 +21,7 @@ import {
   createSession,
   dispatchBrowserSessionOperation,
   dispatchComputerSessionOperation,
+  failBrowserSessionResumePreparation,
   failBrowserSessionSuspension,
   failBrowserSessionOperation,
   failPreparedBrowserSessionEnd,
@@ -172,6 +173,45 @@ async function activeBrowser(scope: Awaited<ReturnType<typeof fixture>>) {
     engineVersion: "151.0.7922.108",
   });
   return { ...active, controllerGeneration };
+}
+
+/** An active browser suspended to a committed private checkpoint, with its
+ * controller already cleaned up: the state any resume starts from. */
+async function suspendedBrowserWithCheckpoint(
+  scope: Awaited<ReturnType<typeof fixture>>,
+): Promise<string> {
+  const active = await activeBrowser(scope);
+  const browserSessionId = active.session.id;
+  const operationId = crypto.randomUUID();
+  await prepareBrowserSessionSuspend(client.db, {
+    ...scope,
+    browserSessionId,
+    operationId,
+    actorSubjectId: scope.subjectId,
+  });
+  await dispatchBrowserSessionOperation(client.db, {
+    ...scope,
+    operationId,
+    browserSessionId,
+    controllerGeneration: active.controllerGeneration,
+    stateUpload: {
+      objectKey: checkpointArtifact(scope, operationId).objectKey,
+      cleanupAfter: new Date(Date.now() + 60_000),
+    },
+  });
+  await commitBrowserSessionSuspension(client.db, {
+    ...scope,
+    operationId,
+    browserSessionId,
+    controllerGeneration: active.controllerGeneration,
+    artifact: checkpointArtifact(scope, operationId),
+  });
+  await clearSuspendedBrowserSessionController(client.db, {
+    ...scope,
+    browserSessionId,
+    expectedControllerGeneration: active.controllerGeneration,
+  });
+  return browserSessionId;
 }
 
 function checkpointArtifact(
@@ -1315,6 +1355,60 @@ describe("durable BrowserSession lifecycle", () => {
         browserSessionId: active.session.id,
       }),
     ).not.toBeNull();
+  });
+
+  test("a resume that fails before dispatch returns to suspended", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const browserSessionId = await suspendedBrowserWithCheckpoint(scope);
+    const operationId = crypto.randomUUID();
+    const input = { ...scope, browserSessionId, operationId, actorSubjectId: scope.subjectId };
+    // The resume is prepared, then its placement turns out to be offline
+    // before the controller is ever dispatched.
+    expect((await prepareBrowserSessionResume(client.db, input)).session.lifecycle).toBe(
+      "restoring",
+    );
+    const failed = await failBrowserSessionResumePreparation(client.db, {
+      ...input,
+      error: { code: "resource_unavailable", message: "Placement is offline", retryable: true },
+    });
+    expect(failed).toMatchObject({
+      session: { lifecycle: "suspended", controller: null },
+      operation: { state: "failed", error: { message: "Placement is offline" } },
+    });
+    expect(
+      await getBrowserPrivateCheckpointAuthority(client.db, { ...scope, browserSessionId }),
+    ).not.toBeNull();
+
+    // A fresh resume starts over; once dispatched, a late failure is a no-op.
+    const nextOperationId = crypto.randomUUID();
+    const next = await prepareBrowserSessionResume(client.db, {
+      ...input,
+      operationId: nextOperationId,
+    });
+    expect(next.operation.state).toBe("prepared");
+    const generation = crypto.randomUUID();
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: nextOperationId,
+      browserSessionId,
+      controllerGeneration: generation,
+      controller: {
+        controllerId: "browserd:test",
+        controllerGeneration: generation,
+        placementInstanceId: "placement:resumed",
+      },
+    });
+    expect(
+      await failBrowserSessionResumePreparation(client.db, {
+        ...input,
+        operationId: nextOperationId,
+        error: { code: "driver_failed", message: "Too late", retryable: true },
+      }),
+    ).toBeNull();
+    expect(await getBrowserSession(client.db, { ...scope, browserSessionId })).toMatchObject({
+      lifecycle: "restoring",
+    });
   });
 
   test("an expired resume returns to suspended and resumes from the same private checkpoint", async () => {
