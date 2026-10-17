@@ -22,6 +22,7 @@ const fixture = `data:text/html,${encodeURIComponent(`<!doctype html><html lang=
 <label id="cl">Country</label>
 <div id="combo" role="combobox" aria-labelledby="cl" aria-expanded="false" aria-haspopup="listbox" tabindex="0">Select a country</div>
 <label>Plan <select><option>Starter</option><option>Team</option></select></label>
+<label>Day <select>${Array.from({ length: 31 }, (_, day) => `<option>${day + 1}</option>`).join("")}</select></label>
 <label><input type="checkbox"> News</label>
 <label>Name <input type="text"></label>
 <div id="pager"></div>
@@ -158,6 +159,14 @@ e2e(
       // Typed text stays out of observations; a chosen option is shown.
       expect(node(observed, "textbox", "Name").value).toBeUndefined();
       expect(node(observed, "combobox", "Plan").value).toBe("Starter");
+      // A short select lists its options; a long one stays collapsed.
+      expect(
+        (node(observed, "combobox", "Plan").children ?? [])
+          .flatMap((child) => [child, ...(child.children ?? [])])
+          .filter((child) => child.role === "option")
+          .map((child) => child.name),
+      ).toEqual(["Starter", "Team"]);
+      expect(node(observed, "combobox", "Day").children ?? []).toEqual([]);
       expect(node(observed, "combobox", "Country").value).toBe("Select a country");
 
       // Clicking one ref twice in a batch fails on the second click because

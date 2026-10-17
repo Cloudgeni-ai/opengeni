@@ -146,7 +146,15 @@ export function normalizeCdpAccessibilityTree(options: {
   for (const [nodeId, entry] of entriesByNodeId) {
     if (!isEditableControlRole(entry.role)) continue;
     const raw = rawById.get(nodeId);
-    if (raw) for (const childId of childIds(raw)) suppressSubtree(childId);
+    if (!raw) continue;
+    // A native select's options are what an agent chooses from, so a short
+    // option list stays visible under its non-editable combobox. Long lists
+    // (countries, time zones) stay collapsed; select takes the label anyway.
+    if (entry.role === "combobox" && !entry.states.some((state) => state.startsWith("editable"))) {
+      const optionCount = countOptions(rawById, nodeId, VISIBLE_SELECT_OPTIONS_MAX + 1);
+      if (optionCount > 0 && optionCount <= VISIBLE_SELECT_OPTIONS_MAX) continue;
+    }
+    for (const childId of childIds(raw)) suppressSubtree(childId);
   }
 
   const visit = (nodeId: string): InteractionSemanticNodeValue[] => {
@@ -266,6 +274,30 @@ const SEMANTIC_VALUE_MAX_CHARS = 32_768;
 
 function isEditableControlRole(role: string): boolean {
   return ["textbox", "searchbox", "combobox", "spinbutton"].includes(role);
+}
+
+/** Most options a collapsed select may show in an observation. */
+const VISIBLE_SELECT_OPTIONS_MAX = 25;
+
+/** Counts option descendants of a node, stopping once `limit` is reached. */
+function countOptions(
+  rawById: ReadonlyMap<string, CdpAxNode>,
+  nodeId: string,
+  limit: number,
+): number {
+  let count = 0;
+  const pending = [...childIds(rawById.get(nodeId) ?? {})];
+  const seen = new Set<string>();
+  while (pending.length > 0 && count < limit) {
+    const id = pending.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const node = rawById.get(id);
+    if (!node) continue;
+    if (roleValue(node) === "option" || roleValue(node) === "MenuListOption") count += 1;
+    pending.push(...childIds(node));
+  }
+  return count;
 }
 
 /** Chromium's roles for native date, time, month, week and datetime-local inputs. */
