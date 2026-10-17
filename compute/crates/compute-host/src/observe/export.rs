@@ -326,7 +326,13 @@ impl Exporter {
             };
             let asked = wait.is_some();
             let wait = wait.unwrap_or(delay);
-            if wait > self.config.retry_for.saturating_sub(started.elapsed()) {
+            // No time left ends the retries even when a collector asks for
+            // no delay at all, so they never outlast their budget.
+            let left = self.config.retry_for.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                return Sent::Failed(problem);
+            }
+            if wait > left {
                 return Sent::Failed(if asked {
                     format!(
                         "{problem}, and asked to wait {} s, beyond the time left to retry",

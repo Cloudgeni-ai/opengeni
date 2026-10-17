@@ -255,6 +255,46 @@ async fn any_delay_a_collector_asks_for_fails_the_batch_without_harm() {
 }
 
 #[tokio::test]
+async fn retries_asked_for_at_once_still_end_with_their_time() {
+    // A collector that keeps saying "again, now": with no time to retry,
+    // as when flushing, one attempt; with a little, done soon after it.
+    let again = vec![Answer(503, Some(0), ""); 100_000];
+    let (endpoint, mut received) = collector(again.clone()).await;
+    let (sent, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        send(&exporter(&endpoint, Duration::ZERO), &mut events(1)),
+    )
+    .await
+    .expect("one attempt ends");
+    assert!(
+        matches!(sent, Sent::Failed(ref why) if why.contains("503")),
+        "{sent:?}"
+    );
+    received.recv().await.unwrap();
+    assert!(received.try_recv().is_err(), "sent once");
+
+    let (endpoint, _received) = collector(again).await;
+    let started = tokio::time::Instant::now();
+    let (sent, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        send(
+            &exporter(&endpoint, Duration::from_millis(200)),
+            &mut events(1),
+        ),
+    )
+    .await
+    .expect("the retries end with their time");
+    assert!(
+        matches!(sent, Sent::Failed(ref why) if why.contains("503")),
+        "{sent:?}"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(200),
+        "retried meanwhile"
+    );
+}
+
+#[tokio::test]
 async fn a_response_cut_short_is_a_transport_failure_and_retried() {
     let script = vec![Answer(200, None, TRUNCATED)];
     let (endpoint, mut received) = collector(script).await;
