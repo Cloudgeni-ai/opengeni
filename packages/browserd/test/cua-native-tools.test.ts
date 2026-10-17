@@ -205,3 +205,51 @@ test("native admission refuses session escape, unselected host tools and schema 
   );
   expect(calls).toBe(0);
 });
+
+test("a run_steps batch that provably ran nothing fails; any possible delivery stays unknown", async () => {
+  const batch = (structuredContent: Record<string, unknown>) => {
+    const runtime: CuaDesktopRuntime = {
+      listToolsJson: async () => JSON.stringify({ tools: CUA_DESKTOP_TOOLS }),
+      callTool: async () => {
+        const raw = { content: [{ type: "text", text: "run_steps report" }], structuredContent };
+        return {
+          text: "",
+          images: [],
+          isError: true,
+          degraded: false,
+          structuredJson: JSON.stringify(structuredContent),
+          rawJson: JSON.stringify({ ...raw, isError: true }),
+        };
+      },
+      shutdown: async () => {},
+    };
+    return new CuaNativeTools(runtime, "owned").call(command());
+  };
+  const stopped = (failed: number, phase: string) => ({
+    ok: false,
+    total: 2,
+    executed: failed + 1,
+    failed_step: failed,
+    steps: [
+      ...Array.from({ length: failed }, () => ({ ok: true, phase: "action" })),
+      { ok: false, phase, code: "not_found", message: "no button" },
+    ],
+  });
+
+  const notFound = await batch(stopped(0, "find"));
+  expect(notFound.outcome).toBe("failed");
+  expect(notFound.error).toMatchObject({ code: "locator_not_found" });
+  for (const phase of ["wait_for", "time_budget"])
+    expect(await batch(stopped(0, phase))).toMatchObject({
+      outcome: "failed",
+      error: { code: "invalid_action" },
+    });
+  expect(
+    await batch({ ok: false, code: "invalid_batch", executed: 0, failed_step: 3, detail: "bad" }),
+  ).toMatchObject({ outcome: "failed", error: { code: "invalid_action" } });
+
+  // An earlier step ran, or the first step reached its action: the app may have changed.
+  expect((await batch(stopped(1, "find"))).outcome).toBe("outcome_unknown");
+  expect((await batch(stopped(0, "action"))).outcome).toBe("outcome_unknown");
+  expect((await batch(stopped(0, "expect"))).outcome).toBe("outcome_unknown");
+});
