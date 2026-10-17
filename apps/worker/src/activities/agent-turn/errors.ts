@@ -23,6 +23,7 @@ import {
   describeCompactionProviderRejection,
   type CompactionProviderRejection,
   isMcpRequestTimeoutError,
+  isMcpServiceUnavailableError,
   isMcpTransportConnectivityError,
   isModalTaskExecStartPreDispatchUnavailableError,
   isModalCommandStartOutcomeUnknownError,
@@ -116,12 +117,16 @@ import {
   PROVIDER_OVERLOAD_RECOVERY_CODE,
   MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
   PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS,
+  MCP_SERVICE_UNAVAILABLE_BACKOFF_MS,
+  MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
   validProviderOverloadRecoveryDelay,
+  windowedRecoveryPolicy,
 } from "./provider-recovery-policy";
 export {
   PROVIDER_OVERLOAD_RECOVERY_CODE,
   MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
   PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS,
+  MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
 } from "./provider-recovery-policy";
 
 // Retryable provider connectivity/5xx failures start quickly and back off to
@@ -130,9 +135,7 @@ export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 export const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
 export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_MS.length;
 export function providerRecoveryLimit(failureCode: unknown): number {
-  return failureCode === PROVIDER_OVERLOAD_RECOVERY_CODE
-    ? MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES
-    : MAX_AUTOMATIC_PROVIDER_RECOVERIES;
+  return windowedRecoveryPolicy(failureCode)?.maxRecoveries ?? MAX_AUTOMATIC_PROVIDER_RECOVERIES;
 }
 /**
  * Minimum wait per rate-limited recovery. Providers such as Azure OpenAI often
@@ -194,6 +197,7 @@ export function providerRecoveryResult(input: {
   now?: number;
 }): ProviderRecoveryResult {
   const overload = input.failureCode === PROVIDER_OVERLOAD_RECOVERY_CODE;
+  const window = windowedRecoveryPolicy(input.failureCode);
   const limit = providerRecoveryLimit(input.failureCode);
   const exhausted = (
     reason: "deadline" | "retry_limit" | "invalid_clock",
@@ -204,7 +208,7 @@ export function providerRecoveryResult(input: {
     providerRecoveryExhaustedReason: reason,
   });
   if (input.attemptNumber > limit) {
-    if (overload) return exhausted("retry_limit");
+    if (window) return exhausted("retry_limit");
     return {
       status: "exhausted",
       providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
@@ -213,7 +217,7 @@ export function providerRecoveryResult(input: {
   }
   const now = input.now ?? Date.now();
   const startedAt = input.recoveryStartedAt ?? (input.attemptNumber === 1 ? now : NaN);
-  if (overload && (!Number.isFinite(startedAt) || !Number.isFinite(now) || startedAt > now)) {
+  if (window && (!Number.isFinite(startedAt) || !Number.isFinite(now) || startedAt > now)) {
     return exhausted("invalid_clock");
   }
   const providerDelay =
@@ -234,25 +238,35 @@ export function providerRecoveryResult(input: {
             )
           ]!,
         )
-      : overload ||
-          input.failureCode === "provider_unavailable" ||
-          input.failureCode === "upstream_connectivity_unavailable" ||
-          input.failureCode === "sandbox_command_start_unavailable" ||
-          input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
-          input.failureCode === "mcp_transport_timeout" ||
-          input.failureCode === "mcp_transport_unavailable" ||
-          input.failureCode === "turn_execution_policy_definition_mismatch" ||
-          input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
+      : input.failureCode === MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE
         ? Math.max(
             providerDelay ?? 0,
-            PROVIDER_CONNECTIVITY_BACKOFF_MS[
+            MCP_SERVICE_UNAVAILABLE_BACKOFF_MS[
               Math.min(
                 Math.max(Math.trunc(input.attemptNumber) - 1, 0),
-                PROVIDER_CONNECTIVITY_BACKOFF_MS.length - 1,
+                MCP_SERVICE_UNAVAILABLE_BACKOFF_MS.length - 1,
               )
             ]!,
           )
-        : PROVIDER_BACKPRESSURE_DELAY_MS;
+        : overload ||
+            input.failureCode === "provider_unavailable" ||
+            input.failureCode === "upstream_connectivity_unavailable" ||
+            input.failureCode === "sandbox_command_start_unavailable" ||
+            input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
+            input.failureCode === "mcp_transport_timeout" ||
+            input.failureCode === "mcp_transport_unavailable" ||
+            input.failureCode === "turn_execution_policy_definition_mismatch" ||
+            input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
+          ? Math.max(
+              providerDelay ?? 0,
+              PROVIDER_CONNECTIVITY_BACKOFF_MS[
+                Math.min(
+                  Math.max(Math.trunc(input.attemptNumber) - 1, 0),
+                  PROVIDER_CONNECTIVITY_BACKOFF_MS.length - 1,
+                )
+              ]!,
+            )
+          : PROVIDER_BACKPRESSURE_DELAY_MS;
   const delayMs =
     continueDelayMs +
     (overload ||
@@ -262,7 +276,7 @@ export function providerRecoveryResult(input: {
       ? providerRecoveryJitterMs(continueDelayMs, input.jitterSample ?? 0)
       : 0);
   // Do not shorten Retry-After, or schedule a replacement outside the window.
-  if (overload && now + delayMs >= startedAt + PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS) {
+  if (window && now + delayMs >= startedAt + window.windowMs) {
     return exhausted("deadline");
   }
   return {
@@ -1687,6 +1701,13 @@ export function providerRecoveryCode(
   error: unknown,
   failure: { code?: string; retryable?: boolean },
 ): string | undefined {
+  if (
+    failure.code === "mcp_transport_unavailable" &&
+    failure.retryable &&
+    isMcpServiceUnavailableError(error)
+  ) {
+    return MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE;
+  }
   if (failure.code !== "provider_unavailable" || !failure.retryable) return failure.code;
   const status = providerHttpStatus(error);
   let current = error;

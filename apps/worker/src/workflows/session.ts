@@ -86,6 +86,18 @@ export const CAPACITY_WAKE_JITTER_PATCH = "session-capacity-wake-jitter-v1";
  * there, so replay only arms it behind this marker.
  */
 export const SCHEDULED_HUMAN_WAIT_TIMEOUT_PATCH = "session-scheduled-human-wait-timeout-v1";
+/** Workflows wait out a recovering turn's durable backoff instead of closing. */
+export const RECOVERY_BACKOFF_WAIT_PATCH = "session-recovery-backoff-wait-v1";
+const RECOVERY_BACKOFF_MIN_WAIT_MS = 1_000;
+
+/**
+ * How long to wait for a recovering turn's durable backoff deadline. The
+ * floor keeps clock skew between the workflow and the database (which owns
+ * the deadline) from turning into a tight peek loop.
+ */
+export function recoveryBackoffWaitMs(notBefore: string, nowMs = Date.now()): number {
+  return Math.max(RECOVERY_BACKOFF_MIN_WAIT_MS, humanInputDeadlineWaitMs(notBefore, nowMs));
+}
 export const CAPACITY_TIMER_WAKE_JITTER_MAX_MS = 60_000;
 export const CAPACITY_WAKE_JITTER_MAX_MS = 30_000;
 
@@ -790,6 +802,25 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       continue;
     }
     if (peek.kind === "admission-blocked") {
+      const recoveryRetry =
+        peek.reason === "recovery_backoff" && peek.ref && "notBefore" in peek.ref ? peek.ref : null;
+      if (recoveryRetry && patched(RECOVERY_BACKOFF_WAIT_PATCH)) {
+        // The recovering turn's durable backoff deadline is authoritative.
+        // Wait for it here; any wake (a new message, Pause/Steer, or the
+        // session's own receipts) re-peeks, and the database decides whether
+        // the backoff still holds. The floor keeps clock skew between the
+        // workflow and the database from turning into a tight peek loop.
+        const seenWakeups = wakeups;
+        const seenInterruptionWakeups = interruptionWakeups;
+        await condition(
+          () =>
+            interruptionWakeups !== seenInterruptionWakeups ||
+            wakeups !== seenWakeups ||
+            pendingQuiescenceProofs.size > 0,
+          recoveryBackoffWaitMs(recoveryRetry.notBefore),
+        );
+        continue;
+      }
       if (signalVersion !== closeSignalVersion || pendingQuiescenceProofs.size > 0) continue;
       return;
     }

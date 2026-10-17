@@ -346,6 +346,10 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
             reason: "rotation_in_progress" as const,
           }
         : undefined;
+      const transitionRetryAfterMs =
+        transitionPending && !sandboxLifecycleWait
+          ? sandboxDeadlineRotationRecoveryDelayMs(settings)
+          : undefined;
       const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
@@ -371,6 +375,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
             }
           : {}),
         ...(sandboxLifecycleWait ? { sandboxLifecycleWait } : {}),
+        ...(transitionRetryAfterMs !== undefined ? { retryAfterMs: transitionRetryAfterMs } : {}),
       });
       if (recovery.action === "stale") {
         acknowledgeLostAttemptOwnership();
@@ -384,10 +389,8 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       control.turnMetricOutcome = "recovering";
       return claimedResult({
         status: "recovering",
-        ...(transitionPending && !sandboxLifecycleWait
-          ? {
-              continueDelayMs: sandboxDeadlineRotationRecoveryDelayMs(settings),
-            }
+        ...(transitionRetryAfterMs !== undefined
+          ? { continueDelayMs: transitionRetryAfterMs }
           : {}),
       });
     } catch (recoveryError) {
@@ -426,6 +429,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         triggerEventId: attempt.triggerEventId,
         attemptId: input.attemptId,
         reason: SESSION_USAGE_CUSTODY_PENDING,
+        retryAfterMs: SESSION_USAGE_CUSTODY_RECHECK_MS,
         detail: {
           code: SESSION_USAGE_CUSTODY_PENDING,
           retryable: true,
@@ -966,6 +970,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           startedAt: new Date(leaseBusyChain.startedAt).toISOString(),
           executionGeneration: leaseBusyChain.executionGeneration,
         },
+        retryAfterMs: continueDelayMs,
         detail: { ...error.payload, continueDelayMs },
       });
     } catch (recoveryError) {
@@ -1402,6 +1407,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           attemptId: input.attemptId,
           reason: recoveryCode ?? "provider_unavailable",
           providerRecoveryCount: nextProviderRecoveryCount,
+          retryAfterMs: recoveryResult.continueDelayMs,
           ...(notStartedToolCallIds.length > 0 ? { notStartedToolCallIds } : {}),
           detail: {
             ...agentRunRecoveryFailurePayload(error, failure),
