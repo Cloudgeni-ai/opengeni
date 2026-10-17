@@ -178,7 +178,11 @@ fn adopt_ops<P: Platform>(
         let lane = lanes
             .lock()
             .expect("frame lanes")
-            .lane_for((op.tag.scope.clone(), prefix));
+            .lane_for((op.tag.scope.clone(), prefix.clone()));
+        let completion_sink =
+            bulk_frame_sink(lane.clone(), format!("{prefix}.events"), engine.clone());
+        let on_exit =
+            crate::ops::completion_publisher(Some(completion_sink), op.tag.request_id.clone());
         let sink = bulk_frame_sink(lane, op.tag.subject.clone(), engine.clone());
         let emit = crate::ops::frame_publisher(sink, op.tag.request_id.clone());
         let child = match op.job.exec.as_ref() {
@@ -189,9 +193,13 @@ fn adopt_ops<P: Platform>(
                 .map_err(|error| format!("could not adopt the command's process: {error}")),
         };
         info!(op = %op.tag.request_id, running = op.job.exec.is_some(), "continuing a handed-over command");
-        engine.adopt_job(op, child, emit, |exit| {
-            crate::ops::wire_exit(exit).encode_to_vec()
-        });
+        engine.adopt_job(
+            op,
+            child,
+            emit,
+            |exit| crate::ops::wire_exit(exit).encode_to_vec(),
+            on_exit,
+        );
     }
 }
 
@@ -1948,6 +1956,11 @@ impl<P: Platform + 'static> Supervisor<P> {
         // Only a link that can continue jobs across an update tags them.
         let frame_subject = self.handover_enabled().then(|| subject.clone());
         let sink = bulk_frame_sink(link.bulk_tx.clone(), subject, self.engine.clone());
+        let completion_sink = bulk_frame_sink(
+            link.bulk_tx.clone(),
+            link.events_subject(),
+            self.engine.clone(),
+        );
         spawn_admitted_rpc(rpc_tasks, reservation, async move {
             let response = if request_epoch != 0 && request_epoch < held_epoch {
                 dispatch::fenced_reply(request_id, request_epoch, held_epoch)
@@ -1961,6 +1974,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     start,
                     resource_policy,
                     frame_subject,
+                    Some(completion_sink),
                 )
                 .await
             };

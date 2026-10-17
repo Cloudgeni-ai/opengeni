@@ -756,6 +756,7 @@ impl Engine {
         child: Result<Option<ContainedExec>, String>,
         emit: impl Fn(Frame) + Send + 'static,
         encode_exit: impl Fn(&JobExit) -> Vec<u8> + Send + 'static,
+        on_exit: impl FnOnce(Option<u64>, &JobExit) + Send + 'static,
     ) {
         let HandedOverOp { tag, job } = handed;
         let op_id = scoped_op_id(&tag.scope, &tag.request_id);
@@ -814,6 +815,7 @@ impl Engine {
                     engine.now_ms(),
                 );
                 drop(ticket);
+                on_exit(exit_seq, exit);
             })
         };
         let (mailbox_tx, mailbox_rx) = mpsc::channel(JOB_MAILBOX_DEPTH);

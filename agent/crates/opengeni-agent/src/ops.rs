@@ -74,7 +74,7 @@ pub async fn serve_op_start_scoped<P: Platform>(
     start: v1::OpStart,
 ) -> ControlResponse {
     serve_op_start_scoped_with_policy(
-        engine, platform, scope, publish, request_id, start, None, None,
+        engine, platform, scope, publish, request_id, start, None, None, None,
     )
     .await
 }
@@ -95,6 +95,7 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
     start: v1::OpStart,
     resource_policy: Option<v1::OperationResourcePolicy>,
     frame_subject: Option<String>,
+    completion_sink: Option<FrameSink>,
 ) -> ControlResponse {
     let mut exec = match extract_exec(&request_id, start.op) {
         Ok(exec) => exec,
@@ -146,7 +147,7 @@ pub async fn serve_op_start_scoped_with_policy<P: Platform>(
         || platform.spawn_exec_with_policy(&exec, resource_policy.as_ref()),
         frame_publisher(publish, request_id.clone()),
         |exit| wire_exit(exit).encode_to_vec(),
-        |_, _| {},
+        completion_publisher(completion_sink, request_id.clone()),
     );
 
     match outcome {
@@ -404,6 +405,30 @@ pub(crate) fn frame_publisher(
             body: Some(body),
         };
         publish(wire.encode_to_vec());
+    }
+}
+
+/// Publish terminal proof even when there is no output consumer or send credit.
+/// A lost event is recoverable through OpQuery; it never acknowledges output.
+pub(crate) fn completion_publisher(
+    publish: Option<FrameSink>,
+    op_id: String,
+) -> impl FnOnce(Option<u64>, &JobExit) + Send + 'static {
+    move |_, exit| {
+        if let Some(publish) = publish {
+            publish(
+                v1::AgentEvent {
+                    agent_id: String::new(),
+                    event: Some(v1::agent_event::Event::OperationCompleted(
+                        v1::OperationCompleted {
+                            op_id,
+                            exit: Some(wire_exit(exit)),
+                        },
+                    )),
+                }
+                .encode_to_vec(),
+            );
+        }
     }
 }
 
@@ -1104,6 +1129,84 @@ mod tests {
         );
         assert!(!wire.timed_out);
         assert!(!wire.cancelled);
+    }
+
+    #[tokio::test]
+    async fn detached_operation_pushes_completion_without_output_attachment() {
+        let rig = rig();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let completion_sink: FrameSink = Arc::new(move |bytes| {
+            tx.send(v1::AgentEvent::decode(bytes.as_slice()).expect("completion event"))
+                .expect("completion receiver");
+        });
+        let response = serve_op_start_scoped_with_policy(
+            &rig.engine,
+            &rig.platform,
+            "default",
+            rig.sink(),
+            "detached-exit".into(),
+            v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                    command: vec!["sleep 30".into()],
+                    shell: true,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            None,
+            None,
+            Some(completion_sink),
+        )
+        .await;
+        assert!(started_status(&response).0);
+        let id = scoped_op_id("default", "detached-exit");
+        assert!(rig
+            .engine
+            .route_command(&id, JobCommand::Detach { completed: None }));
+        serve_op_cancel_scoped(
+            &rig.engine,
+            "default",
+            "cancel".into(),
+            &v1::OpCancel {
+                op_id: "detached-exit".into(),
+            },
+        );
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("completion is pushed promptly")
+            .expect("event");
+        let Some(v1::agent_event::Event::OperationCompleted(completed)) = event.event else {
+            panic!("not a completion event");
+        };
+        assert_eq!(completed.op_id, "detached-exit");
+        assert!(completed.exit.expect("terminal proof").cancelled);
+        assert!(rx.try_recv().is_err(), "one terminal event only");
+        // Lifecycle publication does not release retained output.
+        assert!(rig.engine.handles(&id).is_some());
+    }
+
+    #[test]
+    fn completion_publication_does_not_require_a_retained_exit_frame() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let sink: FrameSink = Arc::new(move |bytes| captured.lock().unwrap().push(bytes));
+        completion_publisher(Some(sink), "overflow".into())(
+            None,
+            &JobExit {
+                outcome: JobOutcome::Failed(JobFailure::Overflow {
+                    retained_bytes: 12345,
+                }),
+                duration_ms: 7,
+                stdout: empty_channel(),
+                stderr: empty_channel(),
+            },
+        );
+        let events = events.lock().unwrap();
+        let event = v1::AgentEvent::decode(events[0].as_slice()).unwrap();
+        let Some(v1::agent_event::Event::OperationCompleted(completed)) = event.event else {
+            panic!("not a completion event");
+        };
+        assert_eq!(completed.exit.unwrap().failure_code, "OP_OVERFLOW");
     }
 
     #[test]

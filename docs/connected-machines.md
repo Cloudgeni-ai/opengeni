@@ -681,6 +681,22 @@ move adopted commands to `stopping`, after which the global reconciler issues
 affects future operations only. A connection blip detaches the stream without
 killing the command; replay or exact-instance reconciliation collects its
 terminal result after reconnect.
+
+Shell backgrounding (`&`, a background subshell, or `nohup`) does not transfer
+process ownership out of a command. When its direct shell exits, the runner
+terminates the remaining process group/Job Object and its owned Linux cgroup,
+then drains the pipes. Terminal shell results state this explicitly. Launch
+long-running work in the foreground; the bounded shell tool yield returns a
+durable command ID for `command_read`/`command_wait` without ending that process.
+
+The runner pushes an `OperationCompleted` event after exit and pipe drain,
+independently of the output consumer and its credit. API ingestion uses the
+authenticated control-workspace/enrollment/connection subject and operation ID
+to settle the original adopted command, even after its session changes routes.
+Duplicate events are harmless. Missed events, older agents and lost connections
+remain covered by reconciliation. Terminal publication does not acknowledge or
+discard retained output; the separate output-custody path still collects it.
+
 The session shell capability also preserves an explicit `exec_command.shell`
 selection: Opengeni sends that shell as direct argv, with the requested login or
 non-login semantics, instead of silently substituting the machine service's

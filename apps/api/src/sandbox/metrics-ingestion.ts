@@ -80,6 +80,7 @@ import {
 } from "@opengeni/agent-proto";
 import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
 import { reconcileScreenControlOnHello } from "./screen-control";
+import { ingestConnectedCommandCompletion } from "./command-completion";
 
 /** The wildcard subject the agent event plane publishes heartbeats on. */
 export const AGENT_EVENTS_SUBJECT = "agent.*.*.connection.*.events";
@@ -519,6 +520,17 @@ export async function handleAgentEventPayload(
       subject,
       error: error instanceof Error ? error.message : String(error),
     });
+    return;
+  }
+  if (event.event?.$case === "operationCompleted") {
+    try {
+      await ingestConnectedCommandCompletion(db, ids, event.event.operationCompleted, bus);
+    } catch (error) {
+      observability?.warn?.("Failed to settle a Connected Machine completion event", {
+        subject,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     return;
   }
   // A clean GoingOffline is the machine-plane's typed shutdown signal. Two things

@@ -30,7 +30,7 @@ import {
   type OperationResourcePolicy,
   type StreamChannel,
 } from "@opengeni/agent-proto";
-import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
+import { CONNECTED_MACHINE_COMMAND_SCOPE_NOTICE, DESKTOP_STREAM_PORT } from "@opengeni/contracts";
 import {
   SELFHOSTED_FILE_CHUNK_BYTES,
   fileContentDigest,
@@ -1458,11 +1458,12 @@ export class SelfhostedSession {
       typeof result.exitCode === "number" && Number.isSafeInteger(result.exitCode)
         ? result.exitCode
         : 1;
-    return formatExecResponse({
+    const banner = formatExecResponse({
       output: joinExecCommandOutput(result.stdout, result.stderr),
       wallTimeSeconds: Math.max(0, Date.now() - startedAt) / 1000,
       exitCode,
     });
+    return `${CONNECTED_MACHINE_COMMAND_SCOPE_NOTICE}\n${banner}`;
   }
 
   /**

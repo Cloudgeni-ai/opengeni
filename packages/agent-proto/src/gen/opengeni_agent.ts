@@ -2388,10 +2388,22 @@ export interface HelloAck {
  */
 export interface AgentEvent {
   agentId: string;
-  event: { $case: "heartbeat"; heartbeat: Heartbeat } | { $case: "goingOffline"; goingOffline: GoingOffline } | {
-    $case: "agentUpdateProgress";
-    agentUpdateProgress: AgentUpdateProgress;
-  } | undefined;
+  event:
+    | { $case: "heartbeat"; heartbeat: Heartbeat }
+    | { $case: "goingOffline"; goingOffline: GoingOffline }
+    | { $case: "agentUpdateProgress"; agentUpdateProgress: AgentUpdateProgress }
+    | { $case: "operationCompleted"; operationCompleted: OperationCompleted }
+    | undefined;
+}
+
+/**
+ * Lifecycle proof, independent of output attachment, credit and final ACK.
+ * The authenticated events subject supplies the exact connection identity.
+ * Output remains retained and must still be collected through OpAttach.
+ */
+export interface OperationCompleted {
+  opId: string;
+  exit: OpExit | undefined;
 }
 
 /** The control plane's ack of an AgentEvent (e.g. a HeartbeatAck). */
@@ -16701,6 +16713,9 @@ export const AgentEvent: MessageFns<AgentEvent> = {
       case "agentUpdateProgress":
         AgentUpdateProgress.encode(message.event.agentUpdateProgress, writer.uint32(98).fork()).join();
         break;
+      case "operationCompleted":
+        OperationCompleted.encode(message.event.operationCompleted, writer.uint32(106).fork()).join();
+        break;
     }
     return writer;
   },
@@ -16747,6 +16762,17 @@ export const AgentEvent: MessageFns<AgentEvent> = {
           };
           continue;
         }
+        case 13: {
+          if (tag !== 106) {
+            break;
+          }
+
+          message.event = {
+            $case: "operationCompleted",
+            operationCompleted: OperationCompleted.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -16779,6 +16805,10 @@ export const AgentEvent: MessageFns<AgentEvent> = {
           $case: "agentUpdateProgress",
           agentUpdateProgress: AgentUpdateProgress.fromJSON(object.agent_update_progress),
         }
+        : isSet(object.operationCompleted)
+        ? { $case: "operationCompleted", operationCompleted: OperationCompleted.fromJSON(object.operationCompleted) }
+        : isSet(object.operation_completed)
+        ? { $case: "operationCompleted", operationCompleted: OperationCompleted.fromJSON(object.operation_completed) }
         : undefined,
     };
   },
@@ -16794,6 +16824,8 @@ export const AgentEvent: MessageFns<AgentEvent> = {
       obj.goingOffline = GoingOffline.toJSON(message.event.goingOffline);
     } else if (message.event?.$case === "agentUpdateProgress") {
       obj.agentUpdateProgress = AgentUpdateProgress.toJSON(message.event.agentUpdateProgress);
+    } else if (message.event?.$case === "operationCompleted") {
+      obj.operationCompleted = OperationCompleted.toJSON(message.event.operationCompleted);
     }
     return obj;
   },
@@ -16826,7 +16858,96 @@ export const AgentEvent: MessageFns<AgentEvent> = {
         }
         break;
       }
+      case "operationCompleted": {
+        if (object.event?.operationCompleted !== undefined && object.event?.operationCompleted !== null) {
+          message.event = {
+            $case: "operationCompleted",
+            operationCompleted: OperationCompleted.fromPartial(object.event.operationCompleted),
+          };
+        }
+        break;
+      }
     }
+    return message;
+  },
+};
+
+function createBaseOperationCompleted(): OperationCompleted {
+  return { opId: "", exit: undefined };
+}
+
+export const OperationCompleted: MessageFns<OperationCompleted> = {
+  encode(message: OperationCompleted, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.opId !== "") {
+      writer.uint32(10).string(message.opId);
+    }
+    if (message.exit !== undefined) {
+      OpExit.encode(message.exit, writer.uint32(18).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OperationCompleted {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOperationCompleted();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.opId = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.exit = OpExit.decode(reader, reader.uint32());
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): OperationCompleted {
+    return {
+      opId: isSet(object.opId)
+        ? globalThis.String(object.opId)
+        : isSet(object.op_id)
+        ? globalThis.String(object.op_id)
+        : "",
+      exit: isSet(object.exit) ? OpExit.fromJSON(object.exit) : undefined,
+    };
+  },
+
+  toJSON(message: OperationCompleted): unknown {
+    const obj: any = {};
+    if (message.opId !== "") {
+      obj.opId = message.opId;
+    }
+    if (message.exit !== undefined) {
+      obj.exit = OpExit.toJSON(message.exit);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<OperationCompleted>, I>>(base?: I): OperationCompleted {
+    return OperationCompleted.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<OperationCompleted>, I>>(object: I): OperationCompleted {
+    const message = createBaseOperationCompleted();
+    message.opId = object.opId ?? "";
+    message.exit = (object.exit !== undefined && object.exit !== null) ? OpExit.fromPartial(object.exit) : undefined;
     return message;
   },
 };

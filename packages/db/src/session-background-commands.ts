@@ -3,7 +3,7 @@ import type {
   SessionBackgroundCommandActivity,
   SessionBackgroundCommandReconciliation,
 } from "@opengeni/contracts";
-import { SessionCommandFailure } from "@opengeni/contracts";
+import { CONNECTED_MACHINE_COMMAND_SCOPE_NOTICE, SessionCommandFailure } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, getTableColumns, gte, inArray, sql, type SQL } from "drizzle-orm";
 
@@ -1178,6 +1178,7 @@ export async function settleConnectedMachineSessionBackgroundCommandWithMutation
           reconcileProofReason: reason,
           reconcileProofObservedAt: settledAt,
           lastReconcileOutcome: `settled_${input.outcome}`,
+          reconcileAfter: settledAt,
           updatedAt: new Date(),
         })
         .where(
@@ -1236,6 +1237,27 @@ export type SessionCommandIdentity = {
   sessionId: string;
   commandId: string;
 };
+
+/** Internal exact-identity discovery for an authenticated machine event. This
+ * returns only a locator; settlement must revalidate it under the session fence. */
+export async function locateConnectedCommandCompletion(
+  db: Database,
+  input: {
+    controlWorkspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    opId: string;
+  },
+): Promise<SessionCommandIdentity | null> {
+  const rows = await db.execute<SessionCommandIdentity>(sql`
+    select account_id as "accountId", workspace_id as "workspaceId",
+      session_id as "sessionId", command_id as "commandId"
+    from opengeni_private.locate_connected_command_completion(
+      ${input.controlWorkspaceId}::uuid, ${input.enrollmentId}::uuid,
+      ${input.connectionInstanceId}::text, ${input.opId}::text
+    )`);
+  return rows[0] ?? null;
+}
 
 /** Observe terminal state, not output consumption. Native terminal-result adapters
  * call this after settlement. Session-first ordering serializes settlement and
@@ -1477,6 +1499,9 @@ export async function readSessionBackgroundCommandOutput(
     state: command.state,
     exitCode: command.exitCode,
     settlementReason: command.settlementReason,
+    ...(command.provider === "connected_machine" && command.state === "exited"
+      ? { scopeNotice: CONNECTED_MACHINE_COMMAND_SCOPE_NOTICE }
+      : {}),
     ...(command.failure ? { failure: command.failure } : {}),
     terminal,
     completionObservedAt: observed?.completionObservedAt ?? null,
