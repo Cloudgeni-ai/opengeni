@@ -60130,7 +60130,7 @@ export async function assertPersonalMachineForAttempt(
   input: {
     accountId: string;
     workspaceId: string;
-    subjectId: string;
+    subjectId: string | null;
     sessionId: string;
     turnId: string;
     attemptId: string;
@@ -60140,10 +60140,7 @@ export async function assertPersonalMachineForAttempt(
   },
 ): Promise<boolean> {
   return await withRlsContext(db, input, async (scopedDb) => {
-    await setSubjectRlsContext(scopedDb, input.subjectId);
-    await scopedDb.execute(sql`select set_config(
-      'opengeni.initiating_human_subject_id', ${input.subjectId}, true
-    )`);
+    await setMachineAttemptSubject(scopedDb, input.subjectId);
     const [row] = await rawRows<{ authorized: boolean }>(
       scopedDb,
       sql`select assert_session_attempt_personal_machine(
@@ -60166,7 +60163,7 @@ export async function resolvePersonalMachineConnectionForAttempt(
   input: {
     accountId: string;
     workspaceId: string;
-    subjectId: string;
+    subjectId: string | null;
     sessionId: string;
     turnId: string;
     attemptId: string;
@@ -60176,28 +60173,18 @@ export async function resolvePersonalMachineConnectionForAttempt(
   },
 ): Promise<EnrollmentRecord | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
-    await setSubjectRlsContext(scopedDb, input.subjectId);
-    await scopedDb.execute(sql`select set_config(
-      'opengeni.initiating_human_subject_id', ${input.subjectId}, true
-    )`);
+    await setMachineAttemptSubject(scopedDb, input.subjectId);
     const [row] = await rawRows<{ value: EnrollmentRecord }>(
       scopedDb,
-      sql`select enrollment.value
-        from (
-          select assert_session_attempt_personal_machine(
+      sql`select machine.value->'enrollment' as value
+        from get_session_attempt_machine(
             ${input.accountId}::uuid, ${input.workspaceId}::uuid,
             ${input.sessionId}::uuid, ${input.turnId}::uuid,
             ${input.attemptId}::uuid, ${input.executionGeneration}::integer,
-            ${input.enrollmentId}::uuid, ${input.requireActiveSandbox !== false}
-          ) as authorized
-        ) authority
-        cross join lateral list_scoped_enrollments(
-          ${input.accountId}::uuid, ${input.workspaceId}::uuid, null, 'active'
-        ) enrollment(value)
-        where authority.authorized
-          and enrollment.value->>'id' = ${input.enrollmentId}
-          and nullif(enrollment.value->>'connectionInstanceId', '') is not null
-          and nullif(enrollment.value->>'connectionLeaseExpiresAt', '')::timestamptz
+            null, ${input.enrollmentId}::uuid, ${input.requireActiveSandbox !== false}, false
+        ) machine(value)
+        where nullif(machine.value->'enrollment'->>'connectionInstanceId', '') is not null
+          and nullif(machine.value->'enrollment'->>'connectionLeaseExpiresAt', '')::timestamptz
             > clock_timestamp()
         limit 1`,
     );
@@ -62584,6 +62571,54 @@ export async function getSandbox(
   });
 }
 
+/** Exact-turn machine consent can expose one route without exposing the owner's
+ * machine list or borrowing their authority for any other resource. */
+export async function getSandboxForAttempt(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string | null;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+  },
+  sandboxId: string,
+): Promise<SandboxRecord | null> {
+  const projection = await withRlsContext(db, input, async (scopedDb) => {
+    await setMachineAttemptSubject(scopedDb, input.subjectId);
+    const [row] = await rawRows<{ value: { sandbox: SandboxRecord | null } | null }>(
+      scopedDb,
+      sql`select get_session_attempt_machine(
+        ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+        ${input.sessionId}::uuid, ${input.turnId}::uuid,
+        ${input.attemptId}::uuid, ${input.executionGeneration}::integer,
+        ${sandboxId}::uuid, null, false, true
+      ) as value`,
+    );
+    return row?.value ?? null;
+  });
+  if (projection) return projection.sandbox;
+  return await getSandbox(
+    db,
+    input.subjectId
+      ? { accountId: input.accountId, workspaceId: input.workspaceId, subjectId: input.subjectId }
+      : input.workspaceId,
+    sandboxId,
+  );
+}
+
+async function setMachineAttemptSubject(db: Database, subjectId: string | null): Promise<void> {
+  if (subjectId) await setSubjectRlsContext(db, subjectId);
+  // A service turn has no human. Explicitly clear any ambient actor rather than
+  // borrowing the owner who consented to its machine route.
+  await db.execute(sql`select
+    set_config('opengeni.subject_id', ${subjectId ?? ""}, true),
+    set_config('opengeni.initiating_human_subject_id', ${subjectId ?? ""}, true)
+  `);
+}
+
 // List a workspace's sandboxes, newest first (the sandboxes_list tool surface).
 export async function listSandboxes(db: Database, workspaceId: string): Promise<SandboxRecord[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -62612,7 +62647,6 @@ export type ActiveSandboxPointer = {
  */
 export type ActiveSandboxSwapRefusal =
   | "epoch_changed"
-  | "chat_busy"
   | "chat_unavailable"
   | "not_permitted"
   | "target_unavailable";
@@ -62701,6 +62735,8 @@ export async function setActiveSandbox(
     targetSandboxId: string | null;
     expectedEpoch: number;
     subjectId?: string;
+    /** Explicit owner click, never implicit create-time or scheduled seeding. */
+    consentToCurrentTurn?: boolean;
     personalMachineAttempt?: {
       turnId: string;
       attemptId: string;
@@ -62723,6 +62759,17 @@ export async function setActiveSandbox(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       let personalEnrollmentId: string | null = null;
+      // Take the session lock before machine locks, matching attempt claim.
+      // A lost CAS must not leave behind consent for a move that did not happen.
+      const [session] = await scopedDb.execute<{ active_epoch: number }>(sql`
+        select active_epoch from sessions
+        where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
+        for no key update
+      `);
+      if (!session) return { swapped: false, pointer: null, refusal: "chat_unavailable" };
+      if (Number(session.active_epoch) !== input.expectedEpoch) {
+        return { swapped: false, pointer: null, refusal: "epoch_changed" };
+      }
       if (input.targetSandboxId !== null) {
         if (input.subjectId) {
           await setSubjectRlsContext(scopedDb, input.subjectId);
@@ -62772,23 +62819,6 @@ export async function setActiveSandbox(
               );
               if (admission?.authorized !== true) {
                 return { swapped: false, pointer: null, refusal: "not_permitted" };
-              }
-            } else {
-              const [session] = await scopedDb.execute<{
-                active_turn_id: string | null;
-              }>(sql`
-                select active_turn_id from sessions
-                where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
-                for no key update
-              `);
-              if (!session) {
-                return { swapped: false, pointer: null, refusal: "chat_unavailable" };
-              }
-              // Consent to use a personal machine travels with the person's next
-              // message, so a turn that is already running has none. The chat
-              // moves once that turn has settled.
-              if (session.active_turn_id !== null) {
-                return { swapped: false, pointer: null, refusal: "chat_busy" };
               }
             }
           }
@@ -62841,6 +62871,12 @@ export async function setActiveSandbox(
       const row = rows[0];
       if (!row) {
         return { swapped: false, pointer: null, refusal: "epoch_changed" };
+      }
+      if (personalEnrollmentId && input.consentToCurrentTurn && !input.personalMachineAttempt) {
+        await scopedDb.execute(sql`select consent_session_turn_personal_machine(
+          ${input.accountId}::uuid, ${input.workspaceId}::uuid,
+          ${input.sessionId}::uuid, ${personalEnrollmentId}::uuid
+        )`);
       }
       if (personalEnrollmentId && input.personalMachineAttempt) {
         const [preUse] = await rawRows<{ authorized: boolean }>(

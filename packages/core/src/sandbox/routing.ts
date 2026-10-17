@@ -24,6 +24,7 @@ import {
   getLiveEnrollmentConnection,
   getRetainedProcess,
   getSandbox,
+  getSandboxForAttempt,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
   resolvePersonalMachineConnectionForAttempt,
@@ -146,7 +147,9 @@ export type ChannelARoutingServices = {
  * rechecked before every routed operation like the worker's turn path.
  */
 export type ChannelAMachineAuthority = {
-  subjectId: string;
+  subjectId: string | null;
+  /** Only browser.end/computer.end: preserve the owner's existing cleanup access. */
+  ownerCleanup?: boolean;
   personalMachineAttempt: {
     turnId: string;
     attemptId: string;
@@ -173,14 +176,24 @@ export async function resolveChannelAMachineConnection(
   authority: ChannelAMachineAuthority,
 ): Promise<EnrollmentRecord | null> {
   const attempt = authority.personalMachineAttempt;
+  const ownAccess = authority.subjectId
+    ? {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: authority.subjectId,
+      }
+    : null;
+  if (authority.ownerCleanup && ownAccess) {
+    const owned = await getLiveEnrollmentConnection(db, ownAccess, input.enrollmentId);
+    if (owned) return owned;
+  }
   if (attempt) {
     const current = await getLiveEnrollmentConnection(
       db,
       input.machineWorkspaceId,
       input.enrollmentId,
     );
-    if (!current) return null;
-    if (current.scope === "user") {
+    if (!current || current.scope === "user") {
       return await resolvePersonalMachineConnectionForAttempt(db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -190,19 +203,35 @@ export async function resolveChannelAMachineConnection(
         attemptId: attempt.attemptId,
         executionGeneration: attempt.executionGeneration,
         enrollmentId: input.enrollmentId,
-        requireActiveSandbox: true,
+        requireActiveSandbox: !authority.ownerCleanup,
       });
     }
+    if (!ownAccess) return current;
   }
-  return await getLiveEnrollmentConnection(
-    db,
-    {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: authority.subjectId,
-    },
-    input.enrollmentId,
-  );
+  if (!ownAccess) return null;
+  return await getLiveEnrollmentConnection(db, ownAccess, input.enrollmentId);
+}
+
+/** Agent requests see only the exact consented route, not the owner's fleet. */
+export async function getChannelAMachineSandbox(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+  authority: ChannelAMachineAuthority,
+  sandboxId: string,
+) {
+  if (authority.personalMachineAttempt) {
+    return await getSandboxForAttempt(
+      db,
+      {
+        ...input,
+        ...authority.personalMachineAttempt,
+        subjectId: authority.subjectId,
+      },
+      sandboxId,
+    );
+  }
+  if (!authority.subjectId) return null;
+  return await getSandbox(db, { ...input, subjectId: authority.subjectId }, sandboxId);
 }
 
 /** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape. The
@@ -626,13 +655,14 @@ export function wrapChannelABoxWithRouting(
     defaultKind: established.backendId,
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
       const authority = await resolveMachineAuthority();
-      const sandbox = await getSandbox(
+      const sandbox = await getChannelAMachineSandbox(
         db,
         {
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
-          subjectId: authority.subjectId,
+          sessionId: ids.sessionId,
         },
+        authority,
         sandboxId,
       );
       return sandbox

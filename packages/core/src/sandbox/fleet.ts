@@ -206,7 +206,6 @@ export type FleetSwapResult = {
     | BackendUnresolvableCode
     | "invalid_working_directory"
     | "concurrent_swap"
-    | "chat_busy"
     | PersonalMachineRefusalCode
     | "recovery_in_progress"
     | "recovery_degraded"
@@ -219,13 +218,6 @@ function swapRefusal(refusal: ActiveSandboxSwapRefusal): {
   reason: string;
 } {
   switch (refusal) {
-    case "chat_busy":
-      return {
-        code: "chat_busy",
-        reason:
-          "This chat is running a turn. A personal machine can only be chosen between turns, " +
-          "so the move can be made once the current turn has finished or the chat is paused.",
-      };
     case "not_permitted":
       return {
         code: "personal_machine_not_permitted",
@@ -855,6 +847,7 @@ export async function swapActiveSandbox(
           sessionId: ctx.sessionId,
           targetSandboxId: resolved.targetSandboxId,
           expectedEpoch: pointer.activeEpoch,
+          consentToCurrentTurn: !ctx.attemptAuthority,
           ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
           ...(ctx.attemptAuthority ? { personalMachineAttempt: ctx.attemptAuthority } : {}),
           ...(resolved.workspaceRoot !== undefined

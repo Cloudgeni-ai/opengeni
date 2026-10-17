@@ -47,7 +47,6 @@ import {
   getAttachedBrowserDevice,
   getComputerSessionControlRecord,
   getLiveEnrollmentConnection,
-  getSandbox,
   getSession,
   listComputerSessions,
   prepareComputerSessionCreate,
@@ -69,6 +68,7 @@ import {
   withSessionAuthorizationReadReuse,
   relayConfigFromSettings,
   resolveChannelAMachineConnection,
+  getChannelAMachineSandbox,
   resolveSessionSandboxRuntime,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
@@ -1174,13 +1174,14 @@ export function registerComputerSessionRoutes(
     sandboxId: string,
   ): Promise<EnrollmentRecord | null> {
     const machineAuthority = await handle.machineAuthority();
-    const sandbox = await getSandbox(
+    const sandbox = await getChannelAMachineSandbox(
       deps.db,
       {
         accountId: grant.accountId,
         workspaceId: sourceSession.workspaceId,
-        subjectId: machineAuthority.subjectId,
+        sessionId: sourceSession.id,
       },
+      machineAuthority,
       sandboxId,
     );
     if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {

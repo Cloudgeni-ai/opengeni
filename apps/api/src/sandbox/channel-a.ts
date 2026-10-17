@@ -31,7 +31,6 @@ import type { AccessGrant, Session } from "@opengeni/contracts";
 import {
   acquireLease,
   getSandboxSessionEnvelope,
-  getSandbox,
   touchLeaseHolder,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
@@ -100,6 +99,7 @@ import {
   relayConfigFromSettings,
   requireLiveAgentAttemptAuthorization,
   resolveChannelAMachineConnection,
+  getChannelAMachineSandbox,
   resolveSessionSandboxRuntime,
   wrapChannelABoxWithRouting,
   type ChannelAMachineAuthority,
@@ -574,9 +574,10 @@ export async function withFormerConnectedMachine<T>(
 ): Promise<{ reached: true; value: T } | { reached: false }> {
   const { db, settings, bus } = services;
   const authority = await channelAMachineAuthority(db, ctx);
-  const sandbox = await getSandbox(
+  const sandbox = await getChannelAMachineSandbox(
     db,
-    { accountId: ctx.accountId, workspaceId: ctx.workspaceId, subjectId: authority.subjectId },
+    { accountId: ctx.accountId, workspaceId: ctx.workspaceId, sessionId: ctx.session.id },
+    authority,
     sandboxId,
   );
   if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) return { reached: false };
@@ -653,14 +654,9 @@ async function channelAMachineAuthority(
     return { subjectId: ctx.subjectId, personalMachineAttempt: null };
   }
   const actor = await requireLiveAgentAttemptAuthorization(db, grant, callerSessionId);
-  if (!actor.initiatingHumanSubjectId) {
-    return { subjectId: ctx.subjectId, personalMachineAttempt: null };
-  }
-  if (ctx.operation === "browser.end" || ctx.operation === "computer.end") {
-    return { subjectId: actor.initiatingHumanSubjectId, personalMachineAttempt: null };
-  }
   return {
     subjectId: actor.initiatingHumanSubjectId,
+    ownerCleanup: ctx.operation === "browser.end" || ctx.operation === "computer.end",
     personalMachineAttempt: {
       turnId: actor.turnId,
       attemptId: actor.attemptId,
@@ -811,9 +807,10 @@ async function withChannelAOperation<T>(
         });
       }
       const requestMachineAuthority = await machineAuthority();
-      const sandbox = await getSandbox(
+      const sandbox = await getChannelAMachineSandbox(
         db,
-        { accountId: ctx.accountId, workspaceId, subjectId: requestMachineAuthority.subjectId },
+        { accountId: ctx.accountId, workspaceId, sessionId: session.id },
+        requestMachineAuthority,
         pointer.activeSandboxId,
       );
       if (sandbox?.kind !== "selfhosted" || !sandbox.enrollmentId) {

@@ -1516,6 +1516,8 @@ describe("runtime database posture evaluator", () => {
         "session_attempt_personal_resource_admissions",
         "session_attempt_personal_resource_snapshots",
         "session_attempt_connected_machine_authorizations",
+        "session_attempt_machine_consents",
+        "session_turn_machine_consents",
         "turn_personal_resource_attachment_receipts",
         "turn_personal_resource_once_receipts",
         "turn_personal_resource_snapshots",
@@ -2418,6 +2420,7 @@ describe("runtime database posture evaluator", () => {
         routine.name.includes("scoped_sandbox") ||
         routine.name.includes("scoped_machine_dependent_sessions") ||
         routine.name.includes("personal_machine") ||
+        routine.name.startsWith("get_session_attempt_machine(") ||
         routine.name.includes("connected_machine_audience") ||
         routine.name.includes("subscription_codex_refresh") ||
         routine.name.includes("authorize_subscription_ownerless_session_access") ||

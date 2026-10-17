@@ -9,10 +9,25 @@ box.
 Human device-flow approval defaults to user ownership. A user-owned machine follows
 its owner across same-organization workspaces they can currently access; workspace
 ownership limits it to the approving workspace, and organization ownership requires
-account-admin approval. Only the owner may attach a user machine. Using it from an
-exact agent attempt additionally requires an explicit `connected_machine.use` grant
-for that session visibility/context. Once/session/always grants use the common
-personal-resource lifecycle; every operation revalidates the exact attempt, owner
+account-admin approval. Only the owner may attach a user machine. Moving a running
+chat is explicit owner consent for that logical turn, even when another person,
+a schedule, or an agent started it. The route changes immediately; the next tool
+operation uses the new machine. Already dispatched work is not moved or replayed.
+The separate `session_turn_machine_consents` receipt is bound to the current attempt
+and to replacement attempts of the same turn (recovery, failover, retry). It does
+not change the initiating person, rewrite accepted resource snapshots, expose the
+owner's other machines/resources, or authorize another person's future turns.
+Only the human move path supplies `consentToCurrentTurn`; session creation and
+schedule seeding do not implicitly consent for a running turn. The receipt's
+route epoch records which successful move supplied consent and orders successive
+clicks; it is not a standing route lock. Metadata resolution does not audit usage
+or demand an unchanged pointer, while dispatch checks the current selection and
+records usage once. Worker and API-direct browser/computer/file routes share this
+authority, including turns without an initiating human.
+Without a turn-bound move receipt, an exact attempt still needs an explicit
+`connected_machine.use` grant for that session visibility/context.
+Once/session/always grants use the common personal-resource lifecycle;
+every operation revalidates the exact attempt, owner
 membership revision, target-workspace access, authority epoch, resource/grant
 generation, interruption state, and current machine selection immediately before
 the machine transport is used. Revocation advances the machine and common authority
@@ -627,8 +642,9 @@ commands may use N GiB. An already-admitted command keeps its immutable policy.
 Every provider operation revalidates its exact live connection and any
 caller-owned personal-machine authority at the last boundary before dispatch,
 even inside a cached, swapped, or pinned multi-day turn. For a personal machine,
-that same PostgreSQL snapshot verifies the accepted attempt, immutable admission
-snapshot, current visibility-keyed grant, membership/generation fences, and the
+that same PostgreSQL snapshot verifies the accepted attempt, its owner-click
+consent or immutable admission snapshot/current visibility-keyed grant,
+membership/generation fences, and the
 runner connection. One-off `run_on` exec/read/write uses the same boundary after
 creating its attempt snapshot, so a concurrent revoke cannot reach the provider.
 Organization- and user-scoped machines used from another same-organization

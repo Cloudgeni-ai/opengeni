@@ -18,7 +18,7 @@ describe("sandboxless attempt attachment boundary", () => {
         activeEpoch: 1,
         activeWorkingDir: null,
       } as never);
-      const sandbox = spyOn(db, "getSandbox").mockResolvedValue({
+      const sandbox = spyOn(db, "getSandboxForAttempt").mockResolvedValue({
         id: "machine-1",
         kind: "selfhosted",
         enrollmentId: "enrollment-1",
@@ -27,7 +27,14 @@ describe("sandboxless attempt attachment boundary", () => {
       const eventing = { modelRunSettings: settings };
       try {
         const route = await resolveSandboxRoute({
-          input: { accountId: "account-1", workspaceId: "workspace-1", sessionId: "session-1" },
+          input: {
+            accountId: "account-1",
+            workspaceId: "workspace-1",
+            sessionId: "session-1",
+            attemptId: "attempt-2",
+          },
+          turn: { id: "turn-1", executionGeneration: 2 },
+          fileAuthoritySubjectId: null,
           settings,
           db: {},
           eventing,
@@ -37,6 +44,19 @@ describe("sandboxless attempt attachment boundary", () => {
           logicalSandboxSettings: settings,
         } as never);
         expect(route.machinePrimary).toBe(true);
+        expect(sandbox).toHaveBeenCalledWith(
+          {},
+          {
+            accountId: "account-1",
+            workspaceId: "workspace-1",
+            sessionId: "session-1",
+            attemptId: "attempt-2",
+            turnId: "turn-1",
+            executionGeneration: 2,
+            subjectId: null,
+          },
+          "machine-1",
+        );
         expect(eventing.modelRunSettings.sandboxBackend).toBe("selfhosted");
         expect(settings.sandboxBackend).toBe("none");
         const capabilities = buildAgentCapabilities(eventing.modelRunSettings, []);

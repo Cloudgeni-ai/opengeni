@@ -708,6 +708,13 @@ A **Connected Machine** (the `selfhosted` backend) is a user's own always-on mac
 - **Machine UI is opt-in.** Connected-machine React components (machines dashboard, enrollment, status pills, metrics) live on the `@opengeni/react/machines` subpath, so the `@opengeni/react` root import stays a clean sandbox-only default; the root re-exports them deprecated for back-compat (#144).
 - Sandbox/enrollment/metrics tables and the session `active_sandbox_id`/`active_epoch` pointer (migration 0024) make sandboxes swappable within a session. The pointer is **establishment-safe**: a swap/seed to a target no turn can establish is rejected before the epoch-fenced CAS with a typed `code`; a persisted-unestablishable pointer is reset to the session home at turn start under the fence with a visible `session.route.reconciled` event. A `null` pointer resolves to the session home when one exists; for `backend:none` it means no compute is attached, while owned Connected Machines remain discoverable and attachable. See `docs/architecture.md` §3.9 and `docs/connected-machines.md`.
 
+A personal-machine owner's mid-turn move is consent for that logical turn,
+including replacement attempts, regardless of who started it. Keep this receipt
+separate from frozen initiating-person/resource snapshots; never widen machine
+discovery or other personal-resource authority. Revalidate exact attempt, live
+ownership/access/generations and route before dispatch. Future turns do not
+inherit another person's turn-bound move consent.
+
 Plugins compose ordinary Skill and integration ownership. Removal releases only
 the Plugin's owner edges and preserves shared or customized Skills. Compute is
 selected independently: explicit Sandbox Environment base images are disabled, and provider-native

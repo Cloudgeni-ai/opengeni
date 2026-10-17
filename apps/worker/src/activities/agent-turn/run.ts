@@ -1434,6 +1434,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
           const sandboxRoute = await resolveSandboxRoute({
             input,
+            turn,
             settings,
             db,
             eventing,
