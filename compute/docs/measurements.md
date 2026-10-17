@@ -340,6 +340,93 @@ checkpoint (in 933 ms in the run that timed it); what the guest wrote after
 it (a file on disk and one in memory) was lost, as it should be, and the
 first host's next checkpoint was fenced off and dropped its copy.
 
+## Multi-host fleet on GCP (2026-10-17)
+
+Measured on 2026-10-17 by `compute-control`'s `cloud` tests (release
+build) against a fleet deployed by `lab/fleet-gcp.sh` in GCP
+europe-west4-a: the fleet service and its Postgres store on one
+n2-standard-4, and a managed instance group of n2-standard-8 hosts (8 vCPUs,
+32 GiB, nested virtualization, 24 GiB of 2 MiB huge pages for VMs, the
+state root on a 250 GB pd-ssd with XFS), starting at 3 and allowed 5. The
+service grants 10-second leases, archives go to one GCS bucket, and every
+host runs the cut-off guard with a 3-second watchdog. Each test sandbox
+runs a beater, a shell loop holding a count in memory and sending it over
+UDP 20 times a second to a witness in the test, which records when each
+beat arrived and from which host. A program kept across a move or a
+restore counts on from where it was; a sandbox running on two hosts at
+once would send beats from both.
+
+**Moves.** A 1-vCPU, 512 MiB sandbox was put to sleep down to object
+storage and moved twice, through three hosts. Each time the new host woke
+it with its file and its beater as they were, and no beat came from the
+old host after the first from the new one.
+
+| Move | Sleep and move | Wake and first command | Count |
+| --- | --- | --- | --- |
+| First | 11.4 s | 1.33 s | 11, then 12 |
+| Second | 5.6 s | 3.70 s | 23, then 24 |
+
+**A host cut off from the service.** A firewall rule cut one host off from
+the service but not from the witness, 25 seconds after its sandbox
+(checkpointed every 10 seconds) started beating. Two runs:
+
+| Run | Last beat from the cut host | First beat from the new host | Gap | Cut host live again |
+| --- | --- | --- | --- | --- |
+| 1 | 6.69 s after the cut | 20.6 s | 13.9 s | 71 s |
+| 2 | 6.71 s after the cut | 20.3 s | 13.6 s | 70 s |
+
+The cut host's VM stopped within its 10-second lease (the guard froze it
+once its last renewal ran out), and the sandbox ran elsewhere only some 14
+seconds later, from its last checkpoint: it never ran on two hosts at once.
+The service reset the cut host's instance before giving up on it, and the
+host registered again about 70 seconds after the cut.
+
+**A host that dies.** Three sandboxes, each checkpointed every 15
+seconds, were gathered on one host by moves, and after 35 seconds that host
+was ended at once (no shutdown, nothing saved). Each came back on another
+host from its last checkpoint, its beater counting on from there:
+
+| Sandbox | Back after the kill | Work lost |
+| --- | --- | --- |
+| 1 | 69 s | 9.8 s |
+| 2 | 76 s | 17.0 s |
+| 3 | 85 s | 20.0 s |
+
+What each lost is what it did since its newest checkpoint reached the
+store, at most the period plus the upload times of its last two
+checkpoints (ADR 18); the test allows a period plus 5 seconds. The host was
+powered off from inside (`sysrq o`), and GCP went on reporting its instance
+as stopping for a while: the service's first fence once the lease had run
+out, an instance reset, was refused (`RESOURCE_NOT_READY`), and the next,
+12 seconds later, found the instance stopped, which counts as fenced. The
+service gave up on the host about a minute after the kill. The test then
+woke the three sandboxes one after another with a command each, from object
+storage, 7 and 9 seconds apart. A host that is merely cut off is fenced at
+once, as the table above shows.
+
+**Scale-out.** Busy 1-vCPU, 2 GiB sandboxes were created every 8 seconds,
+37 in all, two more than the 3 starting hosts' 73,216 MiB of free memory
+holds. The service asked for a host when spare memory fell below 30 per
+cent of the group's; the new host was live 325 seconds in, after 31
+creates, when 13,824 MiB were still free, and all 37 creates succeeded, on 4
+hosts.
+
+**What the runs found.** Two defects showed only on fresh cloud hosts and
+are fixed with regression tests:
+
+- At boot systemd had not yet enabled the cpu controller at the cgroup
+  root, so the agent could not create its VMs' parent group (ENOENT). It
+  now enables the memory and CPU controllers in every group above it.
+- A move named its target host's renewal before handing the sandbox off,
+  and a hand-off longer than the host's request window made the adopt too
+  old to accept. The service now takes the target's renewal at each try,
+  and retries a named host that refused a request as expired.
+
+The test setup itself had two faults, fixed in `lab/`: the hosts' lab
+filesystem kept the 20 GB size of the image it came from on a 250 GB disk,
+so placement saw under 7 GB free; and idle sandboxes slept and gave their
+memory back, so the scale-out test now keeps each one busy.
+
 ## Admission gaps (2026-10-17)
 
 Measured on 2026-10-17 on branch `feat/compute-gaps`, on one Azure
