@@ -104,7 +104,10 @@ import {
   deriveComputerSessionControllerTokens,
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
-import { retireFormerPlacementControllers } from "../former-placement-retirement";
+import {
+  retireFormerPlacementControllers,
+  retireSourceFormerPlacements,
+} from "../former-placement-retirement";
 import { connectedMachineComputerAccessError } from "../connected-machine-computer-access";
 import {
   controllerCacheAllowsHostFetch,
@@ -1727,14 +1730,12 @@ export function registerComputerSessionRoutes(
       connectedSandboxId,
     });
     if (reconciliation.sourcePlacementChanged) {
-      // End what the move left running on the former machine without making
-      // this request wait for it; a failure leaves the binding for `end`.
-      void retireFormerPlacementControllers(channelServices, {
+      // End what the move left running on its former machines without making
+      // this request wait for it. Earlier failed retirements of this task's
+      // resources are retried too; a failure leaves the binding for later.
+      void retireSourceFormerPlacements(channelServices, {
         grant,
         sourceSessionId,
-        connectedSandboxId,
-        browserSessionIds: reconciliation.browserSessionIds,
-        computerSessionIds: reconciliation.computerSessionIds,
         origin: null,
       });
       throw sourcePlacementChangedApiError("computer_session");

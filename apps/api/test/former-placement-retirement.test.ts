@@ -43,7 +43,7 @@ function harness(options: {
       return {
         endSession: async (reference, endOptions) => {
           calls.push(
-            `browser ${reference.browserSessionId} ${reference.controllerGeneration} removeState=${endOptions.removeState}`,
+            `browser ${reference.browserSessionId} ${reference.controllerGeneration} removeState=${endOptions.removeState} discard=${endOptions.discardWorkingRuntime === true}`,
           );
           const error = options.endErrors?.[reference.browserSessionId];
           if (error) throw error;
@@ -75,7 +75,7 @@ describe("retiring controllers a source task's move left on its former machine",
     const run = harness({ controllers: [browser, computer] });
     const result = await retireFormerPlacementControllersWith(run.ports);
     expect(run.calls).toEqual([
-      `browser ${browser.resourceId} generation-1 removeState=false`,
+      `browser ${browser.resourceId} generation-1 removeState=false discard=true`,
       `computer ${computer.resourceId} generation-2 removeState=false`,
     ]);
     expect(run.released).toEqual([browser.resourceId, computer.resourceId]);
