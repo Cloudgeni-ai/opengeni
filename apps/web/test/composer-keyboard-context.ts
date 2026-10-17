@@ -4,6 +4,9 @@ import type { AppContextValue } from "../src/context";
 // No rig/network access is needed for the machine keyboard paths.
 const context = {
   accessContext: { subjectId: "preview", workspaceGrants: [], accountGrants: [] },
+  workspaces: [],
+  managedSelfContext: null,
+  clientConfig: { voiceInput: { available: false } },
 } as unknown as AppContextValue;
 export const useAppContext = () => context;
 export const useOptionalAppContext = () => null;

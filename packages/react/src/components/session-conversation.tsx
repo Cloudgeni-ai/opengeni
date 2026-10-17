@@ -198,7 +198,7 @@ export type SessionConversationProps = ClientOverride &
     /** Presentation/custom controls only; queue and delivery wiring stay owned here. */
     composerProps?: Omit<
       ChatComposerProps,
-      "composer" | "effectiveControl" | "queuedAheadCount" | "attachments"
+      "composer" | "queue" | "effectiveControl" | "queuedAheadCount" | "attachments"
     >;
     /** Optional host context and notifications; stock delivery remains authoritative. */
     composerOptions?: UseSessionConversationOptions["composerOptions"];
@@ -615,6 +615,7 @@ function ConversationView({
               }
               transcriptionSuppressed={composerProps?.transcriptionSuppressed ?? voiceActive}
               composer={composer}
+              queue={queue}
               attachments={uploadsEnabled ? files : undefined}
               disabled={terminal || composerProps?.disabled}
               controlsStart={

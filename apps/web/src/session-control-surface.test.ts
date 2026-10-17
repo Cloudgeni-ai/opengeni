@@ -105,6 +105,21 @@ describe("session control surface architecture", () => {
     expect(route).toContain('className="mb-2 w-full shrink-0 px-4 sm:px-6"');
   });
 
+  test("the production session forwards its queue through ConsoleComposer for Arrow Up checkout", async () => {
+    const [route, wrapper, preview] = await Promise.all([
+      source("routes/session.tsx"),
+      source("components/Composer.tsx"),
+      source("../test/composer-queue-fixture.tsx"),
+    ]);
+    const composer = route.slice(route.indexOf("<ConsoleComposer"));
+    expect(composer).toContain("queue={props.queue}");
+    expect(wrapper).toContain("queue?: UseTurnQueueResult");
+    expect(wrapper).toContain("queue={props.queue}");
+    expect(preview).toContain("<ConsoleComposer");
+    expect(preview).toContain("queue={queue}");
+    expect(preview).not.toContain("<ChatComposer");
+  });
+
   test("current model pacing is shown above the composer, never on an older history page", async () => {
     const route = await source("routes/session.tsx");
     expect(route).toContain("const modelRecovery = props.hasNewer");

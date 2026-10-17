@@ -67,6 +67,8 @@ export type ChatComposerMessages = {
   close: string;
   danger: string;
   draftConflict: string;
+  queueCheckoutUnconfirmed?: string | undefined;
+  retryDraftSync?: string | undefined;
   useOtherDraft: string;
   keepMine: string;
   savingDraft: string;
@@ -75,6 +77,8 @@ export type ChatComposerMessages = {
 };
 
 export const defaultChatComposerMessages: ChatComposerMessages = {
+  queueCheckoutUnconfirmed: "Queued prompt edit is not confirmed. Sending is paused.",
+  retryDraftSync: "Retry draft sync",
   messagePlaceholder: "Message the agent…",
   pausedPlaceholder: "Message the agent — it will wait in the queue…",
   inputLabel: "Message the agent",
