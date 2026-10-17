@@ -2050,23 +2050,28 @@ function webKitLiveEventsPageErrorsForValidatedRace(
   }> = [];
   for (const pageError of problems.pageErrorEvidence) {
     const match =
-      /^\[cross-tab-select-race\] \/(?<authority>127\.0\.0\.1:\d+)(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/live-events\/stream\?controlAfter=\d+&interactionAfter=\d+&transport=http1-bounded) due to access control checks\.$/u.exec(
+      /^\[cross-tab-select-race\] \/(?<authority>127\.0\.0\.1:\d+)(?<pathnameAndSearch>\/v1\/auth\/session-set|\/v1\/workspaces\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/live-events\/stream\?controlAfter=\d+&interactionAfter=\d+&transport=http1-bounded) due to access control checks\.$/u.exec(
         pageError.message,
       );
     const pathnameAndSearch = match?.groups?.pathnameAndSearch;
     const url =
       pathnameAndSearch === undefined ? undefined : new URL(pathnameAndSearch, input.origin);
+    // The neutral projection can be cancelled by this same reload. Unlike an
+    // outgoing live-stream reconnect, it must consume a failed terminal that
+    // already passed requestFailureProblem's authority/acceptance/reload fence.
+    const neutralSessionSet = pathnameAndSearch === "/v1/auth/session-set";
     if (
       url === undefined ||
       `http://${match?.groups?.authority}` !== input.origin ||
-      url.pathname !== input.pathname ||
-      !exactBoundedWorkspaceLiveStreamSearch(url.search) ||
+      (!neutralSessionSet &&
+        (url.pathname !== input.pathname || !exactBoundedWorkspaceLiveStreamSearch(url.search))) ||
       !Number.isFinite(pageError.observedAt) ||
       pageError.observedAt < input.acceptedAt
     ) {
       return [];
     }
     if (
+      !neutralSessionSet &&
       outgoingDocumentWindow !== null &&
       pageError.observedAt >= outgoingDocumentWindow.startedAt &&
       pageError.observedAt <= outgoingDocumentWindow.committedAt
@@ -4653,6 +4658,104 @@ describe("provider-neutral browser account acceptance", () => {
       ),
     ).toEqual({ cost: 6, terminalIndexes: [1, 2, 0] });
     expect(minimumCostTerminalAssignment([new Map(), new Map()], 1)).toBeNull();
+  });
+
+  test("WebKit neutral session-set race pageerrors require a unique validated failed terminal", () => {
+    const origin = "http://127.0.0.1:23212";
+    const pathname = "/v1/auth/session-set";
+    const message = `[cross-tab-select-race] /127.0.0.1:23212${pathname} due to access control checks.`;
+    const failure: BrowserRequestFailureInput = {
+      engine: "webkit",
+      actorEpoch: null,
+      dispatchPhase: "cross-tab-select-race",
+      responsePhase: "cross-tab-select-race",
+      failure: "Load request cancelled",
+      method: "GET",
+      url: `${origin}${pathname}`,
+      sessionSetAuthorityHash: "a".repeat(64),
+      startedAt: 100,
+      failedAt: 400,
+      crossTabReloadStartedAt: 300,
+      acceptedActorTransitions: [
+        {
+          path: "/v1/auth/session-set/select",
+          actorEpoch: "new",
+          sessionSetAuthorityHash: "a".repeat(64),
+          acceptedAt: 200,
+        },
+      ],
+    };
+    // The request listener admits this terminal only after proving authority,
+    // pre-acceptance dispatch, the exact reload window and native cancellation.
+    expect(requestFailureProblem(failure)).toBeNull();
+    const terminal = {
+      observedAt: 400,
+      origin,
+      pathnameAndSearch: pathname,
+      responsePhase: "cross-tab-select-race",
+      terminal: "failed" as const,
+    };
+    const match = (
+      terminals: BrowserProblems["acceptedRequestTerminals"],
+      errors = [{ message, observedAt: 410 }],
+    ) =>
+      webKitLiveEventsPageErrorsForValidatedRace(
+        {
+          acceptedRequestTerminals: terminals,
+          pageErrorEvidence: errors,
+          crossTabReloadStartedAt: 300,
+          mainFrameCommits: [450],
+        },
+        "webkit",
+        {
+          acceptedAt: 200,
+          origin,
+          settledAt: 500,
+          pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream",
+        },
+      );
+    const accepted = [terminal];
+    expect(match(accepted)).toEqual([message]);
+    expect(accepted).toEqual([]);
+    // Unlike the narrowly proven outgoing stream reconnect, a neutral read
+    // never qualifies through the document-replacement window alone.
+    expect(match([])).toEqual([]);
+    for (const changed of [
+      { terminal: "finished" as const },
+      { pathnameAndSearch: `${pathname}/select` },
+      { pathnameAndSearch: `${pathname}?unrelated=1` },
+      { origin: "http://127.0.0.1:23213" },
+      { responsePhase: "settled" },
+      { observedAt: 199 },
+      { observedAt: 1_501 },
+    ]) {
+      const rejected = [{ ...terminal, ...changed }];
+      expect(match(rejected)).toEqual([]);
+      expect(rejected).toHaveLength(1);
+    }
+    expect(match([terminal, terminal])).toEqual([]);
+    expect(
+      match(
+        [terminal],
+        [
+          { message, observedAt: 410 },
+          { message, observedAt: 411 },
+        ],
+      ),
+    ).toEqual([]);
+    for (const suffix of ["/select", "?unrelated=1"]) {
+      expect(
+        match(
+          [{ ...terminal, pathnameAndSearch: `${pathname}${suffix}` }],
+          [
+            {
+              message: message.replace(pathname, `${pathname}${suffix}`),
+              observedAt: 410,
+            },
+          ],
+        ),
+      ).toEqual([]);
+    }
   });
 
   test("the strict browser ledger correlates WebKit race pageerrors without broad CORS exemptions", () => {
