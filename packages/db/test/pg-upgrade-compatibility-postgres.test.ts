@@ -68,7 +68,7 @@ test("the migrated schema stores no type that blocks pg_upgrade", async () => {
       and not attribute.attisdropped
       and attribute.atttypid in (select oid from blocked)
     order by 1`;
-  expect(columns).toEqual([]);
+  expect(Array.from(columns)).toEqual([]);
 });
 
 test("the session tenancy fence registry names its bound schema", async () => {
