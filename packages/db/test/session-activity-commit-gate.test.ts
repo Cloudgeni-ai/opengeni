@@ -1,4 +1,5 @@
 import { withLegacySessionActivityRlsContext } from "./fixtures/legacy-session-activity";
+import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { eq, sql } from "drizzle-orm";
@@ -98,6 +99,12 @@ async function monitor(
 }
 
 describe("transaction-ID session activity and rolling gate compatibility", () => {
+  test("expanded schema preserves the runtime posture accepted by rolling replicas", async () => {
+    await assertRuntimeDatabasePosture(client.db, {
+      rlsStrategy: "force",
+      expectedRole: "opengeni_app",
+    });
+  }, 60_000);
   test("relevance keeps committed matches visible behind an older xid and freezes its allocation ceiling", async () => {
     const scope = await fixture(),
       a = await session(scope);

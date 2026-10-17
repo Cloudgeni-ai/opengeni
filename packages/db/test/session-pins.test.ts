@@ -2822,11 +2822,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const workspace = await freshWorkspace();
     const subjectId = "user:sort-modes";
     await grantMember(workspace, subjectId);
-    const roots = [];
+    const roots: Awaited<ReturnType<typeof session>>[] = [];
     for (const message of ["sort z", "sort alpha", "sort Alpha", "sort blank"]) {
       roots.push(await session({ ...workspace, message }));
     }
-    const children = [];
+    const children: Awaited<ReturnType<typeof session>>[] = [];
     for (const message of ["sort child z", "sort child a", "sort child A"]) {
       children.push(await session({ ...workspace, message, parentSessionId: roots[0]!.id }));
     }
