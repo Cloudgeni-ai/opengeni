@@ -212,10 +212,11 @@ nested, `nested` memory profile, europe-west4) with 1,000 sandboxes of
 The baseline itself costs more here, and its two runs differ by 0.45% of
 a core, so this host resolves the observability cost even less well:
 journaling only measured 0.36% of a core above the mean of the baselines
-and exporting 0.01% below it, both within that spread. Exporting held
-1.3 MiB more anonymous memory than the mean of the baselines and 2.7 MiB
-more resident memory; journaling only held about the same as the
-baselines. The journal grew 85 KB per 240 s, as on Azure.
+(above both of them) and exporting 0.01% below it; both differences are
+smaller than that spread. Exporting held 1.3 MiB more anonymous memory
+than the mean of the baselines and 2.7 MiB more resident memory;
+journaling only held about the same as the baselines. The journal grew
+85 KB per 240 s, as on Azure.
 
 ## Cost per sleeping sandbox
 
