@@ -32859,6 +32859,15 @@
       "prepareKnowledgeSave": "value",
       "SaveAgentLearningSettingsRequest": "type"
     },
+    "@opengeni/sdk/learning-refusal": {
+      "LEARNING_REFUSAL_DESTINATIONS": "value",
+      "LEARNING_REFUSAL_META_KEY": "value",
+      "LEARNING_REFUSAL_REASONS": "value",
+      "LearningRefusal": "type",
+      "LearningRefusalDestination": "type",
+      "learningRefusalFromToolOutput": "value",
+      "LearningRefusalReason": "type"
+    },
     "@opengeni/sdk/memory-slack": {
       "MemorySlackImportance": "type",
       "MemorySlackPublication": "type",
@@ -33509,6 +33518,10 @@
       "languageForPath": "value",
       "LastStartedTurnPolicy": "type",
       "LatencyModeId": "type",
+      "LearningRefusalActions": "type",
+      "LearningRefusalActionsProvider": "value",
+      "LearningRefusalPlace": "type",
+      "LearningRefusalRow": "value",
       "LightboxControlLabels": "type",
       "LightboxGalleryEntry": "type",
       "LightboxGalleryImage": "type",
@@ -34973,6 +34986,9 @@
       "HumanInputSurfaceProps": "type",
       "KnowledgeActivityActions": "type",
       "KnowledgeActivityProvider": "value",
+      "LearningRefusalActions": "type",
+      "LearningRefusalActionsProvider": "value",
+      "LearningRefusalPlace": "type",
       "MessageTimeline": "value",
       "MessageTimelineProps": "type",
       "NewConversation": "value",

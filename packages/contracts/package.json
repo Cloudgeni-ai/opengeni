@@ -34,6 +34,10 @@
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
     },
+    "./learning-refusal": {
+      "types": "./src/learning-refusal.ts",
+      "default": "./src/learning-refusal.ts"
+    },
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",
       "default": "./src/usage-allowances.ts"
