@@ -13,6 +13,10 @@ struct Answer(u16, Option<u64>, &'static str);
 
 const OK: Answer = Answer(200, None, "{}");
 
+/// A body the fake collector cuts short: it promises more than it sends,
+/// then hangs up.
+const TRUNCATED: &str = "\0truncated";
+
 /// A request the fake collector received.
 #[derive(Debug)]
 struct Received {
@@ -58,6 +62,13 @@ async fn serve(
             body,
         });
         let retry = retry.map_or(String::new(), |after| format!("retry-after: {after}\r\n"));
+        if text == TRUNCATED {
+            let response = format!(
+                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{{\"partial"
+            );
+            let _ = stream.get_mut().write_all(response.as_bytes()).await;
+            return;
+        }
         let response = format!(
             "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n{retry}content-length: {}\r\n\r\n{text}",
             text.len()
@@ -183,20 +194,74 @@ async fn a_partial_success_is_never_retried() {
 
 #[tokio::test]
 async fn retries_stop_when_their_time_runs_out() {
-    // Asked to come back in an hour with ten seconds to retry: give up now.
+    // Asked to come back in an hour with a minute to retry: give up now,
+    // not after a shorter wait of its own.
     let (endpoint, mut received) = collector(vec![Answer(503, Some(3600), "")]).await;
-    let exporter = exporter(&endpoint, Duration::from_secs(10));
+    let exporter = exporter(&endpoint, Duration::from_secs(60));
     let started = tokio::time::Instant::now();
     let (sent, _) = send(&exporter, &mut events(1)).await;
     assert!(
-        matches!(sent, Sent::Failed(ref why) if why.contains("503")),
+        matches!(sent, Sent::Failed(ref why) if why.contains("503") && why.contains("3600 s")),
         "{sent:?}"
     );
     assert!(started.elapsed() < Duration::from_secs(5), "did not wait");
     received.recv().await.unwrap();
+    assert!(received.try_recv().is_err(), "sent once");
     let metrics = Metrics::default();
     account(&metrics, Signal::Metrics, sent, 7);
     assert_eq!(metrics.drops(Signal::Metrics, DropReason::Failed), 7);
+}
+
+#[test]
+fn retry_after_is_read_in_seconds_or_as_a_date() {
+    let date = "Sun, 06 Nov 1994 08:49:37 GMT";
+    assert_eq!(http_date(date), Some(784_111_777));
+    assert_eq!(http_date("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
+    assert_eq!(
+        http_date("Tue, 29 Feb 2028 23:59:59 GMT"),
+        Some(1_835_481_599)
+    );
+    assert_eq!(
+        retry_delay(date, 784_111_777 - 90),
+        Some(Duration::from_secs(90))
+    );
+    assert_eq!(retry_delay(date, 784_111_777 + 5), Some(Duration::ZERO));
+    assert_eq!(retry_delay(" 120 ", 0), Some(Duration::from_secs(120)));
+    // The obsolete forms and anything else: the exporter's own backoff.
+    assert_eq!(retry_delay("Sunday, 06-Nov-94 08:49:37 GMT", 0), None);
+    assert_eq!(retry_delay("Sun Nov  6 08:49:37 1994", 0), None);
+    assert_eq!(retry_delay("Sun, 06 Nov 1994 08:49:37 PST", 0), None);
+    assert_eq!(retry_delay("Sun, 32 Nov 1994 08:49:37 GMT", 0), None);
+    assert_eq!(retry_delay("soon", 0), None);
+}
+
+#[tokio::test]
+async fn a_response_cut_short_is_a_transport_failure_and_retried() {
+    let script = vec![Answer(200, None, TRUNCATED)];
+    let (endpoint, mut received) = collector(script).await;
+    let exporter = exporter(&endpoint, Duration::from_secs(5));
+    let (sent, count) = send(&exporter, &mut events(2)).await;
+    assert_eq!((sent, count), (Sent::Accepted { rejected: 0 }, 2));
+    received.recv().await.unwrap();
+    received.recv().await.expect("sent again");
+}
+
+#[tokio::test]
+async fn a_response_that_is_not_otlp_fails_the_batch() {
+    let huge: &'static str = Box::leak("x".repeat(MAX_RESPONSE + 1).into_boxed_str());
+    for body in ["<html>busy</html>", "[1]", huge] {
+        let (endpoint, mut received) = collector(vec![Answer(200, None, body)]).await;
+        let exporter = exporter(&endpoint, Duration::from_secs(5));
+        let (sent, count) = send(&exporter, &mut events(3)).await;
+        assert!(matches!(sent, Sent::Failed(_)), "{sent:?}");
+        assert_eq!(count, 3);
+        received.recv().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            received.try_recv().is_err(),
+            "not retried: it may have been taken"
+        );
+    }
 }
 
 #[tokio::test]

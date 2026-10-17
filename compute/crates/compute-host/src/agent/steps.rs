@@ -509,8 +509,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         ));
                     }
                 }
-                if running.step.wakes() && outcome == Outcome::Done {
-                    // It runs: the request that woke it is answered.
+                // It runs: the request that woke it is answered. A fetch
+                // only brings it back to the host; the restore after it
+                // still serves that request.
+                if running.step.wakes() && running.step != Step::Fetch && outcome == Outcome::Done {
                     slot.asked = None;
                     slot.summarized = Instant::now();
                 }

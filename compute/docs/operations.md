@@ -81,14 +81,18 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   serves a port, `--canary-port`. It costs one 128 MiB sandbox kept awake
   and one created and removed per round, and a little store traffic. Its
   two sandboxes show in status like any other; their ids start with
-  `ca4a79`.
+  `ca4a79`, then 64 bits the host made up at random the first time and
+  keeps in `canary-id` in its state root, so hosts sharing a store never
+  touch each other's canary.
 - **Alert on these:**
   - any increase of `compute.alarm.count`. Each occurrence also writes a
     `compute.alarm` event naming the sandbox (or the stored object's key),
     so group alerts on that.
   - `compute.canary.count` with outcome `failed` or `timed_out`, and a
-    `compute.canary.last_run` older than three canary periods for any
-    path, which also catches an agent that died or hangs.
+    `compute.canary.last_run` older than one rotation plus a period for
+    any path, which also catches an agent that died or hangs. A rotation
+    is four periods (three on a host without a store), since each run
+    takes the next path, so with `--canary-every 5m` that is 25 minutes.
   - `compute.sample.age` above a minute: the agent's loop is stuck.
   - `compute.step.oldest_age` above the step's usual time, for example
     ten minutes for an archive.

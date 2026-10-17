@@ -523,29 +523,42 @@ pub(crate) fn metrics(
 }
 
 /// How many records or data points a successful response says the
-/// collector rejected: its `partialSuccess`, if any. A body that is empty
-/// or not JSON (a collector may answer with nothing) rejected none.
-pub(crate) fn rejected(body: &[u8]) -> (u64, Option<String>) {
-    let Ok(response) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return (0, None);
-    };
+/// collector rejected: its `partialSuccess`, if any. An empty body (a
+/// collector may answer with nothing) rejected none.
+///
+/// # Errors
+///
+/// When the body is not an OTLP response: not a JSON object, or with a
+/// count that is not a number.
+pub(crate) fn rejected(body: &[u8]) -> Result<(u64, Option<String>), String> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok((0, None));
+    }
+    let response =
+        serde_json::from_slice::<serde_json::Value>(body).map_err(|error| error.to_string())?;
+    if !response.is_object() {
+        return Err("not a JSON object".to_owned());
+    }
     let Some(partial) = response.get("partialSuccess") else {
-        return (0, None);
+        return Ok((0, None));
     };
-    let count = ["rejectedLogRecords", "rejectedDataPoints"]
+    let count = match ["rejectedLogRecords", "rejectedDataPoints"]
         .iter()
         .find_map(|key| partial.get(*key))
-        .and_then(|value| match value {
+    {
+        None => 0,
+        Some(value) => match value {
             serde_json::Value::String(text) => text.parse().ok(),
             other => other.as_u64(),
-        })
-        .unwrap_or(0);
+        }
+        .ok_or_else(|| format!("a rejected count of {value}"))?,
+    };
     let message = partial
         .get("errorMessage")
         .and_then(serde_json::Value::as_str)
         .filter(|message| !message.is_empty())
         .map(str::to_owned);
-    (count, message)
+    Ok((count, message))
 }
 
 #[cfg(test)]

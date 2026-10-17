@@ -75,13 +75,15 @@ enum Uploader {
     ReadBack,
 }
 
-/// Told about every stored object found bad and copied to quarantine, for
-/// example to raise an alarm. Called from whichever task found it, so it
-/// must not wait.
+/// Told about every stored object found bad, and about each copy of one
+/// kept in quarantine, for example to raise alarms. Called from whichever
+/// task found it, so it must not wait.
 pub trait QuarantineWatch: Send + Sync + std::fmt::Debug {
     /// The object stored under `key` (relative to the store's prefix) is
-    /// bad, for the reason `why` gives.
-    fn quarantined(&self, key: &str, why: &str);
+    /// bad, for the reason `why` gives: it failed its check on every read.
+    fn verification_failed(&self, key: &str, why: &str);
+    /// A copy of the bad object under `key` is now kept in quarantine.
+    fn quarantined(&self, key: &str);
 }
 
 #[derive(Clone, Debug)]
@@ -666,11 +668,18 @@ impl ChunkStore {
             .unwrap_or_default()
             .join("/");
         if let Some(watch) = &self.watch {
-            watch.quarantined(&relative, why);
+            watch.verification_failed(&relative, why);
         }
         let target = self.path(&format!("quarantine/v1/{relative}.{nanos}-{moves}"));
         match self.backend.copy(path, &target).await {
-            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Ok(()) => {
+                if let Some(watch) = &self.watch {
+                    watch.quarantined(&relative);
+                }
+                Ok(())
+            }
+            // Gone meanwhile: nothing to keep.
+            Err(object_store::Error::NotFound { .. }) => Ok(()),
             Err(error) => Err(error.into()),
         }
     }
@@ -760,6 +769,9 @@ impl ChunkStore {
         format!("manifests/v1/{digest}.json")
     }
 
+    /// Reads the manifest whose digest is `digest`, checking it. A read
+    /// that does not match its digest is tried once more, since the damage
+    /// may have happened in transit; one bad twice is copied to quarantine.
     pub async fn get_manifest(&self, digest: &str) -> Result<DiskManifest> {
         if digest.len() != 64
             || !digest
@@ -768,10 +780,24 @@ impl ChunkStore {
         {
             return Err(Error::Invalid("manifest digest"));
         }
-        let result = self
-            .backend
-            .get(&self.path(&Self::manifest_key(digest)))
-            .await?;
+        let path = self.path(&Self::manifest_key(digest));
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.read_manifest(&path, digest).await {
+                Err(Error::Integrity) if attempt == 1 => {}
+                Err(Error::Integrity) => {
+                    self.quarantine(&path, "the manifest does not match its digest")
+                        .await?;
+                    return Err(Error::Integrity);
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn read_manifest(&self, path: &Path, digest: &str) -> Result<DiskManifest> {
+        let result = self.backend.get(path).await?;
         if result.meta.size > MAX_MANIFEST_BYTES as u64 {
             return Err(Error::Invalid("manifest too large"));
         }
@@ -1021,15 +1047,51 @@ mod tests {
         found
     }
 
+    /// What a [`QuarantineWatch`] was told: keys found bad, and keys
+    /// copied to quarantine.
+    #[derive(Debug, Default)]
+    struct Seen {
+        bad: std::sync::Mutex<Vec<String>>,
+        kept: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl QuarantineWatch for Seen {
+        fn verification_failed(&self, key: &str, _why: &str) {
+            self.bad.lock().unwrap().push(key.to_owned());
+        }
+
+        fn quarantined(&self, key: &str) {
+            self.kept.lock().unwrap().push(key.to_owned());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_manifest_bad_on_every_read_is_reported_and_quarantined() {
+        let backend = Arc::new(InMemory::new());
+        let seen = Arc::new(Seen::default());
+        let store =
+            ChunkStore::new(backend.clone(), Path::from("tenant/test")).with_watch(seen.clone());
+        let digest = blake3::hash(b"the manifest named").to_hex().to_string();
+        let key = ChunkStore::manifest_key(&digest);
+        let bad = Bytes::from_static(b"other bytes");
+        backend
+            .put(&store.path(&key), bad.clone().into())
+            .await
+            .unwrap();
+        let error = store.get_manifest(&digest).await.unwrap_err();
+        assert!(matches!(error, Error::Integrity), "{error}");
+        assert_eq!(quarantined(&backend).await, vec![bad]);
+        assert_eq!(*seen.bad.lock().unwrap(), vec![key.clone()]);
+        assert_eq!(*seen.kept.lock().unwrap(), vec![key]);
+
+        // A manifest that is not there is no damage.
+        let missing = blake3::hash(b"never stored").to_hex().to_string();
+        assert!(store.get_manifest(&missing).await.is_err());
+        assert_eq!(seen.bad.lock().unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn truncated_and_corrupt_chunks_are_rejected_quarantined_and_repaired() {
-        #[derive(Debug, Default)]
-        struct Seen(std::sync::Mutex<Vec<String>>);
-        impl QuarantineWatch for Seen {
-            fn quarantined(&self, key: &str, _why: &str) {
-                self.0.lock().unwrap().push(key.to_owned());
-            }
-        }
         let backend = Arc::new(InMemory::new());
         let seen = Arc::new(Seen::default());
         let store =
@@ -1065,8 +1127,10 @@ mod tests {
             );
         }
         // Each bad copy was reported by its key twice: when a read found it,
-        // and when the repairing upload found it still there.
-        assert_eq!(*seen.0.lock().unwrap(), vec![chunk.object_key(); 4]);
+        // and when the repairing upload found it still there; each time a
+        // copy was kept.
+        assert_eq!(*seen.bad.lock().unwrap(), vec![chunk.object_key(); 4]);
+        assert_eq!(*seen.kept.lock().unwrap(), vec![chunk.object_key(); 4]);
     }
 
     #[tokio::test]

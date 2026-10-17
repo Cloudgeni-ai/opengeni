@@ -205,15 +205,20 @@ fn every_metric_has_a_unit_and_description() {
 
 #[test]
 fn partial_success_counts_what_was_rejected() {
-    assert_eq!(rejected(b""), (0, None));
-    assert_eq!(rejected(b"not json"), (0, None));
-    assert_eq!(rejected(br#"{"partialSuccess":{}}"#), (0, None));
+    assert_eq!(rejected(b""), Ok((0, None)));
+    assert_eq!(rejected(b"{}"), Ok((0, None)));
+    assert_eq!(rejected(br#"{"partialSuccess":{}}"#), Ok((0, None)));
     assert_eq!(
         rejected(br#"{"partialSuccess":{"rejectedLogRecords":"3","errorMessage":"too big"}}"#),
-        (3, Some("too big".into()))
+        Ok((3, Some("too big".into())))
     );
     assert_eq!(
         rejected(br#"{"partialSuccess":{"rejectedDataPoints":2,"errorMessage":""}}"#),
-        (2, None)
+        Ok((2, None))
     );
+    // Not a response the collector meant: what it accepted is unknown.
+    assert!(rejected(b"not json").is_err());
+    assert!(rejected(br#"{"partialSuccess":{"rejectedLogRec"#).is_err());
+    assert!(rejected(b"[]").is_err());
+    assert!(rejected(br#"{"partialSuccess":{"rejectedLogRecords":"many"}}"#).is_err());
 }

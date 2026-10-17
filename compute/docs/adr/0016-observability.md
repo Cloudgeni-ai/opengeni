@@ -54,9 +54,13 @@ for activity ([3](0003-activity-idle-and-sleep-levels.md)).
   Events also go to the local journal, so nothing depends on the collector.
   Compatibility is claimed only after a test against a real OpenTelemetry
   Collector.
-- **Budget targets, not yet measured:** under 0.1% of one core and 2 MiB of
-  memory per host at a thousand sandboxes and one request per second per
-  host, including sampling, encoding and export but not the canary.
+- **Budget targets:** under 0.1% of one core and 2 MiB of memory per host
+  at a thousand sandboxes and one request per second per host, including
+  sampling, encoding and export but not the canary. Measured on a nested
+  host at 1,000 running sandboxes ([measurements](../measurements.md)):
+  processor time within the baselines' spread of about 0.1% of a core, and
+  1.1 MiB more heap while exporting, plus 1.2 MiB of resident code for
+  HTTP and TLS.
 
 ## What building it taught us
 
@@ -71,8 +75,9 @@ for activity ([3](0003-activity-idle-and-sleep-levels.md)).
   its own; a wake consumes the request to sleep.
 - **Trace context.** Any request may carry `traceparent` beside its own
   fields. One that is not valid is ignored. The request's event carries
-  the trace, and so do the steps it caused: the wake it asked for, or each
-  step of a sleep down to the level it asked for. No spans are made.
+  the trace, and so do the steps it caused: each step of the wake it asked
+  for (a fetch from the store and the restore after it), or each step of a
+  sleep down to the level it asked for. No spans are made.
 - **Requests.** A request's event is written after its reply. A client
   that hangs up before its reply gets an event with result `hung_up` and
   is not counted. A `connect` writes its request event when the stream is
@@ -92,18 +97,29 @@ for activity ([3](0003-activity-idle-and-sleep-levels.md)).
   cumulative `some` and `full` totals, as sums whose start time is the
   host's boot, since the kernel counts from then.
 - **Store alarms name the object.** A stored object that failed its
-  checksum names its key, not a sandbox: chunks are shared.
-- **Canary.** It uses two fixed sandbox ids of its own (ending in `01` for
-  the rotating sandbox and `02` for the one each create path makes and
-  removes), asks at background priority, and runs only with
-  `--canary-every`. With `--canary-port`, each wake also connects to that
-  guest port. A host without a store skips the remote path. Each run
-  writes a `compute.canary` event and updates `compute.canary.count`,
-  `compute.canary.duration` and `compute.canary.last_run` per path.
+  checksum (a chunk or a manifest bad on two reads) names its key, not a
+  sandbox: chunks are shared. Quarantine is counted only once the copy is
+  kept. A local memory image found damaged when the agent starts raises
+  the same alarms as one found damaged on a wake.
+- **Canary.** It uses two sandbox ids of its own (ending in `01` for the
+  rotating sandbox and `02` for the one each create path makes and
+  removes). Hosts may share a store, so the ids carry 64 bits each host
+  made up at random once and keeps in its state root. It asks at
+  background priority and runs only with `--canary-every`. A resume,
+  restore or remote wake must come back to the execution put to sleep:
+  one that booted afresh instead fails the run. With `--canary-port`,
+  each wake also connects to that guest port. A host without a store
+  skips the remote path. Each run writes a `compute.canary` event and
+  updates `compute.canary.count`, `compute.canary.duration` and
+  `compute.canary.last_run` per path.
 - **Exporter.** `--otlp-endpoint` turns it on. Events wait in a buffer of
   2,048 and go in batches of up to 512 every second; metrics go every ten
   seconds. One request per signal is in flight at a time, each attempt
-  times out after 10 s, and retries stop after a minute. When the buffer is
+  times out after 10 s, and retries stop after a minute. A `Retry-After`
+  (in seconds or as an HTTP date) is waited out in full, or the batch
+  fails at once when it asks for longer than the minute left. A response
+  is read up to 64 KiB; one cut short is retried, and one too large or
+  not an OTLP response fails its batch. When the buffer is
   full the oldest event goes. `compute.export.dropped` counts what was
   dropped, by signal and reason (`buffer_full`, `rejected`, `failed`).
   An agent told to stop (SIGINT or SIGTERM) sends what is left, each

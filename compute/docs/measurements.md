@@ -157,6 +157,45 @@ agent's lifetime; they now expire 60 s after arrival, which took the
 agent's memory 100 s after the last remote wake and removal from 279 MiB
 to 54 MiB.
 
+## Observability overhead
+
+What [ADR 16](adr/0016-observability.md) costs the agent, measured on
+2026-10-17 on an Azure Standard_E32ds_v5 (32 vCPUs, nested, `nested`
+memory profile, westeurope) with 1,000 sandboxes of 128 MiB running and
+one wake per second. Each phase restarted the agent (the VMs kept
+running), let it settle for 90 s and then read its processor time and
+memory over 240 s, in the order baseline, observability with events
+journaled only, observability exporting to an OpenTelemetry Collector on
+the same host, and baseline again. The baseline is the lab branch the
+observability work started from. No canary ran.
+
+| Phase | Processor, % of one core | Resident at end | Anonymous at end |
+| --- | --- | --- | --- |
+| Baseline | 10.33 | 38.3 MiB | 29.5 MiB |
+| Journal only | 10.26 | 38.6 MiB | 29.9 MiB |
+| Exporting | 10.29 | 40.2 MiB | 30.3 MiB |
+| Baseline again | 10.23 | 37.6 MiB | 29.0 MiB |
+
+Processor time with observability is within the baselines' own spread
+(0.1% of a core between the two here, 0.14% across both runs below), so
+its cost is below what this method resolves, under ADR 16's 0.1% target.
+An earlier run of the same method, before every sample read `memory.stat`
+in one pass, measured 0.16% (journal only) and 0.20% (exporting) of a
+core above the mean of its baselines (10.20 and 10.23). A profile of that
+build (perf at 499 Hz over 120 s, with export on) put 84% of the agent's
+samples in system calls reading cgroup and `/proc` files, which the
+baseline's per-VM sampling already does; the observability code's own
+functions held under 0.1% of its samples. Its added cost was a second
+scan of each VM's `memory.stat` for `pgmajfault`, every second, which the
+one pass removed.
+
+Exporting held 1.1 MiB more anonymous memory than the mean of the
+baselines, within ADR 16's 2 MiB target, and 1.2 MiB more file-backed
+pages, the binary's code for HTTP and TLS; counting those, the resident
+set grew 2.3 MiB, a little over it. Journaling only held 0.6 MiB more
+anonymous memory. Events journaled took 85 KB of log per 240 s, about
+30 MB a day at this rate.
+
 ## Cost per sleeping sandbox
 
 Illustrative estimates of the main resources a sleeping sandbox holds,

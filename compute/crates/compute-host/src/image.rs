@@ -160,6 +160,19 @@ impl Verified {
     }
 }
 
+/// What [`Images::recover`] found.
+#[derive(Debug)]
+pub(crate) enum Recovered {
+    /// A current image that checks out: this generation.
+    Good(Generation),
+    /// No image was published.
+    Absent,
+    /// The current image failed its verification, for the reason `why`:
+    /// there is no usable image. `quarantined` tells whether it was moved
+    /// aside for inspection.
+    Damaged { why: String, quarantined: bool },
+}
+
 /// Why a generation is not good.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Suspect {
@@ -651,14 +664,15 @@ impl Images {
     /// current generation checks out, leftovers older or newer than it are
     /// removed. Without a good current generation nothing is removed.
     ///
-    /// `Ok(None)` means there is proven to be no usable image: none was
-    /// published, or the current one is missing parts or damaged. An error
-    /// means the images could not be looked at (a read failed in a way that
-    /// may pass); nothing is quarantined then, and the image may be good.
-    pub fn recover(&self) -> io::Result<Option<Verified>> {
+    /// Anything but [`Recovered::Good`] means there is proven to be no
+    /// usable image: none was published, or the current one is missing
+    /// parts or damaged. An error means the images could not be looked at
+    /// (a read failed in a way that may pass); nothing is quarantined then,
+    /// and the image may be good.
+    pub fn recover(&self) -> io::Result<Recovered> {
         let entries = match fs::read_dir(&self.dir) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Recovered::Absent),
             Err(error) => return Err(error),
         };
         for entry in entries {
@@ -675,7 +689,10 @@ impl Images {
             // damaged.
             Err(error) if proves_damage(&error) => {
                 remove_durably(&self.dir.join(CURRENT))?;
-                return Ok(None);
+                return Ok(Recovered::Damaged {
+                    why: format!("the pointer to the current image is damaged: {error}"),
+                    quarantined: false,
+                });
             }
             Err(error) => return Err(error),
         };
@@ -684,10 +701,19 @@ impl Images {
             Some(Ok(current)) => Some(current),
             Some(Err(Suspect::Io(error))) if !proves_damage(&error) => return Err(error),
             Some(Err(why)) => {
-                if let Some(generation) = generation {
-                    self.quarantine(generation, &why)?;
-                }
-                return Ok(None);
+                // A verdict: the image is no good, whether or not it can
+                // be moved aside.
+                let quarantined = generation.is_some_and(|generation| {
+                    self.quarantine(generation, &why)
+                        .map_err(|error| {
+                            tracing::error!(%error, %why, "could not quarantine a bad image");
+                        })
+                        .is_ok()
+                });
+                return Ok(Recovered::Damaged {
+                    why: why.to_string(),
+                    quarantined,
+                });
             }
         };
         if let Some(current) = &current {
@@ -698,7 +724,9 @@ impl Images {
             }
             sync_dir(&self.dir)?;
         }
-        Ok(current)
+        Ok(current.map_or(Recovered::Absent, |current| {
+            Recovered::Good(current.generation())
+        }))
     }
 
     /// Removes every image and the pointer: the sandbox has no memory image.

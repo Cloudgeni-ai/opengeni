@@ -277,10 +277,10 @@ fn diff_files(paths: &Paths) -> SnapshotFiles {
 }
 
 /// Makes the sandbox's images consistent after a host restart and reports
-/// whether a good current image exists. An error means they could not be
-/// checked, which proves nothing about them.
-pub(crate) fn recover_images(paths: &Paths) -> io::Result<bool> {
-    images_of(paths).recover().map(|current| current.is_some())
+/// whether a good current image exists, or why not. An error means they
+/// could not be checked, which proves nothing about them.
+pub(crate) fn recover_images(paths: &Paths) -> io::Result<crate::image::Recovered> {
+    images_of(paths).recover()
 }
 
 /// Points `link` at `target` with a hard link, replacing what was there.
@@ -1086,11 +1086,13 @@ impl<E: Engine, S: Store> Job<E, S> {
             return;
         }
         notes::alarm(Alarm::VerificationFailed, suspect);
-        notes::alarm(Alarm::Quarantined, &format!("memory image: {suspect}"));
-        if let Ok(Some(generation)) = images.current()
-            && let Err(error) = images.quarantine(generation, suspect)
-        {
-            tracing::error!(id = %self.id, %error, "could not quarantine a bad image");
+        if let Ok(Some(generation)) = images.current() {
+            match images.quarantine(generation, suspect) {
+                Ok(()) => notes::alarm(Alarm::Quarantined, &format!("memory image: {suspect}")),
+                Err(error) => {
+                    tracing::error!(id = %self.id, %error, "could not quarantine a bad image");
+                }
+            }
         }
         if let Err(error) = self.commit(Change::new().image(false)).await {
             tracing::error!(id = %self.id, %error, "could not record a lost image");

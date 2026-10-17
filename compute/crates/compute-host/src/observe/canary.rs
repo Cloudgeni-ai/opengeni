@@ -15,8 +15,13 @@
 //! The canary asks at background priority, so it never jumps ahead of a
 //! sandbox someone waits on.
 //!
+//! Hosts may share a store, so each host's canary sandboxes have ids of
+//! their own, made up once and kept in the agent's state root.
+//!
 //! [ADR 16]: https://github.com/Cloudgeni-ai/opengeni/blob/main/compute/docs/adr/0016-observability.md
 
+use std::io::{self, Read, Write};
+use std::path::Path;
 use std::time::Duration;
 
 use compute_core::{Level, OpId, Priority, SandboxId};
@@ -26,16 +31,70 @@ use super::{CanaryOutcome, CanaryPath, Event, Severity, unix_nanos_now};
 use crate::agent::{Handle, HostError};
 use crate::protocol::{Id, SandboxConfig, SleepConfig};
 
-/// The canary's own sandbox, which every path but a create uses. It never
-/// sleeps by its own settings: the canary puts it to sleep.
-pub const SANDBOX: Id = Id(SandboxId(0xca4a_7900_0000_0000_0000_0000_0000_0001));
-/// The sandbox a create path makes, and removes again.
-pub const FRESH: Id = Id(SandboxId(0xca4a_7900_0000_0000_0000_0000_0000_0002));
+/// The file in the state root that keeps the host's canary ids.
+const IDS_FILE: &str = "canary-id";
+
+/// One host's canary sandboxes. Their ids start with `ca4a79`, then the
+/// host's own 64 bits, then `01` or `02`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanaryIds {
+    /// The sandbox every path but a create uses. It never sleeps by its
+    /// own settings: the canary puts it to sleep.
+    pub sandbox: Id,
+    /// The sandbox a create path makes, and removes again.
+    pub fresh: Id,
+}
+
+impl CanaryIds {
+    /// The ids for the host with these 64 bits.
+    #[must_use]
+    pub fn for_bits(host: u64) -> Self {
+        let base = (0x00ca_4a79_u128 << 104) | (u128::from(host) << 8);
+        Self {
+            sandbox: Id(SandboxId(base | 1)),
+            fresh: Id(SandboxId(base | 2)),
+        }
+    }
+
+    /// The ids of the host whose agent keeps its state in `root`: made up
+    /// at random the first time and kept there, so a restarted agent finds
+    /// its canary sandbox again.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read or written, or holds something else.
+    pub fn for_host(root: &Path) -> io::Result<Self> {
+        let path = root.join(IDS_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let bits = u64::from_str_radix(text.trim(), 16).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: {error}", path.display()),
+                    )
+                })?;
+                return Ok(Self::for_bits(bits));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let mut bits = [0; 8];
+        std::fs::File::open("/dev/urandom")?.read_exact(&mut bits)?;
+        let bits = u64::from_le_bytes(bits);
+        std::fs::create_dir_all(root)?;
+        let partial = root.join(format!("{IDS_FILE}.partial"));
+        let mut file = std::fs::File::create(&partial)?;
+        writeln!(file, "{bits:016x}")?;
+        file.sync_all()?;
+        std::fs::rename(&partial, &path)?;
+        Ok(Self::for_bits(bits))
+    }
+}
 
 /// How the canary runs.
 #[derive(Clone, Debug)]
 pub struct CanaryConfig {
-    /// How often a run starts.
+    /// How often a run starts; more than zero.
     pub every: Duration,
     /// How long one run may take, sleeping included.
     pub timeout: Duration,
@@ -45,19 +104,22 @@ pub struct CanaryConfig {
     pub memory_mib: u32,
     /// Whether the host has a store, so the remote path can run.
     pub remote: bool,
+    /// Its sandboxes.
+    pub ids: CanaryIds,
 }
 
 impl CanaryConfig {
     /// Runs every `every`, five minutes each at most, with 128 MiB
-    /// sandboxes and no guest port.
+    /// sandboxes `ids` and no guest port.
     #[must_use]
-    pub fn new(every: Duration, remote: bool) -> Self {
+    pub fn new(every: Duration, remote: bool, ids: CanaryIds) -> Self {
         Self {
             every,
             timeout: Duration::from_secs(300),
             port: None,
             memory_mib: 128,
             remote,
+            ids,
         }
     }
 
@@ -90,8 +152,10 @@ struct Woken {
 /// Runs the canary until the agent stops.
 pub async fn run(handle: Handle, config: CanaryConfig) {
     let paths = config.paths();
-    let mut tick = tokio::time::interval(config.every);
+    // A zero period would panic; settings refuse it before this.
+    let mut tick = tokio::time::interval(config.every.max(Duration::from_millis(1)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let CanaryIds { sandbox, fresh } = config.ids;
     for path in paths.into_iter().cycle() {
         tick.tick().await;
         let started = Instant::now();
@@ -111,9 +175,9 @@ pub async fn run(handle: Handle, config: CanaryConfig) {
         report(&handle, path, took, &result);
         if path == CanaryPath::Create || broken {
             let id = if path == CanaryPath::Create {
-                FRESH
+                fresh
             } else {
-                SANDBOX
+                sandbox
             };
             let removed = tokio::time::timeout(config.timeout, handle.remove(id, None)).await;
             if let Ok(Err(error)) = removed
@@ -130,29 +194,35 @@ async fn run_path(
     config: &CanaryConfig,
     path: CanaryPath,
 ) -> Result<Woken, HostError> {
+    let CanaryIds { sandbox, fresh } = config.ids;
     let level = match path {
         CanaryPath::Create => {
             // One a crashed run left goes first.
-            match handle.remove(FRESH, None).await {
+            match handle.remove(fresh, None).await {
                 Ok(()) | Err(HostError::NotFound(_)) => {}
                 Err(error) => return Err(error),
             }
-            handle.create(FRESH, config.sandbox()).await?;
-            return wake(handle, FRESH, config.port).await;
+            handle.create(fresh, config.sandbox()).await?;
+            return wake(handle, fresh, None, config.port).await;
         }
         CanaryPath::Resume => Level::Paused,
         CanaryPath::Restore => Level::Saved,
         CanaryPath::Remote => Level::Remote,
     };
-    match handle.create(SANDBOX, config.sandbox()).await {
+    match handle.create(sandbox, config.sandbox()).await {
         Ok(()) | Err(HostError::Exists(_)) => {}
         Err(error) => return Err(error),
     }
-    // Awake first, so every run of a path starts from the same place.
-    drop(handle.acquire(SANDBOX, None, Priority::Background).await?);
-    handle.sleep(SANDBOX, None, level).await?;
-    reach(handle, SANDBOX, level).await?;
-    wake(handle, SANDBOX, config.port).await
+    // Awake first, so every run of a path starts from the same place. The
+    // wake must come back to this execution: a sandbox booted afresh
+    // instead lost what ran in it, which is a failure, not a slow success.
+    let generation = handle
+        .acquire(sandbox, None, Priority::Background)
+        .await?
+        .generation();
+    handle.sleep(sandbox, Some(generation), level).await?;
+    reach(handle, sandbox, level).await?;
+    wake(handle, sandbox, Some(generation), config.port).await
 }
 
 /// Waits until `id` is at `level` with no step under way.
@@ -166,9 +236,15 @@ async fn reach(handle: &Handle, id: Id, level: Level) -> Result<(), HostError> {
     }
 }
 
-/// Wakes `id` and, with a `port`, connects to it.
-async fn wake(handle: &Handle, id: Id, port: Option<u32>) -> Result<Woken, HostError> {
-    let mut lease = handle.acquire(id, None, Priority::Background).await?;
+/// Wakes `id`, at `generation` if given, and, with a `port`, connects to
+/// it.
+async fn wake(
+    handle: &Handle,
+    id: Id,
+    generation: Option<u64>,
+    port: Option<u32>,
+) -> Result<Woken, HostError> {
+    let mut lease = handle.acquire(id, generation, Priority::Background).await?;
     let connect = match port {
         Some(port) => {
             let started = Instant::now();
@@ -224,4 +300,48 @@ fn report(
         }
     }
     handle.observer().emit(event);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("canary-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
+    #[test]
+    fn each_host_keeps_canary_ids_of_its_own() {
+        let (first, second) = (root("first"), root("second"));
+        let ids = CanaryIds::for_host(&first).unwrap();
+        assert_eq!(
+            CanaryIds::for_host(&first).unwrap(),
+            ids,
+            "kept across restarts"
+        );
+        let other = CanaryIds::for_host(&second).unwrap();
+        assert_ne!(other.sandbox, ids.sandbox, "two hosts sharing a store");
+        assert_ne!(other.fresh, ids.fresh);
+        for id in [ids.sandbox, ids.fresh, other.sandbox, other.fresh] {
+            assert!(id.to_string().starts_with("ca4a79"), "{id}");
+        }
+        assert_ne!(ids.sandbox, ids.fresh);
+
+        // Something else in the file is refused, not replaced: that would
+        // leave the old canary sandbox behind.
+        std::fs::write(first.join(IDS_FILE), "not hex\n").unwrap();
+        assert!(CanaryIds::for_host(&first).is_err());
+        for root in [first, second] {
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_ids_carry_the_host_bits() {
+        let ids = CanaryIds::for_bits(0x0123_4567_89ab_cdef);
+        assert_eq!(ids.sandbox.0.0, 0xca4a_7900_0000_0001_2345_6789_abcd_ef01);
+        assert_eq!(ids.fresh.0.0, 0xca4a_7900_0000_0001_2345_6789_abcd_ef02);
+    }
 }

@@ -6,8 +6,12 @@
 //! the collector is slow or away; when it is full the oldest go, counted.
 //! One request per signal is in flight at a time. A request is retried on
 //! transport failures and on 429, 502, 503 and 504, with backoff and for a
-//! bounded time; any other refusal drops its batch, counted. A partial
-//! success is never retried: what it rejected is counted as dropped.
+//! bounded time, waiting as long as a `Retry-After` asks, or giving up
+//! at once when that is longer than the time left; any other refusal drops
+//! its batch, counted. A partial success is never retried: what it
+//! rejected is counted as dropped. A response that cannot be read in full
+//! counts as a transport failure; one that is too large or not an OTLP
+//! response fails its batch, since what it accepted is unknown.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -19,6 +23,10 @@ use tokio::task::JoinHandle;
 use super::event::{Event, unix_nanos_now};
 use super::metrics::{DropReason, Metrics, Signal};
 use super::otlp::{self, Origin, Process};
+
+/// The most of a collector's response read. A real one is a few bytes, or
+/// a short message with a partial success.
+const MAX_RESPONSE: usize = 64 << 10;
 
 /// Where and how often to export.
 #[derive(Clone, Debug)]
@@ -124,9 +132,16 @@ pub(crate) async fn run(
                 metrics: Arc::clone(&metrics),
             })
     });
+    // A zero period would panic; the agent's settings refuse it before.
     let (logs_every, metrics_every) = sinks.export.as_ref().map_or(
         (Duration::from_secs(3600), Duration::from_secs(3600)),
-        |export| (export.logs_every, export.metrics_every),
+        |export| {
+            let shortest = Duration::from_millis(1);
+            (
+                export.logs_every.max(shortest),
+                export.metrics_every.max(shortest),
+            )
+        },
     );
     let capacity = sinks.export.as_ref().map_or(0, |export| export.buffer);
     let mut pending: VecDeque<Event> = VecDeque::with_capacity(capacity.min(256));
@@ -291,19 +306,15 @@ impl Exporter {
                 request = request.header(name, value);
             }
             let (problem, wait) = match request.send().await {
-                Ok(response) if response.status().is_success() => {
-                    let body = response.bytes().await.unwrap_or_default();
-                    let (rejected, message) = otlp::rejected(&body);
-                    if let Some(message) = message {
-                        tracing::warn!(
-                            path,
-                            rejected,
-                            message,
-                            "the collector rejected part of an export"
-                        );
+                Ok(response) if response.status().is_success() => match read_body(response).await {
+                    Ok(body) => return accepted(path, &url, &body),
+                    Err(Unread::Transport(error)) => (format!("{url}: {error}"), None),
+                    Err(Unread::TooLarge) => {
+                        return Sent::Failed(format!(
+                            "{url}: a response over {MAX_RESPONSE} bytes"
+                        ));
                     }
-                    return Sent::Accepted { rejected };
-                }
+                },
                 Ok(response) if retryable(response.status().as_u16()) => {
                     let wait = retry_after(&response);
                     (format!("{url}: {}", response.status()), wait)
@@ -311,13 +322,65 @@ impl Exporter {
                 Ok(response) => return Sent::Failed(format!("{url}: {}", response.status())),
                 Err(error) => (format!("{url}: {error}"), None),
             };
-            let wait = wait.unwrap_or(delay).min(Duration::from_secs(30));
+            let asked = wait.is_some();
+            let wait = wait.unwrap_or(delay);
             if tokio::time::Instant::now() + wait > give_up {
-                return Sent::Failed(problem);
+                return Sent::Failed(if asked {
+                    format!(
+                        "{problem}, and asked to wait {} s, beyond the time left to retry",
+                        wait.as_secs()
+                    )
+                } else {
+                    problem
+                });
             }
             tokio::time::sleep(wait).await;
             delay = (delay * 2).min(Duration::from_secs(16));
         }
+    }
+}
+
+/// Why a response's body was not read.
+enum Unread {
+    /// The connection failed while reading it.
+    Transport(reqwest::Error),
+    /// It is longer than [`MAX_RESPONSE`].
+    TooLarge,
+}
+
+/// Reads a response's body, up to [`MAX_RESPONSE`].
+async fn read_body(mut response: reqwest::Response) -> Result<Vec<u8>, Unread> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE as u64)
+    {
+        return Err(Unread::TooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(Unread::Transport)? {
+        if body.len() + chunk.len() > MAX_RESPONSE {
+            return Err(Unread::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// What a successful response to `path` says was accepted.
+fn accepted(path: &str, url: &str, body: &[u8]) -> Sent {
+    match otlp::rejected(body) {
+        Ok((rejected, message)) => {
+            if let Some(message) = message {
+                tracing::warn!(
+                    path,
+                    rejected,
+                    message,
+                    "the collector rejected part of an export"
+                );
+            }
+            Sent::Accepted { rejected }
+        }
+        Err(error) => Sent::Failed(format!("{url}: not an OTLP response: {error}")),
     }
 }
 
@@ -327,17 +390,66 @@ pub(crate) fn retryable(status: u16) -> bool {
     matches!(status, 429 | 502 | 503 | 504)
 }
 
-/// The delay a `Retry-After` header in seconds asks for.
+/// The delay a `Retry-After` header asks for, in seconds or as an HTTP
+/// date; a date already past asks for none.
 fn retry_after(response: &reqwest::Response) -> Option<Duration> {
-    response
+    let value = response
         .headers()
         .get(reqwest::header::RETRY_AFTER)?
         .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
-        .map(Duration::from_secs)
+        .ok()?;
+    retry_delay(value, unix_nanos_now() / 1_000_000_000)
+}
+
+/// The delay `value`, a `Retry-After`, asks for when it is `now` in
+/// seconds since the Unix epoch.
+pub(crate) fn retry_delay(value: &str, now: u64) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let at = http_date(value)?;
+    Some(Duration::from_secs(at.saturating_sub(now)))
+}
+
+/// Seconds since the Unix epoch of an HTTP date in its preferred form,
+/// such as `Sun, 06 Nov 1994 08:49:37 GMT`. The two obsolete forms are
+/// not read; a delay in them falls back to the exporter's own backoff.
+pub(crate) fn http_date(text: &str) -> Option<u64> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (_, rest) = text.split_once(", ")?;
+    let mut parts = rest.split(' ');
+    let day: u64 = parts.next()?.parse().ok()?;
+    let month = parts.next()?;
+    let year: u64 = parts.next()?.parse().ok()?;
+    let time = parts.next()?;
+    if parts.next()? != "GMT" || parts.next().is_some() {
+        return None;
+    }
+    let month = MONTHS.iter().position(|name| *name == month)? as u64 + 1;
+    let mut clock = time.split(':').map(|part| part.parse::<u64>().ok());
+    let (hour, minute, second) = (clock.next()??, clock.next()??, clock.next()??);
+    if clock.next().is_some() || !(1..=31).contains(&day) || year < 1970 || hour > 23 {
+        return None;
+    }
+    if minute > 59 || second > 60 {
+        return None;
+    }
+    // Days since the epoch of a proleptic Gregorian date (Howard
+    // Hinnant's `days_from_civil`).
+    let (y, m) = if month <= 2 {
+        (year - 1, month + 9)
+    } else {
+        (year, month - 3)
+    };
+    let era = y / 400;
+    let of_era = y % 400;
+    let of_year = (153 * m + 2) / 5 + day - 1;
+    let of_cycle = of_era * 365 + of_era / 4 - of_era / 100 + of_year;
+    let days = (era * 146_097 + of_cycle).checked_sub(719_468)?;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 /// What the agent's process has used, on Linux.

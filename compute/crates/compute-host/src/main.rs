@@ -624,7 +624,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     protect_from_oom()?;
     let about = describe(memory_profile, &args.base_image);
     let observer = args.observe.observer(&about)?;
-    let canary = args.observe.canary(args.store.is_some());
+    let canary = args.observe.canary(&args.root, args.store.is_some())?;
     let config = HostConfig {
         root: args.root,
         kernel: args.kernel,

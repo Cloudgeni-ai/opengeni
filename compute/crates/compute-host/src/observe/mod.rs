@@ -160,11 +160,15 @@ pub fn alarm_event(what: impl Into<String>) -> Event {
 pub struct StoreAlarms(pub Observer);
 
 impl compute_storage::store::QuarantineWatch for StoreAlarms {
-    fn quarantined(&self, key: &str, why: &str) {
-        for alarm in [Alarm::VerificationFailed, Alarm::Quarantined] {
-            let event = alarm_event(format!("stored object: {why}"))
-                .with("compute.object.key", key.to_owned());
-            self.0.alarm(alarm, event);
-        }
+    fn verification_failed(&self, key: &str, why: &str) {
+        let event =
+            alarm_event(format!("stored object: {why}")).with("compute.object.key", key.to_owned());
+        self.0.alarm(Alarm::VerificationFailed, event);
+    }
+
+    fn quarantined(&self, key: &str) {
+        let event = alarm_event("stored object kept in quarantine")
+            .with("compute.object.key", key.to_owned());
+        self.0.alarm(Alarm::Quarantined, event);
     }
 }

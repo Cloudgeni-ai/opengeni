@@ -9,6 +9,7 @@ use compute_core::{Durability, Input, Level, Priority, SandboxId, State};
 use compute_engine::{Engine, EngineError, ErrorKind, Found, VmSpec};
 use futures::StreamExt;
 
+use crate::image::Recovered;
 use crate::layout::{Images, Paths, vm_spec};
 use crate::observe::{Alarm, alarm_event};
 use crate::protocol::{Id, MAX_MEMORY_MIB, SandboxConfig};
@@ -616,15 +617,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                             .await
                             .map_err(|error| HostError::Io(error.to_string()))?;
                     match recovered {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            tracing::warn!(id = %record.id, "recorded memory image is missing; its programs are lost");
-                            for alarm in [Alarm::CopyLost, Alarm::ProgramsLost] {
-                                let what = "the recorded memory image is missing";
-                                let event = alarm_event(what)
-                                    .with("compute.sandbox.id", record.id.to_string());
-                                self.observer.alarm(alarm, event);
-                            }
+                        Ok(Recovered::Good(generation)) => {
+                            tracing::debug!(id = %record.id, %generation, "memory image checks out");
+                        }
+                        Ok(lost) => {
+                            self.image_lost(record.id, &lost);
                             let lost = Change::new().image(false);
                             self.records.commit(record.id, record.fence(), lost).await?;
                             image = false;
@@ -644,6 +641,27 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     State::new(Level::Saved, Durability::Local, image)
                 })
             }
+        }
+    }
+
+    /// Raises the alarms for a recorded memory image found missing or
+    /// damaged at start: its programs are lost.
+    fn image_lost(&self, id: Id, lost: &Recovered) {
+        let mut alarms = vec![Alarm::CopyLost, Alarm::ProgramsLost];
+        let what = match lost {
+            Recovered::Damaged { why, quarantined } => {
+                alarms.push(Alarm::VerificationFailed);
+                if *quarantined {
+                    alarms.push(Alarm::Quarantined);
+                }
+                format!("the recorded memory image failed its check: {why}")
+            }
+            Recovered::Good(_) | Recovered::Absent => "the recorded memory image is missing".into(),
+        };
+        tracing::warn!(%id, what, "its programs are lost");
+        for alarm in alarms {
+            let event = alarm_event(what.clone()).with("compute.sandbox.id", id.to_string());
+            self.observer.alarm(alarm, event);
         }
     }
 }

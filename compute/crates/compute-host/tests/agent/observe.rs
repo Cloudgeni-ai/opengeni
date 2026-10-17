@@ -5,20 +5,20 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use compute_core::HostPolicy;
-use compute_host::observe::canary::{self, CanaryConfig};
+use compute_core::{HostPolicy, Level, Priority};
+use compute_host::observe::canary::{self, CanaryConfig, CanaryIds};
 use compute_host::observe::{
     Alarm, CanaryOutcome, CanaryPath, Event, ObserveConfig, Observer, RequestKind, Severity,
     TraceContext, Value,
 };
-use compute_host::protocol::{Id, LevelName, PriorityName, Reply, Request};
-use compute_host::{HostAgent, NoStore};
+use compute_host::protocol::{Id, LevelName, PriorityName, Reply, Request, SandboxConfig};
+use compute_host::{Directory, Handle, HostAgent, NoStore, Store};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::{Delays, Fake, Lab, NEVER, SAVE_IN_PLACE, SAVE_QUICKLY, id};
+use super::{Delays, Fake, Lab, NEVER, SAVE_IN_PLACE, SAVE_QUICKLY, World, id};
 
 const TRACE: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
 
@@ -312,9 +312,76 @@ async fn a_damaged_image_raises_its_alarms_once_each() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_canary_reports_every_path() {
-    let root = Lab::root();
+async fn an_image_found_damaged_at_start_raises_its_alarms() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox: Id = id(64);
+    lab.create(sandbox, SAVE_QUICKLY).await;
+    lab.run(sandbox, &["set hello"]).await;
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    let memory = super::sleep::current_image_memory(&lab, sandbox);
+    let (root, world) = lab.stop().await;
+    std::fs::remove_file(memory.with_file_name("state")).unwrap();
+
     let (tap, mut events) = mpsc::channel(4096);
+    let mut kept = None;
+    let lab = Lab::start_configured(
+        root,
+        world,
+        Delays::default(),
+        HostPolicy::default(),
+        |config| {
+            let observer = Observer::start(ObserveConfig {
+                journal: false,
+                tap: Some(tap),
+                ..ObserveConfig::default()
+            });
+            kept = Some(observer.clone());
+            config.observer = observer;
+        },
+    )
+    .await;
+    let observer = kept.unwrap();
+    let mut raised = Vec::new();
+    while raised.len() < 4 {
+        let seen = until(&mut events, |event| event.name == "compute.alarm").await;
+        let alarm = seen.last().unwrap();
+        assert_eq!(
+            text(alarm, "compute.sandbox.id"),
+            Some(sandbox.to_string().as_str())
+        );
+        raised.push(text(alarm, "compute.alarm").unwrap().to_owned());
+    }
+    raised.sort();
+    assert_eq!(
+        raised,
+        [
+            "copy_lost",
+            "programs_lost",
+            "quarantined",
+            "verification_failed"
+        ]
+    );
+    let metrics = observer.metrics();
+    for alarm in [
+        Alarm::VerificationFailed,
+        Alarm::Quarantined,
+        Alarm::CopyLost,
+        Alarm::ProgramsLost,
+    ] {
+        assert_eq!(metrics.alarms(alarm), 1, "{alarm:?}");
+    }
+    assert_eq!(lab.run(sandbox, &["get"]).await, [""], "booted fresh");
+    lab.assert_clean();
+}
+
+/// An agent on a fresh lab root with `store`, whose events go to the
+/// returned receiver.
+async fn agent_with<S: Store>(
+    world: Arc<World>,
+    store: impl FnOnce(&std::path::Path) -> S,
+) -> (Handle, Observer, mpsc::Receiver<Event>) {
+    let root = Lab::root();
+    let (tap, events) = mpsc::channel(4096);
     let mut config = Lab::config(&root, HostPolicy::default());
     config.observer = Observer::start(ObserveConfig {
         journal: false,
@@ -323,27 +390,35 @@ async fn the_canary_reports_every_path() {
     });
     let observer = config.observer.clone();
     let engine = Fake {
-        world: Arc::default(),
+        world,
         delays: Delays::default(),
     };
-    let (handle, _agent) = HostAgent::start(config, engine, NoStore).await.unwrap();
-    // This host has no store, so a remote path claimed for it fails, and
-    // says so.
-    let canary = CanaryConfig {
-        port: Some(52),
-        ..CanaryConfig::new(Duration::from_millis(20), true)
-    };
-    let paths = canary.paths();
-    assert_eq!(paths, CanaryPath::ALL);
+    let (handle, _agent) = HostAgent::start(config, engine, store(&root))
+        .await
+        .unwrap();
+    (handle, observer, events)
+}
+
+/// Runs the canary until it reported `runs` times, and returns what each
+/// run reported.
+async fn canary_runs(
+    handle: Handle,
+    events: &mut mpsc::Receiver<Event>,
+    canary: CanaryConfig,
+    runs: usize,
+) -> Vec<Event> {
     let running = tokio::spawn(canary::run(handle, canary));
     let mut reported = Vec::new();
-    // Each path once, then the first again: the sandbox it left serves on.
-    while reported.len() <= paths.len() {
-        let seen = until(&mut events, |event| event.name == "compute.canary").await;
+    while reported.len() < runs {
+        let seen = until(events, |event| event.name == "compute.canary").await;
         reported.push(seen.last().unwrap().clone());
     }
     running.abort();
-    let outcomes: Vec<(&str, &str)> = reported
+    reported
+}
+
+fn outcomes(reported: &[Event]) -> Vec<(&str, &str)> {
+    reported
         .iter()
         .map(|event| {
             (
@@ -351,30 +426,56 @@ async fn the_canary_reports_every_path() {
                 text(event, "compute.outcome").unwrap(),
             )
         })
-        .collect();
+        .collect()
+}
+
+const IDS: CanaryIds = CanaryIds {
+    sandbox: Id(compute_core::SandboxId(
+        0xca4a_7900_0000_0000_0000_0000_0007_0001,
+    )),
+    fresh: Id(compute_core::SandboxId(
+        0xca4a_7900_0000_0000_0000_0000_0007_0002,
+    )),
+};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_canary_reports_every_path() {
+    let (handle, observer, mut events) =
+        agent_with(Arc::default(), |root| Directory::new(root.join("store"))).await;
+    let canary = CanaryConfig {
+        port: Some(52),
+        ..CanaryConfig::new(Duration::from_millis(20), true, IDS)
+    };
+    let paths = canary.paths();
+    assert_eq!(paths, CanaryPath::ALL);
+    // Each path once, then the first again: the sandbox it left serves on.
+    let reported = canary_runs(handle, &mut events, canary, paths.len() + 1).await;
     assert_eq!(
-        outcomes,
+        outcomes(&reported),
         [
             ("resume", "ok"),
             ("restore", "ok"),
-            ("remote", "failed"),
+            ("remote", "ok"),
             ("create", "ok"),
             ("resume", "ok"),
         ]
     );
-    let remote = &reported[2];
-    assert_eq!(remote.severity, Severity::Error);
-    assert!(text(remote, "compute.error").is_some(), "{remote:#?}");
-    let restore = &reported[1];
-    assert!(int(restore, "compute.wake_us").is_some());
-    assert!(
-        int(restore, "compute.connect_us").is_some(),
-        "the guest answered"
-    );
-    assert!(int(restore, "compute.op.id").is_some(), "a wake step ran");
+    for run in &reported {
+        assert_eq!(run.severity, Severity::Info);
+        assert!(int(run, "compute.wake_us").is_some(), "{run:#?}");
+        assert!(
+            int(run, "compute.connect_us").is_some(),
+            "the guest answered"
+        );
+        assert!(int(run, "compute.op.id").is_some(), "a wake step ran");
+    }
     assert_eq!(
-        text(restore, "compute.sandbox.id"),
-        Some(canary::SANDBOX.to_string().as_str())
+        text(&reported[2], "compute.sandbox.id"),
+        Some(IDS.sandbox.to_string().as_str())
+    );
+    assert_eq!(
+        text(&reported[3], "compute.sandbox.id"),
+        Some(IDS.fresh.to_string().as_str())
     );
     let metrics = observer.metrics();
     assert_eq!(
@@ -382,11 +483,112 @@ async fn the_canary_reports_every_path() {
         2
     );
     assert_eq!(
-        metrics.canary_runs(CanaryPath::Remote, CanaryOutcome::Failed),
+        metrics.canary_runs(CanaryPath::Remote, CanaryOutcome::Ok),
         1
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_canary_path_its_host_cannot_take_fails_and_says_so() {
+    let (handle, observer, mut events) = agent_with(Arc::default(), |_| NoStore).await;
+    // Claimed for a host without a store.
+    let canary = CanaryConfig::new(Duration::from_millis(20), true, IDS);
+    let reported = canary_runs(handle, &mut events, canary, 3).await;
     assert_eq!(
-        metrics.canary_runs(CanaryPath::Create, CanaryOutcome::Ok),
+        outcomes(&reported),
+        [("resume", "ok"), ("restore", "ok"), ("remote", "failed")]
+    );
+    let remote = &reported[2];
+    assert_eq!(remote.severity, Severity::Error);
+    assert!(text(remote, "compute.error").is_some(), "{remote:#?}");
+    assert_eq!(
+        observer
+            .metrics()
+            .canary_runs(CanaryPath::Remote, CanaryOutcome::Failed),
         1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_canary_wake_that_booted_afresh_fails() {
+    // Every resume loses the VM, so the host falls back to booting the
+    // sandbox afresh: it runs, but what ran in it is gone.
+    let world = Arc::new(World::default());
+    world
+        .lose_resumes
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (handle, observer, mut events) = agent_with(world, |_| NoStore).await;
+    let canary = CanaryConfig {
+        timeout: Duration::from_secs(10),
+        ..CanaryConfig::new(Duration::from_millis(20), false, IDS)
+    };
+    let reported = canary_runs(handle, &mut events, canary, 1).await;
+    assert_eq!(outcomes(&reported), [("resume", "failed")]);
+    assert_eq!(reported[0].severity, Severity::Error);
+    assert_eq!(
+        observer
+            .metrics()
+            .canary_runs(CanaryPath::Resume, CanaryOutcome::Failed),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_traced_wake_from_the_store_carries_its_trace_to_the_end() {
+    let (handle, _observer, mut events) =
+        agent_with(Arc::default(), |root| Directory::new(root.join("store"))).await;
+    let sandbox = id(61);
+    handle
+        .create(sandbox, SandboxConfig::new(1, 128, NEVER))
+        .await
+        .unwrap();
+    drop(
+        handle
+            .acquire(sandbox, None, Priority::Interactive)
+            .await
+            .unwrap(),
+    );
+    handle.sleep(sandbox, None, Level::Remote).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !handle
+        .status()
+        .await
+        .unwrap()
+        .sandboxes
+        .iter()
+        .any(|status| {
+            status.id == sandbox && status.level == LevelName::Remote && status.step.is_none()
+        })
+    {
+        assert!(Instant::now() < deadline, "never got to the store");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let trace: TraceContext = TRACE.parse().unwrap();
+    drop(
+        handle
+            .traced(Some(trace))
+            .acquire(sandbox, None, Priority::Interactive)
+            .await
+            .unwrap(),
+    );
+    let seen = until(&mut events, |event| {
+        is(event, "compute.step", "compute.step", "restore")
+    })
+    .await;
+    let steps: Vec<(&str, Option<TraceContext>)> = seen
+        .iter()
+        .filter(|event| event.name == "compute.step")
+        .filter(|event| event.trace.is_some() || text(event, "compute.cause") == Some("request"))
+        .map(|event| (text(event, "compute.step").unwrap(), event.trace))
+        .collect();
+    let woke: Vec<_> = steps
+        .iter()
+        .skip_while(|(step, _)| *step != "fetch")
+        .copied()
+        .collect();
+    assert_eq!(
+        woke,
+        [("fetch", Some(trace)), ("restore", Some(trace))],
+        "{steps:?}"
     );
 }
