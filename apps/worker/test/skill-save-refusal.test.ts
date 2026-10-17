@@ -229,7 +229,7 @@ describe("skill_save refusals", () => {
     expect(result.structuredContent.error?.code).toBe("skill_change_refused");
     expect(result.structuredContent.error?.retryable).toBe(false);
     const text = result.content.map((part) => part.text).join("\n");
-    expect(text).toContain("This Skill is personal");
+    expect(text).toContain("This chat isn't allowed to make this Skill change");
     // The agent is asked to tell the person, never discouraged from it.
     expect(text).toContain("Tell the person in your reply that it was not saved");
     expect(text).not.toMatch(/ask for (an )?approval/iu);
@@ -238,7 +238,7 @@ describe("skill_save refusals", () => {
     // The person is told, in the timeline, that it was not saved and why.
     expect(result._meta?.[LEARNING_REFUSAL_META_KEY]).toEqual({
       destination: "skill",
-      reason: "personal_target",
+      reason: "not_permitted",
       skillId: fixture.skillId,
     });
     // Nothing was saved.

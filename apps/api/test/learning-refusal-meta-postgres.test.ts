@@ -277,6 +277,26 @@ describe("learning refusal facts", () => {
       const proposed = await pending.callTool(correctSharedFact(pending));
       expect(proposed.isError, JSON.stringify(proposed.content)).toBeFalsy();
       expect(JSON.stringify(proposed)).toMatch(/outcome[^a-z]*pending/);
+      // A new entry the agent explicitly saves for everyone.
+      const chosen = await pending.callTool({
+        name: "knowledge_save",
+        arguments: {
+          operationId: crypto.randomUUID(),
+          expectedVersion: 0,
+          scope: "workspace",
+          entry: {
+            kind: "fact",
+            title: "Support hours",
+            content: "Support answers on weekdays.",
+            groupIds: [],
+            evidence: [],
+            relationships: [],
+          },
+        },
+      });
+      expect(chosen.isError, JSON.stringify(chosen.content)).toBeFalsy();
+      // Pending: the workspace's Review first applied, not the chat's Automatic.
+      expect(JSON.stringify(chosen)).toMatch(/outcome[^a-z]*pending/);
       const refused = await off.callTool(correctSharedFact(off));
       expect(refused.isError).toBe(true);
       expect(refused._meta?.[LEARNING_REFUSAL_META_KEY]).toEqual({

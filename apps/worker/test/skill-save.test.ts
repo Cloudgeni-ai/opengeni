@@ -87,7 +87,7 @@ describe("skill_save gateway", () => {
     expect(definition.description).toContain("description");
     expect(definition.description).toContain("instruction_policy_save");
     expect(definition.description).toContain("Off prevents agent authoring");
-    expect(definition.description).toContain("set scope to workspace only when the person wants");
+    expect(definition.description).toContain("Set scope only when the person wants it elsewhere");
     expect(definition.inputSchema.properties).toHaveProperty("scope");
   });
 
