@@ -1170,6 +1170,8 @@ impl Host {
         for step in Step::ALL {
             if let Some(left) = left.as_mut().filter(|_| admission::needs_memory(step)) {
                 changed |= self.admit_measured(now, step, left, out);
+            } else if step == Step::Checkpoint {
+                self.admit_checkpoints(left.as_mut(), out);
             } else {
                 let index = step.index();
                 let limit = self.policy.limits.get(step);

@@ -296,3 +296,64 @@ fn a_checkpoint_books_its_disks_whole_growth_while_it_runs() {
     rig.send(reading);
     assert_eq!(rig.host.disk().unwrap().booked.bytes, before);
 }
+
+#[test]
+fn a_checkpoint_waits_for_disk_its_growth_can_book_and_room_is_made_for_it() {
+    let mut rig = Rig::new(HostPolicy {
+        disk: Some(DiskPolicy {
+            reserve: GIB,
+            reserve_inodes: 100,
+        }),
+        ..HostPolicy::default()
+    });
+    let reading = |gib: u64| Input::Disk {
+        available: DiskSpace {
+            bytes: gib * GIB,
+            inodes: 1_000_000,
+        },
+    };
+    // Sandbox 1's disk grew by 7 GiB of its 8, so a checkpoint of it books
+    // 7 GiB more; sandbox 2's disk has nothing left to grow by, so one of
+    // it books nothing more. Each books 2 GiB now.
+    let big = Size {
+        disk: 8 * GIB,
+        ..Size::whole(GIB)
+    };
+    rig.add(1, State::RUNNING, checkpointed(), big);
+    rig.send(Input::DiskGrowth {
+        sandbox: SandboxId(1),
+        bytes: GIB,
+    });
+    let small = Size {
+        disk: GIB,
+        ..Size::whole(GIB)
+    };
+    rig.add(2, State::RUNNING, checkpointed(), small);
+    // A reading after what sandbox 1's disk took, then an idle sandbox
+    // whose copy is in object storage too.
+    rig.send(reading(6));
+    let archived = State::new(Level::Archived, Durability::Remote, true);
+    let rules = SleepPolicy::new(SleepRules::RECOMMENDED).unwrap();
+    rig.add(3, archived, rules, Size::whole(GIB));
+    assert_eq!(rig.host.disk().unwrap().free().bytes, GIB);
+    assert_eq!(rig.host.sandbox(SandboxId(3)).unwrap().step, None);
+
+    // Both are due: 1 does not fit and waits, without holding up 2, and
+    // the idle copy is given up to make room for it.
+    let mut starts = started(&rig.at(FIRST_CHECKPOINT));
+    starts.sort_unstable_by_key(|start| start.0);
+    let [(2, Step::Checkpoint, checkpoint), (3, Step::Evict, evict)] = starts[..] else {
+        panic!("unexpected starts: {starts:?}");
+    };
+    assert_eq!(rig.host.sandbox(SandboxId(1)).unwrap().step, None);
+    assert_eq!(started(&rig.finish(3, evict, Outcome::Done)), Vec::new());
+    assert_eq!(
+        started(&rig.finish(2, checkpoint, Outcome::Done)),
+        Vec::new()
+    );
+    // Only a reading shows the room it made, and it must fit the whole 7 GiB.
+    assert_eq!(started(&rig.send(reading(11))), Vec::new());
+    let (step, _) = only_start(&rig.send(reading(12)));
+    assert_eq!(step, Step::Checkpoint);
+    assert_eq!(rig.host.disk().unwrap().booked.bytes, 4 * GIB + 7 * GIB);
+}
