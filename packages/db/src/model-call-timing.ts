@@ -8,13 +8,14 @@
  */
 export type ModelCallTiming = {
   /** Opengeni work from SDK model entry (including waiting for the previous
-   *  response to settle) to the literal provider dispatch. */
+   *  response to settle) to the call's first literal provider dispatch. */
   preDispatchMs: number | null;
-  /** Dispatch to the first streamed reasoning or answer fragment. */
+  /** First dispatch to the first streamed reasoning or answer fragment. */
   timeToFirstTokenMs: number | null;
-  /** Dispatch to the first streamed answer text fragment. */
+  /** First dispatch to the first streamed answer text fragment. */
   timeToFirstTextMs: number | null;
-  /** Dispatch to the terminal response, as read by the worker. */
+  /** First dispatch to the terminal response, as read by the worker. A call
+   *  that needed a transport retry or a provider continuation includes them. */
   durationMs: number | null;
 };
 

@@ -11,10 +11,10 @@ ALTER TABLE model_call_facts
   ADD COLUMN IF NOT EXISTS time_to_first_text_ms integer,
   ADD COLUMN IF NOT EXISTS duration_ms integer;
 COMMENT ON COLUMN model_call_facts.pre_dispatch_ms IS
-  'Opengeni work from SDK model entry to provider dispatch, in milliseconds.';
+  'Opengeni work from SDK model entry to the call''s first provider dispatch, in milliseconds.';
 COMMENT ON COLUMN model_call_facts.time_to_first_token_ms IS
-  'Provider dispatch to the first streamed reasoning or answer fragment, in milliseconds.';
+  'First provider dispatch to the first streamed reasoning or answer fragment, in milliseconds.';
 COMMENT ON COLUMN model_call_facts.time_to_first_text_ms IS
-  'Provider dispatch to the first streamed answer text fragment, in milliseconds.';
+  'First provider dispatch to the first streamed answer text fragment, in milliseconds.';
 COMMENT ON COLUMN model_call_facts.duration_ms IS
-  'Provider dispatch to the terminal response as read by the worker, in milliseconds.';
+  'First provider dispatch to the terminal response as read by the worker, in milliseconds. Retries and provider continuations are included.';

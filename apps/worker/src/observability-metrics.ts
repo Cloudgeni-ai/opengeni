@@ -2789,6 +2789,10 @@ export type ProviderFirstContent = "any" | "text";
  * which the worker stores on its usage event and Insights fact. The next model
  * entry waits until the consumer has settled the previous response, so a
  * response's terminal event is always read before the next dispatch.
+ * A call that needs several requests before its one terminal response (a
+ * transport retry, or a provider continuation such as Claude's `pause_turn`)
+ * is measured from its first dispatch and keeps that request's pre-dispatch
+ * work, so its duration and first token cover the whole response.
  */
 export class StreamTimingMetrics {
   private readonly now: () => number;
@@ -2800,6 +2804,7 @@ export class StreamTimingMetrics {
   private readonly providerFirstRecorded = new Set<ProviderFirstContent>();
   /** The model call awaiting its terminal response, if one was dispatched. */
   private openCall: {
+    dispatchedAt: number;
     preDispatchMs: number | null;
     firstContentAt: number | null;
     firstTextAt: number | null;
@@ -2838,12 +2843,8 @@ export class StreamTimingMetrics {
     // belongs to the latest dispatch.
     this.dispatchedAt = at;
     this.providerFirstRecorded.clear();
-    this.openCall = {
-      // A retry keeps the request's own pre-dispatch work.
-      preDispatchMs: preDispatchMs ?? this.openCall?.preDispatchMs ?? null,
-      firstContentAt: null,
-      firstTextAt: null,
-    };
+    // Later dispatches before the terminal response belong to the same call.
+    this.openCall ??= { dispatchedAt: at, preDispatchMs, firstContentAt: null, firstTextAt: null };
   }
 
   onEvent(type: SessionEventType): void {
@@ -2891,15 +2892,16 @@ export class StreamTimingMetrics {
 
   /**
    * Consumer side: the dispatched call's terminal response was read. Returns its
-   * timing once, or null when no call is open (for example a mirrored terminal
-   * event, or a provider that reports no dispatch).
+   * timing once, measured from the call's first dispatch, or null when no call
+   * is open (for example a mirrored terminal event, or a provider that reports
+   * no dispatch).
    */
   completeResponse(): ModelCallTiming | null {
     const call = this.openCall;
-    if (!call || this.dispatchedAt === null) return null;
+    if (!call) return null;
     this.openCall = null;
     const since = (at: number | null) =>
-      at === null ? null : Math.round(Math.max(0, at - this.dispatchedAt!));
+      at === null ? null : Math.round(Math.max(0, at - call.dispatchedAt));
     return {
       preDispatchMs: call.preDispatchMs === null ? null : Math.round(call.preDispatchMs),
       timeToFirstTokenMs: since(call.firstContentAt),
