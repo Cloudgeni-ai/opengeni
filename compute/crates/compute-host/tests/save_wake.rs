@@ -850,6 +850,7 @@ async fn a_checkpoint_of_a_running_guest_brings_it_back_on_another_host() {
             checkpoint_every_ms: Some(4_000),
             ..SleepConfig::default()
         },
+        image: None,
     };
     let created = one
         .client
