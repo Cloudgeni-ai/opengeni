@@ -9651,6 +9651,11 @@ export const sessionEvents = pgTable(
     producerSeq: integer("producer_seq"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Filled by a BEFORE INSERT trigger from payload ->> 'sourceKey' for
+    // agent.model.usage rows (migration 0810). Never written by application
+    // code; a plain column keeps the usage idempotency lookup indexable under
+    // row-level security, where the payload expression index cannot be used.
+    usageSourceKey: text("usage_source_key"),
   },
   (table) => ({
     workspaceAttempt: foreignKey({
@@ -9697,6 +9702,9 @@ export const sessionEvents = pgTable(
     workspaceTurnType: index("session_events_workspace_turn_type_idx")
       .on(table.workspaceId, table.turnId, table.type)
       .where(sql`${table.turnId} is not null`),
+    usageSourceKey: index("session_events_usage_source_key_idx")
+      .on(table.workspaceId, table.turnId, table.usageSourceKey)
+      .where(sql`${table.usageSourceKey} is not null`),
     commandOutputPage: index("session_events_command_output_page_idx")
       .on(
         table.workspaceId,
