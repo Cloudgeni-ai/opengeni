@@ -34,6 +34,11 @@ type Operation = {
   args: Record<string, unknown>;
 };
 
+/** Every CUA action waits for the agent cursor to reach its target, and the
+ * default timing makes each move take at least 600 ms. Keep the cursor visible
+ * but quick, without a pause after each click. */
+const CURSOR_MOTION = { timing: "fixed", glide_duration_ms: 150, dwell_after_click_ms: 0 };
+
 /** CUA owns OS delivery. Opengeni owns authority, receipts and public media.
  * Every call is serialized, including preview captures and shutdown. */
 export class CuaComputerBackend implements ComputerBackend {
@@ -42,6 +47,7 @@ export class CuaComputerBackend implements ComputerBackend {
   private readonly session = `opengeni-${randomUUID()}`;
   private readonly nativeSession = `opengeni-${randomUUID()}`;
   private nativeSessionStarted = false;
+  private readonly cursorMotionSet = new Set<string>();
   private readonly targetsById = new Map<string, Target>();
   private readonly observations = new Map<string, ComputerBackendObservation>();
   private readonly frames = new Map<string, Frame>();
@@ -81,7 +87,7 @@ export class CuaComputerBackend implements ComputerBackend {
     try {
       const permissions = await readPermissions(runtime, platform);
       const backend = new CuaComputerBackend(runtime, permissions, platform);
-      await callDesktop(runtime, "start_session", { session: backend.session });
+      await backend.startSession(backend.session);
       return backend;
     } catch (error) {
       await runtime.shutdown();
@@ -110,7 +116,7 @@ export class CuaComputerBackend implements ComputerBackend {
       // CUA reclaims idle sessions independently of ComputerSession. Reassert
       // the same owned label before dispatch; active snapshots stay intact and
       // revived sessions reject their expired tokens through CUA's own checks.
-      await callDesktop(this.runtime, "start_session", { session: this.nativeSession });
+      await this.startSession(this.nativeSession);
       this.nativeSessionStarted = true;
       this.nativeObservations = true;
       this.observations.clear();
@@ -250,9 +256,7 @@ export class CuaComputerBackend implements ComputerBackend {
     this.pending++;
     const result = this.tail
       .then(async () => {
-        const { data } = await callDesktop(this.runtime, "start_session", {
-          session: this.session,
-        });
+        const data = await this.startSession(this.session);
         if (data.revived === true) {
           this.observations.clear();
           this.frames.clear();
@@ -264,6 +268,21 @@ export class CuaComputerBackend implements ComputerBackend {
       });
     this.tail = result.catch(() => undefined);
     return result;
+  }
+
+  /** Start or reassert a CUA session, setting its cursor motion once per
+   * session and again whenever CUA revives it with defaults. */
+  private async startSession(session: string): Promise<Record<string, unknown>> {
+    const { data } = await callDesktop(this.runtime, "start_session", { session });
+    if (data.revived === true || !this.cursorMotionSet.has(session)) {
+      this.cursorMotionSet.add(session);
+      // Cosmetic: a host without a cursor overlay must still act.
+      await callDesktop(this.runtime, "set_agent_cursor_motion", {
+        session,
+        ...CURSOR_MOTION,
+      }).catch(() => undefined);
+    }
+    return data;
   }
 
   private async discover(): Promise<ComputerBackendTarget[]> {
