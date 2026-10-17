@@ -256,6 +256,7 @@
         "@temporalio/worker": "^1.17.0",
         "@temporalio/workflow": "^1.17.0",
         "sharp": "^0.34.5",
+        "ws": "8.21.1",
       },
       "devDependencies": {
         "@modelcontextprotocol/sdk": "1.29.0",
