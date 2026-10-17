@@ -98,9 +98,21 @@ function isUnreachableWorkspaceError(error: unknown): boolean {
 
 type WorkspaceSkillDiscovery = Readonly<{
   skills: readonly WorkspaceSkill[];
+  warnings: readonly WorkspaceSkillWarning[];
   /** True only when the workspace was unreachable: `skills` is then empty and
    * is not an authoritative "no repository skills" answer. */
   unavailable: boolean;
+}>;
+
+export type WorkspaceSkillWarning = Readonly<{
+  code:
+    | "invalid_metadata"
+    | "invalid_name"
+    | "invalid_description"
+    | "configured_name_conflict"
+    | "conflicting_definitions";
+  paths: readonly string[];
+  name?: string;
 }>;
 
 export type WorkspaceSkillSearchPath = Readonly<{
@@ -160,17 +172,19 @@ export class WorkspaceSkillsCapability extends Capability {
    */
   private discover(): Promise<WorkspaceSkillDiscovery> {
     const session = requireWorkspaceSkillSession(this._session);
+    const warnings: WorkspaceSkillWarning[] = [];
     return (this.discovery ??= discoverWorkspaceSkills(
       session,
       this.searchPaths,
       this.reservedNames,
       this._runAs,
       this.shadowedNames,
+      (warning) => warnings.push(warning),
     ).then(
-      (skills) => ({ skills, unavailable: false }),
+      (skills) => ({ skills, warnings, unavailable: false }),
       (error: unknown) => {
         if (!isUnreachableWorkspaceError(error)) throw error;
-        return { skills: [], unavailable: true };
+        return { skills: [], warnings, unavailable: true };
       },
     ));
   }
@@ -235,13 +249,16 @@ export class WorkspaceSkillsCapability extends Capability {
   }
 
   override async instructions(): Promise<string | null> {
-    const { skills, unavailable } = await this.discover();
+    const { skills, warnings, unavailable } = await this.discover();
+    const warningText = warnings.length
+      ? `\n\n### Skipped repository skills\nThese repository entries were omitted because their metadata or names conflict. Other skills remain available; correct the source files to use the omitted entries.\n${warnings.map((warning) => `- ${JSON.stringify(warning)}`).join("\n")}`
+      : "";
     if (unavailable) {
       return `## Repository skills
 
-Repository skills could not be indexed because the workspace was unreachable when this run started (for example, its Connected Machine is offline). Sandbox tools may fail until it reconnects; if that blocks the task, tell the user.`;
+Repository skills could not be indexed because the workspace was unreachable when this run started (for example, its Connected Machine is offline). Sandbox tools may fail until it reconnects; if that blocks the task, tell the user.${warningText}`;
     }
-    if (skills.length === 0) return null;
+    if (skills.length === 0) return warnings.length ? `## Repository skills${warningText}` : null;
 
     const available = skills
       .map(
@@ -260,7 +277,7 @@ ${available}
 - If the user names a skill, or the task clearly matches a skill description, read its complete SKILL.md before acting.
 - Resolve referenced scripts, references, assets, and templates relative to that skill directory.
 - Use only the minimum relevant skills for the turn, and say briefly which ones you are using.
-- Do not assume a skill remains applicable on later turns; evaluate the current request again.`;
+- Do not assume a skill remains applicable on later turns; evaluate the current request again.${warningText}`;
   }
 }
 
@@ -282,6 +299,7 @@ export async function discoverWorkspaceSkills(
   reservedNames: ReadonlySet<string> = new Set(),
   runAs?: string,
   shadowedNames: ReadonlySet<string> = new Set(),
+  onWarning?: (warning: WorkspaceSkillWarning) => void,
 ): Promise<readonly WorkspaceSkill[]> {
   const startedAt = performance.now();
   let outcome: "completed" | "failed" = "completed";
@@ -292,6 +310,10 @@ export async function discoverWorkspaceSkills(
       reservedNames,
       runAs,
       shadowedNames,
+      (warning) => {
+        console.warn("Repository skill skipped", warning);
+        onWarning?.(warning);
+      },
     );
   } catch (error) {
     outcome = "failed";
@@ -312,11 +334,13 @@ async function discoverWorkspaceSkillsUnmeasured(
   reservedNames: ReadonlySet<string>,
   runAs: string | undefined,
   shadowedNames: ReadonlySet<string>,
+  warn: (warning: WorkspaceSkillWarning) => void,
 ): Promise<readonly WorkspaceSkill[]> {
   if (!session.listDir || !session.readFile) {
     throw new Error("Workspace skill discovery requires sandbox listDir() and readFile() support");
   }
   const discovered = new Map<string, DiscoveredWorkspaceSkill>();
+  const conflictingNames = new Set<string>();
   const roots = await mapDiscovery(searchPaths, async (searchPath) => {
     try {
       return await session.listDir!({ path: searchPath.path, ...(runAs ? { runAs } : {}) });
@@ -359,19 +383,30 @@ async function discoverWorkspaceSkillsUnmeasured(
       if (!isMissingSkillPath(error)) throw error;
       return null;
     }
-    const frontmatter = parseSkillFrontmatter(markdown);
+    const warning = (code: WorkspaceSkillWarning["code"], name?: string) => ({
+      warning: { code, paths: [skillMarkdownPath], ...(name ? { name } : {}) },
+    });
+    let frontmatter: ReturnType<typeof parseSkillFrontmatter>;
+    try {
+      frontmatter = parseSkillFrontmatter(markdown);
+    } catch {
+      // Only repository metadata parsing is degradable. Transport, permission,
+      // cancellation and managed/explicit Skill validation still fail normally.
+      // Do not log YAML parser messages: they may include repository content.
+      return warning("invalid_metadata");
+    }
     const name = frontmatter.name?.trim() || entry.name;
     if (name.length > 64 || !SAFE_SKILL_NAME.test(name)) {
-      throw new Error(`Repository skill has an invalid name: ${name.slice(0, 64)}`);
+      return warning("invalid_name");
     }
     const key = name.toLowerCase();
     if (shadowedNames.has(key)) return null;
     const description = frontmatter.description?.trim() || "No description provided.";
     if (description.length > 2_048) {
-      throw new Error(`Repository skill "${name}" has an invalid description`);
+      return warning("invalid_description", name);
     }
     if (reservedNames.has(key)) {
-      throw new Error(`Workspace skill "${name}" conflicts with a configured Opengeni skill`);
+      return warning("configured_name_conflict", name);
     }
     const candidate: DiscoveredWorkspaceSkill = {
       name,
@@ -384,8 +419,14 @@ async function discoverWorkspaceSkillsUnmeasured(
   });
   for (const candidate of loaded) {
     if (!candidate) continue;
+    if ("warning" in candidate) {
+      warn(candidate.warning);
+      continue;
+    }
     const { name } = candidate;
     const key = name.toLowerCase();
+    // Once ambiguous, never resurrect a name from a third search path.
+    if (conflictingNames.has(key)) continue;
     const existing = discovered.get(key);
     if (!existing) {
       discovered.set(key, candidate);
@@ -402,9 +443,10 @@ async function discoverWorkspaceSkillsUnmeasured(
       runAs,
     );
     if (existingFingerprint !== candidateFingerprint) {
-      throw new Error(
-        `Workspace skill "${name}" has conflicting definitions in ${existing.source} and ${candidate.source}`,
-      );
+      discovered.delete(key);
+      conflictingNames.add(key);
+      warn({ code: "conflicting_definitions", name, paths: [existing.path, candidate.path] });
+      continue;
     }
     existing.fingerprint = existingFingerprint;
   }

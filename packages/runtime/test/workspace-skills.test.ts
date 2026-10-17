@@ -566,21 +566,35 @@ description: Prepare a safe release.
     expect(reads).toEqual([".agents/skills/deploy/SKILL.md", ".agents/skills/release/SKILL.md"]);
   });
 
-  test("fails when the same skill name has different contents", async () => {
+  test("skips all conflicting definitions without resurrecting a third copy", async () => {
     const session = fakeSession({
       ".agents/skills/release/SKILL.md":
         "---\nname: release\ndescription: First definition.\n---\n",
       ".claude/skills/release/SKILL.md":
         "---\nname: release\ndescription: Different definition.\n---\n",
+      ".third/skills/release/SKILL.md": "---\nname: release\ndescription: First definition.\n---\n",
+      ".agents/skills/good/SKILL.md": "# Valid skill",
     });
-    await expect(
-      discoverWorkspaceSkills(session, [
-        { path: ".agents/skills", source: ".agents/skills" },
-        { path: ".claude/skills", source: ".claude/skills" },
-      ]),
-    ).rejects.toThrow(
-      'Workspace skill "release" has conflicting definitions in .agents/skills and .claude/skills',
-    );
+    const capability = workspaceSkills([
+      { path: ".agents/skills", source: ".agents/skills" },
+      { path: ".claude/skills", source: ".claude/skills" },
+      { path: ".third/skills", source: ".third/skills" },
+    ]).bind(session);
+    const instructions = await capability.instructions();
+    expect(instructions).toContain('"name":"good"');
+    expect(instructions).not.toContain('"id":"repository:.agents/skills/release/SKILL.md"');
+    expect(instructions).not.toContain('"id":"repository:.third/skills/release/SKILL.md"');
+    expect(instructions).toContain('"code":"conflicting_definitions"');
+    expect(instructions).toContain(".agents/skills/release/SKILL.md");
+    expect(instructions).toContain(".claude/skills/release/SKILL.md");
+    const reader = capability.tools()[0]!;
+    if (reader.type !== "function") throw new Error("missing reader");
+    expect(
+      await reader.invoke(
+        undefined!,
+        JSON.stringify({ skill: "repository:.agents/skills/release/SKILL.md" }),
+      ),
+    ).toContain("Repository Skill is not in this index");
   });
 
   test("same name with identical SKILL.md but different helpers still conflicts", async () => {
@@ -600,12 +614,10 @@ description: Prepare a safe release.
         { path: ".agents/skills", source: ".agents/skills" },
         { path: ".claude/skills", source: ".claude/skills" },
       ]),
-    ).rejects.toThrow(
-      'Workspace skill "release" has conflicting definitions in .agents/skills and .claude/skills',
-    );
+    ).resolves.toEqual([]);
   });
 
-  test("fails instead of ambiguously shadowing configured skills", async () => {
+  test("skips repository entries instead of shadowing configured skills", async () => {
     const session = fakeSession({
       ".agents/skills/release/SKILL.md":
         "---\nname: release\ndescription: Repository release instructions.\n---\n",
@@ -616,7 +628,12 @@ description: Prepare a safe release.
         [{ path: ".agents/skills", source: ".agents/skills" }],
         new Set(["release"]),
       ),
-    ).rejects.toThrow('Workspace skill "release" conflicts with a configured Opengeni skill');
+    ).resolves.toEqual([]);
+    const capability = workspaceSkills(
+      [{ path: ".agents/skills", source: "agents" }],
+      ["release"],
+    ).bind(session);
+    expect(await capability.instructions()).toContain('"code":"configured_name_conflict"');
   });
 
   test("lets native tool-bound Skills deterministically shadow workspace copies", async () => {
@@ -833,11 +850,44 @@ description: Prepare a safe release.
     });
   }
 
-  test("an invalid repository skill still fails instructions", async () => {
+  test("an invalid repository skill emits a warning even when no valid skills remain", async () => {
     const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
       fakeSession({ ".agents/skills/bad/SKILL.md": "---\nname: bad name!\n---\n" }),
     );
-    await expect(capability.instructions()).rejects.toThrow("Repository skill has an invalid name");
+    expect(await capability.instructions()).toContain('"code":"invalid_name"');
+  });
+
+  test.each([
+    "---\nname: [invalid\n---\n",
+    "---\nname: first\nname: duplicate\n---\n",
+    "---\n- not a mapping\n---\n",
+  ])("malformed repository metadata is isolated from valid skills: %s", async (markdown) => {
+    const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
+      fakeSession({
+        ".agents/skills/bad/SKILL.md": markdown,
+        ".agents/skills/good/SKILL.md": "# Good",
+      }),
+    );
+    const instructions = await capability.instructions();
+    expect(instructions).toContain('"name":"good"');
+    expect(instructions).toContain('"code":"invalid_metadata"');
+    expect(instructions).toContain(".agents/skills/bad/SKILL.md");
+    expect(instructions).not.toContain("invalid YAML");
+    expect(await capability.instructions()).toBe(instructions);
+  });
+
+  test("managed inline Skill metadata remains fail-closed", () => {
+    expect(() =>
+      buildAgentCapabilities(testSettings(), [
+        sessionActivation(
+          {
+            name: "broken",
+            files: [{ path: "SKILL.md", content: "---\nname: [broken\n---\n" }],
+          },
+          "broken",
+        ),
+      ]),
+    ).toThrow("invalid YAML");
   });
 
   test("deduplicates identical inline session skills and rejects conflicts", () => {
