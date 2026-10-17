@@ -604,6 +604,60 @@ headedE2e(
 );
 
 e2e(
+  "a screenshot taken right after a viewport change shows the new viewport",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-viewport-shot-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: "vpshot_" + randomUUID().slice(0, 8),
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+    });
+    try {
+      const observation = await driver.start(
+        dataUrl(`<!doctype html><meta name="viewport" content="width=device-width">
+        <title>Viewport shot</title><body style="margin:0;background:#2a6"><h1>Resize me</h1>`),
+      );
+      const sizes = [
+        { width: 390, height: 844, mobile: true },
+        { width: 1280, height: 633, mobile: false },
+        { width: 768, height: 1024, mobile: true },
+        { width: 1024, height: 700, mobile: false },
+      ];
+      for (let round = 0; round < 3; round += 1) {
+        for (const size of sizes) {
+          // The agent asks for no observation, then captures straight away.
+          await driver.dispatch({
+            ...command(observation, { type: "viewport", deviceScaleFactor: 1, ...size }),
+            observationMode: "none",
+          });
+          const shot = await driver.captureScreenshot(observation.target.id, {
+            format: "jpeg",
+            quality: 50,
+          });
+          expect([shot.width, shot.height]).toEqual([size.width, size.height]);
+        }
+      }
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+e2e(
   "keeps scaled mobile frames stable during pointer interaction",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-scale-");
