@@ -148,22 +148,34 @@ function server(observedSequence: number | null): Server {
     })) as never,
     streamEvents: ((_workspaceId: string, _sessionId: string, options: any) => {
       reads.push("streamEvents");
-      return (async function* () {
-        const open = () => options?.onOpen?.();
-        opens.add(open);
-        open();
-        await new Promise<void>((resolve) =>
-          options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
-        );
-        opens.delete(open);
-      })();
+      // A live stream that opens, delivers nothing and ends when aborted.
+      const announceOpen = () => options?.onOpen?.();
+      return {
+        [Symbol.asyncIterator]() {
+          let opened = false;
+          return {
+            next: async (): Promise<IteratorResult<SessionEvent>> => {
+              if (!opened) {
+                opened = true;
+                opens.add(announceOpen);
+                announceOpen();
+              }
+              await new Promise<void>((resolve) =>
+                options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+              );
+              opens.delete(announceOpen);
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      };
     }) as never,
   }) as unknown as OpenGeniNativeSessionClient;
   return {
     client,
     reads,
     reconnect: () => {
-      for (const open of opens) open();
+      for (const announce of opens) announce();
     },
   };
 }
