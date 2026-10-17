@@ -77,10 +77,13 @@ The options were:
   always starts an interactive login bash, and the adapter typed each
   command into it, so a terminal command never finished and a turn
   waiting for one hung until the sandbox timed out; the command now runs
-  from a one-shot script and the shell exits with its status. And in an
-  image whose workspace root belongs to root, E2B's default user could
-  not write the workspace; creating a sandbox now hands that one
-  directory to the default user, as root, when it has to. Because the
+  from a one-shot script that replaces that bash and runs the command as
+  a job of its own, so the terminal ends with the command's status, also
+  on Ctrl-C, and background processes outlive it. And in an image whose
+  workspace root belongs to root or is not writable, E2B's default user
+  could not write the workspace; creating a sandbox now hands that one
+  directory to the default user, as root, when it has to, and checks
+  again that the user can write it. Because the
   first change alters the command output the model sees, it waits for
   review as a draft pull request.
 - Opengeni has no tool that gives the model a preview link on any

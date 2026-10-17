@@ -445,9 +445,14 @@ image by the fabric's OCI image builder; each sandbox had 2 vCPUs and
 | Commands (`uname -a`, write and read a file under `/workspace`, start `python3 -m http.server 8000` in the background, `curl` it) | all exit 0; the first answered 1.7 s after the create finished, later tool calls took 71 to 111 ms, the commands themselves 62 to 104 ms |
 | Preview port: `https://8000-<id>.<domain>/notes/fabric.txt` from the laptop | 200 with the file, 144 to 155 ms |
 | Idle during the session | the agent paused it after its idle delay (2.3 ms), saved it locally (diff snapshot, 238 ms) and archived it (18.4 MB uploaded, 5.4 s) while the model was not calling it |
-| Timeout | E2B's pause at 900 s became a sleep to `saved`; the copy was already archived, so the step only dropped the local one (21 ms) |
-| Resume on the next message (Opengeni's provision, `origin: resumed`) | 230 ms seen from the laptop; the wake from the archive, memory served lazily by the pager, took 80 ms on the host |
-| After the resume | the file still read `hello from the fabric`, the same server process (pid 901) still ran and answered; the first command took 0.9 s as its pages came from object storage, later ones about 0.1 s |
+| Timeout | E2B's pause at 900 s asks for at least `saved`; the sandbox was already saved and archived, so the agent only released the paused VM (a `drop` step, 21 ms), leaving it `archived` with its local copy kept as a cache |
+| Resume on the next message (Opengeni's provision, `origin: resumed`) | 230 ms seen from the laptop; the restore took 80 ms on the host, from that local copy: memory was served by the pager from local disk (`compute.memory.source` `pager`, not `remote`), so nothing was read from object storage |
+| After the resume | the file still read `hello from the fabric`, the same server process (pid 901) still ran and answered; the first command itself took 91 ms, but its output reached Opengeni about 0.9 s after the resume finished (not broken down further); later tool calls about 0.1 s |
+
+So this session exercised every level up to `archived`, but its wake read
+only local disk. Waking from object storage, where the pages come from
+the archive, is measured in the comparison with Agent Sandbox on GKE
+(its Activation and Sustained activations tables, `remote` rows).
 
 The run found two adapter defects, fixed on the Opengeni branch and
 described in ADR 20: terminal commands never finished, and the workspace
