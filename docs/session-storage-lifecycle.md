@@ -122,6 +122,17 @@ all of these hold for the idle period:
      catalogs, model-request snapshots, content blobs, pending tool calls and
      preference snapshots, each as `{"table": ..., "row": <exact row JSON>}`,
      then a footer with row counts. Full fidelity, for analysis and audit.
+     Rows are read in pages of 200 under the workspace's row-level security,
+     and each page is an indexed read, so a session with hundreds of thousands
+     of rows exports in linear time. Under a policy PostgreSQL only uses
+     leakproof comparisons as index conditions; numeric and row comparisons
+     are not leakproof and become a filter after the policy, which re-reads
+     every earlier row, and a multi-column cursor only bounds its first column.
+     So tables ordered by several keys or by a numeric key (turns, attempts,
+     model history, code-mode calls and the like) read their ordered row ids
+     once and then fetch each page by primary key. Events, machine inputs and
+     content blobs page by one integer or text key that leads a unique
+     `(workspace_id, session_id, key)` index.
    - `transcript.jsonl.zst`: a header, then the readable timeline as public
      `SessionEvent` objects (`{"event": ...}`), then a footer. This is the
      stable, documented readable section and does not require Opengeni's
