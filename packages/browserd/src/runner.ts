@@ -852,9 +852,13 @@ export async function macosOffscreenChromeArguments(
     (probes.chromeMajorVersion ?? chromeMajorVersion)(executable),
     (probes.mainDisplay ?? macosMainDisplay)(),
   ]);
+  // --screen-info sizes are device pixels; Chrome divides them by
+  // devicePixelRatio. The display is measured in points, so a Retina screen
+  // passed as-is would present half its real size (smaller than the window).
+  const pixels = (points: number) => Math.round(points * display.scale);
   return [
     `--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
-    `--screen-info={${display.width}x${display.height} devicePixelRatio=${display.scale} workAreaLeft=${display.insets.left} workAreaRight=${display.insets.right} workAreaTop=${display.insets.top} workAreaBottom=${display.insets.bottom}}`,
+    `--screen-info={${pixels(display.width)}x${pixels(display.height)} devicePixelRatio=${display.scale} workAreaLeft=${pixels(display.insets.left)} workAreaRight=${pixels(display.insets.right)} workAreaTop=${pixels(display.insets.top)} workAreaBottom=${pixels(display.insets.bottom)}}`,
   ];
 }
 
