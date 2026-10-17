@@ -9,7 +9,7 @@ import {
   type EmbeddedHumanInputClientOverride,
 } from "../session-context";
 import { isActionableHumanInputRequest } from "../human-input";
-import { useRetainedSessionView } from "./session-view-cache";
+import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
   projectionReadThrough,
   useDebouncedCallback,
@@ -94,6 +94,7 @@ export function useHumanInputRequests(
     enabled,
     ...(options.events !== undefined ? { events: options.events } : {}),
     readThrough: projectionReadThrough(state.data, state.loading),
+    refresh: scheduleRefresh,
   });
   // Until the first read lands, show the questions pending when this
   // conversation was last left (only when the host retains reads).
@@ -103,7 +104,7 @@ export function useHumanInputRequests(
     sessionId,
     "human-input",
     state.data,
-    { enabled },
+    { enabled, discard: deniesRetainedView(state.error) },
   );
 
   useEffect(() => {

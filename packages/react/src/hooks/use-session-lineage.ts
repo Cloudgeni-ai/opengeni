@@ -1,10 +1,10 @@
 import type { SessionEvent, SessionLineageResponse } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import {
   useEmbeddedSessionLineage,
   type EmbeddedSessionLineageClientOverride,
 } from "../session-context";
-import { useRetainedSessionView } from "./session-view-cache";
+import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
   projectionReadThrough,
   useDebouncedCallback,
@@ -142,16 +142,35 @@ export function useSessionLineage(
     // open its OWN streamEvents tail — a second live SSE connection next to the
     // session route's useSessionEvents. A caller with no feed opts into polling
     // (pollIntervalMs), never a duplicate stream.
-    { events: options.events, enabled: enabled && options.events !== undefined, readThrough },
+    {
+      events: options.events,
+      enabled: enabled && options.events !== undefined,
+      readThrough,
+      refresh: refreshSoon,
+    },
   );
-  useSessionEventTrigger(
-    client,
-    workspaceId,
-    sessionId,
-    isSessionCreateToolCallCreated,
-    refreshAfterChildCreate,
-    { events: options.events, enabled: enabled && options.events !== undefined, readThrough },
-  );
+  // A spawn's child row can commit after the lineage read even when the tool
+  // call started before it, so a spawn still in flight always refreshes (now
+  // and once more shortly after). A finished spawn is covered by its output
+  // event, which the watermark above settles.
+  const feedRef = useRef(options.events);
+  useLayoutEffect(() => {
+    feedRef.current = options.events;
+  }, [options.events]);
+  const isSpawnInFlight = useCallback((event: SessionEvent) => {
+    if (!isSessionCreateToolCallCreated(event)) return false;
+    const callId = (event.payload as { id?: unknown } | null | undefined)?.id;
+    if (typeof callId !== "string") return true;
+    return !(feedRef.current ?? []).some(
+      (item) =>
+        item.type === "agent.toolCall.output" &&
+        (item.payload as { id?: unknown } | null | undefined)?.id === callId,
+    );
+  }, []);
+  useSessionEventTrigger(client, workspaceId, sessionId, isSpawnInFlight, refreshAfterChildCreate, {
+    events: options.events,
+    enabled: enabled && options.events !== undefined,
+  });
   // Until the first read lands, show the lineage as it was when this
   // conversation was last left (only when the host retains reads).
   const retainedLineage = useRetainedSessionView(
@@ -160,7 +179,7 @@ export function useSessionLineage(
     sessionId,
     "lineage",
     state.data?.lineage ?? null,
-    { enabled },
+    { enabled, discard: deniesRetainedView(state.error) },
   );
   return {
     lineage: state.data?.lineage ?? retainedLineage,

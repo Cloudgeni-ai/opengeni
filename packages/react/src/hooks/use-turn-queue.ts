@@ -11,7 +11,7 @@ import type {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { normalizeError } from "../lib/error-message";
-import { useRetainedSessionView } from "./session-view-cache";
+import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
   projectionReadThrough,
   useDebouncedCallback,
@@ -263,6 +263,7 @@ export function useTurnQueue(
       enabled,
       ...(options.events !== undefined ? { events: options.events } : {}),
       readThrough: projectionReadThrough(freshSnapshot, freshLoading),
+      refresh: scheduleRefresh,
     },
     async () => await load(true),
   );
@@ -275,7 +276,7 @@ export function useTurnQueue(
     sessionId,
     "queue",
     freshSnapshot,
-    { enabled },
+    { enabled, discard: stateTargetKey === targetKey && deniesRetainedView(error) },
   );
 
   const mutate = useCallback(

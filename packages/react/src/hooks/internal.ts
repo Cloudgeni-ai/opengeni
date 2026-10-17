@@ -323,7 +323,15 @@ export type SessionEventTriggerOptions = SessionEventFeedOptions & {
    * wait for it and the newest is delivered once if the read predates it.
    */
   readThrough?: SessionReadThrough | undefined;
+  /**
+   * Re-read the hook's projection. Called instead of delivering an event when
+   * the feed's window starts after the sequence the read reflects, so events
+   * between them (which could have changed the projection) were never seen.
+   */
+  refresh?: (() => void) | undefined;
 };
+
+type HeldBatch = { latestMatch: SessionEvent | undefined; windowStart: number };
 
 /**
  * Invoke `onEvent` for every session event matching `match` — the live-update
@@ -349,34 +357,59 @@ export function useSessionEventTrigger(
   const onEventRef = useRef(onEvent);
   const reconcileBeforeLiveRef = useRef(reconcileBeforeLive);
   const readThroughRef = useRef(readThrough);
+  const refreshRef = useRef(options.refresh);
   useLayoutEffect(() => {
     matchRef.current = match;
     onEventRef.current = onEvent;
     reconcileBeforeLiveRef.current = reconcileBeforeLive;
     readThroughRef.current = readThrough;
-  }, [match, onEvent, reconcileBeforeLive, readThrough]);
+    refreshRef.current = options.refresh;
+  }, [match, onEvent, reconcileBeforeLive, readThrough, options.refresh]);
   const consumedRef = useRef(0);
   const feedKeyRef = useRef<string | null>(null);
   const sharedFeedHasEventsRef = useRef(false);
-  // The newest matching event that arrived while the first read was in flight.
-  const awaitingReadRef = useRef<SessionEvent | null>(null);
-  const deliver = useCallback((event: SessionEvent) => {
+  // The newest matching event that arrived while the first read was in flight,
+  // and the latest window start the feed reported meanwhile.
+  const awaitingReadRef = useRef<HeldBatch | null>(null);
+  const deliverBatch = useCallback((batch: HeldBatch) => {
     const through = readThroughRef.current;
     if (through === "reading") {
       const waiting = awaitingReadRef.current;
-      if (!waiting || event.sequence >= waiting.sequence) awaitingReadRef.current = event;
+      const latest =
+        waiting?.latestMatch &&
+        (!batch.latestMatch || waiting.latestMatch.sequence > batch.latestMatch.sequence)
+          ? waiting.latestMatch
+          : batch.latestMatch;
+      awaitingReadRef.current = {
+        latestMatch: latest,
+        windowStart: Math.max(waiting?.windowStart ?? 0, batch.windowStart),
+      };
       return;
     }
-    if (typeof through === "number" && event.sequence <= through) return;
-    onEventRef.current(event);
+    if (typeof through === "number") {
+      // Events between the read and the window's first event were never seen.
+      if (batch.windowStart > through + 1 && refreshRef.current) {
+        refreshRef.current();
+        return;
+      }
+      if (batch.latestMatch && batch.latestMatch.sequence > through) {
+        onEventRef.current(batch.latestMatch);
+      }
+      return;
+    }
+    if (batch.latestMatch) onEventRef.current(batch.latestMatch);
   }, []);
-  // The first read landed: deliver what waited for it only if the read predates it.
+  const deliver = useCallback(
+    (event: SessionEvent) => deliverBatch({ latestMatch: event, windowStart: 0 }),
+    [deliverBatch],
+  );
+  // The first read landed: settle what waited for it against what it reflects.
   useEffect(() => {
     if (readThrough === "reading") return;
     const waiting = awaitingReadRef.current;
     awaitingReadRef.current = null;
-    if (waiting && sharedFeed && liveEnabled) deliver(waiting);
-  }, [deliver, liveEnabled, readThrough, sharedFeed]);
+    if (waiting && sharedFeed && liveEnabled) deliverBatch(waiting);
+  }, [deliverBatch, liveEnabled, readThrough, sharedFeed]);
 
   // Shared-log mode: scan only the unseen tail on every append.
   useEffect(() => {
@@ -411,9 +444,7 @@ export function useSessionEventTrigger(
           break;
         }
       }
-      if (latestMatch) {
-        deliver(latestMatch);
-      }
+      deliverBatch({ latestMatch, windowStart: firstSequence });
       return;
     }
     sharedFeedHasEventsRef.current ||= events.length > 0;
@@ -426,7 +457,7 @@ export function useSessionEventTrigger(
         deliver(event);
       }
     }
-  }, [sharedFeed, liveEnabled, events, workspaceId, sessionId, deliver]);
+  }, [sharedFeed, liveEnabled, events, workspaceId, sessionId, deliver, deliverBatch]);
 
   // Self-stream mode: tail from the session's current lastSequence.
   useEffect(() => {

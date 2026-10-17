@@ -12,7 +12,7 @@ import type { TimelineItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
-import { useRetainedSessionView } from "./session-view-cache";
+import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import type { LatestQuestionOptions } from "./latest-question";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
@@ -1105,6 +1105,7 @@ export function useSessionEvents(
     enabled: !fullReplay,
     bytes: (tail) => tail.bytes,
     budgetBytes: SESSION_EVENT_BROWSER_MAX_BYTES,
+    discard: identityMatches && deniesRetainedView(error),
   });
   const showRetained = retainedTail !== null && !(identityMatches && initialHistoryReady);
   const visibleEvents = showRetained

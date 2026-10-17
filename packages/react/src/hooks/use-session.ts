@@ -1,7 +1,7 @@
 import type { Session, SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSessionRead, type EmbeddedSessionReadClientOverride } from "../session-context";
-import { useRetainedSessionView } from "./session-view-cache";
+import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
   useMutationRunner,
   usePolledValue,
@@ -105,9 +105,7 @@ export function useSession(
     sessionId,
     "detail",
     data?.session ?? null,
-    {
-      enabled,
-    },
+    { enabled, discard: deniesRetainedView(error) },
   );
   const base = data?.session ?? null;
   const readRevision = data?.revision ?? 0;
@@ -123,6 +121,7 @@ export function useSession(
   );
 
   const sharedEvents = options.events;
+  const refreshDetail = useCallback(() => void refresh(), [refresh]);
 
   // Live-patch the title on auto (agent) + cross-client (user/agent) renames so
   // the UI reflects the new title without polling or a full re-fetch.
@@ -171,6 +170,7 @@ export function useSession(
     // The detail row is authoritative through its lastSequence: only a later
     // event can make it stale, and one that arrives first waits for the read.
     readThrough: base ? base.lastSequence : loading ? "reading" : null,
+    refresh: refreshDetail,
   });
 
   const updateTitle = useCallback(

@@ -1,3 +1,4 @@
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { invalidateSharedQueries, peekSharedQuery, sharedQueryWriter } from "./shared-query";
 
@@ -15,6 +16,9 @@ import { invalidateSharedQueries, peekSharedQuery, sharedQueryWriter } from "./s
  *   conversation and shows the retained value only until its own first read
  *   for that conversation lands. Every open still reads every resource once;
  *   the retained view only removes the wait before the first paint.
+ * - A read that says the person may no longer see the conversation (401,
+ *   403, 404), or that the retained value no longer exists (a cleared goal),
+ *   drops what was kept at once.
  * - Retained event windows together stay within one open conversation's
  *   window budget; the least recently left conversation goes first.
  */
@@ -75,10 +79,20 @@ function recordSessionView(
   }
 }
 
+/** A read failure that means the retained view must not be shown again. */
+export function deniesRetainedView(error: unknown): boolean {
+  return (
+    error instanceof OpenGeniApiError &&
+    (error.status === 401 || error.status === 403 || error.status === 404)
+  );
+}
+
 /**
  * Show what this hook left for the conversation until `current` (its own
  * authoritative value) exists, and leave `current` behind when the hook moves
  * to another conversation or unmounts. Returns the retained value, or null.
+ * `discard` (a denied read, or an authoritative "there is none") drops the
+ * retained value now and keeps nothing for this conversation.
  */
 export function useRetainedSessionView<T extends object>(
   client: object,
@@ -90,9 +104,11 @@ export function useRetainedSessionView<T extends object>(
     enabled: boolean;
     bytes?: ((value: T) => number) | undefined;
     budgetBytes?: number | undefined;
+    discard?: boolean | undefined;
   },
 ): T | null {
   const enabled = options.enabled && Boolean(sessionId);
+  const discard = options.discard === true;
   const retained = useMemo(
     () => (enabled && sessionId ? peekSessionView<T>(client, workspaceId, sessionId, part) : null),
     [client, enabled, part, sessionId, workspaceId],
@@ -100,23 +116,34 @@ export function useRetainedSessionView<T extends object>(
   const target = enabled && sessionId ? `${viewKey(workspaceId, sessionId)}\u0000${part}` : null;
   // One box per target: a render for the next conversation must never write
   // its value into the previous conversation's box before that box is saved.
-  const box = useRef<{ target: string; value: T | null } | null>(null);
+  const box = useRef<{ target: string; value: T | null; discard: boolean } | null>(null);
   const bytesRef = useRef(options.bytes);
   const budgetBytes = options.budgetBytes ?? Number.POSITIVE_INFINITY;
   useLayoutEffect(() => {
     bytesRef.current = options.bytes;
-    if (box.current && box.current.target === target) box.current.value = current;
+    if (box.current && box.current.target === target) {
+      box.current.value = current;
+      box.current.discard = discard;
+    }
   });
+  useEffect(() => {
+    if (!discard || !enabled || !sessionId) return;
+    void invalidateSharedQueries(client, [SESSION_VIEW_ROOT, workspaceId, sessionId, part]);
+  }, [client, discard, enabled, part, sessionId, workspaceId]);
   useEffect(() => {
     if (!target || !sessionId) return;
     // Created before this conversation's reads start, so a clear (sign-out)
     // in between refuses the write.
     const write = sharedQueryWriter(client);
-    const owned = { target, value: current };
+    const owned = { target, value: current, discard };
     box.current = owned;
     return () => {
       if (box.current === owned) box.current = null;
       const value = owned.value;
+      if (owned.discard) {
+        void invalidateSharedQueries(client, [SESSION_VIEW_ROOT, workspaceId, sessionId, part]);
+        return;
+      }
       if (value === null) return;
       recordSessionView(
         client,
@@ -132,5 +159,9 @@ export function useRetainedSessionView<T extends object>(
     // `current` seeds the box once; later values arrive through the layout effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [budgetBytes, client, part, sessionId, target, workspaceId]);
-  return retained;
+  // Once dropped, the retained value stays hidden for this conversation even
+  // if a later retry clears the error before its fresh value lands.
+  const dropped = useRef<string | null>(null);
+  if (discard && target) dropped.current = target;
+  return discard || (target !== null && dropped.current === target) ? null : retained;
 }
