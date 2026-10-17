@@ -23830,6 +23830,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.backgroundChildrenStopped": "const?=[\"true\"]",
         "$.cancelRequestedAt": "string! null",
         "$.commandPreview": "string!",
         "$.commandText": "string?",
@@ -32860,13 +32861,8 @@
       "SaveAgentLearningSettingsRequest": "type"
     },
     "@opengeni/sdk/learning-refusal": {
-      "LEARNING_REFUSAL_DESTINATIONS": "value",
-      "LEARNING_REFUSAL_META_KEY": "value",
-      "LEARNING_REFUSAL_REASONS": "value",
       "LearningRefusal": "type",
-      "LearningRefusalDestination": "type",
-      "learningRefusalFromToolOutput": "value",
-      "LearningRefusalReason": "type"
+      "learningRefusalFromToolOutput": "value"
     },
     "@opengeni/sdk/memory-slack": {
       "MemorySlackImportance": "type",
@@ -33521,7 +33517,6 @@
       "LearningRefusalActions": "type",
       "LearningRefusalActionsProvider": "value",
       "LearningRefusalPlace": "type",
-      "LearningRefusalRow": "value",
       "LightboxControlLabels": "type",
       "LightboxGalleryEntry": "type",
       "LightboxGalleryImage": "type",
