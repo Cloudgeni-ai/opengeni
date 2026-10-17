@@ -1108,18 +1108,21 @@ export const englishMessages = {
   "hooks.useMachineChip.sleeping": "Sleeping",
   "hooks.useMachineChip.sleepingSavedAsof": "Sleeping · saved {asOf}",
   "hooks.useMachineChip.waking": "Waking…",
+  "hooks.useMachines.itWasMovedSomewhere":
+    "It was moved somewhere else at the same moment. Try again.",
+  "hooks.useMachines.itsInTheMiddle":
+    "It's in the middle of a reply, and a personal machine can only take over between replies. Wait for it to finish or pause it, then try again.",
+  "hooks.useMachines.thatMachineIsOffline": "That machine is offline.",
+  "hooks.useMachines.thatMachineIsNoLonger": "That machine is no longer connected.",
+  "hooks.useMachines.thatMachineCouldntBeReached": "That machine couldn't be reached. Try again.",
+  "hooks.useMachines.itsComputerIsStillStarting":
+    "Its computer is still starting up. Try again in a moment.",
+  "hooks.useMachines.itsComputerIsntWorking": "Its computer isn't working properly right now.",
+  "hooks.useMachines.itsComputerCouldntBeRestored": "Its computer couldn't be restored.",
+  "hooks.useMachines.tryAgain": "Try again.",
   "hooks.useMachines.onlyTheMachineSOwner": "Only the machine's owner can use it in this chat.",
   "hooks.useMachines.theMachineSOwnerHas":
     "The machine's owner has not allowed this chat to use it.",
-  "hooks.useMachines.theManagedSandboxCouldNot": "The managed sandbox could not be recovered.",
-  "hooks.useMachines.theManagedSandboxIsStill":
-    "The managed sandbox is still recovering. Try again shortly.",
-  "hooks.useMachines.theManagedSandboxRecoveryIs":
-    "The managed sandbox recovery is degraded and needs attention.",
-  "hooks.useMachines.theSelectedMachineIsOffline": "The selected machine is offline.",
-  "hooks.useMachines.theSessionRouteChangedConcurrently":
-    "The session route changed concurrently. Refresh and try again.",
-  "hooks.useMachines.theSessionStayedOnIts": "The session stayed on its current sandbox.",
   "hooks.useNewConversation.newChatsAreNotEnabled": "New chats are not enabled for this product.",
   "hooks.useSandboxFiles.createFile": "create file",
   "hooks.useSandboxFiles.createFolder": "create folder",

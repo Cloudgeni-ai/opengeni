@@ -485,10 +485,12 @@ export async function moveDependentSessionsToDefault(
       target: "default",
     });
     if (!result.swapped) {
-      const sessionName = session.title?.trim() || session.id;
+      // The server's reason is written for agents and logs; people get plain copy.
+      const sessionName = session.title?.trim();
       throw new Error(
-        result.reason?.trim() ||
-          `Session ${sessionName} could not reach a verified default managed sandbox${result.code ? ` (${result.code})` : ""}.`,
+        sessionName
+          ? `Couldn't move “${sessionName}” off this machine. Try again.`
+          : "Couldn't move a chat off this machine. Try again.",
       );
     }
   }

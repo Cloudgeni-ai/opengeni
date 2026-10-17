@@ -312,8 +312,9 @@ describe("useMachines", () => {
     await flush();
 
     expect(ok).toBe(false);
+    // The server's reason is for the agent; people see plain copy for the code.
     expect(hook.result.current.mutationError?.message).toBe(
-      "The managed sandbox restore is still verifying.",
+      "Its computer is still starting up. Try again in a moment.",
     );
     expect(hook.result.current.attaching).toBe(false);
     expect(hook.result.current.attachingSandboxId).toBeNull();
