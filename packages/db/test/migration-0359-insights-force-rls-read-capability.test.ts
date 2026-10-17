@@ -628,8 +628,8 @@ describe("migration 0359 Insights FORCE-RLS read capability", () => {
       );
       expect(selectPolicy?.checkExpression).toBeNull();
       for (const policy of tablePolicies.filter((candidate) => candidate.command !== "SELECT")) {
-        expect(`${policy.usingExpression ?? ""} ${policy.checkExpression ?? ""}`).toContain(
-          "session_reference_visible",
+        expect(`${policy.usingExpression ?? ""} ${policy.checkExpression ?? ""}`).toMatch(
+          /session_reference_visible|FROM sessions session_row/,
         );
         expect(`${policy.usingExpression ?? ""} ${policy.checkExpression ?? ""}`).not.toContain(
           "insights_fact_read_policy_capability_active",

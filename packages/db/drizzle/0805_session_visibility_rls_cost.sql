@@ -123,6 +123,9 @@ BEGIN
     'REVOKE ALL ON FUNCTION %I.session_private_actor_visible_keys() FROM PUBLIC',
     data_schema
   );
+  -- The sessions policy now references this function, so every role that can
+  -- evaluate that policy today (the grantees of the per-row helper it
+  -- complements) keeps being able to, in addition to the application roles.
   FOR role_name IN
     SELECT DISTINCT r.rolname
     FROM pg_catalog.pg_roles r
@@ -135,6 +138,16 @@ BEGIN
             '[]'
           )::jsonb
         ) configured(value)
+      )
+      OR r.oid IN (
+        SELECT acl.grantee
+        FROM pg_catalog.pg_proc helper
+        CROSS JOIN LATERAL pg_catalog.aclexplode(helper.proacl) acl
+        WHERE helper.oid = pg_catalog.format(
+            '%I.session_private_actor_visible(uuid,uuid,uuid,text)', data_schema
+          )::regprocedure
+          AND acl.privilege_type = 'EXECUTE'
+          AND acl.grantee <> helper.proowner
       )
   LOOP
     EXECUTE pg_catalog.format(
