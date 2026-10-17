@@ -1483,6 +1483,18 @@ describe("BrowserSession route discipline", () => {
       resume.indexOf("client.createSession"),
     );
     expect(resume).toContain("...(networkRoute ? { networkRoute } : {})");
+    // Any failure between preparation and dispatch (restore preparation, an
+    // offline or moved placement) settles the prepared resume back to
+    // suspended instead of leaving the browser restoring forever.
+    expect(resume.indexOf("preparedForDispatch = true")).toBeGreaterThan(
+      resume.indexOf("if (isTerminalOperation(prepared.operation.state))"),
+    );
+    expect(resume.indexOf("preparedForDispatch = true")).toBeLessThan(
+      resume.indexOf("prepareBrowserPrivateCheckpointRestore"),
+    );
+    expect(resume.lastIndexOf("failBrowserSessionResumePreparation")).toBeGreaterThan(
+      resume.indexOf("withBrowserPlacement"),
+    );
   });
 
   test("resumes an expired resume only after ending its retained controller generation", async () => {

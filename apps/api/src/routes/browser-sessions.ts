@@ -2466,6 +2466,7 @@ export function registerBrowserSessionRoutes(
       const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings);
       let restore: RestorePlacementBrowserStateInput | null = null;
+      let preparedForDispatch = false;
       try {
         let before = await getBrowserSessionControlRecord(deps.db, {
           accountId: grant.accountId,
@@ -2527,6 +2528,10 @@ export function registerBrowserSessionRoutes(
           observeLifecycleResult(deps.observability, startedAtMs, parsed);
           return context.json(parsed, 200);
         }
+        // From here until controller dispatch, any failure (state restore,
+        // an offline or moved placement, dispatch itself) returns the browser
+        // to suspended in the catch below, so a later resume can start over.
+        preparedForDispatch = true;
 
         const privateCheckpoint = await getBrowserPrivateCheckpointAuthority(deps.db, {
           accountId: grant.accountId,
@@ -2536,31 +2541,20 @@ export function registerBrowserSessionRoutes(
         const revisionAuthority = privateCheckpoint
           ? null
           : await requireBrowserRevisionRestoreAuthority(deps, grant, prepared.session);
-        try {
-          restore = privateCheckpoint
-            ? await prepareBrowserPrivateCheckpointRestore(
-                deps,
-                grant,
-                prepared.session,
-                privateCheckpoint,
-              )
-            : await prepareBrowserStateRestore(
-                deps,
-                grant,
-                prepared.session,
-                prepared.session.placement,
-                revisionAuthority,
-              );
-        } catch (error) {
-          await failBrowserSessionResumePreparation(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            operationId: request.operationId,
-            browserSessionId,
-            error: interactionFailure(error),
-          });
-          throw error;
-        }
+        restore = privateCheckpoint
+          ? await prepareBrowserPrivateCheckpointRestore(
+              deps,
+              grant,
+              prepared.session,
+              privateCheckpoint,
+            )
+          : await prepareBrowserStateRestore(
+              deps,
+              grant,
+              prepared.session,
+              prepared.session.placement,
+              revisionAuthority,
+            );
         if (!restore) {
           throw new BrowserSessionStateError("BrowserSession has no restorable durable state");
         }
@@ -2725,6 +2719,17 @@ export function registerBrowserSessionRoutes(
         observeLifecycleResult(deps.observability, startedAtMs, parsed);
         return context.json(parsed, 200);
       } catch (error) {
+        if (preparedForDispatch) {
+          // A no-op once the operation was dispatched: that path settles
+          // through the controller result or the transition reaper instead.
+          await failBrowserSessionResumePreparation(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            operationId: request.operationId,
+            browserSessionId,
+            error: interactionFailure(error),
+          }).catch(() => undefined);
+        }
         throw browserRouteError(error);
       } finally {
         restore?.dataKey.fill(0);
