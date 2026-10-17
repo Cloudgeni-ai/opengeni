@@ -1110,8 +1110,6 @@ export const englishMessages = {
   "hooks.useMachineChip.waking": "Waking…",
   "hooks.useMachines.itWasMovedSomewhere":
     "It was moved somewhere else at the same moment. Try again.",
-  "hooks.useMachines.itsInTheMiddle":
-    "It's in the middle of a reply, and a personal machine can only take over between replies. Wait for it to finish or pause it, then try again.",
   "hooks.useMachines.thatMachineIsOffline": "That machine is offline.",
   "hooks.useMachines.thatMachineIsNoLonger": "That machine is no longer connected.",
   "hooks.useMachines.thatMachineCouldntBeReached": "That machine couldn't be reached. Try again.",

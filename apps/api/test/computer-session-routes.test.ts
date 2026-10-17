@@ -178,7 +178,8 @@ describe("ComputerSession route discipline", () => {
     // machine is visible only to the person who started the turn, so the
     // routed lookup must use the same authority as routing itself.
     expect(lookup).toContain("await handle.machineAuthority()");
-    expect(lookup).toContain("subjectId: machineAuthority.subjectId");
+    expect(lookup).toContain("getChannelAMachineSandbox(");
+    expect(lookup).toContain("sessionId: sourceSession.id");
     expect(lookup).toContain("resolveChannelAMachineConnection(");
     expect(lookup).not.toContain("getSandbox(deps.db, grant");
   });

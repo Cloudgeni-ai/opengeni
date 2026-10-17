@@ -1,7 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
-import { createDb, createSession, initializeSessionStartAtomically } from "../src";
+import {
+  createDb,
+  createSession,
+  initializeSessionStartAtomically,
+  setActiveSandbox,
+  assertPersonalMachineForAttempt,
+} from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
@@ -206,6 +212,55 @@ describe("migration 0338 atomic Connected Machine attachments", () => {
         join organization_user_resource_grants grant_value on grant_value.id = snapshot.grant_id
         where snapshot.turn_id = ${turnId} and snapshot.resource_kind = 'connected_machine'`;
       expect(grant).toEqual({ status: "consumed", mode: "once", owner: membership!.id });
+
+      // A live owner move adds consent without changing this protocol-v1
+      // turn's already-consumed original attachment or its frozen snapshot.
+      const [secondMachine] = await app.begin(async (sql) => {
+        await sql`select set_config('opengeni.account_id', ${accountId}, true),
+          set_config('opengeni.workspace_id', ${workspaceId}, true),
+          set_config('opengeni.subject_id', ${subjectId}, true)`;
+        return await sql<Array<{ enrollmentId: string; sandboxId: string }>>`
+          select enrollment_id as "enrollmentId", sandbox_id as "sandboxId"
+          from finalize_scoped_enrollment(${accountId}::uuid, ${workspaceId}::uuid, 'user',
+            ${`pubkey-${crypto.randomUUID()}`}, true, false, 'linux', 'x86_64', 'Second machine', false)`;
+      });
+      if (!secondMachine) throw new Error("second machine missing");
+      const [pointer] = await admin`select active_epoch from sessions where id = ${sessionId}`;
+      expect(
+        await setActiveSandbox(client.db, {
+          consentToCurrentTurn: true,
+          accountId,
+          workspaceId,
+          sessionId,
+          subjectId,
+          targetSandboxId: secondMachine.sandboxId,
+          expectedEpoch: Number(pointer!.active_epoch),
+        }),
+      ).toMatchObject({ swapped: true });
+      const assertMoved = (attemptId: string, executionGeneration: number) =>
+        assertPersonalMachineForAttempt(client.db, {
+          accountId,
+          workspaceId,
+          subjectId,
+          sessionId,
+          turnId,
+          attemptId,
+          executionGeneration,
+          enrollmentId: secondMachine.enrollmentId,
+        });
+      expect(await assertMoved(recoveryAttemptId, 2)).toBe(true);
+      await admin.begin(async (sql) => {
+        await sql.unsafe("set local opengeni.session_inference_claim = '1'");
+        await sql`update session_turn_attempts set state = 'closed', outcome = 'interrupted_recoverable',
+          closed_at = now() where id = ${recoveryAttemptId}`;
+        await sql`update session_turns set active_attempt_id = null, status = 'recovering' where id = ${turnId}`;
+      });
+      const movedRecoveryId = crypto.randomUUID();
+      await admitAttempt(movedRecoveryId, 3);
+      expect(await assertMoved(movedRecoveryId, 3)).toBe(true);
+      const snapshots = await admin`select resource_id from turn_personal_resource_snapshots
+        where turn_id = ${turnId} and resource_kind = 'connected_machine'`;
+      expect([...snapshots]).toEqual([{ resource_id: machine.enrollmentId }]);
     } finally {
       await client.close();
     }

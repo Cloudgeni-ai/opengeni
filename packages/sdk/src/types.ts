@@ -10029,7 +10029,6 @@ export type SwapActiveSandboxResponse = {
     | "unsupported_backend_context"
     | "transient_establishment"
     | "concurrent_swap"
-    | "chat_busy"
     | "personal_machine_permission_required"
     | "personal_machine_not_permitted"
     | "recovery_in_progress"

@@ -673,6 +673,15 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
+A human owner's personal-machine move during a turn is explicit consent for
+that logical turn, independent of the initiating person. The separate turn
+receipt and attempt bindings survive recovery without rewriting accepted
+snapshots or borrowing the owner's other authorities. Exact-attempt route
+projection exposes only the consented machine; ordinary discovery stays
+owner-only. Live owner/membership, enrollment/authority generations, session
+execution epoch, interruption and route checks precede dispatch. See
+[Connected Machines](connected-machines.md).
+
 Modal recovery: singleton human consent (`packages/core/src/application/sandbox-recovery.ts`)
 or proved provider loss (`packages/db/src/index.ts`): the quiescent group restores a
 verified checkpoint, else continues empty, warning every member; never replays.

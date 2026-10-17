@@ -34,6 +34,7 @@ import {
   verifyRetainedProcessMutationSettlement,
   verifyWorkspaceMutationSettlement,
   getSandbox,
+  getSandboxForAttempt,
   getLiveEnrollmentConnection,
   markWarmLeaseInstanceLost,
   readLease,
@@ -157,12 +158,12 @@ export type RoutingWiringIds = {
   sessionId: string;
   resourceAccountId?: string;
   resourceSubjectId?: string;
-  /** Frozen initiating-human authority for personal Connected Machine use.
+  /** Exact accepted attempt, including turns without an initiating human.
    * Every routed operation reasserts this exact accepted attempt before the
    * control-plane connection is resolved. */
   personalMachineAttempt?: {
     accountId: string;
-    subjectId: string;
+    subjectId: string | null;
     turnId: string;
     attemptId: string;
     executionGeneration: number;
@@ -989,17 +990,27 @@ export function wrapTurnBoxWithRouting(
     defaultBackend: established.session as RoutableBackendSession,
     defaultKind: established.backendId,
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
-      const sandbox = await getSandbox(
-        db,
-        ids.resourceAccountId && ids.resourceSubjectId
-          ? {
-              accountId: ids.resourceAccountId,
+      const sandbox = ids.personalMachineAttempt
+        ? await getSandboxForAttempt(
+            db,
+            {
+              ...ids.personalMachineAttempt,
               workspaceId: ids.workspaceId,
-              subjectId: ids.resourceSubjectId,
-            }
-          : ids.workspaceId,
-        sandboxId,
-      );
+              sessionId: ids.sessionId,
+            },
+            sandboxId,
+          )
+        : await getSandbox(
+            db,
+            ids.resourceAccountId && ids.resourceSubjectId
+              ? {
+                  accountId: ids.resourceAccountId,
+                  workspaceId: ids.workspaceId,
+                  subjectId: ids.resourceSubjectId,
+                }
+              : ids.workspaceId,
+            sandboxId,
+          );
       return sandbox
         ? {
             id: sandbox.id,
@@ -1291,17 +1302,27 @@ export function wrapLazyTurnBoxWithRouting(
     defaultBackend: syntheticSession,
     defaultKind: "unprovisioned",
     getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
-      const sandbox = await getSandbox(
-        db,
-        ids.resourceAccountId && ids.resourceSubjectId
-          ? {
-              accountId: ids.resourceAccountId,
+      const sandbox = ids.personalMachineAttempt
+        ? await getSandboxForAttempt(
+            db,
+            {
+              ...ids.personalMachineAttempt,
               workspaceId: ids.workspaceId,
-              subjectId: ids.resourceSubjectId,
-            }
-          : ids.workspaceId,
-        sandboxId,
-      );
+              sessionId: ids.sessionId,
+            },
+            sandboxId,
+          )
+        : await getSandbox(
+            db,
+            ids.resourceAccountId && ids.resourceSubjectId
+              ? {
+                  accountId: ids.resourceAccountId,
+                  workspaceId: ids.workspaceId,
+                  subjectId: ids.resourceSubjectId,
+                }
+              : ids.workspaceId,
+            sandboxId,
+          );
       return sandbox
         ? {
             id: sandbox.id,
