@@ -717,6 +717,31 @@ type LinuxBrowserScope = { unit: string; busctl: string };
 const BROWSER_SCOPE_SLICE = "opengeni-browsers.slice";
 const BROWSER_SCOPE_MARKER = "OPENGENI_BROWSER_SCOPE";
 const SYSTEMD_PROBE_TIMEOUT_MS = 2_000;
+const SCOPE_BUS_VARIABLES = ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"] as const;
+
+/** Shell prologue that re-executes the wrapper inside the browser's transient
+ * scope. `systemd-run` talks to the user manager over the probed bus; the
+ * launch's own bus variables (a linked computer session's private desktop bus,
+ * for example) are carried across the re-exec and restored for Chrome. */
+export function browserScopeEntry(
+  launcher: LinuxUserScopeLauncher,
+  unit: string,
+  wrapper: string,
+): string {
+  const saved = SCOPE_BUS_VARIABLES.map(
+    (name) =>
+      `${BROWSER_SCOPE_MARKER}_${name}="\${${name}-}" ${BROWSER_SCOPE_MARKER}_${name}_SET="\${${name}+1}"`,
+  ).join(" ");
+  const manager = SCOPE_BUS_VARIABLES.flatMap((name) => {
+    const value = launcher.managerEnvironment[name];
+    return value === undefined ? [] : [`${name}=${shellQuote(value)}`];
+  }).join(" ");
+  const restore = SCOPE_BUS_VARIABLES.map(
+    (name) =>
+      `if [ -n "\${${BROWSER_SCOPE_MARKER}_${name}_SET:-}" ]; then ${name}="\${${BROWSER_SCOPE_MARKER}_${name}}"; export ${name}; else unset ${name}; fi\nunset ${BROWSER_SCOPE_MARKER}_${name} ${BROWSER_SCOPE_MARKER}_${name}_SET\n`,
+  ).join("");
+  return `if [ "\${${BROWSER_SCOPE_MARKER}:-}" != ${shellQuote(unit)} ]; then\n  ${saved} ${BROWSER_SCOPE_MARKER}=${shellQuote(unit)} ${manager} exec ${shellQuote(launcher.systemdRun)} --user --scope --quiet --collect --property=Delegate=yes --slice=${BROWSER_SCOPE_SLICE} --unit=${shellQuote(unit)} -- ${shellQuote(wrapper)} "$@"\nfi\nunset ${BROWSER_SCOPE_MARKER}\n${restore}`;
+}
 
 async function managedBrowserLaunch(
   options: AgentBrowserRunnerOptions,
@@ -809,9 +834,7 @@ async function chromeStderrDrainWrapper(
     ? { unit: `opengeni-browser-${id}.scope`, busctl: scopeLauncher.busctl }
     : null;
   const scopeEntry =
-    scope && scopeLauncher
-      ? `if [ "\${${BROWSER_SCOPE_MARKER}:-}" != ${shellQuote(scope.unit)} ]; then\n  ${BROWSER_SCOPE_MARKER}=${shellQuote(scope.unit)} exec ${shellQuote(scopeLauncher.systemdRun)} --user --scope --quiet --collect --property=Delegate=yes --slice=${BROWSER_SCOPE_SLICE} --unit=${shellQuote(scope.unit)} -- ${shellQuote(wrapper)} "$@"\nfi\nunset ${BROWSER_SCOPE_MARKER}\n`
-      : "";
+    scope && scopeLauncher ? browserScopeEntry(scopeLauncher, scope.unit, wrapper) : "";
   const fixed = fixedArguments.map((argument) => ` ${shellQuote(argument)}`).join("");
   const trailing = ` ${shellQuote(MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT)}`;
   try {
@@ -999,7 +1022,15 @@ async function readChromeMajorVersion(executable: string): Promise<number> {
   return Number(match[1]);
 }
 
-type LinuxUserScopeLauncher = { systemdRun: string; busctl: string };
+/** `managerEnvironment` is the bus environment the probe reached the user
+ * manager with. A browser linked to a computer session launches with that
+ * desktop's private D-Bus and runtime directory, where no systemd manager
+ * answers, so the scope request always uses the probed manager instead. */
+export type LinuxUserScopeLauncher = {
+  systemdRun: string;
+  busctl: string;
+  managerEnvironment: { DBUS_SESSION_BUS_ADDRESS: string; XDG_RUNTIME_DIR?: string };
+};
 
 /** A transient scope is used only when this process can create one. The probe
  * performs exactly the launch's own operation (a throwaway `systemd-run
@@ -1029,7 +1060,17 @@ async function linuxUserScopeLauncher(): Promise<LinuxUserScopeLauncher | null> 
     ],
     SYSTEMD_PROBE_TIMEOUT_MS,
   );
-  return scopeCreated ? { systemdRun, busctl } : null;
+  if (!scopeCreated) return null;
+  const runtimeDirectory = process.env.XDG_RUNTIME_DIR;
+  return {
+    systemdRun,
+    busctl,
+    managerEnvironment: {
+      DBUS_SESSION_BUS_ADDRESS:
+        process.env.DBUS_SESSION_BUS_ADDRESS ?? `unix:path=${runtimeDirectory}/bus`,
+      ...(runtimeDirectory ? { XDG_RUNTIME_DIR: runtimeDirectory } : {}),
+    },
+  };
 }
 
 /** Chromium moves its own browser process into an `app-<id>-<pid>.scope` at
