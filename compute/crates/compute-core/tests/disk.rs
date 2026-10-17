@@ -524,12 +524,18 @@ fn a_fetch_that_fails_keeps_its_booking_for_its_retry_and_gives_it_up_with_its_w
     // keeps what it booked.
     rig.disk(10 * GIB, 10_000);
     assert_eq!(rig.booked(), 4 * GIB);
-    // Nothing wants it awake any more: what it booked stays until a
-    // reading shows what the failed fetch wrote.
+    // Removed: what it booked stays until its removal has ended and a
+    // reading after that shows what the failed fetch wrote.
     rig.send(Input::Remove {
         sandbox: SandboxId(1),
     });
     assert_eq!(rig.booked(), 4 * GIB);
+    rig.disk(10 * GIB, 10_000);
+    assert_eq!(rig.booked(), 4 * GIB);
+    rig.send(Input::Unmanaged {
+        sandbox: SandboxId(1),
+        bytes: 0,
+    });
     rig.disk(10 * GIB, 10_000);
     assert_eq!(rig.booked(), 0);
 }
@@ -560,6 +566,84 @@ fn a_spare_vm_keeps_what_it_wrote_booked_until_the_next_reading() {
         filling: false,
     });
     assert_eq!(rig.booked(), 2 * GIB);
+    rig.disk(8 * GIB, 10_000);
+    assert_eq!(rig.booked(), 0);
+}
+
+/// A removed sandbox's VM writes until the host agent has ended it, which
+/// it reports as an unmanaged VM ending: until then what it booked stays
+/// booked whatever readings show, and only a reading after it ended gives
+/// it up.
+#[test]
+fn a_removed_vm_keeps_its_booking_until_it_has_ended() {
+    let mut rig = Rig::new();
+    let size = Size {
+        disk: 4 * GIB,
+        ..Size::whole(GIB)
+    };
+    rig.add_sized(1, saved(), size);
+    rig.add_sized(2, saved(), size);
+    // Room for one wake's save and disk growth, not two.
+    rig.disk(8 * GIB, 10_000);
+    wake(&mut rig, 1);
+    let actions = rig.send(Input::Remove {
+        sandbox: SandboxId(1),
+    });
+    assert!(actions.contains(&Action::Destroy {
+        sandbox: SandboxId(1)
+    }));
+    assert_eq!(rig.booked(), 5 * GIB);
+    // Its VM still runs: a reading shows nothing of what it may write.
+    rig.disk(8 * GIB, 10_000);
+    assert_eq!(rig.booked(), 5 * GIB);
+    let actions = rig.hold(2);
+    assert_eq!(started(&actions), []);
+    assert_eq!(
+        host_full(&actions, 2),
+        Some((Resource::Disk, 5 * GIB, 2 * GIB))
+    );
+
+    // Ended: what it wrote shows in the next reading.
+    rig.send(Input::Unmanaged {
+        sandbox: SandboxId(1),
+        bytes: 0,
+    });
+    assert_eq!(rig.booked(), 5 * GIB);
+    let actions = rig.disk(8 * GIB, 10_000);
+    assert!(
+        matches!(started(&actions)[..], [(2, Step::Restore, _)]),
+        "{actions:?}"
+    );
+}
+
+/// A spare VM whose removal stopped part way may still be filling, and
+/// writing: its disk booking lasts until it is gone.
+#[test]
+fn a_spare_vm_that_could_not_be_ended_keeps_its_booking() {
+    let mut rig = Rig::new();
+    rig.disk(10 * GIB, 10_000);
+    let spare = SandboxId(9);
+    let copy = DiskSpace {
+        bytes: 2 * GIB,
+        inodes: 4,
+    };
+    rig.send(Input::Spare {
+        sandbox: spare,
+        bytes: GIB,
+        disk: copy,
+        filling: true,
+    });
+    rig.send(Input::Unmanaged {
+        sandbox: spare,
+        bytes: GIB,
+    });
+    rig.disk(10 * GIB, 10_000);
+    assert_eq!(rig.booked(), 2 * GIB, "it may still write");
+    rig.send(Input::Unmanaged {
+        sandbox: spare,
+        bytes: 0,
+    });
+    assert_eq!(rig.booked(), 2 * GIB, "what it wrote shows in a reading");
     rig.disk(8 * GIB, 10_000);
     assert_eq!(rig.booked(), 0);
 }

@@ -88,16 +88,17 @@ impl Host {
         if bytes == 0 {
             self.unmanaged.remove(&sandbox);
             self.removed_claims.remove(&sandbox);
+            self.removal_ended(sandbox);
         } else {
             // A spare VM that could not be ended moves to this book: it
             // freed nothing, so it is no relief. One still filling may go
-            // on taking memory, so its claim lasts until it is gone; what
-            // it wrote stays booked until the next disk reading.
+            // on taking memory and writing, so its claim and its disk
+            // booking last until it is gone.
             if let Some(spare) = self.spares.vms.remove(&sandbox) {
                 if spare.filling {
                     *self.removed_claims.entry(sandbox).or_default() += spare.bytes;
                 }
-                self.disk_spent = self.disk_spent.add(spare.disk);
+                self.book_removed(sandbox, spare.disk);
             }
             self.unmanaged.insert(sandbox, bytes);
         }

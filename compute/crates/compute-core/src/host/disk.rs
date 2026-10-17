@@ -215,6 +215,7 @@ impl Host {
         let booked = self
             .writes
             .values()
+            .chain(self.removed_disk.values())
             .fold(booked, |sum, disk| sum.add(*disk));
         Some(DiskCapacity {
             available,
@@ -290,6 +291,26 @@ impl Host {
         self.disk_spent = self
             .disk_spent
             .add(before.unwrap_or_default().saturating_sub(disk));
+    }
+
+    /// Keeps `disk`, what the removed sandbox or spare VM `id` booked,
+    /// booked until the host agent reports it ended (see
+    /// [`Self::removal_ended`]): until then its VM, or a step still running
+    /// for it, may write, and no reading can show what they will.
+    pub(super) fn book_removed(&mut self, id: SandboxId, disk: DiskSpace) {
+        if disk != DiskSpace::default() {
+            let booked = self.removed_disk.entry(id).or_default();
+            *booked = booked.add(disk);
+        }
+    }
+
+    /// The removed `id` has ended: nothing of it writes any more, and what
+    /// it booked stays counted only until the next reading, which shows
+    /// what it wrote.
+    pub(super) fn removal_ended(&mut self, id: SandboxId) {
+        if let Some(disk) = self.removed_disk.remove(&id) {
+            self.disk_spent = self.disk_spent.add(disk);
+        }
     }
 
     /// What is short, if anything, for work that may write `disk` to

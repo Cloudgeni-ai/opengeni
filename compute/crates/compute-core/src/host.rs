@@ -50,7 +50,8 @@ pub enum Input {
     /// A VM this core does not manage holds `bytes` of host memory: the VM
     /// of a removed sandbox not yet ended, or one the host agent found
     /// running but could not take back. Counted against the admission
-    /// budget until reported again with 0 once it has ended.
+    /// budget until reported again with 0 once it has ended, as is what a
+    /// removed sandbox or spare VM booked on local disk.
     Unmanaged {
         /// The sandbox whose VM it is.
         sandbox: SandboxId,
@@ -501,6 +502,11 @@ pub struct Host {
     /// Local disk that work outside any step may still write; see
     /// [`Input::Writes`].
     writes: HashMap<SandboxId, DiskSpace>,
+    /// What removed sandboxes and spare VMs whose removal has not finished
+    /// booked: their VM or a step still running for them may still write,
+    /// until the host agent reports them ended ([`Input::Unmanaged`] with
+    /// 0).
+    removed_disk: HashMap<SandboxId, DiskSpace>,
 }
 
 impl Host {
@@ -531,6 +537,7 @@ impl Host {
             disk_fresh: false,
             disk_spent: DiskSpace::default(),
             writes: HashMap::new(),
+            removed_disk: HashMap::new(),
         })
     }
 
@@ -980,11 +987,9 @@ impl Host {
         }
         self.refused.remove(&id);
         self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
-        // What it booked on disk, as of its last reconcile or since, may
-        // have been written; the next reading shows it.
-        self.disk_spent = self
-            .disk_spent
-            .add(slot.local_disk.booked.max(slot.disk_booking()));
+        // What it booked on disk, as of its last reconcile or since, stays
+        // booked while its VM or step may still write.
+        self.book_removed(id, slot.local_disk.booked.max(slot.disk_booking()));
         out.push(Action::Destroy { sandbox: id });
     }
 
