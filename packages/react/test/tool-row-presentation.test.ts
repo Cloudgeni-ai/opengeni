@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { toolRowPresentation } from "../src/timeline-model";
 import type { ToolCallItem } from "../src/timeline/types";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 function call(partial: Partial<ToolCallItem> & Pick<ToolCallItem, "name">): ToolCallItem {
   return {
@@ -20,6 +23,7 @@ function call(partial: Partial<ToolCallItem> & Pick<ToolCallItem, "name">): Tool
 describe("shared tool row presentation", () => {
   test("tool_search reads as a lookup with the disclosed tools", () => {
     const row = toolRowPresentation(
+      englishText,
       call({
         name: "tool_search",
         arguments: { query: "time entries" },
@@ -40,18 +44,28 @@ describe("shared tool row presentation", () => {
 
   test("tool_search running, empty and failed states", () => {
     expect(
-      toolRowPresentation(call({ name: "tool_search", status: "running", arguments: {} })),
+      toolRowPresentation(
+        englishText,
+        call({ name: "tool_search", status: "running", arguments: {} }),
+      ),
     ).toMatchObject({ title: "Looking up tools", running: true, iconTone: "running" });
     expect(
-      toolRowPresentation(call({ name: "tool_search", output: "No matching tools found." })).body,
+      toolRowPresentation(
+        englishText,
+        call({ name: "tool_search", output: "No matching tools found." }),
+      ).body,
     ).toMatchObject({ empty: "no deferred tools matched this capability query." });
     expect(
-      toolRowPresentation(call({ name: "tool_search", status: "failed", output: "boom" })),
+      toolRowPresentation(
+        englishText,
+        call({ name: "tool_search", status: "failed", output: "boom" }),
+      ),
     ).toMatchObject({ title: "Tool lookup failed", failed: true });
   });
 
   test("docs search counts hits and session titles preview the new title", () => {
     const docs = toolRowPresentation(
+      englishText,
       call({
         name: "knowledge_search",
         arguments: { query: "release notes" },
@@ -61,6 +75,7 @@ describe("shared tool row presentation", () => {
     expect(docs.title).toBe("Search \u201crelease notes\u201d");
     expect(docs.preview).toEqual({ kind: "text", text: "1 hit" });
     const title = toolRowPresentation(
+      englishText,
       call({ name: "set_session_title", arguments: { title: "Fibonacci script" } }),
     );
     expect(title.icon).toBe("sessions");

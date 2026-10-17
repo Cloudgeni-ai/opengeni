@@ -14,6 +14,7 @@ import { filePathVisibility, type FileNodeVisibilityPredicate } from "../file-no
 import { CodeEditor } from "./code-editor";
 import { FileBrowser } from "./file-browser";
 import { PierreFile } from "./pierre-file";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type SandboxFilesProps = {
   /** From `useSandboxFiles(...)`. */
@@ -94,6 +95,7 @@ export function SandboxFiles({
   themeType,
   className,
 }: SandboxFilesProps) {
+  const t = useOpenGeniText();
   const [selected, setSelected] = useState<string | null>(() => initialSelectedPath ?? null);
   // View vs Edit for the selected file. Resets to View on every new selection so
   // opening a file never lands you in a stale dirty editor for a different path.
@@ -264,10 +266,14 @@ export function SandboxFiles({
 
   if (workspaceError && !liveWorkspaceReady && files.source !== "capture") {
     return (
-      <Notice className={className} title="Could not open live workspace" announce="alert">
+      <Notice
+        className={className}
+        title={t("sandboxFiles.couldNotOpenLiveWorkspace")}
+        announce="alert"
+      >
         <p>{workspaceError.message}</p>
         {onWakeWorkspace ? (
-          <WakeButton onClick={onWakeWorkspace}>Retry live workspace</WakeButton>
+          <WakeButton onClick={onWakeWorkspace}>{t("sandboxFiles.retryLiveWorkspace")}</WakeButton>
         ) : null}
       </Notice>
     );
@@ -287,16 +293,20 @@ export function SandboxFiles({
               <FileCode2Icon className="size-5" aria-hidden />
             )
           }
-          title={workspaceWaking ? "Waking workspace" : "Workspace is resting"}
+          title={
+            workspaceWaking
+              ? t("sandboxFiles.wakingWorkspace")
+              : t("sandboxFiles.workspaceIsResting")
+          }
           announce="status"
         >
           <p>
             {workspaceWaking
-              ? "Connecting to the live file system…"
-              : "No captured revision is available yet. Wake the sandbox to browse its current files."}
+              ? t("sandboxFiles.connectingToTheLiveFile")
+              : t("sandboxFiles.noCapturedRevisionIsAvailable")}
           </p>
           {!workspaceWaking && onWakeWorkspace ? (
-            <WakeButton onClick={onWakeWorkspace}>Open live workspace</WakeButton>
+            <WakeButton onClick={onWakeWorkspace}>{t("sandboxFiles.openLiveWorkspace")}</WakeButton>
           ) : null}
         </Notice>
       </div>
@@ -308,10 +318,10 @@ export function SandboxFiles({
       <Notice
         className={className}
         icon={<FileWarningIcon className="size-5" aria-hidden />}
-        title="Files unavailable"
+        title={t("sandboxFiles.filesUnavailable")}
         announce="alert"
       >
-        This sandbox does not expose a file system.
+        {t("sandboxFiles.thisSandboxDoesNotExpose")}
       </Notice>
     );
   }
@@ -361,13 +371,13 @@ export function SandboxFiles({
               : {})}
             onSelectFile={selectFile}
             editable={editable}
-            emptyState="This directory is empty"
+            emptyState={t("sandboxFiles.thisDirectoryIsEmpty")}
             className="min-w-0 flex-1"
           />
         </Panel>
 
         <Separator
-          aria-label="Resize file tree"
+          aria-label={t("sandboxFiles.resizeFileTree")}
           className={cn(
             "group relative z-10 shrink-0 cursor-col-resize outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-og-accent",
             "w-px bg-og-border after:absolute after:inset-y-0 after:left-1/2 after:w-3 after:-translate-x-1/2",
@@ -394,7 +404,7 @@ export function SandboxFiles({
                 ? focusLine !== null
                   ? `${selected}:${focusLine}`
                   : selected
-                : "No file selected"}
+                : t("sandboxFiles.noFileSelected")}
             </span>
             {/* View/Edit toggle — only for a real, fully-loaded text file the editor
                 can safely round-trip. Binary/truncated/read-only files never get an
@@ -402,8 +412,8 @@ export function SandboxFiles({
             {canEdit && (
               <Segmented
                 options={[
-                  { value: "view", label: "View" },
-                  { value: "edit", label: "Edit" },
+                  { value: "view", label: t("sandboxFiles.view") },
+                  { value: "edit", label: t("sandboxFiles.edit") },
                 ]}
                 value={editMode ? "edit" : "view"}
                 onChange={(v) => setEditMode(v === "edit")}
@@ -433,10 +443,12 @@ export function SandboxFiles({
               ) : workspaceError &&
                 (liveRequestedPath === viewPath || requestedPath === viewPath) &&
                 !liveWorkspaceReady ? (
-                <Notice title="Could not open live file" announce="alert">
+                <Notice title={t("sandboxFiles.couldNotOpenLiveFile")} announce="alert">
                   <p>{workspaceError.message}</p>
                   {onWakeWorkspace ? (
-                    <WakeButton onClick={onWakeWorkspace}>Retry live file</WakeButton>
+                    <WakeButton onClick={onWakeWorkspace}>
+                      {t("sandboxFiles.retryLiveFile")}
+                    </WakeButton>
                   ) : null}
                 </Notice>
               ) : waitingForSelectedFile ? (
@@ -447,19 +459,22 @@ export function SandboxFiles({
                       aria-hidden
                     />
                   }
-                  title="Waking workspace"
+                  title={t("sandboxFiles.wakingWorkspace")}
                   announce="status"
                 >
-                  Opening {viewPath} when the live file system is ready…
+                  {t("sandboxFiles.openingViewpathWhenTheLive", { viewPath })}
                 </Notice>
               ) : captureFileUnavailable ? (
-                <Notice icon={<FileCode2Icon className="size-5" aria-hidden />} title="On machine">
+                <Notice
+                  icon={<FileCode2Icon className="size-5" aria-hidden />}
+                  title={t("sandboxFiles.onMachine")}
+                >
                   <p>
                     {captureFileUnavailable.reason === "too-large"
-                      ? "This file is larger than the captured preview limit."
+                      ? t("sandboxFiles.thisFileIsLargerThan")
                       : captureFileUnavailable.reason === "content-missing"
-                        ? "The captured copy is no longer available."
-                        : "This file was indexed, but it was not changed in the captured turn."}
+                        ? t("sandboxFiles.theCapturedCopyIsNo")
+                        : t("sandboxFiles.thisFileWasIndexedBut")}
                   </p>
                   {onWakeWorkspace ? (
                     <WakeButton
@@ -469,16 +484,21 @@ export function SandboxFiles({
                         else onWakeWorkspace();
                       }}
                     >
-                      {liveWorkspaceReady ? "Retry live file" : "Open live file"}
+                      {liveWorkspaceReady
+                        ? t("sandboxFiles.retryLiveFile")
+                        : t("sandboxFiles.openLiveFile")}
                     </WakeButton>
                   ) : null}
                 </Notice>
               ) : fileView.error ? (
                 <Notice announce="alert">
-                  Could not open {viewPath}: {fileView.error.message}
+                  {t("sandboxFiles.couldNotOpenViewpathMessage", {
+                    viewPath,
+                    message: fileView.error.message,
+                  })}
                 </Notice>
               ) : fileView.loading ? (
-                <Notice announce="status">Loading {viewPath}…</Notice>
+                <Notice announce="status">{t("sandboxFiles.loadingViewpath", { viewPath })}</Notice>
               ) : fileView.imageUrl ? (
                 <RasterFilePreview
                   key={fileView.imageUrl}
@@ -487,14 +507,15 @@ export function SandboxFiles({
                 />
               ) : fileView.isBinary ? (
                 <Notice>
-                  {viewPath} is a binary file ({fileView.sizeBytes ?? 0} bytes).
+                  {t("sandboxFiles.viewpathIsABinaryFile", { viewPath })}
+                  {fileView.sizeBytes ?? 0} {t("sandboxFiles.bytes")}
                 </Notice>
               ) : fileView.content !== null ? (
                 <>
                   {fileView.truncated && (
                     <div className="border-b border-og-border bg-og-surface-1 px-2 py-1 text-og-xs text-og-status-running">
-                      Large file — showing a truncated preview ({fileView.sizeBytes ?? 0} bytes
-                      loaded). Editing is disabled to avoid corrupting the file.
+                      {t("sandboxFiles.largeFileShowingATruncated")}
+                      {fileView.sizeBytes ?? 0} {t("sandboxFiles.bytesLoadedEditingIsDisabled")}
                     </div>
                   )}
                   {usePierre && focusLine === null ? (
@@ -523,15 +544,17 @@ export function SandboxFiles({
                   )}
                 </>
               ) : (
-                <Notice announce="status">Loading {viewPath}…</Notice>
+                <Notice announce="status">{t("sandboxFiles.loadingViewpath", { viewPath })}</Notice>
               )
             ) : // Nothing selected — the tree shows the whole workspace; pick a file.
             requestedPath && !requestedPathReady ? (
               workspaceError ? (
-                <Notice title="Could not open live file" announce="alert">
+                <Notice title={t("sandboxFiles.couldNotOpenLiveFile")} announce="alert">
                   <p>{workspaceError.message}</p>
                   {onWakeWorkspace ? (
-                    <WakeButton onClick={onWakeWorkspace}>Retry live file</WakeButton>
+                    <WakeButton onClick={onWakeWorkspace}>
+                      {t("sandboxFiles.retryLiveFile")}
+                    </WakeButton>
                   ) : null}
                 </Notice>
               ) : (
@@ -542,15 +565,18 @@ export function SandboxFiles({
                       aria-hidden
                     />
                   }
-                  title="Waking sandbox"
+                  title={t("sandboxFiles.wakingSandbox")}
                   announce="status"
                 >
-                  Opening {requestedPath} when the live workspace is ready…
+                  {t("sandboxFiles.openingRequestedpathWhenTheLive", { requestedPath })}
                 </Notice>
               )
             ) : (
-              <Notice icon={<FileCode2Icon className="size-5" aria-hidden />} title="Choose a file">
-                Select a file in the tree to preview it.
+              <Notice
+                icon={<FileCode2Icon className="size-5" aria-hidden />}
+                title={t("sandboxFiles.chooseAFile")}
+              >
+                {t("sandboxFiles.selectAFileInThe")}
               </Notice>
             )}
           </div>
@@ -581,6 +607,7 @@ function LineNumberedFile({
   contents: string;
   focusLine: number;
 }) {
+  const t = useOpenGeniText();
   const lines = contents.split("\n");
   const inRange = focusLine >= 1 && focusLine <= lines.length;
   const targetRef = useRef<HTMLDivElement | null>(null);
@@ -596,14 +623,14 @@ function LineNumberedFile({
     <div
       className="h-full min-h-0 overflow-auto font-og-mono text-og-sm text-og-fg"
       role="region"
-      aria-label={inRange ? `${path} at line ${focusLine}` : path}
+      aria-label={inRange ? t("sandboxFiles.pathAtLineFocusline", { path, focusLine }) : path}
     >
       {!inRange ? (
         <p
           className="border-b border-og-border bg-og-surface-1 px-2 py-1 text-og-xs text-og-fg-muted"
           role="status"
         >
-          Line {focusLine} is past the end of this file.
+          {t("sandboxFiles.lineFocuslineIsPastThe", { focusLine })}
         </p>
       ) : null}
       <div>
@@ -632,6 +659,7 @@ function LineNumberedFile({
 }
 
 function GitHeader({ git, loading }: { git: SandboxFilesGitSummary; loading: boolean }) {
+  const t = useOpenGeniText();
   if (loading) {
     return (
       <div
@@ -643,7 +671,7 @@ function GitHeader({ git, loading }: { git: SandboxFilesGitSummary; loading: boo
           className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none"
           aria-hidden
         />
-        <span>Loading repository…</span>
+        <span>{t("sandboxFiles.loadingRepository")}</span>
       </div>
     );
   }
@@ -658,12 +686,14 @@ function GitHeader({ git, loading }: { git: SandboxFilesGitSummary; loading: boo
         )}
       />
       <span className="sr-only">
-        {dirty ? `Uncommitted changes in ${git.dirtyCount} files` : "No uncommitted changes"}
+        {dirty
+          ? t("sandboxFiles.uncommittedChangesInDirtycountFiles", { dirtyCount: git.dirtyCount })
+          : t("sandboxFiles.noUncommittedChanges")}
       </span>
       <span className="truncate font-og-mono text-og-fg">
         {git.repoCount > 1
-          ? `${git.repoCount} repositories`
-          : (git.branch ?? (git.isRepo ? "(detached)" : "no repo"))}
+          ? t("sandboxFiles.repocountRepositories", { repoCount: git.repoCount })
+          : (git.branch ?? (git.isRepo ? t("sandboxFiles.detached") : t("sandboxFiles.noRepo")))}
       </span>
       {(git.ahead > 0 || git.behind > 0) && (
         <span className="flex shrink-0 items-center gap-1.5 text-og-xs text-og-fg-subtle">
@@ -679,7 +709,7 @@ function GitHeader({ git, loading }: { git: SandboxFilesGitSummary; loading: boo
           data-contrast-audited
           className="ml-auto shrink-0 text-og-xs text-og-fg-subtle"
         >
-          {git.dirtyCount} changed
+          {t("sandboxFiles.dirtycountChanged", { dirtyCount: git.dirtyCount })}
         </span>
       )}
     </div>
@@ -841,10 +871,11 @@ function rasterImageUrl(path: string, content: string): string | null {
 }
 
 function RasterFilePreview({ src, path }: { src: string; path: string }) {
+  const t = useOpenGeniText();
   const [failed, setFailed] = useState(false);
   return failed ? (
-    <Notice title="Image preview unavailable" announce="alert">
-      Could not decode {path} as an image.
+    <Notice title={t("sandboxFiles.imagePreviewUnavailable")} announce="alert">
+      {t("sandboxFiles.couldNotDecodePathAs", { path })}
     </Notice>
   ) : (
     <img

@@ -5,6 +5,7 @@
  */
 import type { SessionQueueSnapshot, SessionTurn } from "@opengeni/sdk";
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./components/queue-item-content";
+import { type OpenGeniText } from "./messages/runtime";
 
 export { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent };
 
@@ -41,7 +42,7 @@ export type QueuePromptPreview = {
   collapsedVisual: string;
   visibleStart: string;
   visibleIdentity: string | null;
-  visibleIdentityLabel: "End" | "Safe boundary" | null;
+  visibleIdentityLabel: string | null;
   isFallback: boolean;
 };
 
@@ -57,27 +58,27 @@ function labelQueuePreview(summary: string): QueuePromptPreview {
 }
 
 export function queueTurnPreview(
+  t: OpenGeniText,
   turn: SessionTurn | undefined,
   maxCharacters: number,
 ): QueuePromptPreview {
-  if (!turn) return queuePromptPreview("", maxCharacters);
-  return queueContentPreview(turn.prompt, turn.annotations?.length ?? 0, maxCharacters);
+  if (!turn) return queuePromptPreview(t, "", maxCharacters);
+  return queueContentPreview(t, turn.prompt, turn.annotations?.length ?? 0, maxCharacters);
 }
 
 export function queueContentPreview(
+  t: OpenGeniText,
   prompt: string,
   annotationCount: number,
   maxCharacters: number,
 ): QueuePromptPreview {
   switch (queueItemContent(prompt, annotationCount)) {
     case "text":
-      return queuePromptPreview(prompt, maxCharacters);
+      return queuePromptPreview(t, prompt, maxCharacters);
     case "annotations":
-      return labelQueuePreview(
-        `${annotationCount} timeline ${annotationCount === 1 ? "annotation" : "annotations"}`,
-      );
+      return labelQueuePreview(t("counts.timelineAnnotations", { count: annotationCount }));
     case "unavailable":
-      return labelQueuePreview(QUEUE_ITEM_CONTENT_UNAVAILABLE);
+      return labelQueuePreview(QUEUE_ITEM_CONTENT_UNAVAILABLE(t));
   }
 }
 
@@ -89,7 +90,11 @@ export function queueContentPreview(
  * than fragmented, and malformed UTF-16 is replaced only in the summary. The
  * durable prompt remains exact and no operation scans or copies it in full.
  */
-export function queuePromptPreview(prompt: string, maxCharacters: number): QueuePromptPreview {
+export function queuePromptPreview(
+  t: OpenGeniText,
+  prompt: string,
+  maxCharacters: number,
+): QueuePromptPreview {
   const wholePromptProbe = samplePromptStart(prompt, maxCharacters + 1);
   if (!wholePromptProbe.truncated && wholePromptProbe.characters <= maxCharacters) {
     const summary = replaceLoneSurrogates(wholePromptProbe.value);
@@ -102,7 +107,7 @@ export function queuePromptPreview(prompt: string, maxCharacters: number): Queue
           visibleIdentityLabel: null,
           isFallback: false,
         }
-      : fallbackPromptPreview(prompt.length, wholePromptProbe.value, wholePromptProbe.value);
+      : fallbackPromptPreview(t, prompt.length, wholePromptProbe.value, wholePromptProbe.value);
   }
 
   const suffixCharacters = Math.min(Math.floor(maxCharacters / 3), 120);
@@ -148,12 +153,12 @@ export function queuePromptPreview(prompt: string, maxCharacters: number): Queue
   );
 
   if (!hasVisiblePromptContent(prefix) && !hasVisiblePromptContent(suffix)) {
-    return fallbackPromptPreview(prompt.length, prefixSample.value, suffixSample.value);
+    return fallbackPromptPreview(t, prompt.length, prefixSample.value, suffixSample.value);
   }
 
   const safeSuffix = hasVisiblePromptContent(suffix)
     ? suffix
-    : promptPreviewFallbackLabel(reference);
+    : promptPreviewFallbackLabel(t, reference);
   const summary = `${prefix}${QUEUE_PREVIEW_SEPARATOR}${safeSuffix}`;
   if (!hasVisiblePromptContent(prefix)) {
     return {
@@ -175,33 +180,36 @@ export function queuePromptPreview(prompt: string, maxCharacters: number): Queue
     collapsedVisual: summary,
     visibleStart: prefix,
     visibleIdentity: hasVisiblePromptContent(endIdentity) ? endIdentity : `ref ${reference}`,
-    visibleIdentityLabel: hasVisiblePromptContent(endIdentity) ? "End" : "Safe boundary",
+    visibleIdentityLabel: hasVisiblePromptContent(endIdentity)
+      ? t("queuePresentationModel.end")
+      : t("queuePresentationModel.safeBoundary"),
     isFallback: false,
   };
 }
 
 function fallbackPromptPreview(
+  t: OpenGeniText,
   promptLength: number,
   startSample: string,
   endSample: string,
 ): QueuePromptPreview {
   const reference = boundedPromptSampleReference(promptLength, startSample, endSample);
-  const summary = promptPreviewFallbackLabel(reference);
+  const summary = promptPreviewFallbackLabel(t, reference);
   return {
     summary,
-    collapsedVisual: `Omitted · ${reference}`,
+    collapsedVisual: t("queuePresentationModel.omittedReference", { reference }),
     // The complete fallback remains the canonical accessible summary. Narrow
     // collapsed/row layouts paint the bounded reference in a compact truthful
     // form so ellipsis cannot hide the only identifying portion.
-    visibleStart: `Omitted · ${reference}`,
+    visibleStart: t("queuePresentationModel.omittedReference", { reference }),
     visibleIdentity: null,
     visibleIdentityLabel: null,
     isFallback: true,
   };
 }
 
-function promptPreviewFallbackLabel(reference: string): string {
-  return `Content omitted at safe boundary · ref ${reference}`;
+function promptPreviewFallbackLabel(t: OpenGeniText, reference: string): string {
+  return t("queuePresentationModel.contentOmittedAtSafeBoundary", { reference });
 }
 
 function boundedPromptSampleReference(
@@ -401,13 +409,13 @@ export function projectPendingQueueMove(
 }
 
 /** Copy for the "replace your draft with this queued prompt" confirmation. */
-export const QUEUE_REPLACE_DRAFT_COPY = {
-  title: "Your composer already has a draft. Replace it with this queued prompt?",
-  detail:
-    "The current draft will be permanently discarded; this queued prompt is preserved until you confirm.",
-  keep: "Keep current draft",
-  replace: "Replace and edit",
-} as const;
+export const QUEUE_REPLACE_DRAFT_COPY = (t: OpenGeniText) =>
+  ({
+    title: t("queuePresentationModel.yourComposerAlreadyHasA"),
+    detail: t("queuePresentationModel.theCurrentDraftWillBe"),
+    keep: t("queuePresentationModel.keepCurrentDraft"),
+    replace: t("queuePresentationModel.replaceAndEdit"),
+  }) as const;
 
 export type QueuedTurnPresentation = {
   kind: "prompt" | "realtime_voice" | "realtime_voice_handoff";
@@ -421,14 +429,17 @@ function objectValue(value: unknown): Record<string, unknown> | null {
 }
 
 /** What a queued row shows: the prompt, or the transcript of a voice request. */
-export function queuedTurnPresentation(turn: SessionTurn): QueuedTurnPresentation {
+export function queuedTurnPresentation(t: OpenGeniText, turn: SessionTurn): QueuedTurnPresentation {
   const realtimeDelegation = objectValue(turn.metadata.realtimeDelegation);
   const inputTranscript = realtimeDelegation?.inputTranscript;
   if (typeof inputTranscript === "string" && inputTranscript.trim()) {
     return { kind: "realtime_voice", text: inputTranscript.trim() };
   }
   if (objectValue(turn.metadata.realtimeTailFlush)) {
-    return { kind: "realtime_voice_handoff", text: "Remaining voice context" };
+    return {
+      kind: "realtime_voice_handoff",
+      text: t("queuePresentationModel.remainingVoiceContext"),
+    };
   }
   return { kind: "prompt", text: turn.prompt };
 }

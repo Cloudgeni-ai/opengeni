@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { useRepositoryCatalogRefresh } from "@/lib/use-follow-up-repositories";
@@ -1020,7 +1021,7 @@ function SessionsIndexRouteContent({
       const text = hasTypedText
         ? message
         : attachments.readyResources.length > 0
-          ? FILE_ONLY_MESSAGE_TEXT
+          ? FILE_ONLY_MESSAGE_TEXT(t)
           : "";
       if (
         busy ||
@@ -1463,7 +1464,7 @@ function SessionsIndexRouteContent({
     send: async () => await submitNewSession(null),
     steer: async () => {
       const text =
-        message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
+        message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT(t) : "");
       if (!text || busy || attachments.hasUnresolved || !computeReady || !newSessionPolicyValid) {
         return false;
       }
@@ -1822,7 +1823,7 @@ function SessionsIndexRouteContent({
               hooks reconnect on their own so Send works again. */}
           {newSessionDraft.unavailable || connectionAccounts.unavailable ? (
             <div role="status" className="mt-3">
-              <Notice tone="info">{OPENGENI_UPDATING_NOTICE}</Notice>
+              <Notice tone="info">{OPENGENI_UPDATING_NOTICE(t)}</Notice>
             </div>
           ) : null}
 
@@ -1941,7 +1942,7 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
   });
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   // Pins are server-authoritative and sit above running and recency rows.
-  const recent = useMemo(() => recentSessionsForHome(sessions, pinned, 6), [pinned, sessions]);
+  const recent = useMemo(() => recentSessionsForHome(t, sessions, pinned, 6), [pinned, sessions]);
 
   if (recent.length === 0) {
     return null;
@@ -2010,7 +2011,7 @@ function RecentSessionRow({
           ) : null}
         </span>
         <span className="shrink-0 text-2xs tabular-nums text-fg-subtle">
-          {relativeTimeLabel(session.updatedAt)}
+          {relativeTimeLabel(t, session.updatedAt)}
         </span>
       </Link>
     </li>

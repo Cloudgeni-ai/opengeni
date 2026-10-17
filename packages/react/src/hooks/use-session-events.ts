@@ -13,6 +13,7 @@ import type { EmbeddedSessionClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
 import type { LatestQuestionOptions } from "./latest-question";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type SessionEventsConnectionState = StreamConnectionState | "idle" | "ended" | "error";
 
@@ -144,6 +145,7 @@ export function useSessionEvents(
   sessionId: string | null | undefined,
   options: UseSessionEventsOptions = {},
 ): UseSessionEventsResult {
+  const t = useOpenGeniText();
   const { client, workspaceId, reconcileSession } = useEmbeddedSession(options);
   const enabled = options.enabled ?? true;
   const pageLive = usePageLiveActivity();
@@ -393,7 +395,7 @@ export function useSessionEvents(
           const cursor = streamResumeSequenceRef.current;
           let plan: ForegroundCatchupPlan = { kind: "resume" };
           try {
-            plan = await planForegroundCatchup(client, workspaceId, sessionId, cursor, {
+            plan = await planForegroundCatchup(t, client, workspaceId, sessionId, cursor, {
               signal: controller.signal,
             });
           } catch {
@@ -443,7 +445,7 @@ export function useSessionEvents(
           // First paint is ONE compact fetch — the newest window, revealed at
           // the bottom in a few hundred ms. Deeper history loads only when the
           // reader actually scrolls up (the sentinel drives loadOlder).
-          const window = await loadEventWindow(client, workspaceId, sessionId, {
+          const window = await loadEventWindow(t, client, workspaceId, sessionId, {
             before: Number.MAX_SAFE_INTEGER,
             pageSize: SESSION_HISTORY_PAGE_SIZE,
             targetGroups: Number.POSITIVE_INFINITY,
@@ -575,6 +577,7 @@ export function useSessionEvents(
     streamEpoch,
     viewMode,
     reconcileSession,
+    t,
   ]);
 
   const navigationBusy = (): boolean =>
@@ -603,7 +606,7 @@ export function useSessionEvents(
         setLoadingOlder(true);
         let published = false;
         try {
-          const window = await loadEventWindow(client, workspaceId, sessionId, {
+          const window = await loadEventWindow(t, client, workspaceId, sessionId, {
             before,
             pageSize: SESSION_HISTORY_PAGE_SIZE,
             targetGroups: OLDER_GROUP_TARGET,
@@ -709,7 +712,7 @@ export function useSessionEvents(
           }
         }
       }),
-    [client, workspaceId, sessionId, ownsNavigation],
+    [client, workspaceId, sessionId, ownsNavigation, t],
   );
 
   const loadOldest = useCallback(async (): Promise<boolean> => {
@@ -724,7 +727,7 @@ export function useSessionEvents(
     setLoadingOldest(true);
     let published = false;
     try {
-      const window = await loadForwardEventWindow(client, workspaceId, sessionId, {
+      const window = await loadForwardEventWindow(t, client, workspaceId, sessionId, {
         after: 0,
         pageSize: SESSION_HISTORY_PAGE_SIZE,
         targetGroups: OLDEST_GROUP_TARGET,
@@ -783,7 +786,7 @@ export function useSessionEvents(
         setLoadingOldest(false);
       }
     }
-  }, [client, workspaceId, sessionId, ownsNavigation]);
+  }, [client, workspaceId, sessionId, ownsNavigation, t]);
 
   const loadNewer = useCallback(async (): Promise<boolean> => {
     if (!ownsNavigation() || !sessionId || navigationBusy() || !hasNewerRef.current) {
@@ -801,7 +804,7 @@ export function useSessionEvents(
     setLoadingNewer(true);
     let published = false;
     try {
-      const window = await loadForwardEventWindow(client, workspaceId, sessionId, {
+      const window = await loadForwardEventWindow(t, client, workspaceId, sessionId, {
         after: afterSequence,
         pageSize: SESSION_HISTORY_PAGE_SIZE,
         targetGroups: NEWER_GROUP_TARGET,
@@ -895,7 +898,7 @@ export function useSessionEvents(
         setLoadingNewer(false);
       }
     }
-  }, [client, workspaceId, sessionId, ownsNavigation]);
+  }, [client, workspaceId, sessionId, ownsNavigation, t]);
 
   const jumpToSequence = useCallback(
     async (sequence: number, navigationOptions?: { signal?: AbortSignal }): Promise<boolean> => {
@@ -997,7 +1000,7 @@ export function useSessionEvents(
         // before the import and fence its completion just like network reads.
         const { resolveLatestQuestion } = await import("./latest-question");
         if (!current()) return null;
-        const destination = await resolveLatestQuestion({
+        const destination = await resolveLatestQuestion(t, {
           client,
           workspaceId,
           sessionId,
@@ -1023,7 +1026,7 @@ export function useSessionEvents(
         throw reason;
       }
     },
-    [client, workspaceId, sessionId, streamKey, ownsNavigation, jumpToSequence],
+    [client, workspaceId, sessionId, streamKey, ownsNavigation, jumpToSequence, t],
   );
 
   const jumpToLatest = useCallback(async (): Promise<void> => {
@@ -1086,13 +1089,23 @@ export function useSessionEvents(
         ? questionEvidence.events
         : EMPTY_EVENTS;
     const timelineOptions = { partialStart: hasOlder || eventWindow.truncated || after > 0 };
-    if (witness.length === 0) return buildTimeline(visibleEvents, timelineOptions);
+    if (witness.length === 0) return buildTimeline(t, visibleEvents, timelineOptions);
     const ids = new Set(visibleEvents.map((event) => event.id));
     return buildTimeline(
+      t,
       [...visibleEvents, ...witness.filter((event) => !ids.has(event.id))],
       timelineOptions,
     );
-  }, [visibleEvents, hasOlder, eventWindow.truncated, after, questionEvidence, client, streamKey]);
+  }, [
+    visibleEvents,
+    hasOlder,
+    eventWindow.truncated,
+    after,
+    questionEvidence,
+    client,
+    streamKey,
+    t,
+  ]);
 
   return {
     events: visibleEvents,
@@ -1228,6 +1241,7 @@ type ForegroundCatchupPlan =
  * many rows/groups/bytes, reloads the latest tail instead.
  */
 async function planForegroundCatchup(
+  t: OpenGeniText,
   client: EmbeddedSessionClientLike,
   workspaceId: string,
   sessionId: string,
@@ -1266,7 +1280,7 @@ async function planForegroundCatchup(
   }
   if (
     events.length > FOREGROUND_COMPACT_CATCHUP_MAX_EVENTS ||
-    groupCount(events) > FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS ||
+    groupCount(t, events) > FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS ||
     browserJsonBytes(events) > FOREGROUND_COMPACT_CATCHUP_MAX_BYTES
   ) {
     return { kind: "reload" };
@@ -1289,6 +1303,7 @@ type LoadedForwardEventWindow = {
 };
 
 async function loadEventWindow(
+  t: OpenGeniText,
   client: EmbeddedSessionClientLike,
   workspaceId: string,
   sessionId: string,
@@ -1308,7 +1323,7 @@ async function loadEventWindow(
   let fetches = 0;
 
   while (fetches < options.maxFetches) {
-    if (buffer.length > 0 && groupCount(buffer) >= options.targetGroups) {
+    if (buffer.length > 0 && groupCount(t, buffer) >= options.targetGroups) {
       break;
     }
     const page = await loadPreviousPage(client, workspaceId, sessionId, cursor, {
@@ -1367,7 +1382,7 @@ async function loadEventWindow(
       buffer = buffer.slice(boundary);
     }
   }
-  const densityWindow = trimBackwardToGroupTarget(buffer, options.targetGroups);
+  const densityWindow = trimBackwardToGroupTarget(t, buffer, options.targetGroups);
   buffer = densityWindow.events;
 
   const oldest = buffer[0] ?? null;
@@ -1401,6 +1416,7 @@ function isTurnBoundary(event: SessionEvent): boolean {
  * loadNewer so the browser never walks the whole middle gap.
  */
 async function loadForwardEventWindow(
+  t: OpenGeniText,
   client: EmbeddedSessionClientLike,
   workspaceId: string,
   sessionId: string,
@@ -1419,7 +1435,7 @@ async function loadForwardEventWindow(
   let reachedEnd = false;
 
   while (fetches < options.maxFetches) {
-    if (buffer.length > 0 && groupCount(buffer) >= options.targetGroups) {
+    if (buffer.length > 0 && groupCount(t, buffer) >= options.targetGroups) {
       break;
     }
     const page = await loadNextPage(client, workspaceId, sessionId, cursor, {
@@ -1441,7 +1457,7 @@ async function loadForwardEventWindow(
     // events may legitimately collapse into one returned event.
     cursor = maxResumeSequence(page);
   }
-  const densityWindow = trimForwardToGroupTarget(buffer, options.targetGroups);
+  const densityWindow = trimForwardToGroupTarget(t, buffer, options.targetGroups);
   buffer = densityWindow.events;
 
   const oldest = buffer[0] ?? null;
@@ -1460,14 +1476,18 @@ type DensityWindow = {
 };
 
 /** Keep the newest complete turn groups near an older-history seam. */
-function trimBackwardToGroupTarget(events: SessionEvent[], targetGroups: number): DensityWindow {
+function trimBackwardToGroupTarget(
+  t: OpenGeniText,
+  events: SessionEvent[],
+  targetGroups: number,
+): DensityWindow {
   if (!Number.isFinite(targetGroups) || targetGroups <= 0 || events.length === 0) {
     return { events, trimmed: false };
   }
   for (let index = events.length - 1; index > 0; index -= 1) {
     if (!isTurnBoundary(events[index]!)) continue;
     const candidate = events.slice(index);
-    if (groupCount(candidate) >= targetGroups) {
+    if (groupCount(t, candidate) >= targetGroups) {
       return { events: candidate, trimmed: true };
     }
   }
@@ -1475,14 +1495,18 @@ function trimBackwardToGroupTarget(events: SessionEvent[], targetGroups: number)
 }
 
 /** Keep the oldest complete turn groups near a forward-history seam. */
-function trimForwardToGroupTarget(events: SessionEvent[], targetGroups: number): DensityWindow {
+function trimForwardToGroupTarget(
+  t: OpenGeniText,
+  events: SessionEvent[],
+  targetGroups: number,
+): DensityWindow {
   if (!Number.isFinite(targetGroups) || targetGroups <= 0 || events.length === 0) {
     return { events, trimmed: false };
   }
   for (let index = 1; index < events.length; index += 1) {
     if (!isTurnBoundary(events[index]!)) continue;
     const candidate = events.slice(0, index);
-    if (groupCount(candidate) >= targetGroups) {
+    if (groupCount(t, candidate) >= targetGroups) {
       return { events: candidate, trimmed: true };
     }
   }
@@ -1554,11 +1578,11 @@ async function loadNextPage(
   return Object.assign(page, { requested });
 }
 
-function groupCount(events: SessionEvent[]): number {
+function groupCount(t: OpenGeniText, events: SessionEvent[]): number {
   if (events.length === 0) {
     return 0;
   }
-  return groupTimeline(buildTimeline(events)).length;
+  return groupTimeline(t, buildTimeline(t, events)).length;
 }
 
 function isLogStart(event: SessionEvent): boolean {

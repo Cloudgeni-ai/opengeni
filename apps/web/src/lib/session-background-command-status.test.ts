@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { describe, expect, test } from "bun:test";
 import type { Session } from "@/types";
 
@@ -38,7 +39,7 @@ describe("session background command rail status", () => {
   test("an idle session with a running command is not grouped or marked as working", () => {
     const active = session("active", { state: "running", count: 1 });
     const idle = session("idle");
-    const grouped = groupSessionsForRail([idle, active], new Date("2026-08-23T12:00:00.000Z"));
+    const grouped = groupSessionsForRail(t, [idle, active], new Date("2026-08-23T12:00:00.000Z"));
     expect(grouped.running).toHaveLength(0);
     expect(sessionStateLabel(active)).toBe("Background command running");
     expect(
@@ -53,7 +54,7 @@ describe("session background command rail status", () => {
       { state: "running" as const, count: 1, unavailableCount: 1 },
     ]) {
       const value = session("command", activity);
-      expect(groupSessionsForRail([value]).running).toHaveLength(0);
+      expect(groupSessionsForRail(t, [value]).running).toHaveLength(0);
       expect(
         summarizeRailNodes([{ session: value, children: [], hasActiveDescendant: false }]).kind,
       ).toBe("neutral");
@@ -63,7 +64,7 @@ describe("session background command rail status", () => {
   test("running and recovering agents still show working alongside background commands", () => {
     for (const status of ["running", "recovering"] as const) {
       const value = { ...session("agent", { state: "running", count: 1 }), status };
-      expect(groupSessionsForRail([value]).running.map((row) => row.id)).toEqual(["agent"]);
+      expect(groupSessionsForRail(t, [value]).running.map((row) => row.id)).toEqual(["agent"]);
       expect(
         summarizeRailNodes([{ session: value, children: [], hasActiveDescendant: false }]),
       ).toMatchObject({ kind: "active", label: "1 working" });
@@ -97,7 +98,7 @@ describe("durable session waits in the rail", () => {
   });
   test("waiting work takes precedence over unread without changing personal acknowledgment", () => {
     const value = waiting();
-    expect(groupSessionsForRail([value]).running.map((row) => row.id)).toEqual(["waiting"]);
+    expect(groupSessionsForRail(t, [value]).running.map((row) => row.id)).toEqual(["waiting"]);
     expect(
       summarizeRailNodes([{ session: value, children: [], hasActiveDescendant: false }]),
     ).toMatchObject({ kind: "active", label: "1 working" });
@@ -115,7 +116,7 @@ describe("durable session waits in the rail", () => {
       { ...waiting(), status: "failed" as const },
       { ...waiting(), effectiveControl: { state: "paused" } as Session["effectiveControl"] },
     ]) {
-      expect(groupSessionsForRail([value]).running).toHaveLength(0);
+      expect(groupSessionsForRail(t, [value]).running).toHaveLength(0);
       expect(sessionStateLabel(value)).not.toStartWith("Waiting");
     }
   });

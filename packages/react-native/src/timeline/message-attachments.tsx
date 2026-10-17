@@ -4,6 +4,7 @@ import { ActivityIndicator, Image, Linking, Pressable, Text, View } from "react-
 import { Icon } from "./icon";
 import { NativeImageViewer, type NativeViewerImage } from "./image-viewer";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { useOpenGeniText } from "@opengeni/react/messages";
 
 type AttachmentClient = Pick<OpenGeniClient, "getFile" | "createFileDownloadUrl">;
 type FileResource = Extract<ResourceRef, { kind: "file" }>;
@@ -77,6 +78,7 @@ function Attachment(props: {
   onImageReady: (fileId: string, image: NativeViewerImage) => void;
   onOpenImage: (fileId: string) => void;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const [asset, setAsset] = useState<FileAsset | null>(null);
@@ -120,7 +122,7 @@ function Attachment(props: {
       // Opening is best effort; the chip stays.
     }
   };
-  const name = asset?.filename ?? "Attachment";
+  const name = asset?.filename ?? t("native.timeline.messageAttachments.attachment");
   const image = asset?.contentType.startsWith("image/") === true && !failed;
   const { onImageReady } = props;
   useEffect(() => {
@@ -131,7 +133,7 @@ function Attachment(props: {
     return (
       <Pressable
         accessibilityRole="imagebutton"
-        accessibilityLabel={`Open ${name}`}
+        accessibilityLabel={t("native.timeline.messageAttachments.openName", { name })}
         disabled={!url}
         onPress={() => props.onOpenImage(fileId)}
         style={{
@@ -166,7 +168,7 @@ function Attachment(props: {
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Open ${name}`}
+      accessibilityLabel={t("native.timeline.messageAttachments.openName", { name })}
       onPress={() => void open()}
       style={({ pressed }) => ({
         flexDirection: "row",

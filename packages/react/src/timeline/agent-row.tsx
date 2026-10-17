@@ -4,6 +4,7 @@ import { cn } from "../lib/cn";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import type { AgentTitleParts } from "./platform-activity-presentation";
 import { ActivityDisclosure, CompactActivityContext } from "./shared";
+import { useOpenGeniText } from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
    Agent row
@@ -47,6 +48,7 @@ export function AgentRow({
   cancelled,
   children,
 }: AgentRowProps) {
+  const t = useOpenGeniText();
   const compact = useContext(CompactActivityContext);
   const forcedDefaultOpen = useForcedDefaultOpen();
   const [open, setOpen] = useState(forcedDefaultOpen ?? false);
@@ -64,7 +66,9 @@ export function AgentRow({
   }
   const hasBody = children != null;
   const canOpen = Boolean(sessionId && onOpenSession);
-  const openLabel = title.name ? `Open ${title.name}` : "Open agent session";
+  const openLabel = title.name
+    ? t("timeline.agentRow.openName", { name: title.name })
+    : t("timeline.agentRow.openAgentSession");
   const status = failed ? "failed" : cancelled ? "cancelled" : running ? "running" : undefined;
 
   const inner = (
@@ -128,11 +132,11 @@ export function AgentRow({
       {failed ? (
         <span className="inline-flex shrink-0 items-center gap-1.5 self-center font-og-mono text-og-xs leading-none text-og-status-failed">
           <span className="size-1.5 rounded-full bg-og-status-failed" />
-          failed
+          {t("timeline.agentRow.failed")}
         </span>
       ) : cancelled ? (
         <span className="og-cancelled-chip shrink-0 self-center font-og-mono text-og-xs leading-none text-og-fg-subtle">
-          interrupted
+          {t("timeline.agentRow.interrupted")}
         </span>
       ) : null}
       {canOpen && sessionId && onOpenSession ? (

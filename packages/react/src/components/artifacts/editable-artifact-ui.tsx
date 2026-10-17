@@ -3,6 +3,8 @@ import type {
   EditableArtifactSyncView,
 } from "@opengeni/sdk/editable-artifacts";
 import { useEffect, useState } from "react";
+import { type OpenGeniText } from "../../messages/runtime";
+import { useOpenGeniText } from "../../messages/runtime";
 
 export function useEditableArtifactView(
   session: EditableArtifactSession,
@@ -26,27 +28,32 @@ export function editableArtifactProjectionKey(view: EditableArtifactSyncView): s
   ].join(":");
 }
 
-export function editableArtifactStatusLabel(view: EditableArtifactSyncView): string {
+export function editableArtifactStatusLabel(
+  t: OpenGeniText,
+  view: EditableArtifactSyncView,
+): string {
   switch (view.state) {
     case "idle":
     case "connecting":
-      return "Connecting…";
+      return t("artifacts.editableArtifactUi.connecting");
     case "syncing":
     case "resyncing":
-      return "Syncing…";
+      return t("artifacts.editableArtifactUi.syncing");
     case "reconnecting":
-      return "Reconnecting…";
+      return t("artifacts.editableArtifactUi.reconnecting");
     case "unsupported":
-      return "This artifact version is not supported";
+      return t("artifacts.editableArtifactUi.thisArtifactVersionIsNot");
     case "failed":
       if (editableArtifactAccessRevoked(view)) {
-        return "You no longer have access to this artifact";
+        return t("artifacts.editableArtifactUi.youNoLongerHaveAccess");
       }
-      return view.lastError?.message ?? "Could not open this artifact";
+      return view.lastError?.message ?? t("artifacts.editableArtifactUi.couldNotOpenThisArtifact");
     case "closed":
-      return "Artifact session closed";
+      return t("artifacts.editableArtifactUi.artifactSessionClosed");
     case "live":
-      return view.writable ? "Live" : "Live · Read only";
+      return view.writable
+        ? t("artifacts.editableArtifactUi.live")
+        : t("artifacts.editableArtifactUi.liveReadOnly");
   }
 }
 
@@ -60,13 +67,16 @@ export function EditableArtifactMessage({
   title,
   detail,
   retry,
-  retryLabel = "Retry",
+  retryLabel: retryLabelProp,
 }: {
   title: string;
   detail: string;
   retry?: (() => void) | undefined;
   retryLabel?: string | undefined;
 }) {
+  const t = useOpenGeniText();
+  const retryLabel =
+    retryLabelProp === undefined ? t("artifacts.editableArtifactUi.retry") : retryLabelProp;
   return (
     <div className="grid h-full min-h-56 place-items-center bg-og-bg p-6 text-center">
       <div>

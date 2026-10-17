@@ -5,6 +5,7 @@ import {
   isTurnExecutionEvidence,
   timelineQuestionPlacement,
 } from "../timeline/projection";
+import { type OpenGeniText } from "../messages/runtime";
 
 export type LatestQuestionOptions = {
   /** Check navigation.isCurrent() after awaits and immediately before UI effects. */
@@ -28,21 +29,24 @@ export const TIMELINE_TURN_ANCHOR_EVENT_TYPES = SESSION_EVENT_TYPES.filter(
 
 /** Resolve an optional navigation destination without owning the hook's window
  * or React state. The caller guards errors and applies only a current result. */
-export async function resolveLatestQuestion({
-  client,
-  workspaceId,
-  sessionId,
-  isCurrent,
-  resumeSequence,
-  options,
-}: {
-  client: EmbeddedSessionClientLike;
-  workspaceId: string;
-  sessionId: string;
-  isCurrent: () => boolean;
-  resumeSequence: (events: readonly SessionEvent[]) => number;
-  options?: LatestQuestionOptions | undefined;
-}): Promise<{ questionSequence: number; anchor: number; events: SessionEvent[] } | null> {
+export async function resolveLatestQuestion(
+  t: OpenGeniText,
+  {
+    client,
+    workspaceId,
+    sessionId,
+    isCurrent,
+    resumeSequence,
+    options,
+  }: {
+    client: EmbeddedSessionClientLike;
+    workspaceId: string;
+    sessionId: string;
+    isCurrent: () => boolean;
+    resumeSequence: (events: readonly SessionEvent[]) => number;
+    options?: LatestQuestionOptions | undefined;
+  },
+): Promise<{ questionSequence: number; anchor: number; events: SessionEvent[] } | null> {
   let before: number | undefined;
   while (true) {
     const latest = await client.listEvents(workspaceId, sessionId, {
@@ -68,7 +72,7 @@ export async function resolveLatestQuestion({
       );
       if (pending) {
         if (!options?.onQueuedQuestion) {
-          const reason = new Error("The latest question is in the prompt queue.");
+          const reason = new Error(t("hooks.latestQuestion.theLatestQuestionIsIn"));
           reason.name = "LatestQuestionQueuedError";
           throw reason;
         }
@@ -142,7 +146,7 @@ export async function resolveLatestQuestion({
         continue;
       }
       if (placement.kind === "pending")
-        throw new Error("The latest question is changing queue state. Try again.");
+        throw new Error(t("hooks.latestQuestion.theLatestQuestionIsChanging"));
       return {
         questionSequence: question.sequence,
         anchor: placement.sequence,

@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import type { DefaultModelSelection, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -112,7 +113,7 @@ export function useWorkspaceModelCatalog(
     };
   }, [refresh]);
 
-  const rows = useMemo(() => sortPickerRows(projectPickerRows(models)), [models]);
+  const rows = useMemo(() => sortPickerRows(projectPickerRows(t, models)), [models]);
 
   return {
     models,

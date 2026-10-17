@@ -5,6 +5,7 @@ import type {
   UpdateSessionToolPolicyRequest,
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
+import { type OpenGeniText } from "./messages/runtime";
 
 /** Catalog tool discovery may be lazy; selecting the installed server does not
  * require its individual tool inventory to have been fetched. */
@@ -19,6 +20,7 @@ export function sessionCapabilityTools(item: CapabilityCatalogItem) {
  * sessions discover newly enabled servers at admission; explicit/inherited
  * policies add only this reviewed capability, with the existing CAS fence. */
 export async function attachSessionCapability(
+  t: OpenGeniText,
   client: OpenGeniClient,
   workspaceId: string,
   sessionId: string,
@@ -27,14 +29,15 @@ export async function attachSessionCapability(
 ): Promise<void> {
   const tools = sessionCapabilityTools(item);
   if (item.kind === "skill" || tools.length === 0) return;
-  if (!stillCurrent()) throw new Error("Connection setup was interrupted.");
+  if (!stillCurrent()) throw new Error(t("sessionCapabilityPolicy.connectionSetupWasInterrupted"));
   const session = await client.getSession(workspaceId, sessionId);
-  if (!stillCurrent()) throw new Error("Connection setup was interrupted.");
-  const request = capabilityToolPolicyUpdate(session, item);
+  if (!stillCurrent()) throw new Error(t("sessionCapabilityPolicy.connectionSetupWasInterrupted"));
+  const request = capabilityToolPolicyUpdate(t, session, item);
   if (request) await client.updateSessionToolPolicy(workspaceId, sessionId, request);
 }
 
 function capabilityToolPolicyUpdate(
+  t: OpenGeniText,
   session: Session,
   item: CapabilityCatalogItem,
 ): UpdateSessionToolPolicyRequest | null {
@@ -48,9 +51,7 @@ function capabilityToolPolicyUpdate(
   if (session.toolPolicy.mode === "workspace_default") {
     const policy = session.effectiveToolPolicy;
     if (!policy || policy.idsTruncated)
-      throw new Error(
-        "Connected, but the full session tool selection could not be read. Review the Tools picker before continuing.",
-      );
+      throw new Error(t("sessionCapabilityPolicy.connectedButTheFullSession"));
     // A workspace may choose a restricted default instead of all enabled servers.
     // Preserve that exact selection if this connection needs an explicit addition.
     // selectedIds contains only explicit additions, and is normally empty for
@@ -103,6 +104,7 @@ export type SessionCapabilityAccessPlan = {
 };
 
 export async function prepareSessionCapabilityAccess(
+  t: OpenGeniText,
   client: OpenGeniClient,
   workspaceId: string,
   sessionId: string,
@@ -115,12 +117,14 @@ export async function prepareSessionCapabilityAccess(
   const visited = new Set<string>();
   let id: string | null = sessionId;
   while (id) {
-    if (!stillCurrent()) throw new Error("Connection setup was interrupted.");
-    if (visited.has(id)) throw new Error("The parent chat chain could not be verified.");
+    if (!stillCurrent())
+      throw new Error(t("sessionCapabilityPolicy.connectionSetupWasInterrupted"));
+    if (visited.has(id)) throw new Error(t("sessionCapabilityPolicy.theParentChatChainCould"));
     visited.add(id);
     const session = await client.getSession(workspaceId, id);
-    if (!stillCurrent()) throw new Error("Connection setup was interrupted.");
-    const request = capabilityToolPolicyUpdate(session, item);
+    if (!stillCurrent())
+      throw new Error(t("sessionCapabilityPolicy.connectionSetupWasInterrupted"));
+    const request = capabilityToolPolicyUpdate(t, session, item);
     sessions.push({
       id,
       title: session.title ?? null,
@@ -140,22 +144,26 @@ export async function prepareSessionCapabilityAccess(
  * first. A partial failure may leave approved ancestor changes committed; never
  * claim success or roll back another person's edits. Prepare a new review. */
 export async function applySessionCapabilityAccess(
+  t: OpenGeniText,
   client: OpenGeniClient,
   plan: SessionCapabilityAccessPlan,
   stillCurrent: () => boolean = () => true,
 ): Promise<void> {
   for (const reviewed of plan.sessions) {
-    if (!stillCurrent()) throw new Error("Connection setup was interrupted.");
+    if (!stillCurrent())
+      throw new Error(t("sessionCapabilityPolicy.connectionSetupWasInterrupted"));
     const current = await client.getSession(plan.workspaceId, reviewed.id);
-    if (!stillCurrent()) throw new Error("Connection setup was interrupted.");
+    if (!stillCurrent())
+      throw new Error(t("sessionCapabilityPolicy.connectionSetupWasInterrupted"));
     if (
       current.toolPolicyVersion !== reviewed.toolPolicyVersion ||
       (current.parentSessionId ?? null) !== reviewed.parentSessionId
     )
-      throw new Error("Chat access changed. Click Add tools to review the current choices again.");
+      throw new Error(t("sessionCapabilityPolicy.chatAccessChangedClickAdd"));
   }
   for (const reviewed of plan.sessions) {
-    if (!stillCurrent()) throw new Error("Connection setup was interrupted.");
+    if (!stillCurrent())
+      throw new Error(t("sessionCapabilityPolicy.connectionSetupWasInterrupted"));
     if (reviewed.request) {
       const updated = await client.updateSessionToolPolicy(
         plan.workspaceId,
@@ -168,9 +176,7 @@ export async function applySessionCapabilityAccess(
           (tool) => !updated.firstPartyMcpTools.includes(tool),
         )
       )
-        throw new Error(
-          "This chat's capabilities do not allow these tools. Review its capability settings before adding tools again.",
-        );
+        throw new Error(t("sessionCapabilityPolicy.thisChatSCapabilitiesDo"));
     }
   }
 }
@@ -178,19 +184,17 @@ export async function applySessionCapabilityAccess(
 /** Native OAuth callbacks have already saved the provider connection. Finish
  * the separate, version-fenced session tool selection before reporting success. */
 export async function completeSessionCapabilityOAuth(
+  t: OpenGeniText,
   client: OpenGeniClient,
   workspaceId: string,
   sessionId: string,
   capabilityId: string | null,
 ): Promise<void> {
-  if (!capabilityId)
-    throw new Error(
-      "The authorized integration could not be identified. Review its connection card to finish setup.",
-    );
+  if (!capabilityId) throw new Error(t("sessionCapabilityPolicy.theAuthorizedIntegrationCouldNot"));
   const connected = (await client.listCapabilities(workspaceId)).items.find(
     (item) => item.id === capabilityId,
   );
   if (!connected?.enabled)
-    throw new Error("The connection was authorized, but enabling its tools could not be verified.");
-  await attachSessionCapability(client, workspaceId, sessionId, connected);
+    throw new Error(t("sessionCapabilityPolicy.theConnectionWasAuthorizedBut"));
+  await attachSessionCapability(t, client, workspaceId, sessionId, connected);
 }

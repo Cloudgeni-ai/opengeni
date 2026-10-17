@@ -27,6 +27,7 @@ import {
 } from "./native-call";
 import type { NativeWebRtcAdapter } from "./native-realtime";
 import { useNativeSessionRealtime } from "./use-native-session-realtime";
+import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 
 /** Copy the call surfaces draw outside the call screen itself. */
 export type NativeAgentCallMessages = {
@@ -40,16 +41,17 @@ export type NativeAgentCallMessages = {
   call: Partial<OpenGeniNativeCallLabels>;
 };
 
-export const DEFAULT_NATIVE_AGENT_CALL_MESSAGES: NativeAgentCallMessages = {
-  untitledSession: "New session",
-  couldNotStart: "Couldn't start the call",
-  cannotCallSession: "Can't call this session",
-  onCall: "On call",
-  muted: "Muted",
-  connecting: "Connecting…",
-  returnToCall: (status, title) => `${status}: ${title}. Return to call`,
-  call: DEFAULT_OPENGENI_NATIVE_CALL_LABELS,
-};
+export const DEFAULT_NATIVE_AGENT_CALL_MESSAGES = (t: OpenGeniText): NativeAgentCallMessages => ({
+  untitledSession: t("native.realtime.agentCall.newSession"),
+  couldNotStart: t("native.realtime.agentCall.couldnTStartTheCall"),
+  cannotCallSession: t("native.realtime.agentCall.canTCallThisSession"),
+  onCall: t("native.realtime.agentCall.onCall"),
+  muted: t("native.realtime.agentCall.muted"),
+  connecting: t("native.realtime.agentCall.connecting"),
+  returnToCall: (status, title) =>
+    t("native.realtime.agentCall.statusTitleReturnToCall", { status, title }),
+  call: DEFAULT_OPENGENI_NATIVE_CALL_LABELS(t),
+});
 
 export type NativeAgentCallContextValue = {
   /** The session on a call, if any. */
@@ -146,10 +148,11 @@ type CallTarget = { workspaceId: string; sessionId: string; systemTarget: string
  * action), which the system call adapter reports here.
  */
 export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
+  const t = useOpenGeniText();
   const { client, workspaceId, callAdapter, resolveOutsideCall } = props;
   const messages = useMemo(
-    () => ({ ...DEFAULT_NATIVE_AGENT_CALL_MESSAGES, ...props.messages }),
-    [props.messages],
+    () => ({ ...DEFAULT_NATIVE_AGENT_CALL_MESSAGES(t), ...props.messages }),
+    [props.messages, t],
   );
   const onError = props.onError ?? defaultError;
   const onErrorRef = useRef(onError);

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { copyTextToClipboard } from "./clipboard";
+import { useOpenGeniText } from "./messages/runtime";
 
 export type DeviceAuthorizationProps = {
   userCode: string;
@@ -22,6 +23,7 @@ export type DeviceAuthorizationProps = {
 /** Optional presentation for the existing model-account device APIs. It neither
  * owns provider state nor assumes that opening a verification page completed it. */
 export function DeviceAuthorization(props: DeviceAuthorizationProps) {
+  const t = useOpenGeniText();
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
   const generation = useRef(0);
@@ -70,29 +72,40 @@ export function DeviceAuthorization(props: DeviceAuthorizationProps) {
   }
   if (props.render) return props.render({ copied, copyError, copy, verificationHref: href });
   return (
-    <section className={`og-connect ${props.className ?? ""}`} aria-label="Device authorization">
-      <p>{props.description ?? `Enter this code at ${props.providerLabel ?? "the provider"}.`}</p>
+    <section
+      className={`og-connect ${props.className ?? ""}`}
+      aria-label={t("deviceAuthorization.deviceAuthorization")}
+    >
+      <p>
+        {props.description ??
+          t("deviceAuthorization.enterThisCodeAtProviderlabel", {
+            providerLabel: props.providerLabel ?? t("deviceAuthorization.theProvider"),
+          })}
+      </p>
       <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
         <code {...props.codeAttributes} style={{ overflowWrap: "anywhere" }}>
           {props.userCode}
         </code>
         <button
           type="button"
-          aria-label={copied ? "Code copied" : "Copy code"}
+          aria-label={
+            copied ? t("deviceAuthorization.codeCopied") : t("deviceAuthorization.copyCode")
+          }
           onClick={() => void copy()}
         >
-          {copied ? "Copied" : "Copy code"}
+          {copied ? t("deviceAuthorization.copied") : t("deviceAuthorization.copyCode")}
         </button>
         {href ? (
           <a href={href} target="_blank" rel="noopener noreferrer">
-            Open {props.providerLabel ?? "auth page"}
+            {t("deviceAuthorization.open")}{" "}
+            {props.providerLabel ?? t("deviceAuthorization.authPage")}
           </a>
         ) : (
-          <span role="alert">Authorization address unavailable.</span>
+          <span role="alert">{t("deviceAuthorization.authorizationAddressUnavailable")}</span>
         )}
       </div>
-      {copyError ? <p role="alert">Couldn't copy the code. Copy it manually instead.</p> : null}
-      <p role="status">Waiting for authorization…</p>
+      {copyError ? <p role="alert">{t("deviceAuthorization.couldnTCopyTheCode")}</p> : null}
+      <p role="status">{t("deviceAuthorization.waitingForAuthorization")}</p>
     </section>
   );
 }

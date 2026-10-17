@@ -7,6 +7,7 @@ import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";
 import { useErrorMessage } from "../lib/error-message";
 import { useOpenGeni, type ClientOverride } from "../session-context";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type SessionListLabels = {
   heading: string;
@@ -20,17 +21,17 @@ export type SessionListLabels = {
   cancel: string;
 };
 
-const DEFAULT_LABELS: SessionListLabels = {
-  heading: "Chats",
-  newChat: "New chat",
-  empty: "No chats yet",
-  loading: "Loading chats…",
-  loadMore: "Show more",
-  rename: "Rename",
-  archive: "Archive",
-  save: "Save",
-  cancel: "Cancel",
-};
+const DEFAULT_LABELS = (t: OpenGeniText): SessionListLabels => ({
+  heading: t("sessionList.chats"),
+  newChat: t("sessionList.newChat"),
+  empty: t("sessionList.noChatsYet"),
+  loading: t("sessionList.loadingChats"),
+  loadMore: t("sessionList.showMore"),
+  rename: t("sessionList.rename"),
+  archive: t("sessionList.archive"),
+  save: t("sessionList.save"),
+  cancel: t("sessionList.cancel"),
+});
 
 export type SessionListProps = ClientOverride & {
   selectedSessionId?: string | null | undefined;
@@ -75,7 +76,8 @@ export function SessionList({
   labels: labelOverrides,
   className,
 }: SessionListProps) {
-  const labels = { ...DEFAULT_LABELS, ...labelOverrides };
+  const t = useOpenGeniText();
+  const labels = { ...DEFAULT_LABELS(t), ...labelOverrides };
   const scope = { client, workspaceId };
   const context = useOpenGeni(scope);
   const [limit, setLimit] = useState(pageSize);
@@ -212,7 +214,7 @@ export function SessionList({
               >
                 <span className="w-full truncate pr-12 text-og-sm text-og-fg">{title}</span>
                 <span className="text-og-xs text-og-fg-subtle">
-                  {formatRelativeTime(session.updatedAt)}
+                  {formatRelativeTime(t, session.updatedAt)}
                 </span>
               </button>
               <span className="absolute right-1 top-1.5 hidden gap-0.5 group-focus-within:flex group-hover:flex pointer-coarse:flex">

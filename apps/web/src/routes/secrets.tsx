@@ -5,6 +5,7 @@
 //   /secrets?connection=<id>      a password manager connection   &view=choose-vaults|replace-token
 //   /secrets/$vaultId             a vault's page   ?view=availability|new-item&type=
 //   /secrets/$vaultId/$itemId     an item's page   ?view=edit
+import { t } from "@/lib/console-text";
 import {
   useVault,
   useVaultItem,
@@ -215,7 +216,7 @@ export function SecretsRoute({
   const canWriteWorkspace = can("variable-sets:write") || can("secrets:write");
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const organizationName = workspace
-    ? orgLabel(workspace.accountId, access.accountGrants)
+    ? orgLabel(t, workspace.accountId, access.accountGrants)
     : "your organization";
   const organizationWorkspaces: AvailabilityWorkspace[] = useMemo(
     () =>

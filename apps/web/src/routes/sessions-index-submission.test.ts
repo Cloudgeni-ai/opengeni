@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { describe, expect, test } from "bun:test";
 import { FILE_ONLY_MESSAGE_TEXT } from "@opengeni/react";
 
@@ -18,12 +19,12 @@ test("file-only Send persists the same placeholder submitted to create without c
     latencyMode: "standard" as const,
     options: {},
   };
-  const submitted = newSessionCreateSnapshot(visible, FILE_ONLY_MESSAGE_TEXT, {
+  const submitted = newSessionCreateSnapshot(visible, FILE_ONLY_MESSAGE_TEXT(t), {
     model: "selected-model",
     reasoningEffort: "high",
     latencyMode: "standard",
   });
-  expect(submitted.text).toBe(FILE_ONLY_MESSAGE_TEXT);
+  expect(submitted.text).toBe(FILE_ONLY_MESSAGE_TEXT(t));
   expect(submitted.resources).toEqual(visible.resources);
   expect(submitted.model).toBe("selected-model");
   expect(visible.text).toBe("");

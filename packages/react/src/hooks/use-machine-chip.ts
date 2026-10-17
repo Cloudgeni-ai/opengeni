@@ -3,6 +3,7 @@ import type { MachineState } from "@opengeni/sdk";
 import type { SessionCapabilitiesState } from "./use-session-capabilities";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { connectionStatusForState } from "../types/machines";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 /** The one truthful machine indicator. Managed cold compute is sleeping; a
  *  Connected Machine that is genuinely unreachable remains offline. */
@@ -36,11 +37,11 @@ export type DeriveMachineChipInput = {
 };
 
 /** Compact relative-time for the "as of" label. Pure, no Intl dependency. */
-export function formatAsOf(capturedAt: string, now: number): string {
+export function formatAsOf(t: OpenGeniText, capturedAt: string, now: number): string {
   const then = Date.parse(capturedAt);
   if (Number.isNaN(then)) return "recently";
   const seconds = Math.max(0, Math.round((now - then) / 1000));
-  if (seconds < 45) return "just now";
+  if (seconds < 45) return t("hooks.useMachineChip.justNow");
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.round(minutes / 60);
@@ -61,11 +62,13 @@ export function formatAsOf(capturedAt: string, now: number): string {
  *   3. everything else (a cold/asleep box, a self-hosted machine that's offline,
  *      an error) → **offline**, labelled "as of <capture time>".
  */
-export function deriveMachineChip(input: DeriveMachineChipInput): MachineChip {
+export function deriveMachineChip(t: OpenGeniText, input: DeriveMachineChipInput): MachineChip {
   const now = input.now ?? Date.now();
   const asOf = input.capturedAt ?? null;
-  const managedRestingLabel = asOf ? `Sleeping · saved ${formatAsOf(asOf, now)}` : "Sleeping";
-  const offlineLabel = "Offline";
+  const managedRestingLabel = asOf
+    ? t("hooks.useMachineChip.sleepingSavedAsof", { asOf: formatAsOf(t, asOf, now) })
+    : t("hooks.useMachineChip.sleeping");
+  const offlineLabel = t("hooks.useMachineChip.offline");
 
   // A connected machine has no Modal group lease, so capability negotiation
   // legitimately reports `cold` until a stream holder is minted. Its fleet
@@ -79,7 +82,7 @@ export function deriveMachineChip(input: DeriveMachineChipInput): MachineChip {
   // 1. A holder-confirmed warm provider or online connected machine is live.
   // Draining remains teardown-owned and may already have lost its instance.
   if (sandboxAcceptsLiveIo(input.liveness) || selfhostedOnline) {
-    return { state: "live", label: "Live", asOf: null };
+    return { state: "live", label: t("hooks.useMachineChip.live"), asOf: null };
   }
 
   // A self-hosted machine that reports offline cannot be woken remotely — honest
@@ -105,7 +108,7 @@ export function deriveMachineChip(input: DeriveMachineChipInput): MachineChip {
     !selfhostedOffline &&
     (input.capabilitiesState === "negotiating" || input.wantsWarm === true || machineWarming)
   ) {
-    return { state: "waking", label: "Waking…", asOf };
+    return { state: "waking", label: t("hooks.useMachineChip.waking"), asOf };
   }
 
   // 3. Managed cold compute is sleeping with saved-workspace freshness. A
@@ -128,6 +131,7 @@ export type UseMachineChipOptions = DeriveMachineChipInput;
  * "as of" label to tick.
  */
 export function useMachineChip(input: UseMachineChipOptions): MachineChip {
+  const t = useOpenGeniText();
   const {
     liveness,
     capabilitiesState,
@@ -139,7 +143,7 @@ export function useMachineChip(input: UseMachineChipOptions): MachineChip {
   } = input;
   return useMemo(
     () =>
-      deriveMachineChip({
+      deriveMachineChip(t, {
         liveness,
         capabilitiesState,
         activeMachineState,
@@ -158,6 +162,7 @@ export function useMachineChip(input: UseMachineChipOptions): MachineChip {
       wantsWarm,
       capturedAt,
       now,
+      t,
     ],
   );
 }

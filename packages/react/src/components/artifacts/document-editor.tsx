@@ -28,6 +28,7 @@ import {
 
 import { cn } from "../../lib/cn";
 import { ArtifactSurface } from "./artifact-surface";
+import { useOpenGeniText } from "../../messages/runtime";
 
 export type DocumentLayoutMode = "paginated" | "continuous";
 
@@ -365,11 +366,14 @@ function DocumentEditorCore({
   onCommandError,
   blockIdForView = identity,
   readOnly = false,
-  ariaLabel = "Document editor",
+  ariaLabel: ariaLabelProp,
   viewportHeight = DEFAULT_VIEWPORT_HEIGHT,
   overscanPages = 1,
   className,
 }: DocumentEditorCoreProps) {
+  const t = useOpenGeniText();
+  const ariaLabel =
+    ariaLabelProp === undefined ? t("artifacts.documentEditor.documentEditor") : ariaLabelProp;
   const [uncontrolledLayout, setUncontrolledLayout] = useState<DocumentLayoutMode>(
     defaultLayout ?? "paginated",
   );
@@ -799,11 +803,11 @@ function DocumentEditorCore({
     >
       <div
         role="toolbar"
-        aria-label="Document formatting"
+        aria-label={t("artifacts.documentEditor.documentFormatting")}
         className="flex min-h-10 shrink-0 items-center gap-1 border-b border-og-border bg-og-surface-1 px-2"
       >
         <ToolbarButton
-          label="Bold"
+          label={t("artifacts.documentEditor.bold")}
           shortcut="⌘B"
           disabled={readOnly || !selectedBlockId || !hasTextSelection}
           onPress={() => applyFormat("bold")}
@@ -811,7 +815,7 @@ function DocumentEditorCore({
           <BoldIcon className="size-4" />
         </ToolbarButton>
         <ToolbarButton
-          label="Italic"
+          label={t("artifacts.documentEditor.italic")}
           shortcut="⌘I"
           disabled={readOnly || !selectedBlockId || !hasTextSelection}
           onPress={() => applyFormat("italic")}
@@ -819,7 +823,7 @@ function DocumentEditorCore({
           <ItalicIcon className="size-4" />
         </ToolbarButton>
         <ToolbarButton
-          label="Underline"
+          label={t("artifacts.documentEditor.underline")}
           shortcut="⌘U"
           disabled={readOnly || !selectedBlockId || !hasTextSelection}
           onPress={() => applyFormat("underline")}
@@ -828,14 +832,14 @@ function DocumentEditorCore({
         </ToolbarButton>
         <span aria-hidden className="mx-1 h-5 w-px bg-og-border" />
         <ToolbarButton
-          label="Continuous layout"
+          label={t("artifacts.documentEditor.continuousLayout")}
           pressed={layout === "continuous"}
           onPress={() => changeLayout("continuous")}
         >
           <Rows3Icon className="size-4" />
         </ToolbarButton>
         <ToolbarButton
-          label="Paginated layout"
+          label={t("artifacts.documentEditor.paginatedLayout")}
           pressed={layout === "paginated"}
           onPress={() => changeLayout("paginated")}
         >
@@ -843,18 +847,21 @@ function DocumentEditorCore({
         </ToolbarButton>
         <span className="ml-auto truncate text-og-xs text-og-fg-muted">
           {commandFailure
-            ? "Change not saved"
+            ? t("artifacts.documentEditor.changeNotSaved")
             : pendingCommands > 0
-              ? "Saving…"
+              ? t("artifacts.documentEditor.saving")
               : readOnly
-                ? "Read only"
-                : "Editing"}{" "}
-          · {document.blocks.items.length.toLocaleString()} blocks
+                ? t("artifacts.documentEditor.readOnly")
+                : t("artifacts.documentEditor.editing")}{" "}
+          {t("artifacts.documentEditor.localestringBlocks", {
+            localeString: document.blocks.items.length.toLocaleString(t.locale),
+          })}
         </span>
       </div>
 
       <div role="status" aria-live="polite" className="sr-only">
-        {commandFailure?.message ?? (pendingCommands > 0 ? "Saving document changes" : "")}
+        {commandFailure?.message ??
+          (pendingCommands > 0 ? t("artifacts.documentEditor.savingDocumentChanges") : "")}
       </div>
 
       <div
@@ -888,7 +895,7 @@ function DocumentEditorCore({
               onClick={commandFailure.retry}
               className="shrink-0 rounded-og-xs px-1.5 py-0.5 font-medium outline-hidden hover:bg-og-surface-3 focus-visible:ring-2 focus-visible:ring-og-accent"
             >
-              Retry
+              {t("artifacts.documentEditor.retry")}
             </button>
           </div>
         ) : null}
@@ -896,14 +903,16 @@ function DocumentEditorCore({
           <div className="grid h-full place-items-center p-8 text-center">
             <div>
               <PilcrowIcon aria-hidden className="mx-auto mb-3 size-7 text-og-fg-subtle" />
-              <p className="text-og-sm text-og-fg-muted">This document is empty.</p>
+              <p className="text-og-sm text-og-fg-muted">
+                {t("artifacts.documentEditor.thisDocumentIsEmpty")}
+              </p>
               {!readOnly ? (
                 <button
                   type="button"
                   onClick={addFirstParagraph}
                   className="mt-3 rounded-og-md border border-og-primary-border bg-og-primary px-3 py-1.5 text-og-sm text-og-primary-fg hover:bg-og-primary-hover focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
                 >
-                  Start writing
+                  {t("artifacts.documentEditor.startWriting")}
                 </button>
               ) : null}
             </div>
@@ -933,7 +942,7 @@ function DocumentEditorCore({
               return (
                 <article
                   key={page.key}
-                  aria-label={`${layout === "paginated" ? "Page" : "Section"} ${pageIndex + 1} of ${pages.length}`}
+                  aria-label={`${layout === "paginated" ? t("artifacts.documentEditor.page") : t("artifacts.documentEditor.section")} ${pageIndex + 1} of ${pages.length}`}
                   aria-posinset={pageIndex + 1}
                   aria-setsize={pages.length}
                   data-og-document-page={pageIndex + 1}
@@ -1028,6 +1037,7 @@ export function DocumentArtifactSurface({
   editorClassName,
   ...editorProps
 }: DocumentArtifactSurfaceProps) {
+  const t = useOpenGeniText();
   return (
     <ArtifactSurface
       modality="document"
@@ -1040,7 +1050,7 @@ export function DocumentArtifactSurface({
       <DocumentEditor
         {...editorProps}
         document={document}
-        ariaLabel={`${title} document`}
+        ariaLabel={t("artifacts.documentEditor.titleDocument", { title })}
         className={editorClassName}
       />
     </ArtifactSurface>
@@ -1058,6 +1068,7 @@ export function DocumentProjectionArtifactSurface({
   editorClassName,
   ...editorProps
 }: DocumentProjectionArtifactSurfaceProps) {
+  const t = useOpenGeniText();
   return (
     <ArtifactSurface
       modality="document"
@@ -1070,7 +1081,7 @@ export function DocumentProjectionArtifactSurface({
       <DocumentProjectionEditor
         {...editorProps}
         projection={projection}
-        ariaLabel={`${title} document`}
+        ariaLabel={t("artifacts.documentEditor.titleDocument", { title })}
         className={editorClassName}
       />
     </ArtifactSurface>
@@ -1143,6 +1154,7 @@ function DocumentBlockView({
   onSelection: (paragraph: DocumentViewParagraph) => void;
   onKeyDown: (event: ReactKeyboardEvent<HTMLElement>, paragraph: DocumentViewParagraph) => void;
 }) {
+  const t = useOpenGeniText();
   if (isDocumentTable(block)) {
     return <DocumentTableView table={block} viewBlockId={viewBlockId} />;
   }
@@ -1200,8 +1212,8 @@ function DocumentBlockView({
               type="button"
               aria-label={
                 unresolved.length > 0
-                  ? `${unresolved.length} unresolved ${unresolved.length === 1 ? "comment" : "comments"}`
-                  : `${comments.length} resolved ${comments.length === 1 ? "comment" : "comments"}`
+                  ? t("artifacts.documentEditor.unresolvedComments", { count: unresolved.length })
+                  : t("artifacts.documentEditor.resolvedComments", { count: comments.length })
               }
               aria-expanded={commentPanelOpen}
               onClick={() => onThreadToggle((unresolved[0] ?? comments[0])!.id)}
@@ -1218,22 +1230,28 @@ function DocumentBlockView({
           {changes.length > 0 ? (
             <span
               role="img"
-              aria-label={`${changes.length} tracked ${changes.length === 1 ? "change" : "changes"}`}
+              aria-label={t("artifacts.documentEditor.trackedChanges", { count: changes.length })}
               className="mt-1 h-4 w-1 rounded-full bg-og-status-idle"
             />
           ) : null}
           {commentPanelOpen ? (
             <aside
-              aria-label="Comment thread"
+              aria-label={t("artifacts.documentEditor.commentThread")}
               className="absolute right-0 top-8 z-20 w-64 rounded-og-md border border-og-border bg-og-surface-1 p-3 text-og-xs text-og-fg shadow-og-lg"
             >
               <div className="mb-2 font-medium">
-                {comments.length === 1 ? "Comment" : `${comments.length} comments`}
+                {comments.length === 1
+                  ? t("artifacts.documentEditor.comment")
+                  : t("artifacts.documentEditor.lengthComments", { length: comments.length })}
               </div>
               <ol className="max-h-72 space-y-3 overflow-y-auto">
                 {comments.map((thread) => (
                   <li key={thread.id} className="space-y-2">
-                    <div className="text-og-fg-muted">{thread.resolved ? "Resolved" : "Open"}</div>
+                    <div className="text-og-fg-muted">
+                      {thread.resolved
+                        ? t("artifacts.documentEditor.resolved")
+                        : t("artifacts.documentEditor.open")}
+                    </div>
                     {thread.replies.map((reply, index) => (
                       // Reply position is stable within the append-only comment thread.
                       // oxlint-disable-next-line react/no-array-index-key
@@ -1287,17 +1305,22 @@ const ParagraphLeaf = memo(
     onSelection,
     onKeyDown,
   }: ParagraphLeafProps) {
+    const t = useOpenGeniText();
     const composing = useRef(false);
     const suppressNextEnter = useRef(false);
     const Tag = headingTag(paragraph.style.headingLevel);
     const label =
       paragraph.style.list?.kind === "number"
-        ? `Numbered list item ${listOrdinal ?? 1}`
+        ? t("artifacts.documentEditor.numberedListItemListordinal", {
+            listOrdinal: listOrdinal ?? 1,
+          })
         : paragraph.style.list?.kind === "bullet"
-          ? "Bullet list item"
+          ? t("artifacts.documentEditor.bulletListItem")
           : paragraph.style.headingLevel
-            ? `Heading ${paragraph.style.headingLevel}`
-            : "Paragraph";
+            ? t("artifacts.documentEditor.headingHeadinglevel", {
+                headingLevel: paragraph.style.headingLevel,
+              })
+            : t("artifacts.documentEditor.paragraph");
 
     return (
       <Tag

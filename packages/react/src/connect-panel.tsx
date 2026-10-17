@@ -6,6 +6,7 @@ import type { OpenGeniClient } from "@opengeni/sdk";
 import { useState } from "react";
 import { connectionServicePresentation } from "./connection-service-presentation";
 import { ConnectionDiscovery } from "./connection-discovery";
+import { useOpenGeniText } from "./messages/runtime";
 
 export type ConnectPanelProps = ConnectSetupProps & {
   returnUrl: string;
@@ -25,7 +26,7 @@ export type ConnectPanelProps = ConnectSetupProps & {
  * transport, actor admission, and controller lifetime. */
 export function ConnectPanel({
   returnUrl,
-  title = "Connections",
+  title: titleProp,
   showAccounts = true,
   showCustomConnections = true,
   showProviderConnections = false,
@@ -34,6 +35,8 @@ export function ConnectPanel({
   client,
   ...setup
 }: ConnectPanelProps) {
+  const t = useOpenGeniText();
+  const title = titleProp === undefined ? t("connectPanel.connections") : titleProp;
   const { attempt } = useConnect(setup.controller);
   const [inventoryRevision, setInventoryRevision] = useState(0);
   // Unknown/failed outcomes still need reconciliation or cancellation, not a
@@ -68,7 +71,7 @@ export function ConnectPanel({
             />
             {showCustomConnections && (
               <details className="og-connect-secondary">
-                <summary>Custom connection</summary>
+                <summary>{t("connectPanel.customConnection")}</summary>
                 <ConnectChooser
                   customOnly
                   presentation={presentation}
@@ -90,7 +93,9 @@ export function ConnectPanel({
           {...setup}
           authorizeLabel={
             setup.authorizeLabel ??
-            (serviceName ? `Continue to ${serviceName}` : "Authorize connection")
+            (serviceName
+              ? t("connectPanel.continueToServicename", { serviceName })
+              : t("connectPanel.authorizeConnection"))
           }
         />
       )}

@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { useNavigate } from "@tanstack/react-router";
 
 import {
@@ -23,7 +24,7 @@ export function AgentLearningSettingsPage({ workspaceId }: { workspaceId: string
   const workspace = context.workspaces.find((each) => each.id === workspaceId) ?? null;
   const personal = isPersonalWorkspace(workspace, context.managedSelfContext);
   const organizationName = workspace?.accountId
-    ? orgLabel(workspace.accountId, context.accessContext.accountGrants)
+    ? orgLabel(t, workspace.accountId, context.accessContext.accountGrants)
     : null;
   const canManageWorkspace = canManageWorkspaceSettings(
     context.accessContext,

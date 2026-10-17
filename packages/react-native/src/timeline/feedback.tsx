@@ -7,6 +7,7 @@ import {
   turnRatingsFromFeedback,
   type FeedbackClient,
 } from "@opengeni/react/session-feedback-model";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   KeyboardAvoidingView,
@@ -91,7 +92,8 @@ export function TurnFeedbackButtons(props: {
 
 function Thumb(props: { sentiment: FeedbackSentiment; pressed: boolean; onPress: () => void }) {
   const theme = useNativeTimelineTheme();
-  const label = feedbackSentimentLabel(props.sentiment);
+  const t = useOpenGeniText();
+  const label = feedbackSentimentLabel(t, props.sentiment);
   return (
     <Pressable
       accessibilityRole="button"
@@ -131,7 +133,8 @@ export function FeedbackSheet(props: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pending = useRef<ReturnType<typeof feedbackSubmission> | null>(null);
-  const copy = feedbackDialogCopy({ sessionId: props.target.sessionId, turnId: props.turnId });
+  const t = useOpenGeniText();
+  const copy = feedbackDialogCopy(t, { sessionId: props.target.sessionId, turnId: props.turnId });
   const open = props.sentiment !== null;
   const close = () => {
     if (busy) return;
@@ -159,8 +162,10 @@ export function FeedbackSheet(props: {
       props.onSubmitted(props.sentiment);
     } catch (caught) {
       const detail =
-        caught instanceof Error && caught.message ? ` ${caught.message}` : " Try again.";
-      setError(`Couldn't send feedback.${detail}`);
+        caught instanceof Error && caught.message
+          ? ` ${caught.message}`
+          : ` ${t("native.timeline.feedback.tryAgain")}`;
+      setError(t("native.timeline.feedback.couldnTSendFeedbackDetail", { detail }));
     } finally {
       setBusy(false);
     }
@@ -201,14 +206,14 @@ export function FeedbackSheet(props: {
           </Text>
           {props.sentiment ? (
             <Text style={{ ...fontStyle(theme), fontSize: 14, color: c.fg }}>
-              {feedbackSentimentLabel(props.sentiment)}
+              {feedbackSentimentLabel(t, props.sentiment)}
             </Text>
           ) : null}
           <Text style={{ ...fontStyle(theme, 500), fontSize: 13, color: c.fg }}>
-            Comment (optional)
+            {t("native.timeline.feedback.commentOptional")}
           </Text>
           <TextInput
-            accessibilityLabel="Comment (optional)"
+            accessibilityLabel={t("native.timeline.feedback.commentOptional")}
             value={comment}
             onChangeText={setComment}
             maxLength={4000}

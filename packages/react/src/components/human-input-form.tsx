@@ -32,6 +32,7 @@ import {
 } from "../human-input-model";
 import { SecretQuestionField, type SecretFieldHandle } from "./secret-question-field";
 import { linkifyText } from "./linkified-text";
+import { useOpenGeniText } from "../messages/runtime";
 
 export {
   answersFromDrafts,
@@ -108,8 +109,9 @@ function HumanInputRequestForm({
   allowedSaveTo,
   className,
 }: HumanInputFormProps) {
+  const t = useOpenGeniText();
   const formatError = useErrorMessage();
-  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
+  const messages = { ...defaultHumanInputFormMessages(t), ...messageOverrides };
   const singleQuestion = request.questions.length === 1 ? request.questions[0]! : null;
   const decision = decisionButtons ? binaryDecision(request.questions) : null;
   const [decisionChoice, setDecisionChoice] = useState<string | null>(null);
@@ -197,10 +199,7 @@ function HumanInputRequestForm({
     setReviews(null);
     void Promise.all(
       questions.map(async (question) => {
-        if (!loadSkillReview)
-          throw new Error(
-            "This client cannot preview Skill files. Ask your administrator for a review-capable client.",
-          );
+        if (!loadSkillReview) throw new Error(t("humanInputForm.thisClientCannotPreviewSkill"));
         const reference = question.reference;
         const record = await loadSkillReview(reference);
         if (
@@ -210,7 +209,7 @@ function HumanInputRequestForm({
           !record.files.some((file) => file.path === "SKILL.md")
         ) {
           throw new SkillReviewVerificationError(
-            "The requested Skill revision could not be verified.",
+            t("humanInputForm.theRequestedSkillRevisionCould"),
           );
         }
         return [question.id, record] as const;
@@ -236,7 +235,7 @@ function HumanInputRequestForm({
               cause instanceof SkillReviewVerificationError
                 ? cause.message
                 : !loadSkillReview
-                  ? "This client cannot preview Skill files. Ask your administrator for a review-capable client."
+                  ? t("humanInputForm.thisClientCannotPreviewSkill")
                   : undefined,
             ),
           });
@@ -244,7 +243,7 @@ function HumanInputRequestForm({
     return () => {
       current = false;
     };
-  }, [loadSkillReview, reviewIdentity, reviewReload, formatError]);
+  }, [loadSkillReview, reviewIdentity, reviewReload, formatError, t]);
   const visibleReviews =
     reviews?.loader === loadSkillReview && reviews?.identity === reviewIdentity ? reviews : null;
   const preview = (question: HumanInputQuestion) => {
@@ -255,12 +254,16 @@ function HumanInputRequestForm({
         {record ? (
           <>
             <p className="text-og-sm">
-              {record.title ?? "Skill"} · {record.scope} · {record.files.length} files
+              {record.title ?? t("humanInputForm.skill")}{" "}
+              {t("humanInputForm.scopeLengthFiles", {
+                scope: record.scope,
+                length: record.files.length,
+              })}
             </p>
             <p className="text-og-xs text-og-fg-muted">
               {question.skillReview.removalOperationId
-                ? "Permanently deletes this Skill and all stored revisions. This cannot be undone; conversations remain unchanged."
-                : "Saving activates these exact files. No additional review is required."}
+                ? t("humanInputForm.permanentlyDeletesThisSkillAnd")
+                : t("humanInputForm.savingActivatesTheseExactFiles")}
             </p>
             {record.files.map((file) => (
               <details key={file.path} open={file.path === "SKILL.md"}>
@@ -277,12 +280,12 @@ function HumanInputRequestForm({
               {visibleReviews.error}
             </p>
             <button type="button" onClick={() => setReviewReload((value) => value + 1)}>
-              Retry preview
+              {t("humanInputForm.retryPreview")}
             </button>
           </>
         ) : (
           <p role="status" className="text-og-sm">
-            Loading the exact Skill files…
+            {t("humanInputForm.loadingTheExactSkillFiles")}
           </p>
         )}
       </div>
@@ -379,14 +382,14 @@ function HumanInputRequestForm({
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    const result = answersFromDrafts(request.questions, drafts, messages);
+    const result = answersFromDrafts(t, request.questions, drafts, messages);
     const secretAnswers: HumanInputSecretAnswer[] = [];
     const secretPublicAnswers = new Map<string, HumanInputAnswer>();
     for (const question of request.questions) {
       if (question.kind !== "secret") continue;
       const handle = secretHandles.current.get(question.id);
       if (!handle) continue;
-      const secret = secretAnswerFromReading(question, handle.read(), messages);
+      const secret = secretAnswerFromReading(t, question, handle.read(), messages);
       if (!secret) continue;
       if ("error" in secret) {
         result.errors[question.id] = secret.error;
@@ -415,8 +418,8 @@ function HumanInputRequestForm({
     if (unreviewedSave) {
       setValidationErrors({
         [unreviewedSave.id]: unreviewedSave.skillReview?.removalOperationId
-          ? "Load the exact Skill proposal before approving permanent deletion."
-          : "Load the exact Skill files before saving.",
+          ? t("humanInputForm.loadTheExactSkillProposal")
+          : t("humanInputForm.loadTheExactSkillFiles"),
       });
       return;
     }
@@ -440,7 +443,10 @@ function HumanInputRequestForm({
     request.expiresAt ? (
       <>
         {messages.deadlineLabel}{" "}
-        <time dateTime={request.expiresAt} title={new Date(request.expiresAt).toLocaleString()}>
+        <time
+          dateTime={request.expiresAt}
+          title={new Date(request.expiresAt).toLocaleString(t.locale)}
+        >
           {messages.formatDeadline(request.expiresAt)}
         </time>
       </>
@@ -536,14 +542,16 @@ function HumanInputRequestForm({
                 {messages.deadlineLabel}{" "}
                 <time
                   dateTime={request.expiresAt}
-                  title={new Date(request.expiresAt).toLocaleString()}
+                  title={new Date(request.expiresAt).toLocaleString(t.locale)}
                 >
                   {messages.formatDeadline(request.expiresAt)}
                 </time>
               </p>
             ) : null}
             {request.allowSkip && singleQuestion ? (
-              <p className="mt-1 text-og-xs text-og-fg-subtle">Or skip and let the agent decide.</p>
+              <p className="mt-1 text-og-xs text-og-fg-subtle">
+                {t("humanInputForm.orSkipAndLetThe")}
+              </p>
             ) : null}
           </div>
           <button
@@ -834,6 +842,7 @@ function QuestionControls({
   onSecretEdited: () => void;
   onUpdate: (apply: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => void;
 }) {
+  const t = useOpenGeniText();
   const errorId = `${fieldId}-error`;
   const helpId = `${fieldId}-help`;
   const labelId = `${fieldId}-label`;
@@ -945,7 +954,7 @@ function QuestionControls({
             onEdited={onSecretEdited}
           />
         ) : (
-          <p className="text-og-sm text-og-fg-muted">This question can't be answered here.</p>
+          <p className="text-og-sm text-og-fg-muted">{t("humanInputForm.thisQuestionCanTBe")}</p>
         )
       ) : question.kind === "text" ? (
         <textarea
@@ -1053,14 +1062,17 @@ function QuestionControls({
                   {messages.other}
                 </label>
                 <label htmlFor={otherTextId} className="sr-only">
-                  {messages.other} answer for {visibleLabel}
+                  {t("humanInputForm.otherAnswerForVisiblelabel", {
+                    other: messages.other,
+                    visibleLabel,
+                  })}
                 </label>
                 <input
                   id={otherTextId}
                   type="text"
                   value={draft.other}
                   disabled={busy}
-                  placeholder="Type a value…"
+                  placeholder={t("humanInputForm.typeAValue")}
                   onClick={() => onUpdate(selectOtherDraft)}
                   onFocus={() => onUpdate(selectOtherDraft)}
                   onChange={(event) => {

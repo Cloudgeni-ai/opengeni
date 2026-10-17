@@ -1,3 +1,4 @@
+import type { OpenGeniText } from "@opengeni/react/messages";
 import { GENIE_PREPARING_PHRASES, GENIE_WAITING_PHRASES } from "@opengeni/react/timeline-model";
 
 /** What the composer's single trailing control does right now. */
@@ -30,9 +31,10 @@ export function composerTrailingMode(input: {
  * preparing or waiting copy.
  */
 export function nativeLoadingPhrases(
+  t: OpenGeniText,
   hostPhrases: readonly string[],
   phase: "preparing" | "waiting",
 ): readonly string[] {
   if (hostPhrases.length > 0) return hostPhrases;
-  return phase === "waiting" ? GENIE_WAITING_PHRASES : GENIE_PREPARING_PHRASES;
+  return phase === "waiting" ? GENIE_WAITING_PHRASES(t) : GENIE_PREPARING_PHRASES(t);
 }

@@ -7,6 +7,7 @@ import type {
   HumanInputSecretSaveTo,
   HumanInputSecretSpec,
 } from "@opengeni/sdk";
+import { type OpenGeniText } from "./messages/runtime";
 
 /* Pure drafting and validation rules for structured human-input requests,
    shared by the web HumanInputForm and non-DOM renderers. */
@@ -60,61 +61,69 @@ export type HumanInputFormMessages = {
   secretSaved: (vaultName: string, itemName: string) => string;
 };
 
-const SAVE_TO_IN_SENTENCE: Record<HumanInputSecretSaveTo, string> = {
-  user: "Only me",
-  task: "this task",
-  workspace: "this workspace",
-};
+const SAVE_TO_IN_SENTENCE = (t: OpenGeniText): Record<HumanInputSecretSaveTo, string> => ({
+  user: t("humanInputModel.onlyMe"),
+  task: t("humanInputModel.thisTask"),
+  workspace: t("humanInputModel.thisWorkspace"),
+});
 
-export const defaultHumanInputFormMessages: HumanInputFormMessages = {
-  title: "Input required",
+export const defaultHumanInputFormMessages = (t: OpenGeniText): HumanInputFormMessages => ({
+  title: t("humanInputModel.inputRequired"),
   /** Multi-question chrome has no default subtitle; hosts may still override. */
   description: "",
-  submit: "Send answers",
-  skip: "Skip",
-  submitting: "Submitting…",
-  other: "Other",
-  deadlineLabel: "Expires",
-  formatDeadline,
-  required: "This question is required.",
-  otherRequired: "Enter a value for Other.",
-  minSelections: (count) => `Choose at least ${count} option${count === 1 ? "" : "s"}.`,
-  maxSelections: (count) => `Choose no more than ${count} option${count === 1 ? "" : "s"}.`,
-  optional: "Optional",
-  moreBelow: "More below",
+  submit: t("humanInputModel.sendAnswers"),
+  skip: t("humanInputModel.skip"),
+  submitting: t("humanInputModel.submitting"),
+  other: t("humanInputModel.other"),
+  deadlineLabel: t("humanInputModel.expires"),
+  formatDeadline: (value) => formatDeadline(t, value),
+  required: t("humanInputModel.thisQuestionIsRequired"),
+  otherRequired: t("humanInputModel.enterAValueForOther"),
+  minSelections: (count) => t("humanInputModel.chooseAtLeastOptions", { count }),
+  maxSelections: (count) => t("humanInputModel.chooseNoMoreThanOptions", { count }),
+  optional: t("humanInputModel.optional"),
+  moreBelow: t("humanInputModel.moreBelow"),
   questionCount: (count) => `${count} questions`,
-  collapse: "Collapse",
-  expand: "Expand",
+  collapse: t("humanInputModel.collapse"),
+  expand: t("humanInputModel.expand"),
   selectionHint: (min, max) => {
-    if (min != null && max != null) return `Choose ${min}–${max}.`;
-    if (min != null) return `Choose at least ${min}.`;
-    if (max != null) return `Choose up to ${max}.`;
+    if (min != null && max != null) return t("humanInputModel.chooseMinMax", { min, max });
+    if (min != null) return t("humanInputModel.chooseAtLeastMin", { min });
+    if (max != null) return t("humanInputModel.chooseUpToMax", { max });
     return null;
   },
-  secretShow: "Show",
-  secretHide: "Hide",
-  secretGenerate: "Generate",
-  secretWillGenerate: "A strong password will be generated",
-  secretUndo: "Undo",
-  secretSaveTo: "Save to",
-  secretSaveToOptions: { user: "Only me", task: "This task", workspace: "This workspace" },
+  secretShow: t("humanInputModel.show"),
+  secretHide: t("humanInputModel.hide"),
+  secretGenerate: t("humanInputModel.generate"),
+  secretWillGenerate: t("humanInputModel.aStrongPasswordWillBe"),
+  secretUndo: t("humanInputModel.undo"),
+  secretSaveTo: t("humanInputModel.saveTo"),
+  secretSaveToOptions: {
+    user: t("humanInputModel.onlyMe"),
+    task: t("humanInputModel.thisTask2"),
+    workspace: t("humanInputModel.thisWorkspace2"),
+  },
   secretVaultHint: (saveTo, vault) =>
     vault
-      ? `Saves to the ${vault} vault`
+      ? t("humanInputModel.savesToTheVaultVault", { vault })
       : saveTo === "user"
-        ? "Saves to your private vault"
+        ? t("humanInputModel.savesToYourPrivateVault")
         : saveTo === "task"
-          ? "Saves to this task"
-          : "Saves to the workspace vault",
+          ? t("humanInputModel.savesToThisTask")
+          : t("humanInputModel.savesToTheWorkspaceVault"),
   secretSaveToDowngraded: (requested, actual) =>
-    `You can't save to ${SAVE_TO_IN_SENTENCE[requested]}, so it will be saved to ${SAVE_TO_IN_SENTENCE[actual]}.`,
-  secretLooksLike: (example) => `Looks like ${example}`,
+    t("humanInputModel.youCanTSaveTo", {
+      requested: SAVE_TO_IN_SENTENCE(t)[requested],
+      actual: SAVE_TO_IN_SENTENCE(t)[actual],
+    }),
+  secretLooksLike: (example) => t("humanInputModel.looksLikeExample", { example }),
   secretPatternWarning: (looksLike) =>
     looksLike
-      ? `This doesn't look like ${looksLike}. You can still send it.`
-      : "This doesn't match the expected format. You can still send it.",
-  secretSaved: (vaultName, itemName) => `Saved to ${vaultName} › ${itemName}`,
-};
+      ? t("humanInputModel.thisDoesnTLookLike", { looksLike })
+      : t("humanInputModel.thisDoesnTMatchThe"),
+  secretSaved: (vaultName, itemName) =>
+    t("humanInputModel.savedToVaultnameItemname", { vaultName, itemName }),
+});
 
 /**
  * Text, single- and multi-select drafts. Secret questions are not drafted:
@@ -122,11 +131,12 @@ export const defaultHumanInputFormMessages: HumanInputFormMessages = {
  * {@link secretAnswerFromReading} at submit time.
  */
 export function answersFromDrafts(
+  t: OpenGeniText,
   questions: HumanInputQuestion[],
   drafts: Record<string, HumanInputAnswerDraft>,
   messageOverrides: Partial<HumanInputFormMessages> = {},
 ): { answers: HumanInputAnswer[]; errors: Record<string, string> } {
-  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
+  const messages = { ...defaultHumanInputFormMessages(t), ...messageOverrides };
   const answers: HumanInputAnswer[] = [];
   const errors: Record<string, string> = {};
   for (const question of questions) {
@@ -181,17 +191,17 @@ export function emptyDraft(): HumanInputAnswerDraft {
   return { values: [], other: "", otherSelected: false };
 }
 
-export function formatDeadline(value: string): string {
+export function formatDeadline(t: OpenGeniText, value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   const ms = date.getTime() - Date.now();
-  if (ms <= 0) return "deadline passed";
+  if (ms <= 0) return t("humanInputModel.deadlinePassed");
   const minutes = Math.round(ms / 60_000);
-  if (minutes < 1) return "in under a minute";
+  if (minutes < 1) return t("humanInputModel.inUnderAMinute");
   if (minutes < 60) return `in ${minutes}m`;
   const hours = Math.round(minutes / 60);
   if (hours < 48) return `in ${hours}h`;
-  return date.toLocaleString();
+  return date.toLocaleString(t.locale);
 }
 
 /** The form heading: a single question leads with its own label/prompt. */
@@ -249,11 +259,14 @@ export function secretCanGenerate(spec: HumanInputSecretSpec): boolean {
 }
 
 /** The input's label: "Password", "API key", "One-time code", or the field name. */
-export function secretFieldLabel(spec: HumanInputSecretSpec): string {
+export function secretFieldLabel(t: OpenGeniText, spec: HumanInputSecretSpec): string {
   const field = spec.field?.trim() || "password";
-  if (spec.fieldKind === "totp" && field.toLowerCase() === "password") return "One-time code";
-  if (spec.itemType === "api_key" && field.toLowerCase() === "password") return "API key";
-  if (spec.itemType === "note" && field.toLowerCase() === "password") return "Note";
+  if (spec.fieldKind === "totp" && field.toLowerCase() === "password")
+    return t("humanInputModel.oneTimeCode");
+  if (spec.itemType === "api_key" && field.toLowerCase() === "password")
+    return t("humanInputModel.apiKey");
+  if (spec.itemType === "note" && field.toLowerCase() === "password")
+    return t("humanInputModel.note");
   const words = field.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
@@ -330,11 +343,12 @@ export type SecretFieldReading = {
  * saved reference. Returns null for an unanswered optional question.
  */
 export function secretAnswerFromReading(
+  t: OpenGeniText,
   question: HumanInputQuestion,
   reading: SecretFieldReading,
   messageOverrides: Partial<HumanInputFormMessages> = {},
 ): { answer: HumanInputAnswer; secretAnswer: HumanInputSecretAnswer } | { error: string } | null {
-  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
+  const messages = { ...defaultHumanInputFormMessages(t), ...messageOverrides };
   const value = reading.generate ? null : reading.value || null;
   if (!reading.generate && value === null) {
     return question.required ? { error: messages.required } : null;
@@ -351,9 +365,10 @@ export function secretAnswerFromReading(
 
 /** The answered chip label, never a value. */
 export function secretAnswerLabel(
+  t: OpenGeniText,
   result: HumanInputSecretAnswerResult,
   messageOverrides: Partial<HumanInputFormMessages> = {},
 ): string {
-  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
+  const messages = { ...defaultHumanInputFormMessages(t), ...messageOverrides };
   return messages.secretSaved(result.vaultName, result.itemName);
 }

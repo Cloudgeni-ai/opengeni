@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline, groupTimeline } from "../src/timeline/projection";
 import type { TimelineGroup } from "../src/timeline/types";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 function event(
   sequence: number,
@@ -21,7 +24,7 @@ function event(
   };
 }
 const fold = (events: SessionEvent[]) =>
-  groupTimeline(buildTimeline(events), { readableTurns: true });
+  groupTimeline(englishText, buildTimeline(englishText, events), { readableTurns: true });
 const work = (groups: TimelineGroup[]) => groups.filter((group) => group.kind === "activity");
 const prose = (groups: TimelineGroup[]) =>
   groups.flatMap((group) =>
@@ -236,7 +239,7 @@ describe("projection lifecycle audit regressions", () => {
   });
 
   test("reasoning summary parts streamed as separate bold deltas become paragraphs", () => {
-    const items = buildTimeline([
+    const items = buildTimeline(englishText, [
       event(1, "agent.reasoning.delta", { text: "**Checking the workspace first**" }),
       event(2, "agent.reasoning.delta", { text: "**Inspecting guidance**" }),
       event(3, "agent.reasoning.delta", { text: " and then **more**" }),
@@ -259,6 +262,7 @@ describe("projection lifecycle audit regressions", () => {
       ["**Checking the workspace first**", "**Inspecting guidance** and then **more**"],
     ]) {
       const items = buildTimeline(
+        englishText,
         rows.map((text, index) => event(index + 1, "agent.reasoning.delta", { text })),
       );
       const reasoning = items.filter((item) => item.kind === "reasoning");

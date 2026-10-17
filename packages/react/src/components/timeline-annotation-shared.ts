@@ -1,4 +1,5 @@
 import type { TimelineAnnotationSource } from "@opengeni/sdk";
+import { type OpenGeniText } from "../messages/runtime";
 
 export const ANNOTATION_CHROME_SELECTOR =
   "[data-og-annotation-chrome], [data-og-annotation-badge], [data-og-annotation-popover]";
@@ -14,19 +15,19 @@ export function annotationDisplayOrdinal(
   return typeof annotation.ordinal === "number" ? annotation.ordinal : index + 1;
 }
 
-export function sourceKindLabel(kind: TimelineAnnotationSource["kind"]): string {
+export function sourceKindLabel(t: OpenGeniText, kind: TimelineAnnotationSource["kind"]): string {
   switch (kind) {
     case "user_message":
-      return "Your message";
+      return t("timelineAnnotationShared.yourMessage");
     case "assistant_message":
-      return "Assistant";
+      return t("timelineAnnotationShared.assistant");
     case "tool_output":
-      return "Tool output";
+      return t("timelineAnnotationShared.toolOutput");
   }
 }
 
-export function annotationSourceLabel(source: TimelineAnnotationSource): string {
-  return source.label?.trim() || sourceKindLabel(source.kind);
+export function annotationSourceLabel(t: OpenGeniText, source: TimelineAnnotationSource): string {
+  return source.label?.trim() || sourceKindLabel(t, source.kind);
 }
 
 export function truncateAnnotationQuote(quote: string, maxChars = 160): string {

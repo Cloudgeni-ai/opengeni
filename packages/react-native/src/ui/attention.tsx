@@ -1,6 +1,7 @@
 import type { PendingApproval, PendingHumanInputRequest } from "@opengeni/react/session";
 import { toolDisplayName } from "@opengeni/react/session";
 import type { HumanInputAnswer } from "@opengeni/sdk";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import Animated, { FadeInDown, FadeOutDown, LinearTransition } from "react-native-reanimated";
@@ -39,6 +40,7 @@ export function AgentAttentionTray(props: {
   onApproval(approvalId: string, decision: "approve" | "reject"): void;
   onAnswer(requestId: string, answers: HumanInputAnswer[] | null): void;
 }) {
+  const t = useOpenGeniText();
   const { theme } = props;
   const items: Attention[] = [
     ...props.approvals.map((approval) => ({ kind: "approval" as const, approval })),
@@ -86,11 +88,13 @@ export function AgentAttentionTray(props: {
             fontWeight: "600",
           }}
         >
-          {current.kind === "approval" ? "Approve to continue" : "Answer to continue"}
+          {current.kind === "approval"
+            ? t("native.ui.attention.approveToContinue")
+            : t("native.ui.attention.answerToContinue")}
         </Text>
         {items.length > 1 ? (
           <Text style={{ color: theme.colors.textFaint, fontSize: theme.type.small }}>
-            1 of {items.length}
+            {t("native.ui.attention.n1OfLength", { length: items.length })}
           </Text>
         ) : null}
       </View>
@@ -104,7 +108,7 @@ export function AgentAttentionTray(props: {
                 fontWeight: theme.type.weightStrong,
               }}
             >
-              {toolDisplayName(current.approval.name, current.approval.display)}
+              {toolDisplayName(t, current.approval.name, current.approval.display)}
             </Text>
             {approvalSummary(current.approval) ? (
               <Text
@@ -123,14 +127,14 @@ export function AgentAttentionTray(props: {
           <View style={{ flexDirection: "row", gap: 10 }}>
             <ActionButton
               flex
-              label="Deny"
+              label={t("native.ui.attention.deny")}
               onPress={() => props.onApproval(current.approval.id, "reject")}
               theme={theme}
               variant="secondary"
             />
             <ActionButton
               flex
-              label="Approve"
+              label={t("native.ui.attention.approve")}
               onPress={() => props.onApproval(current.approval.id, "approve")}
               theme={theme}
               variant="primary"
@@ -195,7 +199,7 @@ export function AgentAttentionTray(props: {
             {current.request.allowSkip ? (
               <ActionButton
                 flex
-                label="Skip"
+                label={t("native.ui.attention.skip")}
                 onPress={() => props.onAnswer(current.request.id, null)}
                 theme={theme}
                 variant="secondary"
@@ -204,7 +208,7 @@ export function AgentAttentionTray(props: {
             <ActionButton
               disabled={selected.length === 0}
               flex
-              label="Send"
+              label={t("native.ui.attention.send")}
               onPress={() => {
                 props.onAnswer(current.request.id, [{ questionId: question.id, values: selected }]);
                 setSelected([]);

@@ -628,6 +628,49 @@ export function App() {
 }
 ```
 
+## Your own labels and languages
+
+Every piece of text the components show, including user-facing error messages,
+comes from one message catalog. The built-in catalog is English; pass `locale`
+and `messages` to `OpenGeniProvider` to show your own words or a full translation.
+
+```tsx
+import { OpenGeniProvider, type OpenGeniMessages } from "@opengeni/react";
+
+const norwegian: OpenGeniMessages = {
+  "composer.stop": "Stopp",
+  "counts.items_one": "{count} element",
+  "counts.items_other": "{count} elementer",
+};
+
+<OpenGeniProvider client={client} workspaceId={workspaceId} locale="nb" messages={norwegian}>
+  {children}
+</OpenGeniProvider>;
+```
+
+- Keys are stable, typed identifiers. `englishMessages` is the complete default
+  catalog: export it to your translation tooling as is.
+- Templates use single-brace parameters (`"Start voice with {model}"`); a
+  translation must keep the same parameters.
+- Counted text uses plural suffixes (`_zero`, `_one`, `_two`, `_few`, `_many`,
+  `_other`) chosen with `Intl.PluralRules` for `locale`, so each language
+  supplies the forms it needs. `_other` is always required.
+- `locale` also sets the language of the dates, times and numbers the
+  components format.
+- Missing keys fall back to an outer provider, then English, never to a raw key.
+  Declare a full translation as `OpenGeniMessageCatalog` and TypeScript reports
+  every key you have not translated yet, including keys added in later releases.
+- `OpenGeniMessagesProvider` scopes overrides to part of a tree (for example a
+  different label in one panel); `useOpenGeniText()` gives your own components
+  the same translator.
+- `@opengeni/react/messages` exports the catalog and runtime without any DOM
+  code, for React Native and server rendering.
+
+Component props that accept labels (for example `ChatComposer`'s `messages`)
+still win over the catalog; their defaults, such as `defaultChatComposerMessages(t)`,
+are functions of the translator. Internal diagnostics (developer invariants and
+protocol errors never meant for end users) stay in English.
+
 ## Realtime composer controls (`@opengeni/react/realtime`)
 
 The realtime subpath is the exact Opengeni composer experience: model catalog

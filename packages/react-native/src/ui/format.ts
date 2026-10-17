@@ -1,8 +1,9 @@
 import type { ActivityItem, TimelineGroup, ToolCallItem } from "@opengeni/react/session";
+import type { OpenGeniText } from "@opengeni/react/messages";
 import { toolDisplayName } from "@opengeni/react/session";
 
-export function toolTitle(item: ToolCallItem): string {
-  return toolDisplayName(item.name, item.display);
+export function toolTitle(t: OpenGeniText, item: ToolCallItem): string {
+  return toolDisplayName(t, item.name, item.display);
 }
 
 function firstString(record: Record<string, unknown>, keys: string[]): string | null {

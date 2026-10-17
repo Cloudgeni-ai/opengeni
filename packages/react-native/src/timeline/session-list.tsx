@@ -14,6 +14,7 @@ import {
   sessionRepoLabel,
   type SessionStatusTone,
 } from "@opengeni/react/session-list-model";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { useEffect, useMemo } from "react";
 import {
   ActionSheetIOS,
@@ -137,7 +138,8 @@ export function SessionRow({ session, models, onPress, onTogglePin, now }: Sessi
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const c = theme.colors;
-  const rows = useMemo(() => projectClientModelRows([...models]), [models]);
+  const t = useOpenGeniText();
+  const rows = useMemo(() => projectClientModelRows(t, [...models]), [t, models]);
   const title = sessionDisplayTitle(session);
   const status = recentSessionStatus(session);
   const model = recentSessionModelPresentation(session.model, rows);
@@ -149,7 +151,11 @@ export function SessionRow({ session, models, onPress, onTogglePin, now }: Sessi
     if (!onTogglePin) return;
     if (Platform.OS === "ios") {
       ActionSheetIOS.showActionSheetWithOptions(
-        { title, options: [pinLabel, "Cancel"], cancelButtonIndex: 1 },
+        {
+          title,
+          options: [pinLabel, t("native.timeline.sessionList.cancel")],
+          cancelButtonIndex: 1,
+        },
         (index) => {
           if (index === 0) onTogglePin();
         },
@@ -158,7 +164,7 @@ export function SessionRow({ session, models, onPress, onTogglePin, now }: Sessi
     }
     Alert.alert(title, undefined, [
       { text: pinLabel, onPress: onTogglePin },
-      { text: "Cancel", style: "cancel" },
+      { text: t("native.timeline.sessionList.cancel"), style: "cancel" },
     ]);
   };
   return (
@@ -218,7 +224,7 @@ export function SessionRow({ session, models, onPress, onTogglePin, now }: Sessi
             fontVariant: ["tabular-nums"],
           }}
         >
-          {relativeTimeLabel(session.updatedAt, now)}
+          {relativeTimeLabel(t, session.updatedAt, now)}
         </Text>
       </View>
     </Pressable>
@@ -293,7 +299,8 @@ export function SessionStatusBadge({
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  const presentation = SESSION_STATUS_PRESENTATION[status];
+  const t = useOpenGeniText();
+  const presentation = SESSION_STATUS_PRESENTATION(t)[status];
   const badge = SESSION_STATUS_BADGE[status];
   const color = (token: string) => c[token as WebColorToken] ?? c["fg-muted"];
   return (
@@ -350,8 +357,9 @@ export function SessionHeaderTitle({
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
+  const t = useOpenGeniText();
   const viewport = useWindowDimensions();
-  const presentation = status ? SESSION_STATUS_PRESENTATION[status] : null;
+  const presentation = status ? SESSION_STATUS_PRESENTATION(t)[status] : null;
   // A settled, idle session needs no status line: the title stands alone, as in
   // native messaging apps. Running, waiting, paused and failed states still say so.
   const label = statusLabel ?? (status === "idle" ? undefined : presentation?.label);

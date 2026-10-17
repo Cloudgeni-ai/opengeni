@@ -3,6 +3,7 @@ import { Modal, Platform, Pressable, ScrollView, Text, View } from "react-native
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AgentStepList } from "./timeline";
 import type { AgentTheme } from "./theme";
+import { useOpenGeniText } from "@opengeni/react/messages";
 
 /** Native sheet with the full step-by-step view of one piece of agent work. */
 export function AgentStepsSheet(props: {
@@ -12,6 +13,7 @@ export function AgentStepsSheet(props: {
   steps: readonly ActivityItem[];
   theme: AgentTheme;
 }) {
+  const t = useOpenGeniText();
   const { theme } = props;
   const insets = useSafeAreaInsets();
   return (
@@ -56,7 +58,7 @@ export function AgentStepsSheet(props: {
             <Text
               style={{ color: theme.colors.accent, fontSize: theme.type.body, fontWeight: "600" }}
             >
-              Done
+              {t("native.ui.stepsSheet.done")}
             </Text>
           </Pressable>
         </View>

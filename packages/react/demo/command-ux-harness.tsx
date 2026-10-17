@@ -23,6 +23,9 @@ import {
 import { useCallback, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 let nextHarnessSession = 0;
@@ -302,7 +305,7 @@ function Timeline({
       .filter((message) => message.destination === "queue")
       .map((message) => message.clientEventId),
   );
-  const durable = buildTimeline(events).filter((item): item is UserMessageItem => {
+  const durable = buildTimeline(englishText, events).filter((item): item is UserMessageItem => {
     if (item.kind !== "user-message" || queuedTriggers.has(item.id)) return false;
     const clientEventId = item.reconciliationKey?.startsWith("user-message:")
       ? item.reconciliationKey.slice("user-message:".length)

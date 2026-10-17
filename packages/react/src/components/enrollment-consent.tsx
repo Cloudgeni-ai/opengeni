@@ -10,6 +10,7 @@ import {
   UsersIcon,
 } from "lucide-react";
 import { cn } from "../lib/cn";
+import { useOpenGeniText } from "../messages/runtime";
 
 /** The machine identity surfaced to the approver, from the device-flow start. */
 export type EnrollmentConsentMachine = {
@@ -70,21 +71,22 @@ export function EnrollmentConsent({
   errorMessage,
   className,
 }: EnrollmentConsentProps) {
+  const t = useOpenGeniText();
   const [allowScreenControl, setAllowScreenControl] = useState(machine.requestsScreenControl);
   const [scope, setScope] = useState<ResourceAuthorityScope>("user");
   const busy = phase === "approving";
   const scopeCopy = {
     user: {
-      label: "Personal",
-      body: "Only you can use this machine, from any workspace you can access in this organization.",
+      label: t("enrollmentConsent.personal"),
+      body: t("enrollmentConsent.onlyYouCanUseThis"),
     },
     workspace: {
-      label: "Workspace",
-      body: "Everyone with access to this workspace can use this machine.",
+      label: t("enrollmentConsent.workspace"),
+      body: t("enrollmentConsent.everyoneWithAccessToThis"),
     },
     organization: {
-      label: "Organization",
-      body: "Members of this organization can use this machine from their workspaces.",
+      label: t("enrollmentConsent.organization"),
+      body: t("enrollmentConsent.membersOfThisOrganizationCan"),
     },
   } satisfies Record<ResourceAuthorityScope, { label: string; body: string }>;
 
@@ -93,8 +95,11 @@ export function EnrollmentConsent({
       <ConsentResult
         className={className}
         tone="ok"
-        title="Machine connected"
-        body={`${machine.machineName} is now connected with ${scopeCopy[scope].label.toLowerCase()} access. You can close this page — it will appear in your Machines dashboard.`}
+        title={t("enrollmentConsent.machineConnected")}
+        body={t("enrollmentConsent.machinenameIsNowConnectedWith", {
+          machineName: machine.machineName,
+          lowerCase: scopeCopy[scope].label.toLowerCase(),
+        })}
       />
     );
   }
@@ -103,8 +108,10 @@ export function EnrollmentConsent({
       <ConsentResult
         className={className}
         tone="muted"
-        title="Enrollment denied"
-        body={`You declined to connect ${machine.machineName}. The agent has no access to this machine. You can re-run the install one-liner to try again.`}
+        title={t("enrollmentConsent.enrollmentDenied")}
+        body={t("enrollmentConsent.youDeclinedToConnectMachinename", {
+          machineName: machine.machineName,
+        })}
       />
     );
   }
@@ -113,11 +120,8 @@ export function EnrollmentConsent({
       <ConsentResult
         className={className}
         tone="danger"
-        title="Could not complete enrollment"
-        body={
-          errorMessage ??
-          "The code may have expired. Re-run the install one-liner on the machine for a fresh code."
-        }
+        title={t("enrollmentConsent.couldNotCompleteEnrollment")}
+        body={errorMessage ?? t("enrollmentConsent.theCodeMayHaveExpired")}
       />
     );
   }
@@ -136,12 +140,12 @@ export function EnrollmentConsent({
         </span>
         <div className="min-w-0">
           <h1 className="text-og-md font-semibold text-og-fg">
-            Give the agent your whole machine?
+            {t("enrollmentConsent.giveTheAgentYourWhole")}
           </h1>
           <p className="mt-1 text-og-base text-og-fg-muted">
-            Approving lets the Opengeni agent run on{" "}
-            <span className="font-medium text-og-fg">{machine.machineName}</span> with full access.
-            This is your real computer — not a sandbox.
+            {t("enrollmentConsent.approvingLetsTheOpengeniAgent")}{" "}
+            <span className="font-medium text-og-fg">{machine.machineName}</span>{" "}
+            {t("enrollmentConsent.withFullAccessThisIs")}
           </p>
         </div>
       </div>
@@ -156,33 +160,36 @@ export function EnrollmentConsent({
           ·
         </span>
         <span className="text-og-fg-subtle">
-          code <span className="font-og-mono font-medium text-og-fg">{userCode}</span>
+          {t("enrollmentConsent.code")}{" "}
+          <span className="font-og-mono font-medium text-og-fg">{userCode}</span>
         </span>
       </div>
 
       <ul className="flex flex-col gap-3">
         <Capability
           icon={<TerminalIcon className="size-4" aria-hidden />}
-          title="Read, write & run anything"
-          body="The agent can read and modify any file, run any command, and use your git credentials — as if it were you at the keyboard."
+          title={t("enrollmentConsent.readWriteRunAnything")}
+          body={t("enrollmentConsent.theAgentCanReadAnd")}
         />
         {machine.canOfferDisplay ? (
           <Capability
             icon={<MonitorIcon className="size-4" aria-hidden />}
-            title="See your screen"
-            body="The agent can capture this machine's display to watch what it is doing."
+            title={t("enrollmentConsent.seeYourScreen")}
+            body={t("enrollmentConsent.theAgentCanCaptureThis")}
           />
         ) : null}
         <Capability
           icon={<UsersIcon className="size-4" aria-hidden />}
-          title={`${scopeCopy[scope].label} access while connected`}
-          body={`${scopeCopy[scope].body} Disconnect the agent to revoke access instantly.`}
+          title={t("enrollmentConsent.labelAccessWhileConnected", {
+            label: scopeCopy[scope].label,
+          })}
+          body={t("enrollmentConsent.bodyDisconnectTheAgentTo", { body: scopeCopy[scope].body })}
         />
       </ul>
 
       <fieldset className="flex flex-col gap-2" disabled={busy}>
         <legend className="mb-1 text-og-sm font-medium text-og-fg">
-          Who can use this machine?
+          {t("enrollmentConsent.whoCanUseThisMachine")}
         </legend>
         {(["user", "workspace", "organization"] as const).map((candidate) => {
           const disabled = candidate === "organization" && !allowOrganizationScope;
@@ -234,19 +241,17 @@ export function EnrollmentConsent({
           <span className="min-w-0">
             <span className="flex items-center gap-1.5 text-og-base font-medium text-og-fg">
               <ScreenShareIcon className="size-3.5 text-og-fg-muted" aria-hidden />
-              Also let the agent control my mouse & keyboard
+              {t("enrollmentConsent.alsoLetTheAgentControl")}
             </span>
             <span className="mt-0.5 block text-og-sm text-og-fg-muted">
-              Optional. Enables computer-use — the agent can move the pointer, type, and click on
-              this machine's desktop. Leave off to let it only watch.
+              {t("enrollmentConsent.optionalEnablesComputerUseThe")}
             </span>
           </span>
         </label>
       ) : (
         <p className="flex items-start gap-2 rounded-og-md border border-og-border bg-og-bg px-3 py-2 text-og-sm text-og-fg-muted">
           <CircleAlertIcon className="mt-px size-3.5 shrink-0 text-og-fg-subtle" aria-hidden />
-          This machine has no display, so screen control isn't available — files, terminal, and git
-          only.
+          {t("enrollmentConsent.thisMachineHasNoDisplay")}
         </p>
       )}
 
@@ -258,7 +263,7 @@ export function EnrollmentConsent({
           onClick={() => onDeny?.()}
           className="flex-1 rounded-og-sm border border-og-border px-3 py-2 text-og-sm font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg disabled:opacity-50 pointer-coarse:min-h-11"
         >
-          Cancel
+          {t("enrollmentConsent.cancel")}
         </button>
         <button
           type="button"
@@ -267,7 +272,7 @@ export function EnrollmentConsent({
           onClick={() => onApprove?.(allowScreenControl, scope)}
           className="flex-1 rounded-og-sm bg-og-status-failed px-3 py-2 text-og-sm font-semibold text-og-accent-fg transition-colors hover:opacity-90 disabled:opacity-50 pointer-coarse:min-h-11"
         >
-          {busy ? "Connecting…" : "Grant full access"}
+          {busy ? t("enrollmentConsent.connecting") : t("enrollmentConsent.grantFullAccess")}
         </button>
       </div>
     </div>

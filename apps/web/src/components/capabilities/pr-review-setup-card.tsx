@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import type {
   PrReviewAppRegistration,
   PrReviewManagedGitHubSetup,
@@ -165,7 +166,7 @@ export function PrReviewSetupCard(props: {
   const reviewModelRows = modelCatalog.rows.filter(
     (row) => row.billingClass === "opengeni_credits" || row.billingClass === "codex_subscription",
   );
-  const modelGroups = groupPickerRowsByBillingClass(reviewModelRows);
+  const modelGroups = groupPickerRowsByBillingClass(t, reviewModelRows);
   const defaultModel = context.clientConfig.defaultModel;
   const defaultModelRow = findPickerRow(reviewModelRows, defaultModel);
   const defaultModelLabel = defaultModelRow

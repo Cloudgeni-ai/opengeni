@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { expect, test } from "bun:test";
 import type { AuthNeededItem } from "@opengeni/react/session";
 import type { CapabilityCatalogItem } from "@/types";
@@ -17,16 +18,18 @@ const item = {
   connectionRef: { connectionId: "connection" },
 } as CapabilityCatalogItem;
 test("reconnect resolves the exact runtime integration", () => {
-  expect(sessionAuthRecommendation(event, [item])?.capability?.id).toBe("catalog-example");
+  expect(sessionAuthRecommendation(t, event, [item])?.capability?.id).toBe("catalog-example");
 });
 test("host-managed and unavailable authority never use stock connection controls", () => {
-  expect(sessionAuthRecommendation({ ...event, authoritySource: "host" }, [item])).toBeUndefined();
   expect(
-    sessionAuthRecommendation({ ...event, reason: "personal_authority_unavailable" }, [item]),
+    sessionAuthRecommendation(t, { ...event, authoritySource: "host" }, [item]),
+  ).toBeUndefined();
+  expect(
+    sessionAuthRecommendation(t, { ...event, reason: "personal_authority_unavailable" }, [item]),
   ).toBeUndefined();
 });
 test("ambiguous accounts are not guessed by provider domain", () => {
-  expect(sessionAuthRecommendation(event, [item, { ...item, id: "other" }])).toBeUndefined();
+  expect(sessionAuthRecommendation(t, event, [item, { ...item, id: "other" }])).toBeUndefined();
 });
 
 test("missing personal access opens the exact integration's consent flow without suggesting reconnect", () => {
@@ -43,20 +46,20 @@ test("missing personal access opens the exact integration's consent flow without
     connectionId: null,
     reason: "personal_authority_unavailable",
   } as AuthNeededItem;
-  const recommendation = sessionAuthRecommendation(missingGrant, [personal]);
+  const recommendation = sessionAuthRecommendation(t, missingGrant, [personal]);
   expect(recommendation?.capability).toMatchObject({
     id: personal.id,
     action: "connect",
     rationale: "Review permission to use your personal account in this conversation.",
   });
   expect(
-    sessionAuthRecommendation(missingGrant, [personal, { ...personal, id: "other" }]),
+    sessionAuthRecommendation(t, missingGrant, [personal, { ...personal, id: "other" }]),
   ).toBeUndefined();
   expect(
-    sessionAuthRecommendation({ ...missingGrant, serverId: "other" }, [personal]),
+    sessionAuthRecommendation(t, { ...missingGrant, serverId: "other" }, [personal]),
   ).toBeUndefined();
   expect(
-    sessionAuthRecommendation(missingGrant, [
+    sessionAuthRecommendation(t, missingGrant, [
       { ...personal, connectionRef: { ...personal.connectionRef!, authoritySource: "host" } },
     ]),
   ).toBeUndefined();

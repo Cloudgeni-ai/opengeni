@@ -42,6 +42,7 @@ import {
   EditableArtifactMessage,
   useEditableArtifactView,
 } from "./editable-artifact-ui";
+import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
 
 const EMU_PER_CSS_PIXEL = 9_525;
 const PRESENTATION_CATALOG_PAGE = 128;
@@ -89,7 +90,7 @@ type PresentationProjectionState = {
  */
 export function EditablePresentationArtifactSurface({
   session,
-  title = "Presentation",
+  title: titleProp,
   showHeader,
   subtitle,
   readOnly = false,
@@ -97,6 +98,9 @@ export function EditablePresentationArtifactSurface({
   onCommandError,
   ...surfaceProps
 }: EditablePresentationArtifactSurfaceProps) {
+  const t = useOpenGeniText();
+  const title =
+    titleProp === undefined ? t("artifacts.editablePresentation.presentation") : titleProp;
   const view = useEditableArtifactView(session);
   const invalidator = editableArtifactProjectionKey(view);
   const [retryEpoch, setRetryEpoch] = useState(0);
@@ -115,7 +119,7 @@ export function EditablePresentationArtifactSurface({
     setState((current) => ({ ...current, loading: true, error: null }));
     scheduleLoad(async () => {
       if (cancelled || generation !== loadGeneration.current) return;
-      await composePresentationEditorProjection(session).then(
+      await composePresentationEditorProjection(t, session).then(
         (composed) => {
           if (cancelled || generation !== loadGeneration.current) return;
           sceneNodes.current = new Map(composed.sceneNodes);
@@ -126,7 +130,10 @@ export function EditablePresentationArtifactSurface({
           setState({
             composed: null,
             loading: false,
-            error: asEditableArtifactError(cause, "Could not open this presentation"),
+            error: asEditableArtifactError(
+              cause,
+              t("artifacts.editablePresentation.couldNotOpenThisPresentation"),
+            ),
           });
         },
       );
@@ -134,7 +141,7 @@ export function EditablePresentationArtifactSurface({
     return () => {
       cancelled = true;
     };
-  }, [invalidator, retryEpoch, scheduleLoad, session]);
+  }, [invalidator, retryEpoch, scheduleLoad, session, t]);
 
   const refresh = useCallback(() => setRetryEpoch((value) => value + 1), []);
   const writable = !readOnly && view.writable;
@@ -142,13 +149,15 @@ export function EditablePresentationArtifactSurface({
     async (commit: PresentationCommit) => {
       const composed = state.composed;
       if (!composed) throw new Error("Presentation projection is not ready");
-      if (!writable) throw new Error("This presentation is read only");
-      if (view.authoringBlockedReason) throw new Error("An earlier change must settle first");
+      if (!writable)
+        throw new Error(t("artifacts.editablePresentation.thisPresentationIsReadOnly"));
+      if (view.authoringBlockedReason)
+        throw new Error(t("artifacts.editablePresentation.anEarlierChangeMustSettle"));
       if (
         commit.revision !== undefined &&
         String(commit.revision) !== String(composed.projection.revision)
       ) {
-        throw new Error("The presentation changed; retry this edit on the latest version");
+        throw new Error(t("artifacts.editablePresentation.thePresentationChangedRetryThis"));
       }
 
       if (commit.kind === "slide-insert") {
@@ -156,7 +165,7 @@ export function EditablePresentationArtifactSurface({
           slideId: commit.slideId,
           index: commit.index,
         });
-        notifyPresentationCommit(onCommit, onCommandError, commit);
+        notifyPresentationCommit(t, onCommit, onCommandError, commit);
         refresh();
         return;
       }
@@ -165,7 +174,7 @@ export function EditablePresentationArtifactSurface({
           version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
           commands: [{ kind: "slide.delete", id: commit.slideId }],
         });
-        notifyPresentationCommit(onCommit, onCommandError, commit);
+        notifyPresentationCommit(t, onCommit, onCommandError, commit);
         refresh();
         return;
       }
@@ -200,7 +209,7 @@ export function EditablePresentationArtifactSurface({
             },
           ],
         });
-        notifyPresentationCommit(onCommit, onCommandError, commit);
+        notifyPresentationCommit(t, onCommit, onCommandError, commit);
         refresh();
         return;
       }
@@ -209,26 +218,26 @@ export function EditablePresentationArtifactSurface({
           version: PRESENTATION_ARTIFACT_COMMAND_VERSION,
           commands: [{ kind: "node.delete", id: commit.objectId }],
         });
-        notifyPresentationCommit(onCommit, onCommandError, commit);
+        notifyPresentationCommit(t, onCommit, onCommandError, commit);
         refresh();
         return;
       }
 
       const key = sceneNodeKey(commit.slideId, commit.objectId);
       const node = sceneNodes.current.get(key);
-      if (!node) throw new Error("The edited presentation object is no longer available");
+      if (!node) throw new Error(t("artifacts.editablePresentation.theEditedPresentationObjectIs"));
       if (node.inherited || node.source.kind !== "slide" || node.source.id !== commit.slideId) {
-        throw new Error("Inherited master and layout objects are view only in the slide editor");
+        throw new Error(t("artifacts.editablePresentation.inheritedMasterAndLayoutObjects"));
       }
 
       let command: PresentationArtifactCommand;
       let nextNode: PresentationArtifactEditorSceneNode;
       if (commit.kind === "text") {
         if (node.content.kind !== "shape" || node.content.text === null) {
-          throw new Error("This presentation object does not contain editable text");
+          throw new Error(t("artifacts.editablePresentation.thisPresentationObjectDoesNot"));
         }
         if (flattenPresentationRichText(node.content.text) !== commit.before) {
-          throw new Error("The presentation text changed; retry this edit");
+          throw new Error(t("artifacts.editablePresentation.thePresentationTextChangedRetry"));
         }
         const text = replacePresentationRichText(node.content.text, commit.before, commit.after);
         const content: PresentationArtifactNodeKind = Object.freeze({ ...node.content, text });
@@ -237,7 +246,7 @@ export function EditablePresentationArtifactSurface({
       } else {
         const current = normalizeProjectedEditorPosition(projectPosition(node.bounds));
         if (!sameProjectedPosition(current, commit.before)) {
-          throw new Error("The presentation object changed; retry this edit");
+          throw new Error(t("artifacts.editablePresentation.thePresentationObjectChangedRetry"));
         }
         const bounds =
           commit.kind === "move"
@@ -260,7 +269,7 @@ export function EditablePresentationArtifactSurface({
         commands: [command],
       });
       sceneNodes.current.set(key, nextNode);
-      notifyPresentationCommit(onCommit, onCommandError, commit);
+      notifyPresentationCommit(t, onCommit, onCommandError, commit);
       refresh();
     },
     [
@@ -271,11 +280,12 @@ export function EditablePresentationArtifactSurface({
       state.composed,
       view.authoringBlockedReason,
       writable,
+      t,
     ],
   );
 
   const projection = state.composed?.projection ?? null;
-  const status = editableArtifactStatusLabel(view);
+  const status = editableArtifactStatusLabel(t, view);
   const accessRevoked = editableArtifactAccessRevoked(view);
   return projection && !accessRevoked ? (
     <PresentationProjectionArtifactSurface
@@ -283,8 +293,11 @@ export function EditablePresentationArtifactSurface({
       title={title}
       showHeader={showHeader}
       subtitle={
-        subtitle ??
-        `${projection.slides.length} slide${projection.slides.length === 1 ? "" : "s"}${writable ? "" : " · Read only"}`
+        (subtitle ?? writable)
+          ? t("counts.slides", { count: projection.slides.length })
+          : t("artifacts.readOnlySubtitle", {
+              subtitle: t("counts.slides", { count: projection.slides.length }),
+            })
       }
       projection={projection}
       commit={writable ? applyCommit : undefined}
@@ -306,10 +319,10 @@ export function EditablePresentationArtifactSurface({
       <EditableArtifactMessage
         title={
           accessRevoked
-            ? "Access changed"
+            ? t("artifacts.editablePresentation.accessChanged")
             : state.error
-              ? "Could not open this presentation"
-              : "Opening presentation"
+              ? t("artifacts.editablePresentation.couldNotOpenThisPresentation")
+              : t("artifacts.editablePresentation.openingPresentation")
         }
         detail={accessRevoked ? status : (state.error?.message ?? status)}
         retry={!accessRevoked && state.error ? refresh : undefined}
@@ -320,6 +333,7 @@ export function EditablePresentationArtifactSurface({
 
 /** Builds a deterministic, bounded catalog + editor-slide projection at one revision. */
 export async function composePresentationEditorProjection(
+  t: OpenGeniText,
   session: EditableArtifactSession,
 ): Promise<ComposedPresentationProjection> {
   if (session.modality !== "presentation") {
@@ -330,7 +344,10 @@ export async function composePresentationEditorProjection(
     try {
       return await composePresentationAttempt(session);
     } catch (cause) {
-      const error = asEditableArtifactError(cause, "Could not project this presentation");
+      const error = asEditableArtifactError(
+        cause,
+        t("artifacts.editablePresentation.couldNotProjectThisPresentation"),
+      );
       if (
         !isPresentationRevisionDrift(error) ||
         attempt === PRESENTATION_COMPOSITION_ATTEMPTS - 1
@@ -1021,6 +1038,7 @@ function isPresentationRevisionDrift(error: Error): boolean {
 }
 
 function notifyPresentationCommit(
+  t: OpenGeniText,
   observer: PresentationCommitHandler | undefined,
   onError: ((error: Error) => void) | undefined,
   commit: PresentationCommit,
@@ -1029,10 +1047,20 @@ function notifyPresentationCommit(
     const result = observer?.(commit);
     if (result && typeof result.then === "function") {
       void Promise.resolve(result).catch((cause) =>
-        onError?.(asEditableArtifactError(cause, "Presentation commit observer failed")),
+        onError?.(
+          asEditableArtifactError(
+            cause,
+            t("artifacts.editablePresentation.presentationCommitObserverFailed"),
+          ),
+        ),
       );
     }
   } catch (cause) {
-    onError?.(asEditableArtifactError(cause, "Presentation commit observer failed"));
+    onError?.(
+      asEditableArtifactError(
+        cause,
+        t("artifacts.editablePresentation.presentationCommitObserverFailed"),
+      ),
+    );
   }
 }

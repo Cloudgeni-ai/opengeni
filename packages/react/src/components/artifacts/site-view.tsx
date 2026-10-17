@@ -10,6 +10,7 @@ import {
 } from "./artifact-chrome";
 import { ArtifactSandbox } from "./artifact-sandbox";
 import type { SiteSnapshotClient, SiteToolBridgeFactory } from "./chat-interactive-block";
+import { useOpenGeniText } from "../../messages/runtime";
 
 type Snapshot = Awaited<ReturnType<typeof loadSiteSnapshot>>;
 
@@ -50,6 +51,7 @@ export function SiteView({
   onTitle,
   className,
 }: SiteViewProps) {
+  const t = useOpenGeniText();
   const labels = useArtifactLabels();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -95,7 +97,7 @@ export function SiteView({
   if (error)
     return (
       <ArtifactProblem
-        view={artifactLoadErrorView(error, "site", labels)}
+        view={artifactLoadErrorView(t, error, "site", labels)}
         onRetry={() => void load()}
       />
     );
@@ -109,7 +111,13 @@ export function SiteView({
       html={content.html}
       title={snapshot.detail.artifact.title}
       showTitle={showTitle}
-      versionLabel={`v${snapshot.detail.artifact.currentVersion?.revision}`}
+      versionLabel={
+        snapshot.detail.artifact.currentVersion
+          ? t("artifacts.siteView.vRevision", {
+              revision: snapshot.detail.artifact.currentVersion.revision,
+            })
+          : undefined
+      }
       toolBridge={bridge}
       viewer={viewer}
       connectedToolCount={content.requestedTools.length}

@@ -14,6 +14,7 @@ import {
 import { Dialog } from "radix-ui";
 import { cn } from "../lib/cn";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
+import { useOpenGeniText } from "../messages/runtime";
 
 /* ----------------------------------------------------------------------------
    Screenshot lightbox
@@ -163,6 +164,7 @@ export function LightboxProvider({ children }: { children: ReactNode }) {
 }
 
 function LightboxRoot({ children }: { children: ReactNode }) {
+  const t = useOpenGeniText();
   const [state, setState] = useState<{
     src: string;
     caption?: string;
@@ -235,7 +237,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
       src: string,
       caption?: string,
       source?: HTMLElement | null,
-      label = "Screenshot",
+      label = t("timeline.screenshotLightbox.screenshot"),
       downloadFilename?: string,
       controlLabels?: LightboxControlLabels,
       releaseSource?: () => void,
@@ -253,7 +255,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
       });
       if (source) discoverGallery(source, token);
     },
-    [sourceOwner, discoverGallery],
+    [sourceOwner, discoverGallery, t],
   );
 
   const close = useCallback(() => {
@@ -360,12 +362,18 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                 >
                   <Dialog.Title className="sr-only">{state.label}</Dialog.Title>
                   <Dialog.Description className="sr-only">
-                    {state.caption ?? `Expanded ${state.label.toLowerCase()}`}
+                    {state.caption ??
+                      t("timeline.screenshotLightbox.expandedLowercase", {
+                        lowerCase: state.label.toLowerCase(),
+                      })}
                   </Dialog.Description>
                   {gallery ? (
                     <LightboxStepButton
                       direction="previous"
-                      label={state.controlLabels?.previous ?? "Previous image"}
+                      label={
+                        state.controlLabels?.previous ??
+                        t("timeline.screenshotLightbox.previousImage")
+                      }
                       onClick={() => step(-1)}
                     />
                   ) : null}
@@ -394,7 +402,10 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                           <span className="text-white/55">{state.caption}</span>
                         ) : null}
                         <span className="tabular-nums text-white/35" aria-live="polite">
-                          {gallery.index + 1} of {gallery.items.length}
+                          {gallery.index + 1}{" "}
+                          {t("timeline.screenshotLightbox.ofLength", {
+                            length: gallery.items.length,
+                          })}
                         </span>
                       </figcaption>
                     ) : state.caption ? (
@@ -403,14 +414,16 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                       </figcaption>
                     ) : (
                       <figcaption className="font-og-mono text-og-xs uppercase tracking-[0.1em] text-white/35">
-                        Esc or click outside to close
+                        {t("timeline.screenshotLightbox.escOrClickOutsideTo")}
                       </figcaption>
                     )}
                   </figure>
                   {gallery ? (
                     <LightboxStepButton
                       direction="next"
-                      label={state.controlLabels?.next ?? "Next image"}
+                      label={
+                        state.controlLabels?.next ?? t("timeline.screenshotLightbox.nextImage")
+                      }
                       onClick={() => step(1)}
                     />
                   ) : null}
@@ -463,6 +476,7 @@ export function ScreenshotLightboxControls({
   downloadFilename?: string | undefined;
   controlLabels?: LightboxControlLabels | undefined;
 }) {
+  const t = useOpenGeniText();
   return (
     <div className="absolute -right-3 -top-3 flex items-center gap-2">
       {downloadFilename ? (
@@ -474,7 +488,10 @@ export function ScreenshotLightboxControls({
             "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
             "transition-colors hover:border-white/30 hover:text-white",
           )}
-          aria-label={controlLabels?.download ?? `Download ${downloadFilename}`}
+          aria-label={
+            controlLabels?.download ??
+            t("timeline.screenshotLightbox.downloadDownloadfilename", { downloadFilename })
+          }
         >
           <DownloadIcon className="size-4" />
         </a>
@@ -485,7 +502,7 @@ export function ScreenshotLightboxControls({
           "border border-white/15 bg-black/60 text-white/70 backdrop-blur",
           "transition-colors hover:border-white/30 hover:text-white",
         )}
-        aria-label={controlLabels?.close ?? "Close"}
+        aria-label={controlLabels?.close ?? t("timeline.screenshotLightbox.close")}
       >
         <XIcon className="size-4" />
       </Dialog.Close>

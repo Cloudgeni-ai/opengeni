@@ -40,6 +40,9 @@ import { useSessionMcpApprovalPolicy } from "../src/hooks/use-session-mcp-approv
 import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useWorkspaces } from "../src/hooks/use-workspaces";
 import { createEmbeddedSessionClient } from "../src/embedded-session-client";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -4528,8 +4531,8 @@ describe("useComposer durable draft and control binding", () => {
     await flush();
     await flushing(async () => hook.result.current.setValue(" \n"));
     await flushing(async () => expect(await hook.result.current.send()).toBe(true));
-    expect(savedTexts.at(-1)).toBe(FILE_ONLY_MESSAGE_TEXT);
-    expect(submittedTexts).toEqual([FILE_ONLY_MESSAGE_TEXT]);
+    expect(savedTexts.at(-1)).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
+    expect(submittedTexts).toEqual([FILE_ONLY_MESSAGE_TEXT(englishText)]);
     await hook.unmount();
   });
 
@@ -5802,8 +5805,8 @@ describe("useComposer file-only send", () => {
 
     expect(saved).toHaveLength(1);
     expect(sent).toHaveLength(1);
-    expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
-    expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
+    expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
+    expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
     await hook.unmount();
   });
 });

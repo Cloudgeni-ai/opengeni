@@ -1,6 +1,7 @@
 // The workspace shell: the Linear-style left rail (brand, org + workspace
 // switcher, workspace nav, the session list) plus a slim canvas top strip for
 // session-contextual actions around every workspace-scoped route.
+import { t } from "@/lib/console-text";
 import { OpenGeniProvider, SecretsUiProvider, useOpenGeni } from "@opengeni/react";
 import type { WorkspaceControlEvent } from "@opengeni/sdk";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
@@ -538,7 +539,7 @@ function AuthorizedWorkspaceShell({
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const organizationName = activeWorkspace
-    ? orgLabel(activeWorkspace.accountId, context.accessContext.accountGrants)
+    ? orgLabel(t, activeWorkspace.accountId, context.accessContext.accountGrants)
     : "Organization";
   useEffect(() => {
     onMount?.();

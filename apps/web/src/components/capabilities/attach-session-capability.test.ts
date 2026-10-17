@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { expect, mock, test } from "bun:test";
 import { CapabilityCatalogItem as CapabilityCatalogItemSchema } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -30,7 +31,7 @@ function harness(mode = "explicit", selectedIds = ["old"], idsTruncated = false)
 }
 test("adding a connection preserves tools and first-party restrictions with CAS", async () => {
   const h = harness();
-  await attachSessionCapability(h.client, "w", "s", item);
+  await attachSessionCapability(t, h.client, "w", "s", item);
   expect(h.updateSessionToolPolicy.mock.calls[0]?.[2]).toEqual({
     mode: "explicit",
     tools: [
@@ -43,12 +44,12 @@ test("adding a connection preserves tools and first-party restrictions with CAS"
 });
 test("a default that already includes the new integration stays a default", async () => {
   const h = harness("workspace_default", ["old", "new"]);
-  await attachSessionCapability(h.client, "w", "s", item);
+  await attachSessionCapability(t, h.client, "w", "s", item);
   expect(h.updateSessionToolPolicy).not.toHaveBeenCalled();
 });
 test("a lazily discovered integration attaches its installed server before reporting success", async () => {
   const h = harness("workspace_default", ["old"]);
-  await attachSessionCapability(h.client, "w", "s", {
+  await attachSessionCapability(t, h.client, "w", "s", {
     ...item,
     tools: [],
     runtime: { mcpServerId: "installed-server", available: true, notes: null },
@@ -72,7 +73,7 @@ test("mandatory runtime servers are not echoed into the explicit tool selection"
       effectiveToolPolicy: { ...session.effectiveToolPolicy!, mandatoryIds: ["opengeni"] },
     };
   };
-  await attachSessionCapability(h.client, "w", "s", item);
+  await attachSessionCapability(t, h.client, "w", "s", item);
   expect(h.updateSessionToolPolicy.mock.calls[0]?.[2]).toMatchObject({
     mode: "explicit",
     tools: [
@@ -83,7 +84,7 @@ test("mandatory runtime servers are not echoed into the explicit tool selection"
 });
 test("a restricted default is preserved when adding just the requested integration", async () => {
   const h = harness("workspace_default", ["allowed"]);
-  await attachSessionCapability(h.client, "w", "s", item);
+  await attachSessionCapability(t, h.client, "w", "s", item);
   expect(h.updateSessionToolPolicy.mock.calls[0]?.[2]).toMatchObject({
     tools: [
       { kind: "mcp", id: "allowed" },
@@ -93,7 +94,7 @@ test("a restricted default is preserved when adding just the requested integrati
 });
 test("a truncated default cannot silently drop tools", async () => {
   const h = harness("workspace_default", ["old"], true);
-  await expect(attachSessionCapability(h.client, "w", "s", item)).rejects.toThrow(
+  await expect(attachSessionCapability(t, h.client, "w", "s", item)).rejects.toThrow(
     "full session tool selection",
   );
   expect(h.updateSessionToolPolicy).not.toHaveBeenCalled();
@@ -117,7 +118,7 @@ test("native OAuth return attaches freshly enabled tools and first-party names",
         }),
       ],
     }) as Awaited<ReturnType<OpenGeniBrowserClient["listCapabilities"]>>;
-  await completeSessionCapabilityOAuth(h.client, "w", "s", "api:fiken");
+  await completeSessionCapabilityOAuth(t, h.client, "w", "s", "api:fiken");
   expect(h.updateSessionToolPolicy.mock.calls[0]?.[2]).toMatchObject({
     tools: [{ kind: "mcp", id: "old" }],
     firstPartyMcpTools: ["session_pause", "fiken_companies_list", "fiken_invoices_list"],
@@ -130,10 +131,10 @@ test("native OAuth return cannot claim success for an unresolved or disabled int
     ({ items: [], installations: [] }) as Awaited<
       ReturnType<OpenGeniBrowserClient["listCapabilities"]>
     >;
-  await expect(completeSessionCapabilityOAuth(h.client, "w", "s", null)).rejects.toThrow(
+  await expect(completeSessionCapabilityOAuth(t, h.client, "w", "s", null)).rejects.toThrow(
     "identified",
   );
-  await expect(completeSessionCapabilityOAuth(h.client, "w", "s", "missing")).rejects.toThrow(
+  await expect(completeSessionCapabilityOAuth(t, h.client, "w", "s", "missing")).rejects.toThrow(
     "verified",
   );
   expect(h.updateSessionToolPolicy).not.toHaveBeenCalled();

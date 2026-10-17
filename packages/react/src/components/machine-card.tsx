@@ -17,6 +17,7 @@ import { MachineMetrics } from "./machine-metrics";
 import { AgentStatusIcon } from "./machines/agent-status-icon";
 import { describeAgentRuntime, runnerConflict, STATUS_TONE_TEXT } from "./machines/machine-status";
 import { MetricSparkline } from "./machines/metric-sparkline";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type MachineCardProps = {
   machine: MachineView;
@@ -61,17 +62,18 @@ export function MachineCard({
   now,
   className,
 }: MachineCardProps) {
+  const msg = useOpenGeniText();
   const offline = machine.state === "offline";
   const attachable = !machine.active && !offline && Boolean(onAttach);
   const shared = machine.sharedSessionCount > 1;
   const clockNow = now ?? Date.now();
   const sampledAgo = machine.metrics
-    ? formatRelativeTime(machine.metrics.sampledAt, new Date(clockNow))
+    ? formatRelativeTime(msg, machine.metrics.sampledAt, new Date(clockNow))
     : null;
   const cpuPts = (series ?? []).map((s) => ({ t: new Date(s.sampledAt).getTime(), v: s.cpuPct }));
   const openable = Boolean(onOpenDetail);
   const runtime = machine.runtime;
-  const agent = runtime ? describeAgentRuntime(runtime, clockNow) : null;
+  const agent = runtime ? describeAgentRuntime(msg, runtime, clockNow) : null;
   const updateAction =
     agent?.action && machine.enrollmentId && onUpdateAgent && !offline ? agent.action : null;
   const conflict = runnerConflict(machine.connectionAuthority, clockNow);
@@ -119,12 +121,14 @@ export function MachineCard({
                   data-active-marker
                   className="shrink-0 rounded-full border border-og-accent/30 bg-og-accent-soft px-1.5 py-px text-og-xs font-medium text-og-accent"
                 >
-                  Active
+                  {msg("machineCard.active")}
                 </span>
               ) : null}
             </div>
             <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-og-xs text-og-fg-subtle">
-              <span data-machine-scope={machine.scope}>{machineScopeLabel(machine.scope)}</span>
+              <span data-machine-scope={machine.scope}>
+                {machineScopeLabel(msg, machine.scope)}
+              </span>
               <span aria-hidden>·</span>
               <span className="capitalize">{machine.kind}</span>
               <span aria-hidden>·</span>
@@ -138,7 +142,7 @@ export function MachineCard({
                 ) : (
                   <MonitorOffIcon className="size-3" aria-hidden />
                 )}
-                {machine.hasDisplay ? "display" : "headless"}
+                {machine.hasDisplay ? msg("machineCard.display") : msg("machineCard.headless")}
               </span>
             </div>
           </div>
@@ -158,7 +162,9 @@ export function MachineCard({
           className="flex items-center gap-1.5 rounded-og-md border border-og-accent/25 bg-og-accent-soft px-2.5 py-1.5 text-og-xs text-og-fg-muted"
         >
           <UsersIcon className="size-3.5 shrink-0 text-og-accent" aria-hidden />
-          Shared — {machine.sharedSessionCount} sessions are on this machine.
+          {msg("machineCard.sharedSharedsessioncountSessionsAreOn", {
+            sharedSessionCount: machine.sharedSessionCount,
+          })}
         </p>
       ) : null}
 
@@ -171,10 +177,7 @@ export function MachineCard({
             className="mt-px size-3.5 shrink-0 text-og-status-waiting"
             aria-hidden
           />
-          <span>
-            A second copy of the agent is running on this machine. It's kept out, so work isn't
-            affected. Stop the extra copy.
-          </span>
+          <span>{msg("machineCard.aSecondCopyOfThe")}</span>
         </p>
       ) : null}
 
@@ -208,7 +211,7 @@ export function MachineCard({
               }}
               className="shrink-0 rounded-og-sm border border-og-border px-2 py-1 font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
             >
-              {updatingAgent ? "Starting…" : updateAction.label}
+              {updatingAgent ? msg("machineCard.starting") : updateAction.label}
             </button>
           ) : null}
         </div>
@@ -220,10 +223,10 @@ export function MachineCard({
       {cpuPts.length > 1 ? (
         <div className="flex flex-col gap-1 rounded-og-md bg-og-surface-2/40 p-2.5">
           <div className="flex items-center justify-between text-[10px] font-medium uppercase tracking-wide text-og-fg-subtle">
-            <span>CPU · last 15m</span>
+            <span>{msg("machineCard.cpuLast15m")}</span>
             {openable ? (
               <span className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                Telemetry <ArrowRightIcon className="size-2.5" aria-hidden />
+                {msg("machineCard.telemetry")} <ArrowRightIcon className="size-2.5" aria-hidden />
               </span>
             ) : null}
           </div>
@@ -242,16 +245,21 @@ export function MachineCard({
                 )}
                 aria-hidden
               />
-              {sampledAgo === "now" ? "Live" : `Updated ${sampledAgo} ago`}
+              {sampledAgo === "now"
+                ? msg("machineCard.live")
+                : msg("machineCard.updatedSampledagoAgo", { sampledAgo })}
             </>
           ) : machine.lastSeenAt ? (
-            <>Last seen {formatRelativeTime(machine.lastSeenAt, new Date(clockNow))}</>
+            <>
+              {msg("machineCard.lastSeen")}{" "}
+              {formatRelativeTime(msg, machine.lastSeenAt, new Date(clockNow))}
+            </>
           ) : (
-            "Never connected"
+            msg("machineCard.neverConnected")
           )}
         </span>
         {machine.active ? (
-          <span className="text-og-accent">Routing here</span>
+          <span className="text-og-accent">{msg("machineCard.routingHere")}</span>
         ) : attachable ? (
           <button
             type="button"
@@ -266,10 +274,12 @@ export function MachineCard({
               "hover:border-og-border-strong hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50",
             )}
           >
-            {attaching ? "Switching…" : "Attach"}
+            {attaching ? msg("machineCard.switching") : msg("machineCard.attach")}
           </button>
         ) : (
-          <span className="text-og-fg-subtle/70">{offline ? "Unavailable" : "—"}</span>
+          <span className="text-og-fg-subtle/70">
+            {offline ? msg("machineCard.unavailable") : "—"}
+          </span>
         )}
       </div>
     </div>

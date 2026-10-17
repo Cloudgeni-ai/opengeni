@@ -5,6 +5,7 @@ import type {
   InteractionSemanticNode,
 } from "@opengeni/sdk/interaction";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useOpenGeniText } from "../messages/runtime";
 
 type NativeOption = { value: string; label: string; selected: boolean; disabled: boolean };
 type NativeSelect = {
@@ -66,6 +67,7 @@ export function BrowserSelectControl(props: {
   observe: () => Promise<BrowserObservation>;
   act: (action: BrowserAction, observation: BrowserObservation) => Promise<BrowserActionReceipt>;
 }) {
+  const t = useOpenGeniText();
   const [snapshot, setSnapshot] = useState<BrowserObservation | null>(null);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -155,7 +157,9 @@ export function BrowserSelectControl(props: {
       );
     } catch (cause) {
       if (current === request.current)
-        setError(cause instanceof Error ? cause.message : "Could not read options.");
+        setError(
+          cause instanceof Error ? cause.message : t("browserSelectControl.couldNotReadOptions"),
+        );
     } finally {
       if (current === request.current) setBusy(false);
     }
@@ -171,7 +175,9 @@ export function BrowserSelectControl(props: {
         snapshot,
       );
       if (receipt.state !== "completed")
-        throw new Error(receipt.error?.message ?? "Selection did not complete.");
+        throw new Error(
+          receipt.error?.message ?? t("browserSelectControl.selectionDidNotComplete"),
+        );
       if (current === request.current) {
         setOpen(false);
         setSnapshot(null);
@@ -180,7 +186,9 @@ export function BrowserSelectControl(props: {
     } catch (cause) {
       if (current === request.current) {
         setError(
-          cause instanceof Error ? cause.message : "Selection failed. Read the options again.",
+          cause instanceof Error
+            ? cause.message
+            : t("browserSelectControl.selectionFailedReadTheOptions"),
         );
         setSnapshot(null); // Never replay an uncertain action.
       }
@@ -210,14 +218,14 @@ export function BrowserSelectControl(props: {
           onClick={() => void load()}
           aria-expanded={open}
         >
-          Choose option
+          {t("browserSelectControl.chooseOption")}
         </button>
       ) : null}
       {open ? (
         <section
           ref={panelRef}
           tabIndex={-1}
-          aria-label="Page selection options"
+          aria-label={t("browserSelectControl.pageSelectionOptions")}
           style={position ? { maxHeight: Math.min(288, position.height) } : undefined}
           onKeyDown={(event) => {
             if (event.key !== "Escape") return;
@@ -232,7 +240,7 @@ export function BrowserSelectControl(props: {
           className="mt-1 max-h-72 w-72 max-w-full overflow-auto rounded-og-sm border border-og-border bg-og-bg p-3 text-og-fg shadow-lg"
         >
           <div className="flex items-center justify-between gap-2">
-            <strong>{selected?.node.name || "Page options"}</strong>
+            <strong>{selected?.node.name || t("browserSelectControl.pageOptions")}</strong>
             <button
               type="button"
               disabled={busy}
@@ -242,19 +250,19 @@ export function BrowserSelectControl(props: {
                 setSnapshot(null);
                 props.onDismiss?.();
               }}
-              aria-label="Close page options"
+              aria-label={t("browserSelectControl.closePageOptions")}
             >
-              Close
+              {t("browserSelectControl.close")}
             </button>
           </div>
           {busy ? (
-            <p role="status">Loading…</p>
+            <p role="status">{t("browserSelectControl.loading")}</p>
           ) : error ? (
             <p role="alert">{error}</p>
           ) : !selected ? (
-            <p>Click a dropdown in the page, then choose “Choose option”.</p>
+            <p>{t("browserSelectControl.clickADropdownInThe")}</p>
           ) : selected.control.disabled ? (
-            <p>This control is disabled.</p>
+            <p>{t("browserSelectControl.thisControlIsDisabled")}</p>
           ) : (
             <>
               {selected.control.options.map((option) => {
@@ -276,8 +284,8 @@ export function BrowserSelectControl(props: {
                         )
                       }
                     />
-                    {option.label || "(empty)"}
-                    {ambiguous ? " (ambiguous value)" : ""}
+                    {option.label || t("browserSelectControl.empty")}
+                    {ambiguous ? ` ${t("browserSelectControl.ambiguousValue")}` : ""}
                   </label>
                 ) : (
                   <button
@@ -288,9 +296,9 @@ export function BrowserSelectControl(props: {
                     className="my-1 block w-full rounded-og-sm border border-og-border px-2 py-1 text-left disabled:opacity-50"
                     onClick={() => void apply([option.value])}
                   >
-                    {option.label || "(empty)"}
+                    {option.label || t("browserSelectControl.empty")}
                     {option.selected ? " ✓" : ""}
-                    {ambiguous ? " (ambiguous value)" : ""}
+                    {ambiguous ? ` ${t("browserSelectControl.ambiguousValue")}` : ""}
                   </button>
                 );
               })}
@@ -300,7 +308,7 @@ export function BrowserSelectControl(props: {
                   disabled={busy || values.some(ambiguousValue)}
                   onClick={() => void apply(values)}
                 >
-                  Apply selection
+                  {t("browserSelectControl.applySelection")}
                 </button>
               ) : null}
             </>

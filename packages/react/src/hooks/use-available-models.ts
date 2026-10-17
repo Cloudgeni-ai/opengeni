@@ -3,6 +3,7 @@ import { useCallback } from "react";
 import { projectPickerRows, sortPickerRows, type PickerModelRow } from "../model-policy";
 import { useOpenGeniClient, type ClientOverride } from "../session-context";
 import { usePolledValue } from "./internal";
+import { useOpenGeniText } from "../messages/runtime";
 
 export type UseAvailableModelsOptions = Pick<ClientOverride, "client"> & {
   /** Refresh interval (ms). Off by default — the host model list rarely moves. */
@@ -64,6 +65,7 @@ export function useAvailableModels(
 export function useWorkspaceModelCatalog(
   options: UseWorkspaceModelCatalogOptions,
 ): UseWorkspaceModelCatalogResult {
+  const t = useOpenGeniText();
   const client = useOpenGeniClient(options);
   const load = useCallback(
     async (signal?: AbortSignal) => {
@@ -85,7 +87,7 @@ export function useWorkspaceModelCatalog(
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled !== false && Boolean(options.workspaceId),
   });
-  const rows = sortPickerRows(projectPickerRows(state.data?.models ?? []));
+  const rows = sortPickerRows(projectPickerRows(t, state.data?.models ?? []));
   return {
     models: state.data?.models ?? [],
     rows,

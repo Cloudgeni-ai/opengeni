@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useOpenGeniText } from "@opengeni/react/messages";
 
 /** A finished recording on the device. */
 export interface NativeVoiceRecording {
@@ -136,6 +137,7 @@ export function useNativeVoiceInput(input: {
   /** Test seam for the retry delays. */
   retryDelaysMs?: readonly number[] | undefined;
 }): NativeVoiceInput {
+  const t = useOpenGeniText();
   const [status, setStatus] = useState<NativeVoiceInputStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [durationSeconds, setDurationSeconds] = useState(0);
@@ -216,15 +218,15 @@ export function useNativeVoiceInput(input: {
         setHasSavedRecording(true);
         setError(
           isRetryableTranscriptionError(cause)
-            ? "Couldn't reach transcription. Your recording is saved. Retry when you're back online."
-            : `Couldn't transcribe this recording${
-                cause instanceof Error && cause.message ? ` (${cause.message})` : ""
-              }. It's saved, so you can retry.`,
+            ? t("native.voiceInput.couldnTReachTranscriptionYour")
+            : cause instanceof Error && cause.message
+              ? t("native.voiceInput.couldNotTranscribeWithReason", { reason: cause.message })
+              : t("native.voiceInput.couldNotTranscribe"),
         );
         update("error");
       }
     },
-    [discardAll, transcribeSegment, update],
+    [discardAll, transcribeSegment, update, t],
   );
 
   const finish = useCallback(async () => {
@@ -304,7 +306,7 @@ export function useNativeVoiceInput(input: {
         const granted = await recorder.requestPermission();
         if (ticket !== generation.current) return;
         if (!granted) {
-          setError("Allow microphone access in Settings to dictate.");
+          setError(t("native.voiceInput.allowMicrophoneAccessInSettings"));
           update("error");
           return;
         }
@@ -318,11 +320,11 @@ export function useNativeVoiceInput(input: {
       } catch {
         if (ticket !== generation.current) return;
         // The platform's reason (no input device, audio session busy) is not actionable.
-        setError("Couldn't start the microphone. Try again.");
+        setError(t("native.voiceInput.couldnTStartTheMicrophone"));
         update("error");
       }
     })();
-  }, [complete, update]);
+  }, [complete, update, t]);
 
   const cancel = useCallback(() => {
     generation.current += 1;

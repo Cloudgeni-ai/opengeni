@@ -3,6 +3,7 @@
 // display label is derived from the access grant — preferring the account
 // name, falling back to a short, stable id fragment. No DOM, no React.
 import type { AccessContext, AccountGrant, Workspace } from "@opengeni/sdk";
+import { type OpenGeniText } from "./messages/runtime";
 
 export type OrgOption = {
   accountId: string;
@@ -39,8 +40,11 @@ export function orgName(accountId: string, grants: AccountGrant[]): string | nul
 }
 
 /** Human label for an organization: the grant's subjectLabel, else a short id. */
-export function orgLabel(accountId: string, grants: AccountGrant[]): string {
-  return orgName(accountId, grants) ?? `Org ${shortAccountId(accountId)}`;
+export function orgLabel(t: OpenGeniText, accountId: string, grants: AccountGrant[]): string {
+  return (
+    orgName(accountId, grants) ??
+    t("organizationModel.orgShortaccountid", { shortAccountId: shortAccountId(accountId) })
+  );
 }
 
 /**
@@ -50,6 +54,7 @@ export function orgLabel(accountId: string, grants: AccountGrant[]): string {
  * explicit grant.
  */
 export function organizationsForSubject(
+  t: OpenGeniText,
   context: AccessContext,
   workspaces: Workspace[],
 ): OrgOption[] {
@@ -63,7 +68,7 @@ export function organizationsForSubject(
   }
   const options = [...ids].map((accountId) => ({
     accountId,
-    label: orgLabel(accountId, context.accountGrants),
+    label: orgLabel(t, accountId, context.accountGrants),
     canManage: administeredIds.has(accountId),
   }));
   return options.sort((a, b) => {

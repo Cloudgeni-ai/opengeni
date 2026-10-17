@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { buildTimeline } from "@opengeni/react";
@@ -37,31 +38,31 @@ const failed = (sequence: number, turnId: string, error = recorded) =>
   event(sequence, "turn.failed", { error, code: "context_compaction_failed" }, turnId);
 
 test("the failed turn's own compaction landmark owns the failure", () => {
-  const items = buildTimeline([
+  const items = buildTimeline(t, [
     event(1, "user.message", { text: "Continue" }, "turn-1"),
     skipped(2, "turn-1"),
     failed(3, "turn-1"),
   ]);
   expect(timelineShowsFailure(items, { failureEventId: "evt-3", turnId: "turn-1" })).toBe(true);
   // Without a provider rejection, the landmark carries the recorded text instead.
-  const plain = buildTimeline([skipped(1, "turn-1", null), failed(2, "turn-1")]);
+  const plain = buildTimeline(t, [skipped(1, "turn-1", null), failed(2, "turn-1")]);
   expect(timelineShowsFailure(plain, { failureEventId: "evt-2", turnId: "turn-1" })).toBe(true);
 });
 
 test("the failure event's own notice owns it when there is no landmark", () => {
-  const items = buildTimeline([failed(1, "turn-1")]);
+  const items = buildTimeline(t, [failed(1, "turn-1")]);
   expect(items.some((item) => item.kind === "notice")).toBe(true);
   expect(timelineShowsFailure(items, { failureEventId: "evt-1", turnId: "turn-1" })).toBe(true);
 });
 
 test("an older, unrelated or hidden failure never suppresses the banner", () => {
   // A newer failure in another turn is not represented by an older landmark.
-  const older = buildTimeline([skipped(1, "turn-1"), failed(2, "turn-1")]);
+  const older = buildTimeline(t, [skipped(1, "turn-1"), failed(2, "turn-1")]);
   expect(timelineShowsFailure(older, { failureEventId: "evt-9", turnId: "turn-2" })).toBe(false);
   // Unknown identity proves nothing.
   expect(timelineShowsFailure(older, { failureEventId: null, turnId: null })).toBe(false);
   // A landmark without diagnostics has no Details to stand in for the banner's.
-  const bare = buildTimeline([skipped(1, "turn-1", null)]);
+  const bare = buildTimeline(t, [skipped(1, "turn-1", null)]);
   expect(timelineShowsFailure(bare, { failureEventId: "evt-2", turnId: "turn-1" })).toBe(false);
   // A cleared or paged-out view shows nothing.
   expect(timelineShowsFailure([], { failureEventId: "evt-2", turnId: "turn-1" })).toBe(false);
@@ -73,7 +74,7 @@ test("after Retry reopens the turn, only the new attempt's landmark owns its fai
   // The retried attempt failed without settling a new landmark: the old one
   // belongs to the earlier failure. The newer failure still has its own notice
   // only when the turn had no activity, so drop it to prove the landmark alone.
-  const stale = buildTimeline([
+  const stale = buildTimeline(t, [
     skipped(1, "turn-1"),
     failed(2, "turn-1"),
     recovery(3),
@@ -83,7 +84,7 @@ test("after Retry reopens the turn, only the new attempt's landmark owns its fai
   // The earlier failure is still owned by its own landmark.
   expect(timelineShowsFailure(stale, { failureEventId: "evt-2", turnId: "turn-1" })).toBe(true);
   // A landmark settled by the retried attempt owns the newer failure.
-  const fresh = buildTimeline([
+  const fresh = buildTimeline(t, [
     skipped(1, "turn-1"),
     failed(2, "turn-1"),
     recovery(3),
