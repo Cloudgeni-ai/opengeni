@@ -9,7 +9,10 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  getAgentLearningSettings,
   initializeSessionStartAtomically,
+  saveAgentLearningSettings,
+  type KnowledgeContext,
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
@@ -19,9 +22,10 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import { registerKnowledgeEntryTools } from "../src/mcp/knowledge-entries";
 
-// A workspace instruction an agent tries to save from a chat that learns only
-// for its person is refused. The refusal carries a content-free `_meta` fact
-// the model never sees, so the timeline tells the person it was not saved.
+// A workspace instruction an agent saves from a chat that learns for its person
+// is governed by the stricter of the chat's and the workspace's Instructions
+// mode. A refusal carries a content-free `_meta` fact the model never sees, so
+// the timeline tells the person it was not saved.
 let shared: SharedTestDatabase | null = null;
 let app: ReturnType<typeof createDb> | null = null;
 beforeAll(async () => {
@@ -37,9 +41,12 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
+type Mode = "automatic" | "review_first" | "off";
+
 async function liveAgent(
   db: ReturnType<typeof createDb>["db"],
   learning: "personal" | "workspace",
+  modes: { personal?: Mode; workspace?: Mode } = {},
 ) {
   const suffix = crypto.randomUUID();
   const subjectId = `user:learning-refusal-${suffix}`;
@@ -56,6 +63,30 @@ async function liveAgent(
   ).workspaceGrants[0]!;
   const accountId = grant.accountId;
   const workspaceId = grant.workspaceId!;
+  const human: KnowledgeContext = {
+    accountId,
+    workspaceId,
+    actor: {
+      kind: "human",
+      principalKind: "human_session",
+      subjectId,
+      writeScopes: ["workspace", "personal"],
+      settingsScopes: ["workspace", "personal"],
+      review: true,
+    },
+  };
+  // Settings saved before the chat's turn is accepted govern that turn.
+  for (const scope of ["workspace", "personal"] as const) {
+    const instructions = modes[scope];
+    if (!instructions) continue;
+    const current = await getAgentLearningSettings(db, human, scope);
+    await saveAgentLearningSettings(db, human, {
+      scope,
+      operationId: crypto.randomUUID(),
+      expectedVersion: current.version,
+      settings: { knowledge: "automatic", instructions, skills: "review_first" },
+    });
+  }
   const session = await createSession(db, {
     accountId,
     workspaceId,
@@ -129,15 +160,46 @@ const appendRule = () => ({
 });
 
 describe("learning refusal facts", () => {
-  test("a workspace instruction saved from a chat that learns only for its person is reported as not saved", async () => {
+  test("a workspace instruction from a chat that learns for its person waits for workspace review", async () => {
     if (!app || !shared) return;
-    const client = await liveAgent(app.db, "personal");
+    const client = await liveAgent(app.db, "personal", {
+      personal: "automatic",
+      workspace: "review_first",
+    });
+    try {
+      const result = await client.callTool(appendRule());
+      expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
+      expect(JSON.stringify(result)).toMatch(/outcome[^a-z]*pending/);
+      expect(result._meta?.[LEARNING_REFUSAL_META_KEY]).toBeUndefined();
+    } finally {
+      await client.close();
+    }
+  }, 120_000);
+
+  test("a workspace instruction from a chat that learns for its person publishes when both modes are Automatic", async () => {
+    if (!app || !shared) return;
+    const client = await liveAgent(app.db, "personal", {
+      personal: "automatic",
+      workspace: "automatic",
+    });
+    try {
+      const result = await client.callTool(appendRule());
+      expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
+      expect(JSON.stringify(result)).toMatch(/outcome[^a-z]*published/);
+    } finally {
+      await client.close();
+    }
+  }, 120_000);
+
+  test("the workspace's Off refuses an instruction from a chat that learns for its person", async () => {
+    if (!app || !shared) return;
+    const client = await liveAgent(app.db, "personal", { personal: "automatic", workspace: "off" });
     try {
       const result = await client.callTool(appendRule());
       expect(result.isError).toBe(true);
       expect(result._meta?.[LEARNING_REFUSAL_META_KEY]).toEqual({
         destination: "instruction",
-        reason: "personal_chat",
+        reason: "learning_off",
       });
     } finally {
       await client.close();

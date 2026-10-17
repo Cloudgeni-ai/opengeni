@@ -15,14 +15,14 @@ const REFUSAL_REASONS: ReadonlyMap<string, LearningRefusalReason | "skill_scope"
   ["Instruction learning is Off", "learning_off"],
   ["Knowledge learning is Off for this task", "learning_off"],
   // An agent whose learning saves only for its person (a private chat, a
-  // chat using personal memory), in a shared workspace.
-  ["Workspace instructions require a workspace agent context", "personal_chat"],
+  // chat using personal memory) can explicitly save workspace Skills and
+  // instructions, but cannot review Skills or install plugins.
   [
     "Agents cannot review Skills or install workspace plugins from personal learning",
     "personal_chat",
   ],
-  // The direction depends on the Skill: a shared Skill from a personal-learning
-  // chat, or a personal Skill from a workspace-learning chat.
+  // A personal Skill from a workspace-learning chat; otherwise a Skill (such as
+  // an organization Skill) no agent may change.
   ["Skill outside accepted learning scope", "skill_scope"],
 ]);
 
@@ -82,9 +82,7 @@ export function classifyLearningRefusal(input: {
     known === "skill_scope"
       ? input.skillScope === "user"
         ? "personal_target"
-        : input.skillScope === "workspace" || input.skillScope === "organization"
-          ? "personal_chat"
-          : "not_permitted"
+        : "not_permitted"
       : (known ?? "not_permitted");
   return {
     destination: input.destination,
