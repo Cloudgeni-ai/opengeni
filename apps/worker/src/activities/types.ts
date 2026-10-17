@@ -411,6 +411,8 @@ export type PeekSessionWorkInput = {
   includeAdmissionFence?: boolean;
   /** Versioned workflow observer opt-in, never a caller authorization grant. */
   observerAccountId?: string;
+  /** Patch-gated: old workflow histories only understand unavailable. */
+  includeDeletion?: boolean;
 };
 
 export type SettleSessionInputWaitInput = {

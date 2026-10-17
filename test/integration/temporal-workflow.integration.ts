@@ -414,6 +414,56 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "definitively deleted sessions close without idle settlement or an observer timer",
+    async () => {
+      const taskQueue = `deleted-session-${crypto.randomUUID()}`;
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      let peeks = 0;
+      let settlements = 0;
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        peekSessionWork: async (input: { includeDeletion?: boolean }) => {
+          expect(input.includeDeletion).toBe(true);
+          peeks += 1;
+          return { kind: "deleted" };
+        },
+        markSessionIdle: async () => {
+          settlements += 1;
+        },
+        maybeContinueGoal: async () => {
+          throw new Error("Deleted session continued its goal");
+        },
+        runAgentTurn: async () => {
+          throw new Error("Deleted session dispatched a turn");
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...workflowScope(), sessionId: crypto.randomUUID() }],
+        });
+        await handle.result();
+        const history = await handle.fetchHistory();
+        expect(peeks).toBe(1);
+        expect(settlements).toBe(0);
+        expect(history.events?.some((event) => !!event.timerStartedEventAttributes)).toBe(false);
+        expect(patchIds(history)).toContain("session-close-deleted-v1");
+        await Worker.runReplayHistory(
+          { workflowsPath: workflowDefinitionsPath },
+          history,
+          workflowId,
+        );
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "safe control observations wait without settlement and re-read after a wake with replay-safe history",
     async () => {
       for (const kind of ["unavailable", "attempt-owned"] as const) {

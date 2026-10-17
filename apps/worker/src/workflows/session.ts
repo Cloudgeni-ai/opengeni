@@ -748,12 +748,15 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     // can activate this fix without waiting for continueAsNew.
     durableAdmissionBlocking = patched("session-durable-admission-block-v1");
     const safeObservation = patched("session-safe-control-observation-v1");
+    const closeDeletedSession = patched("session-close-deleted-v1");
     const peek = await activity.peekSessionWork({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       ...(durableAdmissionBlocking ? { includeAdmissionFence: true } : {}),
       ...(safeObservation ? { observerAccountId: input.accountId } : {}),
+      ...(closeDeletedSession ? { includeDeletion: true } : {}),
     });
+    if (closeDeletedSession && peek.kind === "deleted") return;
     if (peek.kind === "unavailable" || peek.kind === "attempt-owned") {
       if (
         peek.kind === "attempt-owned" &&

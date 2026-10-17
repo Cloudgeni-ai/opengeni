@@ -757,8 +757,18 @@ exactly idempotent transaction on these SQLSTATEs; connector-ledger
 transactions take the canonical event-write prefix and retry the same way.
 
 Versioned control observers distinguish unavailable session reads from idle
-business state. Missing and RLS-hidden rows are indistinguishable; neither is
-evidence of deletion, completion, or permission to resume. An unavailable
+business state. An absent observer read alone is not deletion evidence. Behind
+`session-close-deleted-v1`, a separate control lookup verifies the workspace's
+account and a subject-free worker RLS scope before proving session absence;
+an absent workspace also proves deletion. Wrong-account or actor-filtered reads
+stay unavailable, and database failures retry. A proven deletion closes the
+workflow without idle settlement, goal continuation, or parent notification.
+Old histories retain the unavailable result and timer command order until a live
+cycle records the patch. Idle/failure settlement retries also re-prove deletion
+after a failed lookup and return harmlessly if deletion won the race. Session
+tree deletion is quiescence-gated database deletion, not Temporal termination;
+the control observer provides closure without a cross-system delete transaction.
+An unavailable
 observer retains a signal-interruptible 30-second control wait because restoring
 visibility is not guaranteed to produce a wake. The wake outbox retains its
 revision with `session_unavailable` and its existing bounded retry schedule.

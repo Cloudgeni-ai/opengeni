@@ -73934,6 +73934,8 @@ export async function settleSessionAttemptInterruptions(
   );
 }
 
+export { isSessionDefinitivelyDeleted } from "./session-deletion";
+
 export type SessionWorkPeek =
   | { kind: "unavailable" }
   | {
