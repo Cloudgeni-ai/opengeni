@@ -2408,7 +2408,18 @@ export interface OperationCompleted {
 
 /** The control plane's ack of an AgentEvent (e.g. a HeartbeatAck). */
 export interface AgentEventAck {
-  ack: { $case: "heartbeat"; heartbeat: HeartbeatAck } | undefined;
+  ack: { $case: "heartbeat"; heartbeat: HeartbeatAck } | {
+    $case: "operationCompleted";
+    operationCompleted: OperationCompletedAck;
+  } | undefined;
+}
+
+/**
+ * The server durably owns exit reconciliation. This acknowledges notification
+ * delivery only: it grants no output custody, credit, final ACK or collection.
+ */
+export interface OperationCompletedAck {
+  opId: string;
 }
 
 /**
@@ -16962,6 +16973,9 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
       case "heartbeat":
         HeartbeatAck.encode(message.ack.heartbeat, writer.uint32(82).fork()).join();
         break;
+      case "operationCompleted":
+        OperationCompletedAck.encode(message.ack.operationCompleted, writer.uint32(90).fork()).join();
+        break;
     }
     return writer;
   },
@@ -16981,6 +16995,17 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
           message.ack = { $case: "heartbeat", heartbeat: HeartbeatAck.decode(reader, reader.uint32()) };
           continue;
         }
+        case 11: {
+          if (tag !== 90) {
+            break;
+          }
+
+          message.ack = {
+            $case: "operationCompleted",
+            operationCompleted: OperationCompletedAck.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -16994,6 +17019,13 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
     return {
       ack: isSet(object.heartbeat)
         ? { $case: "heartbeat", heartbeat: HeartbeatAck.fromJSON(object.heartbeat) }
+        : isSet(object.operationCompleted)
+        ? { $case: "operationCompleted", operationCompleted: OperationCompletedAck.fromJSON(object.operationCompleted) }
+        : isSet(object.operation_completed)
+        ? {
+          $case: "operationCompleted",
+          operationCompleted: OperationCompletedAck.fromJSON(object.operation_completed),
+        }
         : undefined,
     };
   },
@@ -17002,6 +17034,8 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
     const obj: any = {};
     if (message.ack?.$case === "heartbeat") {
       obj.heartbeat = HeartbeatAck.toJSON(message.ack.heartbeat);
+    } else if (message.ack?.$case === "operationCompleted") {
+      obj.operationCompleted = OperationCompletedAck.toJSON(message.ack.operationCompleted);
     }
     return obj;
   },
@@ -17018,7 +17052,80 @@ export const AgentEventAck: MessageFns<AgentEventAck> = {
         }
         break;
       }
+      case "operationCompleted": {
+        if (object.ack?.operationCompleted !== undefined && object.ack?.operationCompleted !== null) {
+          message.ack = {
+            $case: "operationCompleted",
+            operationCompleted: OperationCompletedAck.fromPartial(object.ack.operationCompleted),
+          };
+        }
+        break;
+      }
     }
+    return message;
+  },
+};
+
+function createBaseOperationCompletedAck(): OperationCompletedAck {
+  return { opId: "" };
+}
+
+export const OperationCompletedAck: MessageFns<OperationCompletedAck> = {
+  encode(message: OperationCompletedAck, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.opId !== "") {
+      writer.uint32(10).string(message.opId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): OperationCompletedAck {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseOperationCompletedAck();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.opId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): OperationCompletedAck {
+    return {
+      opId: isSet(object.opId)
+        ? globalThis.String(object.opId)
+        : isSet(object.op_id)
+        ? globalThis.String(object.op_id)
+        : "",
+    };
+  },
+
+  toJSON(message: OperationCompletedAck): unknown {
+    const obj: any = {};
+    if (message.opId !== "") {
+      obj.opId = message.opId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<OperationCompletedAck>, I>>(base?: I): OperationCompletedAck {
+    return OperationCompletedAck.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<OperationCompletedAck>, I>>(object: I): OperationCompletedAck {
+    const message = createBaseOperationCompletedAck();
+    message.opId = object.opId ?? "";
     return message;
   },
 };

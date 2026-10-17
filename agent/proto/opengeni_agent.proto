@@ -1473,7 +1473,14 @@ message OperationCompleted {
 message AgentEventAck {
   oneof ack {
     HeartbeatAck heartbeat = 10;
+    OperationCompletedAck operation_completed = 11;
   }
+}
+
+// The server durably owns exit reconciliation. This acknowledges notification
+// delivery only: it grants no output custody, credit, final ACK or collection.
+message OperationCompletedAck {
+  string op_id = 1;
 }
 
 // =============================================================================

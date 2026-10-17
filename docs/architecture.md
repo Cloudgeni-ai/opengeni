@@ -246,6 +246,9 @@ steal an active reaper claim; a racing push preserves an immediate retry. The ru
 retries unacknowledged terminal records on reconnect and its existing heartbeat
 cadence over the bulk connection. Completion collectors use independent ingestion
 capacity and yield before their claim expires, preserving heartbeat/control liveness.
+An exact-operation delivery receipt stops notification retries after durable server
+ownership; it never grants output custody. A dedicated first-notification timestamp
+bypasses polling backoff once, while failed collection keeps reconciliation backoff.
 Reaping remains the unavailable-runner fallback. The event alone does not grant output custody
 or acknowledge retained bytes. Unobserved nonterminal
 sessions receive fallback input. Terminal reads suppress pending notifications,

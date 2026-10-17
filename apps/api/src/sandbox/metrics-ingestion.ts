@@ -223,10 +223,13 @@ function createAgentEventIngestionLane(
       if (!accepting) return;
       const heartbeat = payloadIsHeartbeat(payload);
       let queueKey = subject;
+      let completion = false;
       try {
         const event = AgentEvent.decode(payload).event;
-        if (event?.$case === "operationCompleted")
+        if (event?.$case === "operationCompleted") {
+          completion = true;
           queueKey = `${subject}:operation:${event.operationCompleted.opId}`;
+        }
       } catch {
         /* The handler owns malformed payload diagnostics. */
       }
@@ -238,9 +241,9 @@ function createAgentEventIngestionLane(
 
       const queued = { payload, subject, heartbeat };
       const lastIndex = state.pending.length - 1;
-      if (heartbeat && lastIndex >= 0 && state.pending[lastIndex]!.heartbeat) {
+      if (lastIndex >= 0 && (completion || (heartbeat && state.pending[lastIndex]!.heartbeat))) {
         state.pending[lastIndex] = queued;
-        options.onHeartbeatCoalesced?.();
+        if (heartbeat) options.onHeartbeatCoalesced?.();
       } else {
         state.pending.push(queued);
       }

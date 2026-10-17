@@ -360,7 +360,20 @@ pub fn handle_op_ack(engine: &Arc<Engine>, ack: &v1::OpAck) {
     handle_op_ack_scoped(engine, "default", ack);
 }
 
-/// Multi-connection form of [`handle_op_ack`].
+/// Decode a notification-only receipt, never an output credit or final ACK.
+pub fn handle_completion_ack_scoped(engine: &Engine, scope: &str, payload: &[u8]) -> bool {
+    if let Ok(v1::AgentEventAck {
+        ack: Some(v1::agent_event_ack::Ack::OperationCompleted(ack)),
+    }) = v1::AgentEventAck::decode(payload)
+    {
+        engine.acknowledge_completion(scope, &ack.op_id);
+        true
+    } else {
+        false
+    }
+}
+
+/// Multi-connection output acknowledgement, independent of notification receipts.
 pub fn handle_op_ack_scoped(engine: &Arc<Engine>, scope: &str, ack: &v1::OpAck) {
     let op_id = scoped_op_id(scope, &ack.op_id);
     let routed = engine.route_command(

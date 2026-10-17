@@ -97,6 +97,7 @@ import {
   claimConnectedCommandOutputReleases,
   claimConnectedMachineSessionBackgroundCommands,
   deferConnectedMachineBackgroundCommandReconciliation,
+  connectedCommandReconciliationRetryMs,
   recordConnectedCommandOutputConsumption,
   settleConnectedCommandOutputReleaseClaim,
   type ConnectedMachineBackgroundCommandClaim,
@@ -1961,10 +1962,9 @@ async function deferConnectedCommandClaim(
   claim: ConnectedMachineBackgroundCommandClaim,
   outcome: "provider_running" | "provider_offline" | "provider_error" | "settlement_failed",
 ): Promise<void> {
-  const exponent = Math.min(4, Math.max(0, claim.reconcileAttempts - 1));
-  const retryAfterMs = Math.min(
-    5 * 60_000,
-    Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) * 2 ** exponent,
+  const retryAfterMs = connectedCommandReconciliationRetryMs(
+    claim.reconcileAttempts,
+    settings.sandboxLeaseReaperPeriodMs,
   );
   try {
     if (

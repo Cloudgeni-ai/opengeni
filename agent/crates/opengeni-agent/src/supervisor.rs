@@ -1238,6 +1238,9 @@ impl<P: Platform + 'static> Supervisor<P> {
                 // served inline.
                 ack = ack_subscription.next() => match ack {
                     Some(message) => {
+                        if crate::ops::handle_completion_ack_scoped(&self.engine, &link.connection_id, message.payload.as_ref()) {
+                            continue;
+                        }
                         match v1::OpAck::decode(message.payload.as_ref()) {
                             Ok(ack) => crate::ops::handle_op_ack_scoped(
                                 &self.engine,
@@ -3135,7 +3138,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn completion_retry_heals_a_full_queue_and_reconnect_until_final_ack() {
+    async fn completion_retry_heals_a_full_queue_and_reconnect_until_delivery_ack() {
         let Some(bin) = it::find_nats_server() else {
             eprintln!("SKIP completion retry: no nats-server");
             return;
@@ -3197,9 +3200,36 @@ mod tests {
             publisher.abort();
             let _ = publisher.await;
             if generation == 1 {
-                acknowledge_update_result(&engine, &operation, &started, sequence).await;
+                let ack = v1::AgentEventAck {
+                    ack: Some(v1::agent_event_ack::Ack::OperationCompleted(
+                        v1::OperationCompletedAck {
+                            op_id: "synthetic-command".into(),
+                        },
+                    )),
+                }
+                .encode_to_vec();
+                assert!(crate::ops::handle_completion_ack_scoped(
+                    &engine,
+                    "other-scope",
+                    &ack
+                ));
+                assert_eq!(engine.retained_completions("scope-a").len(), 1);
+                assert!(crate::ops::handle_completion_ack_scoped(
+                    &engine, "scope-a", &ack
+                ));
+                assert!(
+                    matches!(
+                        engine.query(&operation),
+                        opengeni_agent_engine::registry::QueryAnswer::Complete {
+                            final_acked: false,
+                            ..
+                        }
+                    ),
+                    "delivery receipt never releases output"
+                );
             }
         }
+        acknowledge_update_result(&engine, &operation, &started, sequence).await;
     }
 
     #[cfg(unix)]

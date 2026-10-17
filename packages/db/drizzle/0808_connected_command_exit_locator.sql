@@ -4,6 +4,10 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
+-- First notification bypasses polling backoff once; later delivery retries must
+-- not reset a failed collector's reconciliation schedule.
+ALTER TABLE session_background_commands ADD COLUMN completion_notified_at timestamptz;
+
 DO $install$
 DECLARE data_schema text := current_schema();
 BEGIN
@@ -11,19 +15,19 @@ BEGIN
     CREATE FUNCTION opengeni_private.locate_connected_command_completion(
       p_control_workspace_id uuid, p_enrollment_id uuid,
       p_connection_instance_id text, p_op_id text
-    ) RETURNS TABLE (account_id uuid, workspace_id uuid, session_id uuid, command_id uuid)
+    ) RETURNS TABLE (account_id uuid, workspace_id uuid, session_id uuid, command_id uuid, terminal boolean)
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $body$
     DECLARE inventory_id uuid;
     BEGIN
       inventory_id := opengeni_private.open_session_tenancy_fence_inventory(%1$I.session_tenancy_fence_target_schema());
-      RETURN QUERY SELECT command.account_id, command.workspace_id, command.session_id, command.id
+      RETURN QUERY SELECT command.account_id, command.workspace_id, command.session_id, command.id,
+        command.state IN ('exited', 'lost')
         FROM %1$I.session_background_commands command
         WHERE command.provider = 'connected_machine'
           AND command.control_workspace_id = p_control_workspace_id
           AND command.enrollment_id = p_enrollment_id
           AND command.connection_instance_id = p_connection_instance_id
-          AND command.op_id = p_op_id
-          AND command.state IN ('running', 'stopping');
+          AND command.op_id = p_op_id;
       PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory_id);
     EXCEPTION WHEN OTHERS THEN
       PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory_id);

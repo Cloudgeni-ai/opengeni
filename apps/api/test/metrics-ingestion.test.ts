@@ -195,7 +195,7 @@ describe("Connected Machine event ingestion scheduling", () => {
         },
       }).finish();
     scheduler.enqueue(completed("slow"), subjectA);
-    scheduler.enqueue(completed("slow"), subjectA);
+    for (let retry = 0; retry < 100; retry++) scheduler.enqueue(completed("slow"), subjectA);
     scheduler.enqueue(heartbeat(1), subjectA);
     scheduler.enqueue(completed("fast"), subjectA);
     await progress;

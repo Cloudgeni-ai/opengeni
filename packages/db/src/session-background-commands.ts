@@ -24,6 +24,14 @@ export type ConnectedMachineBackgroundCommandProof = {
 
 export const SESSION_BACKGROUND_COMMAND_REASON_MAX_BYTES = 512;
 
+/** Existing reconciler policy, shared by initial push collection failures. */
+export function connectedCommandReconciliationRetryMs(attempts: number, periodMs = 30_000): number {
+  return Math.min(
+    5 * 60_000,
+    Math.max(periodMs, 30_000) * 2 ** Math.min(4, Math.max(0, attempts - 1)),
+  );
+}
+
 export function boundedSessionBackgroundCommandReason(value: string, label: string): string {
   const normalized = value.trim();
   let bounded = "";
@@ -728,8 +736,8 @@ function connectedClaimIdentityWhere(claim: ConnectedMachineBackgroundCommandCla
   );
 }
 
-/** A push bypasses retry backoff, but never steals an active output collector.
- * If a collector is already running, its next defer must preserve this wake. */
+/** Only the first exit notification bypasses polling backoff. Delivery retries
+ * cannot erase a failed collector's backoff or steal another active claim. */
 export async function claimPushedConnectedCommandCompletion(
   db: Database,
   input: ConnectedCommandOutputIdentity & { claimTtlMs: number },
@@ -753,11 +761,14 @@ export async function claimPushedConnectedCommandCompletion(
     const [row] = await tx.select().from(table).where(identity).for("update").limit(1);
     if (!row) return null;
     const now = new Date();
-    await tx
-      .update(table)
-      .set({ reconcileAfter: now, lastReconcileOutcome: "exit_pushed" })
-      .where(identity);
+    const firstNotification = row.completionNotifiedAt === null;
+    if (firstNotification)
+      await tx
+        .update(table)
+        .set({ reconcileAfter: now, completionNotifiedAt: now })
+        .where(identity);
     if (
+      (!firstNotification && row.reconcileAfter.getTime() > now.getTime()) ||
       row.reconcileProofOutcome !== null ||
       (row.reconcileClaimId !== null &&
         row.reconcileClaimedAt !== null &&
@@ -872,7 +883,8 @@ export async function deferConnectedMachineBackgroundCommandReconciliation(
       const rows = await scopedDb
         .update(schema.sessionBackgroundCommands)
         .set({
-          reconcileAfter: sql`case when ${schema.sessionBackgroundCommands.lastReconcileOutcome} = 'exit_pushed'
+          reconcileAfter: sql`case when ${outcome} = 'provider_running'
+            and ${schema.sessionBackgroundCommands.completionNotifiedAt} > ${schema.sessionBackgroundCommands.reconcileClaimedAt}
             then now() else ${new Date(Date.now() + input.retryAfterMs).toISOString()}::timestamptz end`,
           reconcileClaimId: null,
           reconcileClaimedAt: null,
@@ -1307,10 +1319,10 @@ export async function locateConnectedCommandCompletion(
     connectionInstanceId: string;
     opId: string;
   },
-): Promise<SessionCommandIdentity | null> {
-  const rows = await db.execute<SessionCommandIdentity>(sql`
+): Promise<(SessionCommandIdentity & { terminal: boolean }) | null> {
+  const rows = await db.execute<SessionCommandIdentity & { terminal: boolean }>(sql`
     select account_id as "accountId", workspace_id as "workspaceId",
-      session_id as "sessionId", command_id as "commandId"
+      session_id as "sessionId", command_id as "commandId", terminal
     from opengeni_private.locate_connected_command_completion(
       ${input.controlWorkspaceId}::uuid, ${input.enrollmentId}::uuid,
       ${input.connectionInstanceId}::text, ${input.opId}::text

@@ -1,9 +1,10 @@
-import type { OperationCompleted } from "@opengeni/agent-proto";
+import { AgentEventAck, type OperationCompleted } from "@opengeni/agent-proto";
 import { settleCollectedConnectedMachineBackgroundCommand, type Database } from "@opengeni/db";
 import {
   locateConnectedCommandCompletion,
   claimPushedConnectedCommandCompletion,
   deferConnectedMachineBackgroundCommandReconciliation,
+  connectedCommandReconciliationRetryMs,
 } from "@opengeni/db/session-background-commands";
 import { createConnectedCommandOutputCapture } from "@opengeni/db/session-command-output";
 import type { EventBus } from "@opengeni/events";
@@ -38,6 +39,20 @@ export async function ingestConnectedCommandCompletion(
   // Foreground operations and exits before adoption have no background row.
   // Their attached consumer still owns terminal proof and the adoption race.
   if (!command) return;
+  const acknowledgeDelivery = async () => {
+    if (!bus?.getOpStreamConnection) return;
+    const connection = await bus.getOpStreamConnection();
+    connection.publish(
+      `agent.${ids.workspaceId}.${ids.agentId}.connection.${ids.connectionInstanceId}.ack`,
+      AgentEventAck.encode({
+        ack: { $case: "operationCompleted", operationCompleted: { opId: completed.opId } },
+      }).finish(),
+    );
+  };
+  if (command.terminal) {
+    await acknowledgeDelivery();
+    return;
+  }
   if (!reader && !bus?.getOpStreamConnection)
     throw new Error("Connected command output transport unavailable");
   const claimTtlMs = 5 * 60_000;
@@ -50,6 +65,9 @@ export async function ingestConnectedCommandCompletion(
     ...identity,
     claimTtlMs,
   });
+  // Delivery receipt is independent of output/final ACK. Once this transaction
+  // commits, the reconciler owns retries even if this API process disappears.
+  await acknowledgeDelivery().catch(() => undefined); // A lost receipt is healed by the runner's retry.
   if (!claim) return;
   try {
     const client =
@@ -111,7 +129,7 @@ export async function ingestConnectedCommandCompletion(
     await deferConnectedMachineBackgroundCommandReconciliation(db, {
       claim,
       outcome: "completion_retry",
-      retryAfterMs: 0,
+      retryAfterMs: connectedCommandReconciliationRetryMs(claim.reconcileAttempts),
     });
     throw error;
   }

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { AgentEvent, OpExit, ExecResponse } from "@opengeni/agent-proto";
+import { AgentEvent, AgentEventAck, OpExit, ExecResponse } from "@opengeni/agent-proto";
+import type { EventBus } from "@opengeni/events";
 import type { OpStreamExecClient } from "@opengeni/runtime/sandbox";
 import {
   acquireSharedTestDatabase,
@@ -305,6 +306,9 @@ test("push cannot steal an active collector and preserves its wake through a con
     claimTtlMs: 300_000,
   });
   expect(claim).not.toBeNull();
+  // Model a reaper claim already in flight before the first exit notification.
+  await shared.admin`update session_background_commands set completion_notified_at = null,
+    reconcile_claimed_at = now() - interval '1 second' where id = ${command.commandId}`;
   expect(
     await claimPushedConnectedCommandCompletion(client.db, { ...command, claimTtlMs: 300_000 }),
   ).toBeNull();
@@ -316,6 +320,58 @@ test("push cannot steal an active collector and preserves its wake through a con
   const [row] =
     await shared.admin`select reconcile_after <= now() as due from session_background_commands where id = ${command.commandId}`;
   expect(row.due).toBe(true);
+});
+
+test("repeated delivery cannot bypass failed-collection backoff and delivery ACK does not claim custody", async () => {
+  const command = await fixture();
+  const completed = { opId: command.opId, exit: OpExit.fromPartial({ exitCode: 0 }) };
+  const acknowledgements: AgentEventAck[] = [];
+  const bus = Object.assign(new MemoryEventBus(), {
+    getOpStreamConnection: () =>
+      ({
+        publish: (subject: string, bytes: Uint8Array) => {
+          expect(subject).toBe(
+            `agent.${command.controlWorkspaceId}.${command.enrollmentId}.connection.${command.connectionInstanceId}.ack`,
+          );
+          acknowledgements.push(AgentEventAck.decode(bytes));
+        },
+      }) as unknown as ReturnType<NonNullable<EventBus["getOpStreamConnection"]>>,
+  });
+  let reads = 0;
+  const failed: Pick<OpStreamExecClient, "readExisting"> = {
+    readExisting: async () => {
+      reads++;
+      expect(acknowledgements.length).toBeGreaterThan(0);
+      throw new Error("retained replay unavailable");
+    },
+  };
+  await expect(
+    ingestConnectedCommandCompletion(client.db, ids(command), completed, bus, failed),
+  ).rejects.toThrow("retained replay unavailable");
+  for (let retry = 0; retry < 5; retry++)
+    await ingestConnectedCommandCompletion(client.db, ids(command), completed, bus, failed);
+  expect(reads).toBe(1);
+  expect(acknowledgements[0]?.ack).toEqual({
+    $case: "operationCompleted",
+    operationCompleted: { opId: command.opId },
+  });
+  const [deferred] =
+    await shared.admin`select reconcile_after > now() as backed_off, completion_notified_at,
+    output_consumed_at, state from session_background_commands where id = ${command.commandId}`;
+  expect(deferred).toMatchObject({
+    backed_off: true,
+    completion_notified_at: expect.any(Date),
+    output_consumed_at: null,
+    state: "running",
+  });
+  await shared.admin`update session_background_commands set reconcile_after = now() where id = ${command.commandId}`;
+  await expect(
+    ingestConnectedCommandCompletion(client.db, ids(command), completed, bus, failed),
+  ).rejects.toThrow("retained replay unavailable");
+  expect(reads).toBe(2);
+  const [retry] =
+    await shared.admin`select reconcile_after > now() + interval '50 seconds' as increased from session_background_commands where id = ${command.commandId}`;
+  expect(retry.increased).toBe(true);
 });
 
 test("verified replay supplies the exit proof, not a disagreeing event payload", async () => {
