@@ -20803,7 +20803,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"openrouter\\\"\",\"\\\"opper\\\"\",\"\\\"vercel_gateway\\\"\"]"
+        "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"azure_openai\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"openrouter\\\"\",\"\\\"opper\\\"\",\"\\\"vercel_gateway\\\"\"]"
       }
     },
     "OrganizationModelUsage": {
@@ -28092,6 +28092,7 @@
         "$.claudeIdentity": "object?",
         "$.claudeIdentity.accountUuid": "string!",
         "$.claudeIdentity.deviceId": "string!",
+        "$.endpoint": "string?",
         "$.expectedVersion": "integer?",
         "$.operationId": "string!"
       }

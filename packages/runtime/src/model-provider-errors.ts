@@ -52,6 +52,15 @@ export class OrganizationOpperUnavailableError extends Error {
   }
 }
 
+export class OrganizationAzureOpenAIUnavailableError extends Error {
+  constructor() {
+    super(
+      "This organization Azure OpenAI model is unavailable: ask an organization admin to connect or reconnect Azure OpenAI in Organization settings, then retry.",
+    );
+    this.name = "OrganizationAzureOpenAIUnavailableError";
+  }
+}
+
 export const UNKNOWN_MODEL_FINISH_REASON_CODE = "provider_unknown_finish_reason";
 
 /**

@@ -1706,6 +1706,8 @@ export const englishMessages = {
     "Billed to the organization Anthropic API account",
   "modelPolicy.billedToTheOrganizationOpenrouter": "Billed to the organization OpenRouter account",
   "modelPolicy.billedToTheOrganizationOpper": "Billed to the organization Opper account",
+  "modelPolicy.billedToTheOrganizationAzureOpenai":
+    "Billed to the organization Azure OpenAI account",
   "modelPolicy.billedToTheOrganizationProvider": "Billed to the organization provider account",
   "modelPolicy.billedToTheOrganizationVercel": "Billed to the organization Vercel account",
   "modelPolicy.billedToTheWorkspaceAnthropic": "Billed to the workspace Anthropic API account",

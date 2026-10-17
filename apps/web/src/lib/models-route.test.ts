@@ -52,6 +52,24 @@ describe("Models URLs", () => {
     expect(connectStepOf("connect")).toBeNull();
   });
 
+  test("Azure OpenAI is addressed for the organization only", () => {
+    // A workspace's own Azure key is a direct connection, not a Models account.
+    expect(parseModelsAccount("org:gateway:azure_openai")).toBe("org:gateway:azure_openai");
+    expect(parseModelsAccount("gateway:azure_openai")).toBeUndefined();
+    expect(accountKeyOf("org:gateway:azure_openai")).toEqual({
+      provider: "gateway",
+      id: "azure_openai",
+      organization: true,
+    });
+    expect(accountKeyOf("gateway:azure_openai")).toBeNull();
+    expect(parseModelsView("connect-org:azure_openai")).toBe("connect-org:azure_openai");
+    expect(parseModelsView("connect:azure_openai")).toBeUndefined();
+    expect(connectStepOf("connect-org:azure_openai")).toEqual({
+      provider: "azure_openai",
+      organization: true,
+    });
+  });
+
   test("a workspace's old Models URL opens its page in Organization settings > Models", () => {
     expect(
       workspaceModelsRedirect({ workspaceId: "ws-1", account: undefined, view: undefined }),

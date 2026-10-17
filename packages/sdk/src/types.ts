@@ -4198,14 +4198,16 @@ export type ModelConnectionAccessKind =
   | "openrouter"
   | "anthropic"
   | "claude_subscription"
-  | "opper";
+  | "opper"
+  | "azure_openai";
 
 export type OrganizationModelProviderKind =
   | "vercel_gateway"
   | "openrouter"
   | "anthropic"
   | "claude_subscription"
-  | "opper";
+  | "opper"
+  | "azure_openai";
 
 export type ClaudeUsageWindow = {
   id:
@@ -4247,6 +4249,8 @@ export type OrganizationModelProviderConnection = {
   providerKind: OrganizationModelProviderKind;
   status: "active" | "revoked";
   version: number;
+  /** Azure OpenAI only: the non-secret `https://<resource>.openai.azure.com/openai/v1` endpoint. */
+  endpoint?: string | undefined;
   createdAt: string;
   updatedAt: string;
 };
@@ -4255,6 +4259,8 @@ export type UpsertOrganizationModelProviderConnectionRequest = {
   operationId: string;
   expectedVersion?: number | undefined;
   apiKey: string;
+  /** Required for `azure_openai` (its resource endpoint); refused for every other kind. */
+  endpoint?: string | undefined;
   claudeIdentity?: { accountUuid: string; deviceId: string } | undefined;
 };
 

@@ -23,6 +23,7 @@ export type ModelsProvider =
   | "vercel"
   | "openrouter"
   | "opper"
+  | "azure_openai"
   | "anthropic"
   | "claude_subscription";
 
@@ -46,11 +47,16 @@ const PROVIDERS: readonly ModelsProvider[] = [
   "claude_subscription",
 ];
 
+/** Connected for the organization only: a workspace's own Azure key is a direct connection. */
+const ORGANIZATION_ONLY_PROVIDERS: readonly ModelsProvider[] = ["azure_openai"];
+
 const VIEWS: ReadonlySet<string> = new Set<ModelsView>([
   "connect",
   "connect-workspace",
   ...PROVIDERS.map((provider) => `connect:${provider}` as const),
-  ...PROVIDERS.map((provider) => `connect-org:${provider}` as const),
+  ...[...PROVIDERS, ...ORGANIZATION_ONLY_PROVIDERS].map(
+    (provider) => `connect-org:${provider}` as const,
+  ),
   "allowed-models",
   "compaction",
   "account-rule-locks",
@@ -62,13 +68,23 @@ export function parseModelsView(value: unknown): ModelsView | undefined {
 }
 
 const ACCOUNT_KEY =
-  /^(org:)?((codex|supergrok|claude):[\w-]{1,128}|gateway:(vercel|openrouter|opper|anthropic|claude_subscription))$/;
+  /^((org:)?((codex|supergrok|claude):[\w-]{1,128}|gateway:(vercel|openrouter|opper|anthropic|claude_subscription))|org:gateway:azure_openai)$/;
 
 export function parseModelsAccount(value: unknown): string | undefined {
   return typeof value === "string" && ACCOUNT_KEY.test(value) ? value : undefined;
 }
 
-export type GatewayId = "vercel" | "openrouter" | "opper" | "anthropic" | "claude_subscription";
+export type GatewayId =
+  | "vercel"
+  | "openrouter"
+  | "opper"
+  | "anthropic"
+  | "claude_subscription"
+  /** Organization only; workspace pages never address it. */
+  | "azure_openai";
+
+/** The API-key providers a workspace can hold as its own. */
+export type WorkspaceGatewayId = Exclude<GatewayId, "azure_openai">;
 
 export type AccountKey = (
   | { provider: "codex" | "supergrok" | "claude"; id: string }
@@ -92,7 +108,8 @@ export function accountKeyOf(value: string | undefined): AccountKey | null {
       id === "openrouter" ||
       id === "opper" ||
       id === "anthropic" ||
-      id === "claude_subscription")
+      id === "claude_subscription" ||
+      (id === "azure_openai" && organization))
   ) {
     return { provider, id, organization };
   }

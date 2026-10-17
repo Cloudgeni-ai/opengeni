@@ -31,6 +31,7 @@ export type ConnectionAccessKind =
   | "vercel_gateway"
   | "openrouter"
   | "opper"
+  | "azure_openai"
   | "anthropic"
   | "claude_subscription";
 

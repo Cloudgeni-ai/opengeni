@@ -62,6 +62,7 @@ describe("integration classes", () => {
     expect(integrationClassFromConnectProvider("openapi")).toBe("other");
     expect(modelConnectionClass("ai-gateway")).toBe("vercel_gateway");
     expect(modelConnectionClass("claude_subscription")).toBe("claude_subscription");
+    expect(modelConnectionClass("azure_openai")).toBe("azure_openai");
     expect(modelConnectionClass("unknown")).toBeNull();
   });
 

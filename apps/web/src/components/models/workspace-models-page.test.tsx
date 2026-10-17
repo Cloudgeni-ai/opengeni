@@ -241,7 +241,17 @@ const client = {
     ],
   })),
   updateModelConnectionAccess: mock(async (_target: unknown, policy: unknown) => policy),
-  listOrganizationProviderCustomModels: mock(async () => ({ models: [] })),
+  listOrganizationProviderCustomModels: mock(async (): Promise<unknown> => ({ models: [] })),
+  createOrganizationProviderCustomModel: mock(
+    async (...args: unknown[]): Promise<unknown> => ({
+      id: "org-model",
+      upstreamModelId: (args[2] as { upstreamModelId: string }).upstreamModelId,
+      label: null,
+      version: 1,
+      createdAt: "2026-10-17T12:00:00.000Z",
+      updatedAt: "2026-10-17T12:00:00.000Z",
+    }),
+  ),
   listOrganizationSuperGrokAccounts: mock(
     async (): Promise<unknown> => ({
       accounts: [],
@@ -2141,6 +2151,194 @@ describe("One Models page for the organization and the workspace", () => {
       );
     } finally {
       await cleanup(view);
+    }
+  });
+
+  /** Types into a controlled input the way React reads it. */
+  async function typeInto(input: HTMLInputElement, value: string): Promise<void> {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      const reactPropsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"));
+      const props = (
+        input as unknown as Record<
+          string,
+          {
+            onChange?: (event: { target: HTMLInputElement }) => void;
+            onBlur?: (event: { target: HTMLInputElement }) => void;
+          }
+        >
+      )[reactPropsKey ?? ""];
+      props?.onChange?.({ target: input });
+      props?.onBlur?.({ target: input });
+    });
+  }
+
+  const AZURE_CONNECTION = {
+    providerKind: "azure_openai",
+    status: "active",
+    version: 1,
+    endpoint: "https://acme.openai.azure.com/openai/v1",
+    createdAt: "2026-10-17T12:00:00.000Z",
+    updatedAt: "2026-10-17T12:00:00.000Z",
+  };
+
+  test("an organization Azure OpenAI key needs its resource endpoint and saves it with the key", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    client.getModelConnectionAccess.mockImplementation(async () => ({
+      policy: openPolicy,
+      workspaces: [],
+      models: [],
+      personalWorkspacesSupported: false,
+    }));
+    client.upsertOrganizationModelProviderConnection.mockImplementation(
+      async () => AZURE_CONNECTION,
+    );
+    const view = await render();
+    try {
+      // Connect provider lists it for the organization.
+      await act(async () => navigateTo({ view: "connect" }));
+      await flush();
+      const choice = [...view.container.querySelectorAll<HTMLElement>("[data-row-action]")].find(
+        (candidate) => candidate.closest("[data-slot=list-row]")?.textContent?.includes("Azure"),
+      );
+      expect(choice).toBeDefined();
+      await act(async () => choice!.click());
+      await flush();
+      expect(lastNavigation?.search.view).toBe("connect-org:azure_openai");
+
+      const key = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Organization Azure OpenAI API key"]',
+      )!;
+      const endpoint = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Azure OpenAI endpoint"]',
+      )!;
+      expect(key.type).toBe("password");
+      expect(endpoint.placeholder).toBe("https://RESOURCE.openai.azure.com");
+      await typeInto(key, "azure-secret-key");
+      // No endpoint, or one that isn't an Azure OpenAI resource, can't be saved.
+      expect(button(view.container, "Connect Azure OpenAI")!.disabled).toBe(true);
+      await typeInto(endpoint, "https://proxy.example.com/openai/v1");
+      expect(button(view.container, "Connect Azure OpenAI")!.disabled).toBe(true);
+      expect(view.container.textContent).toContain(
+        "Enter the https://RESOURCE.openai.azure.com endpoint of your Azure OpenAI resource.",
+      );
+      expect(client.upsertOrganizationModelProviderConnection).not.toHaveBeenCalled();
+
+      await typeInto(endpoint, "https://acme.openai.azure.com");
+      expect(button(view.container, "Connect Azure OpenAI")!.disabled).toBe(false);
+      await act(async () => button(view.container, "Connect Azure OpenAI")!.click());
+      await flush();
+      await flush();
+      expect(client.upsertOrganizationModelProviderConnection).toHaveBeenCalledTimes(1);
+      expect(client.upsertOrganizationModelProviderConnection).toHaveBeenCalledWith(
+        "organization-a",
+        "azure_openai",
+        {
+          operationId: expect.any(String),
+          expectedVersion: 0,
+          apiKey: "azure-secret-key",
+          endpoint: "https://acme.openai.azure.com",
+        },
+      );
+      // Its page names the saved endpoint and never the key.
+      expect(lastNavigation?.search.account).toBe("org:gateway:azure_openai");
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Azure OpenAI");
+      expect(view.container.textContent).toContain("https://acme.openai.azure.com/openai/v1");
+      expect(view.container.textContent).toContain("Deployments");
+      expect(view.container.innerHTML).not.toContain("azure-secret-key");
+    } finally {
+      await cleanup(view);
+      client.upsertOrganizationModelProviderConnection.mockImplementation(async () => ({
+        id: "org-key",
+        status: "active",
+        version: 1,
+      }));
+    }
+  });
+
+  test("Azure OpenAI deployments are added by exact name once the organization is connected", async () => {
+    organizationAdmin = true;
+    routeOrganizationReads();
+    let connected = false;
+    client.getOrganizationModelProviderConnection.mockImplementation(async (...args: unknown[]) =>
+      args[1] === "azure_openai" && connected ? AZURE_CONNECTION : null,
+    );
+    client.getModelConnectionAccess.mockImplementation(async () => ({
+      policy: openPolicy,
+      workspaces: [],
+      models: [],
+      personalWorkspacesSupported: false,
+    }));
+    const view = await render();
+    try {
+      // Not connected: deployments come after connecting, so there's nothing to type yet.
+      await act(async () => navigateTo({ account: "org:gateway:azure_openai" }));
+      await flush();
+      expect(view.container.textContent).toContain(
+        "Deployments can be added after Azure OpenAI is connected.",
+      );
+      expect(
+        view.container.querySelector('input[aria-label="Azure OpenAI deployment name"]'),
+      ).toBeNull();
+    } finally {
+      await cleanup(view);
+    }
+
+    connected = true;
+    const page = await render();
+    try {
+      await act(async () => navigateTo({ account: "org:gateway:azure_openai" }));
+      await flush();
+      const text = page.container.textContent ?? "";
+      expect(text).toContain("Deployments");
+      expect(text).toContain("Add a deployment");
+      expect(text).toContain("checked against the organization's endpoint before it is saved");
+      // The endpoint is the only connection detail shown; the key is write-only.
+      expect(text).toContain("https://acme.openai.azure.com/openai/v1");
+      expect(text).toContain("Stored encrypted");
+      const input = page.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Azure OpenAI deployment name"]',
+      )!;
+      expect(input.placeholder).toBe("gpt-6.1-sol");
+      await typeInto(input, "gpt 6.1 sol");
+      expect(button(page.container, "Add deployment")!.disabled).toBe(true);
+      expect(page.container.textContent).toContain(
+        "Use the exact deployment name: letters, numbers, dots, underscores or hyphens.",
+      );
+      // A deployment Azure refuses is checked once, not asked about again.
+      const { OpenGeniApiError } = await import("@opengeni/sdk/browser");
+      client.createOrganizationProviderCustomModel.mockImplementationOnce(async () => {
+        throw new OpenGeniApiError(422, "", { mutation: true });
+      });
+      await typeInto(input, "missing-deployment");
+      await act(async () => button(page.container, "Add deployment")!.click());
+      await flush();
+      await flush();
+      expect(client.createOrganizationProviderCustomModel).toHaveBeenCalledTimes(1);
+      expect(page.container.querySelector('[aria-label="Deployments on Azure OpenAI"]')).toBeNull();
+
+      await typeInto(input, "gpt-6.1-sol");
+      expect(button(page.container, "Add deployment")!.disabled).toBe(false);
+      await act(async () => button(page.container, "Add deployment")!.click());
+      await flush();
+      await flush();
+      expect(client.createOrganizationProviderCustomModel).toHaveBeenCalledTimes(2);
+      expect(client.createOrganizationProviderCustomModel).toHaveBeenLastCalledWith(
+        "organization-a",
+        "azure_openai",
+        { operationId: expect.any(String), upstreamModelId: "gpt-6.1-sol" },
+      );
+      const list = page.container.querySelector<HTMLElement>(
+        '[aria-label="Deployments on Azure OpenAI"]',
+      );
+      expect(list?.textContent).toContain("gpt-6.1-sol");
+      // A workspace's own Azure key stays a direct connection, not a Models account.
+      expect(page.container.textContent).not.toContain("Connect a key for Design preview");
+    } finally {
+      await cleanup(page);
+      client.getOrganizationModelProviderConnection.mockImplementation(async () => null);
     }
   });
 
