@@ -432,7 +432,12 @@ export class ComputerDriver implements ComputerInteractionDriver {
       target: this.projectTarget(observation.target),
       frameId: observation.frameId,
       semantic: this.capabilities.semanticObservation
-        ? { kind: "snapshot", roots: observation.roots, nodeCount: observation.nodeCount }
+        ? {
+            kind: "snapshot",
+            roots: observation.roots,
+            nodeCount: observation.nodeCount,
+            ...(observation.incomplete ? { incomplete: observation.incomplete } : {}),
+          }
         : null,
       screenshot: null,
       focusedRef: observation.focusedRef,

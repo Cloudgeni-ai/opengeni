@@ -1876,6 +1876,16 @@ export const InteractionSemanticSnapshot = /* @__PURE__ */ defineSchema(() =>
       kind: z.literal("snapshot"),
       roots: z.array(InteractionSemanticNode),
       nodeCount: z.number().int().nonnegative().max(INTERACTION_MAX_SEMANTIC_NODES),
+      /** Present when the platform stopped reading the tree early: every
+       * listed node is real, but nodes after the cut are missing. */
+      incomplete: z
+        .object({
+          reason: z.enum(["time_budget", "node_budget"]),
+          /** Nodes found but not read; the true number missing can be larger. */
+          unreadCount: z.number().int().nonnegative().max(1_000_000),
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
 );

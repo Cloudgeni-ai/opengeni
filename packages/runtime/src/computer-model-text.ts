@@ -38,7 +38,12 @@ export type ComputerTextObservation = {
   frameId: string | null;
   capturedFrame?: { width: number; height: number } | undefined;
   semantic:
-    | { kind: "snapshot"; roots: readonly ComputerTextNode[]; nodeCount: number }
+    | {
+        kind: "snapshot";
+        roots: readonly ComputerTextNode[];
+        nodeCount: number;
+        incomplete?: { reason: "time_budget" | "node_budget"; unreadCount: number } | undefined;
+      }
     | {
         kind: "diff";
         baseObservationId: string;
@@ -361,6 +366,18 @@ export function computerObservationText(observation: ComputerTextObservation): s
     rendered.clipped ? `${plural(rendered.clipped, "long field")} clipped` : null,
   ].filter((entry): entry is string => entry !== null);
   if (notes.length) lines.push(`(${notes.join("; ")})`);
+  if (semantic.kind === "snapshot" && semantic.incomplete) {
+    const { reason, unreadCount } = semantic.incomplete;
+    const cause =
+      reason === "node_budget" ? "it reached its element limit" : "the app answered too slowly";
+    const unread =
+      unreadCount > 0
+        ? `; at least ${plural(unreadCount, "more element")} ${unreadCount === 1 ? "was" : "were"} not read`
+        : "";
+    lines.push(
+      `Partial tree: reading stopped because ${cause}${unread}. Elements not listed here may still exist; use the screenshot for them.`,
+    );
+  }
   return lines.join("\n");
 }
 

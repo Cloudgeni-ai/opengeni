@@ -506,6 +506,38 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("reports a walk that ran out of time as an incomplete observation", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    let partial = true;
+    fixture.callTool = async (name, argumentsJson) => {
+      const response = await original(name, argumentsJson);
+      const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+      if (name === "get_window_state" && args.include_accessibility_tree && partial) {
+        const state = JSON.parse(response.structuredJson!);
+        Object.assign(state, {
+          truncated: true,
+          truncation_reason: "timeout",
+          nodes_visited: 296,
+          nodes_pending: 567,
+        });
+        response.structuredJson = JSON.stringify(state);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture);
+    try {
+      const target = (await backend.targets())[0]!;
+      const cut = await backend.observe(target.id);
+      expect(cut.incomplete).toEqual({ reason: "time_budget", unreadCount: 567 });
+      expect(cut.roots.length).toBeGreaterThan(0);
+      partial = false;
+      expect((await backend.observe(target.id)).incomplete).toBeUndefined();
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("invokes controls and opens their menu through the native button contract", async () => {
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);

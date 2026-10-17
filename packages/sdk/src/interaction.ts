@@ -739,6 +739,7 @@ export type InteractionSemanticSnapshot = {
   kind: "snapshot";
   roots: InteractionSemanticNode[];
   nodeCount: number;
+  incomplete?: { reason: "time_budget" | "node_budget"; unreadCount: number } | undefined;
 };
 
 export type InteractionSemanticDiff = {
