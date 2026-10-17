@@ -30,9 +30,68 @@ const roles: Record<string, string> = {
   Hyperlink: "link",
 };
 
+const MARKDOWN_ROW = /^(\s*)- (?:\[(\d+)\] )?(\S+)(.*)$/u;
+const QUOTED = String.raw`"((?:[^"\\]|\\.)*)"`;
+const MARKDOWN_LABEL = new RegExp(`^ ${QUOTED}`, "u");
+const MARKDOWN_VALUE = new RegExp(`(?:^| )= (?:${QUOTED}|([^\\s\\[][^\\[]*?))(?: \\[|$)`, "u");
+const MAX_ROW_TEXTS = 64;
+
+function unquote(value: string): string {
+  try {
+    return JSON.parse(`"${value}"`) as string;
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Text that CUA's element list leaves out. Its structured `elements` carry
+ * only addressable elements, so the static text inside a table row, list item
+ * or cell exists only in the Markdown tree as unindexed rows. Collect that
+ * text under the nearest indexed ancestor, so a row reads as its cells
+ * instead of an empty AXRow. Keyed by element_index.
+ */
+export function unindexedTextByElement(markdown: string | undefined): Map<number, string[]> {
+  const texts = new Map<number, string[]>();
+  if (!markdown) return texts;
+  const ancestors: Array<{ indent: number; index: number | null }> = [];
+  for (const line of markdown.split("\n")) {
+    const row = MARKDOWN_ROW.exec(line);
+    if (!row) continue;
+    const indent = row[1]!.length;
+    while (ancestors.length > 0 && ancestors.at(-1)!.indent >= indent) ancestors.pop();
+    const index = row[2] === undefined ? null : Number(row[2]);
+    ancestors.push({ indent, index });
+    if (index !== null) continue;
+    const rest = row[4] ?? "";
+    const label = MARKDOWN_LABEL.exec(rest);
+    const value = MARKDOWN_VALUE.exec(label ? rest.slice(label[0].length) : rest);
+    const text = (
+      value
+        ? value[1] !== undefined
+          ? unquote(value[1])
+          : (value[2] ?? "")
+        : label
+          ? unquote(label[1]!)
+          : ""
+    ).trim();
+    if (!text) continue;
+    const owner = ancestors
+      .slice(0, -1)
+      .reverse()
+      .find((ancestor) => ancestor.index !== null);
+    if (!owner) continue;
+    const list = texts.get(owner.index!) ?? [];
+    if (list.length < MAX_ROW_TEXTS) list.push(text);
+    texts.set(owner.index!, list);
+  }
+  return texts;
+}
+
 export function projectElements(
   elements: z.infer<typeof Element>[],
   platform: "macos" | "windows" | "linux" = "macos",
+  childTexts: ReadonlyMap<number, readonly string[]> = new Map(),
 ): InteractionSemanticNodeValue[] {
   // CUA may omit non-actionable parents. A flat, bounded forest preserves every
   // returned node without inventing ancestry or dropping orphaned children.
@@ -72,13 +131,23 @@ export function projectElements(
       )
         actions.push("set_value");
     }
+    const label = element.label && !valueLabel ? element.label : undefined;
+    const contained = (childTexts.get(element.element_index) ?? []).filter(
+      (text) => text !== label && text !== String(element.value ?? ""),
+    );
+    const containedText = contained.length > 0 ? contained.join(" | ").slice(0, 8_192) : undefined;
     return {
       ref: element.element_token ?? `read-only:${element.element_index}`,
       // Desktop labels and values can be whole documents (an editor's text
       // area). Clip to the semantic-node contract so one element cannot make
       // the entire observation invalid.
       role: (roles[element.role] ?? element.role).slice(0, 256),
-      ...(element.label && !valueLabel ? { name: element.label.slice(0, 8_192) } : {}),
+      ...(label
+        ? { name: label.slice(0, 8_192) }
+        : containedText && !protectedReason
+          ? { name: containedText }
+          : {}),
+      ...(label && containedText && !protectedReason ? { description: containedText } : {}),
       ...(protectedReason
         ? { value: { redacted: true as const, reason: protectedReason } }
         : element.value !== undefined
