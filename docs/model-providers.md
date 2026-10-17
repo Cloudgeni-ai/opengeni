@@ -1649,6 +1649,12 @@ to the same `x-codex-*` response headers the HTTP path returns, so usage
 accounting is unchanged. `OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED=false`
 turns the transport off.
 
+A socket that closes mid-response fails that model request, and the turn
+recovers within its bounded provider-recovery budget. A conversation whose
+socket drops mid-response twice within ten minutes uses HTTP for the next
+30 minutes (`http; reason=stream_dropped`), as the Codex CLI falls back to
+HTTPS after repeated WebSocket failures.
+
 Pricing is keyed by product model ID. A tiered schedule selects the greatest
 `minimumInputTokens` threshold not exceeding the current input count. Billing
 classification comes from the accepted policy: `external` usage must not spend
