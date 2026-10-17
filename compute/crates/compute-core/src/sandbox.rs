@@ -93,6 +93,10 @@ pub(crate) struct Sandbox {
     /// Whether the host agent was last told it waits for room after a
     /// pause for host memory; see [`Notice::PausedForMemory`].
     pub wait_told: bool,
+    /// Host memory its VM held when it was paused for memory, for a wait
+    /// the host agent kept across a restart that found its VM still there,
+    /// paused: the agent is told it waits until the VM runs again.
+    pub kept_wait: Option<u64>,
     /// What it may still write to local disk, and what it booked there.
     pub local_disk: LocalDisk,
     pub in_flight: Option<InFlight>,
@@ -152,6 +156,7 @@ impl Sandbox {
             balloon_retry: None,
             squeeze: Squeeze::None,
             wait_told: false,
+            kept_wait: None,
             local_disk: LocalDisk {
                 growth: size.disk,
                 hydrating: false,

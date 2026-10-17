@@ -403,12 +403,17 @@ impl Host {
         }
         // Told from before its pause and save start until its VM runs
         // again, so a host agent that keeps it never finds the sandbox
-        // saved for memory without knowing it waits.
+        // saved for memory without knowing it waits. So is a wait the
+        // agent kept for a VM found paused.
+        if slot.state.level == Level::Running {
+            slot.kept_wait = None;
+        }
         let waiting = match slot.squeeze {
             Squeeze::Leaving { bytes, .. } | Squeeze::Waiting { bytes } => Some(bytes),
             Squeeze::Returning { bytes } if slot.state.level != Level::Running => Some(bytes),
             _ => None,
-        };
+        }
+        .or(slot.kept_wait);
         if waiting.is_some() != slot.wait_told {
             slot.wait_told = waiting.is_some();
             out.push(Action::Notify {
@@ -421,16 +426,18 @@ impl Host {
 
     /// Takes in [`crate::Input::PausedForMemory`]: `id` waits again, as it
     /// did before a restart, wanted awake, for `bytes` to fit above the
-    /// high watermark. One whose VM is still there was never saved: it
-    /// wakes again if paused, and the wait is over.
+    /// high watermark. One whose VM is still there was never saved: one
+    /// running waits no more, and one paused wakes, still told it waits
+    /// until it runs.
     pub(super) fn paused_for_memory(&mut self, now: At, id: SandboxId, bytes: u64) {
         let Some(slot) = self.sandboxes.get_mut(&id) else {
             return;
         };
         if slot.state.level.has_process() {
-            // Told it waits, so it is told the wait is over.
+            // Told it waits, so it is told once the wait is over.
             slot.wait_told = true;
             if slot.state.level != Level::Running {
+                slot.kept_wait = Some(bytes);
                 slot.request_wake(Priority::Background, now);
             }
         } else if slot.in_flight.is_none() && !slot.is_broken() {

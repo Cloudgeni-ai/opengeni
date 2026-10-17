@@ -660,8 +660,10 @@ fn a_sandbox_paused_for_memory_still_wakes_by_itself_after_a_restart() {
 }
 
 /// A wait kept for a sandbox whose VM is still there, its save never done
-/// or its wake done before the wait could be forgotten, is over: the host
-/// agent is told so, and a paused VM wakes as it would have.
+/// or its wake done before the wait could be forgotten, is over once the
+/// VM runs: the host agent is told so at once for a running VM, and a
+/// paused one wakes as it would have, told it waits until it runs, so a
+/// crash before then still finds it waiting.
 #[test]
 fn a_kept_wait_for_memory_ends_for_a_sandbox_with_a_vm() {
     let mut rig = Rig::new();
@@ -689,6 +691,11 @@ fn a_kept_wait_for_memory_ends_for_a_sandbox_with_a_vm() {
         bytes: 2 * GIB,
     });
     assert_eq!(started(&actions, 2)[0].0, Step::Resume, "{actions:?}");
+    assert_eq!(
+        waits_told(&actions, 2),
+        [],
+        "the wait ended before the VM ran"
+    );
     let all = rig.settle(2, actions);
     assert_eq!(rig.level(2), Level::Running);
     assert_eq!(waits_told(&all, 2), [None]);
