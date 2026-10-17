@@ -688,7 +688,11 @@ async function observedResponse(
         if (semanticPhase === "completed") {
           controller.close();
         } else {
-          controller.error(error);
+          // The connection broke before a terminal event (a reset HTTP body
+          // or a WebSocket that closed mid-response). That is the same
+          // interrupted stream as one that ends without a terminal event, so
+          // it gets the same typed failure and the same recovery.
+          controller.error(interruptedCodexStreamError(res, error));
         }
       }
     },
@@ -1558,6 +1562,25 @@ function codexSseFailureError(
   return new CodexStreamingTerminalError(
     codexSseFailureProjection(source, rawError, fallbackCode, publicMessage, metadata),
   );
+}
+
+/**
+ * A response body whose connection broke before any terminal event. The
+ * original transport error stays the cause; the typed failure is the same
+ * one an SSE body that ends without a terminal event produces.
+ */
+function interruptedCodexStreamError(
+  source: Response,
+  cause: unknown,
+): CodexStreamingTerminalError {
+  const error = codexSseFailureError(
+    source,
+    null,
+    "invalid_sse_terminal",
+    "The Codex response stream ended without a terminal response",
+  );
+  error.cause = cause;
+  return error;
 }
 
 /**
