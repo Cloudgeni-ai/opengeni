@@ -241,7 +241,7 @@ index 8d02fff468300317388d5f4dc2b9d9bdafd72abe..f7eb5c982b6585b4e5a7c70b42d50d21
  }
  export {};
 diff --git a/dist/sandbox/e2b/sandbox.js b/dist/sandbox/e2b/sandbox.js
-index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56afa424e4c 100644
+index a383d0a56ab09709dfdf20984a483940a34060b7..b488c934aad0980dbddd770892ea5cfdeb76c423 100644
 --- a/dist/sandbox/e2b/sandbox.js
 +++ b/dist/sandbox/e2b/sandbox.js
 @@ -43,6 +43,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
@@ -285,16 +285,24 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56a
          const timeoutMs = typeof this.state.commandTimeoutMs === 'number'
              ? this.state.commandTimeoutMs
              : typeof this.state.timeout === 'number'
-@@ -98,7 +115,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+@@ -98,9 +115,15 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
              cwd: this.resolveWorkdir(args.workdir),
              envs: this.state.environment,
              timeoutMs,
 -            onData: (data) => (0, shared_1.appendPtyOutput)(entry, data),
 +            onData: (data) => output.write(data),
          });
++        // Ending a command kills its PTY, unless the command already reported
++        // its status: it is over then, and what it left running stays.
++        let statusReported = false;
          entry.terminate = async () => {
++            if (statusReported) {
++                return;
++            }
              if (handle.kill) {
-@@ -122,9 +139,24 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+                 await handle.kill();
+             }
+@@ -122,9 +145,25 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
                  requestTimeoutMs: this.state.requestTimeoutMs,
              });
          };
@@ -306,6 +314,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56a
 +        // then, without killing anything. A PTY that ends with no status
 +        // reported (its shell was killed) ends the command with E2B's status.
 +        const reported = output.exited.then((exitCode) => {
++            statusReported = true;
 +            void Promise.resolve()
 +                .then(() => handle.disconnect?.())
 +                .catch(() => { });
@@ -322,7 +331,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56a
          try {
              await entry.sendInput(`${command}\n`);
          }
-@@ -179,21 +211,53 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+@@ -179,21 +218,53 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
      }
      async prepareWorkspaceRoot() {
          const root = this.state.manifest.root;
@@ -386,7 +395,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56a
      }
      async persistWorkspace() {
          if (this.state.workspacePersistence === 'snapshot') {
-@@ -251,7 +315,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+@@ -251,7 +322,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
          return this.state.manifest.ephemeralPersistencePaths().size > 0;
      }
      async replaceSandboxFromSnapshot(snapshotId) {
@@ -395,7 +404,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56a
          const previousSandbox = this.sandbox;
          let sandbox;
          try {
-@@ -542,11 +606,12 @@ class E2BSandboxClient {
+@@ -542,11 +613,12 @@ class E2BSandboxClient {
              };
              validateOptions(resolvedOptions);
              (0, shared_1.assertSandboxManifestMetadataSupported)('E2BSandboxClient', manifest, shared_1.SANDBOX_MANIFEST_METADATA_SUPPORT);
@@ -409,7 +418,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56a
                  concurrencyLimits: createArgs.concurrencyLimits,
                  archiveLimits: createArgs.archiveLimits,
                  state: {
-@@ -616,9 +681,9 @@ class E2BSandboxClient {
+@@ -616,9 +688,9 @@ class E2BSandboxClient {
              pauseOnExitSupported: (0, shared_1.readOptionalBoolean)(state, 'pauseOnExitSupported') ?? false,
          };
      }
@@ -421,7 +430,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56a
          const connect = Sandbox.connect ?? Sandbox.resume;
          if (connect) {
              try {
-@@ -626,6 +691,7 @@ class E2BSandboxClient {
+@@ -626,6 +698,7 @@ class E2BSandboxClient {
                  return new E2BSandboxSession({
                      state,
                      sandbox,
@@ -429,7 +438,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56a
                      archiveLimits: this.options.archiveLimits,
                  });
              }
-@@ -635,9 +701,15 @@ class E2BSandboxClient {
+@@ -635,9 +708,15 @@ class E2BSandboxClient {
                      provider: 'e2b',
                      details: { sandboxId: state.sandboxId },
                  });
@@ -445,7 +454,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56a
          const manifest = state.manifest;
          const session = await this.create((0, shared_1.manifestWithMaterializedEnvironmentReferences)(manifest, state.environment), {
              ...stateToCreateOptions(state),
-@@ -646,6 +718,9 @@ class E2BSandboxClient {
+@@ -646,6 +725,9 @@ class E2BSandboxClient {
          session.state.manifest = manifest;
          return session;
      }
@@ -455,7 +464,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56a
  }
  exports.E2BSandboxClient = E2BSandboxClient;
  function validateOptions(options) {
-@@ -714,7 +789,7 @@ function e2bReconnectOptions(state) {
+@@ -714,7 +796,7 @@ function e2bReconnectOptions(state) {
  function canPauseE2BSandbox(sandbox) {
      return typeof sandbox.pause === 'function';
  }
@@ -464,7 +473,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56a
      const moduleName = sandboxType === 'e2b_code_interpreter' ? '@e2b/code-interpreter' : 'e2b';
      try {
          const Sandbox = sandboxType === 'e2b_code_interpreter'
-@@ -723,25 +798,44 @@ async function loadE2BSandboxClass(sandboxType) {
+@@ -723,25 +805,44 @@ async function loadE2BSandboxClass(sandboxType) {
          if (!Sandbox) {
              throw new Error(`Missing Sandbox export from ${moduleName}.`);
          }
@@ -514,7 +523,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56a
  async function createSandboxInstance(Sandbox, options, environment) {
      const createOptions = {};
      if (typeof options.timeout === 'number') {
-@@ -826,6 +920,108 @@ function commandResultFromRecord(value) {
+@@ -826,6 +927,108 @@ function commandResultFromRecord(value) {
          stderr,
      };
  }
@@ -624,7 +633,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56a
      if (!(0, shared_1.isRecord)(value)) {
          return undefined;
 diff --git a/dist/sandbox/e2b/sandbox.mjs b/dist/sandbox/e2b/sandbox.mjs
-index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f6a4c4d2c 100644
+index 6453de1e106fddcfe030beabf0056122dbe18566..1904c8127941d1ac05f0d4c00eea65c9664a49be 100644
 --- a/dist/sandbox/e2b/sandbox.mjs
 +++ b/dist/sandbox/e2b/sandbox.mjs
 @@ -7,6 +7,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
@@ -668,16 +677,24 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f
          const timeoutMs = typeof this.state.commandTimeoutMs === 'number'
              ? this.state.commandTimeoutMs
              : typeof this.state.timeout === 'number'
-@@ -62,7 +79,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+@@ -62,9 +79,15 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
              cwd: this.resolveWorkdir(args.workdir),
              envs: this.state.environment,
              timeoutMs,
 -            onData: (data) => appendPtyOutput(entry, data),
 +            onData: (data) => output.write(data),
          });
++        // Ending a command kills its PTY, unless the command already reported
++        // its status: it is over then, and what it left running stays.
++        let statusReported = false;
          entry.terminate = async () => {
++            if (statusReported) {
++                return;
++            }
              if (handle.kill) {
-@@ -86,9 +103,24 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+                 await handle.kill();
+             }
+@@ -86,9 +109,25 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
                  requestTimeoutMs: this.state.requestTimeoutMs,
              });
          };
@@ -689,6 +706,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f
 +        // then, without killing anything. A PTY that ends with no status
 +        // reported (its shell was killed) ends the command with E2B's status.
 +        const reported = output.exited.then((exitCode) => {
++            statusReported = true;
 +            void Promise.resolve()
 +                .then(() => handle.disconnect?.())
 +                .catch(() => { });
@@ -705,7 +723,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f
          try {
              await entry.sendInput(`${command}\n`);
          }
-@@ -143,21 +175,53 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+@@ -143,21 +182,53 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
      }
      async prepareWorkspaceRoot() {
          const root = this.state.manifest.root;
@@ -769,7 +787,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f
      }
      async persistWorkspace() {
          if (this.state.workspacePersistence === 'snapshot') {
-@@ -215,7 +279,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+@@ -215,7 +286,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
          return this.state.manifest.ephemeralPersistencePaths().size > 0;
      }
      async replaceSandboxFromSnapshot(snapshotId) {
@@ -778,7 +796,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f
          const previousSandbox = this.sandbox;
          let sandbox;
          try {
-@@ -505,11 +569,12 @@ export class E2BSandboxClient {
+@@ -505,11 +576,12 @@ export class E2BSandboxClient {
              };
              validateOptions(resolvedOptions);
              assertSandboxManifestMetadataSupported('E2BSandboxClient', manifest, SANDBOX_MANIFEST_METADATA_SUPPORT);
@@ -792,7 +810,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f
                  concurrencyLimits: createArgs.concurrencyLimits,
                  archiveLimits: createArgs.archiveLimits,
                  state: {
-@@ -579,9 +644,9 @@ export class E2BSandboxClient {
+@@ -579,9 +651,9 @@ export class E2BSandboxClient {
              pauseOnExitSupported: readOptionalBoolean(state, 'pauseOnExitSupported') ?? false,
          };
      }
@@ -804,7 +822,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f
          const connect = Sandbox.connect ?? Sandbox.resume;
          if (connect) {
              try {
-@@ -589,6 +654,7 @@ export class E2BSandboxClient {
+@@ -589,6 +661,7 @@ export class E2BSandboxClient {
                  return new E2BSandboxSession({
                      state,
                      sandbox,
@@ -812,7 +830,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f
                      archiveLimits: this.options.archiveLimits,
                  });
              }
-@@ -598,9 +664,15 @@ export class E2BSandboxClient {
+@@ -598,9 +671,15 @@ export class E2BSandboxClient {
                      provider: 'e2b',
                      details: { sandboxId: state.sandboxId },
                  });
@@ -828,7 +846,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f
          const manifest = state.manifest;
          const session = await this.create(manifestWithMaterializedEnvironmentReferences(manifest, state.environment), {
              ...stateToCreateOptions(state),
-@@ -609,6 +681,9 @@ export class E2BSandboxClient {
+@@ -609,6 +688,9 @@ export class E2BSandboxClient {
          session.state.manifest = manifest;
          return session;
      }
@@ -838,7 +856,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f
  }
  function validateOptions(options) {
      readE2BWorkspacePersistence(options.workspacePersistence);
-@@ -676,7 +751,7 @@ function e2bReconnectOptions(state) {
+@@ -676,7 +758,7 @@ function e2bReconnectOptions(state) {
  function canPauseE2BSandbox(sandbox) {
      return typeof sandbox.pause === 'function';
  }
@@ -847,7 +865,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f
      const moduleName = sandboxType === 'e2b_code_interpreter' ? '@e2b/code-interpreter' : 'e2b';
      try {
          const Sandbox = sandboxType === 'e2b_code_interpreter'
-@@ -685,25 +760,44 @@ async function loadE2BSandboxClass(sandboxType) {
+@@ -685,25 +767,44 @@ async function loadE2BSandboxClass(sandboxType) {
          if (!Sandbox) {
              throw new Error(`Missing Sandbox export from ${moduleName}.`);
          }
@@ -897,7 +915,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f
  async function createSandboxInstance(Sandbox, options, environment) {
      const createOptions = {};
      if (typeof options.timeout === 'number') {
-@@ -788,6 +882,108 @@ function commandResultFromRecord(value) {
+@@ -788,6 +889,108 @@ function commandResultFromRecord(value) {
          stderr,
      };
  }

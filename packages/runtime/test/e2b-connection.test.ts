@@ -47,6 +47,7 @@ class RealPty {
   readonly shell: Bun.Subprocess;
   readonly ended: Promise<void>;
   disconnected = false;
+  kills = 0;
   release: () => void = () => {};
   private closed: () => void = () => {};
 
@@ -87,6 +88,7 @@ class RealPty {
         this.disconnected = true;
       },
       kill: async () => {
+        this.kills += 1;
         this.shell.kill(9);
         return true;
       },
@@ -343,6 +345,8 @@ describe("E2B adapter tty commands", () => {
       expect(await run("exit 3")).toEqual({ exitCode: 3, output: "" });
       // Not bash's prompt, the typed line or the marks.
       expect(await run("echo hi there")).toEqual({ exitCode: 0, output: "hi there\r\n" });
+      // A command that reported its status is over: nothing is killed.
+      expect(RealPty.all.map((pty) => pty.kills)).toEqual([0, 0]);
     },
     15_000,
   );
@@ -362,6 +366,7 @@ describe("E2B adapter tty commands", () => {
       );
       expect(handled.exitCode).toBe(4);
       expect(handled.output).toContain("caught");
+      expect(RealPty.all.map((pty) => pty.kills)).toEqual([0, 0]);
     },
     20_000,
   );
@@ -385,6 +390,7 @@ describe("E2B adapter tty commands", () => {
         expect(ended).toBe(false);
         // The adapter stopped following the PTY, and killed nothing.
         expect(pty!.disconnected).toBe(true);
+        expect(pty!.kills).toBe(0);
         const pid = Number(readFileSync(pidFile, "utf8"));
         expect(() => process.kill(pid, 0)).not.toThrow();
         process.kill(pid, "SIGKILL");
