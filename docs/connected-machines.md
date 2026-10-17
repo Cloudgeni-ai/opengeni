@@ -682,13 +682,6 @@ affects future operations only. A connection blip detaches the stream without
 killing the command; replay or exact-instance reconciliation collects its
 terminal result after reconnect.
 
-Shell backgrounding (`&`, a background subshell, or `nohup`) does not transfer
-process ownership out of a command. When its direct shell exits, the runner
-terminates the remaining process group/Job Object and its owned Linux cgroup,
-then drains the pipes. Terminal shell results state this explicitly. Launch
-long-running work in the foreground; the bounded shell tool yield returns a
-durable command ID for `command_read`/`command_wait` without ending that process.
-
 The runner pushes an `OperationCompleted` event after exit and pipe drain,
 independently of the output consumer and its credit. API ingestion uses the
 authenticated control-workspace/enrollment/connection subject and operation ID

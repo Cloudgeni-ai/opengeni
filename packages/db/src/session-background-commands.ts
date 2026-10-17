@@ -3,7 +3,7 @@ import type {
   SessionBackgroundCommandActivity,
   SessionBackgroundCommandReconciliation,
 } from "@opengeni/contracts";
-import { CONNECTED_MACHINE_COMMAND_SCOPE_NOTICE, SessionCommandFailure } from "@opengeni/contracts";
+import { SessionCommandFailure } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, getTableColumns, gte, inArray, sql, type SQL } from "drizzle-orm";
 
@@ -1499,9 +1499,6 @@ export async function readSessionBackgroundCommandOutput(
     state: command.state,
     exitCode: command.exitCode,
     settlementReason: command.settlementReason,
-    ...(command.provider === "connected_machine" && command.state === "exited"
-      ? { scopeNotice: CONNECTED_MACHINE_COMMAND_SCOPE_NOTICE }
-      : {}),
     ...(command.failure ? { failure: command.failure } : {}),
     terminal,
     completionObservedAt: observed?.completionObservedAt ?? null,

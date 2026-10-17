@@ -514,8 +514,6 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     });
     const session = sessionWith(mock);
     const banner = await session.execCommand({ cmd: "ls /workspace/missing" });
-    expect(banner).toContain("Any remaining background child processes were stopped");
-    expect(banner).toContain("command_read/command_wait");
     expect(parseExecBannerExitCode(banner)).toBe(2);
     expect(stripExecBanner(banner)).toBe(stderr);
     const structured = await session.exec({ cmd: "ls /workspace/missing" });

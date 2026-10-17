@@ -18,7 +18,6 @@ import {
 import {
   getSessionBackgroundCommand,
   locateConnectedCommandCompletion,
-  readSessionBackgroundCommandOutput,
 } from "@opengeni/db/session-background-commands";
 import { handleAgentEventPayload } from "../src/sandbox/metrics-ingestion";
 
@@ -129,10 +128,6 @@ test("pushed terminal proof settles the original command once despite route chan
     output_release_observed_at: null,
     output_due: true,
   });
-  const read = await readSessionBackgroundCommandOutput(client.db, command);
-  expect(read.scopeNotice).toContain("Any remaining background child processes were stopped");
-  expect(read.scopeNotice).toContain("command_read/command_wait");
-  expect(read.chunks).toEqual([]);
 });
 
 test("wrong process, enrollment, control workspace and operation cannot settle another command", async () => {
@@ -151,9 +146,6 @@ test("wrong process, enrollment, control workspace and operation cannot settle a
     state: "running",
     exitCode: null,
   });
-  expect(
-    (await readSessionBackgroundCommandOutput(client.db, command)).scopeNotice,
-  ).toBeUndefined();
 });
 
 test("runner failures keep their typed detail and a missing exit is not terminal proof", async () => {

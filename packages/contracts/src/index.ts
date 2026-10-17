@@ -15320,10 +15320,6 @@ export const UninstallPluginResult = /* @__PURE__ */ defineSchema(() =>
 );
 export type UninstallPluginResult = z.infer<typeof UninstallPluginResult>;
 
-/** Shown on proven Connected Machine shell completion, never mixed into stdout. */
-export const CONNECTED_MACHINE_COMMAND_SCOPE_NOTICE =
-  "Command scope closed. Any remaining background child processes were stopped, including jobs started with & or nohup. For long-running work, launch the command in the foreground and use its returned command ID with command_read/command_wait.";
-
 export const SessionBackgroundCommandState = /* @__PURE__ */ defineSchema(() =>
   z.enum(["running", "stopping", "exited", "lost"]),
 );
