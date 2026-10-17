@@ -81,6 +81,8 @@ export type FleetContext = {
   accountId: string;
   workspaceId: string;
   subjectId?: string;
+  /** Only an explicit human move request may consent for the running turn. */
+  consentToCurrentTurn?: boolean;
   attemptAuthority?: {
     turnId: string;
     attemptId: string;
@@ -847,7 +849,7 @@ export async function swapActiveSandbox(
           sessionId: ctx.sessionId,
           targetSandboxId: resolved.targetSandboxId,
           expectedEpoch: pointer.activeEpoch,
-          consentToCurrentTurn: !ctx.attemptAuthority,
+          consentToCurrentTurn: ctx.consentToCurrentTurn === true,
           ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
           ...(ctx.attemptAuthority ? { personalMachineAttempt: ctx.attemptAuthority } : {}),
           ...(resolved.workspaceRoot !== undefined

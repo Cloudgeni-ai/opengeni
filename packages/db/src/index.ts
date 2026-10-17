@@ -60172,23 +60172,33 @@ export async function resolvePersonalMachineConnectionForAttempt(
     requireActiveSandbox?: boolean;
   },
 ): Promise<EnrollmentRecord | null> {
+  return (await resolvePersonalMachineRouteForAttempt(db, input))?.liveConnection ?? null;
+}
+
+/** Preserve authorized machine metadata while its runner is offline. Admission
+ * and liveness are separate: startup may bind the normal offline transport. */
+export async function resolvePersonalMachineRouteForAttempt(
+  db: Database,
+  input: Parameters<typeof resolvePersonalMachineConnectionForAttempt>[1],
+): Promise<{ enrollment: EnrollmentRecord; liveConnection: EnrollmentRecord | null } | null> {
   return await withRlsContext(db, input, async (scopedDb) => {
     await setMachineAttemptSubject(scopedDb, input.subjectId);
-    const [row] = await rawRows<{ value: EnrollmentRecord }>(
+    const [row] = await rawRows<{ value: EnrollmentRecord | null; live: boolean | null }>(
       scopedDb,
-      sql`select machine.value->'enrollment' as value
+      sql`select machine.value->'enrollment' as value,
+          nullif(machine.value->'enrollment'->>'connectionInstanceId', '') is not null
+          and nullif(machine.value->'enrollment'->>'connectionLeaseExpiresAt', '')::timestamptz
+            > clock_timestamp() as live
         from get_session_attempt_machine(
             ${input.accountId}::uuid, ${input.workspaceId}::uuid,
             ${input.sessionId}::uuid, ${input.turnId}::uuid,
             ${input.attemptId}::uuid, ${input.executionGeneration}::integer,
             null, ${input.enrollmentId}::uuid, ${input.requireActiveSandbox !== false}, false
         ) machine(value)
-        where nullif(machine.value->'enrollment'->>'connectionInstanceId', '') is not null
-          and nullif(machine.value->'enrollment'->>'connectionLeaseExpiresAt', '')::timestamptz
-            > clock_timestamp()
         limit 1`,
     );
-    return row?.value ?? null;
+    if (!row?.value) return null;
+    return { enrollment: row.value, liveConnection: row.live ? row.value : null };
   });
 }
 
@@ -62761,8 +62771,11 @@ export async function setActiveSandbox(
       let personalEnrollmentId: string | null = null;
       // Take the session lock before machine locks, matching attempt claim.
       // A lost CAS must not leave behind consent for a move that did not happen.
-      const [session] = await scopedDb.execute<{ active_epoch: number }>(sql`
-        select active_epoch from sessions
+      const [session] = await scopedDb.execute<{
+        active_epoch: number;
+        active_turn_id: string | null;
+      }>(sql`
+        select active_epoch, active_turn_id from sessions
         where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
         for no key update
       `);
@@ -62806,6 +62819,16 @@ export async function setActiveSandbox(
               return { swapped: false, pointer: null, refusal: "target_unavailable" };
             }
             personalEnrollmentId = target.value.enrollmentId;
+            if (!input.personalMachineAttempt && !input.consentToCurrentTurn) {
+              const [recovering] = await scopedDb.execute<{ present: boolean }>(sql`
+                select exists(select 1 from session_turns
+                  where workspace_id = ${input.workspaceId} and session_id = ${input.sessionId}
+                    and status = 'recovering') as present
+              `);
+              if (session.active_turn_id || recovering?.present) {
+                return { swapped: false, pointer: null, refusal: "not_permitted" };
+              }
+            }
             if (input.personalMachineAttempt) {
               const [admission] = await rawRows<{ authorized: boolean }>(
                 scopedDb,

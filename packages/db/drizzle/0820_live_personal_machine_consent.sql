@@ -14,7 +14,8 @@ BEGIN
     'organization_memberships', 'workspace_memberships', 'session_turns', 'session_turn_attempts'
   ] LOOP
     EXECUTE format('CREATE POLICY scoped_compute_capability_lock ON %I FOR UPDATE USING '
-      || '(scoped_compute_policy_capability_active(current_user, %L, NULL)) WITH CHECK (false)',
+      || '(account_id = nullif(current_setting(''opengeni.account_id'', true), '''')::uuid '
+      || 'AND (SELECT scoped_compute_policy_capability_active(current_user, %L, NULL))) WITH CHECK (false)',
       table_name, current_user);
   END LOOP;
 END

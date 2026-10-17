@@ -17,6 +17,7 @@ import {
   initializeSessionStartAtomically,
   recoverSessionDispatch,
   resolvePersonalMachineConnectionForAttempt,
+  resolvePersonalMachineRouteForAttempt,
   setActiveSandbox,
   withRlsContext,
   type DbClient,
@@ -190,18 +191,42 @@ describe("live personal machine consent under FORCE RLS", () => {
         }),
       ).toMatchObject({ id: f.enrollmentId, connectionInstanceId: "connection-1" });
       expect(await uses()).toHaveLength(1);
-      await withRlsContext(client.db, { accountId: f.accountId, workspaceId: f.workspaceId }, async (tx) => {
-        await tx.execute(sql`select
+      await shared.admin`update enrollments set connection_lease_expires_at = now() - interval '1 second'
+        where id = ${f.enrollmentId}`;
+      expect(
+        await resolvePersonalMachineRouteForAttempt(client.db, {
+          ...runtime,
+          enrollmentId: f.enrollmentId,
+        }),
+      ).toMatchObject({
+        enrollment: { id: f.enrollmentId, workspaceRoot: "/srv/build" },
+        liveConnection: null,
+      });
+      expect(
+        await resolvePersonalMachineConnectionForAttempt(client.db, {
+          ...runtime,
+          enrollmentId: f.enrollmentId,
+        }),
+      ).toBeNull();
+      await shared.admin`update enrollments set connection_lease_expires_at = now() + interval '1 hour'
+        where id = ${f.enrollmentId}`;
+      await withRlsContext(
+        client.db,
+        { accountId: f.accountId, workspaceId: f.workspaceId },
+        async (tx) => {
+          await tx.execute(sql`select
           set_config('opengeni.subject_id', ${subjectId ?? ""}, true),
           set_config('opengeni.initiating_human_subject_id', ${subjectId ?? ""}, true)`);
-        await tx.execute(sql`select get_session_attempt_machine(${f.accountId}::uuid, ${f.workspaceId}::uuid,
+          await tx.execute(sql`select get_session_attempt_machine(${f.accountId}::uuid, ${f.workspaceId}::uuid,
           ${session.id}::uuid, ${first.turnId}::uuid, ${first.attemptId}::uuid,
           ${first.executionGeneration}::integer, ${f.sandboxId}::uuid, null, false, true)`);
-        const [actor] = await tx.execute(sql`select current_setting('opengeni.subject_id') as subject,
+          const [actor] =
+            await tx.execute(sql`select current_setting('opengeni.subject_id') as subject,
           current_setting('opengeni.initiating_human_subject_id') as initiator`);
-        expect(actor).toEqual({ subject: subjectId ?? "", initiator: subjectId ?? "" });
-      });
-      expect(await uses()).toHaveLength(1);
+          expect(actor).toEqual({ subject: subjectId ?? "", initiator: subjectId ?? "" });
+        },
+      );
+      expect(await uses()).toHaveLength(3);
       expect(await getSandbox(client.db, { ...f, subjectId: f.member }, f.sandboxId)).toBeNull();
       await expect(
         resolvePersonalMachineConnectionForAttempt(client.db, {

@@ -4,7 +4,7 @@ import {
   getSandboxForAttempt,
   readActiveSandbox,
   getLiveEnrollmentConnection,
-  resolvePersonalMachineConnectionForAttempt,
+  resolvePersonalMachineRouteForAttempt,
   type SandboxRecord,
 } from "@opengeni/db";
 import {
@@ -311,6 +311,33 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
   };
 }
 
+/** Turn startup needs authorized metadata even when the machine's runner is
+ * offline. Keep the missing live connection for the normal offline transport. */
+export async function resolveMachineEnrollmentForTurn(
+  db: ActivityServices["db"],
+  sandbox: SandboxRecord,
+  authority: Omit<Parameters<typeof resolvePersonalMachineRouteForAttempt>[1], "enrollmentId">,
+) {
+  if (sandbox.scope === "user") {
+    const route = await resolvePersonalMachineRouteForAttempt(db, {
+      ...authority,
+      enrollmentId: sandbox.enrollmentId!,
+    });
+    if (!route) throw new Error("personal Connected Machine use was not admitted for this turn");
+    return route;
+  }
+  const liveConnection = await getLiveEnrollmentConnection(
+    db,
+    sandbox.workspaceId,
+    sandbox.enrollmentId!,
+  );
+  return {
+    enrollment:
+      liveConnection ?? (await getEnrollment(db, sandbox.workspaceId, sandbox.enrollmentId!)),
+    liveConnection,
+  };
+}
+
 export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Promise<void> {
   // One fresh-box readiness replacement per turn attempt, shared by the eager
   // establish and every lazy provisioner retry of this attempt.
@@ -464,35 +491,16 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
         // Whether the machine's latest Hello advertised the op-stream engine
         // (refreshed on every connect). Read only when the server flag is on —
         // one indexed lookup, and the flag off keeps this path byte-identical.
-        const liveMachineEnrollment =
-          activeSandboxRecord!.scope === "user"
-            ? await resolvePersonalMachineConnectionForAttempt(db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                subjectId: fileAuthoritySubjectId,
-                sessionId: input.sessionId,
-                turnId: turn.id,
-                attemptId: input.attemptId,
-                executionGeneration: turn.executionGeneration,
-                enrollmentId: activeSandboxRecord!.enrollmentId!,
-              })
-            : await getLiveEnrollmentConnection(
-                db,
-                activeSandboxRecord!.workspaceId,
-                activeSandboxRecord!.enrollmentId!,
-              );
-        if (activeSandboxRecord!.scope === "user" && !liveMachineEnrollment) {
-          throw new Error("personal Connected Machine use was not admitted for this turn");
-        }
-        const machineEnrollment =
-          liveMachineEnrollment ??
-          (activeSandboxRecord!.scope === "user"
-            ? null
-            : await getEnrollment(
-                db,
-                activeSandboxRecord!.workspaceId,
-                activeSandboxRecord!.enrollmentId!,
-              ));
+        const { enrollment: machineEnrollment, liveConnection: liveMachineEnrollment } =
+          await resolveMachineEnrollmentForTurn(db, activeSandboxRecord!, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: fileAuthoritySubjectId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            attemptId: input.attemptId,
+            executionGeneration: turn.executionGeneration,
+          });
         if (!machineEnrollment?.workspaceRoot) {
           throw new Error(
             "Connected Machine has not reported an absolute workspace root; reconnect it with a current agent",
