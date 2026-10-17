@@ -47,6 +47,7 @@ import {
 export * from "./agent-instruction-changes";
 export * from "./bundled-skills";
 export * from "./skill-use";
+export * from "./learning-refusal";
 import { BundledSkillSelection } from "./bundled-skills";
 import { SkillWriteReceipt, SkillSourceReleaseReceipt, SkillPublicationReceipt } from "./skills";
 import { readSkillMetadata } from "./skill-metadata";

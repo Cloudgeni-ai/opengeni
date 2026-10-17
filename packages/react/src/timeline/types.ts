@@ -1,3 +1,4 @@
+import type { LearningRefusal } from "@opengeni/sdk/learning-refusal";
 import type {
   AllowanceExhaustedRefusal,
   HumanInputQuestion,
@@ -450,6 +451,13 @@ export type NoticeItem = {
    * `MessageTimeline` renders it as a "Usage limit reached" row.
    */
   sessionUsageLimit?: SessionUsageLimitStop;
+  /**
+   * A Skill, workspace instruction, or Knowledge change the agent tried to
+   * save was refused. `text` keeps the plain sentence for plain-text
+   * consumers; `MessageTimeline` renders it as a "Not saved" row with the
+   * place where the change can still be made.
+   */
+  learningRefusal?: LearningRefusal;
   occurredAt: string;
 };
 
