@@ -20,6 +20,7 @@ use std::io;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -397,7 +398,7 @@ impl Firecracker {
             api,
             cgroup: self.cgroup_of(spec),
             jail: jail.clone(),
-            memory_low: u64::from(spec.memory_request_mib) << 20,
+            memory_low: AtomicU64::new(u64::from(spec.memory_request_mib) << 20),
             runtime: recorded_runtime(jail),
         })
     }
@@ -600,7 +601,7 @@ pub struct FirecrackerVm {
     cgroup: Cgroup,
     jail: Jail,
     /// Bytes of its memory protected from reclaim for others while it runs.
-    memory_low: u64,
+    memory_low: AtomicU64,
     balloon: Balloon,
     /// See [`Engine::vm_runtime`].
     runtime: String,
@@ -704,7 +705,8 @@ impl FirecrackerVm {
     /// its memory guarantee.
     fn guard_running(&self) -> io::Result<()> {
         self.cgroup.close_zswap()?;
-        self.cgroup.set_memory_low(self.memory_low)
+        self.cgroup
+            .set_memory_low(self.memory_low.load(Ordering::Acquire))
     }
 
     async fn set_state(&self, operation: &'static str, run: RunState) -> Result<(), EngineError> {
@@ -1073,6 +1075,21 @@ impl Engine for Firecracker {
             PageSize::Huge => vm.cgroup.huge_page_bytes(),
         }
         .map_err(|error| EngineError::io("resident_bytes", error))
+    }
+
+    fn set_guarantees(
+        &self,
+        vm: &FirecrackerVm,
+        memory_request_mib: u32,
+        cpu_weight: u16,
+    ) -> Result<(), EngineError> {
+        vm.cgroup
+            .set_cpu_weight(cpu_weight)
+            .map_err(|error| EngineError::io("set_guarantees", error))?;
+        // Applied by its next resume, as every running VM's is.
+        vm.memory_low
+            .store(u64::from(memory_request_mib) << 20, Ordering::Release);
+        Ok(())
     }
 
     fn cpu_time(&self, vm: &FirecrackerVm) -> Result<Duration, EngineError> {

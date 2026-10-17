@@ -71,7 +71,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep, timeout};
 
-use crate::image::{Depth, Images, Parts, Suspect};
+use crate::image::{CHUNK_BYTES, Depth, Images, Parts, Suspect, Verified, ZERO};
 use crate::layout::{
     Machine, Paths, copy_size, copy_sparse, link_kernel, remove_if_present, sync_parent,
     templates_dir, write_atomic,
@@ -368,11 +368,27 @@ struct FileId {
 pub(crate) struct Template {
     dir: PathBuf,
     inputs: Inputs,
+    /// Bytes of its memory image that are not zeros, in whole chunks: what
+    /// a VM restored from it holds of guest memory once every page of the
+    /// image is in; see [`Template::footprint`].
+    footprint: u64,
 }
 
 impl Template {
     pub fn shape(&self) -> Shape {
         self.inputs.shape
+    }
+
+    /// Bytes of guest memory a VM restored from it holds once its whole
+    /// image is in, before its guest touches memory the image never held:
+    /// every chunk of the image that is not zeros.
+    pub fn footprint(&self) -> u64 {
+        self.footprint
+    }
+
+    /// Its disk, which every sandbox started from it copies.
+    pub fn disk(&self) -> PathBuf {
+        self.dir.join(DISK)
     }
 
     /// Whether the template still fits today's `sources`. Blocks, as
@@ -391,13 +407,19 @@ impl Template {
         let inputs: Inputs = serde_json::from_slice(&fs::read(dir.join(INPUTS))?)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let fits = inputs == *now && dir.file_name().is_some_and(|name| *name == *now.dir_name());
-        let template = Self {
+        let mut template = Self {
             dir: dir.to_owned(),
             inputs,
+            footprint: 0,
         };
-        if !fits || !matches!(template.images().current_verified(), Ok(Some(_))) {
+        if !fits {
             return Ok(None);
         }
+        let images = template.images();
+        let Ok(Some(image)) = images.current_verified() else {
+            return Ok(None);
+        };
+        template.footprint = footprint(&images, &image)?;
         Ok(Some(template))
     }
 
@@ -926,23 +948,25 @@ async fn attempt<E: Engine>(
     blocking(move || publish(&root, inputs, &paths, &files, &runtime)).await
 }
 
-/// What a build of `shape` may write to local disk at most: its copies of
-/// the files it copies in, `sources` (the base image and the kernel), as
-/// [`copy_size`] counts them on a filesystem allocating `unit` bytes at a
-/// time, and a snapshot of the whole of guest memory, `copies` times where
+/// What a build of `shape` may write to local disk at most: its disk, a
+/// copy of `base_image` its guest writes to while it boots, at the most a
+/// disk may take (see [`disk_bound`]); its copy of `kernel`, as
+/// [`copy_size`] counts it on a filesystem allocating `unit` bytes at a
+/// time; and a snapshot of the whole of guest memory, `copies` times where
 /// publishing it cannot share extents, plus `extra` for its device state;
 /// with the inodes of two saves for the build's few files.
+///
+/// [`disk_bound`]: crate::disk_growth::disk_bound
 pub(crate) fn build_disk(
     shape: Shape,
-    sources: &[&Path],
+    base_image: &Path,
+    kernel: &Path,
     unit: u64,
     copies: u64,
     extra: u64,
 ) -> io::Result<DiskSpace> {
-    let mut copy = 0_u64;
-    for file in sources {
-        copy = copy.saturating_add(copy_size(file, unit)?);
-    }
+    let disk = crate::disk_growth::disk_bound(fs::metadata(base_image)?.len(), unit);
+    let copy = disk.saturating_add(copy_size(kernel, unit)?);
     let snapshot = DiskSpace::save(shape.bytes().saturating_mul(copies).saturating_add(extra));
     Ok(DiskSpace {
         bytes: snapshot.bytes.saturating_add(copy),
@@ -1000,7 +1024,8 @@ fn publish(
     fs::rename(&paths.disk, &disk)?;
     compute_engine::confined::check_written(&disk)?;
     seal(&disk)?;
-    Images::new(staging.join("images"))
+    let images = Images::new(staging.join("images"));
+    images
         .publish_made_by(
             Parts::Whole {
                 state: &written.state,
@@ -1010,6 +1035,10 @@ fn publish(
             Some(runtime),
         )
         .map_err(io::Error::other)?;
+    let footprint = match images.current_verified() {
+        Ok(Some(image)) => footprint(&images, &image)?,
+        _ => inputs.shape.bytes(),
+    };
     let encoded = serde_json::to_vec_pretty(&inputs).map_err(io::Error::other)?;
     write_atomic(&staging.join(INPUTS), &encoded)?;
     let ready = templates.join(&name);
@@ -1025,7 +1054,21 @@ fn publish(
             remove_dir(&entry.path())?;
         }
     }
-    Ok(Template { dir: ready, inputs })
+    Ok(Template {
+        dir: ready,
+        inputs,
+        footprint,
+    })
+}
+
+/// Bytes of `image`'s memory, in `images`, that are not zeros, in whole
+/// chunks.
+fn footprint(images: &Images, image: &Verified) -> io::Result<u64> {
+    let chunks = images.chunk_map(image)?;
+    let data = chunks.0.iter().filter(|hash| **hash != ZERO).count();
+    Ok((data as u64)
+        .saturating_mul(CHUNK_BYTES)
+        .min(image.meta().memory_len))
 }
 
 /// Makes the template's disk read-only and the agent's, so nothing changes

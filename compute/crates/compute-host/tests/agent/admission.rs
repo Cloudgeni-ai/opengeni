@@ -240,3 +240,67 @@ async fn the_buffer_is_kept_ahead_of_wakes_in_the_background() {
     );
     lab.assert_clean();
 }
+
+/// Watermarks that `available` bytes of host memory are far above
+/// (`room`) or far below (no room).
+fn memory_policy(room: bool) -> HostPolicy {
+    let available = compute_host::host_memory::available(false).unwrap_or(1 << 40);
+    let (low, high) = if room {
+        (MIB, 2 * MIB)
+    } else {
+        (available * 4, available * 8)
+    };
+    HostPolicy {
+        memory: Some(compute_core::MemoryPolicy {
+            low_watermark: low,
+            high_watermark: high,
+            compressed_percent: 30,
+            balloon_grace: Duration::from_millis(200),
+        }),
+        ..HostPolicy::default()
+    }
+}
+
+/// A sandbox in use that was paused and saved for host memory wakes by
+/// itself once there is room, even after the agent that paused it was
+/// restarted: whether it waits for memory is kept across restarts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_paused_for_memory_wakes_by_itself_after_a_restart() {
+    let sandbox = id(31);
+    let lab = Lab::new(Delays::default(), memory_policy(true)).await;
+    // The fake's VMs hold 100 MiB: above this request.
+    let config = SandboxConfig {
+        memory_request_mib: Some(64),
+        ..SandboxConfig::new(1, 256, NEVER)
+    };
+    let created = lab
+        .client
+        .call(&Request::Create {
+            id: sandbox,
+            config,
+        })
+        .await
+        .unwrap();
+    assert_eq!(created, Reply::Done);
+    woke(&lab.wake(sandbox).await);
+
+    // No room: its balloon gives nothing back, so it is paused and saved.
+    let (root, world) = lab.stop().await;
+    let lab = Lab::start(root, world, Delays::default(), memory_policy(false)).await;
+    lab.wait_until("the sandbox saved for memory", |status| {
+        Lab::sandbox(status, sandbox).level == LevelName::Saved
+    })
+    .await;
+    sleep_a_little().await;
+
+    // A new agent finds room and wakes it, with nothing asking.
+    let (root, world) = lab.stop().await;
+    let lab = Lab::start(root, world, Delays::default(), memory_policy(true)).await;
+    lab.wait_level(sandbox, LevelName::Running).await;
+    lab.assert_clean();
+}
+
+/// Long enough for a background write of the holds file to land.
+async fn sleep_a_little() {
+    tokio::time::sleep(Duration::from_millis(300)).await;
+}

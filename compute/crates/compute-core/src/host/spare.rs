@@ -135,6 +135,9 @@ impl Host {
         if spare.filling && !filling {
             self.unread_claims = self.unread_claims.saturating_add(spare.bytes);
         }
+        // What it no longer books may have been written, such as a ready
+        // sandbox's disk copy once it is filled: the next reading shows it.
+        self.disk_spent = self.disk_spent.add(spare.disk.saturating_sub(disk));
         spare.bytes = bytes;
         spare.disk = disk;
         spare.filling = filling;
@@ -179,10 +182,7 @@ impl Host {
     /// reading.
     #[must_use]
     pub fn spare_fits(&self, bytes: u64, disk: DiskSpace) -> bool {
-        self.spare_room().is_none_or(|room| room >= bytes)
-            && self
-                .disk_room()
-                .is_none_or(|mut room| room.take(disk).is_ok())
+        self.spare_room().is_none_or(|room| room >= bytes) && self.disk_shortage(disk).is_none()
     }
 
     /// Asks ready spare VMs to end, oldest first, until they free `needed`

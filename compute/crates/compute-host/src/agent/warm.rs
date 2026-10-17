@@ -299,7 +299,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let disk = pool::build_disk(
             shape,
-            &[&sources.base_image, &sources.kernel],
+            &sources.base_image,
+            &sources.kernel,
             self.allocation_unit,
             self.save_copies,
             SAVE_EXTRA,

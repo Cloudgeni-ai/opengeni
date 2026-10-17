@@ -1,6 +1,8 @@
-//! Whether the host's local disk can take the next save of every VM whose
-//! state is not saved yet, and the background relief that keeps it so;
-//! see [`crate::DiskPolicy`].
+//! Whether the host's local disk can take everything its sandboxes may
+//! still write: the next save of every VM whose state is not saved yet,
+//! what the disks of awake VMs may grow by, and what wakes from object
+//! storage still write locally; and the background relief that keeps it
+//! so; see [`crate::DiskPolicy`].
 
 use core::fmt;
 
@@ -62,11 +64,23 @@ impl DiskSpace {
         }
     }
 
-    fn saturating_sub(self, other: Self) -> Self {
+    pub(super) fn saturating_sub(self, other: Self) -> Self {
         Self {
             bytes: self.bytes.saturating_sub(other.bytes),
             inodes: self.inodes.saturating_sub(other.inodes),
         }
+    }
+
+    /// The larger of each part.
+    pub(super) fn max(self, other: Self) -> Self {
+        Self {
+            bytes: self.bytes.max(other.bytes),
+            inodes: self.inodes.max(other.inodes),
+        }
+    }
+
+    fn bytes(bytes: u64) -> Self {
+        Self { bytes, inodes: 0 }
     }
 }
 
@@ -76,7 +90,10 @@ impl DiskSpace {
 pub struct DiskCapacity {
     /// What the disk had available at the last reading.
     pub available: DiskSpace,
-    /// What the next saves of VMs not saved yet may need at most.
+    /// What sandboxes may still write at most: the next saves of VMs not
+    /// saved yet, the growth of awake VMs' disks and the local copies
+    /// wakes from object storage still write, and what spare VMs may
+    /// still write; with what any of them wrote since the last reading.
     pub booked: DiskSpace,
     /// What is never booked; see [`crate::DiskPolicy::reserve`].
     pub reserve: DiskSpace,
@@ -146,22 +163,45 @@ impl Sandbox {
         DiskSpace::save(self.size.save)
     }
 
-    /// What a wake of it books besides what it already does.
-    pub(super) fn save_need(&self) -> DiskSpace {
+    /// What it books on local disk now: its next save while its VM holds
+    /// state no copy has; what its disk may grow by while it is awake or
+    /// waking, since only a running VM writes to it; and what a wake from
+    /// object storage still writes locally, from its admission, across
+    /// any retry, until its copy is whole.
+    pub(super) fn disk_booking(&self) -> DiskSpace {
+        let mut booked = DiskSpace::default();
         if self.books_save() {
-            DiskSpace::default()
-        } else {
-            self.save_space()
+            booked = booked.add(self.save_space());
         }
+        if self.reserves() {
+            booked = booked.add(DiskSpace::bytes(self.local_disk.growth));
+        }
+        if self.local_disk.hydrating || (self.reserves() && self.state.level == Level::Remote) {
+            booked = booked.add(DiskSpace::save(self.size.fetch));
+        }
+        booked
+    }
+
+    /// What a wake of it books besides what it already does: its next
+    /// save, its disk's growth, and from object storage its local copy.
+    pub(super) fn disk_need(&self) -> DiskSpace {
+        let mut awake = self
+            .save_space()
+            .add(DiskSpace::bytes(self.local_disk.growth));
+        if self.local_disk.hydrating || self.state.level == Level::Remote {
+            awake = awake.add(DiskSpace::save(self.size.fetch));
+        }
+        awake.saturating_sub(self.disk_booking())
     }
 }
 
 impl Host {
-    /// How much of the host's local disk saves have booked, or `None`
-    /// without a disk policy or a reading. Spare VMs book what they may
-    /// still write, such as a template build its snapshot. What steps and
-    /// spare VMs that finished since that reading wrote stays booked until
-    /// the next one.
+    /// How much of the host's local disk is booked, or `None` without a
+    /// disk policy or a reading: what sandboxes may still write (see
+    /// [`DiskCapacity::booked`]), and what spare VMs may, such as a
+    /// template build its snapshot. What any booking that ended since that
+    /// reading stood for stays booked until the next one, which shows what
+    /// was written.
     #[must_use]
     pub fn disk(&self) -> Option<DiskCapacity> {
         let policy = self.policy.disk?;
@@ -169,10 +209,13 @@ impl Host {
         let booked = self
             .sandboxes
             .values()
-            .filter(|slot| slot.books_save())
             .fold(self.disk_spent.add(self.spares.disk()), |sum, slot| {
-                sum.add(slot.save_space())
+                sum.add(slot.disk_booking())
             });
+        let booked = self
+            .writes
+            .values()
+            .fold(booked, |sum, disk| sum.add(*disk));
         Some(DiskCapacity {
             available,
             booked,
@@ -181,6 +224,84 @@ impl Host {
                 inodes: policy.reserve_inodes,
             },
         })
+    }
+
+    /// Brings `id`'s disk booking up to date. What it no longer books
+    /// stays counted until the next reading, which shows what was written
+    /// meanwhile. A wake from object storage whose sandbox has nothing
+    /// local left, nor a step that could write it, writes no more.
+    pub(super) fn rebook_disk(&mut self, id: SandboxId) {
+        let Some(slot) = self.sandboxes.get_mut(&id) else {
+            return;
+        };
+        if slot.local_disk.hydrating
+            && slot.state.level == Level::Remote
+            && slot.in_flight.is_none()
+        {
+            slot.local_disk.hydrating = false;
+        }
+        let booked = slot.disk_booking();
+        self.disk_spent = self
+            .disk_spent
+            .add(slot.local_disk.booked.saturating_sub(booked));
+        slot.local_disk.booked = booked;
+    }
+
+    /// Takes in [`crate::Input::DiskGrowth`]: what `id`'s disk may still
+    /// grow by. A smaller number than before stands for what the disk
+    /// grew by, which only a reading taken after it shows: it stays
+    /// booked until then, and a reading later in the same batch ends that
+    /// at once.
+    pub(super) fn disk_growth(&mut self, id: SandboxId, bytes: u64) {
+        if let Some(slot) = self.sandboxes.get_mut(&id) {
+            slot.local_disk.growth = bytes;
+            self.mark(id);
+        }
+        self.rebook_disk(id);
+    }
+
+    /// Takes in [`crate::Input::Hydrating`]. What a finished wake no
+    /// longer books is rebooked at once, as for [`Self::disk_growth`], so
+    /// a reading later in the same batch, which shows what it wrote, ends
+    /// it.
+    pub(super) fn hydrating(&mut self, id: SandboxId, hydrating: bool) {
+        if let Some(slot) = self.sandboxes.get_mut(&id) {
+            slot.local_disk.hydrating = hydrating;
+            self.mark(id);
+        }
+        self.rebook_disk(id);
+    }
+
+    /// Takes in [`crate::Input::Disk`]: it shows everything written so
+    /// far, so nothing that ended before it stays booked.
+    pub(super) fn disk_read(&mut self, available: DiskSpace) {
+        self.disk = Some(available);
+        self.disk_fresh = true;
+        self.disk_spent = DiskSpace::default();
+    }
+
+    /// Takes in [`crate::Input::Writes`].
+    pub(super) fn writes(&mut self, key: SandboxId, disk: DiskSpace) {
+        let before = if disk == DiskSpace::default() {
+            self.writes.remove(&key)
+        } else {
+            self.writes.insert(key, disk)
+        };
+        self.disk_spent = self
+            .disk_spent
+            .add(before.unwrap_or_default().saturating_sub(disk));
+    }
+
+    /// What is short, if anything, for work that may write `disk` to
+    /// local disk: the resource, what it needs and what is free. Nothing
+    /// fits before the first reading; everything does without a disk
+    /// policy.
+    #[must_use]
+    pub fn disk_shortage(&self, disk: DiskSpace) -> Option<(Resource, u64, u64)> {
+        let mut room = self.disk_room()?;
+        room.take(disk)
+            .err()
+            .map(|short| (short.resource, short.needed, short.free))
     }
 
     /// What wakes may still book in one decision: nothing before the first
@@ -221,7 +342,7 @@ impl Host {
             .refused
             .iter()
             .filter_map(|id| self.sandboxes.get(id))
-            .fold(DiskSpace::default(), |sum, slot| sum.add(slot.save_need()));
+            .fold(DiskSpace::default(), |sum, slot| sum.add(slot.disk_need()));
         let leaving = self
             .sandboxes
             .values()

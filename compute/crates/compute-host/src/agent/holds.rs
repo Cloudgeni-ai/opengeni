@@ -4,6 +4,12 @@
 //! that lapsed meanwhile. The holds a connection takes end with the
 //! connection, which a restart ends too, so only named holds are kept.
 //!
+//! The same file keeps whether the sandbox waits, saved, for host memory
+//! after a pause for it (see [`compute_core::Notice::PausedForMemory`]), so
+//! after a restart it still wakes by itself once there is room. It wants
+//! the sandbox awake, as a hold does, and like one is written by the same
+//! writer, so the file always holds the latest of both.
+//!
 //! Writes run in the background, one at a time per sandbox. A write that
 //! has started keeps the sandbox's writer and a share of the state root's
 //! ownership until it lands, even when nobody waits for it any more, so
@@ -20,6 +26,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use compute_core::HoldId;
+use serde::{Deserialize, Serialize};
 
 use crate::layout::write_atomic;
 use crate::state::Ownership;
@@ -34,6 +41,17 @@ pub(super) type Closing = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// The hold an unreadable holds file becomes: which holds it kept is
 /// unknown, so the sandbox stays awake until this is released by name.
 pub(super) const UNREADABLE: &str = "holds-file-unreadable";
+
+/// What a holds file keeps.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Kept {
+    /// Each named hold, with when it lapses.
+    holds: BTreeMap<String, Option<u64>>,
+    /// Host memory the sandbox's VM held when it was paused for memory, if
+    /// it waits for room to wake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paused_for_memory: Option<u64>,
+}
 
 /// The hold id for a hold named through the API. Leases count up from one,
 /// so named holds take the upper half of the id space.
@@ -51,6 +69,9 @@ pub(super) struct Holds {
     /// When each lapses, in milliseconds since the Unix epoch; `None` lasts
     /// until released.
     named: BTreeMap<String, Option<u64>>,
+    /// Host memory its VM held when it was paused for memory, while it
+    /// waits for room to wake.
+    paused_for_memory: Option<u64>,
     /// Changes made so far; each write carries the count it saw.
     changes: u64,
     /// Held while writing, so writes happen one at a time and an older
@@ -74,6 +95,7 @@ impl Holds {
         Self {
             path,
             named: BTreeMap::new(),
+            paused_for_memory: None,
             changes: 0,
             writer: Arc::default(),
             owner,
@@ -86,16 +108,19 @@ impl Holds {
     /// unknown, and dropping one a caller counts on could let the sandbox
     /// sleep, and in time forget its memory, under a running task. The
     /// file stays, so a restart finds the same, until the next write
-    /// replaces it; a copy is kept beside it for inspection.
+    /// replaces it; a copy is kept beside it for inspection. That hold
+    /// keeps the sandbox wanted awake, so a wait for memory it may have
+    /// kept is not lost either.
     pub fn load(path: PathBuf, now_ms: u64, owner: Ownership) -> (Self, Option<io::Error>) {
         let mut holds = Self::new(path, owner);
         let read = std::fs::read(&holds.path).and_then(|bytes| {
-            serde_json::from_slice(&bytes)
+            serde_json::from_slice::<Kept>(&bytes)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
         });
         match read {
-            Ok(named) => {
-                holds.named = named;
+            Ok(kept) => {
+                holds.named = kept.holds;
+                holds.paused_for_memory = kept.paused_for_memory;
                 holds.drop_lapsed(now_ms);
                 (holds, None)
             }
@@ -123,6 +148,18 @@ impl Holds {
     /// Forgets hold `name`. Returns whether it was held.
     pub fn remove(&mut self, name: &str) -> bool {
         self.named.remove(name).is_some()
+    }
+
+    /// Host memory its VM held when it was paused for memory, if it waits
+    /// for room to wake.
+    pub fn paused_for_memory(&self) -> Option<u64> {
+        self.paused_for_memory
+    }
+
+    /// Keeps whether it waits for room after a pause for memory, and how
+    /// much its VM held. Returns whether that changed.
+    pub fn set_paused_for_memory(&mut self, bytes: Option<u64>) -> bool {
+        std::mem::replace(&mut self.paused_for_memory, bytes) != bytes
     }
 
     /// A write of the holds as they are now, less those lapsed by `now_ms`.
@@ -156,7 +193,10 @@ impl Holds {
     /// still waits for it.
     fn persist(&self) -> Write {
         let change = self.changes;
-        let bytes = serde_json::to_vec(&self.named);
+        let bytes = serde_json::to_vec(&Kept {
+            holds: self.named.clone(),
+            paused_for_memory: self.paused_for_memory,
+        });
         let path = self.path.clone();
         let writer = Arc::clone(&self.writer);
         let owner = self.owner.clone();
@@ -268,6 +308,28 @@ mod tests {
         holds.write(1_000).await.unwrap();
         let (loaded, _) = Holds::load(path.clone(), 2_000, Ownership::detached());
         assert_eq!(loaded.named().count(), 0, "lapsed at 2000");
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// A wait for host memory is kept beside the holds, and ends with them
+    /// written again once it is over.
+    #[tokio::test]
+    async fn a_wait_for_memory_comes_back_until_it_is_over() {
+        let path = file();
+        let mut holds = Holds::new(path.clone(), Ownership::detached());
+        holds.set("turn".into(), None);
+        assert!(holds.set_paused_for_memory(Some(1 << 30)));
+        assert!(!holds.set_paused_for_memory(Some(1 << 30)));
+        holds.write(0).await.unwrap();
+        let (loaded, error) = Holds::load(path.clone(), 0, Ownership::detached());
+        assert!(error.is_none());
+        assert_eq!(loaded.paused_for_memory(), Some(1 << 30));
+        assert_eq!(loaded.named().collect::<Vec<_>>(), [("turn", None)]);
+
+        assert!(holds.set_paused_for_memory(None));
+        holds.write(0).await.unwrap();
+        let (loaded, _) = Holds::load(path.clone(), 0, Ownership::detached());
+        assert_eq!(loaded.paused_for_memory(), None);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

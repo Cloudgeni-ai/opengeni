@@ -193,16 +193,23 @@ twice, plus 64 MiB), and bookings plus `--disk-reserve-mib` and
 `--disk-reserve-inodes` (default a twentieth of the filesystem) stay within
 what is free. A booking stays until a reading after its save shows what
 the save used, and nothing needing disk is admitted before the first
-reading. A template build books its copies of the base image and kernel
-(in the state filesystem's allocation unit, learned at start) and its
-snapshot like a save before it starts and waits without the room. The
-state root must be on ext4, XFS or btrfs, where that unit bounds what any
-write takes; the agent refuses to start on any other filesystem. Ready
-sandboxes' disk copies and guests' disk growth are not booked. A wake the
-disk cannot book gets `host_full` naming disk or inodes; archived idle
-sandboxes give up their local copies in the background to make room. The
-status shows the disk (available, booked, reserve, free), and a sandbox's
-`failed_step` with the error while a step such as a save keeps failing.
+reading. Everything else that writes is booked the same way, before it can
+write: an awake VM books what its disk may still grow by (its length in
+whole allocation units, less what it holds alone, measured every sample;
+on XFS and btrfs only blocks no template or base image shares count); a
+wake from object storage books its local disk, the memory image its pager
+fills and its device state until the image is whole; a new sandbox's
+first files and a ready sandbox's fill book their copies before they
+start; and a template build books its disk at its full length, its kernel
+copy and its snapshot. Each of these that cannot be booked waits or is
+refused with `host_full` rather than start. The state filesystem's
+allocation unit is learned at start; the state root must be on ext4, XFS
+or btrfs, where that unit bounds what any write takes, and the agent
+refuses to start on any other filesystem. A wake the disk cannot book gets
+`host_full` naming disk or inodes; archived idle sandboxes give up their
+local copies in the background to make room. The status shows the disk
+(available, booked, reserve, free), and a sandbox's `failed_step` with the
+error while a step such as a save keeps failing.
 
 The request also sets the VM's guarantees in its cgroup: `memory.low` while
 it runs (zero while paused, so the kernel takes from idle VMs first; not
@@ -240,10 +247,13 @@ For each shape (processors and memory) the host keeps a template: a guest
 booted once, paused and saved. A new sandbox gets a copy-on-write copy of its
 disk and shares its memory image, so creating one is a restore, not a boot. A
 ready pool keeps clones already restored and paused, so a create is a resume
-([ADR 12](docs/adr/0012-templates-and-ready-pool.md)). A clone is used only
-once its guest has taken its own id, random seed, machine id and hostname. A
-shape unused for a week gives up its template and ready clones until its
-next create.
+([ADR 12](docs/adr/0012-templates-and-ready-pool.md)). Any create of a clone's
+processors and memory takes it, whatever it requests: the clone's VM is given
+the request's `memory.low` and `cpu.weight` before the claim is recorded. A
+clone is used only once its guest has taken its own id, random seed, machine
+id and hostname. A fill books its template's memory footprint and its disk
+copy until it is ready and measured. A shape unused for a week gives up its
+template and ready clones until its next create.
 
 ## Code map
 

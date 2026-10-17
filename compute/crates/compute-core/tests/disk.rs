@@ -52,11 +52,15 @@ impl Rig {
     }
 
     fn add(&mut self, id: u128, state: State) {
+        self.add_sized(id, state, Size::whole(GIB));
+    }
+
+    fn add_sized(&mut self, id: u128, state: State, size: Size) {
         self.send(Input::Add {
             sandbox: SandboxId(id),
             state,
             policy: rules(),
-            size: Size::whole(GIB),
+            size,
             last_activity: self.now,
         });
     }
@@ -305,4 +309,257 @@ fn a_saved_copy_not_yet_archived_is_archived_first() {
     };
     let actions = rig.finish(1, op);
     assert!(matches!(started(&actions)[..], [(1, Step::Evict, _)]));
+}
+
+#[test]
+fn an_awake_vm_books_what_its_disk_may_still_grow_by() {
+    let mut rig = Rig::new();
+    // Saves of 1 GiB, and disks that may grow by 4 GiB.
+    let size = Size {
+        disk: 4 * GIB,
+        ..Size::whole(GIB)
+    };
+    rig.add_sized(1, saved(), size);
+    rig.add_sized(2, saved(), size);
+    // 8 GiB available, 1 GiB of it reserved: room for one wake's save and
+    // disk growth, not two.
+    rig.disk(8 * GIB, 10_000);
+    wake(&mut rig, 1);
+    assert_eq!(rig.booked(), 5 * GIB);
+    let actions = rig.hold(2);
+    assert_eq!(started(&actions), []);
+    assert_eq!(
+        host_full(&actions, 2),
+        Some((Resource::Disk, 5 * GIB, 2 * GIB))
+    );
+
+    // Its disk grew by 3 GiB: it may grow by 1 GiB more. What it grew by
+    // stays booked until a reading shows it.
+    rig.send(Input::DiskGrowth {
+        sandbox: SandboxId(1),
+        bytes: GIB,
+    });
+    assert_eq!(rig.booked(), 5 * GIB);
+    rig.disk(5 * GIB, 10_000);
+    assert_eq!(rig.booked(), 2 * GIB);
+
+    // Paused, it writes to its disk no more; what it wrote just before
+    // stays booked until a reading shows it.
+    rig.release(1);
+    let actions = rig.at(10);
+    let [(1, Step::Pause, op)] = started(&actions)[..] else {
+        panic!("no pause: {actions:?}");
+    };
+    rig.finish(1, op);
+    assert_eq!(rig.booked(), 2 * GIB);
+    rig.disk(5 * GIB, 10_000);
+    assert_eq!(rig.booked(), GIB, "only its save");
+}
+
+#[test]
+fn a_growth_reading_and_a_disk_reading_in_one_batch_count_the_growth_once() {
+    let mut rig = Rig::new();
+    let size = Size {
+        disk: 4 * GIB,
+        ..Size::whole(GIB)
+    };
+    rig.add_sized(1, saved(), size);
+    rig.disk(8 * GIB, 10_000);
+    wake(&mut rig, 1);
+    let mut out = Vec::new();
+    rig.host.handle_all(
+        rig.now,
+        [
+            Input::DiskGrowth {
+                sandbox: SandboxId(1),
+                bytes: GIB,
+            },
+            Input::Disk {
+                available: DiskSpace {
+                    bytes: 5 * GIB,
+                    inodes: 10_000,
+                },
+            },
+        ],
+        &mut out,
+    );
+    assert_eq!(rig.booked(), 2 * GIB);
+}
+
+#[test]
+fn a_wake_from_object_storage_books_its_local_copy_until_it_is_whole() {
+    let mut rig = Rig::new();
+    // Saves of 1 GiB; a fetch writes its 1 GiB disk and the 1 GiB memory
+    // image its pager fills, with room to spare.
+    let size = Size {
+        fetch: 3 * GIB,
+        ..Size::whole(GIB)
+    };
+    rig.add_sized(1, State::new(Level::Remote, Durability::Remote, true), size);
+    rig.disk(4 * GIB, 10_000);
+    let actions = rig.hold(1);
+    assert_eq!(started(&actions), []);
+    assert_eq!(
+        host_full(&actions, 1),
+        Some((Resource::Disk, 4 * GIB, 3 * GIB))
+    );
+    let actions = rig.disk(5 * GIB, 10_000);
+    let [(1, Step::Fetch, op)] = started(&actions)[..] else {
+        panic!("no fetch: {actions:?}");
+    };
+    assert_eq!(rig.booked(), 4 * GIB);
+    let actions = rig.finish(1, op);
+    let [(1, Step::Restore, op)] = started(&actions)[..] else {
+        panic!("no restore: {actions:?}");
+    };
+    rig.finish(1, op);
+    assert_eq!(rig.level(1), Level::Running);
+    // Its pager still fills the memory image while the guest runs.
+    rig.disk(4 * GIB, 10_000);
+    assert_eq!(rig.booked(), 4 * GIB);
+    rig.send(Input::Hydrating {
+        sandbox: SandboxId(1),
+        hydrating: false,
+    });
+    assert_eq!(rig.booked(), 4 * GIB, "until a reading shows it");
+    rig.disk(2 * GIB, 10_000);
+    assert_eq!(rig.booked(), GIB);
+}
+
+/// The host agent sends the end of a hydration before the disk reading it
+/// takes after it, in one batch: that reading shows what the copy took.
+#[test]
+fn a_hydration_end_and_a_disk_reading_in_one_batch_count_the_copy_once() {
+    let mut rig = Rig::new();
+    let size = Size {
+        fetch: 3 * GIB,
+        ..Size::whole(GIB)
+    };
+    rig.add_sized(1, State::new(Level::Remote, Durability::Remote, true), size);
+    rig.disk(10 * GIB, 10_000);
+    let actions = rig.hold(1);
+    let [(1, Step::Fetch, op)] = started(&actions)[..] else {
+        panic!("no fetch: {actions:?}");
+    };
+    let actions = rig.finish(1, op);
+    let [(1, Step::Restore, op)] = started(&actions)[..] else {
+        panic!("no restore: {actions:?}");
+    };
+    rig.finish(1, op);
+    let mut out = Vec::new();
+    rig.host.handle_all(
+        rig.now,
+        [
+            Input::Hydrating {
+                sandbox: SandboxId(1),
+                hydrating: false,
+            },
+            Input::Disk {
+                available: DiskSpace {
+                    bytes: 7 * GIB,
+                    inodes: 10_000,
+                },
+            },
+        ],
+        &mut out,
+    );
+    assert_eq!(rig.booked(), GIB, "only its next save");
+}
+
+/// A new sandbox's first files are written before the core knows the
+/// sandbox: they are booked from before the copy starts until a reading
+/// taken after it ended, and a copy that does not fit is refused.
+#[test]
+fn writes_outside_steps_stay_booked_until_a_reading_shows_them() {
+    let mut rig = Rig::new();
+    let copy = DiskSpace {
+        bytes: 2 * GIB,
+        inodes: 16,
+    };
+    assert!(
+        rig.host.disk_shortage(copy).is_some(),
+        "nothing fits before a reading"
+    );
+    // 4 GiB available, 1 GiB of it reserved.
+    rig.disk(4 * GIB, 10_000);
+    assert_eq!(rig.host.disk_shortage(copy), None);
+    rig.send(Input::Writes {
+        key: SandboxId(9),
+        disk: copy,
+    });
+    assert_eq!(rig.booked(), 2 * GIB);
+    assert_eq!(
+        rig.host.disk_shortage(copy),
+        Some((Resource::Disk, 2 * GIB, GIB))
+    );
+    rig.send(Input::Writes {
+        key: SandboxId(9),
+        disk: DiskSpace::default(),
+    });
+    assert_eq!(rig.booked(), 2 * GIB, "until a reading shows the copy");
+    rig.disk(2 * GIB, 10_000);
+    assert_eq!(rig.booked(), 0);
+}
+
+#[test]
+fn a_fetch_that_fails_keeps_its_booking_for_its_retry_and_gives_it_up_with_its_wake() {
+    let mut rig = Rig::new();
+    let size = Size {
+        fetch: 3 * GIB,
+        ..Size::whole(GIB)
+    };
+    rig.add_sized(1, State::new(Level::Remote, Durability::Remote, true), size);
+    rig.disk(10 * GIB, 10_000);
+    let actions = rig.hold(1);
+    let [(1, Step::Fetch, op)] = started(&actions)[..] else {
+        panic!("no fetch: {actions:?}");
+    };
+    rig.send(Input::Finished {
+        sandbox: SandboxId(1),
+        op,
+        outcome: Outcome::Failed(compute_core::Failure::Transient),
+    });
+    assert_eq!(rig.level(1), Level::Remote);
+    // Its wake is still admitted and retries without asking again, so it
+    // keeps what it booked.
+    rig.disk(10 * GIB, 10_000);
+    assert_eq!(rig.booked(), 4 * GIB);
+    // Nothing wants it awake any more: what it booked stays until a
+    // reading shows what the failed fetch wrote.
+    rig.send(Input::Remove {
+        sandbox: SandboxId(1),
+    });
+    assert_eq!(rig.booked(), 4 * GIB);
+    rig.disk(10 * GIB, 10_000);
+    assert_eq!(rig.booked(), 0);
+}
+
+#[test]
+fn a_spare_vm_keeps_what_it_wrote_booked_until_the_next_reading() {
+    let mut rig = Rig::new();
+    rig.disk(10 * GIB, 10_000);
+    let spare = SandboxId(9);
+    let copy = DiskSpace {
+        bytes: 2 * GIB,
+        inodes: 4,
+    };
+    assert!(rig.host.spare_fits(GIB, copy));
+    rig.send(Input::Spare {
+        sandbox: spare,
+        bytes: GIB,
+        disk: copy,
+        filling: true,
+    });
+    assert_eq!(rig.booked(), 2 * GIB);
+    // Filled: it writes nothing more, but its copy shows only in the next
+    // reading.
+    rig.send(Input::Spare {
+        sandbox: spare,
+        bytes: GIB,
+        disk: DiskSpace::default(),
+        filling: false,
+    });
+    assert_eq!(rig.booked(), 2 * GIB);
+    rig.disk(8 * GIB, 10_000);
+    assert_eq!(rig.booked(), 0);
 }

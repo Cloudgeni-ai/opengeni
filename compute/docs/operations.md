@@ -20,15 +20,17 @@ and what we chose not to build.
   storage. A directory is for tests and single machines: the agent warns at
   start, and an archive there is lost with the host. Production hosts use
   `gs://`, `az://` or `s3://`.
-- **Disk headroom for saves is the deployment's job.** The agent does not
-  yet book disk for the saves it admits (the admission in
-  [ADR 14](adr/0014-requests-limits-and-admission.md) is being built), and
-  guest disk growth and pages written during a wake from object storage
-  will not be booked even then. A full disk does not lose memory: a save
-  that cannot write fails and is tried again later, and a wake from object
-  storage whose local writes fail waits, shown as stalled, and continues
-  once there is room. Size state volumes for the sandboxes placed on them
-  and alert on free space early, for example below 20 %.
+- **Size state volumes for what is placed on them.** The agent books local
+  disk before anything writes: saves, guest disk growth, wakes from object
+  storage, new sandboxes' first files, ready-sandbox fills and template
+  builds ([ADR 14](adr/0014-requests-limits-and-admission.md)). What it
+  cannot book waits or is refused with `host_full`, so a volume too small
+  for its sandboxes shows as refused wakes and creates, not as lost data.
+  Bookings are worst cases (a disk's full length less what it holds
+  alone), so a host of many large, mostly empty disks fits fewer sandboxes
+  than its free space suggests. Writes outside the agent (logs, other
+  programs on the volume) are not booked: keep `--disk-reserve-mib` above
+  them and alert on free space early, for example below 20 %.
 - **Encryption is the volume's and the store's.** Chunks are stored raw or
   compressed, not encrypted by us, and a host's state volume holds disks and
   memory images. Check that every state volume and the bucket are encrypted

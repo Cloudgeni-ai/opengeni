@@ -406,6 +406,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     pub(super) fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
+        self.create_from(id, config, reply, true);
+    }
+
+    /// Creates sandbox `id`, from a ready sandbox if `ready` and there is
+    /// one.
+    pub(super) fn create_from(
+        &mut self,
+        id: Id,
+        config: SandboxConfig,
+        reply: Reply<()>,
+        ready: bool,
+    ) {
         if let Some(answer) = self.create_answer(id, &config) {
             let _ = reply.send(answer);
             return;
@@ -415,8 +427,28 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         }
         self.template_used(Shape::of(&config));
-        let Some((config, reply)) = self.claim(id, config, reply) else {
+        let unclaimed = if ready {
+            self.claim(id, config, reply)
+        } else {
+            Some((config, reply))
+        };
+        let Some((config, reply)) = unclaimed else {
             return;
+        };
+        self.create_fresh(id, config, reply);
+    }
+
+    /// Creates sandbox `id` from its shape's template, or cold.
+    fn create_fresh(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
+        let template = self.template_for(Shape::of(&config));
+        // Its first files are written before the core knows it: they are
+        // booked from before the copy until a reading shows them.
+        let disk = match self.first_files_fit(id, template.as_ref().map(|t| t.disk()).as_deref()) {
+            Ok(disk) => disk,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
         };
         let ordinal = match self.take_ordinal() {
             Ok(ordinal) => ordinal,
@@ -435,7 +467,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
         };
-        let template = self.template_for(Shape::of(&config));
         let sources = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources));
         let mut record = Record::new(id, ordinal, allocation, config);
         let link = Images::link(&record);
@@ -445,6 +476,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let records = Arc::clone(&self.records);
         let net = self.net.clone();
         let events = self.events_tx.clone();
+        self.input(Input::Writes { key: id.0, disk });
         tokio::spawn(async move {
             let networks = net.clone();
             let from = template.clone();

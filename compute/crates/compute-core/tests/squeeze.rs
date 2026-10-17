@@ -163,6 +163,7 @@ fn size(request: u64, limit: u64) -> Size {
         request,
         limit,
         save: limit,
+        ..Size::default()
     }
 }
 
@@ -587,4 +588,73 @@ fn a_balloon_the_vm_did_not_take_is_set_again_after_a_backoff() {
     rig.send(Input::BalloonFailed { sandbox, request });
     let due = rig.host.next_deadline().unwrap();
     assert_eq!(Some(due.saturating_since(rig.now)), first);
+}
+
+fn waits_told(actions: &[Action], id: u128) -> Vec<Option<u64>> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::Notify {
+                sandbox,
+                notice: Notice::PausedForMemory(bytes),
+            } if sandbox.0 == id => Some(*bytes),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_sandbox_paused_for_memory_still_wakes_by_itself_after_a_restart() {
+    // The host agent hears when a sandbox starts and stops waiting for
+    // room, to keep it across a restart.
+    let mut rig = three_busy();
+    rig.available(3 * GIB);
+    rig.at(1);
+    rig.resident(1, 2 * GIB + 512 * MIB);
+    rig.resident(2, GIB + 768 * MIB);
+    rig.at(3);
+    let actions = rig.available(3 * GIB + 512 * MIB);
+    let all = rig.settle(1, actions);
+    assert_eq!(rig.level(1), Level::Saved);
+    assert_eq!(waits_told(&all, 1), [Some(2 * GIB + 512 * MIB)]);
+
+    // A new agent, after a restart: the sandbox is saved and nothing holds
+    // it, so without what was kept it would stay saved until used.
+    let mut rig = Rig::new();
+    let sandbox = SandboxId(1);
+    rig.send(Input::Add {
+        sandbox,
+        state: State::new(Level::Saved, Durability::Local, true),
+        policy: SleepPolicy::new(SleepRules::RECOMMENDED).unwrap(),
+        size: size(GIB, 4 * GIB),
+        last_activity: rig.now,
+    });
+    let actions = rig.send(Input::PausedForMemory {
+        sandbox,
+        bytes: 2 * GIB + 512 * MIB,
+    });
+    assert_eq!(started(&actions, 1), [], "not before a reading");
+    assert!(rig.paused_for_memory(1));
+    assert!(rig.host.waits_for_room(sandbox));
+    assert_eq!(waits_told(&actions, 1), [], "already kept");
+    let actions = rig.available(7 * GIB);
+    assert_eq!(started(&actions, 1), [], "not yet room: {actions:?}");
+    let actions = rig.available(7 * GIB + 512 * MIB);
+    assert_eq!(started(&actions, 1)[0].0, Step::Restore);
+    assert_eq!(waits_told(&actions, 1), [None], "it no longer waits");
+    rig.settle(1, actions);
+    assert_eq!(rig.level(1), Level::Running);
+    assert!(!rig.paused_for_memory(1));
+}
+
+#[test]
+fn a_kept_wait_for_memory_is_ignored_for_a_sandbox_with_a_vm() {
+    let mut rig = Rig::new();
+    rig.running(1, size(GIB, 4 * GIB), 2 * GIB);
+    rig.send(Input::PausedForMemory {
+        sandbox: SandboxId(1),
+        bytes: 2 * GIB,
+    });
+    assert!(!rig.paused_for_memory(1));
+    assert!(!rig.host.waits_for_room(SandboxId(1)));
 }

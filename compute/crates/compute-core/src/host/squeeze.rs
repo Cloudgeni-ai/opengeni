@@ -283,11 +283,11 @@ impl Host {
 
     /// Whether a sandbox that held `bytes` when it was paused for host
     /// memory may wake: they fit with the high watermark still free, next
-    /// to what sandboxes let through before claim.
+    /// to what sandboxes let through before claim. Not before the first
+    /// reading, as for one given back after a restart.
     pub(super) fn room_returned(&self, bytes: u64) -> bool {
         self.policy.memory.is_none()
-            || self.available_memory.is_none()
-            || bytes <= self.free_above_watermark()
+            || (self.available_memory.is_some() && bytes <= self.free_above_watermark())
     }
 
     /// Bytes available above the high watermark that no sandbox let
@@ -401,6 +401,35 @@ impl Host {
         {
             slot.squeeze = Squeeze::None;
         }
+        let waiting = match slot.squeeze {
+            Squeeze::Waiting { bytes } => Some(bytes),
+            _ => None,
+        };
+        if waiting.is_some() != slot.wait_told {
+            slot.wait_told = waiting.is_some();
+            out.push(Action::Notify {
+                sandbox: id,
+                notice: Notice::PausedForMemory(waiting),
+            });
+        }
         self.unread_claims += claim.saturating_sub(slot.squeeze.claim());
+    }
+
+    /// Takes in [`crate::Input::PausedForMemory`]: `id` waits again, as it
+    /// did before a restart, wanted awake, for `bytes` to fit above the
+    /// high watermark.
+    pub(super) fn paused_for_memory(&mut self, now: At, id: SandboxId, bytes: u64) {
+        let Some(slot) = self.sandboxes.get_mut(&id) else {
+            return;
+        };
+        if slot.state.level.has_process() || slot.in_flight.is_some() || slot.is_broken() {
+            return;
+        }
+        slot.squeeze = Squeeze::Waiting { bytes };
+        slot.wait_told = true;
+        slot.request_wake(Priority::Background, now);
+        slot.room = WakeRoom::Refused;
+        self.refused.insert(id);
+        self.mark(id);
     }
 }

@@ -58,17 +58,41 @@ sandboxes created at once all pay it at the same time.
   ahead of any idle sandbox. They and template builds share the host's one
   memory book with sandboxes
   ([14](0014-requests-limits-and-admission.md)): the decision core counts
-  each against the admission budget (at its shape's full size while it
-  fills or builds, then at what it holds), and a fill or build starts only
-  in room the core says no wake wants, so a fill and a wake never take the
+  each against the admission budget, and a fill or build starts only in
+  room the core says no wake wants, so a fill and a wake never take the
   same memory. When a wake, the buffer or memory pressure needs room, the
   core ends ready clones first, oldest first. They fill a few at a time and
   stop when sandbox users run out. Status shows their count and resident
   memory per shape.
-- A create claims a ready clone only when it asks for the clone's whole
-  shape as its request, since the clone's cgroup settings were made when
-  it filled. The claimed VM leaves the pool's book and enters the
-  sandbox's in the same decision, counted once.
+- A fill is booked by what it will hold, not its whole shape: the bytes of
+  the template's memory image that are not zeros (counted in whole 256 KiB
+  chunks when the template is built or found), plus 64 MiB for the VMM and
+  for what the guest touches between its restore and answering, never more
+  than the shape. That bounds a fill because the template was saved right
+  after its guest answered on the same port, so a fill's guest only resumes
+  where it left off; once ready it is measured, and from then on counts at
+  what it holds. Should a guest touch more meanwhile, the core's memory
+  readings show it within a sample. On huge-page hosts, where no guest
+  gives memory back and every sandbox reserves its whole shape, a fill does
+  too. A fill also books disk until it is ready: its copy of the template's
+  disk and what its guest writes to it, together at most the disk's full
+  length in allocation units. A ready clone writes nothing while paused and
+  books no disk.
+- A template build is booked at its shape's full memory: its guest boots
+  cold, so nothing tells what it will touch before it answers, and builds
+  are rare (one per shape and base image). Its disk is booked at its full
+  length, since its guest writes to its copy while it boots, with its kernel
+  copy and snapshot.
+- A create claims a ready clone whenever it asks for the clone's processors
+  and memory, whatever its request: before the claim is recorded, the
+  clone's VM is given the request's guarantees (`cpu.weight` at once,
+  `memory.low` from its first resume, which is when a VM gets it). These
+  are the only VM settings a request changes; sleep settings and the rest
+  live in the record, and the identity and reseed contract is unchanged,
+  since the guest still learns who it is at that resume. A clone whose VM
+  cannot take them is removed, and the create starts without a ready clone.
+  The claimed VM leaves the pool's book and enters the sandbox's in the same
+  decision, counted once.
 - Every clone the agent ends on purpose (a discarded or failed ready clone,
   a claim it takes back, a clone whose guest never answered) first tells its
   pager the VM is ending, so the pager going with it is not reported as lost

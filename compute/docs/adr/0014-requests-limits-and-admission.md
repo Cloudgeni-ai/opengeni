@@ -71,8 +71,15 @@ pick a VM.
      is not enough: a let-go is confirmed only once the device's
      statistics, turned on at boot, report the guest holds no page in
      the balloon (within 10 s, else it is retried). A VM restored from an
-     image booted without statistics cannot confirm, so its claim lasts
-     until it next pauses and is saved. A sandbox whose let-go is
+     image booted without statistics cannot report it, and statistics
+     cannot be turned on after boot; its let-go is confirmed once it has
+     run, let go, for those same 10 s, which is the longest a guest that
+     can report is given. A guest driver gives pages back as soon as it
+     sees the new target, a megabyte per round trip, so 10 s covers far
+     more than any guest's memory; a guest that touches them later shows
+     in readings like any other use above its request. Without this its
+     claim would last until it next paused and was saved, holding room no
+     one could use. A sandbox whose let-go is
      unconfirmed is not ballooned again, but step 3 may still pause and
      save it, keeping its claim, or give it back its claim if it turns
      out unsavable and stays awake. Pausing frees nothing, so a claim
@@ -144,19 +151,46 @@ pick a VM.
   filesystem has free, read every sample. A booking whose save has written
   stays counted until a reading taken after it shows what the save used,
   and before the first reading after a start nothing that needs disk is
-  admitted. A template build books its copies of the base image and the
-  kernel (their data ranges in whole allocation units of the state
-  filesystem, as written where extents cannot be shared; the agent
-  learns the unit at start by writing a probe, so ext4 bigalloc's
-  clusters count) and its worst-case snapshot the same way before it
-  starts, and waits without the room. The probe bounds what any write
-  takes only on ext4, XFS and btrfs, so the agent refuses to start on a
-  state root on any other filesystem (ZFS grows a file's record size,
-  tmpfs can give huge pages within a file's size), naming those three.
-  What a build wrote stays booked until the next reading after it ends. Ready
-  clones' disk copies, which share extents with their template where
-  the filesystem can, and guests' disk growth are not booked. A wake that
-  cannot book its save
+  admitted. Sizes are in whole allocation units of the state filesystem,
+  which the agent learns at start by writing a probe, so ext4 bigalloc's
+  clusters count. The probe bounds what any write takes only on ext4, XFS
+  and btrfs, so the agent refuses to start on a state root on any other
+  filesystem (ZFS grows a file's record size, tmpfs can give huge pages
+  within a file's size), naming those three.
+- Everything else that writes to local disk is booked the same way, before
+  it can write, and any booking that ends or shrinks stays counted until a
+  reading taken after that shows what was written:
+  - An awake or waking VM books what its guest disk may still grow by: the
+    disk's length in whole units plus 1/256 of it for the blocks that map
+    it (ext4 maps 340 data blocks per 4 KiB of extent tree), less what the
+    disk already holds alone. Until a VM is first measured it books the
+    whole bound. The agent measures every sample, before its disk
+    reading: on ext4 every allocated block counts; on XFS and btrfs, where
+    a disk copied from its template or the base image shares their blocks
+    and a write to a shared block takes a new one, only blocks the disk
+    holds alone count (`FS_IOC_FIEMAP`). A sleeping VM books no growth: no
+    guest writes to its disk.
+  - A wake from object storage books its local copy from admission until
+    the copy is whole: its disk at that bound, its memory image (what the
+    pager fills while the guest runs) and 64 MiB of device state. A failed
+    fetch keeps it for its retry; a wake that gives up gives it up. The
+    agent reports the end of the fill, measured every sample, and a
+    restarted agent reports a fill it finds still running.
+  - A new sandbox's first files (its copy of its template's disk or the
+    base image, by data ranges, whichever is larger since a stale template
+    falls back to the base image) are booked before the copy starts, and a
+    create the disk cannot take is refused with `host_full` naming disk.
+  - A ready clone's fill books its copy of the template's disk and what its
+    guest writes until it is ready, together at most the disk's bound; a
+    paused clone writes nothing and books nothing.
+  - A template build books its disk at the bound, since its guest writes to
+    its copy while it boots, its kernel copy by data ranges, and its
+    worst-case snapshot, before it starts, and waits without the room.
+  A sandbox's bound comes from today's base image, as every disk is a copy
+  of it; an awake VM's measurement uses its own disk's length, so a disk
+  that differs counts right from its first sample. A boot also relinks the
+  kernel (tens of MiB, replacing the previous copy), which the reserve
+  covers. A wake that cannot book what it needs
   gets `host_full` at once, naming disk or inodes and how much. In the
   background, while refused held sandboxes cannot book, idle sandboxes
   that are already archived to object storage give up their local copies,
@@ -169,14 +203,28 @@ pick a VM.
 - A sandbox that stays within its request is never squeezed, paused or
   killed for memory. Above it, it may be squeezed or paused for a few
   seconds, never lose data.
-- Whether a sandbox was paused for memory lives only in the agent: after an
-  agent restart it stays Saved until it is used again.
+- Whether a sandbox waits, saved, for room after a pause for memory is kept
+  in its holds file, written by the same writer as its holds whenever the
+  core says the wait starts or ends. A restarted agent gives it back to the
+  core, which waits for room above the high watermark for it again, and
+  wakes it by itself once there is. If that write fails, a restart finds it
+  saved and waiting only for use, as before.
 - The room a paused sandbox waits for is its VM's cgroup footprint, file
   cache included, so it may wait somewhat longer than its guest needs.
 - Free page reporting does not return huge pages, so on nested hosts a
   guest's freed memory stays booked until the VM is saved and ended.
+  Confirmed on a nested host ([measurements](../measurements.md)): with
+  huge pages Firecracker 1.17 backs guest memory with a shared memfd, and
+  discards reported ranges with `madvise(MADV_DONTNEED)`, which only unmaps
+  them; the memfd keeps the pages. Nested hosts book every running VM
+  whole, so nothing is overcommitted by it. Firecracker's next release
+  frees the whole huge pages inside a discarded range (its change 6237),
+  and the guest reports in 2 MiB blocks by default, so after that upgrade
+  nested hosts could count running VMs by what they hold, as bare metal
+  does; that is a change for then.
 - Nested hosts hold fewer running sandboxes for the same memory, in exchange
   for cheaper wakes ([5](0005-host-memory-profiles.md)).
-- Disk bookings count saves only. A guest's own disk growth, and memory a
-  remote wake writes into its local image while it hydrates, are measured
-  in what is free but not booked ahead.
+- Disk bookings are worst cases: an awake VM on ext4 books all of its
+  disk it has not yet allocated, though most guests never fill their disk.
+  On a host with many awake sandboxes the disk, not memory, may then bound
+  how many wake; size state volumes for it.

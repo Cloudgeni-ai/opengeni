@@ -128,6 +128,11 @@ struct World {
     /// Every traffic reading: which VM, and when, so a test can line up
     /// with the agent's sampling.
     readings: Mutex<Vec<(String, Instant)>>,
+    /// Guarantees given to VMs after they started: which VM, its memory
+    /// request in MiB and its processor weight.
+    guarantees: Mutex<Vec<(String, u32, u16)>>,
+    /// While set, no VM can be given new guarantees.
+    refuse_guarantees: AtomicBool,
 }
 
 /// What a fake VM process is, independent of any agent's handle to it.
@@ -707,6 +712,27 @@ impl Engine for Fake {
 
     fn resident_bytes(&self, _: &FakeVm) -> Result<u64, EngineError> {
         Ok(100 << 20)
+    }
+
+    fn set_guarantees(
+        &self,
+        vm: &FakeVm,
+        memory_request_mib: u32,
+        cpu_weight: u16,
+    ) -> Result<(), EngineError> {
+        if self.world.refuse_guarantees.load(Ordering::SeqCst) {
+            return Err(EngineError::new(
+                ErrorKind::Transient,
+                "set_guarantees",
+                "cpu.weight not writable",
+            ));
+        }
+        self.world.guarantees.lock().unwrap().push((
+            vm.name.clone(),
+            memory_request_mib,
+            cpu_weight,
+        ));
+        Ok(())
     }
 
     fn cpu_time(&self, vm: &FakeVm) -> Result<Duration, EngineError> {

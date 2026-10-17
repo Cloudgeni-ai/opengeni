@@ -278,7 +278,10 @@ impl World {
                         truth.unreported_losses -= 1;
                         self.losses += 1;
                     }
-                    Notice::Retrying { .. } | Notice::Unsavable | Notice::Broken => {}
+                    Notice::Retrying { .. }
+                    | Notice::Unsavable
+                    | Notice::Broken
+                    | Notice::PausedForMemory(_) => {}
                     Notice::HostFull { .. } => panic!("{sandbox:?} refused without admission"),
                 }
             }

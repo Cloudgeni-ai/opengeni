@@ -556,6 +556,13 @@ impl Hydration {
         lock(&self.failure).clone()
     }
 
+    /// Whether filling has ended: every chunk is in place, or it failed or
+    /// was stopped, after which no new write into the memory file starts.
+    /// A write already under way then may still land, as the VM ends.
+    pub fn is_finished(&self) -> bool {
+        self.done.borrow().is_some()
+    }
+
     /// Stops filling: the image is going away. Anyone waiting for the fill
     /// to finish is told it will not. Writes may still be under way: see
     /// [`Self::stop`].

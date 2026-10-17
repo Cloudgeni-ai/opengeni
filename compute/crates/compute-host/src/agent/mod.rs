@@ -37,6 +37,7 @@ use crate::state::{Record, Records, StateError, claim_host, unix_ms_now};
 use crate::step::{After, Live};
 use crate::store::Store;
 
+mod disk;
 mod handle;
 mod holds;
 mod ready;
@@ -707,6 +708,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Copies of guest memory a save may write at most: one where files
     /// share extents, otherwise also the merged image.
     save_copies: u64,
+    /// The base image's length when the agent started, for when it
+    /// cannot be read later; see [`HostAgent::disk_bound`].
+    base_length: u64,
     /// The bytes the state root's filesystem allocates at a time.
     allocation_unit: u64,
     pager: PagerConfig,
@@ -888,6 +892,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             net,
             images,
             root: config.root,
+            base_length: std::fs::metadata(&config.base_image).map_or(0, |found| found.len()),
             base_image: config.base_image,
             warm,
             memory_policy: config.policy.memory,
@@ -1026,7 +1031,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// What a sandbox of `config` reserves and may use of host memory, and
     /// what one save of it may write: the memory that changed, the merged
     /// image where files cannot share extents, and its device state and
-    /// chunk map.
+    /// chunk map; what its disk may grow by while it runs; and what a wake
+    /// from object storage writes locally: its disk, the memory image its
+    /// pager fills, and its device state.
     fn size(&self, config: &SandboxConfig) -> Size {
         let limit = u64::from(config.memory_mib) << 20;
         let request = if self.reserve_whole {
@@ -1034,10 +1041,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         } else {
             u64::from(config.memory_request()) << 20
         };
+        let disk = self.disk_bound();
         Size {
             request,
             limit,
             save: limit * self.save_copies + SAVE_EXTRA,
+            disk,
+            fetch: disk
+                .saturating_add(limit.next_multiple_of(self.allocation_unit.max(1)))
+                .saturating_add(SAVE_EXTRA),
         }
     }
 

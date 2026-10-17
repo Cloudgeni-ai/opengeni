@@ -18,6 +18,7 @@ fn template(shape: Shape) -> Template {
             memory: String::new(),
             ready_port: 52,
         },
+        footprint: shape.bytes(),
     }
 }
 
@@ -31,11 +32,11 @@ fn kept_shapes_parse_with_an_optional_ready_count() {
     }
 }
 
-/// A build books its copies of the base image and the kernel as well as
-/// its snapshot, so inputs larger than guest memory are booked at the size
-/// of their data; holes cost nothing.
+/// A build books its disk at the most it may take, since its guest writes
+/// to it while it boots, its copy of the kernel at the size of its data,
+/// and its snapshot.
 #[test]
-fn a_build_books_its_copies_of_the_base_image_and_kernel_and_its_snapshot() {
+fn a_build_books_its_disk_its_kernel_copy_and_its_snapshot() {
     const MIB: u64 = 1 << 20;
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("base.img");
@@ -45,25 +46,33 @@ fn a_build_books_its_copies_of_the_base_image_and_kernel_and_its_snapshot() {
     file.set_len(72 * MIB).unwrap();
     file.sync_all().unwrap();
     let kernel = dir.path().join("vmlinux");
-    fs::write(&kernel, vec![9; 16 << 20]).unwrap();
-    let booked = build_disk(shape(1, 1), &[&image, &kernel], 4096, 2, MIB).unwrap();
+    let kernel_file = fs::File::create(&kernel).unwrap();
+    std::io::Write::write_all(&mut &kernel_file, &vec![9; 16 << 20]).unwrap();
+    kernel_file.set_len(80 * MIB).unwrap();
+    kernel_file.sync_all().unwrap();
+    let booked = build_disk(shape(1, 1), &image, &kernel, 4096, 2, MIB).unwrap();
+    let disk = crate::disk_growth::disk_bound(72 * MIB, 4096);
+    let snapshot = DiskSpace::save(2 * MIB + MIB).bytes;
     assert!(
-        (27 * MIB..36 * MIB).contains(&booked.bytes),
-        "8 + 16 MiB copied, 2 x 1 MiB of memory and 1 MiB besides: {booked:?}"
+        (disk + 16 * MIB + snapshot..disk + 17 * MIB + snapshot).contains(&booked.bytes),
+        "a 72 MiB disk, 16 MiB of kernel and its snapshot: {booked:?}"
     );
     assert!(booked.inodes > DiskSpace::save(0).inodes, "{booked:?}");
     let missing = dir.path().join("missing");
-    assert!(build_disk(shape(1, 1), &[&image, &missing], 4096, 1, 0).is_err());
+    assert!(build_disk(shape(1, 1), &image, &missing, 4096, 1, 0).is_err());
+    assert!(build_disk(shape(1, 1), &missing, &kernel, 4096, 1, 0).is_err());
 }
 
 /// On a filesystem that allocates in large clusters, such as ext4 with
-/// bigalloc, every data range of a sparse input takes whole clusters.
+/// bigalloc, every data range of a sparse kernel takes whole clusters.
 #[test]
 fn sparse_copies_are_booked_in_whole_allocation_units() {
     const MIB: u64 = 1 << 20;
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("base.img");
-    let file = fs::File::create(&image).unwrap();
+    fs::File::create(&image).unwrap().set_len(MIB).unwrap();
+    let kernel = dir.path().join("vmlinux");
+    let file = fs::File::create(&kernel).unwrap();
     // Eight 4 KiB data ranges, 4 MiB apart.
     for range in 0..8 {
         std::os::unix::fs::FileExt::write_all_at(&file, &[7; 4096], range * 4 * MIB).unwrap();
@@ -71,9 +80,9 @@ fn sparse_copies_are_booked_in_whole_allocation_units() {
     file.set_len(32 * MIB).unwrap();
     file.sync_all().unwrap();
     let snapshot = DiskSpace::save(shape(1, 1).bytes()).bytes;
-    let booked = build_disk(shape(1, 1), &[&image], MIB, 1, 0).unwrap();
+    let booked = build_disk(shape(1, 1), &image, &kernel, MIB, 1, 0).unwrap();
     assert_eq!(
-        booked.bytes - snapshot,
+        booked.bytes - snapshot - crate::disk_growth::disk_bound(MIB, MIB),
         8 * MIB,
         "one 1 MiB cluster per range"
     );

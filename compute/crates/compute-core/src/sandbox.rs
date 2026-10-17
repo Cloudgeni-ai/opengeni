@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::host::{Balloon, Failure, Notice, Outcome, Size, Squeeze, WakeRoom};
+use crate::host::{Balloon, DiskSpace, Failure, Notice, Outcome, Size, Squeeze, WakeRoom};
 use crate::ids::{BalloonRequest, HoldId, OpId, SandboxId};
 use crate::level::{Durability, Level, Priority, State, Step};
 use crate::policy::{Backoff, SleepPolicy};
@@ -90,6 +90,11 @@ pub(crate) struct Sandbox {
     pub balloon_retry: Option<(At, u32)>,
     /// Whether it was paused for host memory while in use.
     pub squeeze: Squeeze,
+    /// Whether the host agent was last told it waits for room after a
+    /// pause for host memory; see [`Notice::PausedForMemory`].
+    pub wait_told: bool,
+    /// What it may still write to local disk, and what it booked there.
+    pub local_disk: LocalDisk,
     pub in_flight: Option<InFlight>,
     /// The VM process died while a step was in flight.
     pub process_lost: bool,
@@ -98,6 +103,20 @@ pub(crate) struct Sandbox {
     pub timer: Option<At>,
     pub dirty: bool,
     pub health: Health,
+}
+
+#[derive(Debug)]
+pub(crate) struct LocalDisk {
+    /// Bytes its disk may still grow by while its VM runs: its size's
+    /// `disk` until [`crate::Input::DiskGrowth`] measures it.
+    pub growth: u64,
+    /// Whether a wake from object storage may still be writing its local
+    /// copy: from that wake's start until [`crate::Input::Hydrating`]
+    /// says it is whole, or nothing local is left.
+    pub hydrating: bool,
+    /// What it booked on local disk as of its last reconcile, so what it
+    /// stops booking is counted until a reading shows it.
+    pub booked: DiskSpace,
 }
 
 /// What can still be done with a sandbox.
@@ -132,6 +151,12 @@ impl Sandbox {
             balloon_request: BalloonRequest(0),
             balloon_retry: None,
             squeeze: Squeeze::None,
+            wait_told: false,
+            local_disk: LocalDisk {
+                growth: size.disk,
+                hydrating: false,
+                booked: DiskSpace::default(),
+            },
             in_flight: None,
             process_lost: false,
             retry: None,

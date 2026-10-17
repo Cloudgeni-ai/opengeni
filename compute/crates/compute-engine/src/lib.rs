@@ -225,6 +225,26 @@ pub trait Engine: Send + Sync + 'static {
         ))
     }
 
+    /// Gives the VM new guarantees, as [`VmSpec::memory_request_mib`] and
+    /// [`VmSpec::cpu_weight`] give a new one: its processor share at once,
+    /// its memory protection from its next resume, which is when a VM gets
+    /// it. For a VM restored for one request and handed to another. Engines
+    /// that cannot change them report an error, and the VM is not handed
+    /// on.
+    fn set_guarantees(
+        &self,
+        vm: &Self::Vm,
+        memory_request_mib: u32,
+        cpu_weight: u16,
+    ) -> Result<(), EngineError> {
+        let _ = (vm, memory_request_mib, cpu_weight);
+        Err(EngineError::new(
+            ErrorKind::Transient,
+            "set_guarantees",
+            "this engine cannot change a VM's guarantees",
+        ))
+    }
+
     /// Resolves once the VM process has ended for any reason, including
     /// [`Engine::stop`]. The future does not borrow the VM, so the host can
     /// watch for a VM dying on its own while a step uses it.

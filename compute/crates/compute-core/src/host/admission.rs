@@ -26,17 +26,28 @@ pub struct Size {
     /// Bytes of local disk one save of its VM may write at most, booked
     /// while its VM holds state not saved yet; see [`crate::DiskPolicy`].
     pub save: u64,
+    /// Bytes its disk may grow by at most while its VM runs, booked while
+    /// it is awake or waking, until [`crate::Input::DiskGrowth`] measures
+    /// it; see [`crate::DiskPolicy`].
+    pub disk: u64,
+    /// Bytes a wake from object storage writes to local disk at most: its
+    /// disk, and the memory image its pager fills while the guest already
+    /// runs. Booked from the wake's admission until
+    /// [`crate::Input::Hydrating`] says the local copy is whole.
+    pub fetch: u64,
 }
 
 impl Size {
-    /// A sandbox that reserves and may use `bytes`, and whose saves write
-    /// at most as much.
+    /// A sandbox that reserves and may use `bytes`, whose saves write at
+    /// most as much, and that books no disk growth or fetch.
     #[must_use]
     pub const fn whole(bytes: u64) -> Self {
         Self {
             request: bytes,
             limit: bytes,
             save: bytes,
+            disk: 0,
+            fetch: 0,
         }
     }
 }
@@ -273,7 +284,7 @@ impl Host {
                 continue;
             }
             let need = slot.wake_need(percent);
-            let save = slot.save_need();
+            let save = slot.disk_need();
             if let Some(disk) = left.disk.as_mut()
                 && let Err(short) = disk.take(save)
             {
@@ -338,7 +349,7 @@ impl Host {
             for slot in &queued {
                 // What a wake already queued cannot book does not change
                 // whether a retried one can.
-                let _ = room.take(slot.save_need());
+                let _ = room.take(slot.disk_need());
             }
         }
         let mut ready = Vec::new();
@@ -359,7 +370,7 @@ impl Host {
                     <= capacity.headroom() + i128::from(dropping) + i128::from(droppable)
             }) && disk
                 .as_mut()
-                .is_none_or(|room| room.take(slot.save_need()).is_ok());
+                .is_none_or(|room| room.take(slot.disk_need()).is_ok());
             if fits {
                 wanted += need;
                 claimed += returning;

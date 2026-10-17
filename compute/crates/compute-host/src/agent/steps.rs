@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use compute_core::{
-    Action, BalloonRequest, Durability, Failure, Input, Level, Notice, OpId, Outcome, State, Step,
+    Action, BalloonRequest, DiskSpace, Durability, Failure, Input, Level, Notice, OpId, Outcome,
+    State, Step,
 };
 use compute_engine::{CancellationToken, Engine, VmSpec};
 use tokio::time::{Instant, sleep};
@@ -121,6 +122,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         stale: Option<&Arc<Template>>,
     ) {
         self.preparing.remove(&id.0);
+        // What its first files took shows in the next reading.
+        self.input(Input::Writes {
+            key: id.0,
+            disk: DiskSpace::default(),
+        });
         if let Some(template) = stale {
             self.template_stale(template);
         }
@@ -801,6 +807,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 tracing::error!(%id, "sandbox broken on this host");
                 self.settle(id);
             }
+            Notice::PausedForMemory(bytes) => self.keep_memory_wait(id, bytes),
             Notice::HostFull {
                 resource,
                 needed,

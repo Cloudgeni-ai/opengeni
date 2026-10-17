@@ -472,9 +472,12 @@ async fn a_surviving_build_keeps_its_claim_on_memory_across_a_restart() {
         return;
     };
     // A shape of a quarter of what the host has free; the fake engine
-    // takes nothing for it. The high watermark leaves room for one and a
-    // half of it, so memory read at any moment in the test stays within
-    // half a shape of that.
+    // takes nothing for it. The high watermark first leaves room for one
+    // and a half of it, so the build fits; after the restart, room for half
+    // of it: a ready sandbox, which books a small part of its shape, fits
+    // only once the surviving build's claim of the whole shape is gone.
+    // Memory read at any moment in the test stays within a few hundred MiB
+    // of what it was at the start.
     let mib = u32::try_from((available >> 20) / 4)
         .unwrap_or(u32::MAX)
         .min(compute_host::protocol::MAX_MEMORY_MIB);
@@ -486,11 +489,10 @@ async fn a_surviving_build_keeps_its_claim_on_memory_across_a_restart() {
         vcpus: 1,
         memory_mib: mib,
     };
-    let high = available - big.bytes() * 3 / 2;
-    let policy = || HostPolicy {
+    let policy = |room: u64| HostPolicy {
         memory: Some(MemoryPolicy {
-            low_watermark: high - big.bytes(),
-            high_watermark: high,
+            low_watermark: available - room - big.bytes(),
+            high_watermark: available - room,
             compressed_percent: 30,
             balloon_grace: Duration::from_secs(2),
         }),
@@ -506,11 +508,16 @@ async fn a_surviving_build_keeps_its_claim_on_memory_across_a_restart() {
     let world = Arc::<World>::default();
     world.stuck_clean_ups.store(true, Ordering::Relaxed);
     let start = |root: PathBuf, world: Arc<World>, ready: u32| {
+        let room = if ready == 0 {
+            big.bytes() * 3 / 2
+        } else {
+            big.bytes() / 2
+        };
         Lab::start_configured(
             root,
             world,
             Delays::default(),
-            policy(),
+            policy(room),
             keeping(big, ready),
         )
     };

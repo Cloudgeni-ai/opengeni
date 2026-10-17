@@ -508,9 +508,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .named()
             .map(|(name, lapses)| (name.to_owned(), lapses))
             .collect();
+        let paused_for_memory = holds.paused_for_memory();
         slot.holds = holds;
         let now = self.now();
-        named
+        let mut inputs: Vec<Input> = named
             .into_iter()
             .map(|(name, lapses_ms)| Input::Hold {
                 sandbox: id.0,
@@ -520,7 +521,36 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // taken, and wakes only if it has since gone to sleep.
                 priority: Priority::Background,
             })
-            .collect()
+            .collect();
+        // It still waits for room after a pause for memory, and wakes by
+        // itself once there is; the core ignores this for one whose VM
+        // still runs.
+        if let Some(bytes) = paused_for_memory {
+            inputs.push(Input::PausedForMemory {
+                sandbox: id.0,
+                bytes,
+            });
+        }
+        inputs
+    }
+
+    /// Keeps whether sandbox `id` waits for room after a pause for memory
+    /// (see [`compute_core::Notice::PausedForMemory`]) in its holds file,
+    /// in the background, so a restart does not lose the wait. If the write
+    /// fails, a restart finds it saved and waiting only for use.
+    pub(super) fn keep_memory_wait(&mut self, id: Id, bytes: Option<u64>) {
+        let Some(slot) = self.slots.get_mut(&id.0) else {
+            return;
+        };
+        if !slot.holds.set_paused_for_memory(bytes) {
+            return;
+        }
+        let write = slot.holds.write(unix_ms_now());
+        tokio::spawn(async move {
+            if let Err(error) = write.await {
+                tracing::warn!(%id, %error, "could not keep that the sandbox waits for memory");
+            }
+        });
     }
 
     /// Where a sandbox whose VM was found still running stands. A paused

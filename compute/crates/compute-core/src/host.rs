@@ -57,6 +57,17 @@ pub enum Input {
         /// Bytes it holds; 0 once it has ended.
         bytes: u64,
     },
+    /// Work outside any step, named `key`, may still write `disk` to local
+    /// disk, such as a new sandbox's first files: booked like a save until
+    /// reported again with nothing once it is done, and what it booked
+    /// then stays booked until a disk reading taken after that. Check
+    /// that it fits first with [`Host::disk_shortage`].
+    Writes {
+        /// Names the work; any id no other work uses.
+        key: SandboxId,
+        /// What it may still write.
+        disk: DiskSpace,
+    },
     /// The sandbox is needed: wake it if it sleeps, and count it as activity.
     Touch {
         /// The sandbox.
@@ -193,6 +204,39 @@ pub enum Input {
     Disk {
         /// Available bytes and inodes.
         available: DiskSpace,
+    },
+    /// Bytes the sandbox's disk may still grow by, measured: what its
+    /// awake VM books for its disk from now on instead of its size's
+    /// `disk`. Send it before the [`Input::Disk`] reading taken after it,
+    /// in the same batch, since that reading shows what the disk grew by.
+    DiskGrowth {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// Bytes it may still grow by.
+        bytes: u64,
+    },
+    /// Whether the sandbox's local copy may still be written by a wake
+    /// from object storage, such as the memory image a pager fills while
+    /// its guest runs: what such a wake books on local disk (its size's
+    /// `fetch`) is kept until this says `false`. A wake that starts from
+    /// [`Level::Remote`] books it by itself; the host agent says `true`
+    /// for a copy it finds still being filled after a restart.
+    Hydrating {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// Whether it may still be written.
+        hydrating: bool,
+    },
+    /// The sandbox was paused and saved for host memory while in use
+    /// before the host agent restarted, holding `bytes` (see
+    /// [`Notice::PausedForMemory`]): it waits again, wanted awake, until
+    /// they fit above the high watermark, and then wakes by itself.
+    /// Ignored for a sandbox with a VM process or a step in flight.
+    PausedForMemory {
+        /// The sandbox.
+        sandbox: SandboxId,
+        /// Host memory its VM held.
+        bytes: u64,
     },
     /// Bytes of host memory one sandbox currently holds.
     Resident {
@@ -362,6 +406,13 @@ pub enum Notice {
         /// Bytes, or inodes, free.
         free: u64,
     },
+    /// Whether the sandbox waits, saved, for room after a pause for host
+    /// memory, and how much its VM held: `Some` once it waits, `None` once
+    /// it no longer does, because it was let through to wake or nothing
+    /// wants it awake any more. Keep it across restarts and give it back
+    /// with [`Input::PausedForMemory`], so the sandbox still wakes by
+    /// itself.
+    PausedForMemory(Option<u64>),
 }
 
 /// A read-only snapshot of one sandbox's state.
@@ -447,6 +498,9 @@ pub struct Host {
     /// Bookings that steps finished since that reading gave up: what they
     /// wrote shows only in the next one.
     disk_spent: DiskSpace,
+    /// Local disk that work outside any step may still write; see
+    /// [`Input::Writes`].
+    writes: HashMap<SandboxId, DiskSpace>,
 }
 
 impl Host {
@@ -476,6 +530,7 @@ impl Host {
             disk: None,
             disk_fresh: false,
             disk_spent: DiskSpace::default(),
+            writes: HashMap::new(),
         })
     }
 
@@ -605,6 +660,7 @@ impl Host {
                 filling,
             } => self.spare(sandbox, bytes, disk, filling),
             Input::Unmanaged { sandbox, bytes } => self.unmanaged(sandbox, bytes),
+            Input::Writes { key, disk } => self.writes(key, disk),
             Input::Touch { sandbox, priority } => {
                 self.ask_awake(sandbox, out);
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
@@ -659,10 +715,11 @@ impl Host {
                 }
             }
             Input::Memory { available } => self.memory_read(available),
-            Input::Disk { available } => {
-                self.disk = Some(available);
-                self.disk_fresh = true;
-                self.disk_spent = DiskSpace::default();
+            Input::Disk { available } => self.disk_read(available),
+            Input::DiskGrowth { sandbox, bytes } => self.disk_growth(sandbox, bytes),
+            Input::Hydrating { sandbox, hydrating } => self.hydrating(sandbox, hydrating),
+            Input::PausedForMemory { sandbox, bytes } => {
+                self.paused_for_memory(now, sandbox, bytes);
             }
             Input::Resident { sandbox, bytes } => {
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox)
@@ -818,7 +875,17 @@ impl Host {
         }
         // What deleting local files freed shows only in a later reading.
         self.disk_fresh &= !matches!(flight.step, Step::Evict | Step::Forget);
-        let booked = slot.books_save();
+        // What a failed save or fetch wrote may stay, such as a failed
+        // copy kept in quarantine, while a retry books its writes afresh:
+        // it stays booked until a reading shows it.
+        if matches!(outcome, Outcome::Failed(_)) {
+            let wrote = match flight.step {
+                Step::Save => slot.save_space(),
+                Step::Fetch => DiskSpace::save(slot.size.fetch),
+                _ => DiskSpace::default(),
+            };
+            self.disk_spent = self.disk_spent.add(wrote);
+        }
         let before = slot.state;
         let backoff = if flight.step.wakes() {
             &self.policy.wake_backoff
@@ -826,9 +893,6 @@ impl Host {
             &self.policy.sleep_backoff
         };
         let settled = slot.settle_step(flight.step, outcome, now, backoff);
-        if booked && !slot.books_save() {
-            self.disk_spent = self.disk_spent.add(slot.save_space());
-        }
         if let Some(notice) = settled.notice {
             out.push(Action::Notify {
                 sandbox: id,
@@ -916,6 +980,11 @@ impl Host {
         }
         self.refused.remove(&id);
         self.pending_relief = self.pending_relief.saturating_sub(slot.floor_relief);
+        // What it booked on disk, as of its last reconcile or since, may
+        // have been written; the next reading shows it.
+        self.disk_spent = self
+            .disk_spent
+            .add(slot.local_disk.booked.max(slot.disk_booking()));
         out.push(Action::Destroy { sandbox: id });
     }
 
@@ -1032,6 +1101,7 @@ impl Host {
             }
             slot.timer = deadline;
         }
+        self.rebook_disk(id);
     }
 
     /// Starts queued steps while their limits allow, wake steps first,
@@ -1089,6 +1159,9 @@ impl Host {
         slot.balloon_taken = None;
         if admission::needs_memory(step) {
             slot.room = WakeRoom::Admitted;
+            // A wake from object storage writes its local copy from now
+            // on, as booked when it was admitted.
+            slot.local_disk.hydrating |= slot.state.level == Level::Remote;
         }
         let op = OpId(self.next_op);
         self.next_op += 1;
@@ -1104,6 +1177,9 @@ impl Host {
             op,
             step,
         });
+        // A wake books more from now on: record it, so what it later stops
+        // booking is counted from there.
+        self.rebook_disk(key.sandbox);
     }
 }
 

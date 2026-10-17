@@ -47,7 +47,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         {
             batch.push(Input::Memory { available });
         }
-        // The core ignores it without a disk policy.
+        // What disks may still grow by and which memory images are still
+        // being filled, then the disk reading that shows what they took.
+        // The core ignores them without a disk policy.
+        batch.extend(self.disk_readings());
         if let Some(available) = read_disk(&self.root) {
             batch.push(Input::Disk { available });
         }

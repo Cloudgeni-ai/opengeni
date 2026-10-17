@@ -13,6 +13,7 @@
 mod agent;
 mod chunked;
 pub mod client;
+mod disk_growth;
 pub mod guest_ports;
 pub mod host_memory;
 mod image;
