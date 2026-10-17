@@ -148,6 +148,7 @@ import {
   touchBrowserSessionController,
   verifyAuthRun,
   settleBrowserDownloadSaveFailure,
+  readActiveSandbox,
   terminalizeStaleConnectedInteractionPlacement,
   recordAuditEvent,
   type BrowserSessionControlRecord,
@@ -255,7 +256,10 @@ import {
 import { withChannelA, withChannelARead, type ChannelAOperation } from "../sandbox/channel-a";
 import { sanitizeFilename } from "./files";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
-import { wrongInteractionPlacementMessage } from "./interaction-placement-message";
+import {
+  wrongInteractionPlacementMessage,
+  wrongPlacementInsteadOfOffline,
+} from "./interaction-placement-message";
 import {
   releaseBrowserPasskeys,
   resolveInteractionSecretValues,
@@ -3117,129 +3121,141 @@ export function registerBrowserSessionRoutes(
       operation === "browser.attach"
         ? withChannelARead
         : withChannelA;
-    return await runWithChannelA(
-      channelServices,
-      {
-        accountId: grant.accountId,
-        workspaceId: sourceSession.workspaceId,
-        session: sourceSession,
-        subjectId: grant.subjectId,
-        grant,
-        waitSignal,
-        operation,
-        retryControllerTransport: operation === "browser.read" || operation === "browser.action",
-        allowOperationReplay,
-        ...(expectedPlacementInstanceId &&
-        (expectedPlacement?.kind === "sandbox_group" ||
-          expectedPlacement?.kind === "external_provider")
-          ? { retainedInstanceId: expectedPlacementInstanceId }
-          : {}),
-      },
-      async (handle) => {
-        if (expectedPlacement?.kind === "sandbox_group") {
-          if (
-            sourceSession.sandboxGroupId !== expectedPlacement.sandboxGroupId ||
-            !handle.lease?.instanceId
-          ) {
-            throw new BrowserSessionStateError("BrowserSession home placement is unavailable");
-          }
-          assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
-          return await callback({
-            placement: expectedPlacement,
-            controllerHostSandboxGroupId: expectedPlacement.sandboxGroupId,
-            placementInstanceId: handle.lease.instanceId,
-            session: handle.homeSession,
-            lease: handle.lease,
-            transport: { kind: "managed" },
-          });
-        }
-
-        if (expectedPlacement?.kind === "external_provider") {
-          if (!handle.lease?.instanceId) {
-            throw new BrowserSessionStateError(
-              "Remote BrowserSession controller placement is unavailable",
-            );
-          }
-          assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
-          return await callback({
-            placement: expectedPlacement,
-            controllerHostSandboxGroupId: sourceSession.sandboxGroupId,
-            placementInstanceId: handle.lease.instanceId,
-            session: handle.homeSession,
-            lease: handle.lease,
-            transport: externalBrowserTransport(deps, expectedPlacement),
-          });
-        }
-
-        const resolved = await handle.routingSession.prime();
-        if (expectedPlacement?.kind === "connected_machine") {
-          if (
-            resolved.kind !== "selfhosted" ||
-            resolved.sandboxId !== expectedPlacement.sandboxId
-          ) {
-            if (operation === "browser.create") {
-              throw new HTTPException(422, {
-                message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
-              });
+    try {
+      return await runWithChannelA(
+        channelServices,
+        {
+          accountId: grant.accountId,
+          workspaceId: sourceSession.workspaceId,
+          session: sourceSession,
+          subjectId: grant.subjectId,
+          grant,
+          waitSignal,
+          operation,
+          retryControllerTransport: operation === "browser.read" || operation === "browser.action",
+          allowOperationReplay,
+          ...(expectedPlacementInstanceId &&
+          (expectedPlacement?.kind === "sandbox_group" ||
+            expectedPlacement?.kind === "external_provider")
+            ? { retainedInstanceId: expectedPlacementInstanceId }
+            : {}),
+        },
+        async (handle) => {
+          if (expectedPlacement?.kind === "sandbox_group") {
+            if (
+              sourceSession.sandboxGroupId !== expectedPlacement.sandboxGroupId ||
+              !handle.lease?.instanceId
+            ) {
+              throw new BrowserSessionStateError("BrowserSession home placement is unavailable");
             }
-            return await throwBrowserSourcePlacementChanged(
-              grant,
-              sourceSession.id,
-              expectedPlacement.sandboxId,
-            );
+            assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
+            return await callback({
+              placement: expectedPlacement,
+              controllerHostSandboxGroupId: expectedPlacement.sandboxGroupId,
+              placementInstanceId: handle.lease.instanceId,
+              session: handle.homeSession,
+              lease: handle.lease,
+              transport: { kind: "managed" },
+            });
           }
-          const placementInstanceId = resolved.providerInstanceId ?? expectedPlacement.sandboxId;
-          assertPlacementInstance(expectedPlacementInstanceId, placementInstanceId);
-          return await callback({
-            placement: expectedPlacement,
-            controllerHostSandboxGroupId: null,
-            placementInstanceId,
-            session: resolved.session as unknown as BrowserControlPlacementSession,
-            lease: null,
-            transport: { kind: "managed" },
-          });
-        }
-        if (resolved.sandboxId === null) {
-          if (!handle.lease?.instanceId) {
-            throw new BrowserSessionStateError("BrowserSession home placement is unavailable");
+
+          if (expectedPlacement?.kind === "external_provider") {
+            if (!handle.lease?.instanceId) {
+              throw new BrowserSessionStateError(
+                "Remote BrowserSession controller placement is unavailable",
+              );
+            }
+            assertPlacementInstance(expectedPlacementInstanceId, handle.lease.instanceId);
+            return await callback({
+              placement: expectedPlacement,
+              controllerHostSandboxGroupId: sourceSession.sandboxGroupId,
+              placementInstanceId: handle.lease.instanceId,
+              session: handle.homeSession,
+              lease: handle.lease,
+              transport: externalBrowserTransport(deps, expectedPlacement),
+            });
           }
-          if (
-            resolved.providerInstanceId &&
-            resolved.providerInstanceId !== handle.lease.instanceId
-          ) {
-            throw new BrowserSessionStateError("BrowserSession home placement fence changed");
+
+          const resolved = await handle.routingSession.prime();
+          if (expectedPlacement?.kind === "connected_machine") {
+            if (
+              resolved.kind !== "selfhosted" ||
+              resolved.sandboxId !== expectedPlacement.sandboxId
+            ) {
+              if (operation === "browser.create") {
+                throw new HTTPException(422, {
+                  message: wrongInteractionPlacementMessage(expectedPlacement.sandboxId),
+                });
+              }
+              return await throwBrowserSourcePlacementChanged(
+                grant,
+                sourceSession.id,
+                expectedPlacement.sandboxId,
+              );
+            }
+            const placementInstanceId = resolved.providerInstanceId ?? expectedPlacement.sandboxId;
+            assertPlacementInstance(expectedPlacementInstanceId, placementInstanceId);
+            return await callback({
+              placement: expectedPlacement,
+              controllerHostSandboxGroupId: null,
+              placementInstanceId,
+              session: resolved.session as unknown as BrowserControlPlacementSession,
+              lease: null,
+              transport: { kind: "managed" },
+            });
           }
-          return await callback({
-            placement: {
-              kind: "sandbox_group",
-              sandboxGroupId: sourceSession.sandboxGroupId,
-            },
-            controllerHostSandboxGroupId: sourceSession.sandboxGroupId,
-            placementInstanceId: handle.lease.instanceId,
-            session: handle.homeSession,
-            lease: handle.lease,
-            transport: { kind: "managed" },
-          });
-        }
-        if (resolved.kind === "selfhosted") {
-          const placement = {
-            kind: "connected_machine" as const,
-            sandboxId: resolved.sandboxId,
-          };
-          return await callback({
-            placement,
-            controllerHostSandboxGroupId: null,
-            placementInstanceId: resolved.providerInstanceId ?? resolved.sandboxId,
-            session: resolved.session as unknown as BrowserControlPlacementSession,
-            lease: null,
-            transport: { kind: "managed" },
-          });
-        }
-        throw new BrowserControlUnsupportedError(
-          "browser creation on a non-home provider sandbox is not supported",
-        );
-      },
-    );
+          if (resolved.sandboxId === null) {
+            if (!handle.lease?.instanceId) {
+              throw new BrowserSessionStateError("BrowserSession home placement is unavailable");
+            }
+            if (
+              resolved.providerInstanceId &&
+              resolved.providerInstanceId !== handle.lease.instanceId
+            ) {
+              throw new BrowserSessionStateError("BrowserSession home placement fence changed");
+            }
+            return await callback({
+              placement: {
+                kind: "sandbox_group",
+                sandboxGroupId: sourceSession.sandboxGroupId,
+              },
+              controllerHostSandboxGroupId: sourceSession.sandboxGroupId,
+              placementInstanceId: handle.lease.instanceId,
+              session: handle.homeSession,
+              lease: handle.lease,
+              transport: { kind: "managed" },
+            });
+          }
+          if (resolved.kind === "selfhosted") {
+            const placement = {
+              kind: "connected_machine" as const,
+              sandboxId: resolved.sandboxId,
+            };
+            return await callback({
+              placement,
+              controllerHostSandboxGroupId: null,
+              placementInstanceId: resolved.providerInstanceId ?? resolved.sandboxId,
+              session: resolved.session as unknown as BrowserControlPlacementSession,
+              lease: null,
+              transport: { kind: "managed" },
+            });
+          }
+          throw new BrowserControlUnsupportedError(
+            "browser creation on a non-home provider sandbox is not supported",
+          );
+        },
+      );
+    } catch (error) {
+      if (operation !== "browser.create" || expectedPlacement?.kind !== "connected_machine")
+        throw error;
+      throw await wrongPlacementInsteadOfOffline(
+        error,
+        expectedPlacement.sandboxId,
+        async () =>
+          (await readActiveSandbox(deps.db, sourceSession.workspaceId, sourceSession.id))
+            ?.activeSandboxId ?? null,
+      );
+    }
   }
 
   async function browserRoutePreamble(
