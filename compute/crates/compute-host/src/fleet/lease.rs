@@ -82,6 +82,9 @@ pub(crate) struct Renewer {
     pub(crate) current: Arc<Current>,
     pub(crate) handle: Handle,
     pub(crate) info: HostInfo,
+    /// The name the fleet gives the image this host's sandboxes start
+    /// from.
+    pub(crate) image: String,
 }
 
 /// The renewer's state while it runs.
@@ -140,7 +143,7 @@ impl Running {
                 host: renewer.host.unwrap_or_default(),
                 epoch: epoch.0,
                 seq: renewal.seq,
-                capacity: capacity(&status),
+                capacity: capacity(&status, &renewer.image),
             };
             self.post(RENEW_PATH, &body, timeout, renewal, Answer::Renewed);
             return Ok(());
@@ -160,7 +163,7 @@ impl Running {
                 host: renewer.host,
                 attempt: renewal.attempt,
                 info: renewer.info.clone(),
-                capacity: capacity(&status),
+                capacity: capacity(&status, &renewer.image),
                 held: status
                     .sandboxes
                     .iter()
@@ -322,7 +325,7 @@ impl Running {
         let Ok(status) = renewer.handle.status().await else {
             return;
         };
-        let capacity = capacity(&status);
+        let capacity = capacity(&status, &renewer.image);
         if self.reported.as_ref() == Some(&capacity) {
             return;
         }
@@ -348,8 +351,9 @@ impl Running {
     }
 }
 
-/// What the host can take on, from its status.
-fn capacity(status: &HostStatus) -> Capacity {
+/// What the host can take on, from its status; its ready clones all start
+/// from `image`.
+fn capacity(status: &HostStatus, image: &str) -> Capacity {
     let mib = |bytes: u64| bytes >> 20;
     Capacity {
         memory_free_mib: status.capacity.as_ref().map_or(0, |held| mib(held.free)),
@@ -359,6 +363,7 @@ fn capacity(status: &HostStatus) -> Capacity {
             .iter()
             .filter(|template| template.ready > 0)
             .map(|template| ReadyClones {
+                image: image.to_owned(),
                 vcpus: u32::from(template.vcpus),
                 memory_mib: template.memory_mib,
                 count: template.ready,

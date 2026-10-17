@@ -15,7 +15,8 @@ Opengeni does not use this yet.
 | Templates and a ready pool for new sandboxes | on `feat/compute-lab` |
 | Admission with requests and limits, memory guarantees for running VMs | on `feat/compute-lab` |
 | Fleet decisions: placement, host leases with a safety budget, the VM guard, fences on every archive write, recovery and moves, with a seeded simulation of the whole protocol | on `feat/compute-fleet` |
-| The fleet service (Postgres store, host API, proxy), multi-host runs, autoscaling, observability, Opengeni integration | in progress |
+| A host in a fleet: registering and renewing over mutual TLS, the guard service, owner epochs on every request, adopt, hand-off and reconcile, no decisions while the lease has run out | on `feat/compute-fleet` |
+| The fleet service (Postgres store, public API, proxy), multi-host runs, autoscaling, observability, Opengeni integration | in progress |
 
 Decisions and their reasons are in [docs/adr](docs/adr/README.md). Numbers
 below are observations from our lab runs, with workloads and hosts in
@@ -252,7 +253,7 @@ next create.
 | --- | --- |
 | `crates/compute-core` | Pure decisions: levels, sleep policy, each sandbox's state machine, memory pressure. No I/O, clock or randomness. |
 | `crates/compute-engine` | VM operations (boot, pause, resume, compress, snapshot, restore, stop) behind one trait; Firecracker with its jailer, cgroups. |
-| `crates/compute-host` | The agent: API, records, steps, images, archives, network, activity, templates. |
+| `crates/compute-host` | The agent: API, records, steps, images, archives, network, activity, templates, and a host's part in a fleet (lease, guard, listener). |
 | `crates/compute-pager` | The userfaultfd pager, with a pure, separately tested memory-layout core. |
 | `crates/compute-storage` | Content-addressed chunks, manifests and stores; archive pointers stamped with their owner. |
 | `crates/compute-fleet` | Pure fleet decisions: placement, host leases, the guard that stops a cut-off host's VMs, the fence rule for archive writes, recovery and moves. No I/O, clock or randomness. |

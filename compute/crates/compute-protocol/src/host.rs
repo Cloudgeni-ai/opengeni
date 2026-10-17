@@ -430,11 +430,15 @@ pub enum Request {
     /// Hand a sandbox off to whichever host adopts it next: the host stops
     /// taking wakes for it (they are refused with [`ErrorCode::Busy`]),
     /// archives its latest state, ends its VM, forgets it, keeping the
-    /// store's copy, and replies once all that is done. A restarted agent
-    /// finishes a hand-off it began. Refused with [`ErrorCode::Busy`] while
-    /// something holds the sandbox awake, and with [`ErrorCode::Stale`]
-    /// under another owner epoch than the one held; once it is done the
-    /// host no longer has the sandbox ([`ErrorCode::NotFound`]).
+    /// store's copy, and replies once all that is done. Only the last step,
+    /// forgetting it, is recorded, so a restarted agent finishes a hand-off
+    /// that got that far; one cut short earlier leaves the sandbox here,
+    /// awake or asleep, and the service, which had no answer, sends it
+    /// again. Refused with [`ErrorCode::Busy`] while something holds the
+    /// sandbox awake, with [`ErrorCode::Stale`] under an earlier owner
+    /// epoch than the one held, and with [`ErrorCode::NotFound`] under a
+    /// later one, which this host never held; once it is done the host no
+    /// longer has the sandbox ([`ErrorCode::NotFound`]).
     HandOff {
         /// Its id.
         id: Id,

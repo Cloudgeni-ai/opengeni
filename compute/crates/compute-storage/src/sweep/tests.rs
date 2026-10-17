@@ -10,7 +10,7 @@ use super::*;
 use crate::chunk::EncodedChunk;
 use crate::fake::{Bucket, Fake, Object, Rng};
 use crate::fresh::{Clock, Freshness};
-use crate::store::{Begun, TEST_EPOCH, next_save, unstamped};
+use crate::store::{Begun, Rewrite, TEST_EPOCH, next_save, unstamped};
 
 const SECOND: Duration = Duration::from_secs(1);
 
@@ -103,8 +103,7 @@ async fn a_reused_chunk_stored_long_ago_is_stored_again() {
 
 /// An archive's first pointer is an empty one stored when it begins; it
 /// names nothing and reads as no copy. Deleting the sandbox leaves a
-/// tombstone, which no later archive publishes over and a sweep removes
-/// once it is older than the sweep window.
+/// tombstone, which no later archive publishes over and every sweep keeps.
 #[tokio::test(start_paused = true)]
 async fn an_archive_begins_by_storing_an_empty_pointer() {
     let fake = Fake::new(paused_clock());
@@ -130,19 +129,48 @@ async fn an_archive_begins_by_storing_an_empty_pointer() {
     assert!(matches!(late, Begun::Deleted), "{late:?}");
 
     let young = sweep(&store, listed_names, true).await.unwrap();
-    assert_eq!((young.tombstones, young.tombstones_deleted), (1, 0));
+    assert_eq!(young.tombstones, 1);
     assert_eq!(
         fake.bytes("p/pointers/v3/a"),
-        Some(tombstone),
+        Some(tombstone.clone()),
         "not stored again"
     );
     tokio::time::advance(store.freshness().sweep_after() + SECOND).await;
     let old = sweep(&store, listed_names, true).await.unwrap();
-    assert_eq!(
-        (old.tombstones, old.old_tombstones, old.tombstones_deleted),
-        (1, 1, 1)
-    );
-    assert!(fake.bytes("p/pointers/v3/a").is_none());
+    assert_eq!(old.tombstones, 1);
+    assert_eq!(fake.bytes("p/pointers/v3/a"), Some(tombstone), "kept");
+}
+
+/// A first archive's empty pointer, held up in flight while the sandbox
+/// is deleted and long past any sweep, lands on the tombstone and is
+/// refused: the archive finds the sandbox deleted and stores nothing. A
+/// sweep that deleted old tombstones would have let it start a copy of a
+/// deleted sandbox.
+#[tokio::test(start_paused = true)]
+async fn a_first_archive_held_up_past_a_delete_and_a_sweep_finds_the_sandbox_deleted() {
+    let fake = Fake::new(paused_clock());
+    let store = ChunkStore::over_fake(&fake, "p");
+    let held_for = store.freshness().sweep_after() + 600 * SECOND;
+    *fake.stall.lock().unwrap() = Some(("pointers/", held_for));
+    let archiving = tokio::spawn({
+        let store = store.clone();
+        async move { store.begin("a", next_save()).await }
+    });
+    while *fake.held.lock().unwrap() == 0 {
+        tokio::task::yield_now().await;
+    }
+    *fake.stall.lock().unwrap() = None;
+    store.delete_pointer("a", TEST_EPOCH).await.unwrap();
+    let tombstone = fake.bytes("p/pointers/v3/a").expect("a tombstone");
+
+    tokio::time::advance(store.freshness().sweep_after() + SECOND).await;
+    let swept = sweep(&store, listed_names, true).await.unwrap();
+    assert_eq!(swept.tombstones, 1, "{swept:?}");
+
+    let late = archiving.await.unwrap();
+    assert!(matches!(late, Ok(Begun::Deleted)), "{late:?}");
+    assert_eq!(fake.bytes("p/pointers/v3/a"), Some(tombstone));
+    assert_eq!(store.get_pointer("a").await.unwrap(), None);
 }
 
 /// The race a deadline cannot close: an archive reuses an old chunk, its
@@ -239,6 +267,52 @@ async fn a_change_held_up_past_a_newer_copy_never_lands() {
     assert_eq!(*fake.held.lock().unwrap(), 1);
     assert_eq!(store.get_pointer("a").await.unwrap(), Some(current));
     store.get_chunk(&newer.reference).await.unwrap();
+}
+
+/// A rewrite (forgetting memory) that finds only an archive's empty start
+/// stores its own number there, so that archive, which began before it,
+/// cannot land after it and bring the memory back.
+#[tokio::test(start_paused = true)]
+async fn a_forget_that_finds_an_archive_starting_stops_it() {
+    let fake = Fake::new(paused_clock());
+    let store = ChunkStore::over_fake(&fake, "p");
+    let archive = store.begin("a", next_save()).await.unwrap();
+    let forget = store.read_for_change("a", next_save()).await.unwrap();
+    assert!(matches!(forget, Rewrite::Nothing), "{forget:?}");
+
+    let Begun::Publish(publication) = archive else {
+        panic!("{archive:?}")
+    };
+    let late = store
+        .publish(publication, pointer(&["memory".to_owned()]))
+        .await;
+    assert!(matches!(late, Err(Error::Superseded)), "{late:?}");
+    assert_eq!(store.get_pointer("a").await.unwrap(), None);
+}
+
+/// The same with the archive's start itself held up in flight: the forget
+/// finds no pointer, stores its number, and the start lands on it and is
+/// refused, so the archive finds itself outdated.
+#[tokio::test(start_paused = true)]
+async fn a_forget_with_nothing_stored_stops_an_archive_whose_start_is_in_flight() {
+    let fake = Fake::new(paused_clock());
+    let store = ChunkStore::over_fake(&fake, "p");
+    let archive_stamp = next_save();
+    *fake.stall.lock().unwrap() = Some(("pointers/", 300 * SECOND));
+    let archiving = tokio::spawn({
+        let store = store.clone();
+        async move { store.begin("a", archive_stamp).await }
+    });
+    while *fake.held.lock().unwrap() == 0 {
+        tokio::task::yield_now().await;
+    }
+    *fake.stall.lock().unwrap() = None;
+    let forget = store.read_for_change("a", next_save()).await.unwrap();
+    assert!(matches!(forget, Rewrite::Nothing), "{forget:?}");
+
+    let late = archiving.await.unwrap();
+    assert!(matches!(late, Ok(Begun::Outdated)), "{late:?}");
+    assert_eq!(store.get_pointer("a").await.unwrap(), None);
 }
 
 /// A delete of a removed sandbox's pointer, held up in flight after its

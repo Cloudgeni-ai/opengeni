@@ -15,7 +15,9 @@
 //!   memory image) takes a new number from a counter the host records
 //!   before the store sees it, so a change never lands over a later one,
 //!   even when two overlap, and a retry tells its own change, already
-//!   there ([`Fence::Done`]), from a later one ([`Fence::Outdated`]).
+//!   there ([`Fence::Done`]), from a later one ([`Fence::Outdated`]). A
+//!   rewrite that finds no copy still stores its number, in an empty
+//!   pointer, so an archive begun before it can no longer land after it.
 //! - A delete leaves a tombstone under the deleting owner's epoch. It is
 //!   final: nothing writes over it, and every later change by that owner
 //!   or an earlier one finds the sandbox [`Fence::Deleted`], not done.
@@ -85,8 +87,6 @@ pub enum Fence {
     Outdated,
     /// The sandbox was deleted: nothing of it is written again.
     Deleted,
-    /// There is nothing to rewrite.
-    Nothing,
     /// A later owner holds it: the sandbox belongs to that owner now, and
     /// this host drops its copy.
     Superseded {
@@ -107,10 +107,7 @@ pub fn fence(mutation: Mutation, found: Found) -> Fence {
             Mutation::Delete(_) => Fence::Done,
             _ => Fence::Deleted,
         },
-        Found::Nothing => match mutation {
-            Mutation::Rewrite(_) => Fence::Nothing,
-            _ => Fence::Write,
-        },
+        Found::Nothing => Fence::Write,
         Found::Copy(found) => match mutation {
             Mutation::Archive(stamp) | Mutation::Rewrite(stamp) => match found.cmp(&stamp) {
                 Ordering::Equal => Fence::Done,
@@ -178,9 +175,11 @@ mod tests {
             fence(Mutation::Archive(stamp(4, 7)), Found::Nothing),
             Fence::Write
         );
+        // A rewrite with no copy to rewrite stores its number all the same,
+        // or an archive whose start is still in flight could land after it.
         assert_eq!(
             fence(Mutation::Rewrite(stamp(4, 7)), Found::Nothing),
-            Fence::Nothing
+            Fence::Write
         );
     }
 
@@ -393,10 +392,7 @@ mod tests {
                         }
                         flights.swap_remove(index);
                     }
-                    Fence::Outdated
-                    | Fence::Deleted
-                    | Fence::Nothing
-                    | Fence::Superseded { .. } => {
+                    Fence::Outdated | Fence::Deleted | Fence::Superseded { .. } => {
                         flights.swap_remove(index);
                     }
                 }

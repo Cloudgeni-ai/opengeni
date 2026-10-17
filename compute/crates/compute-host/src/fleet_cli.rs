@@ -39,6 +39,10 @@ pub struct FleetArgs {
     /// The host's failure zone.
     #[arg(long = "fleet-zone", id = "fleet_zone", default_value = "default")]
     pub zone: String,
+    /// The name the fleet gives the image `--base-image` holds, which the
+    /// host's ready clones are reported under.
+    #[arg(long = "fleet-image", id = "fleet_image", default_value = "base")]
+    pub image: String,
     /// The host's certificate chain, PEM, signed by the hosts' authority.
     #[arg(long = "fleet-cert", id = "fleet_cert")]
     pub cert: Option<PathBuf>,
@@ -102,6 +106,7 @@ impl FleetArgs {
                 memory_mib: host.memory_bytes >> 20,
                 disk_mib: stat.f_blocks.saturating_mul(stat.f_frsize) >> 20,
             },
+            image: self.image.clone(),
             listen: self.listen,
             tls: TlsFiles {
                 cert: required(&self.cert, "--fleet-cert")?,

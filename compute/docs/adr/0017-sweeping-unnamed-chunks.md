@@ -67,9 +67,10 @@ would delete a chunk the new copy needs, after its local copy may be gone.
   prefix used.
 - Deleting a sandbox leaves a tombstone, an empty pointer under its
   owner's stamp that no later archive publishes over. A sweep never
-  stores a tombstone again, and deletes one stored longer ago than the
-  sweep window, on condition that it is still the same write; by then no
-  archive of that sandbox is still trying.
+  stores a tombstone again, and never deletes one: the age of an object
+  says nothing about how long a write can be held up in flight, and a
+  first archive's write that found the tombstone gone would start a copy
+  of the deleted sandbox. Tombstones are a few hundred bytes each.
 - Forgetting a memory image also drops its working-set pack, which holds
   memory pages; a copy without memory names no pack. The forget carries a
   change number of its own, as an archive does

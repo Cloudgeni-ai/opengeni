@@ -75,10 +75,14 @@ pub struct HostInfo {
     pub disk_mib: u64,
 }
 
-/// Ready clones a host holds of one shape (see the host's ready pool).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Ready clones a host holds of one image and shape (see the host's ready
+/// pool). Two images of the same shape are two entries: a create gets a
+/// clone only of the image it asks for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadyClones {
+    /// The image the clones start from, by the name the fleet gives it.
+    pub image: String,
     pub vcpus: u32,
     pub memory_mib: u32,
     pub count: u32,
@@ -229,8 +233,10 @@ pub struct Envelope {
     pub request: Request,
 }
 
-/// When a host answered: under which registration, and its latest renewal
-/// the service had accepted then. Of two answers about one sandbox, one
+/// When a host answered: under which registration, and the number of the
+/// last renewal it had sent under it. The host stores that number before
+/// it sends the renewal, so it never goes back, and it is at least the
+/// last one the service accepted. Of two answers about one sandbox, one
 /// under a later registration, or after a later renewal of the same one,
 /// was given later; two between the same renewals do not order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +245,7 @@ pub struct Answered {
     /// The registration, if the host held one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_epoch: Option<u64>,
+    /// The last renewal sent under it.
     pub seq: u64,
 }
 
@@ -291,6 +298,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!((register.host, register.attempt), (None, 7));
+    }
+
+    #[test]
+    fn ready_clones_of_two_images_of_one_shape_stay_apart() {
+        let capacity: Capacity = serde_json::from_str(
+            r#"{"memory_free_mib":1,"disk_free_mib":1,"ready":[{"image":"python","vcpus":2,"memory_mib":1024,"count":3},{"image":"node","vcpus":2,"memory_mib":1024,"count":1}],"awake":0,"sandboxes":0}"#,
+        )
+        .unwrap();
+        let images: Vec<(&str, u32)> = capacity
+            .ready
+            .iter()
+            .map(|ready| (ready.image.as_str(), ready.count))
+            .collect();
+        assert_eq!(images, [("python", 3), ("node", 1)]);
+        let again: Capacity =
+            serde_json::from_str(&serde_json::to_string(&capacity).unwrap()).unwrap();
+        assert_eq!(again, capacity);
+        assert!(
+            serde_json::from_str::<ReadyClones>(r#"{"vcpus":2,"memory_mib":1024,"count":3}"#)
+                .is_err(),
+            "a report names its image"
+        );
     }
 
     #[test]

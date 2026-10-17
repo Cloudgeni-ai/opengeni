@@ -1200,7 +1200,7 @@ impl Sim {
                 return;
             }
             Fence::Write => {}
-            Fence::Deleted | Fence::Nothing => unreachable!("nothing deletes or rewrites here"),
+            Fence::Deleted => unreachable!("nothing deletes here"),
         }
         let version = found.map_or(0, |pointer| pointer.version);
         // The upload takes a while, sometimes very long.

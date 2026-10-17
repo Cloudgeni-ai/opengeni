@@ -4,15 +4,12 @@
 //! whether to write at all, so no write a former owner or an earlier
 //! change has in flight can land once a later one has.
 
-use std::time::SystemTime;
-
 use bytes::Bytes;
 use compute_fleet::{Fence, Found, Mutation, OwnerEpoch, Stamp, fence};
 use futures::TryStreamExt as _;
 use object_store::{PutMode, PutOptions, UpdateVersion, path::Path};
 
-use super::{ChunkStore, MAX_POINTER_BYTES, Removal, Uploader};
-use crate::upload::Deleted;
+use super::{ChunkStore, MAX_POINTER_BYTES};
 use crate::{Error, Result};
 
 /// Length of the write stamp every stored pointer begins with (see
@@ -93,7 +90,9 @@ pub enum Rewrite {
     /// A later change by the same owner is there: the rewrite is moot.
     Outdated,
     /// There is no copy to rewrite: no pointer, an empty one, or a
-    /// tombstone.
+    /// tombstone. Where there was no pointer or an empty one, the change
+    /// is stored all the same, as an empty pointer under its number, so
+    /// no change before it can land after it.
     Nothing,
 }
 
@@ -296,29 +295,45 @@ impl ChunkStore {
     /// again. Refused with [`Error::Fenced`] once a later owner holds it.
     pub async fn read_for_change(&self, name: &str, own: Stamp) -> Result<Rewrite> {
         let path = self.pointer_path(name)?;
-        let stored = self.read_pointer(&path).await?;
-        Ok(
+        for _ in 0..POINTER_TRIES {
+            let stored = self.read_pointer(&path).await?;
             match fence(Mutation::Rewrite(own), found(stored.as_ref())) {
                 Fence::Superseded { by } => return Err(Error::Fenced { by }),
-                Fence::Write => match stored {
-                    Some(stored) if !stored.pointer.is_empty() => Rewrite::Change(
+                Fence::Outdated => return Ok(Rewrite::Outdated),
+                Fence::Deleted => return Ok(Rewrite::Nothing),
+                Fence::Done => {
+                    return Ok(match stored {
+                        Some(stored) if !stored.pointer.is_empty() => {
+                            Rewrite::Done(stored.pointer.to_vec())
+                        }
+                        _ => Rewrite::Nothing,
+                    });
+                }
+                Fence::Write => {}
+            }
+            match stored {
+                Some(stored) if !stored.pointer.is_empty() => {
+                    return Ok(Rewrite::Change(
                         stored.pointer.to_vec(),
                         Publication {
                             path,
                             version: stored.version,
                             stamp: own,
                         },
-                    ),
-                    _ => Rewrite::Nothing,
-                },
-                Fence::Done => match stored {
-                    Some(stored) => Rewrite::Done(stored.pointer.to_vec()),
-                    None => Rewrite::Nothing,
-                },
-                Fence::Outdated => Rewrite::Outdated,
-                Fence::Deleted | Fence::Nothing => Rewrite::Nothing,
-            },
-        )
+                    ));
+                }
+                // No copy, or only an archive's empty start: nothing to
+                // rewrite, but the change is stored, so that archive, or
+                // one whose start is still in flight, cannot land after it.
+                stored => {
+                    let version = stored.map(|stored| stored.version);
+                    if self.put_pointer(&path, own, &[], version).await?.is_some() {
+                        return Ok(Rewrite::Nothing);
+                    }
+                }
+            }
+        }
+        Err(Error::Superseded)
     }
 
     /// Replaces pointer `name` with no condition, as a writer without the
@@ -366,7 +381,7 @@ impl ChunkStore {
                         _ => Begun::Outdated,
                     });
                 }
-                Fence::Write | Fence::Nothing => {}
+                Fence::Write => {}
             }
             if let Some(stored) = stored {
                 return Ok(Begun::Publish(Publication {
@@ -435,7 +450,7 @@ impl ChunkStore {
                                 .then(|| (stored.owner, stored.pointer.to_vec()))
                         }));
                     }
-                    Fence::Outdated | Fence::Nothing => {
+                    Fence::Outdated => {
                         unreachable!("a claim is never outdated, and takes over even nothing")
                     }
                     Fence::Write => match stored {
@@ -556,10 +571,10 @@ impl ChunkStore {
     /// flight long after its caller stopped waiting brings the copy back. Even where
     /// there is no pointer a tombstone is stored. Refused with
     /// [`Error::Fenced`] once a later owner holds the pointer. A tombstone
-    /// is final: no owner archives over it, and claiming it takes nothing.
-    /// What the pointer named stays until a sweep finds nothing names it,
-    /// and the tombstone until a sweep finds it older than the sweep
-    /// window (see [`Self::delete_tombstone_if_stored_before`]).
+    /// is final and stays for good: no owner archives over it, claiming it
+    /// takes nothing, and a first archive held up in flight, however long,
+    /// finds it rather than an empty place to start a copy in. What the
+    /// pointer named stays until a sweep finds nothing names it.
     pub async fn delete_pointer(&self, name: &str, own: OwnerEpoch) -> Result<()> {
         let path = self.pointer_path(name)?;
         let tombstone = Stamp {
@@ -572,7 +587,7 @@ impl ChunkStore {
                 Fence::Superseded { by } => return Err(Error::Fenced { by }),
                 Fence::Done => return Ok(()),
                 Fence::Write => {}
-                Fence::Outdated | Fence::Deleted | Fence::Nothing => {
+                Fence::Outdated | Fence::Deleted => {
                     unreachable!("a delete writes over anything but a tombstone")
                 }
             }
@@ -593,48 +608,5 @@ impl ChunkStore {
     #[must_use]
     pub fn pointer_name(key: &str) -> Option<&str> {
         key.strip_prefix(POINTERS)?.strip_prefix('/')
-    }
-
-    /// Deletes the tombstone at pointer `key` (as a listing gives it) if it
-    /// was stored before `before` and is still that tombstone when deleted:
-    /// a pointer stored there since stays. By then no archive of the
-    /// deleted sandbox is still trying, so nothing can bring it back; a
-    /// request held up in flight longer than that would only store an
-    /// empty pointer. Only GCS deletes on that condition; elsewhere this
-    /// refuses with [`Error::Unsupported`].
-    pub async fn delete_tombstone_if_stored_before(
-        &self,
-        key: &str,
-        before: SystemTime,
-    ) -> Result<Removal> {
-        let Uploader::Gcs(gcs) = &self.uploader else {
-            return Err(Error::Unsupported(
-                "deleting stored objects needs a delete on condition (GCS)",
-            ));
-        };
-        let name = Self::pointer_name(key).ok_or(Error::Invalid("pointer key"))?;
-        let path = self.pointer_path(name)?;
-        let Some(stored_at) = gcs.stored(&path).await? else {
-            return Ok(Removal::Gone);
-        };
-        if stored_at.at.is_none_or(|at| at >= before) {
-            return Ok(Removal::Kept);
-        }
-        let Some(stored) = self.read_pointer(&path).await? else {
-            return Ok(Removal::Gone);
-        };
-        // The generation read, which the delete is conditional on, must be
-        // the one that was old enough.
-        let (true, Some(generation)) = (stored.is_tombstone(), stored.version.version) else {
-            return Ok(Removal::Kept);
-        };
-        if stored_at.generation.as_deref() != Some(generation.as_str()) {
-            return Ok(Removal::Kept);
-        }
-        Ok(match gcs.delete_generation(&path, &generation).await? {
-            Deleted::Yes => Removal::Deleted,
-            Deleted::Changed => Removal::Kept,
-            Deleted::Gone => Removal::Gone,
-        })
     }
 }
