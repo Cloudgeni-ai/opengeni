@@ -1,18 +1,22 @@
 //! Talking to the agent: handles, leases and the requests they send.
 
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use compute_core::{HoldId, Level, Priority, Step};
 use compute_engine::vsock;
 use tokio::net::UnixStream;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep};
 
-use crate::protocol::{HostStatus, Id, SandboxConfig};
+use compute_protocol::fleet::Verdict;
 
-use super::{Command, Handle, HostError, Lease, ReleaseOnDrop};
+use crate::protocol::{HostStatus, Id, SandboxConfig};
+use crate::store::OwnerEpoch;
+
+use super::{Command, Handle, HostError, Lease, Origin, ReleaseOnDrop};
 
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
@@ -26,7 +30,117 @@ impl Drop for ReleaseOnDrop {
 }
 
 impl Handle {
+    pub(super) fn new(commands: mpsc::UnboundedSender<Command>, stream_idle: Duration) -> Self {
+        Self {
+            commands,
+            holds: Arc::new(AtomicU64::new(1)),
+            stream_idle,
+            origin: Origin::Local,
+        }
+    }
+
     async fn ask<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<T>) -> Command,
+    ) -> Result<T, HostError> {
+        let (reply, answer) = oneshot::channel();
+        let command = match self.origin {
+            Origin::Fleet(owner) => Command::Owned {
+                owner,
+                command: Box::new(make(reply)),
+            },
+            Origin::Local | Origin::LocalToFleet => make(reply),
+        };
+        self.commands
+            .send(command)
+            .map_err(|_| HostError::Stopped)?;
+        answer.await.map_err(|_| HostError::Stopped)
+    }
+
+    /// A handle for the fleet service's requests about the ownership of a
+    /// sandbox under `owner`: the agent carries each out only while this
+    /// host holds that ownership (see [`crate::protocol::Request::Adopt`]).
+    #[must_use]
+    pub fn owned(&self, owner: OwnerEpoch) -> Self {
+        Self {
+            origin: Origin::Fleet(owner),
+            ..self.clone()
+        }
+    }
+
+    /// A handle for the host's own tools on a host in a fleet, which
+    /// create, adopt and hand off nothing: only the fleet service knows
+    /// which sandboxes a fleet has, and where.
+    #[must_use]
+    pub fn local_to_fleet(&self) -> Self {
+        Self {
+            origin: Origin::LocalToFleet,
+            ..self.clone()
+        }
+    }
+
+    /// Refuses what only the fleet service asks of a host in a fleet.
+    fn fleet_only(&self, what: &str) -> Result<(), HostError> {
+        if self.origin == Origin::LocalToFleet {
+            return Err(HostError::Invalid(format!(
+                "this host is in a fleet: only the fleet service may {what} sandboxes"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Creates a sandbox. It costs only disk until first needed.
+    pub async fn create(&self, id: Id, config: SandboxConfig) -> Result<(), HostError> {
+        self.fleet_only("create")?;
+        let owner = match self.origin {
+            Origin::Fleet(owner) => owner,
+            Origin::Local | Origin::LocalToFleet => OwnerEpoch::FIRST,
+        };
+        self.ask(|reply| Command::Create {
+            id,
+            config,
+            owner,
+            reply,
+        })
+        .await?
+    }
+
+    /// Takes a sandbox over from the store's latest copy as its owner under
+    /// `owner`; see [`crate::protocol::Request::Adopt`].
+    pub async fn adopt(
+        &self,
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+    ) -> Result<(), HostError> {
+        self.fleet_only("adopt")?;
+        self.send_unfenced(|reply| Command::Adopt {
+            id,
+            config,
+            owner,
+            reply,
+        })
+        .await?
+    }
+
+    /// Hands a sandbox held under `owner` off, and returns once this host
+    /// no longer has it; see [`crate::protocol::Request::HandOff`].
+    pub async fn hand_off(&self, id: Id, owner: OwnerEpoch) -> Result<(), HostError> {
+        self.fleet_only("hand off")?;
+        self.send_unfenced(|reply| Command::HandOff { id, owner, reply })
+            .await?
+    }
+
+    /// Takes in the fleet service's rulings on the sandboxes the host
+    /// listed when it registered, and returns once every sandbox the
+    /// rulings do not keep is gone (see [`compute_protocol::fleet::Registered`]).
+    pub async fn reconcile(&self, rulings: Vec<(Id, Verdict)>) -> Result<(), HostError> {
+        self.send_unfenced(|reply| Command::Reconcile { rulings, reply })
+            .await?
+    }
+
+    /// Sends a request that names its owner epoch itself.
+    async fn send_unfenced<T>(
         &self,
         make: impl FnOnce(oneshot::Sender<T>) -> Command,
     ) -> Result<T, HostError> {
@@ -35,12 +149,6 @@ impl Handle {
             .send(make(reply))
             .map_err(|_| HostError::Stopped)?;
         answer.await.map_err(|_| HostError::Stopped)
-    }
-
-    /// Creates a sandbox. It costs only disk until first needed.
-    pub async fn create(&self, id: Id, config: SandboxConfig) -> Result<(), HostError> {
-        self.ask(|reply| Command::Create { id, config, reply })
-            .await?
     }
 
     /// Deletes a sandbox and everything it stores, waiting until it is gone.

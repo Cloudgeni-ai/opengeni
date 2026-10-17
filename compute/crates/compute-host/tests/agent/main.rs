@@ -20,7 +20,7 @@ use compute_host::protocol::{
     HostStatus, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SandboxStatus,
     SleepConfig,
 };
-use compute_host::{BusyRule, HostAgent, HostConfig, NoStore, PagerConfig, serve};
+use compute_host::{BusyRule, Handle, HostAgent, HostConfig, NoStore, PagerConfig, Store, serve};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::watch;
@@ -28,6 +28,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Instant, sleep};
 
 mod admission;
+mod fleet;
 mod pool;
 mod ready;
 mod requests;
@@ -752,6 +753,9 @@ struct Lab {
     client: Client,
     world: Arc<World>,
     server: JoinHandle<()>,
+    /// The agent's own handle, for requests the socket does not carry,
+    /// such as the fleet service's.
+    handle: Handle,
 }
 
 static NEXT_LAB: AtomicUsize = AtomicUsize::new(0);
@@ -809,16 +813,33 @@ impl Lab {
     ) -> Self {
         let mut config = Self::config(&root, policy);
         configure(&mut config);
+        Self::launch(root, world, delays, config, NoStore).await
+    }
+
+    /// A lab whose agent keeps sandboxes in `store`.
+    async fn start_stored(root: PathBuf, world: Arc<World>, store: impl Store) -> Self {
+        let config = Self::config(&root, HostPolicy::default());
+        Self::launch(root, world, Delays::default(), config, store).await
+    }
+
+    async fn launch(
+        root: PathBuf,
+        world: Arc<World>,
+        delays: Delays,
+        config: HostConfig,
+        store: impl Store,
+    ) -> Self {
         let engine = Fake {
             world: Arc::clone(&world),
             delays,
         };
-        let (handle, _agent) = HostAgent::start(config, engine, NoStore).await.unwrap();
+        let (handle, _agent) = HostAgent::start(config, engine, store).await.unwrap();
+        let api = handle.clone();
         let socket = root.join("host.sock");
         let _ = std::fs::remove_file(&socket);
         let listening = socket.clone();
         let server = tokio::spawn(async move {
-            let _ = serve(handle, &listening).await;
+            let _ = serve(api, &listening).await;
         });
         // Generous: on a loaded machine the server can take a while to bind.
         // The socket file appears at bind, before the server listens, so
@@ -834,6 +855,7 @@ impl Lab {
             client,
             world,
             server,
+            handle,
         }
     }
 
@@ -843,6 +865,7 @@ impl Lab {
 
     /// Stops serving; the agent stops once its last handle is gone.
     async fn stop(self) -> (PathBuf, Arc<World>) {
+        drop(self.handle);
         self.server.abort();
         let _ = self.server.await;
         sleep(Duration::from_millis(20)).await;

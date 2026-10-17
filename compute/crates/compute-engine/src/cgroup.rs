@@ -216,6 +216,38 @@ impl Cgroup {
         }
     }
 
+    /// Asks the kernel to freeze every process in the group and its
+    /// descendants (`cgroup.freeze` 1), or to thaw them (0). Freezing
+    /// completes asynchronously: [`Self::freezer`] reports when it has.
+    pub fn set_frozen(&self, frozen: bool) -> io::Result<()> {
+        fs::write(
+            self.path.join("cgroup.freeze"),
+            if frozen { "1" } else { "0" },
+        )
+    }
+
+    /// What the kernel reports of the group's freezer and processes. A
+    /// group that does not exist is empty.
+    pub fn freezer(&self) -> io::Result<Freezer> {
+        let asked = match fs::read_to_string(self.path.join("cgroup.freeze")) {
+            Ok(value) => value.trim() == "1",
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Freezer {
+                    asked: false,
+                    frozen: false,
+                    empty: true,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let events = match fs::read_to_string(self.path.join("cgroup.events")) {
+            Ok(events) => events,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error),
+        };
+        Ok(Freezer::parse(asked, &events))
+    }
+
     /// Moves process `pid` into the group.
     pub fn add(&self, pid: u32) -> io::Result<()> {
         fs::write(self.path.join("cgroup.procs"), pid.to_string())
@@ -287,6 +319,33 @@ impl Cgroup {
         }
         fs::remove_dir(&self.path)?;
         self.protect_parent()
+    }
+}
+
+/// What the kernel reports of a group's freezer; see [`Cgroup::freezer`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Freezer {
+    /// A freeze is asked for (`cgroup.freeze` reads 1), whoever asked.
+    pub asked: bool,
+    /// Every process in it is frozen (`cgroup.events`: `frozen 1`).
+    pub frozen: bool,
+    /// No process is in it (`cgroup.events`: `populated 0`).
+    pub empty: bool,
+}
+
+impl Freezer {
+    fn parse(asked: bool, events: &str) -> Self {
+        let flag = |name: &str| {
+            events.lines().any(|line| {
+                line.split_once(' ')
+                    .is_some_and(|(key, value)| key == name && value.trim() == "1")
+            })
+        };
+        Self {
+            asked,
+            frozen: flag("frozen"),
+            empty: !flag("populated"),
+        }
     }
 }
 
@@ -438,6 +497,25 @@ mod tests {
         let root = parse_own("0::/\n").unwrap();
         assert!(!encloses(&root, Path::new("compute")));
         assert_eq!(parse_own("1:name=systemd:/x\n"), None);
+    }
+
+    #[test]
+    fn reads_the_freezer_from_cgroup_events() {
+        let running = Freezer::parse(false, "populated 1\nfrozen 0\n");
+        assert_eq!(
+            running,
+            Freezer {
+                asked: false,
+                frozen: false,
+                empty: false
+            }
+        );
+        let frozen = Freezer::parse(true, "populated 1\nfrozen 1\n");
+        assert!(frozen.asked && frozen.frozen && !frozen.empty);
+        // An empty group a freeze was asked of reports frozen too.
+        let empty = Freezer::parse(true, "populated 0\nfrozen 1\n");
+        assert!(empty.empty && empty.frozen);
+        assert!(Freezer::parse(false, "").empty);
     }
 
     #[test]

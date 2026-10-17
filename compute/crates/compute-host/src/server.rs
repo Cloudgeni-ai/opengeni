@@ -19,6 +19,7 @@ use tokio::time::{Instant, sleep_until};
 
 use crate::agent::{Handle, HostError, Lease};
 use crate::protocol::{ErrorCode, Id, Reply, Request, step_name};
+use crate::store::OwnerEpoch;
 
 /// Bytes relayed per read, each way.
 const RELAY_BUFFER: usize = 16 << 10;
@@ -103,6 +104,14 @@ async fn serve_one(handle: &Handle, stream: UnixStream) -> io::Result<()> {
             return serve_connect(client, acquire, port, &wake).await;
         }
         Request::Create { id, config } => done(handle.create(id, config).await),
+        Request::Adopt {
+            id,
+            config,
+            owner_epoch,
+        } => done(handle.adopt(id, config, OwnerEpoch(owner_epoch)).await),
+        Request::HandOff { id, owner_epoch } => {
+            done(handle.hand_off(id, OwnerEpoch(owner_epoch)).await)
+        }
         Request::Remove { id, generation } => done(handle.remove(id, generation).await),
         Request::Touch {
             id,
@@ -453,14 +462,14 @@ fn error_reply(error: &HostError) -> Reply {
     Reply::Error {
         message: error.to_string(),
         code: match error {
-            HostError::NotFound(_) => ErrorCode::NotFound,
+            HostError::NotFound(_) | HostError::NoCopy(_) => ErrorCode::NotFound,
             HostError::Exists(_) => ErrorCode::Exists,
-            HostError::Busy(_) => ErrorCode::Busy,
+            HostError::Busy(_) | HostError::Awake(_) | HostError::HandingOff(_) => ErrorCode::Busy,
             HostError::Broken(_) => ErrorCode::Broken,
             HostError::Blocked { .. } => ErrorCode::Blocked,
             HostError::Removed(_) => ErrorCode::Removed,
             HostError::Invalid(_) => ErrorCode::Invalid,
-            HostError::Stale { .. } => ErrorCode::Stale,
+            HostError::Stale { .. } | HostError::Superseded { .. } => ErrorCode::Stale,
             HostError::Unreachable { .. } => ErrorCode::Unreachable,
             HostError::HostFull { .. } => ErrorCode::HostFull,
             HostError::Io(_) | HostError::Stopped => ErrorCode::Internal,

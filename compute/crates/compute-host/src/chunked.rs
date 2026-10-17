@@ -786,6 +786,11 @@ impl Store for Chunked {
     /// finds nothing names them. The new pointer lands only on the version
     /// read, so a write held up past a newer copy never replaces it; a
     /// sweep's fence meanwhile means reading it again.
+    ///
+    /// It is stored under `change` even when the copy names no memory
+    /// already: an earlier archive whose upload is still in flight is
+    /// conditional on the version read here, and only a new version stops
+    /// it from landing afterwards with the memory this forgets.
     async fn forget_memory(
         &self,
         id: Id,
@@ -813,9 +818,6 @@ impl Store for Chunked {
                 Err(error) => return Err(storage_error(OP, error)),
             };
             let head = parse_head(OP, &stored)?;
-            if head.memory.is_none() && head.pack.is_none() {
-                return Ok(Owned::Done(Some(receipt_of(&stored))));
-            }
             let head = Head {
                 memory: None,
                 pack: None,

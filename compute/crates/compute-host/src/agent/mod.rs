@@ -35,10 +35,13 @@ use crate::pool::{Built, Lender, Loaning, Pool, PoolConfig, Shape, Sources, Temp
 use crate::protocol::{About, HostStatus, Id, SandboxConfig, StepStats};
 use crate::state::{Record, Records, StateError, claim_host, unix_ms_now};
 use crate::step::{After, Live};
+use crate::store::OwnerEpoch;
 use crate::store::Store;
+use compute_protocol::fleet::Verdict;
 
 mod handle;
 mod holds;
+mod owners;
 mod ready;
 mod recover;
 mod requests;
@@ -307,6 +310,26 @@ pub enum HostError {
     /// The host agent has shut down.
     #[error("the host agent stopped")]
     Stopped,
+    /// The request names an earlier ownership of the sandbox than the one
+    /// this host holds.
+    #[error("sandbox {id} is held under owner epoch {held}, not {asked}")]
+    Superseded {
+        /// The sandbox.
+        id: Id,
+        /// The owner epoch held.
+        held: u64,
+        /// The owner epoch the request names.
+        asked: u64,
+    },
+    /// An adopt found no copy of the sandbox in the store.
+    #[error("the store holds no copy of sandbox {0}")]
+    NoCopy(Id),
+    /// A hand-off was asked of a sandbox that is awake or held awake.
+    #[error("sandbox {0} is awake; it is handed off only while it sleeps")]
+    Awake(Id),
+    /// The sandbox is being handed off and takes no wake.
+    #[error("sandbox {0} is being handed off")]
+    HandingOff(Id),
 }
 
 impl From<StateError> for HostError {
@@ -363,7 +386,33 @@ enum Command {
     Create {
         id: Id,
         config: SandboxConfig,
+        /// The ownership it is created under.
+        owner: OwnerEpoch,
         reply: Reply<()>,
+    },
+    /// See [`crate::protocol::Request::Adopt`].
+    Adopt {
+        id: Id,
+        config: SandboxConfig,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+    },
+    /// See [`crate::protocol::Request::HandOff`].
+    HandOff {
+        id: Id,
+        owner: OwnerEpoch,
+        reply: Reply<()>,
+    },
+    /// The fleet service's rulings on the sandboxes the host listed when
+    /// it registered.
+    Reconcile {
+        rulings: Vec<(Id, Verdict)>,
+        reply: Reply<()>,
+    },
+    /// `command`, sent for the ownership of its sandbox under `owner`.
+    Owned {
+        owner: OwnerEpoch,
+        command: Box<Command>,
     },
     Remove {
         id: Id,
@@ -578,6 +627,8 @@ struct Slot<V> {
     failed: Option<(Step, String)>,
     /// Its named holds, kept on disk.
     holds: holds::Holds,
+    /// Its removal hands it off: it keeps the store's copy.
+    hand_off: bool,
 }
 
 /// A request waiting for a sandbox to run.
@@ -605,6 +656,22 @@ pub struct Handle {
     commands: mpsc::UnboundedSender<Command>,
     holds: Arc<AtomicU64>,
     stream_idle: Duration,
+    /// Who sends through it; see [`Handle::owned`] and
+    /// [`Handle::local_to_fleet`].
+    origin: Origin,
+}
+
+/// Who sends requests through a [`Handle`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    /// The host's own tools, on a host outside a fleet.
+    Local,
+    /// The host's own tools, on a host in a fleet: they create, adopt and
+    /// hand off nothing, since only the fleet service tracks sandboxes.
+    LocalToFleet,
+    /// The fleet service, for the ownership under this owner epoch of the
+    /// sandbox each request is about.
+    Fleet(OwnerEpoch),
 }
 
 /// Keeps a sandbox awake while it lives. Dropping it lets the sandbox go
@@ -695,6 +762,10 @@ pub struct HostAgent<E: Engine, S: Store> {
     memory_policy: Option<MemoryPolicy>,
     /// Ready sandboxes, kept for creates to claim (see [`ready`]).
     ready: ready::Ready<E::Vm>,
+    /// Hand-offs under way (see [`owners`]).
+    handing_off: owners::HandOffs,
+    /// Adopts that wait for an earlier ownership's copy to go.
+    then_adopt: owners::Adopts,
     guest_ports: Arc<[GuestPort]>,
     restore_notice_port: Option<u32>,
     #[cfg(target_os = "linux")]
@@ -892,6 +963,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             warm,
             memory_policy: config.policy.memory,
             ready: ready::Ready::new(ready),
+            handing_off: HashMap::new(),
+            then_adopt: HashMap::new(),
             pager: config.pager,
             core,
             origin: Instant::now(),
@@ -935,12 +1008,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // any build starts or request is served.
         agent.sample();
         agent.start_templates(warm_shapes);
-        let handle = Handle {
-            commands: commands_tx,
-            holds: Arc::new(AtomicU64::new(1)),
-            stream_idle,
-        };
-        Ok((handle, tokio::spawn(agent.run())))
+        Ok((
+            Handle::new(commands_tx, stream_idle),
+            tokio::spawn(agent.run()),
+        ))
     }
 
     /// Refuses while some ordinal is unknown: any ordinal that looks free
@@ -1005,6 +1076,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 destroy: false,
                 removers: Vec::new(),
                 waiters: Vec::new(),
+                hand_off: false,
                 deferred: None,
                 activity: None,
                 compressed: None,

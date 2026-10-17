@@ -273,6 +273,7 @@ pub(crate) struct Change {
     backed_up_ms: Option<u64>,
     next_save: bool,
     handed_off: bool,
+    owner: Option<OwnerEpoch>,
 }
 
 impl Change {
@@ -332,6 +333,13 @@ impl Change {
         self
     }
 
+    /// This host holds the sandbox under owner epoch `owner` from now on.
+    /// Its save numbers go on from where they were.
+    pub fn owner(mut self, owner: OwnerEpoch) -> Self {
+        self.owner = Some(owner);
+        self
+    }
+
     /// The sandbox is no longer this host's: its removal begins and leaves
     /// the store's copy.
     pub fn handed_off(mut self) -> Self {
@@ -367,6 +375,9 @@ impl Change {
             record.saves += 1;
         }
         record.handed_off |= self.handed_off;
+        if let Some(owner) = self.owner {
+            record.owner_epoch = owner.0;
+        }
     }
 }
 
@@ -814,8 +825,30 @@ impl Records {
         .await
     }
 
+    /// Applies `change` to the record for `id` as it is now, whatever
+    /// version that is: for changes that do not depend on what the record
+    /// held, such as a new owner epoch. A step that issued its own write
+    /// against an earlier version then finds it stale. Returns the record
+    /// now committed.
+    pub async fn amend(&self, id: Id, change: Change) -> Result<Record, StateError> {
+        let entry = self.entry(id)?;
+        self.exclusive(entry, move |slot| {
+            let current = slot.current();
+            let expected = current.as_ref().ok_or(StateError::NotFound(id))?.fence();
+            match apply(id, current.as_ref(), expected, change)? {
+                Some(next) => {
+                    slot.write(Some(next.clone()))?;
+                    Ok(next)
+                }
+                None => current.ok_or(StateError::NotFound(id)),
+            }
+        })
+        .await
+    }
+
     /// Gives the ready sandbox `ready`, still at `expected`, to a create:
-    /// one write makes it sandbox `id` with `config`, no longer ready, and
+    /// one write makes it sandbox `id` with `config`, held under owner
+    /// epoch `owner`, no longer ready, and
     /// with a guest that has yet to learn which sandbox it is. Its
     /// directory keeps its name, which the record keeps as its host name.
     /// Like a new record it takes a generation no earlier record used, so
@@ -831,6 +864,7 @@ impl Records {
         expected: Fence,
         id: Id,
         config: SandboxConfig,
+        owner: OwnerEpoch,
     ) -> Result<Record, StateError> {
         let entry = {
             let mut entries = locked(&self.entries);
@@ -869,6 +903,9 @@ impl Records {
                     // a restart never finds it overdue for a sleep it never
                     // had the time to earn.
                     last_used_ms: Some(unix_ms_now()),
+                    owner_epoch: owner.0,
+                    saves: 0,
+                    handed_off: false,
                     ..current
                 };
                 slot.write(Some(next.clone()))?;

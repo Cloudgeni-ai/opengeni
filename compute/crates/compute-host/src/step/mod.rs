@@ -222,6 +222,15 @@ fn archive_receipt(paths: &Paths) -> PathBuf {
     paths.dir.join("archive.json")
 }
 
+/// Notes, durably, that the stored copy `receipt` names matches the
+/// sandbox's files, holding a memory image if `memory`: as an archive
+/// does, for a sandbox adopted from the store. Blocks.
+pub(crate) fn mark_archived(paths: &Paths, receipt: Receipt, memory: bool) -> io::Result<()> {
+    let marker = Archived { receipt, memory };
+    let bytes = serde_json::to_vec(&marker).map_err(io::Error::other)?;
+    write_atomic(&archive_receipt(paths), &bytes)
+}
+
 /// Present while the sandbox's VM may have its memory served by a pager,
 /// naming that pager's launch (see [`crate::paging::tag`]).
 fn paged_marker(paths: &Paths) -> PathBuf {

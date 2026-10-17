@@ -18,7 +18,7 @@ use crate::net::Networks;
 use crate::pool::{Loaning, Template};
 use crate::protocol::Id;
 use crate::restore_notice::ask_commands;
-use crate::state::{Change, Fence, Record, Records};
+use crate::state::{Change, Disk, Fence, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory};
 use crate::store::{Owned, Store};
 
@@ -140,11 +140,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let size = self.size(&record.config);
         self.insert(id, paths, spec);
         // A new sandbox is a saved one: a disk, with a memory image when it
-        // started from a template. Its first wake boots or restores it,
-        // under the same admission limits as any wake.
+        // started from a template. An adopted one is in the store alone.
+        // Its first wake boots, restores or fetches it, under the same
+        // admission limits as any wake.
+        let (level, durability) = match record.disk {
+            Disk::Local => (Level::Saved, Durability::Local),
+            Disk::Remote => (Level::Remote, Durability::Remote),
+        };
         self.input(Input::Add {
             sandbox: id.0,
-            state: State::new(Level::Saved, Durability::Local, record.image),
+            state: State::new(level, durability, record.image),
             policy,
             size,
             last_activity: self.now(),
@@ -187,6 +192,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         for remover in self.destroying.remove(&id.0).unwrap_or_default() {
             let _ = remover.send(result.clone());
         }
+        self.dropped(id, result);
         self.spare_gone(host, result.is_ok());
     }
 
@@ -551,6 +557,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
         } else {
             self.settle(id);
+            self.continue_hand_off(id);
         }
     }
 
@@ -687,14 +694,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if let Some(live) = &live {
             live.stopping.store(true, Ordering::Release);
         }
-        let removers = std::mem::take(&mut slot.removers);
+        let mut removers = std::mem::take(&mut slot.removers);
+        // A hand-off under way ends with the sandbox, however it goes.
+        removers.extend(self.handing_off.remove(&id.0).unwrap_or_default());
         if let Some(record) = self.records.get(id) {
             let closing = slot.holds.close();
-            self.remove_recorded(
+            self.remove_recorded_as(
                 &record,
                 live.map(|live| (live.vm, live.memory)),
                 removers,
                 Some(closing),
+                slot.hand_off,
             );
         } else {
             tracing::error!(%id, "removing a sandbox without a record");
@@ -713,6 +723,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         vm: Option<(E::Vm, LiveMemory)>,
         removers: Vec<Reply<()>>,
         holds: Option<Closing>,
+    ) {
+        self.remove_recorded_as(record, vm, removers, holds, false);
+    }
+
+    /// [`Self::remove_recorded`], keeping the store's copy if `hand_off`.
+    fn remove_recorded_as(
+        &mut self,
+        record: &Record,
+        vm: Option<(E::Vm, LiveMemory)>,
+        removers: Vec<Reply<()>>,
+        holds: Option<Closing>,
+        hand_off: bool,
     ) {
         let (id, host) = (record.id, record.host());
         self.destroying.insert(id.0, removers);
@@ -735,6 +757,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 net,
                 id,
                 host,
+                hand_off,
             };
             let result = removal.run(fence, vm, &spec, &paths.dir).await;
             if let Err(error) = &result {
@@ -879,6 +902,8 @@ struct Removal<'a, E, S> {
     id: Id,
     /// The name its network was made under.
     host: Id,
+    /// It is handed off: the store's copy stays for its next owner.
+    hand_off: bool,
 }
 
 impl<E: Engine, S: Store> Removal<'_, E, S> {
@@ -894,10 +919,12 @@ impl<E: Engine, S: Store> Removal<'_, E, S> {
         dir: &Path,
     ) -> Result<(), HostError> {
         let id = self.id;
-        let record = self
-            .records
-            .commit(id, fence, Change::new().removing())
-            .await?;
+        let begun = if self.hand_off {
+            Change::new().handed_off()
+        } else {
+            Change::new().removing()
+        };
+        let record = self.records.commit(id, fence, begun).await?;
         let stopped = match vm {
             Some((vm, memory)) => {
                 memory.ending();

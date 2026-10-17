@@ -201,6 +201,40 @@ async fn a_forget_is_a_change_of_its_own_and_a_delete_is_final() {
     );
 }
 
+/// Forgetting memory stores a new version even when the copy names none
+/// already: an archive upload held up in flight from before, conditional
+/// on the version the forget read, then can no longer land with its
+/// memory image afterwards.
+#[tokio::test]
+async fn a_forget_of_a_disk_only_copy_still_stops_an_archive_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, store) = owned_fixture(dir.path());
+    let disk_only = files(dir.path(), false);
+    let sandbox = id("0123456789abcdef0123456789abcde2");
+    let cancel = CancellationToken::new();
+    let first = store
+        .archive(sandbox, at(2, 4), &disk_only, &cancel)
+        .await
+        .unwrap();
+    assert!(matches!(first, Archive::Stored(_)), "{first:?}");
+    // The next save read the pointer; its upload is held up and lands
+    // only on the version it read.
+    let held = store
+        .chunks
+        .begin(&sandbox.to_string(), at(2, 5))
+        .await
+        .unwrap()
+        .into_publication()
+        .expect("a later save publishes");
+    let forgot = store.forget_memory(sandbox, at(2, 6)).await.unwrap();
+    assert!(matches!(forgot, Owned::Done(Some(_))), "{forgot:?}");
+    let landed = store.chunks.publish(held, b"{}".to_vec()).await;
+    assert!(
+        matches!(landed, Err(StorageError::Superseded)),
+        "the held-up save must not land after the forget: {landed:?}"
+    );
+}
+
 async fn objects(backend: &InMemory, prefix: &str) -> usize {
     backend
         .list(Some(&ObjectPath::from(prefix)))

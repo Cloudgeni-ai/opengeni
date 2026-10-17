@@ -56,7 +56,7 @@ use crate::pool::{self, Lender, Shape, Sources, Start, Template};
 use crate::protocol::{Id, SandboxConfig, TemplateStatus};
 use crate::state::{Identity, Record, Records};
 use crate::step::{After, Job, Live, LiveMemory};
-use crate::store::Store;
+use crate::store::{OwnerEpoch, Store};
 
 use super::requests::new_files;
 use super::{Event, HostAgent, HostError, Reply};
@@ -661,6 +661,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         &mut self,
         id: Id,
         config: SandboxConfig,
+        owner: OwnerEpoch,
         reply: Reply<()>,
     ) -> Option<(SandboxConfig, Reply<()>)> {
         let shape = Shape::of(&config);
@@ -715,7 +716,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let result = match fits {
                 Ok(true) => Some(
                     records
-                        .claim(host, fence, id, config.clone())
+                        .claim(host, fence, id, config.clone(), owner)
                         .await
                         .map_err(HostError::from),
                 ),
@@ -726,7 +727,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 id,
                 config,
                 reply,
-                claimed: Box::new(Claimed { idle, result }),
+                claimed: Box::new(Claimed {
+                    idle,
+                    owner,
+                    result,
+                }),
             });
         });
         None
@@ -742,7 +747,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         claimed: Claimed<E::Vm>,
     ) {
         self.preparing.remove(&id.0);
-        let Claimed { idle, result } = claimed;
+        let Claimed {
+            idle,
+            owner,
+            result,
+        } = claimed;
         let host = idle.record.id;
         let died = self.ready.claiming.remove(&host.0).unwrap_or(false);
         let record = match result {
@@ -753,7 +762,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let template = Arc::clone(&idle.template);
                 self.discard(idle);
                 self.template_stale(&template);
-                self.create(id, config, reply);
+                self.create(id, config, owner, reply);
                 return;
             }
             Some(Err(error)) => {
@@ -828,6 +837,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 #[derive(Debug)]
 pub(super) struct Claimed<V> {
     idle: Idle<V>,
+    /// The ownership the create is for.
+    owner: OwnerEpoch,
     /// The claimed record, why the claim failed, or `None` when the
     /// template turned out stale and nothing was written.
     result: Option<Result<Record, HostError>>,

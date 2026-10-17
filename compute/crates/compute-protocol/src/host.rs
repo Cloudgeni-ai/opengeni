@@ -409,6 +409,38 @@ pub enum Request {
         /// The reason that ended.
         hold: String,
     },
+    /// Take a sandbox over from the store's latest copy, as its owner under
+    /// `owner_epoch`
+    /// ([ADR 18](../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+    /// The host claims the copy under that epoch, so no earlier owner's
+    /// archive can land after it, and keeps the sandbox at Remote: its
+    /// next wake fetches it. A copy of the sandbox this host holds under an
+    /// earlier epoch is dropped first. Adopting again under the same epoch
+    /// succeeds; under an earlier epoch than the one held, or than the
+    /// store's, it is refused with [`ErrorCode::Stale`], and without a
+    /// stored copy with [`ErrorCode::NotFound`].
+    Adopt {
+        /// Its id.
+        id: Id,
+        /// Its shape and sleep ladder.
+        config: SandboxConfig,
+        /// The owner epoch the host takes it under.
+        owner_epoch: u64,
+    },
+    /// Hand a sandbox off to whichever host adopts it next: the host stops
+    /// taking wakes for it (they are refused with [`ErrorCode::Busy`]),
+    /// archives its latest state, ends its VM, forgets it, keeping the
+    /// store's copy, and replies once all that is done. A restarted agent
+    /// finishes a hand-off it began. Refused with [`ErrorCode::Busy`] while
+    /// something holds the sandbox awake, and with [`ErrorCode::Stale`]
+    /// under another owner epoch than the one held; once it is done the
+    /// host no longer has the sandbox ([`ErrorCode::NotFound`]).
+    HandOff {
+        /// Its id.
+        id: Id,
+        /// The owner epoch the host holds it under.
+        owner_epoch: u64,
+    },
     /// Report every sandbox and host counters.
     Status,
 }
@@ -489,6 +521,13 @@ pub enum ErrorCode {
     /// slow work, and keeps making room in the background. Retry later or
     /// on another host; the message says how much was needed.
     HostFull,
+    /// The host does not take requests sent under this registration, or
+    /// may not run sandboxes now: it holds no sandbox the request is
+    /// about, under it. Only requests from the fleet service get it.
+    Unavailable,
+    /// The request was sent more renewals ago than the host still takes:
+    /// it changed nothing. Only requests from the fleet service get it.
+    Expired,
     /// The host failed; the request may succeed if retried.
     #[default]
     Internal,
@@ -502,6 +541,10 @@ pub struct SandboxStatus {
     /// Its execution: raised by every boot; pausing, saving and restoring
     /// keep it.
     pub generation: u64,
+    /// The ownership of it this host holds (see [`Request::Adopt`]); 1
+    /// outside a fleet.
+    #[serde(default = "first_owner")]
+    pub owner_epoch: u64,
     /// How many times its record has been written.
     pub revision: u64,
     /// Where its state lives.
@@ -558,6 +601,10 @@ pub struct SandboxStatus {
     /// save that could not be written for want of disk; it is retried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed_step: Option<FailedStep>,
+}
+
+fn first_owner() -> u64 {
+    1
 }
 
 /// A step that failed, with what went wrong.
@@ -814,6 +861,24 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn fleet_requests_name_the_owner_epoch() {
+        let request: Request = serde_json::from_str(
+            r#"{"op":"hand_off","id":"0193f3c27a1b7cde8f00112233445566","owner_epoch":3}"#,
+        )
+        .unwrap();
+        assert!(matches!(request, Request::HandOff { owner_epoch: 3, .. }));
+        assert!(
+            serde_json::from_str::<Request>(
+                r#"{"op":"hand_off","id":"0193f3c27a1b7cde8f00112233445566"}"#
+            )
+            .is_err(),
+            "a hand-off says which ownership it ends"
+        );
+        let code: ErrorCode = serde_json::from_str(r#""unavailable""#).unwrap();
+        assert_eq!(code, ErrorCode::Unavailable);
     }
 
     #[test]
