@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { sql as drizzleSql, type SQL } from "drizzle-orm";
+import { rawRows } from "../src/database";
 import {
   SESSION_ARCHIVE_EXPORT_TABLES,
   SESSION_ARCHIVE_PURGE_TABLES,
@@ -19,12 +21,16 @@ import {
   listSessionArchiveCandidates,
   persistModelContextSnapshot,
   purgeArchivedSessionContent,
-  readSessionArchiveRows,
+  readSessionArchiveTablePages,
   readSessionArchiveTranscriptEvents,
   readSessionEventStorageGapEnd,
+  sessionArchiveExportSql,
   setSessionKeepLive,
   submitHumanPromptInTransaction,
+  withRlsContext,
   withWorkspaceSessionActivityRls,
+  type Database,
+  type SessionArchiveExportTable,
   type SessionArchiveManifest,
   type SessionArchiveScope,
 } from "../src/index";
@@ -162,14 +168,55 @@ async function countRows(table: string, scope: SessionArchiveScope): Promise<num
   return (row as unknown as { count: number }).count;
 }
 
-/** The export reader's refusals surface as the query error's cause. */
-async function expectArchiveReadRefused(read: Promise<unknown>, pattern: RegExp) {
-  const error = await read.then(
-    () => null,
-    (caught: unknown) => caught as Error & { cause?: { message?: string } },
-  );
-  expect(error).not.toBeNull();
-  expect(`${error!.message} ${error!.cause?.message ?? ""}`).toMatch(pattern);
+async function exportAll(
+  db: Database,
+  scope: SessionArchiveScope,
+  spec: SessionArchiveExportTable,
+  pageRows: number,
+): Promise<string[][]> {
+  const pages: string[][] = [];
+  for await (const rows of readSessionArchiveTablePages(db, scope, spec, { pageRows })) {
+    pages.push(rows);
+  }
+  return pages;
+}
+
+function exportSpec(table: string): SessionArchiveExportTable {
+  return SESSION_ARCHIVE_EXPORT_TABLES.find((spec) => spec.table === table)!;
+}
+
+type PlanNode = {
+  "Node Type": string;
+  "Index Cond"?: string;
+  "Rows Removed by Filter"?: number;
+  Plans?: PlanNode[];
+};
+
+/** EXPLAIN ANALYZE as the application role under the session's RLS context. */
+async function explainUnderRls(db: Database, scope: SessionArchiveScope, query: SQL) {
+  const [row] = await withRlsContext(db, scope, async (scoped) => {
+    // Fix the plan shape on a small table; the point is whether the cursor is
+    // an index condition or a filter applied after the policy.
+    await rawRows(
+      scoped,
+      drizzleSql`select set_config('enable_seqscan', 'off', true),
+        set_config('enable_bitmapscan', 'off', true)`,
+    );
+    return await rawRows<{ "QUERY PLAN": [{ Plan: PlanNode }] }>(
+      scoped,
+      drizzleSql`explain (analyze, format json) ${query}`,
+    );
+  });
+  const nodes: PlanNode[] = [];
+  const walk = (node: PlanNode) => {
+    nodes.push(node);
+    node.Plans?.forEach(walk);
+  };
+  walk(row!["QUERY PLAN"][0].Plan);
+  return {
+    indexConds: nodes.flatMap((node) => (node["Index Cond"] ? [node["Index Cond"]] : [])),
+    rowsRemoved: nodes.reduce((sum, node) => sum + (node["Rows Removed by Filter"] ?? 0), 0),
+  };
 }
 
 function manifest(keys: string[]): SessionArchiveManifest {
@@ -211,12 +258,9 @@ describe("idle-session archive lifecycle", () => {
     const exporter = createDb(shared.appUrl);
     const exported: Record<string, number> = {};
     for (const spec of SESSION_ARCHIVE_EXPORT_TABLES) {
-      const page = await readSessionArchiveRows(exporter.db, scope, spec, {
-        after: null,
-        limit: 1000,
-      });
-      exported[spec.table] = page.rows.length;
-      for (const row of page.rows) expect(typeof JSON.parse(row)).toBe("object");
+      const rows = (await exportAll(exporter.db, scope, spec, 1000)).flat();
+      exported[spec.table] = rows.length;
+      for (const row of rows) expect(typeof JSON.parse(row)).toBe("object");
       // The rendering carries exactly the values jsonb would, column for column.
       const order = spec.keys.map((key) => `t."${key.column}"`).join(", ");
       const reference = await shared.admin.unsafe(
@@ -224,20 +268,12 @@ describe("idle-session archive lifecycle", () => {
           where t.workspace_id = $1 and t.session_id = $2 order by ${order} limit 1000`,
         [scope.workspaceId, scope.sessionId],
       );
-      expect(page.rows.map((row) => JSON.parse(row))).toEqual(
+      expect(rows.map((row) => JSON.parse(row))).toEqual(
         reference.map((row) => JSON.parse((row as unknown as { row: string }).row)),
       );
       // Paging one row at a time yields the same rows: the keyset is unique
-      // and the cursor resumes exactly after the last row.
-      const paged: string[] = [];
-      let after: string[] | null = null;
-      for (;;) {
-        const step = await readSessionArchiveRows(exporter.db, scope, spec, { after, limit: 1 });
-        paged.push(...step.rows);
-        if (step.rows.length < 1) break;
-        after = step.last;
-      }
-      expect(paged).toEqual(page.rows);
+      // and each cursor resumes exactly after the last row.
+      expect((await exportAll(exporter.db, scope, spec, 1)).flat()).toEqual(rows);
     }
     expect(exported.session_events).toBeGreaterThan(3);
     expect(exported.session_history_items).toBeGreaterThanOrEqual(1);
@@ -245,33 +281,6 @@ describe("idle-session archive lifecycle", () => {
     expect(exported.session_turns).toBeGreaterThanOrEqual(1);
     // Visible only to the initiating human under RLS, yet part of the bundle.
     expect(exported.preference_registry_snapshots).toBe(1);
-    const historySpec = SESSION_ARCHIVE_EXPORT_TABLES.find(
-      (spec) => spec.table === "session_history_items",
-    )!;
-    // A page size the reader would silently clamp could end a table early.
-    await expectArchiveReadRefused(
-      readSessionArchiveRows(exporter.db, scope, historySpec, { after: null, limit: 1001 }),
-      /outside 1\.\.1000/,
-    );
-    // Only export tables and their real columns are accepted.
-    await expectArchiveReadRefused(
-      readSessionArchiveRows(
-        exporter.db,
-        scope,
-        { table: "sessions", keys: [{ column: "id", cast: "uuid" }] },
-        { after: null, limit: 10 },
-      ),
-      /not an export table/,
-    );
-    await expectArchiveReadRefused(
-      readSessionArchiveRows(
-        exporter.db,
-        scope,
-        { table: "session_history_items", keys: [{ column: "id; drop", cast: "uuid" }] },
-        { after: null, limit: 10 },
-      ),
-      /has no column/,
-    );
     await exporter.close();
 
     const transcript = await readSessionArchiveTranscriptEvents(client.db, scope, {
@@ -430,15 +439,6 @@ describe("idle-session archive lifecycle", () => {
     expect(await abandonSessionArchive(client.db, scope)).toBe(false);
     const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
     expect(session?.retention?.archive).toBeNull();
-    // Once abandoned, the export reader refuses instead of returning an empty
-    // page that could be recorded as a complete bundle and then purged.
-    const historySpec = SESSION_ARCHIVE_EXPORT_TABLES.find(
-      (spec) => spec.table === "session_history_items",
-    )!;
-    await expectArchiveReadRefused(
-      readSessionArchiveRows(client.db, scope, historySpec, { after: null, limit: 10 }),
-      /is not being archived/,
-    );
     await send(scope, subjectId, "back to work");
     const claims = await claimSessionArchiveObjectDeletions(client.db, {
       claimTimeoutSeconds: 600,
@@ -503,5 +503,132 @@ describe("idle-session archive lifecycle", () => {
       where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}`;
     expect(items.map((row) => row.id)).toEqual([evidenceItem]);
     expect(await countRows("session_pending_tool_calls", scope)).toBe(0);
+  }, 120_000);
+});
+
+describe("idle-session archive export reads", () => {
+  test("keyset cursors compare only with leakproof operators; numeric-ordered tables page by id", async () => {
+    for (const spec of SESSION_ARCHIVE_EXPORT_TABLES) {
+      // Read through its own archive-only definer.
+      if (spec.table === "preference_registry_snapshots") continue;
+      if (spec.pageByIdList) {
+        expect(spec.keys.map((key) => key.cast)).toContain("numeric");
+        continue;
+      }
+      for (const key of spec.keys) {
+        const operators = await shared.admin`select o.oprname, p.proleakproof
+          from pg_operator o join pg_proc p on p.oid = o.oprcode
+          where o.oprname in ('=', '>', '>=')
+            and o.oprleft = ${key.cast}::regtype and o.oprright = ${key.cast}::regtype`;
+        expect({ table: spec.table, key: key.column, operators: operators.length }).toEqual({
+          table: spec.table,
+          key: key.column,
+          operators: 3,
+        });
+        for (const operator of operators) {
+          expect({ table: spec.table, key: key.column, leakproof: operator.proleakproof }).toEqual({
+            table: spec.table,
+            key: key.column,
+            leakproof: true,
+          });
+        }
+      }
+    }
+  });
+
+  test("a long session exports completely and in order, with every page an indexed read under RLS", async () => {
+    const { scope } = await idleSession();
+    const [turn] = await shared.admin<{ id: string }[]>`select id::text as id from session_turns
+      where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId} limit 1`;
+    const rows = 1_500;
+    await shared.admin.begin(async (tx) => {
+      // Fixture volume only: bypass activity triggers for these writes.
+      await tx`set local session_replication_role = replica`;
+      // Half the positions are fractional, as when items are inserted between others.
+      await tx`insert into session_history_items
+          (account_id, workspace_id, session_id, turn_id, position, item, active)
+        select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, ${turn!.id},
+          1 + n / 2.0, jsonb_build_object('type', 'message', 'n', n), true
+        from generate_series(1, ${rows}) n`;
+      await tx`insert into session_events
+          (account_id, workspace_id, session_id, turn_id, turn_association, sequence, type, payload, occurred_at)
+        select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, ${turn!.id}, 'current',
+          b.base + n, 'agent.message.completed', jsonb_build_object('text', 'event ' || n), now()
+        from generate_series(1, ${rows}) n,
+          (select max(sequence) as base from session_events
+            where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) b`;
+    });
+    await shared.admin`analyze session_history_items`;
+    await shared.admin`analyze session_events`;
+    const exporter = createDb(shared.appUrl);
+    try {
+      const history = exportSpec("session_history_items");
+      const pages = await exportAll(exporter.db, scope, history, 100);
+      expect(pages.every((page) => page.length > 0 && page.length <= 100)).toBe(true);
+      const reference = await shared.admin<{ id: string }[]>`select id::text as id
+        from session_history_items
+        where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}
+        order by position, id`;
+      expect(reference.length).toBeGreaterThan(rows);
+      expect(pages.flat().map((row) => (JSON.parse(row) as { id: string }).id)).toEqual(
+        reference.map((row) => row.id),
+      );
+
+      // Under the policy a numeric cursor is a filter after it: a late page
+      // would re-read every earlier row. That is why history pages by id.
+      const lastPosition = (JSON.parse(pages.at(-2)!.at(-1)!) as { position: number }).position;
+      const numericCursor = await explainUnderRls(
+        exporter.db,
+        scope,
+        sessionArchiveExportSql.keysetPage(scope, history, {
+          after: [String(lastPosition), (JSON.parse(pages.at(-2)!.at(-1)!) as { id: string }).id],
+          limit: 100,
+        }),
+      );
+      expect(numericCursor.rowsRemoved).toBeGreaterThan(rows - 200);
+      // The id page is a primary-key seek and filters nothing.
+      const lastIds = reference.slice(-100).map((row) => row.id);
+      const idPage = await explainUnderRls(
+        exporter.db,
+        scope,
+        sessionArchiveExportSql.idPage(scope, history, lastIds),
+      );
+      expect(idPage.indexConds.some((cond) => cond.includes("id = ANY"))).toBe(true);
+      expect(idPage.rowsRemoved).toBe(0);
+
+      // An integer keyset cursor is an index condition under the policy.
+      const events = exportSpec("session_events");
+      const [late] = await shared.admin<
+        { sequence: number }[]
+      >`select max(sequence) - 100 as sequence
+        from session_events where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}`;
+      const eventPage = await explainUnderRls(
+        exporter.db,
+        scope,
+        sessionArchiveExportSql.keysetPage(scope, events, {
+          after: [String(late!.sequence)],
+          limit: 100,
+        }),
+      );
+      expect(eventPage.indexConds.some((cond) => cond.includes("sequence >"))).toBe(true);
+      expect(eventPage.rowsRemoved).toBeLessThan(100);
+      // And the whole table still exports completely through it.
+      const eventRows = (await exportAll(exporter.db, scope, events, 200)).flat();
+      expect(eventRows.length).toBe(await countRows("session_events", scope));
+
+      // A row that disappears between the id list and its page fails the export.
+      const iterator = readSessionArchiveTablePages(exporter.db, scope, history, { pageRows: 100 });
+      expect((await iterator.next()).done).toBe(false);
+      await shared.admin`delete from session_history_items where id = ${reference.at(-1)!.id}::uuid`;
+      let failure: unknown;
+      try {
+        for (;;) if ((await iterator.next()).done) break;
+      } catch (error) {
+        failure = error;
+      }
+      expect(String(failure)).toContain("the session changed while archiving");
+    } finally {
+      await exporter.close();
+    }
   }, 120_000);
 });

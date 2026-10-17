@@ -1,5 +1,5 @@
 import type { SessionEvent, SessionEventType } from "@opengeni/contracts";
-import { and, asc, eq, gt, isNull, notInArray, sql } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, notInArray, sql, type SQL } from "drizzle-orm";
 import {
   rawRows,
   withRlsContext,
@@ -58,15 +58,27 @@ export const SESSION_ARCHIVE_PURGED_EVENT_TYPES = [
 ] as const;
 
 type KeyColumn = { column: string; cast: string };
-export type SessionArchiveExportTable = { table: string; keys: KeyColumn[] };
+export type SessionArchiveExportTable = {
+  table: string;
+  /** Bundle order; unique per session. */
+  keys: KeyColumn[];
+  /**
+   * Page by a prefetched list of row ids instead of a keyset cursor. For tables
+   * ordered by a numeric key: PostgreSQL's numeric comparisons are not
+   * leakproof, so under row-level security a numeric cursor is applied after the
+   * policy and every page re-filters all earlier rows.
+   */
+  pageByIdList?: true;
+};
 
 /**
- * Everything the bundle carries, in bundle order. Keyset columns are unique per
- * session and follow an index on (workspace_id, session_id, ...) for the large
- * tables, so each page is an index seek and exporting a very long session stays
- * linear. Pages are read by session_archive_export_rows, outside row-level
- * security, because PostgreSQL will not seek on a numeric or row comparison
- * under a policy.
+ * Everything the bundle carries, in bundle order. Export reads run under
+ * row-level security, where PostgreSQL only evaluates leakproof comparisons
+ * before the policy or as index conditions. Keyset cursors therefore use only
+ * integer, uuid, text and timestamptz keys, compared column by column (a row
+ * comparison is not leakproof either), so a page seeks instead of re-filtering
+ * the rows before it. Model history is ordered by a numeric position and pages
+ * by id list instead; see readSessionArchiveTablePages.
  */
 export const SESSION_ARCHIVE_EXPORT_TABLES: readonly SessionArchiveExportTable[] = [
   { table: "session_turns", keys: [{ column: "position", cast: "bigint" }, uuidKey("id")] },
@@ -77,8 +89,11 @@ export const SESSION_ARCHIVE_EXPORT_TABLES: readonly SessionArchiveExportTable[]
   { table: "session_goals", keys: [uuidKey("id")] },
   { table: "session_goal_revisions", keys: [uuidKey("id")] },
   { table: "session_events", keys: [{ column: "sequence", cast: "integer" }] },
-  // position is unique per session (session_history_items_position_idx).
-  { table: "session_history_items", keys: [{ column: "position", cast: "numeric" }] },
+  {
+    table: "session_history_items",
+    keys: [{ column: "position", cast: "numeric" }, uuidKey("id")],
+    pageByIdList: true,
+  },
   { table: "session_system_updates", keys: [{ column: "dedupe_key", cast: "text" }] },
   { table: "session_realtime_entries", keys: [uuidKey("id")] },
   {
@@ -315,33 +330,138 @@ export async function readSessionArchiveRows(
     const lastRow = rows.at(-1);
     return { rows: rows.map((row) => row.row_json), last: lastRow ? [lastRow.id] : null };
   }
-  const textArray = (values: string[]) =>
-    sql`array[${sql.join(
-      values.map((value) => sql`${value}::text`),
-      sql`, `,
-    )}]::text[]`;
   return await withRlsContext(
     db,
     { accountId: scope.accountId, workspaceId: scope.workspaceId },
     async (scoped) => {
-      const rows = await rawRows<{ row_json: string; key_values: string[] }>(
+      const rows = await rawRows<Record<string, string>>(
         scoped,
-        sql`select row_json, key_values
-          from opengeni_private.session_archive_export_rows(
-            ${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${scope.sessionId}::uuid,
-            ${spec.table}::text,
-            ${textArray(spec.keys.map((key) => key.column))},
-            ${textArray(spec.keys.map((key) => key.cast))},
-            ${input.after ? textArray(input.after) : sql`null::text[]`},
-            ${input.limit}::integer)`,
+        sessionArchiveExportSql.keysetPage(scope, spec, input),
       );
       const lastRow = rows.at(-1);
       return {
-        rows: rows.map((row) => row.row_json),
-        last: lastRow ? lastRow.key_values : null,
+        rows: rows.map((row) => row.row!),
+        last: lastRow ? spec.keys.map((_, index) => lastRow[`k${index}`]!) : null,
       };
     },
   );
+}
+
+function keyColumns(spec: SessionArchiveExportTable): SQL[] {
+  return spec.keys.map((key) => sql`t.${sql.identifier(key.column)}`);
+}
+
+function sessionRows(scope: SessionArchiveScope): SQL {
+  return sql`t.workspace_id = ${scope.workspaceId}::uuid
+    and t.session_id = ${scope.sessionId}::uuid`;
+}
+
+/**
+ * The export's page queries, run under the workspace's row-level security
+ * context. Exported so tests can check their plans.
+ */
+export const sessionArchiveExportSql = {
+  /** One keyset page, with each row's key values as text for the next cursor. */
+  keysetPage(
+    scope: SessionArchiveScope,
+    spec: SessionArchiveExportTable,
+    input: { after: string[] | null; limit: number },
+  ): SQL {
+    const keys = keyColumns(spec);
+    const keyText = sql.join(
+      keys.map((key, index) => sql`${key}::text as ${sql.identifier(`k${index}`)}`),
+      sql`, `,
+    );
+    const after = input.after
+      ? keysetAfter(
+          keys,
+          spec.keys.map((key, index) => sql`${input.after![index]}::${sql.raw(key.cast)}`),
+        )
+      : sql`true`;
+    return sql`select row_to_json(t)::text as row, ${keyText}
+      from ${sql.identifier(spec.table)} t
+      where ${sessionRows(scope)} and ${after}
+      order by ${sql.join(keys, sql`, `)}
+      limit ${input.limit}`;
+  },
+  /** Every row id of the session's rows, in bundle order. */
+  idList(scope: SessionArchiveScope, spec: SessionArchiveExportTable): SQL {
+    return sql`select t.id::text as id
+      from ${sql.identifier(spec.table)} t
+      where ${sessionRows(scope)}
+      order by ${sql.join(keyColumns(spec), sql`, `)}`;
+  },
+  /** The rows with these ids, in bundle order, found by primary key. */
+  idPage(scope: SessionArchiveScope, spec: SessionArchiveExportTable, ids: string[]): SQL {
+    return sql`select row_to_json(t)::text as row
+      from ${sql.identifier(spec.table)} t
+      where t.id = any(${`{${ids.join(",")}}`}::uuid[]) and ${sessionRows(scope)}
+      order by ${sql.join(keyColumns(spec), sql`, `)}`;
+  },
+};
+
+/**
+ * `(k0, k1, ...) > (v0, v1, ...)` spelled column by column. Under row-level
+ * security PostgreSQL only uses leakproof comparisons as index conditions or
+ * before the policy; a row comparison is not leakproof, while the per-column
+ * operators of the export key types are. The leading `k0 >= v0` gives the index
+ * a lower bound.
+ */
+function keysetAfter(keys: SQL[], values: SQL[]): SQL {
+  const last = keys.length - 1;
+  let tail = sql`${keys[last]} > ${values[last]}`;
+  for (let index = last - 1; index >= 0; index -= 1) {
+    tail = sql`(${keys[index]} > ${values[index]} or (${keys[index]} = ${values[index]} and ${tail}))`;
+  }
+  return last === 0 ? tail : sql`${keys[0]} >= ${values[0]} and ${tail}`;
+}
+
+/**
+ * Every row of one export table, as exact JSON text in bundle order, in pages
+ * of at most `pageRows`. Each page is a bounded, indexed read, so exporting a
+ * session with hundreds of thousands of rows stays linear. Tables marked
+ * `pageByIdList` first read their ordered row ids in one pass, then fetch each
+ * page by primary key; the session is frozen while archiving, and a row that
+ * disappears in between fails the export rather than shortening the bundle.
+ */
+export async function* readSessionArchiveTablePages(
+  db: Database,
+  scope: SessionArchiveScope,
+  spec: SessionArchiveExportTable,
+  input: { pageRows: number },
+): AsyncGenerator<string[]> {
+  if (!spec.pageByIdList) {
+    let after: string[] | null = null;
+    for (;;) {
+      const page = await readSessionArchiveRows(db, scope, spec, {
+        after,
+        limit: input.pageRows,
+      });
+      if (page.rows.length > 0) yield page.rows;
+      if (page.rows.length < input.pageRows) return;
+      after = page.last;
+    }
+  }
+  const context = { accountId: scope.accountId, workspaceId: scope.workspaceId };
+  const ids = await withRlsContext(db, context, async (scoped) =>
+    (await rawRows<{ id: string }>(scoped, sessionArchiveExportSql.idList(scope, spec))).map(
+      (row) => row.id,
+    ),
+  );
+  for (let start = 0; start < ids.length; start += input.pageRows) {
+    const pageIds = ids.slice(start, start + input.pageRows);
+    const rows = await withRlsContext(db, context, async (scoped) =>
+      (
+        await rawRows<{ row: string }>(scoped, sessionArchiveExportSql.idPage(scope, spec, pageIds))
+      ).map((row) => row.row),
+    );
+    if (rows.length !== pageIds.length) {
+      throw new Error(
+        `session archive export: ${spec.table} returned ${rows.length} of ${pageIds.length} rows; the session changed while archiving`,
+      );
+    }
+    yield rows;
+  }
 }
 
 /**
