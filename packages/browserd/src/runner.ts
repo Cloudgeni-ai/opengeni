@@ -838,8 +838,9 @@ async function chromeStderrDrainWrapper(
  * present like the person's ordinary windowed Chrome. Headless Chrome names
  * itself HeadlessChrome in every User-Agent, including workers', and reports
  * an 800x600 screen with no work area; sites treat both as bot signals. The
- * User-Agent switch keeps Chrome's own brand list and Client Hints intact,
- * unlike CDP overrides, which also miss service workers. */
+ * User-Agent switch reaches every scope, workers and the HTTP header included,
+ * and keeps Chrome's own brand list. It also empties the high-entropy Client
+ * Hints; the driver presents this machine's real values in their place. */
 export async function macosOffscreenChromeArguments(
   executable: string,
   probes: {

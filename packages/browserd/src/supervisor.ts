@@ -2790,6 +2790,11 @@ async function createBrowserDriver(
   if (context.headlessSessionCookies && !useHeadlessShell) {
     throw new Error("Headless cookie state requires its matching verified profile launcher");
   }
+  // A managed browser on macOS runs on the person's own desktop. A window
+  // would appear in front of them, take focus and intercept their typing;
+  // the agent and the person's live view work through CDP, so it stays
+  // offscreen. A linked ComputerSession drives the native window itself.
+  const offscreen = process.platform === "darwin" && context.headed && !context.linkedComputer;
   const runner = await AgentBrowserJsonRunner.create({
     namespace: "og",
     // A close followed immediately by another daemon using the same socket
@@ -2802,13 +2807,7 @@ async function createBrowserDriver(
     downloadDirectory: context.downloadDirectory,
     screenshotDirectory: context.screenshotDirectory,
     headed: context.headed,
-    // A managed browser on macOS runs on the person's own desktop. A window
-    // would appear in front of them, take focus and intercept their typing;
-    // the agent and the person's live view work through CDP, so it stays
-    // offscreen. A linked ComputerSession drives the native window itself.
-    ...(process.platform === "darwin" && context.headed && !context.linkedComputer
-      ? { offscreen: true }
-      : {}),
+    ...(offscreen ? { offscreen: true } : {}),
     ...(route?.kind === "proxy" && route.proxyUrl ? { proxyUrl: route.proxyUrl } : {}),
     ...(launchArguments.length > 0 ? { launchArguments } : {}),
     ...(route?.consistency.timezone ? { timezone: route.consistency.timezone } : {}),
@@ -2835,6 +2834,12 @@ async function createBrowserDriver(
         }
       : {}),
     focusEmulation: true,
+    // Headless and offscreen Chrome on this machine launch with an ordinary
+    // User-Agent switch, which empties their high-entropy Client Hints.
+    ...((process.platform === "darwin" || process.platform === "linux") &&
+    (!context.headed || offscreen)
+      ? { completeClientHints: true }
+      : {}),
     ...(headlessShell && browserExecutablePath === headlessShell.path
       ? { userAgentMetadataSource: "intercepted_local" as const }
       : {}),
