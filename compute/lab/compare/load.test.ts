@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { type Clock, poissonArrivals, RestingSet, runOpenLoop, seededRandom, StarvedError } from "./load.ts";
+import { type Clock, poissonArrivals, RestingSet, realClock, runOpenLoop, seededRandom, StarvedError } from "./load.ts";
 
 test("the generator is reproducible and uniform enough", () => {
   const a = seededRandom(42);
@@ -16,8 +16,8 @@ test("Poisson arrivals have the offered rate and exponential gaps", () => {
   const rate = 50;
   const durationMs = 2_000_000;
   const arrivals = poissonArrivals(rate, durationMs, seededRandom(7));
-  // Expected 100 000 arrivals; the standard deviation is about 316.
-  expect(Math.abs(arrivals.length - (rate * durationMs) / 1000)).toBeLessThan(1500);
+  // Exactly the expected count.
+  expect(arrivals.length).toBe((rate * durationMs) / 1000);
   const gaps = arrivals.slice(1).map((at, i) => at - arrivals[i]);
   const mean = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
   expect(Math.abs(mean - 20)).toBeLessThan(0.3);
@@ -29,6 +29,15 @@ test("Poisson arrivals have the offered rate and exponential gaps", () => {
   expect(Math.abs(longer - Math.exp(-1))).toBeLessThan(0.01);
   // Sorted, inside the window.
   expect(arrivals.every((at, i) => at < durationMs && (i === 0 || at >= arrivals[i - 1]))).toBe(true);
+});
+
+test("a low-rate window gets exactly the offered load, whatever the seed", () => {
+  // 0.8/s over 50 s: 40 arrivals for every seed, where an unconditioned
+  // Poisson draw gave one step 26.
+  for (let seed = 0; seed < 200; seed++) {
+    expect(poissonArrivals(0.8, 50_000, seededRandom(seed * 1000 + 3)).length).toBe(40);
+  }
+  expect(poissonArrivals(0.3, 133_334, seededRandom(1)).length).toBe(40);
 });
 
 test("a rate must be positive", () => {
@@ -93,6 +102,25 @@ test("failures and starvation are told apart", async () => {
   );
   expect(outcomes[0]).toMatchObject({ ok: false, error: "boom", starved: false });
   expect(outcomes[1]).toMatchObject({ ok: false, starved: true });
+});
+
+test("on the real clock no arrival is sent before its time", async () => {
+  // Fractional offsets under a millisecond apart, the case a timer that
+  // fires early or a skipped short wait gets wrong.
+  const arrivals = Array.from({ length: 40 }, (_, i) => i * 0.7 + 0.35);
+  const early: number[] = [];
+  const outcomes = await runOpenLoop(arrivals, async (scheduledAt) => {
+    const now = performance.now();
+    if (now < scheduledAt) early.push(scheduledAt - now);
+    // An operation that answers at once.
+    return now;
+  });
+  expect(early).toEqual([]);
+  expect(outcomes.every((outcome) => outcome.ok && outcome.latencyMs >= 0)).toBe(true);
+  // And a single wait lands at or after its time.
+  const at = performance.now() + 5.5;
+  await realClock.sleepUntil(at);
+  expect(performance.now()).toBeGreaterThanOrEqual(at);
 });
 
 test("a resting set never hands out a sandbox twice", () => {

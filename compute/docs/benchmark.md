@@ -77,10 +77,15 @@ N sandboxes are created and put to rest, each as soon as it is made, so a
 host never has to hold all N awake at once. The client then waits two
 minutes, so whatever putting them to rest started (writing memory images
 out, uploading snapshots) is done, and offers activations as an open-loop
-Poisson process: arrival times are drawn from an exponential distribution
-at the offered rate, fixed before the step starts,
-and each arrival is sent at its time whether or not earlier ones have
-finished. Each arrival picks a resting sandbox at random, activates it with
+Poisson process conditioned on its count: the warm-up and the measured
+window each get exactly the offered rate times their length in arrivals,
+at independent uniform times, fixed before the step starts. That is what a
+Poisson process looks like given its count, so its bursts and exponential
+gaps stay, but every window carries the offered load: an unconditioned
+draw of 40 expected arrivals varies by about 6, enough to pass a step on
+two-thirds of its load. Each arrival is sent at its time, never before it,
+whether or not earlier ones have finished. Each arrival picks a resting
+sandbox at random, activates it with
 `echo`, then puts it back to rest; it rests again before it can be picked
 again. Latency is measured from each arrival's scheduled time, not from
 when the client got round to sending it, so a client that falls behind
@@ -88,14 +93,22 @@ cannot hide queueing (coordinated omission).
 
 The offered rate steps up a ladder, 60 seconds per step with the first 10
 seconds discarded; at rates under 0.8 a second the measured part is
-longer, so that it expects 40 arrivals. A step **holds** when every
-activation succeeded, at least 20 were measured, and p99 is under 1
-second. Every arrival is waited for, so a system that falls behind shows
-it in the p99; the completed rate is reported but not judged, since
-Poisson arrivals at a low rate often fall short of the nominal rate by
-chance. After the first step that does not hold, the search halves
-the gap between the last step that held and the first that did not, three
-times. A resting state whose activation p99 without load is already above
+longer, so that it holds 40 arrivals. A step **holds** when every
+activation succeeded, every sandbox went back to rest, at least 20 were
+measured, and p99 is under 1 second. Every arrival is waited for, so a
+system that falls behind shows it in the p99; the completed rate is
+reported but not judged. A sandbox that does not go back to rest within
+five minutes of a step ends the search, since the next step would run on
+a different system.
+
+A first search offers each rate once and, after the first step that does
+not hold, halves the gap between the last step that held and the first
+that did not, three times. The reported search then offers a fixed ladder
+around that limit, each rate three times for the slow states (saved,
+remote, Pod Snapshot) and twice for the fast ones, each time with its own
+arrivals; a rate holds only if every repeat does.
+
+A resting state whose activation p99 without load is already above
 half a second is judged against twice that p99 (the higher of the `echo`
 and state p99s), rounded up to the next second, instead of 1 second; the
 bound is reported with its result. Its

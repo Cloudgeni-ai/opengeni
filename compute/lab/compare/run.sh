@@ -28,7 +28,8 @@ rate() { # system level sandboxes ladder
   echo "== $1 rate $2 with $3 sandboxes -> $file"
   sleep "${SETTLE_SECONDS:-5}"
   bun bench.ts rate --system "$1" --level "$2" --sandboxes "$3" --ladder "$4" \
-    --p99-limit-ms "${P99_LIMIT_MS:-1000}" --step-seconds "${STEP_SECONDS:-60}" --warmup-seconds "${WARMUP_SECONDS:-10}" --refinements "${REFINEMENTS:-3}" --out "$file"
+    --p99-limit-ms "${P99_LIMIT_MS:-1000}" --step-seconds "${STEP_SECONDS:-60}" --warmup-seconds "${WARMUP_SECONDS:-10}" \
+    --refinements "${REFINEMENTS:-3}" --repeats "${REPEATS:-1}" --seed "${SEED:-1}" --out "$file"
 }
 
 suite=${1:?suite}

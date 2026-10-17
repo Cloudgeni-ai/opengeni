@@ -18,19 +18,17 @@ export function seededRandom(seed: number): () => number {
 
 /**
  * Arrival offsets in milliseconds for a Poisson process of `ratePerSecond`
- * over `durationMs`: exponential gaps with mean 1000 / rate.
+ * over `durationMs`, conditioned on its expected count: exactly
+ * round(rate × duration) arrivals, each at an independent uniform time.
+ * Given its count, a Poisson process's arrival times are exactly that, so
+ * the bursts and gaps (exponential, mean 1000 / rate) stay, but a window
+ * carries the offered load rather than whatever chance gives: 40 expected
+ * arrivals would otherwise vary by about 6.
  */
 export function poissonArrivals(ratePerSecond: number, durationMs: number, random: () => number): number[] {
   if (!(ratePerSecond > 0)) throw new Error(`rate must be positive: ${ratePerSecond}`);
-  const meanGapMs = 1000 / ratePerSecond;
-  const arrivals: number[] = [];
-  let at = 0;
-  for (;;) {
-    // 1 - random() is in (0, 1], so the logarithm is finite.
-    at += -Math.log(1 - random()) * meanGapMs;
-    if (at >= durationMs) return arrivals;
-    arrivals.push(at);
-  }
+  const count = Math.round((ratePerSecond * durationMs) / 1000);
+  return Array.from({ length: count }, () => random() * durationMs).sort((a, b) => a - b);
 }
 
 /** What one arrival did. Times are from its scheduled time. */
@@ -54,9 +52,14 @@ export interface Clock {
 
 export const realClock: Clock = {
   now: () => performance.now(),
+  // Never returns before `at`: timers can fire a little early, so it sleeps
+  // most of the way and then yields until the time has come.
   sleepUntil: async (at) => {
-    const wait = at - performance.now();
-    if (wait > 1) await Bun.sleep(wait);
+    for (;;) {
+      const wait = at - performance.now();
+      if (wait <= 0) return;
+      await Bun.sleep(wait > 2 ? wait - 1 : 0);
+    }
   },
 };
 

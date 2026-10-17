@@ -1,6 +1,15 @@
 import { expect, test } from "bun:test";
 import type { Outcome } from "./load.ts";
-import { judgeStep, MIN_EXPECTED_SAMPLES, roundRate, searchSustainedRate, type StepResult, stepWindow } from "./search.ts";
+import {
+  DEFAULT_CRITERIA,
+  isClientLimited,
+  judgeStep,
+  MIN_EXPECTED_SAMPLES,
+  roundRate,
+  searchSustainedRate,
+  type StepResult,
+  stepWindow,
+} from "./search.ts";
 
 function outcomes(count: number, windowMs: number, latencyMs: number, extra: Partial<Outcome> = {}): Outcome[] {
   return Array.from({ length: count }, (_, i) => ({ at: (i * windowMs) / count, ok: true, latencyMs, lagMs: 0, ...extra }));
@@ -34,8 +43,9 @@ test("one error fails a step", () => {
   expect(step).toMatchObject({ holds: false, errors: 1, sampleErrors: ["host full"] });
 });
 
-test("fewer arrivals than the nominal rate is chance, not a failure", () => {
-  // 0.3/s over 133 s expects 40; 34 is about one standard deviation short.
+test("the completed rate is reported, not judged", () => {
+  // 34 completions in a 133 s window at 0.3/s: every arrival was waited
+  // for, so slowness shows in the p99, which held.
   const all = outcomes(34, 133_000, 3000).map((o) => ({ ...o, at: o.at + 10_000 }));
   const step = judgeStep(0.3, all, 10_000, 133_000, { p99LimitMs: 8000, minSamples: 20 });
   expect(step.completedRate).toBeCloseTo(0.256, 3);
@@ -46,6 +56,23 @@ test("starvation is the client's limit", () => {
   const all = outcomes(500, 50_000, 100, { at: 20_000 });
   all[0] = { ...all[0], ok: false, starved: true };
   expect(judgeStep(10, all, 10_000, 50_000).reason).toContain("client-limited");
+});
+
+test("a sandbox that fails to rest again fails the step, however good the activations were", () => {
+  const all = outcomes(500, 50_000, 100).map((o) => ({ ...o, at: o.at + 10_000 }));
+  const step = judgeStep(10, all, 10_000, 50_000, DEFAULT_CRITERIA, 1);
+  expect(step).toMatchObject({ holds: false, errors: 1 });
+  expect(step.reason).toContain("rest");
+  expect(isClientLimited(step)).toBe(false);
+});
+
+test("starvation alongside errors is the system's failure, not the client's limit", () => {
+  const all = outcomes(500, 50_000, 100, { at: 20_000 });
+  all[0] = { ...all[0], ok: false, starved: true };
+  all[1] = { ...all[1], ok: false, error: "host full" };
+  const step = judgeStep(10, all, 10_000, 50_000);
+  expect(step.reason).toContain("errors");
+  expect(isClientLimited(step)).toBe(false);
 });
 
 function step(rate: number, holds: boolean, errors = 0, starved = 0): StepResult {

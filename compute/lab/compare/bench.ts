@@ -15,7 +15,7 @@ import { E2b } from "./e2b.ts";
 import { Gke } from "./gke.ts";
 import { poissonArrivals, RestingSet, runOpenLoop, seededRandom } from "./load.ts";
 import { Ours } from "./ours.ts";
-import { DEFAULT_CRITERIA, judgeStep, searchSustainedRate, stepWindow } from "./search.ts";
+import { DEFAULT_CRITERIA, judgeStep, searchSustainedRate, type StepResult, stepWindow } from "./search.ts";
 import { formatMs, summarize } from "./stats.ts";
 import { type CreateKind, READ_STATE_SCRIPT, type RunResult, type Sandbox, type System, WrongOutputError, writeStateScript } from "./system.ts";
 
@@ -195,6 +195,8 @@ interface RateSettings {
   warmupMs: number;
   refinements: number;
   seed: number;
+  /** Times each rate is offered, each with its own arrivals; it holds only if every one does. */
+  repeats: number;
   parallel: number;
   /** The p99 a step must stay under; see docs/benchmark.md for when it is not 1 s. */
   p99LimitMs: number;
@@ -215,40 +217,69 @@ async function rate(system: System, settings: RateSettings, record: Recorder) {
     const random = seededRandom(settings.seed);
     const resting = new RestingSet(sandboxes, random);
     let stepIndex = 0;
+    const offer = async (offered: number, repeat: number) => {
+      stepIndex += 1;
+      const window = stepWindow(offered, settings.stepMs - settings.warmupMs, settings.warmupMs);
+      // Independent arrivals for every step and repeat, the warm-up and the
+      // measured window each carrying the offered load.
+      const arrivalRandom = seededRandom(settings.seed * 1000 + stepIndex);
+      const arrivals = [
+        ...poissonArrivals(offered, settings.warmupMs, arrivalRandom),
+        ...poissonArrivals(offered, window.measuredMs, arrivalRandom).map((at) => at + settings.warmupMs),
+      ];
+      const restErrorsBefore = restErrors;
+      const outcomes = await runOpenLoop(arrivals, async (scheduledAt) => {
+        const sandbox = resting.take();
+        try {
+          const run = await system.run(sandbox, ECHO, scheduledAt);
+          expectOutput(run, ECHO_OUTPUT, `echo in ${sandbox.id}`);
+          return scheduledAt + run.firstByteMs;
+        } finally {
+          // Back to rest, then free to be picked again.
+          void system.rest(sandbox, settings.level).then(
+            () => resting.give(sandbox),
+            (error: unknown) => {
+              restErrors += 1;
+              record.write({ kind: "rest-error", sandbox: sandbox.id, error: String(error) });
+            },
+          );
+        }
+      });
+      // Steps never overlap: wait until every sandbox rests again. One that
+      // has not by then leaves the next step a different system: stop.
+      const settleBy = performance.now() + 300_000;
+      while (resting.size + restErrors < sandboxes.length && performance.now() < settleBy) await Bun.sleep(100);
+      const outstanding = sandboxes.length - resting.size - restErrors;
+      if (outstanding > 0) {
+        record.write({ kind: "aborted", rate: offered, outstanding });
+        throw new Error(`${outstanding} sandboxes still not at rest five minutes after the ${offered}/s step`);
+      }
+      const step = judgeStep(
+        offered,
+        outcomes,
+        settings.warmupMs,
+        window.measuredMs,
+        { ...DEFAULT_CRITERIA, p99LimitMs: settings.p99LimitMs },
+        restErrors - restErrorsBefore,
+      );
+      const lag = summarize(outcomes.map((outcome) => outcome.lagMs));
+      record.write({ kind: "step", level: settings.level, sandboxes: settings.sandboxes, repeat, restErrors, clientLagP99: lag.p99, ...step });
+      console.log(
+        `${offered}/s${settings.repeats > 1 ? ` (${repeat + 1}/${settings.repeats})` : ""}: ${step.holds ? "holds" : `fails (${step.reason})`}, p50 ${formatMs(step.latency?.p50 ?? 0)}, p99 ${formatMs(step.latency?.p99 ?? 0)}, completed ${step.completedRate.toFixed(1)}/s`,
+      );
+      return step;
+    };
     const result = await searchSustainedRate(
       settings.ladder,
       async (offered) => {
-        stepIndex += 1;
-        const window = stepWindow(offered, settings.stepMs - settings.warmupMs, settings.warmupMs);
-        const arrivals = poissonArrivals(offered, window.stepMs, seededRandom(settings.seed * 1000 + stepIndex));
-        const outcomes = await runOpenLoop(arrivals, async (scheduledAt) => {
-          const sandbox = resting.take();
-          try {
-            const run = await system.run(sandbox, ECHO, scheduledAt);
-            expectOutput(run, ECHO_OUTPUT, `echo in ${sandbox.id}`);
-            return scheduledAt + run.firstByteMs;
-          } finally {
-            // Back to rest, then free to be picked again.
-            void system.rest(sandbox, settings.level).then(
-              () => resting.give(sandbox),
-              (error: unknown) => {
-                restErrors += 1;
-                record.write({ kind: "rest-error", sandbox: sandbox.id, error: String(error) });
-              },
-            );
-          }
-        });
-        // Steps never overlap: wait until every sandbox rests again.
-        const settleBy = performance.now() + 300_000;
-        while (resting.size + restErrors < sandboxes.length && performance.now() < settleBy) await Bun.sleep(100);
-        const step = judgeStep(offered, outcomes, settings.warmupMs, window.measuredMs, {
-          ...DEFAULT_CRITERIA,
-          p99LimitMs: settings.p99LimitMs,
-        });
-        const lag = summarize(outcomes.map((outcome) => outcome.lagMs));
-        record.write({ kind: "step", level: settings.level, sandboxes: settings.sandboxes, restErrors, clientLagP99: lag.p99, ...step });
-        console.log(`${offered}/s: ${step.holds ? "holds" : `fails (${step.reason})`}, p50 ${formatMs(step.latency?.p50 ?? 0)}, p99 ${formatMs(step.latency?.p99 ?? 0)}, completed ${step.completedRate.toFixed(1)}/s`);
-        return step;
+        // A rate holds only if every repeat does; report the worst one.
+        let worst: StepResult | undefined;
+        for (let repeat = 0; repeat < settings.repeats; repeat++) {
+          const step = await offer(offered, repeat);
+          if (!step.holds) return step;
+          if (!worst || (step.latency?.p99 ?? 0) > (worst.latency?.p99 ?? 0)) worst = step;
+        }
+        return worst as StepResult;
       },
       settings.refinements,
     );
@@ -310,6 +341,7 @@ async function main() {
       "warmup-seconds": { type: "string", default: "10" },
       refinements: { type: "string", default: "3" },
       seed: { type: "string", default: "1" },
+      repeats: { type: "string", default: "1" },
       "p99-limit-ms": { type: "string", default: String(DEFAULT_CRITERIA.p99LimitMs) },
       "settle-seconds": { type: "string", default: "120" },
       out: { type: "string", default: "results.jsonl" },
@@ -356,6 +388,7 @@ async function main() {
           warmupMs: Number(values["warmup-seconds"]) * 1000,
           refinements: Number(values.refinements),
           seed: Number(values.seed),
+          repeats: Number(values.repeats),
           parallel: settings.parallel,
           p99LimitMs: Number(values["p99-limit-ms"]),
           settleMs: Number(values["settle-seconds"]) * 1000,

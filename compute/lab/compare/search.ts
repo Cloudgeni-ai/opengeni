@@ -31,13 +31,14 @@ export interface Criteria {
 
 export const DEFAULT_CRITERIA: Criteria = { p99LimitMs: 1000, minSamples: 20 };
 
-/** Arrivals a step's measured window should expect, so a low rate is not judged on a handful. */
+/** Arrivals a step's measured window carries at least, so a low rate is not judged on a handful. */
 export const MIN_EXPECTED_SAMPLES = 40;
 
 /**
  * How long one step offers `rate`: the warm-up, then a measured window of
  * at least `measuredMs`, longer at low rates so that it expects
- * `MIN_EXPECTED_SAMPLES` arrivals.
+ * `MIN_EXPECTED_SAMPLES` arrivals (and, with arrivals conditioned on their
+ * count, gets them).
  */
 export function stepWindow(rate: number, measuredMs: number, warmupMs: number): { stepMs: number; measuredMs: number } {
   const measured = Math.max(measuredMs, Math.ceil((MIN_EXPECTED_SAMPLES / rate) * 1000));
@@ -48,9 +49,10 @@ export function stepWindow(rate: number, measuredMs: number, warmupMs: number): 
  * Judges one step from its outcomes. Only arrivals scheduled at or after
  * `warmupMs` count, and `measuredMs` is the length of that window. Every
  * arrival is waited for, so a system that falls behind shows it in the
- * p99, not in how many completed. The completed rate is reported, not
- * judged: Poisson arrivals at a low rate often fall short of the nominal
- * rate by chance (40 expected arrivals vary by about 6).
+ * p99, not in how many completed; the completed rate is reported, not
+ * judged. `restFailures` counts the step's sandboxes that could not be put
+ * back to rest: the system failed at half of each activation, so the step
+ * does not hold.
  */
 export function judgeStep(
   rate: number,
@@ -58,6 +60,7 @@ export function judgeStep(
   warmupMs: number,
   measuredMs: number,
   criteria: Criteria = DEFAULT_CRITERIA,
+  restFailures = 0,
 ): StepResult {
   const measured = outcomes.filter((outcome) => outcome.at >= warmupMs);
   const starved = measured.filter((outcome) => outcome.starved).length;
@@ -67,8 +70,10 @@ export function judgeStep(
   const completedRate = succeeded.length / (measuredMs / 1000);
   const latency = succeeded.length > 0 ? summarize(succeeded.map((outcome) => outcome.latencyMs)) : undefined;
   const sampleErrors = [...new Set(failed.map((outcome) => outcome.error ?? "unknown"))].slice(0, 3);
-  const base = { rate, measured: measured.length, errors, starved, completedRate, latency, sampleErrors };
-  if (starved > 0) return { ...base, holds: false, reason: "client-limited: no resting sandbox was free" };
+  const base = { rate, measured: measured.length, errors: errors + restFailures, starved, completedRate, latency, sampleErrors };
+  if (restFailures > 0) return { ...base, holds: false, reason: `${restFailures} sandboxes failed to rest again` };
+  // Starvation with no error is the client's limit; with errors, the errors decide.
+  if (starved > 0 && errors === 0) return { ...base, holds: false, reason: "client-limited: no resting sandbox was free" };
   if (measured.length < criteria.minSamples) return { ...base, holds: false, reason: `only ${measured.length} samples` };
   if (errors > 0) return { ...base, holds: false, reason: `${errors} errors` };
   if (!latency || latency.p99 >= criteria.p99LimitMs) {
@@ -111,7 +116,7 @@ export async function searchSustainedRate(
   };
   for (const rate of ladder) {
     const result = await run(rate);
-    if (result.starved > 0) return finish(steps, good, true);
+    if (isClientLimited(result)) return finish(steps, good, true);
     if (!result.holds) {
       bad = rate;
       break;
@@ -122,11 +127,16 @@ export async function searchSustainedRate(
     const rate = roundRate((good + bad) / 2);
     if (rate <= good || rate >= bad) break;
     const result = await run(rate);
-    if (result.starved > 0) return finish(steps, good, true);
+    if (isClientLimited(result)) return finish(steps, good, true);
     if (result.holds) good = rate;
     else bad = rate;
   }
   return finish(steps, good, false);
+}
+
+/** Some arrival found no resting sandbox and nothing failed: the client ran out, not the system. */
+export function isClientLimited(step: StepResult): boolean {
+  return step.starved > 0 && step.errors === 0;
 }
 
 function finish(steps: StepResult[], sustained: number, clientLimited: boolean): SearchResult {
