@@ -16,7 +16,7 @@ const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
 const MAX_DIMENSION = 16_384;
 const MAX_PIXELS = 67_108_864;
 const MAX_RANGE_BYTES = 1024 * 1024;
-const MAX_SANDBOX_FILE_BYTES = 25 * 1024 * 1024 - 1;
+const MAX_SANDBOX_FILE_BYTES = 5_000_000_000;
 
 /** Zero-dependency validation for a permanent generic workspace-file receipt. */
 export function parseRetainedWorkspaceFileReference(
