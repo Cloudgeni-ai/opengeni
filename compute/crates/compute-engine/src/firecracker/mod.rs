@@ -233,6 +233,7 @@ impl Firecracker {
             ));
         }
         crate::cgroup::check_outside_own(&cgroup_relative)?;
+        crate::cgroup::enable_controllers_above(&mount, &cgroup_relative)?;
         Ok(Self {
             binary,
             retained,

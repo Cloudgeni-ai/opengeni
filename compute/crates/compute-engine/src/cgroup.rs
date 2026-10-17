@@ -11,6 +11,9 @@ use std::time::Duration;
 /// one written counts every child's.
 static PARENT_LOW: Mutex<()> = Mutex::new(());
 
+/// The controllers a parent group hands its VMs' groups.
+const CONTROLLERS: &str = "+memory +cpu";
+
 /// One cgroup v2 directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cgroup {
@@ -30,10 +33,11 @@ impl Cgroup {
     }
 
     /// Opens or creates a parent group whose children get memory and CPU
-    /// controllers.
+    /// controllers. The groups above it must have them
+    /// ([`enable_controllers_above`]).
     pub fn create_parent(path: impl Into<PathBuf>) -> io::Result<Self> {
         let group = Self::create(path)?;
-        fs::write(group.path.join("cgroup.subtree_control"), "+memory +cpu")?;
+        enable_controllers(&group.path)?;
         Ok(group)
     }
 
@@ -501,6 +505,33 @@ fn parse_own(text: &str) -> Option<PathBuf> {
         .map(|path| PathBuf::from(path.trim().trim_start_matches('/')))
 }
 
+/// Enables the memory and CPU controllers in every group above `relative`
+/// (a group below the cgroup v2 hierarchy mounted at `mount`), from the root
+/// down, so that group can have them and hand them on to its children. A
+/// group gets a controller only once its parent enables it, and systemd
+/// enables one at the root only when some unit needs it, which at boot can
+/// be after the agent starts.
+pub fn enable_controllers_above(mount: &Path, relative: &Path) -> io::Result<()> {
+    let mut above: Vec<&Path> = relative.ancestors().skip(1).collect();
+    above.reverse();
+    for group in above {
+        enable_controllers(&mount.join(group))?;
+    }
+    Ok(())
+}
+
+/// Enables the memory and CPU controllers for the children of the group at
+/// `group`; enabling one already enabled changes nothing.
+fn enable_controllers(group: &Path) -> io::Result<()> {
+    let control = group.join("cgroup.subtree_control");
+    fs::write(&control, CONTROLLERS).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("enabling {CONTROLLERS} in {}: {error}", control.display()),
+        )
+    })
+}
+
 /// Whether group `inner` is `outer` or below it; the root encloses nothing
 /// here.
 fn encloses(outer: &Path, inner: &Path) -> bool {
@@ -510,6 +541,23 @@ fn encloses(outer: &Path, inner: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controllers_are_enabled_in_every_group_above_a_parent() {
+        let mount = tempfile::tempdir().unwrap();
+        fs::create_dir_all(mount.path().join("fleet/hosts")).unwrap();
+        enable_controllers_above(mount.path(), Path::new("fleet/hosts/vms")).unwrap();
+        for group in ["", "fleet", "fleet/hosts"] {
+            let control = mount.path().join(group).join("cgroup.subtree_control");
+            assert_eq!(fs::read_to_string(control).unwrap(), CONTROLLERS, "{group}");
+        }
+        assert!(!mount.path().join("fleet/hosts/vms").exists());
+        // Only the root is above a group just below it.
+        let mount = tempfile::tempdir().unwrap();
+        enable_controllers_above(mount.path(), Path::new("compute")).unwrap();
+        assert!(mount.path().join("cgroup.subtree_control").exists());
+        assert!(!mount.path().join("compute").exists());
+    }
 
     #[test]
     fn vm_groups_must_lie_outside_the_callers_own() {
