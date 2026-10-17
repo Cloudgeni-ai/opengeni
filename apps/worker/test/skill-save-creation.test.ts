@@ -154,7 +154,8 @@ describe("skill_save creation through the real PostgreSQL boundary", () => {
             expect(result.structuredContent).toMatchObject({
               error: { code: "skill_change_refused", retryable: false },
             });
-            expect(JSON.stringify(result.content)).toContain("Learning is Off");
+            expect(JSON.stringify(result.content)).toContain("Nothing was saved.");
+            expect(JSON.stringify(result.content)).toContain("Agent learning for Skills is Off");
             expect(JSON.stringify(result.content)).not.toContain("Failed query");
             expect(record).toBeNull();
             continue;

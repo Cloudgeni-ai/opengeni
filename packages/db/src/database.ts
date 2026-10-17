@@ -38,9 +38,8 @@ export type Database = PgDatabase<any, typeof schema>;
 declare const sessionActivityDatabaseBrand: unique symbol;
 
 /**
- * A workspace-scoped transaction whose session activity commit gate is open.
- * Session-row writers accept this narrower handle so new call sites cannot
- * accidentally bypass the once-per-transaction revision finalizer.
+ * A workspace-scoped session writer transaction. The BEFORE row trigger stamps
+ * activity in the same write; the brand retains the writer/tenancy boundary.
  */
 export type SessionActivityDatabase = Database & {
   readonly [sessionActivityDatabaseBrand]: true;
@@ -1025,176 +1024,12 @@ export async function withWorkspaceRls<T>(
   );
 }
 
-type SessionActivityGate = {
-  db: SessionActivityDatabase;
-  owner: boolean;
-};
-
 /** True for an open transaction (or savepoint) handle rather than a pool handle. */
 export function isTransactionHandle(db: Database): boolean {
   return typeof (db as Database & { rollback?: unknown }).rollback === "function";
 }
 
-async function assertSessionActivityGateEntry(db: Database): Promise<void> {
-  if (!isTransactionHandle(db)) return;
-  const [gate] = await rawRows<{ state: string | null }>(
-    db,
-    sql`
-      select nullif(
-        current_setting('opengeni.session_activity_gate_state', true),
-        ''
-      ) as state
-    `,
-  );
-  if (gate?.state === null || gate === undefined) {
-    throw new Error("Session activity commit gate must start at the outer transaction boundary");
-  }
-}
-
-async function beginSessionActivityGate(
-  db: Database,
-  workspaceId: string,
-): Promise<SessionActivityGate> {
-  const [gate] = await rawRows<{
-    prior_state: string | null;
-    prior_workspace_id: string | null;
-  }>(
-    db,
-    sql`
-      with current_gate as materialized (
-        select
-          nullif(current_setting('opengeni.session_activity_gate_state', true), '') as prior_state,
-          nullif(current_setting('opengeni.session_activity_gate_workspace_id', true), '') as prior_workspace_id
-      )
-      select
-        prior_state,
-        prior_workspace_id,
-        case
-          when prior_state is null
-            then set_config('opengeni.session_activity_gate_state', 'open', true)
-          else prior_state
-        end as effective_state,
-        case
-          when prior_state is null
-            then set_config('opengeni.session_activity_gate_workspace_id', ${workspaceId}, true)
-          else prior_workspace_id
-        end as effective_workspace_id
-      from current_gate
-    `,
-  );
-  if (!gate) {
-    throw new Error("Session activity commit gate could not be opened");
-  }
-  if (gate.prior_state === null) {
-    return { db: db as SessionActivityDatabase, owner: true };
-  }
-  if (gate.prior_state === "open" && gate.prior_workspace_id === workspaceId) {
-    return { db: db as SessionActivityDatabase, owner: false };
-  }
-  throw new Error("Session activity commit gate is already owned by another transaction scope");
-}
-
-async function finalizeSessionActivityGate(
-  db: SessionActivityDatabase,
-  workspaceId: string,
-): Promise<void> {
-  // Resolve every deferred FK/constraint before taking the shared workspace
-  // counter. The only row writes after that point stamp session rows already
-  // modified and therefore already owned by this transaction.
-  await db.execute(
-    sql`select set_config('opengeni.session_activity_gate_state', 'preparing', true)`,
-  );
-  await db.execute(sql`set constraints all immediate`);
-  // The first flush proves every pre-existing deferred obligation. Re-defer
-  // only our commit guard so the marker-clearing writes below queue a fresh
-  // proof against the final row state, then force that proof before returning.
-  await db.execute(
-    sql`set constraints sessions_activity_insert_commit_guard, sessions_activity_update_commit_guard deferred`,
-  );
-  const [result] = await rawRows<{
-    had_pending: boolean;
-    pending_count: number;
-    revision: string | null;
-    stamped_count: number;
-  }>(
-    db,
-    sql`
-      with gate as materialized (
-        select set_config('opengeni.session_activity_gate_state', 'finalizing', true) as state
-      ),
-      pending as materialized (
-        select ${schema.sessions.id}
-        from ${schema.sessions}
-        cross join gate
-        where ${schema.sessions.workspaceId} = ${workspaceId}
-          and ${schema.sessions.activityRevisionPendingXid}
-            = pg_current_xact_id()::text::bigint
-      ),
-      advanced as (
-        update ${schema.workspaceSessionActivityRevisions} as counter
-        set revision = counter.revision + 1
-        where counter.workspace_id = ${workspaceId}
-          and exists (select 1 from pending)
-        returning counter.revision
-      ),
-      stamped as (
-        update ${schema.sessions} as session
-        set
-          activity_revision = advanced.revision,
-          activity_revision_pending_xid = null
-        from advanced
-        where session.workspace_id = ${workspaceId}
-          and session.activity_revision_pending_xid
-            = pg_current_xact_id()::text::bigint
-        returning session.id
-      ),
-      stats as materialized (
-        select
-          exists (select 1 from pending) as had_pending,
-          (select count(*)::integer from pending) as pending_count,
-          (select revision::text from advanced) as revision,
-          (select count(*)::integer from stamped) as stamped_count
-      ),
-      finalized as materialized (
-        select
-          had_pending,
-          pending_count,
-          revision,
-          stamped_count,
-          set_config('opengeni.session_activity_gate_state', 'finalized', true) as state
-        from stats
-      )
-      select had_pending, pending_count, revision, stamped_count
-      from finalized
-    `,
-  );
-  if (!result) {
-    throw new Error("Session activity commit gate did not return a finalization result");
-  }
-  if (result.had_pending && result.revision === null) {
-    throw new Error("Workspace session activity counter is unavailable");
-  }
-  if (result.stamped_count !== result.pending_count) {
-    throw new Error("Session activity commit gate did not stamp every pending row");
-  }
-  await db.execute(
-    sql`set constraints sessions_activity_insert_commit_guard, sessions_activity_update_commit_guard immediate`,
-  );
-  // A restored activity scope can be followed by another workspace scope, or
-  // by a SECURITY DEFINER lifecycle that opens and finalizes its own gate in
-  // the same outer transaction. Keep the guards deferred after proving this
-  // scope's final state so those later writes reach their own finalizer instead
-  // of firing the commit guard at the first session update.
-  await db.execute(
-    sql`set constraints sessions_activity_insert_commit_guard, sessions_activity_update_commit_guard deferred`,
-  );
-}
-
-/**
- * Run one workspace transaction with explicit once-per-transaction session
- * activity finalization. Nested callers reuse the outer gate; only its owner
- * finalizes immediately before the enclosing RLS transaction commits.
- */
+/** Session activity is stamped by the row trigger; retain the scoped writer API. */
 export async function withSessionActivityRlsContext<T>(
   db: Database,
   context: RlsContext & { workspaceId: string },
@@ -1224,7 +1059,6 @@ async function withSessionActivityRlsScope<T>(
   fenceMode: "shared" | "none",
   organizationMembershipFence: boolean,
 ): Promise<T> {
-  await assertSessionActivityGateEntry(db);
   // Only callers that reauthorize or mutate under the membership lifecycle
   // lock take it, always exclusively, and before even a shared tenancy fence:
   // an exclusive tenancy/control waiter can otherwise complete the same lock
@@ -1251,15 +1085,9 @@ async function withSessionActivityRlsScope<T>(
       locks,
     },
     async (scopedDb, context) => {
-      const gate = await beginSessionActivityGate(scopedDb, scope.workspaceId);
-      const value = await fn(gate.db);
-      // The finalizer must never trust tenant GUCs that arbitrary callback code
-      // could have changed. Nested RLS helpers restore their parent scope; this
-      // assertion is the fail-closed commit-boundary proof for every other path.
-      await assertRlsContextApplied(gate.db, context);
-      if (gate.owner) {
-        await finalizeSessionActivityGate(gate.db, scope.workspaceId);
-      }
+      const value = await fn(scopedDb as SessionActivityDatabase);
+      // Keep the tenant proof; removing the activity gate must not weaken RLS.
+      await assertRlsContextApplied(scopedDb, context);
       return value;
     },
     transactionConfig,
@@ -1292,8 +1120,7 @@ export async function withWorkspaceSessionActivityRls<T>(
 
 /**
  * Run one of several ordered workspace activity scopes inside a caller-owned
- * transaction. Each scope is fully finalized before restoring the caller's
- * gate GUCs, so the next workspace can reuse the same outer transaction.
+ * transaction. Tenant and actor settings are restored before the next scope.
  */
 export async function withRestoredSessionActivityRlsContext<T>(
   db: Database,
@@ -1303,38 +1130,15 @@ export async function withRestoredSessionActivityRlsContext<T>(
   if (!isTransactionHandle(db)) {
     throw new Error("Sequential workspace activity scopes require a caller-owned transaction");
   }
-  const [prior] = await rawRows<{ state: string; workspace_id: string }>(
-    db,
-    sql`select
-      coalesce(current_setting('opengeni.session_activity_gate_state', true), '') as state,
-      coalesce(
-        current_setting('opengeni.session_activity_gate_workspace_id', true), ''
-      ) as workspace_id`,
-  );
-  try {
-    return await withRlsContext(db, context, async (scopedDb) => {
-      const gate = await beginSessionActivityGate(scopedDb, context.workspaceId);
-      if (!gate.owner) {
-        throw new Error("Sequential workspace activity scope unexpectedly reused an open gate");
-      }
-      const value = await fn(gate.db);
-      await assertRlsContextApplied(gate.db, context);
-      await finalizeSessionActivityGate(gate.db, context.workspaceId);
-      return value;
-    });
-  } finally {
-    await db.execute(sql`select
-      set_config('opengeni.session_activity_gate_state', ${prior?.state ?? ""}, true),
-      set_config(
-        'opengeni.session_activity_gate_workspace_id', ${prior?.workspace_id ?? ""}, true
-      )`);
-  }
+  return await withRlsContext(db, context, async (scopedDb) => {
+    const value = await fn(scopedDb as SessionActivityDatabase);
+    await assertRlsContextApplied(scopedDb, context);
+    return value;
+  });
 }
 
 /**
- * Open one nested savepoint without losing the gate brand. Drizzle correctly
- * preserves the backend-local gate GUCs, but its structural transaction type
- * cannot express that provenance; keep the single trusted rebrand here.
+ * Open one nested savepoint without losing the scoped writer brand.
  */
 export async function withSessionActivitySavepoint<T>(
   db: SessionActivityDatabase,

@@ -10,17 +10,22 @@ import { copyRuntimeDependencies } from "./copy-runtime-dependencies";
 // The 1Password SDK stays a real package in both images: its core loads a WASM
 // file from beside its own module, which a bundle cannot carry. The Keeper
 // SDK does too: its adapter reads the installed, hash-pinned build at run time.
+// `ws` is loaded through its installed package file (see @opengeni/network's
+// nodeWebSocketFactory) to bypass Bun's built-in shim, so the bundle never
+// contains it and both images must carry the real package.
 export const API_RUNTIME_EXTERNALS = [
   "sharp",
   "better-auth",
   "@1password/sdk",
   "@keeper-security/secrets-manager-core",
+  "ws",
 ];
 export const WORKER_RUNTIME_EXTERNALS = [
   "@llamaindex/liteparse",
   "sharp",
   "@1password/sdk",
   "@keeper-security/secrets-manager-core",
+  "ws",
   "@temporalio/activity",
   "@temporalio/client",
   "@temporalio/worker",

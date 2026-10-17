@@ -543,10 +543,8 @@ export const workspaceInferenceControls = pgTable(
   }),
 );
 
-// One transactionally allocated activity clock per workspace. Updated-order
-// discovery reads the committed value through plain MVCC. Semantic writers
-// advance it once at their explicit commit gate, after every other deferred
-// constraint and row lock has settled.
+// Legacy rolling-compatibility shape, not the activity clock for new readers or
+// writers. Retain until old binaries and SQL lifecycle finalizers are retired.
 export const workspaceSessionActivityRevisions = pgTable(
   "workspace_session_activity_revisions",
   {
@@ -5243,15 +5241,13 @@ export const sessions = pgTable(
     agentConfig: jsonb("agent_config").$type<ResolvedAgentConfig>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-    // Assigned once by the explicit transaction commit gate whenever canonical
-    // updated_at activity advances. Raw delta-only writers intentionally omit
-    // updated_at and therefore do not allocate revisions.
-    activityRevision: bigint("activity_revision", { mode: "number" }).notNull().default(0),
-    // Transaction ownership marker between the cheap row trigger and the
-    // once-per-transaction commit gate. Committed rows must always be null.
-    activityRevisionPendingXid: bigint("activity_revision_pending_xid", {
-      mode: "bigint",
-    }),
+    // Top-level xid, assigned by a BEFORE trigger in the original row write.
+    // Strings preserve all 64 bits; raw event-only writes do not stamp activity.
+    activityXid: customType<{ data: string; driverData: string }>({
+      dataType: () => "xid8",
+    })("activity_xid")
+      .notNull()
+      .default(sql`'0'::xid8`),
   },
   (table) => ({
     reasoningEffortValid: check(
@@ -5328,15 +5324,12 @@ export const sessions = pgTable(
       table.updatedAt.desc(),
       table.id.desc(),
     ),
-    workspaceActivityRevision: index("sessions_workspace_activity_revision_idx").on(
+    workspaceActivityXid: index("sessions_workspace_activity_xid_idx").on(
       table.workspaceId,
-      table.activityRevision.desc(),
+      table.activityXid.desc(),
       table.updatedAt.desc(),
       table.id.desc(),
     ),
-    workspaceActivityPending: index("sessions_workspace_activity_pending_idx")
-      .on(table.workspaceId, table.activityRevisionPendingXid, table.id)
-      .where(sql`${table.activityRevisionPendingXid} is not null`),
     ownerOrganizationMembership: foreignKey({
       name: "sessions_owner_organization_membership_fk",
       columns: [table.ownerOrganizationMembershipId, table.accountId],

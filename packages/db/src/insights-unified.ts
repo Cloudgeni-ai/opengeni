@@ -20,7 +20,7 @@ type Scope = {
   detailsSharedWorkspaces?: boolean;
 };
 
-/** Read-only cache invalidation through the existing committed activity clock.
+/** Read-only cache invalidation through the current database visibility snapshot.
  * No cached authorization: callers must establish the normal scope on every read.
  * Missing/denied clock metadata disables caching rather than reusing an old result.
  */
@@ -51,12 +51,12 @@ export async function readInsightsResponseCacheFence(
           return await cacheMetadataRead(scoped, async (bounded) =>
             rows<{ revision: string; projects: unknown; schedules: unknown }>(
               await bounded.execute(sql`
-          select r.revision::text,
+          select pg_current_snapshot()::text as revision,
             (select coalesce(jsonb_agg(jsonb_build_array(c.id,c.name) order by c.id),'[]')
               from channels c where c.account_id=${scope.accountId}::uuid and c.workspace_id=${workspace.id}::uuid) projects,
             (select coalesce(jsonb_agg(jsonb_build_array(t.id,t.name,t.deleted_at) order by t.id),'[]')
               from scheduled_tasks t where t.account_id=${scope.accountId}::uuid and t.workspace_id=${workspace.id}::uuid) schedules
-          from workspace_session_activity_revisions r where r.account_id=${scope.accountId}::uuid and r.workspace_id=${workspace.id}::uuid`),
+          `),
             ),
           );
         },

@@ -1,3 +1,9 @@
+import {
+  decodeActivityXid,
+  encodeActivityXid,
+  isActivityXidToken,
+  normalizeActivityToken,
+} from "./session-activity-xid";
 export {
   listExhaustedScheduledTasks,
   retireExhaustedScheduledTask,
@@ -31575,10 +31581,12 @@ export type SessionListSnapshotCursor = {
 };
 
 export type SessionListKeysetCursor = {
+  /** Xid key for updated ordering, independent of the displayed timestamp. */
+  sortXid?: string;
   kind: "keyset";
   /** Absent on v2 cursors, which always used session updatedAt. */
   sortBy?: "updatedAt" | "archivedAt" | "createdAt" | "name";
-  /** Decimal committed workspace activity revision frozen on page one. */
+  /** Decimal cursor generation marker; legacy values restart conservatively. */
   snapshotRevision: string;
   /** Exact PostgreSQL timestamp (including microseconds), or normalized name for name order. */
   sortAt: string;
@@ -33086,6 +33094,7 @@ export function encodeSessionListCursor(cursor: SessionListCursor): string {
             snapshotId: SESSION_LIST_KEYSET_LEGACY_SNAPSHOT_ID,
             offset: 0,
             snapshotRevision: cursor.snapshotRevision,
+            ...(cursor.sortXid !== undefined ? { sortXid: cursor.sortXid } : {}),
             sortAt: cursor.sortAt,
             id: cursor.id,
             parentSessionFilter: cursor.parentSessionFilter,
@@ -33114,6 +33123,7 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       snapshotId?: unknown;
       offset?: unknown;
       snapshotRevision?: unknown;
+      sortXid?: unknown;
       sortAt?: unknown;
       id?: unknown;
       parentSessionFilter?: unknown;
@@ -33153,6 +33163,18 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       ) {
         return null;
       }
+      if (
+        parsed.sortXid !== undefined &&
+        (typeof parsed.sortXid !== "string" ||
+          BigInt(normalizeActivityToken(parsed.sortXid, "cursor sort xid")) >= 1n << 64n)
+      )
+        return null;
+      if (
+        isActivityXidToken(parsed.snapshotRevision) &&
+        sortBy === "updatedAt" &&
+        parsed.sortXid === undefined
+      )
+        return null;
       return {
         kind: "keyset",
         ...(parsed.version !== 2
@@ -33162,6 +33184,9 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
           parsed.snapshotRevision,
           "cursor snapshot revision",
         ),
+        ...(parsed.sortXid !== undefined
+          ? { sortXid: normalizeActivityToken(String(parsed.sortXid), "cursor sort xid") }
+          : {}),
         sortAt: parsed.sortAt,
         id: parsed.id,
         parentSessionFilter: parentSessionFilter as string,
@@ -33430,7 +33455,9 @@ async function readSessionListForSubject(
         const ordinaryOrder =
           sortBy === "name"
             ? [asc(ordinarySortAt), asc(schema.sessions.id)]
-            : [desc(ordinarySortAt), desc(schema.sessions.id)];
+            : sortBy === "updatedAt"
+              ? [desc(schema.sessions.activityXid), desc(ordinarySortAt), desc(schema.sessions.id)]
+              : [desc(ordinarySortAt), desc(schema.sessions.id)];
         const listFilter = sessionListFilterIdentity(options);
         const now = new Date();
 
@@ -33624,7 +33651,13 @@ async function readSessionListForSubject(
             for (const row of ordinaryIdRows) exactArchiveTimestamps.set(row.id, row.archiveAt);
           }
         } else {
-          const cursor = options.cursor?.kind === "keyset" ? options.cursor : undefined;
+          // A legacy boundary is in a different ordering domain. Restart rather
+          // than interpreting its counter as an xid and silently losing rows.
+          const requestedCursor = options.cursor?.kind === "keyset" ? options.cursor : undefined;
+          const cursor =
+            requestedCursor && isActivityXidToken(requestedCursor.snapshotRevision)
+              ? requestedCursor
+              : undefined;
           if (
             cursor &&
             (cursor.parentSessionFilter !== parentFilter ||
@@ -33634,10 +33667,8 @@ async function readSessionListForSubject(
           ) {
             throw new SessionListCursorError("session list cursor does not match its filters");
           }
-          const snapshotRevision = cursor
-            ? normalizeSessionActivityRevision(cursor.snapshotRevision, "cursor snapshot revision")
-            : await readWorkspaceSessionActivityRevision(tx, workspaceId);
-          const cursorPredicate = cursor
+          const snapshotRevision = encodeActivityXid("0");
+          const timestampCursorPredicate = cursor
             ? sortBy === "name"
               ? or(
                   sql`${ordinarySortAt} > ${cursor.sortAt}::text collate "C"`,
@@ -33654,6 +33685,11 @@ async function readSessionListForSubject(
                   ),
                 )
             : undefined;
+          const cursorPredicate =
+            sortBy === "updatedAt" && cursor
+              ? sql`(${schema.sessions.activityXid}, ${schema.sessions.updatedAt}, ${schema.sessions.id})
+                < (${cursor.sortXid ?? "0"}::xid8, ${cursor.sortAt}::timestamptz, ${cursor.id}::uuid)`
+              : timestampCursorPredicate;
           const ordinaryIdRows = await tx
             .select({
               id: schema.sessions.id,
@@ -33661,6 +33697,7 @@ async function readSessionListForSubject(
               pin: schema.sessionPins,
               sortAt: exactOrdinarySortAt,
               archiveAt: exactArchiveSortAt,
+              sortXid: sql<string>`${schema.sessions.activityXid}::text`,
             })
             .from(schema.sessions)
             .leftJoin(
@@ -33671,14 +33708,7 @@ async function readSessionListForSubject(
                 eq(schema.sessionPins.sessionId, schema.sessions.id),
               ),
             )
-            .where(
-              and(
-                ...filters,
-                ordinaryPinFilter,
-                sql`${schema.sessions.activityRevision} <= ${snapshotRevision}::text::bigint`,
-                cursorPredicate,
-              ),
-            )
+            .where(and(...filters, ordinaryPinFilter, cursorPredicate))
             .orderBy(...ordinaryOrder)
             .limit(limit + 1);
           const hasMore = ordinaryIdRows.length > limit;
@@ -33697,6 +33727,7 @@ async function readSessionListForSubject(
               kind: "keyset",
               sortBy,
               snapshotRevision,
+              sortXid: last.sortXid,
               sortAt: last.sortAt,
               id: last.id,
               parentSessionFilter: parentFilter,
@@ -34774,37 +34805,8 @@ function projectSessionDiscoveryControlForRelatedAccess(
   };
 }
 
-const SESSION_ACTIVITY_REVISION_PATTERN = /^(?:0|[1-9]\d*)$/;
-const SESSION_ACTIVITY_REVISION_MAX = 9_223_372_036_854_775_807n;
-
 function normalizeSessionActivityRevision(value: string, label: string): string {
-  if (!SESSION_ACTIVITY_REVISION_PATTERN.test(value)) {
-    throw new Error(`sessions_list ${label} must be a decimal activity revision`);
-  }
-  const revision = BigInt(value);
-  if (revision > SESSION_ACTIVITY_REVISION_MAX) {
-    throw new Error(`sessions_list ${label} exceeds the database activity revision range`);
-  }
-  return revision.toString();
-}
-
-async function readWorkspaceSessionActivityRevision(
-  db: Database,
-  workspaceId: string,
-): Promise<string> {
-  const rows = await rawRows<{ revision: string }>(
-    db,
-    sql`
-      select revision::text as revision
-      from ${schema.workspaceSessionActivityRevisions}
-      where workspace_id = ${workspaceId}
-    `,
-  );
-  const revision = rows[0]?.revision;
-  if (revision === undefined) {
-    throw new Error("sessions_list workspace activity revision is unavailable");
-  }
-  return normalizeSessionActivityRevision(revision, "snapshot revision");
+  return normalizeActivityToken(value, label);
 }
 
 const SESSION_DISCOVERY_QUERY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u;
@@ -34984,7 +34986,7 @@ async function selectSessionDiscoveryPageRows(
     authorizationScope?: SessionAuthorizationListScope;
     filters: NormalizedSessionDiscoveryFilters;
   },
-): Promise<{ rows: SessionDiscoveryPageRow[]; total: number }> {
+): Promise<{ rows: SessionDiscoveryPageRow[]; total: number; watermark: string }> {
   const authorizationFilters: SQL[] = [eq(schema.sessions.workspaceId, workspaceId)];
   if (options.subjectId) {
     authorizationFilters.push(sql`not exists (
@@ -35055,11 +35057,13 @@ async function selectSessionDiscoveryPageRows(
   authorizationFilters.push(
     options.orderBy === "createdAt"
       ? sql`${schema.sessions.createdAt} <= ${options.snapshotAt}::text::timestamptz`
-      : sql`${schema.sessions.activityRevision} <= ${options.snapshotRevision}::text::bigint`,
+      : options.orderBy === "relevance"
+        ? sql`${schema.sessions.activityXid} < (select watermark from activity_window)`
+        : sql`true`,
   );
   if (options.updatedAfter !== null) {
     authorizationFilters.push(
-      sql`${schema.sessions.activityRevision} > ${options.updatedAfter}::text::bigint`,
+      sql`${schema.sessions.activityXid} >= ${decodeActivityXid(options.updatedAfter)}::xid8`,
     );
   }
   const authorizedPredicate = and(...authorizationFilters) ?? sql`false`;
@@ -35281,9 +35285,9 @@ async function selectSessionDiscoveryPageRows(
           or (
             ranked_sessions.match_rank = ${options.cursor.sortRank}::integer
             and (
-              ranked_sessions.activity_revision < ${options.cursor.sortRevision}::text::bigint
+              ranked_sessions.activity_xid < ${options.cursor.sortRevision}::text::xid8
               or (
-                ranked_sessions.activity_revision = ${options.cursor.sortRevision}::text::bigint
+                ranked_sessions.activity_xid = ${options.cursor.sortRevision}::text::xid8
                 and (
                   ranked_sessions.updated_at < ${options.cursor.sortAt}::text::timestamptz
                   or (
@@ -35297,9 +35301,9 @@ async function selectSessionDiscoveryPageRows(
         )`
       : options.orderBy === "updatedAt"
         ? sql`(
-            ranked_sessions.activity_revision < ${options.cursor.sortRevision}::text::bigint
+            ranked_sessions.activity_xid < ${options.cursor.sortRevision}::text::xid8
             or (
-              ranked_sessions.activity_revision = ${options.cursor.sortRevision}::text::bigint
+              ranked_sessions.activity_xid = ${options.cursor.sortRevision}::text::xid8
               and (
                 ranked_sessions.updated_at < ${options.cursor.sortAt}::text::timestamptz
                 or (
@@ -35318,31 +35322,37 @@ async function selectSessionDiscoveryPageRows(
           )`;
   const pageOrder =
     options.orderBy === "relevance"
-      ? sql`ranked_sessions.match_rank asc, ranked_sessions.activity_revision desc,
+      ? sql`ranked_sessions.match_rank asc, ranked_sessions.activity_xid desc,
           ranked_sessions.updated_at desc, ranked_sessions.id desc`
       : options.orderBy === "updatedAt"
-        ? sql`ranked_sessions.activity_revision desc, ranked_sessions.updated_at desc,
+        ? sql`ranked_sessions.activity_xid desc, ranked_sessions.updated_at desc,
             ranked_sessions.id desc`
         : sql`ranked_sessions.created_at desc, ranked_sessions.id desc`;
   const outerOrder =
     options.orderBy === "relevance"
-      ? sql`page."sortRank" asc nulls last, page."sortRevision"::bigint desc nulls last,
+      ? sql`page."sortRank" asc nulls last, page."sortRevision"::xid8 desc nulls last,
           page."sortAt"::timestamptz desc nulls last, page.id desc nulls last`
       : options.orderBy === "updatedAt"
-        ? sql`page."sortRevision"::bigint desc nulls last,
+        ? sql`page."sortRevision"::xid8 desc nulls last,
             page."sortAt"::timestamptz desc nulls last, page.id desc nulls last`
         : sql`page."sortAt"::timestamptz desc nulls last, page.id desc nulls last`;
   const sortRevision =
-    options.orderBy === "createdAt" ? sql`'0'::text` : sql`ranked_sessions.activity_revision::text`;
+    options.orderBy === "createdAt" ? sql`'0'::text` : sql`ranked_sessions.activity_xid::text`;
   const sortAt =
     options.orderBy === "createdAt"
       ? sql`to_char(ranked_sessions.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
       : sql`to_char(ranked_sessions.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
-  const result = await rawRows<SessionDiscoveryPageRow>(
+  const result = await rawRows<SessionDiscoveryPageRow & { watermark: string }>(
     db,
     sql`
-      with authorized_sessions as materialized (
+      with activity_window as materialized (
+        -- xmin and the rows share this statement's MVCC snapshot. A lower xid
+        -- that commits late is >= this token and is replayed on the next poll.
+        -- Keep page one's watermark across continuation pages: advancing it on
+        -- a later page could skip an interleaved commit above that page's keyset.
+        select ${options.cursor ? sql`${decodeActivityXid(options.snapshotRevision)}::xid8` : options.orderBy === "relevance" ? sql`pg_snapshot_xmax(pg_current_snapshot())` : sql`pg_snapshot_xmin(pg_current_snapshot())`} as watermark
+      ), authorized_sessions as materialized (
         select
           ${schema.sessions.id} as id,
           ${schema.sessions.title} as title,
@@ -35353,7 +35363,7 @@ async function selectSessionDiscoveryPageRows(
           ${schema.sessions.status} as status,
           ${schema.sessions.createdAt} as created_at,
           ${schema.sessions.updatedAt} as updated_at,
-          ${schema.sessions.activityRevision} as activity_revision
+          ${schema.sessions.activityXid} as activity_xid
         from ${schema.sessions}
         where ${authorizedPredicate}
       ),
@@ -35380,8 +35390,9 @@ async function selectSessionDiscoveryPageRows(
         page."matchedField",
         page."scoreBand",
         page."matchedClaimId",
-        totals.total
-      from (select count(*)::integer as total from ranked_sessions) totals
+        totals.total,
+        activity_window.watermark::text as watermark
+      from activity_window cross join (select count(*)::integer as total from ranked_sessions) totals
       left join lateral (
         select
           ranked_sessions.id,
@@ -35410,7 +35421,7 @@ async function selectSessionDiscoveryPageRows(
     `,
   );
   const total = Number(result[0]?.total ?? 0);
-  return { rows: result.filter((row) => row.id !== null), total };
+  return { rows: result.filter((row) => row.id !== null), total, watermark: result[0]!.watermark };
 }
 
 async function sessionDiscoveryClaimsForSessions(
@@ -35704,8 +35715,13 @@ export async function listSessionDiscoverySummaries(
     ) {
       throw new Error("sessions_list chronological cursor cannot carry relevance fields");
     }
+    const cursor =
+      orderBy !== "createdAt" &&
+      (!options.cursor || !isActivityXidToken(options.cursor.snapshotRevision))
+        ? undefined
+        : options.cursor;
     const snapshotAt =
-      options.cursor?.snapshotAt ??
+      cursor?.snapshotAt ??
       (
         await rawRows<{ value: string }>(
           scopedDb,
@@ -35715,17 +35731,10 @@ export async function listSessionDiscoverySummaries(
           sql`select to_char(transaction_timestamp() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as value`,
         )
       )[0]!.value;
-    const snapshotRevision =
-      orderBy !== "createdAt"
-        ? options.cursor?.snapshotRevision !== undefined
-          ? normalizeSessionActivityRevision(
-              options.cursor.snapshotRevision,
-              "cursor snapshot revision",
-            )
-          : await readWorkspaceSessionActivityRevision(scopedDb, workspaceId)
-        : "0";
-    const cursorSortRevision = options.cursor
-      ? normalizeSessionActivityRevision(options.cursor.sortRevision, "cursor sort revision")
+    // For a new traversal the SQL page statement captures its own xmin.
+    let snapshotRevision = cursor?.snapshotRevision ?? "0";
+    const cursorSortRevision = cursor
+      ? normalizeSessionActivityRevision(cursor.sortRevision, "cursor sort revision")
       : null;
     if (
       orderBy === "createdAt" &&
@@ -35740,7 +35749,7 @@ export async function listSessionDiscoverySummaries(
     const selected = await selectSessionDiscoveryPageRows(scopedDb, workspaceId, {
       limit,
       orderBy,
-      ...(options.cursor ? { cursor: options.cursor } : {}),
+      ...(cursor ? { cursor } : {}),
       snapshotAt,
       snapshotRevision,
       updatedAfter,
@@ -35748,6 +35757,7 @@ export async function listSessionDiscoverySummaries(
       ...(options.authorizationScope ? { authorizationScope: options.authorizationScope } : {}),
       filters,
     });
+    snapshotRevision = orderBy === "createdAt" ? "0" : encodeActivityXid(selected.watermark);
     const hasMore = selected.rows.length > limit;
     const page = selected.rows.slice(0, limit);
     const ids = page.map((row) => row.id!);
@@ -83668,8 +83678,8 @@ async function retryWorkspaceSessionEventActivityPersistence<T>(
  * the outer session-activity boundary. The mutation callback is deliberately
  * transaction-local and idempotent, so the rollback cannot leak an effect.
  */
-class SessionActivityGateEscalation extends Error {
-  readonly name = "SessionActivityGateEscalation";
+class SessionSemanticWriteEscalation extends Error {
+  readonly name = "SessionSemanticWriteEscalation";
 }
 
 export async function appendSessionEvents(
@@ -84471,7 +84481,7 @@ async function runSessionEventAppendPhase<T>(
   } catch (error) {
     observeSessionEventAppendPhase(observer, {
       ...input,
-      outcome: error instanceof SessionActivityGateEscalation ? "escalated" : "error",
+      outcome: error instanceof SessionSemanticWriteEscalation ? "escalated" : "error",
       durationSeconds: Math.max(0, (performance.now() - startedAt) / 1_000),
     });
     throw error;
@@ -84515,7 +84525,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
     maxAttempts: 3,
     correlationId: crypto.randomUUID(),
   };
-  const persist = async (activityGateOpen: boolean) => {
+  const persist = async (semanticActivity: boolean) => {
     const startedAt = performance.now();
     try {
       const result = await runIdempotentPersistenceTransaction(
@@ -84524,7 +84534,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
           await withWorkspaceSessionEventActivityRls(
             db,
             workspaceId,
-            activityGateOpen,
+            semanticActivity,
             async (tx) => {
               // Canonical prefix BEFORE the caller's mutation. The mutation
               // locks a session-owned row (the Codemode journal row on
@@ -84543,14 +84553,14 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                     executionGeneration,
                     attemptId,
                     sessionLock:
-                      activityGateOpen || !rawLaneEnabled ? "no_key_update" : "key_share",
+                      semanticActivity || !rawLaneEnabled ? "no_key_update" : "key_share",
                   }),
                 (fenceResult) => (fenceResult.allowed ? "ok" : "rejected"),
               );
               const session = fence.session;
               if (!session) throw new Error(`Session not found: ${sessionId}`);
-              if (!activityGateOpen && !fence.allowed) {
-                throw new SessionActivityGateEscalation();
+              if (!semanticActivity && !fence.allowed) {
+                throw new SessionSemanticWriteEscalation();
               }
               const mutationApplied = await runSessionEventAppendPhase(
                 observer,
@@ -84831,7 +84841,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
       observeSessionEventAppendPhase(observer, {
         ...phaseInput,
         phase: "transaction",
-        outcome: error instanceof SessionActivityGateEscalation ? "escalated" : "error",
+        outcome: error instanceof SessionSemanticWriteEscalation ? "escalated" : "error",
         durationSeconds: Math.max(0, (performance.now() - startedAt) / 1_000),
       });
       throw error;
@@ -84840,7 +84850,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
   try {
     return await persist(initiallyAdvancesActivity);
   } catch (error) {
-    if (initiallyAdvancesActivity || !(error instanceof SessionActivityGateEscalation)) {
+    if (initiallyAdvancesActivity || !(error instanceof SessionSemanticWriteEscalation)) {
       throw error;
     }
     return await persist(true);
