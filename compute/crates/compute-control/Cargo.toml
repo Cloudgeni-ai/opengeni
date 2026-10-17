@@ -1,0 +1,48 @@
+[package]
+name = "compute-control"
+description = "The Opengeni compute fleet service: hosts' leases, sandbox ownership, placement, recovery, moves and the public API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "compute-control"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+blake3 = "1.8"
+clap = { version = "4", features = ["derive", "env"] }
+compute-fleet = { path = "../compute-fleet" }
+compute-protocol = { path = "../compute-protocol" }
+compute-storage = { path = "../compute-storage" }
+deadpool-postgres = "0.14"
+futures = "0.3"
+getrandom = { version = "0.3", features = ["std"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server", "service", "tokio", "http1"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+tokio-postgres-rustls = "0.13"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+tower = { version = "0.5", default-features = false, features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+rcgen = "0.13"
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -60,6 +60,7 @@ patterns = [
 ]
 allow = [
   "crates/archcheck/**",
+  "crates/compute-control/**",
   "crates/compute-engine/**",
   "crates/compute-host/**",
   "crates/compute-pager/**",
