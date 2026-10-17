@@ -27,7 +27,9 @@ export const CODEX_TRANSPORT_HEADER = "x-opengeni-codex-transport";
  * opened its connection or reused a warm one. An HTTP request names why the
  * socket did not carry it: the request was not a streaming Responses POST, the
  * conversation's connection was busy with another request, a recent handshake
- * failed (backoff), or this handshake failed. `unavailable` means no socket
+ * failed (backoff), this handshake failed, or the conversation's connection
+ * dropped mid-response repeatedly (`stream_dropped`, after which the
+ * conversation stays on HTTP for a while). `unavailable` means no socket
  * transport was in the path at all (disabled, or a runtime without
  * header-capable WebSockets).
  */
@@ -45,6 +47,7 @@ export type CodexRequestTransport =
         | "connection_busy"
         | "handshake_backoff"
         | "handshake_failed"
+        | "stream_dropped"
         | "unavailable";
     };
 
@@ -53,6 +56,7 @@ const HTTP_REASONS = new Set([
   "connection_busy",
   "handshake_backoff",
   "handshake_failed",
+  "stream_dropped",
   "unavailable",
 ]);
 
@@ -139,6 +143,8 @@ export type CodexResponsesTransportOptions = {
   connectTimeoutMs?: number;
   /** After a failed handshake, use HTTP for this conversation for this long. */
   handshakeBackoffMs?: number;
+  /** After repeated mid-response drops, use HTTP for this conversation for this long. */
+  dropFallbackMs?: number;
   now?: () => number;
 };
 
@@ -148,6 +154,12 @@ const DEFAULT_IDLE_MS = 5 * 60_000;
 const DEFAULT_MAX_AGE_MS = 45 * 60_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_HANDSHAKE_BACKOFF_MS = 5 * 60_000;
+// Like the Codex CLI, a conversation whose socket keeps dropping mid-response
+// falls back to HTTP: after this many drops close together it uses HTTP for
+// DEFAULT_DROP_FALLBACK_MS. A completed response clears the count.
+const DROPS_BEFORE_HTTP = 2;
+const DROP_WINDOW_MS = 10 * 60_000;
+const DEFAULT_DROP_FALLBACK_MS = 30 * 60_000;
 
 // Per-request headers stay off the shared handshake: they would split every
 // request onto its own connection, and the WebSocket protocol has no
@@ -312,9 +324,23 @@ export function codexResponsesTransport(
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
   const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const handshakeBackoffMs = options.handshakeBackoffMs ?? DEFAULT_HANDSHAKE_BACKOFF_MS;
+  const dropFallbackMs = options.dropFallbackMs ?? DEFAULT_DROP_FALLBACK_MS;
   const now = options.now ?? Date.now;
   const pool = new Map<string, Connection>();
   const backoffUntil = new Map<string, number>();
+  const recentDrops = new Map<string, { count: number; at: number }>();
+  const httpAfterDropsUntil = new Map<string, number>();
+  const recordDrop = (key: string) => {
+    const previous = recentDrops.get(key);
+    const count = previous && now() - previous.at < DROP_WINDOW_MS ? previous.count + 1 : 1;
+    if (count >= DROPS_BEFORE_HTTP) {
+      recentDrops.delete(key);
+      httpAfterDropsUntil.set(key, now() + dropFallbackMs);
+    } else {
+      recentDrops.set(key, { count, at: now() });
+    }
+  };
+  const droppedRecently = (key: string) => (httpAfterDropsUntil.get(key) ?? 0) > now();
   // Handshakes started by `warm`, keyed like the pool, until they settle.
   const warming = new Map<string, Promise<Connection | null>>();
 
@@ -439,7 +465,13 @@ export function codexResponsesTransport(
     try {
       if (!CODEX_RESPONSES_URL.test(url)) return;
       const { wsUrl, handshake, key } = identity(url, headers);
-      if ((backoffUntil.get(key) ?? 0) > now() || pooled(key) || warming.has(key)) return;
+      if (
+        (backoffUntil.get(key) ?? 0) > now() ||
+        droppedRecently(key) ||
+        pooled(key) ||
+        warming.has(key)
+      )
+        return;
       const opening = connect(wsUrl, key, handshake).then(
         (connection) => {
           const existing = pooled(key);
@@ -505,6 +537,7 @@ export function codexResponsesTransport(
       handshakeMs = now() - waitStartedAt;
     }
     if ((backoffUntil.get(key) ?? 0) > now()) return await viaHttp("handshake_backoff");
+    if (droppedRecently(key)) return await viaHttp("stream_dropped");
 
     const signal = init?.signal ?? null;
     signal?.throwIfAborted();
@@ -576,6 +609,7 @@ export function codexResponsesTransport(
           else reject(error);
           return;
         }
+        recentDrops.delete(key);
         release(active);
         try {
           controller?.close();
@@ -607,7 +641,11 @@ export function codexResponsesTransport(
         resolve(new Response(stream, { status, headers }));
       };
 
-      active.onClose = (error) => finish(error);
+      active.onClose = (error) => {
+        // The socket closed while this response was still streaming.
+        if (!finished) recordDrop(key);
+        finish(error);
+      };
       active.onEvent = (event) => {
         if (finished) return;
         const type = typeof event.type === "string" ? event.type : "";

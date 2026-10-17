@@ -352,6 +352,49 @@ test("a connection lost mid-response fails that stream and is never reused", asy
   expect(sockets).toHaveLength(2);
 });
 
+test("a conversation whose socket keeps dropping mid-response falls back to HTTP", async () => {
+  let clock = 1_000;
+  const { transport, sockets, httpCalls } = harness({ now: () => clock });
+  const dropOnce = async (index: number) => {
+    const pending = transport(URL, request());
+    const socket = await nextSend(() => sockets[index]);
+    socket.emit({ type: "response.created", response: {} });
+    const response = await pending;
+    socket.drop(1012);
+    await expect(response.text()).rejects.toThrow("closed before the response finished (1012)");
+  };
+
+  // One drop is retried on a new socket, and a completed response clears it.
+  await dropOnce(0);
+  const recovered = transport(URL, request());
+  const replacement = await nextSend(() => sockets[1]);
+  replacement.emit({ type: "response.completed", response: {} });
+  await (await recovered).text();
+  await dropOnce(1);
+  expect(httpCalls).toEqual([]);
+
+  // A second drop close to the first moves the conversation to HTTP.
+  await dropOnce(2);
+  const viaHttp = await transport(URL, request());
+  expect(viaHttp.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=stream_dropped");
+  transport.warm(URL, request().headers);
+  expect(sockets).toHaveLength(3);
+  expect(httpCalls).toEqual([URL]);
+
+  // After the fallback period the conversation tries the socket again.
+  clock += 31 * 60_000;
+  const again = transport(URL, request());
+  const fresh = await nextSend(() => sockets[3]);
+  fresh.emit({ type: "response.completed", response: {} });
+  expect((await again).headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+    "websocket; connection=new; handshake_ms=0",
+  );
+  expect(parseCodexRequestTransport("http; reason=stream_dropped")).toEqual({
+    kind: "http",
+    reason: "stream_dropped",
+  });
+});
+
 test("aborting a request closes its socket", async () => {
   const { transport, sockets } = harness();
   const controller = new AbortController();
