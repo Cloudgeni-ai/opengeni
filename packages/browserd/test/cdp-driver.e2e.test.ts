@@ -658,6 +658,61 @@ e2e(
 );
 
 e2e(
+  "a tab opened after a viewport change has the size the agent set, and earlier tabs keep theirs",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-viewport-tab-");
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: "vptab_" + randomUUID().slice(0, 8),
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: randomUUID(),
+      controllerGeneration: randomUUID(),
+      runner,
+    });
+    const page = (title: string) =>
+      dataUrl(`<!doctype html><meta name="viewport" content="width=device-width">
+        <title>${title}</title><body style="margin:0"><h1>${title}</h1>`);
+    try {
+      const first = await driver.start(page("First"));
+      const earlier = await driver.openTarget(page("Earlier"));
+      const earlierSize = [earlier.viewport?.width, earlier.viewport?.height];
+      await driver.dispatch({
+        ...command(first, {
+          type: "viewport",
+          width: 1600,
+          height: 1000,
+          deviceScaleFactor: 1,
+          mobile: false,
+        }),
+        observationMode: "none",
+      });
+      const opened = await driver.openTarget(page("Later"));
+      expect([opened.viewport?.width, opened.viewport?.height]).toEqual([1600, 1000]);
+      const shot = await driver.captureScreenshot(opened.target.id, {
+        format: "jpeg",
+        quality: 50,
+      });
+      expect([shot.width, shot.height]).toEqual([1600, 1000]);
+      const unchanged = await driver.observe(earlier.target.id);
+      expect([unchanged.viewport?.width, unchanged.viewport?.height]).toEqual(earlierSize);
+    } finally {
+      await driver.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);
+
+e2e(
   "keeps scaled mobile frames stable during pointer interaction",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-scale-");

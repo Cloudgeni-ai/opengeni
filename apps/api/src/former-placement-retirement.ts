@@ -3,6 +3,7 @@ import type { AccessGrant } from "@opengeni/contracts";
 import {
   getSession,
   listLostConnectedInteractionControllers,
+  listSourceFormerPlacementResources,
   releaseLostConnectedInteractionController,
   type LostConnectedInteractionController,
 } from "@opengeni/db";
@@ -95,12 +96,15 @@ async function endController(
 ): Promise<void> {
   try {
     if (controller.resource === "browser_session") {
+      // Discarding the exact generation also stops a browser its controller
+      // no longer holds in memory (an agent restart leaves it running
+      // detached), while removeState=false keeps its profile and downloads.
       await client.endSession(
         {
           browserSessionId: controller.resourceId,
           controllerGeneration: controller.controllerGeneration,
         },
-        { removeState: false },
+        { removeState: false, discardWorkingRuntime: true },
       );
     } else {
       await client.endComputerSession(
@@ -214,4 +218,52 @@ export async function retireFormerPlacementControllers(
       unreachable: false,
     };
   }
+}
+
+/**
+ * End everything a task's move left `lost` but still running on Connected
+ * Machines it no longer runs on: each machine's resources whose controller
+ * binding was never released, including earlier attempts that found the
+ * machine offline or refusing. Callers first terminalize the machine they
+ * noticed the move on, so its live resources are part of the set. Best
+ * effort: it never throws.
+ */
+export async function retireSourceFormerPlacements(
+  services: ChannelAServices,
+  input: {
+    grant: AccessGrant;
+    sourceSessionId: string;
+    origin: string | null;
+    waitSignal?: AbortSignal | undefined;
+  },
+): Promise<FormerPlacementRetirementResult[]> {
+  const { grant, sourceSessionId } = input;
+  const results: FormerPlacementRetirementResult[] = [];
+  try {
+    const machines = await listSourceFormerPlacementResources(services.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sourceSessionId,
+    });
+    for (const machine of machines) {
+      results.push(
+        await retireFormerPlacementControllers(services, {
+          grant,
+          sourceSessionId,
+          connectedSandboxId: machine.connectedSandboxId,
+          browserSessionIds: machine.browserSessionIds,
+          computerSessionIds: machine.computerSessionIds,
+          origin: input.origin,
+          waitSignal: input.waitSignal,
+        }),
+      );
+    }
+  } catch (error) {
+    console.warn("interaction.former_placement_retirement_failed", {
+      workspaceId: grant.workspaceId,
+      sourceSessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return results;
 }

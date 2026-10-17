@@ -782,6 +782,31 @@ export const browserSessions = pgTable(
   }),
 );
 
+/** A completed browser download published as a workspace file before its
+ * browser's working directory went away (see migration 0819), so it can still
+ * be saved into the task's workspace while the browser is not running. */
+export const browserSessionRetainedDownloads = pgTable(
+  "browser_session_retained_downloads",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    browserSessionId: uuid("browser_session_id").notNull(),
+    downloadId: uuid("download_id").notNull(),
+    download: jsonb("download").$type<Record<string, unknown>>().notNull(),
+    fileId: uuid("file_id").notNull(),
+    uploadId: uuid("upload_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.browserSessionId, table.downloadId] }),
+    file: index("browser_session_retained_downloads_file_idx").on(
+      table.accountId,
+      table.workspaceId,
+      table.fileId,
+    ),
+  }),
+);
+
 export const browserSessionAssociations = pgTable(
   "browser_session_associations",
   {

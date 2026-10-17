@@ -1313,15 +1313,17 @@ export class BrowserSupervisor {
       // Missing memory cannot acknowledge cleanup of a possibly accepted
       // launch. Its exact binding/holder must stay addressable for cleanup,
       // unless this generation's latest launch provably never completed, or
-      // the person explicitly ends this exact generation and discards it.
+      // the control plane explicitly discards this exact generation: a
+      // person's end (removing its state) or the retirement of a browser
+      // whose task moved to another machine (keeping its state on disk).
       if (workingRuntimePresent) {
         await this.whileNoAdoption(reference.browserSessionId, async () => {
-          if (
-            options.removeState === true &&
-            options.discardWorkingRuntime === true &&
-            !suspendForShutdown
-          ) {
-            await this.retireNonResidentWorkingRuntime(reference, sessionDirectory);
+          if (options.discardWorkingRuntime === true && !suspendForShutdown) {
+            await this.retireNonResidentWorkingRuntime(
+              reference,
+              sessionDirectory,
+              options.removeState === true,
+            );
           } else if (
             options.removeState === true &&
             options.setAsideInterruptedLaunch === true &&
@@ -2391,13 +2393,17 @@ export class BrowserSupervisor {
   /** An explicit end of a session this controller no longer holds in memory
    * (it restarted, or the browser's runtime was lost), for the exact
    * controller generation the control plane still binds. Ending discards the
-   * browser, so nothing here needs preserving for recovery: any browser still
-   * running the session's private profile is stopped by verified identity,
-   * the working runtime is retired and the session's state is removed. History
+   * runtime, so nothing here needs preserving for recovery: any browser still
+   * running the session's private profile is stopped by verified identity
+   * and the working runtime is retired. With removeState the session's state
+   * is removed; without it (a browser whose task moved to another machine)
+   * the profile and downloads stay on disk. After an agent restart such a
+   * browser keeps running detached until something ends it here. History
    * that belongs to another generation stays preserved. */
   private async retireNonResidentWorkingRuntime(
     reference: BrowserSessionReference,
     sessionDirectory: string,
+    removeState: boolean,
   ): Promise<void> {
     let journal: SqliteBrowserWorkingRuntimeJournal;
     let latest: BrowserWorkingRuntimeReceipt | null;
@@ -2417,7 +2423,14 @@ export class BrowserSupervisor {
         throw workingRuntimeUnavailable();
       }
       await this.stopEndedProcess(join(sessionDirectory, "profile"), latest?.process ?? null);
-      if (latest && latest.intent !== "retire") journal.retire(latest);
+      if (latest && latest.intent !== "retire") {
+        const retiring = journal.retire(latest);
+        // A kept directory must record that its runtime ended, so no later
+        // recovery adopts it as a live browser.
+        if (!removeState) journal.complete(retiring, null);
+      } else if (latest?.intent === "retire" && latest.state !== "completed" && !removeState) {
+        journal.complete(latest, null);
+      }
     } finally {
       journal.close();
     }
@@ -2425,7 +2438,7 @@ export class BrowserSupervisor {
       recursive: true,
       force: true,
     });
-    await rm(sessionDirectory, { recursive: true, force: true });
+    if (removeState) await rm(sessionDirectory, { recursive: true, force: true });
   }
 
   /** Move an interrupted launch of this exact generation out of the session's

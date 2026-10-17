@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
-const file = "0819_session_pin_owner_short_circuit.sql";
+const file = "0822_session_pin_owner_short_circuit.sql";
 const source = await readFile(new URL(`../drizzle/${file}`, import.meta.url), "utf8");
 let shared: SharedTestDatabase;
 beforeAll(async () => {

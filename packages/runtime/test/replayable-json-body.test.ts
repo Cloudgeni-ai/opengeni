@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { withResponsesConversation } from "@opengeni/network/responses-websocket";
 import {
   ReplayableJsonBody,
   ReplayableJsonOpenAI,
@@ -67,6 +68,27 @@ function seededValues(seed: number, count: number): unknown[] {
 }
 
 describe("replayable JSON model requests", () => {
+  test("the durable turn owns retries from the first Responses request", async () => {
+    let calls = 0;
+    const client = new ReplayableJsonOpenAI({
+      apiKey: "test",
+      maxRetries: 5,
+      fetch: async () => {
+        calls++;
+        return new Response(JSON.stringify({ error: { message: "unavailable" } }), {
+          status: 503,
+          headers: { "content-type": "application/json", "retry-after-ms": "1" },
+        });
+      },
+    });
+    await expect(
+      withResponsesConversation(
+        "retry-owner",
+        async () => await client.responses.create({ model: "m", input: "hi", stream: true }),
+      ),
+    ).rejects.toThrow();
+    expect(calls).toBe(1);
+  });
   test("matches native JSON.stringify across model-request edge cases", async () => {
     const sparse = Array<unknown>(5);
     sparse[0] = "first";

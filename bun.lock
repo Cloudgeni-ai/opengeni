@@ -627,8 +627,10 @@
       "version": "3.4.0",
       "dependencies": {
         "undici": "^6.21.3",
+        "ws": "8.21.1",
       },
       "devDependencies": {
+        "@types/ws": "^8.18.1",
         "tsup": "^8.5.0",
         "typescript": "7.0.2",
       },

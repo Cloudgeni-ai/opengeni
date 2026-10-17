@@ -1640,20 +1640,60 @@ model settings, so the portable checkpoint summary is also requested at low
 verbosity. `reasoning.summary` stays `detailed`.
 
 Streaming Codex subscription requests travel over a pooled Responses
-WebSocket (`packages/codex/src/responses-websocket.ts`), as the Codex CLI does,
-which saves a TLS/HTTP setup per model call. Each worker process keeps one idle
-socket per account and handshake identity; a busy socket, a failed handshake
-(five-minute backoff), a non-streaming request, or any non-Responses URL uses
+WebSocket (`packages/network/src/responses-websocket.ts`), with the Codex
+endpoint and metadata adapter in `packages/codex/src/responses-websocket.ts`.
+Each worker process keeps one socket per conversation and handshake identity;
+concurrent cold callers share one handshake and credential changes retire the
+old idle connection. A busy socket, a refused handshake, a non-streaming request, or any non-Responses URL uses
 ordinary HTTP instead. Rate-limit and response-metadata events are mapped back
 to the same `x-codex-*` response headers the HTTP path returns, so usage
 accounting is unchanged. `OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED=false`
 turns the transport off.
 
 A socket that closes mid-response fails that model request, and the turn
-recovers within its bounded provider-recovery budget. A conversation whose
-socket drops mid-response twice within ten minutes uses HTTP for the next
-30 minutes (`http; reason=stream_dropped`), as the Codex CLI falls back to
-HTTPS after repeated WebSocket failures.
+recovers from durable history within its existing model-step recovery budget;
+partial response events are never concatenated with a replacement response.
+The final existing recovery slot uses HTTP after the socket allowance is spent,
+without granting an extra retry. A server refusal selects HTTP immediately.
+That selection lasts for the logical turn, survives worker recovery, and is
+not reset by successful model steps. A new turn tries WebSocket again. There
+are no cooldown timers, and SDK retries cannot multiply the worker's budget.
+
+When a request extends the last completed response on its connection exactly
+(same request fields, the same earlier input, then that response's output),
+the transport sends `previous_response_id` and only the new input items, as
+the Codex CLI does; otherwise, or when the provider no longer holds that
+response, it sends the full request.
+The transport fingerprints rather than retains full prompt bodies. It recognizes
+only proven SDK round-trip equivalences, preserves phase and hosted-call status,
+and leaves explicit caller-owned continuation untouched. A rejected continuation
+settles the old physical request and crosses custody admission again before the
+full-input resend, retaining the original deadline.
+
+The same transport serves the OpenAI API (`https://api.openai.com/v1/responses`)
+and Azure OpenAI's v1 API (`https://<resource>.openai.azure.com/openai/v1/responses`).
+There, each agent turn's model requests run as one conversation with its own
+connection; requests outside a turn (titles, summaries) and every other
+OpenAI-compatible host use HTTP. Azure's legacy deployment URLs
+(`/openai/deployments/...`) stay on HTTP. `OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED=false`
+turns this off.
+
+The explicit JavaScript `ws` implementation bypasses Bun's native compatibility
+shim, which retains each socket's largest sent frame. `perMessageDeflate` is off
+so compression state does not replace that retained memory. Reproduce the
+isolated client-memory comparison with
+`bun packages/network/bench/persistent-socket-memory.ts native` and `js` in
+fresh processes; the echo server runs separately.
+
+`opengeni_model_transport_*` metrics use the same bounded labels for every
+Responses provider: connection/input mode, first/later request, outcome and
+fallback reason. They include wire versus full-input bytes, provider-reported
+first-request cache ratio, and the interval from final normalized prefix to send.
+Handshake-only warming sends no model request. Speculative `generate:false`
+prewarm is not enabled: final tools/instructions emerge at request construction,
+after startup preparation, and the remaining credential and custody checks
+cannot be bypassed. These measurements keep that decision testable without
+blocking a turn or sending a different prefix to the provider.
 
 Pricing is keyed by product model ID. A tiered schedule selects the greatest
 `minimumInputTokens` threshold not exceeding the current input count. Billing

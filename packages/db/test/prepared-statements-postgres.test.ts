@@ -103,17 +103,27 @@ async function probeStatement(db: Database) {
 }
 
 describe("prepared statements under row-level security", () => {
-  test("a prepared pool still plans each execution with its bound values", async () => {
-    const [preparedMode] = await rawRows<{ mode: string }>(
-      prepared.db,
-      sql`select current_setting('plan_cache_mode') as mode`,
-    );
-    const [unpreparedMode] = await rawRows<{ mode: string }>(
-      unprepared.db,
-      sql`select current_setting('plan_cache_mode') as mode`,
-    );
-    expect(preparedMode?.mode).toBe("force_custom_plan");
-    expect(unpreparedMode?.mode).toBe("auto");
+  test("a prepared pool reuses a generic plan under the server's default plan cache mode", async () => {
+    for (const pool of [prepared, unprepared]) {
+      const [mode] = await rawRows<{ mode: string }>(
+        pool.db,
+        sql`select current_setting('plan_cache_mode') as mode`,
+      );
+      expect(mode?.mode).toBe("auto");
+    }
+    // Planning under row-level security is the expensive part of a short
+    // statement; after its first custom plans Postgres reuses one generic plan.
+    for (let round = 0; round < 8; round += 1) {
+      for (const current of [tenantA, tenantB]) {
+        const rows = await withWorkspaceRls(prepared.db, current.workspaceId, (scoped) =>
+          visibleWorkspaces(scoped, "probe"),
+        );
+        expect(rows.map((row) => row.id)).toEqual([current.workspaceId]);
+      }
+    }
+    const statement = await probeStatement(prepared.db);
+    expect(statement.prepared).toBe(1);
+    expect(statement.generic).toBeGreaterThan(0);
   });
 
   test("a reused generic plan still filters by each transaction's own scope", async () => {
