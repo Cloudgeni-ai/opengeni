@@ -1701,6 +1701,18 @@ after startup preparation, and the remaining credential and custody checks
 cannot be bypassed. These measurements keep that decision testable without
 blocking a turn or sending a different prefix to the provider.
 
+Azure API-key credentials use the `api-key` header for both HTTP and WebSocket
+requests; Entra tokens retain bearer authentication and explicit caller-owned
+Authorization headers remain unchanged. This avoids Azure deployments redirecting
+bearer-key upgrades to a credential-bearing query URL. The socket transport never follows
+redirects: a 3xx upgrade refusal selects the existing HTTP path for that turn,
+just like a 4xx refusal other than 429. Rate limits, server errors, and connection
+failures retain the existing retry budget. A new turn can try WebSocket again.
+Azure documents Responses WebSocket support for API keys and Entra ID in its
+[WebSocket guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/websockets);
+HTTP API-key header authentication is shown in its
+[Responses guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses).
+
 Pricing is keyed by product model ID. A tiered schedule selects the greatest
 `minimumInputTokens` threshold not exceeding the current input count. Billing
 classification comes from the accepted policy: `external` usage must not spend

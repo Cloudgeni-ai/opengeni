@@ -92,12 +92,20 @@ export function recordRuntimeMcpLifecycleMetric(
   }
 }
 
+function azureApiKeyHeaders(apiKey: string, headers?: Record<string, string>) {
+  // An explicitly configured bearer credential may be an Entra token. Do not
+  // infer its kind from its contents or replace caller-owned authentication.
+  if (Object.keys(headers ?? {}).some((name) => name.toLowerCase() === "authorization"))
+    return headers;
+  // Azure accepts this for HTTP and WebSocket upgrades. Bearer API keys can
+  // redirect an upgrade to a URL containing the key instead of accepting it.
+  return { Authorization: null, "api-key": apiKey, ...headers };
+}
+
 /**
  * Build an OpenAI client from settings for the configured provider. Mirrors the
  * client construction in configureOpenAI so a direct API call (the compaction
- * summarizer) uses the same Azure/OpenAI auth and base URL. Returns null when
- * the OpenAI-platform path has only a key (the SDK default client is used via
- * setDefaultOpenAIKey there); the caller then constructs a key-only client.
+ * summarizer) uses the same Azure/OpenAI auth and base URL.
  */
 export function buildOpenAIClientFromSettings(
   settings: Settings,
@@ -112,8 +120,9 @@ export function buildOpenAIClientFromSettings(
         baseURL,
         maxRetries: settings.openaiMaxRetries,
         defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
-        defaultHeaders:
-          settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
+        defaultHeaders: settings.azureOpenaiApiKey
+          ? azureApiKeyHeaders(settings.azureOpenaiApiKey)
+          : settings.azureOpenaiAdToken
             ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
             : undefined,
         fetch: sdkRetryingModelFetch(
@@ -522,7 +531,10 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
               maxRetries: registryMaxRetries,
               ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
-              ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
+              defaultHeaders:
+                provider.wireProfile === "azure-openai" && provider.apiKey
+                  ? azureApiKeyHeaders(provider.apiKey, provider.defaultHeaders)
+                  : provider.defaultHeaders,
               fetch: sdkRetryingModelFetch(
                 registryMaxRetries,
                 streamIdleTimeoutModelFetch(

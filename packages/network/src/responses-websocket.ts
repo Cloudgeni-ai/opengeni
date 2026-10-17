@@ -690,7 +690,9 @@ export function responsesTransport(
                   `${endpoint.label} response WebSocket handshake failed (${event?.code ?? "closed"})`,
                   "handshake",
                   socket.handshakeStatus !== undefined &&
-                    socket.handshakeStatus >= 400 &&
+                    // A redirect also refuses this upgrade. Never follow it:
+                    // providers can put credentials in the Location URL.
+                    socket.handshakeStatus >= 300 &&
                     socket.handshakeStatus < 500 &&
                     socket.handshakeStatus !== 429,
                 ),
