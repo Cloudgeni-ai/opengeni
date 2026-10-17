@@ -155,7 +155,7 @@ Organization Azure: `withOrganizationAzureOpenAICatalogProvider` /
 `withOrganizationAzureOpenAICredential` in `packages/config/src/index.ts`,
 `packages/db/src/organization-model-providers.ts` (endpoint, digest binding,
 `loadOrganizationModelProviderCredential`), migration
-`packages/db/drizzle/0832_organization_azure_openai_model_providers.sql`,
+`packages/db/drizzle/0836_organization_azure_openai_model_providers.sql`,
 `settingsWithOrganizationProviderCredentials` in
 `packages/core/src/model-provider-credentials.ts`,
 `apps/api/src/routes/organization-model-providers.ts`, and the organization

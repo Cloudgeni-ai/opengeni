@@ -82,7 +82,7 @@ describe("product analytics dimensions", () => {
     );
     // 0832 is the current definition of the model-provider families.
     const providers = readFileSync(
-      `${repoRoot}packages/db/drizzle/0832_organization_azure_openai_model_providers.sql`,
+      `${repoRoot}packages/db/drizzle/0836_organization_azure_openai_model_providers.sql`,
       "utf8",
     );
     for (const surface of SESSION_TURN_SURFACES) expect(sql).toContain(`'${surface}'`);
