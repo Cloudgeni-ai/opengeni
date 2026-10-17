@@ -1,3 +1,6 @@
+diff --git a/packages/runtime/node_modules/@openai/agents-extensions/.bun-tag-9a6b1f94568a6d97 b/.bun-tag-9a6b1f94568a6d97
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/sandbox/blaxel/sandbox.d.ts b/dist/sandbox/blaxel/sandbox.d.ts
 index e2dccf6b67a01d9c7f9f6d12d9716ed3a36241f8..a5027031e230f862c34a1a284e86ab34bb050e09 100644
 --- a/dist/sandbox/blaxel/sandbox.d.ts
@@ -15,7 +18,7 @@ index e2dccf6b67a01d9c7f9f6d12d9716ed3a36241f8..a5027031e230f862c34a1a284e86ab34
  }
  export {};
 diff --git a/dist/sandbox/blaxel/sandbox.js b/dist/sandbox/blaxel/sandbox.js
-index 99cd2cf7ced30b5cab0bdcb82eb3225a08a191e1..14b5e20d7d50cb67470cdea4502faeec47f76be9 100644
+index 99cd2cf7ced30b5cab0bdcb82eb3225a08a191e1..f51e67a26ca2268970d75d6e3ebd25a5158c008f 100644
 --- a/dist/sandbox/blaxel/sandbox.js
 +++ b/dist/sandbox/blaxel/sandbox.js
 @@ -643,7 +643,7 @@ class BlaxelSandboxClient {
@@ -60,7 +63,7 @@ index 99cd2cf7ced30b5cab0bdcb82eb3225a08a191e1..14b5e20d7d50cb67470cdea4502faeec
          const manifest = state.manifest;
          const session = await this.create((0, shared_1.manifestWithMaterializedEnvironmentReferences)(manifest, state.environment), {
 diff --git a/dist/sandbox/blaxel/sandbox.mjs b/dist/sandbox/blaxel/sandbox.mjs
-index f891a40cfd99ac073f022335e120aaf7b3a730a3..25fc0f872e84453e7c64bcb14b9d5fbbc6ef26f6 100644
+index f891a40cfd99ac073f022335e120aaf7b3a730a3..be4b7fc0e10f38d52e052e7e18329ed504051cbd 100644
 --- a/dist/sandbox/blaxel/sandbox.mjs
 +++ b/dist/sandbox/blaxel/sandbox.mjs
 @@ -606,7 +606,7 @@ export class BlaxelSandboxClient {
@@ -121,7 +124,7 @@ index 8374847c4a8064b1f17ae45771732c5f13cceb5d..393a532dc98e80c91c621fb3e3206f39
  }
  export {};
 diff --git a/dist/sandbox/daytona/sandbox.js b/dist/sandbox/daytona/sandbox.js
-index 68517e721ad21e35205abd513803f4ae71b7c251..787fc1371cfc427a17f868bb72254f7030a2c03b 100644
+index 68517e721ad21e35205abd513803f4ae71b7c251..b741fa06e674d185fe4c085cba1a093df2c2616d 100644
 --- a/dist/sandbox/daytona/sandbox.js
 +++ b/dist/sandbox/daytona/sandbox.js
 @@ -751,7 +751,7 @@ class DaytonaSandboxClient {
@@ -154,7 +157,7 @@ index 68517e721ad21e35205abd513803f4ae71b7c251..787fc1371cfc427a17f868bb72254f70
          const sandbox = await (0, shared_1.withProviderError)('DaytonaSandboxClient', 'daytona', 'create sandbox', async () => await client.create({
              ...(state.sandboxSnapshotName
 diff --git a/dist/sandbox/daytona/sandbox.mjs b/dist/sandbox/daytona/sandbox.mjs
-index cd691f2246a96425f6cdf03894aeff7bc73c0cee..805200a1ae980e09395c437d7fd662a2b0bcecfe 100644
+index cd691f2246a96425f6cdf03894aeff7bc73c0cee..507d055c5c416314e46f9757b1c485be5bfeb1c9 100644
 --- a/dist/sandbox/daytona/sandbox.mjs
 +++ b/dist/sandbox/daytona/sandbox.mjs
 @@ -714,7 +714,7 @@ export class DaytonaSandboxClient {
@@ -187,10 +190,49 @@ index cd691f2246a96425f6cdf03894aeff7bc73c0cee..805200a1ae980e09395c437d7fd662a2
          const sandbox = await withProviderError('DaytonaSandboxClient', 'daytona', 'create sandbox', async () => await client.create({
              ...(state.sandboxSnapshotName
 diff --git a/dist/sandbox/e2b/sandbox.d.ts b/dist/sandbox/e2b/sandbox.d.ts
-index 8d02fff468300317388d5f4dc2b9d9bdafd72abe..b85cd52bf840ec3e4f64672ae491363953ae44f2 100644
+index 8d02fff468300317388d5f4dc2b9d9bdafd72abe..f7eb5c982b6585b4e5a7c70b42d50d21fc404e47 100644
 --- a/dist/sandbox/e2b/sandbox.d.ts
 +++ b/dist/sandbox/e2b/sandbox.d.ts
-@@ -166,6 +166,9 @@ export declare class E2BSandboxClient implements SandboxClient<E2BSandboxClientO
+@@ -66,6 +66,16 @@ type E2BPtyApi = {
+ export type E2BSandboxType = 'e2b' | 'e2b_code_interpreter';
+ export type E2BWorkspacePersistence = true | 'tar' | 'snapshot';
+ export type E2BTimeoutAction = 'pause' | 'kill';
++/**
++ * Where and as whom the SDK connects. Unset fields fall back to the SDK's
++ * own `E2B_*` environment variables. Never part of serialized session state.
++ */
++export interface E2BConnectionOptions {
++    apiKey?: string;
++    domain?: string;
++    apiUrl?: string;
++    sandboxUrl?: string;
++}
+ export interface E2BSandboxClientOptions extends SandboxClientOptions {
+     sandboxType?: E2BSandboxType;
+     template?: string;
+@@ -85,6 +95,7 @@ export interface E2BSandboxClientOptions extends SandboxClientOptions {
+     mcp?: Record<string, unknown>;
+     pauseOnExit?: boolean;
+     env?: Record<string, string>;
++    connection?: E2BConnectionOptions;
+ }
+ export interface E2BSandboxSessionState extends SandboxSessionState {
+     sandboxId: string;
+@@ -111,11 +122,13 @@ export declare class E2BSandboxSession extends RemoteSandboxSessionBase<E2BSandb
+     private sandbox;
+     private readonly ptyProcesses;
+     private readonly activeMountPaths;
++    private readonly connection;
+     constructor(args: {
+         state: E2BSandboxSessionState;
+         sandbox: E2BSandboxInstance;
+         concurrencyLimits?: SandboxConcurrencyLimits;
+         archiveLimits?: SandboxArchiveLimits | null;
++        connection?: E2BConnectionOptions;
+     });
+     supportsPty(): boolean;
+     writeStdin(args: WriteStdinArgs): Promise<string>;
+@@ -166,6 +179,9 @@ export declare class E2BSandboxClient implements SandboxClient<E2BSandboxClientO
      serializeSessionState(state: E2BSandboxSessionState): Promise<Record<string, unknown>>;
      canPersistOwnedSessionState(state: E2BSandboxSessionState): boolean;
      deserializeSessionState(state: Record<string, unknown>): Promise<E2BSandboxSessionState>;
@@ -202,19 +244,69 @@ index 8d02fff468300317388d5f4dc2b9d9bdafd72abe..b85cd52bf840ec3e4f64672ae4913639
  }
  export {};
 diff --git a/dist/sandbox/e2b/sandbox.js b/dist/sandbox/e2b/sandbox.js
-index a383d0a56ab09709dfdf20984a483940a34060b7..276133da390e35799827c385fbad257a3dbf5e82 100644
+index a383d0a56ab09709dfdf20984a483940a34060b7..cd5964aaa95eac5d94033d945025e60b7a9001b5 100644
 --- a/dist/sandbox/e2b/sandbox.js
 +++ b/dist/sandbox/e2b/sandbox.js
-@@ -616,7 +616,7 @@ class E2BSandboxClient {
+@@ -43,6 +43,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+     sandbox;
+     ptyProcesses = new shared_1.PtyProcessRegistry();
+     activeMountPaths = new Set();
++    connection;
+     constructor(args) {
+         super({
+             state: args.state,
+@@ -54,6 +55,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+             },
+         });
+         this.sandbox = args.sandbox;
++        this.connection = args.connection;
+         this.state.pauseOnExitSupported = canPauseE2BSandbox(args.sandbox);
+     }
+     supportsPty() {
+@@ -251,7 +253,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+         return this.state.manifest.ephemeralPersistencePaths().size > 0;
+     }
+     async replaceSandboxFromSnapshot(snapshotId) {
+-        const Sandbox = await loadE2BSandboxClass(this.state.sandboxType);
++        const Sandbox = await loadE2BSandboxClass(this.state.sandboxType, this.connection);
+         const previousSandbox = this.sandbox;
+         let sandbox;
+         try {
+@@ -542,11 +544,12 @@ class E2BSandboxClient {
+             };
+             validateOptions(resolvedOptions);
+             (0, shared_1.assertSandboxManifestMetadataSupported)('E2BSandboxClient', manifest, shared_1.SANDBOX_MANIFEST_METADATA_SUPPORT);
+-            const Sandbox = await loadE2BSandboxClass(resolvedOptions.sandboxType ?? 'e2b');
++            const Sandbox = await loadE2BSandboxClass(resolvedOptions.sandboxType ?? 'e2b', resolvedOptions.connection);
+             const environment = await (0, shared_1.materializeEnvironment)(manifest, resolvedOptions.env);
+             const sandbox = await createSandboxInstance(Sandbox, resolvedOptions, environment);
+             const session = new E2BSandboxSession({
+                 sandbox,
++                connection: resolvedOptions.connection,
+                 concurrencyLimits: createArgs.concurrencyLimits,
+                 archiveLimits: createArgs.archiveLimits,
+                 state: {
+@@ -616,9 +619,9 @@ class E2BSandboxClient {
              pauseOnExitSupported: (0, shared_1.readOptionalBoolean)(state, 'pauseOnExitSupported') ?? false,
          };
      }
 -    async resume(state) {
 +    async resume(state, options = {}) {
          (0, shared_1.assertRemoteSandboxSessionStateCanResume)(state);
-         const Sandbox = await loadE2BSandboxClass(state.sandboxType);
+-        const Sandbox = await loadE2BSandboxClass(state.sandboxType);
++        const Sandbox = await loadE2BSandboxClass(state.sandboxType, this.options.connection);
          const connect = Sandbox.connect ?? Sandbox.resume;
-@@ -635,9 +635,15 @@ class E2BSandboxClient {
+         if (connect) {
+             try {
+@@ -626,6 +629,7 @@ class E2BSandboxClient {
+                 return new E2BSandboxSession({
+                     state,
+                     sandbox,
++                    connection: this.options.connection,
+                     archiveLimits: this.options.archiveLimits,
+                 });
+             }
+@@ -635,9 +639,15 @@ class E2BSandboxClient {
                      provider: 'e2b',
                      details: { sandboxId: state.sandboxId },
                  });
@@ -230,7 +322,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..276133da390e35799827c385fbad257a
          const manifest = state.manifest;
          const session = await this.create((0, shared_1.manifestWithMaterializedEnvironmentReferences)(manifest, state.environment), {
              ...stateToCreateOptions(state),
-@@ -646,6 +652,9 @@ class E2BSandboxClient {
+@@ -646,6 +656,9 @@ class E2BSandboxClient {
          session.state.manifest = manifest;
          return session;
      }
@@ -240,20 +332,129 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..276133da390e35799827c385fbad257a
  }
  exports.E2BSandboxClient = E2BSandboxClient;
  function validateOptions(options) {
+@@ -714,7 +727,7 @@ function e2bReconnectOptions(state) {
+ function canPauseE2BSandbox(sandbox) {
+     return typeof sandbox.pause === 'function';
+ }
+-async function loadE2BSandboxClass(sandboxType) {
++async function loadE2BSandboxClass(sandboxType, connection) {
+     const moduleName = sandboxType === 'e2b_code_interpreter' ? '@e2b/code-interpreter' : 'e2b';
+     try {
+         const Sandbox = sandboxType === 'e2b_code_interpreter'
+@@ -723,25 +736,44 @@ async function loadE2BSandboxClass(sandboxType) {
+         if (!Sandbox) {
+             throw new Error(`Missing Sandbox export from ${moduleName}.`);
+         }
+-        return adaptE2BSandboxClass(Sandbox);
++        return adaptE2BSandboxClass(Sandbox, connection);
+     }
+     catch (error) {
+         throw new agents_core_1.UserError(`E2B sandbox support requires the optional \`${moduleName}\` package. Install it before using E2B-backed sandbox examples. ${error.message}`);
+     }
+ }
+-function adaptE2BSandboxClass(Sandbox) {
++function adaptE2BSandboxClass(Sandbox, connection) {
+     const sdkSandbox = Sandbox;
++    // The connection (API key, domain, API and sandbox addresses) comes only
++    // from the client's options, never from serialized session state. The SDK
++    // copies it into each instance, so later instance calls reuse it.
++    const bound = definedE2BConnectionOptions(connection);
++    const withConnection = (opts) => (bound ? { ...bound, ...opts } : opts);
+     const adapted = {
+-        create: Sandbox.create.bind(Sandbox),
++        create: (templateOrOpts, opts) => typeof templateOrOpts === 'string'
++            ? Sandbox.create(templateOrOpts, withConnection(opts))
++            : Sandbox.create(withConnection(templateOrOpts)),
+     };
+     if (typeof sdkSandbox.connect === 'function') {
+-        adapted.connect = sdkSandbox.connect.bind(Sandbox);
++        adapted.connect = (sandboxId, opts) => sdkSandbox.connect.call(Sandbox, sandboxId, withConnection(opts));
+     }
+     if (typeof sdkSandbox.resume === 'function') {
+-        adapted.resume = sdkSandbox.resume.bind(Sandbox);
++        adapted.resume = (sandboxId, opts) => sdkSandbox.resume.call(Sandbox, sandboxId, withConnection(opts));
+     }
+     return adapted;
+ }
++function definedE2BConnectionOptions(connection) {
++    if (!connection) {
++        return undefined;
++    }
++    const bound = {};
++    for (const key of ['apiKey', 'domain', 'apiUrl', 'sandboxUrl']) {
++        if (connection[key] !== undefined) {
++            bound[key] = connection[key];
++        }
++    }
++    return Object.keys(bound).length > 0 ? bound : undefined;
++}
+ async function createSandboxInstance(Sandbox, options, environment) {
+     const createOptions = {};
+     if (typeof options.timeout === 'number') {
 diff --git a/dist/sandbox/e2b/sandbox.mjs b/dist/sandbox/e2b/sandbox.mjs
-index 6453de1e106fddcfe030beabf0056122dbe18566..ed17d24f7090696b15fadc826d719d80fda57a64 100644
+index 6453de1e106fddcfe030beabf0056122dbe18566..433dd5fc004c66cdaba7338978ebea7050c78ab6 100644
 --- a/dist/sandbox/e2b/sandbox.mjs
 +++ b/dist/sandbox/e2b/sandbox.mjs
-@@ -579,7 +579,7 @@ export class E2BSandboxClient {
+@@ -7,6 +7,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+     sandbox;
+     ptyProcesses = new PtyProcessRegistry();
+     activeMountPaths = new Set();
++    connection;
+     constructor(args) {
+         super({
+             state: args.state,
+@@ -18,6 +19,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+             },
+         });
+         this.sandbox = args.sandbox;
++        this.connection = args.connection;
+         this.state.pauseOnExitSupported = canPauseE2BSandbox(args.sandbox);
+     }
+     supportsPty() {
+@@ -215,7 +217,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+         return this.state.manifest.ephemeralPersistencePaths().size > 0;
+     }
+     async replaceSandboxFromSnapshot(snapshotId) {
+-        const Sandbox = await loadE2BSandboxClass(this.state.sandboxType);
++        const Sandbox = await loadE2BSandboxClass(this.state.sandboxType, this.connection);
+         const previousSandbox = this.sandbox;
+         let sandbox;
+         try {
+@@ -505,11 +507,12 @@ export class E2BSandboxClient {
+             };
+             validateOptions(resolvedOptions);
+             assertSandboxManifestMetadataSupported('E2BSandboxClient', manifest, SANDBOX_MANIFEST_METADATA_SUPPORT);
+-            const Sandbox = await loadE2BSandboxClass(resolvedOptions.sandboxType ?? 'e2b');
++            const Sandbox = await loadE2BSandboxClass(resolvedOptions.sandboxType ?? 'e2b', resolvedOptions.connection);
+             const environment = await materializeEnvironment(manifest, resolvedOptions.env);
+             const sandbox = await createSandboxInstance(Sandbox, resolvedOptions, environment);
+             const session = new E2BSandboxSession({
+                 sandbox,
++                connection: resolvedOptions.connection,
+                 concurrencyLimits: createArgs.concurrencyLimits,
+                 archiveLimits: createArgs.archiveLimits,
+                 state: {
+@@ -579,9 +582,9 @@ export class E2BSandboxClient {
              pauseOnExitSupported: readOptionalBoolean(state, 'pauseOnExitSupported') ?? false,
          };
      }
 -    async resume(state) {
 +    async resume(state, options = {}) {
          assertRemoteSandboxSessionStateCanResume(state);
-         const Sandbox = await loadE2BSandboxClass(state.sandboxType);
+-        const Sandbox = await loadE2BSandboxClass(state.sandboxType);
++        const Sandbox = await loadE2BSandboxClass(state.sandboxType, this.options.connection);
          const connect = Sandbox.connect ?? Sandbox.resume;
-@@ -598,9 +598,15 @@ export class E2BSandboxClient {
+         if (connect) {
+             try {
+@@ -589,6 +592,7 @@ export class E2BSandboxClient {
+                 return new E2BSandboxSession({
+                     state,
+                     sandbox,
++                    connection: this.options.connection,
+                     archiveLimits: this.options.archiveLimits,
+                 });
+             }
+@@ -598,9 +602,15 @@ export class E2BSandboxClient {
                      provider: 'e2b',
                      details: { sandboxId: state.sandboxId },
                  });
@@ -269,7 +470,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..ed17d24f7090696b15fadc826d719d80
          const manifest = state.manifest;
          const session = await this.create(manifestWithMaterializedEnvironmentReferences(manifest, state.environment), {
              ...stateToCreateOptions(state),
-@@ -609,6 +615,9 @@ export class E2BSandboxClient {
+@@ -609,6 +619,9 @@ export class E2BSandboxClient {
          session.state.manifest = manifest;
          return session;
      }
@@ -279,6 +480,65 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..ed17d24f7090696b15fadc826d719d80
  }
  function validateOptions(options) {
      readE2BWorkspacePersistence(options.workspacePersistence);
+@@ -676,7 +689,7 @@ function e2bReconnectOptions(state) {
+ function canPauseE2BSandbox(sandbox) {
+     return typeof sandbox.pause === 'function';
+ }
+-async function loadE2BSandboxClass(sandboxType) {
++async function loadE2BSandboxClass(sandboxType, connection) {
+     const moduleName = sandboxType === 'e2b_code_interpreter' ? '@e2b/code-interpreter' : 'e2b';
+     try {
+         const Sandbox = sandboxType === 'e2b_code_interpreter'
+@@ -685,25 +698,44 @@ async function loadE2BSandboxClass(sandboxType) {
+         if (!Sandbox) {
+             throw new Error(`Missing Sandbox export from ${moduleName}.`);
+         }
+-        return adaptE2BSandboxClass(Sandbox);
++        return adaptE2BSandboxClass(Sandbox, connection);
+     }
+     catch (error) {
+         throw new UserError(`E2B sandbox support requires the optional \`${moduleName}\` package. Install it before using E2B-backed sandbox examples. ${error.message}`);
+     }
+ }
+-function adaptE2BSandboxClass(Sandbox) {
++function adaptE2BSandboxClass(Sandbox, connection) {
+     const sdkSandbox = Sandbox;
++    // The connection (API key, domain, API and sandbox addresses) comes only
++    // from the client's options, never from serialized session state. The SDK
++    // copies it into each instance, so later instance calls reuse it.
++    const bound = definedE2BConnectionOptions(connection);
++    const withConnection = (opts) => (bound ? { ...bound, ...opts } : opts);
+     const adapted = {
+-        create: Sandbox.create.bind(Sandbox),
++        create: (templateOrOpts, opts) => typeof templateOrOpts === 'string'
++            ? Sandbox.create(templateOrOpts, withConnection(opts))
++            : Sandbox.create(withConnection(templateOrOpts)),
+     };
+     if (typeof sdkSandbox.connect === 'function') {
+-        adapted.connect = sdkSandbox.connect.bind(Sandbox);
++        adapted.connect = (sandboxId, opts) => sdkSandbox.connect.call(Sandbox, sandboxId, withConnection(opts));
+     }
+     if (typeof sdkSandbox.resume === 'function') {
+-        adapted.resume = sdkSandbox.resume.bind(Sandbox);
++        adapted.resume = (sandboxId, opts) => sdkSandbox.resume.call(Sandbox, sandboxId, withConnection(opts));
+     }
+     return adapted;
+ }
++function definedE2BConnectionOptions(connection) {
++    if (!connection) {
++        return undefined;
++    }
++    const bound = {};
++    for (const key of ['apiKey', 'domain', 'apiUrl', 'sandboxUrl']) {
++        if (connection[key] !== undefined) {
++            bound[key] = connection[key];
++        }
++    }
++    return Object.keys(bound).length > 0 ? bound : undefined;
++}
+ async function createSandboxInstance(Sandbox, options, environment) {
+     const createOptions = {};
+     if (typeof options.timeout === 'number') {
 diff --git a/dist/sandbox/modal/sandbox.d.ts b/dist/sandbox/modal/sandbox.d.ts
 index 0d118abe05044cca502e167daaee6eb10b46793b..d36d1c9a82d3b38f5bd0cfdd6865aec68e27b00c 100644
 --- a/dist/sandbox/modal/sandbox.d.ts
@@ -302,7 +562,7 @@ index 0d118abe05044cca502e167daaee6eb10b46793b..d36d1c9a82d3b38f5bd0cfdd6865aec6
      configuredExposedPorts?: number[];
      modalEnvironment?: string;
 diff --git a/dist/sandbox/modal/sandbox.js b/dist/sandbox/modal/sandbox.js
-index ca96b80..f3cfd04 100644
+index ca96b807fe5661ee9e60fbddf145fa1150a19cd0..f3cfd04b14e9600a387ac9e054bed129b6ad7d27 100644
 --- a/dist/sandbox/modal/sandbox.js
 +++ b/dist/sandbox/modal/sandbox.js
 @@ -525,6 +525,10 @@ class ModalSandboxSession {
@@ -450,7 +710,7 @@ index ca96b80..f3cfd04 100644
  }
  function modalErrorMessage(error) {
 diff --git a/dist/sandbox/modal/sandbox.mjs b/dist/sandbox/modal/sandbox.mjs
-index da2ef8d..9ad2436 100644
+index da2ef8d7ae856e81b0903a0d09f0c45a7e0b44b7..9ad24369c4707b989c4cd3dcf2e17ce919087cce 100644
 --- a/dist/sandbox/modal/sandbox.mjs
 +++ b/dist/sandbox/modal/sandbox.mjs
 @@ -487,6 +487,10 @@ export class ModalSandboxSession {
@@ -613,7 +873,7 @@ index 99e9131d49c18987c997adf493795a648cd8f261..7484dd5d704ca3b22b095eaffdf43b28
  }
  export {};
 diff --git a/dist/sandbox/runloop/sandbox.js b/dist/sandbox/runloop/sandbox.js
-index a2d4b2f7d9f6286f2c14a1758a53bc51048f418b..4ec21a7c7f6ea998dca5f399582577750feb4aef 100644
+index a2d4b2f7d9f6286f2c14a1758a53bc51048f418b..f0b7e5fa9df430e3d2dcbfcfef8d7cc2b9ccbd9a 100644
 --- a/dist/sandbox/runloop/sandbox.js
 +++ b/dist/sandbox/runloop/sandbox.js
 @@ -844,7 +844,7 @@ class RunloopSandboxClient {
@@ -646,7 +906,7 @@ index a2d4b2f7d9f6286f2c14a1758a53bc51048f418b..4ec21a7c7f6ea998dca5f39958257775
  exports.RunloopSandboxClient = RunloopSandboxClient;
  async function createRunloopClient(options) {
 diff --git a/dist/sandbox/runloop/sandbox.mjs b/dist/sandbox/runloop/sandbox.mjs
-index 41969fcc87d854f799f4819442f863ad4b8c4f5a..e067e448504e7d9bb842942d977082f928d29688 100644
+index 41969fcc87d854f799f4819442f863ad4b8c4f5a..1c2c71b95464ce56d09276556b370dfea452a5bf 100644
 --- a/dist/sandbox/runloop/sandbox.mjs
 +++ b/dist/sandbox/runloop/sandbox.mjs
 @@ -801,7 +801,7 @@ export class RunloopSandboxClient {
@@ -747,10 +1007,10 @@ index d462054fd897417c24134de99993db8d31985a00..70f0842ee767254eef6a85314e13f707
      finally {
          await args.io
 diff --git a/dist/sandbox/shared/session.js b/dist/sandbox/shared/session.js
-index d6698518838dcab5f7a4b8843e1da5f6eacbf654..dc9d760fa417f85bb70f6af330a675c6850fd731 100644
+index d6698518838dcab5f7a4b8843e1da5f6eacbf654..0559bc87fe27f7d6c9176df436c393a16d6064f1 100644
 --- a/dist/sandbox/shared/session.js
 +++ b/dist/sandbox/shared/session.js
-@@ -20,7 +20,7 @@ async function closeRemoteSessionOnManifestError(providerName, session, manifestError) {
+@@ -20,7 +20,7 @@ async function closeRemoteSessionOnManifestError(providerName, session, manifest
          await session.close();
      }
      catch (closeError) {
@@ -777,10 +1037,10 @@ index d6698518838dcab5f7a4b8843e1da5f6eacbf654..dc9d760fa417f85bb70f6af330a675c6
  }
  function isProviderSandboxNotFoundError(error) {
 diff --git a/dist/sandbox/shared/session.mjs b/dist/sandbox/shared/session.mjs
-index b3cf905259abeca724c282ebd16b725a7b10e0f9..fe0faaba628d168f6e56f6840f21d35310d9af32 100644
+index b3cf905259abeca724c282ebd16b725a7b10e0f9..d18117aeda2ec37986b6b08d3e9932593a2e0d59 100644
 --- a/dist/sandbox/shared/session.mjs
 +++ b/dist/sandbox/shared/session.mjs
-@@ -7,7 +7,7 @@ export async function closeRemoteSessionOnManifestError(providerName, session, manifestError) {
+@@ -7,7 +7,7 @@ export async function closeRemoteSessionOnManifestError(providerName, session, m
          await session.close();
      }
      catch (closeError) {
