@@ -178,8 +178,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         });
                     let config =
                         SandboxConfig::new(1, mib, crate::protocol::SleepConfig::default());
+                    // Only a sandbox whose disk is in the store has no VM
+                    // that may hold its local disk open.
+                    let remote = loose
+                        .as_ref()
+                        .and_then(|record| record.get("disk")?.as_str())
+                        == Some("remote");
                     let disk = Paths::new(&self.root, stray.id).disk;
-                    let size = self.retained_size_of(&config, None, disk).await;
+                    let size = self.retained_size_of(&config, None, disk, !remote).await;
                     self.unmanaged(stray.id, size);
                 }
             }
@@ -260,26 +266,36 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// [`Self::retained_size_of`] for the sandbox `record` describes.
     async fn retained_size(&self, record: &Record) -> Size {
         let disk = Paths::of(&self.root, record).disk;
-        self.retained_size_of(&record.config, record.allocation.disk_bytes, disk)
-            .await
+        // A sandbox is recorded as remote only once its VM has ended.
+        let may_be_open = record.disk == Disk::Local;
+        self.retained_size_of(
+            &record.config,
+            record.allocation.disk_bytes,
+            disk,
+            may_be_open,
+        )
+        .await
     }
 
     /// [`Self::size`] for a sandbox of `config` whose VM this agent leaves
     /// running unmanaged, with the disk at `disk` it may still write booked
     /// by that disk's own length, or the length its record keeps if longer:
     /// never by today's base image, which may be shorter. A length that
-    /// cannot be read books more than any host holds, so nothing else is
-    /// admitted to the disk meanwhile.
+    /// cannot be read, or a missing disk a VM `may_be_open` on, books more
+    /// than any host holds, so nothing else is admitted to the disk
+    /// meanwhile; see [`crate::disk_growth::retained_disk_len`].
     async fn retained_size_of(
         &self,
         config: &SandboxConfig,
         recorded: Option<u64>,
         disk: std::path::PathBuf,
+        may_be_open: bool,
     ) -> Size {
-        let length =
-            tokio::task::spawn_blocking(move || crate::disk_growth::retained_disk_len(&disk))
-                .await
-                .unwrap_or(crate::disk_growth::UNKNOWN_DISK);
+        let length = tokio::task::spawn_blocking(move || {
+            crate::disk_growth::retained_disk_len(&disk, may_be_open)
+        })
+        .await
+        .unwrap_or(crate::disk_growth::UNKNOWN_DISK);
         self.size(config, Some(length.max(recorded.unwrap_or(0))))
     }
 

@@ -33,12 +33,14 @@ pub(crate) fn disk_bound(length: u64, unit: u64) -> u64 {
 pub(crate) const UNKNOWN_DISK: u64 = u64::MAX / 4;
 
 /// The length of the disk file at `path` that a VM this agent does not
-/// manage may still write to: 0 when there is none, which nothing then
-/// grows, and [`UNKNOWN_DISK`] when it cannot be read.
-pub(crate) fn retained_disk_len(path: &Path) -> u64 {
+/// manage may still write to, and [`UNKNOWN_DISK`] when it cannot be read.
+/// A missing file is 0 only when `may_be_open` is false, since no VM can
+/// have it open; otherwise a VM may still write to it through a descriptor
+/// it held when the file was unlinked, so its length is unknown.
+pub(crate) fn retained_disk_len(path: &Path, may_be_open: bool) -> u64 {
     match std::fs::metadata(path) {
         Ok(metadata) => metadata.len(),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !may_be_open => 0,
         Err(_) => UNKNOWN_DISK,
     }
 }

@@ -199,7 +199,10 @@ pick a VM.
     Each such disk is booked by the length of its own file, or the length
     its record keeps if that is longer, never by today's base image; one
     whose length cannot be read books more than any disk holds, so nothing
-    else is admitted to the disk until it has ended.
+    else is admitted to the disk until it has ended. A missing disk file
+    counts as unreadable, since its VM may still write to it through a
+    descriptor it held when the file was unlinked, unless the record says
+    the disk is in the store, which it does only once its VM has ended.
   - A new sandbox's first files (its copy of its template's disk or the
     base image, by data ranges, whichever is larger since a stale template
     falls back to the base image) are booked before the copy starts, and a

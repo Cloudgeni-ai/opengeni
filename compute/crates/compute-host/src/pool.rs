@@ -1178,9 +1178,10 @@ pub(crate) async fn end_leftover_builds<E: Engine>(
             tracing::error!(%error, %name, ?ordinal, "a template VM left behind may still run; its user stays taken");
             let memory_mib = memory_mib.unwrap_or(MAX_MEMORY_MIB);
             let disk = paths.disk.clone();
-            let disk_bytes = blocking(move || Ok(crate::disk_growth::retained_disk_len(&disk)))
-                .await
-                .unwrap_or(crate::disk_growth::UNKNOWN_DISK);
+            let disk_bytes =
+                blocking(move || Ok(crate::disk_growth::retained_disk_len(&disk, true)))
+                    .await
+                    .unwrap_or(crate::disk_growth::UNKNOWN_DISK);
             held.push(Held {
                 name,
                 ordinal,
