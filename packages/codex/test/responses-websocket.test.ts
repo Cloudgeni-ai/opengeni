@@ -268,6 +268,8 @@ test("a streamed request body, as the model client sends it, goes over the socke
         return socket;
       },
       connectTimeoutMs: 1_000,
+      // A fixed clock, as in harness(): the new connection's handshake reports 0 ms.
+      now: () => 1_000,
     },
   );
   const body = { model: "m", input: [{ role: "user", content: "hi" }], stream: true };
