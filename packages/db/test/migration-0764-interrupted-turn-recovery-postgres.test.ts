@@ -48,12 +48,18 @@ beforeAll(async () => {
   try {
     await owner`create table schema_migrations(name text primary key, applied_at timestamptz not null default now())`;
     for (const name of await readdir(join(import.meta.dir, "../drizzle"))) {
-      if (name.endsWith(".sql") && name >= MIGRATION && name !== "0832_session_activity_xid.sql")
+      if (
+        name.endsWith(".sql") &&
+        name >= MIGRATION &&
+        name !== "0832_session_activity_xid.sql" &&
+        name !== "0809_session_open_settlement_index.sql"
+      )
         await owner`insert into schema_migrations(name) values (${name})`;
     }
     await migrate(shared.ownerUrl);
     // The repair schema stops before 0764 (0793 stays marked applied), except
-    // for the real additive xid writer migration needed by today's adapter.
+    // for the real additive xid writer and interruption-index migrations needed
+    // by today's adapter and cancellation reader.
     // That adapter also names the 0793 Site audience columns.
     await stageSiteSessionAudienceColumns(shared.ownerUrl);
     // Current event readers also project 0810's nullable usage source key.

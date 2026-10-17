@@ -290,4 +290,13 @@ export const embeddingMigrationTail = [
   "0809_session_open_settlement_index.sql",
   "0811_session_events_usage_source_key_backfill.sql",
   "0821_session_history_owner_backfill_repair.sql",
+  // Rewrite the Knowledge/Skill actor and lifecycle routines from 0461.
+  "0813_preserve_accepted_learning_scope.sql",
+  "0819_explicit_workspace_learning_destination.sql",
+  "0824_explicit_learning_destination_symmetry.sql",
+  // The hourly rollup value function calls the payer classifier from 0604.
+  "0815_insights_usage_hourly.sql",
+  "0816_insights_usage_hourly_queue.sql",
+  "0817_insights_usage_hourly_backfill.sql",
+  "0818_insights_usage_hourly_reader.sql",
 ];
