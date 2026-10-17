@@ -3,15 +3,14 @@
 
 use std::fs;
 use std::io::{self, Write as _};
-use std::os::unix::fs::PermissionsExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use compute_guest::config::{self, ImageConfig};
 use compute_guest::users;
 
 use crate::registry::RunConfig;
-use crate::rootpath::{clean, resolve};
+use crate::rootpath::{self, clean, resolve, resolve_all};
 
 /// The files a build takes from the guest directory (`guest/build.sh`).
 pub const GUEST_INIT: &str = "compute-guest";
@@ -42,69 +41,96 @@ pub fn image_config(run: Option<&RunConfig>) -> ImageConfig {
     }
 }
 
-fn at(root: &Path, path: &str) -> io::Result<std::path::PathBuf> {
+/// `path` in the image, its last component not followed.
+fn at(root: &Path, path: &str) -> io::Result<PathBuf> {
     resolve(root, &clean(Path::new(path))?)
 }
 
-fn install(from: &Path, to: &Path, mode: u32) -> Result<()> {
-    if let Some(parent) = to.parent() {
-        fs::create_dir_all(parent)?;
+/// `path` in the image as the image itself would open it: every
+/// component followed, inside the root.
+fn opened(root: &Path, path: &str) -> io::Result<PathBuf> {
+    resolve_all(root, &clean(Path::new(path))?)
+}
+
+/// A directory the image has at `path` (following its symlinks inside
+/// the root), made if missing, with `mode`.
+fn directory(root: &Path, path: &str, mode: Option<u32>, owner: Option<(u32, u32)>) -> Result<()> {
+    let dir = opened(root, path)?;
+    fs::create_dir_all(&dir).with_context(|| format!("/{path}"))?;
+    if let Some(mode) = mode {
+        rootpath::set_dir(&dir, mode, None, owner).with_context(|| format!("/{path}"))?;
     }
-    let _ = fs::remove_file(to);
-    fs::copy(from, to).with_context(|| format!("copy {}", from.display()))?;
-    fs::set_permissions(to, fs::Permissions::from_mode(mode))?;
     Ok(())
 }
 
-/// Adds the guest's files from `guest` to the image at `root`, with
-/// `image` as its config.
-pub fn finish(root: &Path, guest: &Path, image: &ImageConfig) -> Result<Added> {
-    for dir in [
-        "proc", "sys", "dev", "run", "tmp", "etc", "home", "opengeni",
-    ] {
-        fs::create_dir_all(at(root, dir)?)?;
+/// Writes `contents` to a new file at `to` in the image, with `mode`,
+/// replacing whatever was there without following it.
+fn write(root: &Path, to: &str, contents: &mut dyn io::Read, mode: u32) -> Result<()> {
+    let path = at(root, to)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
-    fs::set_permissions(at(root, "tmp")?, fs::Permissions::from_mode(0o1777))?;
-    install(
-        &guest.join(GUEST_INIT),
-        &at(root, config::INIT_PATH)?,
-        0o755,
-    )?;
-    install(
-        &guest.join(GUEST_ENVD),
-        &at(root, config::ENVD_PATH)?,
-        0o755,
-    )?;
-    fs::write(
-        at(root, config::CONFIG_PATH)?,
-        serde_json::to_vec_pretty(image)?,
+    let mut file = rootpath::create(root, &path, mode).with_context(|| format!("/{to}"))?;
+    io::copy(contents, &mut file).with_context(|| format!("/{to}"))?;
+    Ok(())
+}
+
+fn install(root: &Path, from: &Path, to: &str, mode: u32) -> Result<()> {
+    let mut source = fs::File::open(from).with_context(|| format!("copy {}", from.display()))?;
+    write(root, to, &mut source, mode)
+}
+
+/// Adds the guest's files from `guest` to the image at `root`, with
+/// `image` as its config. Nothing it writes follows a symlink the image
+/// has, out of the root or within it.
+pub fn finish(root: &Path, guest: &Path, image: &ImageConfig) -> Result<Added> {
+    for dir in ["proc", "sys", "dev", "run", "etc", "home", "opengeni"] {
+        directory(root, dir, None, None)?;
+    }
+    directory(root, "tmp", Some(0o1777), None)?;
+    install(root, &guest.join(GUEST_INIT), config::INIT_PATH, 0o755)?;
+    install(root, &guest.join(GUEST_ENVD), config::ENVD_PATH, 0o755)?;
+    write(
+        root,
+        config::CONFIG_PATH,
+        &mut serde_json::to_vec_pretty(image)?.as_slice(),
+        0o644,
     )?;
     // The kernel starts /sbin/init; the image's own init, if any, never runs.
     let init = at(root, "sbin/init")?;
     if let Some(parent) = init.parent() {
         fs::create_dir_all(parent)?;
     }
-    if fs::symlink_metadata(&init).is_ok_and(|meta| meta.is_dir()) {
-        fs::remove_dir_all(&init)?;
-    } else {
-        let _ = fs::remove_file(&init);
-    }
+    rootpath::remove(root, &init)?;
     std::os::unix::fs::symlink(config::INIT_PATH, &init)?;
     let mut added = Added::default();
-    let bash = at(root, "bin/bash")?;
-    if fs::symlink_metadata(&bash).is_err() {
-        install(&guest.join(GUEST_BASH), &bash, 0o755)?;
+    if fs::symlink_metadata(at(root, "bin/bash")?).is_err() {
+        install(root, &guest.join(GUEST_BASH), "bin/bash", 0o755)?;
         added.bash = true;
     }
     added.user = add_user(root)?;
     Ok(added)
 }
 
+/// The text of the file the image has at `path`; empty when missing.
+fn read(path: &Path) -> Result<String> {
+    match rootpath::open(path, None) {
+        Ok(mut file) => {
+            let mut text = String::new();
+            io::Read::read_to_string(&mut file, &mut text)
+                .with_context(|| format!("reading {}", path.display()))?;
+            Ok(text)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
 /// Adds E2B's `user` (uid 1000, home `/home/user`) unless an account of
 /// that name exists. Returns whether it did.
 fn add_user(root: &Path) -> Result<bool> {
-    let passwd = at(root, "etc/passwd")?;
-    let text = fs::read_to_string(&passwd).unwrap_or_default();
+    let passwd = opened(root, "etc/passwd")?;
+    let text = read(&passwd)?;
     let accounts = users::parse_passwd(&text);
     if accounts
         .iter()
@@ -118,9 +144,9 @@ fn add_user(root: &Path) -> Result<bool> {
     }
     lines.push_str(USER_LINE);
     lines.push('\n');
-    append(&passwd, &text, &lines)?;
-    let group = at(root, "etc/group")?;
-    let text = fs::read_to_string(&group).unwrap_or_default();
+    append(root, &passwd, &text, &lines, 0o644)?;
+    let group = opened(root, "etc/group")?;
+    let text = read(&group)?;
     let groups = users::parse_group(&text);
     if !groups
         .iter()
@@ -132,43 +158,75 @@ fn add_user(root: &Path) -> Result<bool> {
         }
         lines.push_str(USER_GROUP_LINE);
         lines.push('\n');
-        append(&group, &text, &lines)?;
+        append(root, &group, &text, &lines, 0o644)?;
     }
-    let shadow = at(root, "etc/shadow")?;
-    if let Ok(text) = fs::read_to_string(&shadow) {
-        append(&shadow, &text, "user:!:1::::::\n")?;
+    let shadow = opened(root, "etc/shadow")?;
+    if fs::symlink_metadata(&shadow).is_ok() {
+        let text = read(&shadow)?;
+        append(root, &shadow, &text, "user:!:1::::::\n", 0o640)?;
     }
-    let home = at(root, "home/user")?;
-    fs::create_dir_all(&home)?;
-    fs::set_permissions(&home, fs::Permissions::from_mode(0o755))?;
-    if rustix::process::geteuid().is_root() {
-        rustix::fs::chown(
-            &home,
-            Some(rustix::fs::Uid::from_raw(1000)),
-            Some(rustix::fs::Gid::from_raw(1000)),
-        )?;
-    }
+    let owner = rustix::process::geteuid().is_root().then_some((1000, 1000));
+    directory(root, "home/user", Some(0o755), owner)?;
     Ok(true)
 }
 
-/// Appends `lines` to the file at `path`, whose text is `text`, on a line
-/// of their own.
-fn append(path: &Path, text: &str, lines: &str) -> io::Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+/// Appends `lines` to the file at `path` inside `root`, whose text is
+/// `text`, on a line of their own; creates it with `mode` if missing.
+fn append(root: &Path, path: &Path, text: &str, lines: &str, mode: u32) -> Result<()> {
+    rootpath::confined(root, path)?;
+    let mut file = rootpath::open(path, Some(mode))
+        .with_context(|| format!("appending to {}", path.display()))?;
     if !text.is_empty() && !text.ends_with('\n') {
         file.write_all(b"\n")?;
     }
-    file.write_all(lines.as_bytes())
+    file.write_all(lines.as_bytes())?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     use super::*;
+
+    #[test]
+    fn symlinks_in_the_image_never_lead_writes_out_of_it() {
+        let guest = guest();
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("root");
+        fs::create_dir_all(root.join("etc")).unwrap();
+        fs::create_dir_all(root.join("opengeni")).unwrap();
+        let victim = outer.path().join("victim");
+        fs::write(&victim, "keep").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+        let victim_dir = outer.path().join("victim-dir");
+        fs::create_dir(&victim_dir).unwrap();
+        fs::set_permissions(&victim_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(&victim, root.join("opengeni/image.json")).unwrap();
+        symlink(&victim, root.join("opengeni/envd")).unwrap();
+        symlink("../../victim", root.join("etc/passwd")).unwrap();
+        symlink("../../../victim", root.join("etc/group")).unwrap();
+        symlink(&victim, root.join("etc/shadow")).unwrap();
+        // Relative: an absolute target is taken inside the root, and on a
+        // host whose temporary directory is /tmp it would name itself.
+        symlink("../victim-dir", root.join("tmp")).unwrap();
+        symlink("../..", root.join("home")).unwrap();
+        finish(&root, guest.path(), &ImageConfig::default()).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&victim), 0o644);
+        assert_eq!(mode(&victim_dir), 0o755);
+        assert_eq!(fs::read_dir(&victim_dir).unwrap().count(), 0);
+        // The image's own files took the writes, inside the root.
+        assert!(!root.join("opengeni/image.json").is_symlink());
+        assert!(!root.join("opengeni/envd").is_symlink());
+        assert!(
+            fs::read_to_string(root.join("victim"))
+                .unwrap()
+                .contains(USER_LINE)
+        );
+        assert!(root.join("user").is_dir());
+    }
 
     fn guest() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

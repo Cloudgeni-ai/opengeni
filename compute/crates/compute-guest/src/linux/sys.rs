@@ -134,6 +134,31 @@ pub fn run_as(command: &mut std::process::Command, uid: u32, gid: u32, groups: V
     }
 }
 
+/// Makes `command`'s process start with no signal blocked. A child
+/// inherits its parent's mask, and this init blocks the signals it takes
+/// itself; a program that never unblocks them could not handle `SIGTERM`.
+pub fn unblock_signals(command: &mut std::process::Command) {
+    // SAFETY: the closure makes two async-signal-safe calls on a set it
+    // builds on its own stack.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(command, || {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&raw mut set);
+            check(libc::sigprocmask(
+                libc::SIG_SETMASK,
+                &raw const set,
+                std::ptr::null_mut(),
+            ))
+        });
+    }
+}
+
+/// Sends `signal` to the process `pid`.
+pub fn kill(pid: i32, signal: libc::c_int) -> io::Result<()> {
+    // SAFETY: no pointers.
+    check(unsafe { libc::kill(pid, signal) })
+}
+
 /// Sends `signal` to every process but this one (`kill(-1, …)`).
 pub fn signal_all(signal: libc::c_int) {
     // SAFETY: no pointers.
@@ -146,8 +171,8 @@ pub struct Signals(libc::sigset_t);
 
 impl Signals {
     /// Blocks `signals` in the calling thread and every thread it starts
-    /// later. Children start with an empty mask (the standard library
-    /// resets it).
+    /// later. Children would inherit the mask too: they start through
+    /// [`unblock_signals`].
     pub fn block(signals: &[libc::c_int]) -> io::Result<Self> {
         // SAFETY: sigset_t is plain data; sigemptyset initialises it.
         let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };

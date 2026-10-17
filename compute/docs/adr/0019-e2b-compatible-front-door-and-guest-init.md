@@ -79,8 +79,25 @@ an init system of its own.
   user, uid 1000, home `/home/user`) when there is none. The image's own
   `ENTRYPOINT` and `CMD` run as one supervised process, as `docker run`
   would, under the image's `USER`, named or numeric (a number with no
-  account entry runs as that number). Commands from the SDK run as the
-  user it names, `user` by default.
+  account entry runs as that number), with the image's environment and
+  then the sandbox's. Commands from the SDK run as the user it names,
+  `user` by default.
+- **When the image's command runs.** Never in a template: whatever it
+  made would be copied into every clone. It starts once a sandbox has its
+  own identity and has taken its create's init, so it sees its own
+  machine id, environment and random numbers. A restore from memory finds
+  it running; a boot from the sandbox's own disk starts it again, as a
+  container restart would. A sandbox that never gets an init (the native
+  API gives none) does not run it. Children start with no signal blocked,
+  so the command can handle the `SIGTERM` a shutdown sends; five seconds
+  later the rest are killed.
+- **The guest keeps the init for good before it answers.** It writes the
+  init to the sandbox's disk (synced, renamed, directory synced), then
+  gives it to envd, then answers `ok`. If envd fails, the kept init
+  stands and goes to envd with the retry or the next restore, so disk,
+  guest and envd never disagree for long. An init file that is there but
+  cannot be read holds envd back, rather than run it without the
+  sandbox's access token, until a new init replaces it.
 
 ## Consequences
 

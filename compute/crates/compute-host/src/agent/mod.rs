@@ -36,7 +36,7 @@ use crate::pool::{Built, Held, Lender, Loaning, Pool, PoolConfig, Shape, Sources
 
 use crate::protocol::{About, HostStatus, Id, ImageId, SandboxConfig, StepStats};
 use crate::rootfs::{Cache, Missing};
-use crate::state::{Record, Records, StateError, Stray, claim_host, unix_ms_now};
+use crate::state::{Ownership, Record, Records, StateError, Stray, claim_host, unix_ms_now};
 use crate::step::{After, Live, Report};
 use crate::store::{OwnerEpoch, Store};
 use compute_protocol::fleet::Verdict;
@@ -1016,13 +1016,13 @@ impl Activity for Toucher {
 
 /// The host's sandbox images. An image goes unused as long as a template
 /// may before it is removed.
-async fn open_rootfs(config: &HostConfig) -> Result<Arc<Cache>, HostError> {
+async fn open_rootfs(config: &HostConfig, owner: Ownership) -> Result<Arc<Cache>, HostError> {
     let dir = crate::layout::rootfs_dir(&config.root);
     let unused_after = config
         .pool
         .as_ref()
         .map_or(PoolConfig::UNUSED_AFTER, |pool| pool.unused_after);
-    let cache = tokio::task::spawn_blocking(move || Cache::open(dir, unused_after))
+    let cache = tokio::task::spawn_blocking(move || Cache::open(dir, unused_after, owner))
         .await
         .map_err(|error| HostError::Io(error.to_string()))?
         .map_err(|error| HostError::Io(format!("sandbox images: {error}")))?;
@@ -1073,7 +1073,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let reserve_whole = engine.memory_profile().pages == PageSize::Huge;
         let allocation_unit = allocation_unit(&config.root)?;
         let save_copies = save_copies(&config.root)?;
-        let rootfs = open_rootfs(&config).await?;
+        let rootfs = open_rootfs(&config, records.ownership()).await?;
         // Template VMs an earlier agent left are ended before any sandbox
         // can be given the user one of them ran as.
         let warm::Started {

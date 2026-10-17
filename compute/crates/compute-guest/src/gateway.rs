@@ -9,8 +9,10 @@
 //!   without waiting for the answer.
 //! - `init <json>`: the sandbox's own environment, access token, default
 //!   user and directory ([`crate::envd::InitData`]), as a create gives
-//!   them. The guest passes them to envd's `/init` and answers `ok` once
-//!   envd took them; from then on it sends them again after every restore.
+//!   them. The guest keeps them on its disk for good, passes them to
+//!   envd's `/init`, starts the image's command if it has not yet, and
+//!   only then answers `ok`; from then on it sends them again after every
+//!   restore.
 //!
 //! Any failure is answered `error <reason>` and the stream is closed.
 

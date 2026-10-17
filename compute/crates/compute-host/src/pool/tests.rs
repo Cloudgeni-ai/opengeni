@@ -147,7 +147,14 @@ fn inputs_follow_file_contents() {
     let sources = Sources {
         kernel: file("vmlinux", "kernel"),
         base_image: file("base.img", "base one"),
-        rootfs: Arc::new(Cache::open(dir.path().join("rootfs"), PoolConfig::UNUSED_AFTER).unwrap()),
+        rootfs: Arc::new(
+            Cache::open(
+                dir.path().join("rootfs"),
+                PoolConfig::UNUSED_AFTER,
+                crate::state::Ownership::detached(),
+            )
+            .unwrap(),
+        ),
         depends_on: Vec::new(),
         boot_args: String::new(),
         networked: false,

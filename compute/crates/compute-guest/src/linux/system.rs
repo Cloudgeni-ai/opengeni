@@ -2,7 +2,7 @@
 
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
 use super::{log, sys};
@@ -141,18 +141,10 @@ fn write_resolv_conf(text: &str) {
     }
 }
 
-/// Replaces `path` with `text` all at once, through a file beside it.
+/// Replaces `path` with `text` all at once, through a file beside it,
+/// for good once this returns.
 pub fn replace(path: &str, text: &str, mode: u32) -> io::Result<()> {
-    let staged = format!("{path}.new");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(mode)
-        .open(&staged)?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
-    fs::rename(&staged, path)
+    crate::given::write_durably(Path::new(path), text.as_bytes(), mode)
 }
 
 /// The guest booted for `sandbox`: it records the id, takes its host name

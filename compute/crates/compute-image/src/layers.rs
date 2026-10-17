@@ -18,7 +18,7 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use rustix::fs::{AtFlags, CWD, Timespec, Timestamps};
@@ -26,7 +26,7 @@ use sha2::{Digest as _, Sha256};
 use tar::{Archive, EntryType};
 
 use crate::registry::{Compression, Layer};
-use crate::rootpath::{clean, resolve};
+use crate::rootpath::{self, clean, resolve};
 
 const WHITEOUT: &str = ".wh.";
 const OPAQUE: &str = ".wh..wh..opq";
@@ -106,16 +106,30 @@ enum Deletion {
     Contents(Vec<OsString>),
 }
 
-fn deletion(parts: &[OsString]) -> Option<Deletion> {
-    let (name, parent) = parts.split_last()?;
+/// The deletion an entry at `parts` makes, if it is a whiteout.
+///
+/// # Errors
+///
+/// For a whiteout that names no entry: `.wh.`, `.wh..` or `.wh...`.
+fn deletion(parts: &[OsString]) -> Result<Option<Deletion>> {
+    let Some((name, parent)) = parts.split_last() else {
+        return Ok(None);
+    };
     let name = name.as_bytes();
     if name == OPAQUE.as_bytes() {
-        return Some(Deletion::Contents(parent.to_vec()));
+        return Ok(Some(Deletion::Contents(parent.to_vec())));
     }
-    let hidden = name.strip_prefix(WHITEOUT.as_bytes())?;
+    let Some(hidden) = name.strip_prefix(WHITEOUT.as_bytes()) else {
+        return Ok(None);
+    };
+    ensure!(
+        !hidden.is_empty() && hidden != b"." && hidden != b"..",
+        "{}: a whiteout that names no entry",
+        parts_display(parts)
+    );
     let mut path = parent.to_vec();
     path.push(OsStr::from_bytes(hidden).to_owned());
-    Some(Deletion::Path(path))
+    Ok(Some(Deletion::Path(path)))
 }
 
 fn apply(root: &Path, layer: &impl Source, privileged: bool, applied: &mut Applied) -> Result<()> {
@@ -129,7 +143,7 @@ fn apply(root: &Path, layer: &impl Source, privileged: bool, applied: &mut Appli
         let mut archive = Archive::new(&mut hashing);
         for entry in archive.entries()? {
             let entry = entry?;
-            if let Some(deletion) = deletion(&clean(&entry.path()?)?) {
+            if let Some(deletion) = deletion(&clean(&entry.path()?)?)? {
                 deletions.push(deletion);
             }
         }
@@ -154,7 +168,7 @@ fn apply(root: &Path, layer: &impl Source, privileged: bool, applied: &mut Appli
         if parts.is_empty() {
             continue;
         }
-        if deletion(&parts).is_some() {
+        if deletion(&parts)?.is_some() {
             // The marker's directory exists in this layer.
             fs::create_dir_all(resolve(root, &parts[..parts.len() - 1])?)?;
             continue;
@@ -164,10 +178,12 @@ fn apply(root: &Path, layer: &impl Source, privileged: bool, applied: &mut Appli
             dirs.push(dir);
         }
     }
-    // Directories last, deepest first: adding into them changed their times.
-    for (path, mode, mtime) in dirs.into_iter().rev() {
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
-        set_mtime(&path, mtime)?;
+    // Directories last, deepest first: adding into them changed their
+    // times. Each is found again from the root and changed only if it is
+    // still a directory: a later entry may have replaced it, with a
+    // symlink to anywhere, say.
+    for (parts, mode, mtime) in dirs.into_iter().rev() {
+        rootpath::set_dir(&resolve(root, &parts)?, mode, Some(mtime), None)?;
     }
     Ok(())
 }
@@ -175,7 +191,7 @@ fn apply(root: &Path, layer: &impl Source, privileged: bool, applied: &mut Appli
 /// Applies one deletion; returns how many top-level entries went.
 fn delete(root: &Path, deletion: &Deletion) -> Result<u64> {
     match deletion {
-        Deletion::Path(parts) => Ok(u64::from(remove(&resolve(root, parts)?)?)),
+        Deletion::Path(parts) => Ok(u64::from(rootpath::remove(root, &resolve(root, parts)?)?)),
         Deletion::Contents(parts) => {
             let dir = resolve(root, parts)?;
             let Ok(meta) = fs::symlink_metadata(&dir) else {
@@ -186,21 +202,10 @@ fn delete(root: &Path, deletion: &Deletion) -> Result<u64> {
             }
             let mut count = 0;
             for child in fs::read_dir(&dir)? {
-                count += u64::from(remove(&child?.path())?);
+                count += u64::from(rootpath::remove(root, &child?.path())?);
             }
             Ok(count)
         }
-    }
-}
-
-/// Removes whatever is at `path`, a directory with its contents. Returns
-/// whether something was there.
-fn remove(path: &Path) -> io::Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path).map(|()| true),
-        Ok(_) => fs::remove_file(path).map(|()| true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
     }
 }
 
@@ -212,7 +217,7 @@ fn add<R: Read>(
     entry: &mut tar::Entry<'_, R>,
     privileged: bool,
     applied: &mut Applied,
-) -> Result<Option<(PathBuf, u32, i64)>> {
+) -> Result<Option<(Vec<OsString>, u32, i64)>> {
     let target = resolve(root, parts)?;
     let header = entry.header().clone();
     let kind = header.entry_type();
@@ -229,19 +234,19 @@ fn add<R: Read>(
     }
     let existing = fs::symlink_metadata(&target).ok();
     if !(kind == EntryType::Directory && existing.as_ref().is_some_and(fs::Metadata::is_dir)) {
-        remove(&target)?;
+        rootpath::remove(root, &target)?;
     }
     let mut deferred = None;
     match kind {
         EntryType::Regular | EntryType::Continuous => {
-            let mut file = File::create(&target)?;
+            let mut file = rootpath::create(root, &target, 0o600)?;
             applied.file_bytes += io::copy(entry, &mut file)?;
         }
         EntryType::Directory => {
             if existing.as_ref().is_none_or(|meta| !meta.is_dir()) {
                 fs::create_dir(&target)?;
             }
-            deferred = Some((target.clone(), mode, mtime));
+            deferred = Some((parts.to_vec(), mode, mtime));
         }
         EntryType::Symlink => {
             let link = entry.link_name()?.context("symlink without a target")?;
@@ -359,6 +364,7 @@ fn make_node(
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(clippy::unnecessary_wraps)] // Same signature as the Linux one.
 fn make_node(_: &Path, _: EntryType, _: u32, _: &tar::Header, _: bool) -> Result<bool> {
     Ok(false)
 }

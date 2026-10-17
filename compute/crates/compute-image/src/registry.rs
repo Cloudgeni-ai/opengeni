@@ -133,6 +133,28 @@ pub struct ImageFile {
     pub rootfs: RootFs,
 }
 
+impl ImageFile {
+    /// Fails unless the image is for Linux on amd64, the only platform
+    /// the builder and the hosts run.
+    ///
+    /// # Errors
+    ///
+    /// For any other platform, or one the config leaves out.
+    pub fn platform(&self) -> Result<()> {
+        ensure!(
+            self.os == "linux" && self.architecture == "amd64",
+            "the image is for {}/{}, not linux/amd64",
+            or_unset(&self.os),
+            or_unset(&self.architecture)
+        );
+        Ok(())
+    }
+}
+
+fn or_unset(value: &str) -> &str {
+    if value.is_empty() { "(unset)" } else { value }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct RunConfig {
@@ -284,11 +306,8 @@ impl Registry {
         let layers = document.layers.unwrap_or_default();
         let config_bytes = self.small_blob(&base, &config).await?;
         let image: ImageFile = serde_json::from_slice(&config_bytes).context("image config")?;
-        ensure!(
-            image.os.is_empty() || image.os == "linux",
-            "{reference} is for {}",
-            image.os
-        );
+        // Checked here too: a tag or digest can name one manifest directly.
+        image.platform().with_context(|| reference.to_string())?;
         ensure!(
             image.rootfs.diff_ids.len() == layers.len(),
             "{reference}: {} layers but {} diff ids",
@@ -592,11 +611,37 @@ mod tests {
                 "rootfs":{"type":"layers","diff_ids":["sha256:x"]}}"#,
         )
         .unwrap();
+        image.platform().unwrap();
         let run = image.config.unwrap();
         assert_eq!(run.user.as_deref(), Some("node"));
         assert_eq!(run.working_dir.as_deref(), Some("/app"));
         assert_eq!(run.entrypoint, None);
         assert_eq!(image.rootfs.diff_ids, ["sha256:x"]);
+    }
+
+    #[test]
+    fn only_linux_amd64_configs_pass() {
+        let config = |platform: &str| -> ImageFile {
+            serde_json::from_str(&format!(
+                r#"{{{platform}"rootfs":{{"type":"layers","diff_ids":[]}}}}"#
+            ))
+            .unwrap()
+        };
+        config(r#""architecture":"amd64","os":"linux","#)
+            .platform()
+            .unwrap();
+        // A tag that names one arm64 manifest directly, with no index.
+        let arm = config(r#""architecture":"arm64","os":"linux","#).platform();
+        assert!(
+            arm.unwrap_err().to_string().contains("linux/arm64"),
+            "arm64 refused"
+        );
+        assert!(
+            config(r#""architecture":"amd64","os":"windows","#)
+                .platform()
+                .is_err()
+        );
+        assert!(config("").platform().is_err());
     }
 
     #[test]

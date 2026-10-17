@@ -16,14 +16,15 @@
 //!
 //! Inside, it mounts the basics, sets up the network from the kernel's
 //! `ip=` argument, starts and supervises envd, runs the image's command as
-//! one supervised process under the image's user, reaps orphans and shuts
-//! down cleanly. The parsers and state machines live in the portable
+//! one supervised process under the image's user once the sandbox has its
+//! own identity and init, reaps orphans and shuts down cleanly. The parsers and state machines live in the portable
 //! modules here; the system calls live under `linux`.
 
 pub mod cmdline;
 pub mod config;
 pub mod envd;
 pub mod gateway;
+pub mod given;
 pub mod identity;
 pub mod notice;
 pub mod users;

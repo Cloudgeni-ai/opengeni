@@ -163,13 +163,22 @@ impl Sources {
     }
 
     /// The inputs a template of `shape` built now has. Blocks: the first
-    /// time, and after a file changed, it reads the whole file.
+    /// time, and after a file changed, it reads the whole file. Fails for
+    /// a shape whose image file is not that image.
     pub fn inputs(&self, shape: Shape) -> io::Result<Inputs> {
-        let files = [&self.kernel, &self.image(shape)]
+        let files: Vec<FileId> = [&self.kernel, &self.image(shape)]
             .into_iter()
             .chain(&self.depends_on)
             .map(|path| self.content(path))
             .collect::<io::Result<_>>()?;
+        if let Some(image) = shape.image
+            && files[1].blake3 != image.to_string()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("the file of image {image} holds another image"),
+            ));
+        }
         Ok(Inputs {
             format: FORMAT,
             shape,

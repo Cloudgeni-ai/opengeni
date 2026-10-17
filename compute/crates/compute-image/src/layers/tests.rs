@@ -307,6 +307,48 @@ fn entries_never_leave_the_root() {
 }
 
 #[test]
+fn whiteouts_that_name_no_entry_are_refused() {
+    let outer = tempfile::tempdir().unwrap();
+    let root = outer.path().join("root");
+    fs::create_dir_all(root.join("a")).unwrap();
+    let sentinel = outer.path().join("sentinel");
+    fs::write(&sentinel, "keep").unwrap();
+    for marker in [".wh...", "a/.wh...", ".wh..", "a/.wh.", ".wh."] {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut h = header(EntryType::Regular, 0o644, 0);
+        builder.append_data(&mut h, marker, &[][..]).unwrap();
+        let layer = builder.into_inner().unwrap();
+        assert!(apply_all(&root, &[layer]).is_err(), "{marker}");
+        assert_eq!(fs::read_to_string(&sentinel).unwrap(), "keep", "{marker}");
+        assert!(root.join("a").is_dir(), "{marker}");
+    }
+}
+
+#[test]
+fn a_directory_replaced_by_a_symlink_keeps_its_metadata_inside() {
+    let outer = tempfile::tempdir().unwrap();
+    let root = outer.path().join("root");
+    fs::create_dir(&root).unwrap();
+    let outside = outer.path().join("outside");
+    fs::write(&outside, "keep").unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o644)).unwrap();
+    let mut builder = tar::Builder::new(Vec::new());
+    // A directory whose mode and time are set at the end of the layer...
+    let mut h = header(EntryType::Directory, 0o700, 0);
+    builder.append_data(&mut h, "d/", &[][..]).unwrap();
+    // ...replaced, in the same layer, by a symlink out of the root.
+    let mut h = header(EntryType::Symlink, 0o777, 0);
+    builder
+        .append_link(&mut h, "d", outside.to_string_lossy().as_ref())
+        .unwrap();
+    apply_all(&root, &[builder.into_inner().unwrap()]).unwrap();
+    assert!(root.join("d").is_symlink());
+    let mode = fs::metadata(&outside).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o644);
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "keep");
+}
+
+#[test]
 fn hard_links_share_their_file() {
     let dir = tempfile::tempdir().unwrap();
     let layer = tar_of(&[Op::File("a/f", 7, 0o755), Op::Hardlink("a/h", "a/f")]);

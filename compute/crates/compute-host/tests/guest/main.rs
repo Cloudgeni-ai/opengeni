@@ -587,18 +587,11 @@ async fn templates_give_each_sandbox_its_own_environment_and_token() {
     host.finish().await;
 }
 
-/// The image's command runs once, as `docker run` would: under the image's
-/// user, in its working directory, with its environment. A guest told to
-/// stop ends its processes, leaves its file system clean and ends the VM;
-/// booted again from its disk, it still holds its sandbox's environment
-/// and token.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_image_command_runs_as_its_user_and_the_guest_shuts_down_cleanly() {
-    let Some((lab, guest)) = setup() else {
-        return;
-    };
-    let alpine = image(&lab, &guest, ALPINE);
-    let image = alpine.with_file_name("alpine-command.ext4");
+/// A copy of the alpine image whose config is `config`, as
+/// `<name>.ext4`, and the config's file beside it.
+fn command_image(lab: &Path, guest: &Path, name: &str, config: &serde_json::Value) -> PathBuf {
+    let alpine = image(lab, guest, ALPINE);
+    let image = alpine.with_file_name(format!("{name}.ext4"));
     let copied = Command::new("cp")
         .arg("--sparse=always")
         .arg(&alpine)
@@ -606,13 +599,6 @@ async fn the_image_command_runs_as_its_user_and_the_guest_shuts_down_cleanly() {
         .status()
         .unwrap();
     assert!(copied.success());
-    let config = serde_json::json!({
-        "user": "nobody",
-        "workingDir": "/srv/app",
-        "env": ["PATH=/usr/sbin:/usr/bin:/sbin:/bin", "GREETING=hello"],
-        "entrypoint": ["/bin/sh", "-c"],
-        "cmd": ["echo \"$(id -un) $(pwd) $HOME $GREETING\" > /tmp/command-ran; exec sleep 100000"],
-    });
     let local = image.with_extension("json");
     std::fs::write(&local, config.to_string()).unwrap();
     for request in [
@@ -626,24 +612,65 @@ async fn the_image_command_runs_as_its_user_and_the_guest_shuts_down_cleanly() {
             .unwrap();
         assert!(edited.status.success(), "debugfs {request}: {edited:?}");
     }
+    let _ = std::fs::remove_file(&local);
+    image
+}
+
+/// Whether `path` exists in the sandbox, asked as root.
+async fn exists(envd: &Envd<'_>, path: &str) -> bool {
+    let ran = envd
+        .run(&format!("test -e {path} && echo yes || echo no"))
+        .await
+        .unwrap();
+    ran.stdout.trim() == "yes"
+}
+
+/// The image's command runs once the sandbox has its own init, as `docker
+/// run` would: under the image's user, in its working directory, with its
+/// environment and then the sandbox's. A guest told to stop sends it
+/// `SIGTERM` (which it can handle), ends its processes, leaves its file
+/// system clean and ends the VM; booted again from its disk, it still
+/// holds its sandbox's environment and token, and the command starts
+/// again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_image_command_runs_as_its_user_and_the_guest_shuts_down_cleanly() {
+    let Some((lab, guest)) = setup() else {
+        return;
+    };
+    let config = serde_json::json!({
+        "user": "nobody",
+        "workingDir": "/srv/app",
+        "env": ["PATH=/usr/sbin:/usr/bin:/sbin:/bin", "GREETING=hello"],
+        "entrypoint": ["/bin/sh", "-c"],
+        "cmd": ["trap 'echo got-term > /tmp/term-got; exit 0' TERM; \
+                 echo \"$(id -un) $(pwd) $HOME $GREETING $FOO\" > /tmp/command-ran; \
+                 while :; do sleep 1; done"],
+    });
+    let image = command_image(&lab, &guest, "alpine-command", &config);
 
     let host = Host::start(&lab, "command", &image, &[]).await;
     let sandbox = id(3);
     host.create(sandbox, 1, 512).await;
-    Envd::new(&host.client, sandbox)
-        .wait_healthy(Duration::from_secs(120))
-        .await;
+    let before = Envd::new(&host.client, sandbox).with_user("root");
+    before.wait_healthy(Duration::from_secs(120)).await;
+    // Not before the sandbox has its own init.
+    assert!(!exists(&before, "/tmp/command-ran").await);
     init(&host.client, sandbox, &[("FOO", "kept")], "token-command").await;
     let root = Envd::new(&host.client, sandbox)
         .with_token("token-command")
         .with_user("root");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !exists(&root, "/tmp/command-ran").await {
+        assert!(Instant::now() < deadline, "the command never ran");
+        sleep(Duration::from_millis(100)).await;
+    }
     let ran = root
-        .run("cat /tmp/command-ran; ps -o user,args | grep '[s]leep 100000'")
+        .run("cat /tmp/command-ran; ps -o user,args | grep '[t]erm-got'")
         .await
         .unwrap();
     assert_eq!(
         ran.stdout.lines().next(),
-        Some("nobody /srv/app / hello"),
+        Some("nobody /srv/app / hello kept"),
         "{ran:?}"
     );
     assert!(
@@ -657,7 +684,7 @@ async fn the_image_command_runs_as_its_user_and_the_guest_shuts_down_cleanly() {
     assert_own(&host, sandbox, "token-command", "kept", "/srv/app").await;
 
     // Told to stop, as a power button or the host would.
-    let _ = root.run("kill -TERM 1").await;
+    let _ = root.run("rm /tmp/command-ran; kill -TERM 1").await;
     let deadline = Instant::now() + Duration::from_secs(60);
     let vm = host.vm_dir();
     let console = vm.join("console.log");
@@ -686,13 +713,87 @@ async fn the_image_command_runs_as_its_user_and_the_guest_shuts_down_cleanly() {
         String::from_utf8_lossy(&checked.stdout)
     );
 
-    // Booted again from its disk, it is the same sandbox.
-    Envd::new(&host.client, sandbox)
-        .with_token("token-command")
-        .wait_healthy(Duration::from_secs(120))
-        .await;
+    // Booted again from its disk, it is the same sandbox, and its command
+    // handled the TERM it got and runs again.
+    root.wait_healthy(Duration::from_secs(120)).await;
     assert_own(&host, sandbox, "token-command", "kept", "/srv/app").await;
+    let term = root.run("cat /tmp/term-got").await.unwrap();
+    assert_eq!(term.stdout.trim(), "got-term", "{term:?}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !exists(&root, "/tmp/command-ran").await {
+        assert!(Instant::now() < deadline, "the command did not start again");
+        sleep(Duration::from_millis(100)).await;
+    }
     host.finish().await;
     let _ = std::fs::remove_file(&image);
-    let _ = std::fs::remove_file(&local);
+}
+
+/// A warm template of an image with a command never runs the command:
+/// each sandbox started from it runs it once given its own init, after it
+/// took its own identity, so nothing the command makes is shared between
+/// sandboxes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_template_runs_the_image_command_in_each_sandbox_not_in_itself() {
+    let Some((lab, guest)) = setup() else {
+        return;
+    };
+    let config = serde_json::json!({
+        "entrypoint": ["/bin/sh", "-c"],
+        "cmd": ["{ cat /etc/machine-id; echo \"$FOO\"; } > /tmp/command-saw; exec sleep 100000"],
+    });
+    let image = command_image(&lab, &guest, "alpine-template-command", &config);
+    let host = Host::start(
+        &lab,
+        "tplcmd",
+        &image,
+        &["--template-ready-port", "54", "--template", "1x512"],
+    )
+    .await;
+    host.wait_until("a ready template", |status| {
+        status
+            .templates
+            .iter()
+            .any(|template| template.state == TemplateState::Ready)
+    })
+    .await;
+    let sandboxes = [id(4), id(5)];
+    let mut machine_ids = Vec::new();
+    for (n, &sandbox) in sandboxes.iter().enumerate() {
+        host.create(sandbox, 1, 512).await;
+        let before = Envd::new(&host.client, sandbox).with_user("root");
+        assert!(
+            !exists(&before, "/tmp/command-saw").await,
+            "the command ran before the sandbox's init"
+        );
+        let token = format!("token-{n}");
+        init(
+            &host.client,
+            sandbox,
+            &[("FOO", &format!("own-{n}"))],
+            &token,
+        )
+        .await;
+        let root = Envd::new(&host.client, sandbox)
+            .with_token(&token)
+            .with_user("root");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !exists(&root, "/tmp/command-saw").await {
+            assert!(Instant::now() < deadline, "the command never ran");
+            sleep(Duration::from_millis(100)).await;
+        }
+        let ran = root
+            .run("cat /tmp/command-saw /etc/machine-id")
+            .await
+            .unwrap();
+        let lines: Vec<&str> = ran.stdout.lines().collect();
+        assert_eq!(lines.len(), 3, "{ran:?}");
+        assert_eq!(lines[0], lines[2], "the command saw the sandbox's identity");
+        assert_eq!(lines[1], format!("own-{n}"), "and its environment");
+        machine_ids.push(lines[0].to_owned());
+    }
+    assert_ne!(machine_ids[0], machine_ids[1]);
+    let status = host.status().await;
+    assert_eq!(Host::steps(&status, "boot"), 0, "every sandbox restored");
+    host.finish().await;
+    let _ = std::fs::remove_file(&image);
 }

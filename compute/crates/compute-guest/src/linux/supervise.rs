@@ -41,10 +41,23 @@ impl Children {
             }
         }
     }
+
+    /// Sends `signal` to `pid` if it is a child that has not ended yet,
+    /// so never to a process that took over the number of one reaped.
+    pub fn signal(&self, pid: i32, signal: libc::c_int) -> io::Result<()> {
+        let waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        if waiting.contains_key(&pid) {
+            sys::kill(pid, signal)
+        } else {
+            Ok(())
+        }
+    }
 }
 
-/// The new command, for the program at `path`. All children go through
-/// here.
+/// The new command, for the program at `path`, starting with no signal
+/// blocked. All children go through here.
 pub fn command(path: &str) -> Command {
-    Command::new(path)
+    let mut command = Command::new(path);
+    sys::unblock_signals(&mut command);
+    command
 }

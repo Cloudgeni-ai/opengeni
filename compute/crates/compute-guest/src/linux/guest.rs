@@ -1,9 +1,10 @@
 //! What the guest keeps and what its vsock ports do.
 
-use std::fs::{self, OpenOptions};
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
-use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
+use std::sync::mpsc::Sender;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -12,12 +13,8 @@ use super::{log, spawn, sys, system};
 use crate::ENVD_PORT;
 use crate::envd::{self, InitData};
 use crate::gateway::{self, Header};
+use crate::given::{self, GIVEN_FILE, Given};
 use crate::notice::{self, Notice, Orders};
-
-/// Where the guest keeps what a create gave the sandbox, so a guest booted
-/// again from its disk gives envd the same. Only root may read it: it
-/// holds the access token.
-const GIVEN_FILE: &str = "/opengeni/init-data.json";
 
 /// Longest a notice or an `init` waits for envd to be up.
 const ENVD_WAIT: Duration = Duration::from_secs(10);
@@ -31,13 +28,20 @@ const LINE_LIMIT: Duration = Duration::from_secs(10);
 /// Longest connecting to a guest TCP port may take.
 const CONNECT_LIMIT: Duration = Duration::from_secs(2);
 
+/// The environment the image's command gets on top of the image's own.
+pub type CommandEnv = BTreeMap<String, String>;
+
 /// The guest's state, shared by its threads.
 #[derive(Debug)]
 pub struct Guest {
     /// Serialises every `/init`.
     state: Mutex<State>,
+    /// Signalled when what the sandbox was given changes.
+    given_changed: Condvar,
     envd: Mutex<Envd>,
     envd_changed: Condvar,
+    /// Starts the image's command, once.
+    command: Mutex<Option<Sender<CommandEnv>>>,
 }
 
 #[derive(Debug)]
@@ -45,16 +49,22 @@ struct State {
     /// The image's defaults: its environment, user and directory.
     image: InitData,
     /// What a create gave the sandbox, if anything yet.
-    given: Option<InitData>,
+    given: Given,
     orders: Orders,
 }
 
 impl State {
     /// What envd gets: the image's defaults, overlaid by what the sandbox
-    /// was given.
-    fn effective(&self) -> InitData {
+    /// was given. Fails while what it was given cannot be read: envd
+    /// would then run without the sandbox's access token.
+    fn effective(&self) -> io::Result<InitData> {
         let mut data = self.image.clone();
-        if let Some(given) = &self.given {
+        if let Given::Unreadable(reason) = &self.given {
+            return Err(io::Error::other(format!(
+                "what the sandbox was given cannot be read: {reason}"
+            )));
+        }
+        if let Given::Kept(given) = &self.given {
             data.env_vars.extend(given.env_vars.clone());
             data.access_token.clone_from(&given.access_token);
             if given.default_user.is_some() {
@@ -64,7 +74,7 @@ impl State {
                 data.default_workdir.clone_from(&given.default_workdir);
             }
         }
-        data
+        Ok(data)
     }
 }
 
@@ -83,20 +93,59 @@ fn now_nanos() -> u64 {
 
 impl Guest {
     /// A guest whose image gives `image`, and which keeps what a create
-    /// gave it before it was last booted.
-    pub fn new(image: InitData) -> Self {
-        let given = fs::read(GIVEN_FILE)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    /// gave it before it was last booted. `command` starts the image's
+    /// command.
+    pub fn new(image: InitData, command: Sender<CommandEnv>) -> Self {
+        let given = given::load(Path::new(GIVEN_FILE));
+        if let Given::Unreadable(reason) = &given {
+            log(&format!(
+                "envd waits for a new init: what the sandbox was given cannot be read: {reason}"
+            ));
+        }
         Self {
             state: Mutex::new(State {
                 image,
                 given,
                 orders: Orders::default(),
             }),
+            given_changed: Condvar::new(),
             envd: Mutex::new(Envd::default()),
             envd_changed: Condvar::new(),
+            command: Mutex::new(Some(command)),
         }
+    }
+
+    /// Booted from the disk of a sandbox that a create already gave its
+    /// init: the image's command starts again, as after a restart.
+    /// Otherwise it waits for that init (see [`Self::init`]).
+    pub fn booted(&self, sandbox: Option<&str>) {
+        let env = match &self.state().given {
+            Given::Kept(given) if sandbox.is_some() => given.env_vars.clone(),
+            _ => return,
+        };
+        self.start_command(env);
+    }
+
+    /// Starts the image's command with `env`, unless it started already.
+    fn start_command(&self, env: CommandEnv) {
+        let sender = self
+            .command
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(sender) = sender {
+            let _ = sender.send(env);
+        }
+    }
+
+    /// Waits while what the sandbox was given cannot be read: envd starts
+    /// only with the sandbox's access token.
+    pub fn wait_readable(&self) {
+        let state = self.state();
+        let _state = self
+            .given_changed
+            .wait_while(state, |state| matches!(state.given, Given::Unreadable(_)))
+            .unwrap_or_else(PoisonError::into_inner);
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
@@ -107,7 +156,7 @@ impl Guest {
     /// does it count as up.
     pub fn envd_started(&self) -> io::Result<()> {
         let state = self.state();
-        call_init(&state.effective(), now_nanos())?;
+        call_init(&state.effective()?, now_nanos())?;
         self.envd.lock().unwrap_or_else(PoisonError::into_inner).up = true;
         self.envd_changed.notify_all();
         Ok(())
@@ -162,7 +211,10 @@ impl Guest {
             return;
         }
         let mut state = self.state();
-        if let Err(error) = call_init(&state.effective(), now_nanos()) {
+        if let Err(error) = state
+            .effective()
+            .and_then(|data| call_init(&data, now_nanos()))
+        {
             log(&format!("restore notice: envd /init: {error}"));
             return;
         }
@@ -199,39 +251,35 @@ impl Guest {
         }
     }
 
-    /// A create gives the sandbox `given`: envd takes it, then the guest
-    /// keeps it.
+    /// A create gives the sandbox `given`. The guest keeps it on disk for
+    /// good, then gives it to envd, then starts the image's command if it
+    /// has not yet; it answers `ok` only after all of that. On a failure
+    /// what it kept stays kept, so envd gets it with a retry or the next
+    /// restore: the disk, the guest and the next `/init` always agree.
     fn init(&self, given: InitData) -> io::Result<()> {
+        // The image's command must start in this sandbox only, never in a
+        // template its clones copy.
+        if system::current_sandbox().is_none() {
+            return Err(io::Error::other("the guest is no sandbox yet"));
+        }
+        let env = given.env_vars.clone();
+        {
+            let mut state = self.state();
+            given::keep(Path::new(GIVEN_FILE), &given)
+                .map_err(|error| io::Error::other(format!("keeping the init: {error}")))?;
+            state.given = Given::Kept(given);
+        }
+        // envd may have waited for a readable init.
+        self.given_changed.notify_all();
         if !self.wait_envd(ENVD_WAIT) {
             return Err(io::Error::other("envd is not up"));
         }
-        let mut state = self.state();
-        let previous = state.given.replace(given);
-        if let Err(error) = call_init(&state.effective(), now_nanos()) {
-            state.given = previous;
-            return Err(error);
-        }
-        if let Some(given) = &state.given
-            && let Err(error) = keep(given)
-        {
-            log(&format!("keeping init data: {error}"));
-        }
+        let state = self.state();
+        call_init(&state.effective()?, now_nanos())?;
+        drop(state);
+        self.start_command(env);
         Ok(())
     }
-}
-
-/// Writes `given` to [`GIVEN_FILE`].
-fn keep(given: &InitData) -> io::Result<()> {
-    let staged = format!("{GIVEN_FILE}.new");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&staged)?;
-    file.write_all(&serde_json::to_vec(given).map_err(io::Error::other)?)?;
-    file.sync_all()?;
-    fs::rename(&staged, GIVEN_FILE)
 }
 
 /// Reads up to the first newline, at most `limit` bytes. Returns the line

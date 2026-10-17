@@ -9,13 +9,14 @@ mod vsock;
 
 use std::fs;
 use std::os::unix::process::CommandExt;
+use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use self::guest::Guest;
+use self::guest::{CommandEnv, Guest};
 use self::supervise::Children;
 use self::sys::{Exit, Signals};
 use crate::cmdline::BootArgs;
@@ -73,13 +74,22 @@ pub fn run() -> ! {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
+    // envd starts SDK commands there by default, before the image's
+    // command may have run.
+    if let Err(error) = fs::create_dir_all(image.working_dir()) {
+        log(&format!("working directory: {error}"));
+    }
     let children = Arc::new(Children::default());
-    let guest = Arc::new(Guest::new(InitData {
-        env_vars: image.env_map(),
-        access_token: None,
-        default_user: Some(config::DEFAULT_USER.to_owned()),
-        default_workdir: image.default_workdir().map(str::to_owned),
-    }));
+    let (command, start_command) = channel();
+    let guest = Arc::new(Guest::new(
+        InitData {
+            env_vars: image.env_map(),
+            access_token: None,
+            default_user: Some(config::DEFAULT_USER.to_owned()),
+            default_workdir: image.default_workdir().map(str::to_owned),
+        },
+        command,
+    ));
     listen(NOTICE_PORT, "notice", {
         let guest = Arc::clone(&guest);
         move |stream| guest.notice(stream)
@@ -95,10 +105,18 @@ pub fn run() -> ! {
         let (guest, children) = (Arc::clone(&guest), Arc::clone(&children));
         move || supervise_envd(&guest, &children)
     });
+    // The image's command starts once the sandbox has its own identity
+    // and init: never in a template, whose clones would all copy what it
+    // made, and on a restore it simply carries on.
     spawn("command", {
         let children = Arc::clone(&children);
-        move || run_command(&image, &children)
+        move || {
+            if let Ok(env) = start_command.recv() {
+                run_command(&image, &env, &children);
+            }
+        }
     });
+    guest.booted(args.sandbox.as_deref());
     loop {
         match signals.wait(Duration::from_secs(1)) {
             Some(libc::SIGTERM | libc::SIGINT | libc::SIGPWR) => shutdown(&signals, &children),
@@ -133,11 +151,13 @@ fn listen(port: u32, name: &'static str, handle: impl Fn(vsock::Stream) + Send +
 const ENVD_START: Duration = Duration::from_secs(30);
 
 /// Keeps envd running. Each time it starts, it gets its `/init` before the
-/// guest counts it as up; the first time, the guest becomes ready.
+/// guest counts it as up; the first time, the guest becomes ready. One
+/// that does not take it in time is stopped and started again.
 fn supervise_envd(guest: &Guest, children: &Children) {
     let mut ready = false;
     let mut pause = Duration::from_millis(200);
     loop {
+        guest.wait_readable();
         let started = Instant::now();
         let mut command = supervise::command(config::ENVD_PATH);
         command
@@ -146,9 +166,16 @@ fn supervise_envd(guest: &Guest, children: &Children) {
             .env("PATH", config::DEFAULT_PATH)
             .env("HOME", "/root")
             .stdin(Stdio::null());
-        match children.spawn(&mut command) {
-            Ok((pid, exited)) => {
-                if bring_up(guest, &exited) && !ready {
+        let up = || {
+            guest::envd_healthy()
+                && guest
+                    .envd_started()
+                    .inspect_err(|error| log(&format!("envd /init: {error}")))
+                    .is_ok()
+        };
+        match start(children, &mut command, ENVD_START, up) {
+            Ok((pid, Started::Up(exited))) => {
+                if !ready {
                     ready = true;
                     // Template builders and the host wait on this port.
                     listen(READY_PORT, "ready", drop);
@@ -156,6 +183,9 @@ fn supervise_envd(guest: &Guest, children: &Children) {
                 let exit = exited.recv();
                 guest.envd_stopped();
                 log(&format!("envd (pid {pid}) ended: {exit:?}"));
+            }
+            Ok((pid, Started::Ended(exit))) => {
+                log(&format!("envd (pid {pid}) never came up: {exit:?}"));
             }
             Err(error) => log(&format!("envd: {error}")),
         }
@@ -167,29 +197,47 @@ fn supervise_envd(guest: &Guest, children: &Children) {
     }
 }
 
-/// Waits for a started envd to answer, then gives it its `/init`. False if
-/// it ended or never took it.
-fn bring_up(guest: &Guest, exited: &Receiver<Exit>) -> bool {
-    let deadline = Instant::now() + ENVD_START;
+/// How a started daemon fared.
+#[derive(Debug)]
+enum Started {
+    /// It came up; the receiver gets how it ends.
+    Up(Receiver<Exit>),
+    /// It ended, or was stopped for not coming up in time.
+    Ended(Option<Exit>),
+}
+
+/// Starts `command` and waits at most `within` for `up` to say it came
+/// up. One still running then is killed and reaped, so the caller can
+/// start it again from scratch.
+fn start(
+    children: &Children,
+    command: &mut Command,
+    within: Duration,
+    mut up: impl FnMut() -> bool,
+) -> std::io::Result<(i32, Started)> {
+    let (pid, exited) = children.spawn(command)?;
+    let deadline = Instant::now() + within;
     while Instant::now() < deadline {
-        if exited.try_recv().is_ok() {
-            return false;
+        if let Ok(exit) = exited.try_recv() {
+            return Ok((pid, Started::Ended(Some(exit))));
         }
-        if guest::envd_healthy() {
-            match guest.envd_started() {
-                Ok(()) => return true,
-                Err(error) => log(&format!("envd /init: {error}")),
-            }
+        if up() {
+            return Ok((pid, Started::Up(exited)));
         }
         thread::sleep(Duration::from_millis(10));
     }
-    log("envd did not come up");
-    false
+    log(&format!(
+        "pid {pid} did not come up in {within:?}; stopping it"
+    ));
+    if let Err(error) = children.signal(pid, libc::SIGKILL) {
+        log(&format!("stopping pid {pid}: {error}"));
+    }
+    Ok((pid, Started::Ended(exited.recv().ok())))
 }
 
 /// Runs the image's command once, as `docker run` would, under the image's
-/// user.
-fn run_command(image: &ImageConfig, children: &Children) {
+/// user, with the image's environment and then `given`'s.
+fn run_command(image: &ImageConfig, given: &CommandEnv, children: &Children) {
     let command = image.command();
     let Some((program, args)) = command.split_first() else {
         return;
@@ -205,11 +253,13 @@ fn run_command(image: &ImageConfig, children: &Children) {
     };
     let dir = image.working_dir();
     let _ = fs::create_dir_all(dir);
+    let mut env = image.process_env(&user.home);
+    env.extend(given.clone());
     let mut process = supervise::command(program);
     process
         .args(args)
         .env_clear()
-        .envs(image.process_env(&user.home))
+        .envs(env)
         .current_dir(dir)
         .process_group(0)
         .stdin(Stdio::null());
@@ -245,3 +295,6 @@ fn shutdown(signals: &Signals, children: &Children) -> ! {
     log(&format!("restart: {error}"));
     std::process::exit(1)
 }
+
+#[cfg(test)]
+mod tests;
