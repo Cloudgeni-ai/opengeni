@@ -219,6 +219,45 @@ fn use_does_not_cancel_a_checkpoint_but_memory_pressure_does() {
 }
 
 #[test]
+fn a_sleep_asked_for_cancels_a_checkpoint_once_nothing_holds_its_sandbox() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, State::RUNNING, checkpointed(), Size::whole(GIB));
+    rig.hold(1);
+    let (step, op) = only_start(&rig.at(FIRST_CHECKPOINT));
+    assert_eq!(step, Step::Checkpoint);
+    let sleep = Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Saved,
+    };
+    // Asked while held, the sleep waits for the hold, and so the
+    // checkpoint goes on.
+    let actions = rig.send(sleep);
+    assert!(cancelled(&actions).is_empty(), "{actions:?}");
+    // Let go, the sandbox sleeps as asked: a slow upload must not keep it
+    // running, as one would keep an E2B pause waiting.
+    let actions = rig.send(Input::Release {
+        sandbox: SandboxId(1),
+        hold: HoldId(1),
+    });
+    assert_eq!(cancelled(&actions), [op], "{actions:?}");
+    let (step, _) = only_start(&rig.finish(1, op, Outcome::Cancelled));
+    assert_eq!(step, Step::Pause, "it sleeps instead");
+
+    // Asked with nothing holding it, the sleep cancels a checkpoint at once.
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(2, State::RUNNING, checkpointed(), Size::whole(GIB));
+    let (step, op) = only_start(&rig.at(FIRST_CHECKPOINT));
+    assert_eq!(step, Step::Checkpoint);
+    let actions = rig.send(Input::Sleep {
+        sandbox: SandboxId(2),
+        level: Level::Paused,
+    });
+    assert_eq!(cancelled(&actions), [op], "{actions:?}");
+    let (step, _) = only_start(&rig.finish(2, op, Outcome::Cancelled));
+    assert_eq!(step, Step::Pause);
+}
+
+#[test]
 fn a_sandbox_that_never_ran_is_archived_at_once_and_a_wake_comes_first() {
     let mut rig = Rig::new(HostPolicy::default());
     let created = State::new(Level::Saved, Durability::Local, false);

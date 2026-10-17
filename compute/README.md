@@ -40,9 +40,10 @@ an operator must set up and watch is in [docs/operations.md](docs/operations.md)
 2. **Idle is nearly free, use is fast.** Idle means no work is happening, not
    that a timer ran out. Memory goes to whoever needs it.
 3. **The agent can restart at any moment** without stopping the sandboxes.
-4. **Small and plain.** One agent per host and no cluster services, a pure
-   decision core, few dependencies, structure rules checked on every change.
-   Less code to review is less code to attack.
+4. **Small and plain.** One agent per host, which needs no cluster services
+   to run on its own, a pure decision core, few dependencies, structure
+   rules checked on every change. Less code to review is less code to
+   attack.
 5. **Measured, not assumed.** Design choices were tested with real Firecracker
    VMs on cloud hosts, both bare metal and nested.
 
@@ -279,25 +280,32 @@ base image, as before.
 
 `compute-control` is the fleet service ([ADR 15](docs/adr/0015-placement-and-moves-between-hosts.md),
 [ADR 18](docs/adr/0018-the-fleet-service-leases-and-fences.md)). Its
-Postgres store holds each sandbox's configuration, the host that owns it
-with that host's owner epoch, and its latest archive. Hosts register over
-mutual TLS, renew a lease and push their capacity; creates and wakes are
-placed from that capacity, and the public API reaches a sandbox through its
-owner. A host runs only what its current lease covers: its guard stops its
-VMs when renewals stop, before the service may let another host run them,
-and every archive write carries the owner epoch, so a cut-off host cannot
-overwrite what the new owner stored. Replicas keep no state of their own;
-one at a time leads, gives up on hosts whose renewals stopped and grows the
-host group.
+Postgres store holds each sandbox's configuration, lifecycle and owner:
+the host that owns it and the sandbox's owner epoch, raised each time it
+changes hands or loses its owner. Its archives, and the pointer to the
+latest one, are in object storage. Hosts register over mutual TLS, renew a
+lease and push their capacity; creates and wakes are placed from that
+capacity, and the public API reaches a sandbox through its owner. A host
+runs only what its current lease covers: its guard stops its VMs when
+renewals stop, before the service may let another host run them, and every
+archive write carries the owner epoch, so a cut-off host cannot overwrite
+what the new owner stored. Replicas keep no state of their own; one at a
+time leads, gives up on hosts whose renewals stopped and grows the host
+group.
 
 A sandbox moves between hosts while it sleeps, through object storage, and
 a lost host's sandboxes come back on others from their newest stored copy.
 A running sandbox is checkpointed to object storage too: by default once it
 has run ten minutes since its last stored copy (`checkpoint_every_ms` in
-its sleep rules). Losing its host costs a sandbox what it did since that
-copy was captured, which its status reports as `backed_up_ms`. With
-`--gcp-group` the leader grows a Google Cloud managed instance group before
-spare memory runs out (`--scale-spare-per-mille`, `--scale-spare-largest`).
+its sleep rules). That period is a scheduling target, not a bound on loss:
+a checkpoint may wait for disk admission or retries, and it protects the
+sandbox only once it is published. Losing its host costs a sandbox what it
+did since the capture of its newest published copy, which its status
+reports as `backed_up_ms`. Only a host whose files share extents (XFS,
+btrfs) takes checkpoints; on any other its status says so, and its
+sandboxes reach the store only as they sleep. With `--gcp-group` the
+leader grows a Google Cloud managed instance group before spare memory runs
+out (`--scale-spare-per-mille`, `--scale-spare-largest`).
 
 ## The E2B front door
 

@@ -1115,15 +1115,21 @@ impl Host {
                     op: flight.op,
                 });
             }
-        } else if slot.floor != Level::Running
-            && let Some(flight) = &mut slot.in_flight
-            && matches!(flight.step, Step::Archive | Step::Checkpoint)
+        } else if let Some(flight) = &mut slot.in_flight
             && !flight.cancel_sent
+            && match flight.step {
+                // Archiving frees no memory and is not needed to free it,
+                // so it must not hold up the memory pressure demands. It
+                // starts again from the saved copy once the pressure is
+                // relieved.
+                Step::Archive => slot.floor != Level::Running,
+                // Nor may a checkpoint hold up any sleep, demanded or asked
+                // for: the sleep keeps a copy of its own, and the sandbox
+                // is checkpointed again once it runs again.
+                Step::Checkpoint => slot.floor.max(slot.requested) != Level::Running,
+                _ => false,
+            }
         {
-            // Archiving frees no memory and is not needed to free it, so it
-            // must not hold up the memory pressure demands. It starts again
-            // from the saved copy once the pressure is relieved; a
-            // checkpoint, once the sandbox runs again.
             flight.cancel_sent = true;
             out.push(Action::Cancel {
                 sandbox: id,
