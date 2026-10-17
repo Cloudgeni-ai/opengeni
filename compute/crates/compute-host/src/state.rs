@@ -48,6 +48,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use compute_core::SandboxId;
+use compute_fleet::{OwnerEpoch, Stamp};
 use serde::{Deserialize, Serialize};
 
 use crate::layout::{
@@ -151,6 +152,24 @@ pub(crate) struct Record {
     /// still what losing this host would go back to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backed_up_ms: Option<u64>,
+    /// Its owner epoch: which ownership of the sandbox this host holds
+    /// ([ADR 18](../../docs/adr/0018-the-fleet-service-leases-and-fences.md)).
+    /// The store refuses this host's writes once a later one holds it. A
+    /// host outside a fleet keeps the first.
+    #[serde(default = "first_owner")]
+    pub owner_epoch: u64,
+    /// The number of the last save this owner began archiving, recorded
+    /// before it began, so no two archives of one owner share a number.
+    #[serde(default)]
+    pub saves: u64,
+    /// Its removal leaves the store's copy, which belongs to a later owner
+    /// or was handed on: the host drops only what it has.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handed_off: bool,
+}
+
+fn first_owner() -> u64 {
+    OwnerEpoch::FIRST.0
 }
 
 /// Whether a sandbox's guest knows which sandbox it is.
@@ -188,6 +207,23 @@ impl Record {
             identity: Identity::Known,
             last_used_ms: None,
             backed_up_ms: None,
+            owner_epoch: OwnerEpoch::FIRST.0,
+            saves: 0,
+            handed_off: false,
+        }
+    }
+
+    /// Its owner epoch.
+    pub fn owner(&self) -> OwnerEpoch {
+        OwnerEpoch(self.owner_epoch)
+    }
+
+    /// The stamp of the save an archive about to begin takes, once
+    /// [`Change::next_save`] is committed.
+    pub fn save(&self) -> Stamp {
+        Stamp {
+            epoch: self.owner(),
+            save: self.saves,
         }
     }
 
@@ -227,6 +263,10 @@ impl std::fmt::Display for Fence {
 
 /// What one write changes. Anything not set keeps its value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag is a separate change one write may make on its own"
+)]
 pub(crate) struct Change {
     disk: Option<Disk>,
     image: Option<bool>,
@@ -236,6 +276,9 @@ pub(crate) struct Change {
     identity: Option<Identity>,
     last_used_ms: Option<u64>,
     backed_up_ms: Option<u64>,
+    next_save: bool,
+    handed_off: bool,
+    owner: Option<OwnerEpoch>,
     disk_bytes: Option<u64>,
 }
 
@@ -290,6 +333,27 @@ impl Change {
         self
     }
 
+    /// Takes the next save number, for an archive about to begin.
+    pub fn next_save(mut self) -> Self {
+        self.next_save = true;
+        self
+    }
+
+    /// This host holds the sandbox under owner epoch `owner` from now on.
+    /// Its save numbers go on from where they were.
+    pub fn owner(mut self, owner: OwnerEpoch) -> Self {
+        self.owner = Some(owner);
+        self
+    }
+
+    /// The sandbox is no longer this host's: its removal begins and leaves
+    /// the store's copy.
+    pub fn handed_off(mut self) -> Self {
+        self.handed_off = true;
+        self.removing = true;
+        self
+    }
+
     /// Records the disk's length where the record does not know it yet,
     /// as for one written before it was kept; a known length never changes.
     pub fn disk_bytes(mut self, bytes: u64) -> Self {
@@ -319,6 +383,13 @@ impl Change {
         }
         if let Some(at) = self.backed_up_ms {
             record.backed_up_ms = Some(record.backed_up_ms.map_or(at, |was| was.max(at)));
+        }
+        if self.next_save {
+            record.saves += 1;
+        }
+        record.handed_off |= self.handed_off;
+        if let Some(owner) = self.owner {
+            record.owner_epoch = owner.0;
         }
         if let Some(bytes) = self.disk_bytes {
             record.allocation.disk_bytes.get_or_insert(bytes);
@@ -352,6 +423,17 @@ pub enum StateError {
     /// No record for this sandbox.
     #[error("no record for sandbox {0}")]
     NotFound(Id),
+    /// The write would give the sandbox an earlier owner epoch than the
+    /// one its record holds.
+    #[error("sandbox {id} is held under owner epoch {held}, not {asked}")]
+    Superseded {
+        /// The sandbox.
+        id: Id,
+        /// The owner epoch the record holds.
+        held: u64,
+        /// The owner epoch the write names.
+        asked: u64,
+    },
     /// A record for this sandbox already exists.
     #[error("a record for sandbox {0} already exists")]
     Exists(Id),
@@ -396,6 +478,18 @@ pub(crate) fn apply(
             id,
             expected,
             found,
+        });
+    }
+    // Ownership only moves forward, whatever order the writes that move it
+    // land in: a new owner checked against an earlier record must not undo
+    // a later one committed since.
+    if let Some(owner) = change.owner
+        && owner < current.owner()
+    {
+        return Err(StateError::Superseded {
+            id,
+            held: current.owner_epoch,
+            asked: owner.0,
         });
     }
     let mut next = current.clone();
@@ -770,8 +864,30 @@ impl Records {
         .await
     }
 
+    /// Applies `change` to the record for `id` as it is now, whatever
+    /// version that is: for changes that do not depend on what the record
+    /// held, such as a new owner epoch. A step that issued its own write
+    /// against an earlier version then finds it stale. Returns the record
+    /// now committed.
+    pub async fn amend(&self, id: Id, change: Change) -> Result<Record, StateError> {
+        let entry = self.entry(id)?;
+        self.exclusive(entry, move |slot| {
+            let current = slot.current();
+            let expected = current.as_ref().ok_or(StateError::NotFound(id))?.fence();
+            match apply(id, current.as_ref(), expected, change)? {
+                Some(next) => {
+                    slot.write(Some(next.clone()))?;
+                    Ok(next)
+                }
+                None => current.ok_or(StateError::NotFound(id)),
+            }
+        })
+        .await
+    }
+
     /// Gives the ready sandbox `ready`, still at `expected`, to a create:
-    /// one write makes it sandbox `id` with `config`, no longer ready, and
+    /// one write makes it sandbox `id` with `config`, held under owner
+    /// epoch `owner`, no longer ready, and
     /// with a guest that has yet to learn which sandbox it is. Its
     /// directory keeps its name, which the record keeps as its host name.
     /// Like a new record it takes a generation no earlier record used, so
@@ -787,6 +903,7 @@ impl Records {
         expected: Fence,
         id: Id,
         config: SandboxConfig,
+        owner: OwnerEpoch,
     ) -> Result<Record, StateError> {
         let entry = {
             let mut entries = locked(&self.entries);
@@ -825,6 +942,9 @@ impl Records {
                     // a restart never finds it overdue for a sleep it never
                     // had the time to earn.
                     last_used_ms: Some(unix_ms_now()),
+                    owner_epoch: owner.0,
+                    saves: 0,
+                    handed_off: false,
                     ..current
                 };
                 slot.write(Some(next.clone()))?;

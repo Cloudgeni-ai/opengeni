@@ -14,6 +14,7 @@ mod agent;
 mod chunked;
 pub mod client;
 mod disk_growth;
+pub mod fleet;
 pub mod guest_ports;
 pub mod host_memory;
 mod image;
@@ -28,7 +29,6 @@ pub mod observe;
 #[cfg(target_os = "linux")]
 mod paging;
 mod pool;
-pub mod protocol;
 pub mod restore_notice;
 mod server;
 mod state;
@@ -39,13 +39,14 @@ mod working_set;
 
 pub use agent::{BusyRule, Handle, HostAgent, HostConfig, HostError, Lease, PagerConfig};
 pub use chunked::{CHUNK_BYTES, Chunked};
+pub use compute_protocol::host as protocol;
 pub use guest_ports::{GuestPort, Route};
 pub use lanes::Lanes;
 pub use layout::check_filesystem;
 pub use pool::{Keep, PoolConfig, Shape};
 pub use server::serve;
 pub use store::{
-    Archive, Directory, FetchInto, FetchedMemory, JailedFile, NoStore, Prefilled, Receipt,
-    SavedFiles, SavedImage, Store,
+    Archive, Claimed, Directory, FetchInto, FetchedMemory, JailedFile, NoStore, Owned, OwnerEpoch,
+    Prefilled, Receipt, SavedFiles, SavedImage, Stamp, Store,
 };
 pub use threads::Threads;

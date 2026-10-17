@@ -1,6 +1,6 @@
 # 15. Placement and moving sandboxes between hosts
 
-Status: Proposed, 2026-10-16
+Status: Accepted, 2026-10-17. Built as [18](0018-the-fleet-service-leases-and-fences.md).
 
 ## Context
 

@@ -15,6 +15,7 @@ pub mod firecracker;
 mod profile;
 mod spec;
 pub mod vsock;
+pub mod watchdog;
 
 use std::future::Future;
 use std::os::fd::OwnedFd;
