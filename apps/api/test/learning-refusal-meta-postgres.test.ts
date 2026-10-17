@@ -12,6 +12,7 @@ import {
   getAgentLearningSettings,
   initializeSessionStartAtomically,
   saveAgentLearningSettings,
+  saveKnowledgeEntry,
   type KnowledgeContext,
 } from "@opengeni/db";
 import {
@@ -47,6 +48,7 @@ async function liveAgent(
   db: ReturnType<typeof createDb>["db"],
   learning: "personal" | "workspace",
   modes: { personal?: Mode; workspace?: Mode } = {},
+  knowledgeModes: { personal?: Mode; workspace?: Mode } = {},
 ) {
   const suffix = crypto.randomUUID();
   const subjectId = `user:learning-refusal-${suffix}`;
@@ -77,16 +79,34 @@ async function liveAgent(
   };
   // Settings saved before the chat's turn is accepted govern that turn.
   for (const scope of ["workspace", "personal"] as const) {
-    const instructions = modes[scope];
-    if (!instructions) continue;
+    if (!modes[scope] && !knowledgeModes[scope]) continue;
     const current = await getAgentLearningSettings(db, human, scope);
     await saveAgentLearningSettings(db, human, {
       scope,
       operationId: crypto.randomUUID(),
       expectedVersion: current.version,
-      settings: { knowledge: "automatic", instructions, skills: "review_first" },
+      settings: {
+        knowledge: knowledgeModes[scope] ?? "automatic",
+        instructions: modes[scope] ?? "review_first",
+        skills: "review_first",
+      },
     });
   }
+  // A shared fact the person may later correct from a private chat.
+  const sharedFact = await saveKnowledgeEntry(db, human, {
+    operationId: crypto.randomUUID(),
+    entryId: crypto.randomUUID(),
+    expectedVersion: 0,
+    scope: "workspace",
+    entry: {
+      kind: "fact",
+      title: "Renewal terms",
+      content: "Renewals are yearly.",
+      groupIds: [],
+      evidence: [],
+      relationships: [],
+    },
+  });
   const session = await createSession(db, {
     accountId,
     workspaceId,
@@ -143,8 +163,25 @@ async function liveAgent(
   const client = new Client({ name: "learning-refusal", version: "1" });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
-  return client;
+  return Object.assign(client, { sharedFact });
 }
+
+const correctSharedFact = (client: Awaited<ReturnType<typeof liveAgent>>) => ({
+  name: "knowledge_save",
+  arguments: {
+    operationId: crypto.randomUUID(),
+    entryId: client.sharedFact.entryId,
+    expectedVersion: client.sharedFact.version,
+    entry: {
+      kind: "fact",
+      title: "Renewal terms",
+      content: "Renewals are yearly, with 60 days' notice.",
+      groupIds: [],
+      evidence: [],
+      relationships: [],
+    },
+  },
+});
 
 const appendRule = () => ({
   name: "instruction_policy_save",
@@ -205,6 +242,44 @@ describe("learning refusal facts", () => {
       await client.close();
     }
   }, 120_000);
+
+  test("a private chat corrects shared Knowledge under the stricter Knowledge mode", async () => {
+    if (!app || !shared) return;
+    const published = await liveAgent(
+      app.db,
+      "personal",
+      {},
+      { personal: "automatic", workspace: "automatic" },
+    );
+    const pending = await liveAgent(
+      app.db,
+      "personal",
+      {},
+      { personal: "automatic", workspace: "review_first" },
+    );
+    const off = await liveAgent(
+      app.db,
+      "personal",
+      {},
+      { personal: "automatic", workspace: "off" },
+    );
+    try {
+      const applied = await published.callTool(correctSharedFact(published));
+      expect(applied.isError, JSON.stringify(applied.content)).toBeFalsy();
+      expect(JSON.stringify(applied)).toMatch(/outcome[^a-z]*published/);
+      const proposed = await pending.callTool(correctSharedFact(pending));
+      expect(proposed.isError, JSON.stringify(proposed.content)).toBeFalsy();
+      expect(JSON.stringify(proposed)).toMatch(/outcome[^a-z]*pending/);
+      const refused = await off.callTool(correctSharedFact(off));
+      expect(refused.isError).toBe(true);
+      expect(refused._meta?.[LEARNING_REFUSAL_META_KEY]).toEqual({
+        destination: "knowledge",
+        reason: "learning_off",
+      });
+    } finally {
+      await Promise.all([published.close(), pending.close(), off.close()]);
+    }
+  }, 180_000);
 
   test("a saved instruction carries no refusal fact", async () => {
     if (!app || !shared) return;
