@@ -9,6 +9,7 @@ import {
   withSessionRlsActorContext,
 } from "../src/index";
 import { createSessionStateActivities } from "../../../apps/worker/src/activities/session-state";
+import { createGoalActivities } from "../../../apps/worker/src/activities/goals";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -81,5 +82,30 @@ test("application-role deletion proof distinguishes tenant/actor invisibility an
   await expect(activities.markSessionIdle(input)).resolves.toBeUndefined();
   await expect(
     activities.markSessionIdle({ workspaceId: crypto.randomUUID(), sessionId: session.id }),
+  ).resolves.toBeUndefined();
+  const deletedScope = {
+    accountId: grant.accountId,
+    workspaceId: crypto.randomUUID(),
+    sessionId: session.id,
+  };
+  const goals = createGoalActivities(async () => ({ db: client.db }) as any);
+  await expect(
+    goals.maybeContinueGoal({ ...deletedScope, workflowId: "deleted" }),
+  ).resolves.toEqual({ action: "none" });
+  await expect(
+    activities.settleSessionInterruptions({
+      ...deletedScope,
+      workflowId: "deleted",
+      attemptId: crypto.randomUUID(),
+    }),
+  ).resolves.toEqual({ action: "stale" });
+  await expect(
+    activities.persistSessionAttemptQuiescence({
+      ...deletedScope,
+      workflowId: "deleted",
+      workflowRunId: crypto.randomUUID(),
+      activityId: "deleted",
+      attemptId: crypto.randomUUID(),
+    }),
   ).resolves.toBeUndefined();
 }, 60_000);

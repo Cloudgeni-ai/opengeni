@@ -875,10 +875,38 @@ export function createSessionStateActivities(
     );
   }
 
+  async function settleUnlessDeleted<T>(
+    input: { workspaceId: string; sessionId: string; accountId?: string },
+    deletedResult: T,
+    settle: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await settle();
+    } catch (error) {
+      const { db } = await services();
+      if (
+        await isSessionDefinitivelyDeletedFn(
+          db,
+          input.workspaceId,
+          input.sessionId,
+          input.accountId,
+        )
+      )
+        return deletedResult;
+      throw error;
+    }
+  }
+
   return {
     failSessionAttempt,
-    settleSessionInterruptions,
-    persistSessionAttemptQuiescence,
+    // These can already be scheduled when quiescent deletion commits. In
+    // particular, a late proof signal must not pin the workflow before its peek.
+    settleSessionInterruptions: (input: SettleSessionInterruptionsInput) =>
+      settleUnlessDeleted(input, { action: "stale" as const }, () =>
+        settleSessionInterruptions(input),
+      ),
+    persistSessionAttemptQuiescence: (input: PersistSessionAttemptQuiescenceInput) =>
+      settleUnlessDeleted(input, undefined, () => persistSessionAttemptQuiescence(input)),
     reconcileSessionAttemptQuiescence: reconcileSessionAttemptQuiescenceActivity,
     reconcileSettledSessionAttempt: reconcileSettledSessionAttemptActivity,
     recoverDispatch,

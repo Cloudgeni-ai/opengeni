@@ -6,6 +6,40 @@ const services = async () => ({ db: {}, bus: {}, settings: {}, observability: {}
 
 describe("deleted session control activities", () => {
   test.each([true, false])(
+    "late interruption and proof activities tolerate only deletion (%s)",
+    async (deleted) => {
+      const failed = async () => {
+        throw new Error("Session not found");
+      };
+      const activities = createSessionStateActivities(services, {
+        settleSessionAttemptInterruptions: failed,
+        markSessionAttemptQuiesced: failed,
+        isSessionDefinitivelyDeleted: mock(async () => deleted),
+      });
+      const proof = {
+        ...input,
+        accountId: "account",
+        attemptId: "attempt",
+        workflowId: "workflow",
+        workflowRunId: "run",
+        activityId: "activity",
+      };
+      if (deleted) {
+        await expect(activities.settleSessionInterruptions(proof)).resolves.toEqual({
+          action: "stale",
+        });
+        await expect(activities.persistSessionAttemptQuiescence(proof)).resolves.toBeUndefined();
+      } else {
+        await expect(activities.settleSessionInterruptions(proof)).rejects.toThrow(
+          "Session not found",
+        );
+        await expect(activities.persistSessionAttemptQuiescence(proof)).rejects.toThrow(
+          "Session not found",
+        );
+      }
+    },
+  );
+  test.each([true, false])(
     "only patch-aware peeks report proven deletion (%s)",
     async (patched) => {
       const proof = mock(async () => true);

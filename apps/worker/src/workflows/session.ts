@@ -748,6 +748,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     // can activate this fix without waiting for continueAsNew.
     durableAdmissionBlocking = patched("session-durable-admission-block-v1");
     const safeObservation = patched("session-safe-control-observation-v1");
+    // Negotiate the deleted result at this command boundary: replay keeps old
+    // activity inputs/results, while the next live cycle can close an orphan.
     const closeDeletedSession = patched("session-close-deleted-v1");
     const peek = await activity.peekSessionWork({
       workspaceId: input.workspaceId,

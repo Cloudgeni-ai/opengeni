@@ -764,7 +764,7 @@ an absent workspace also proves deletion. Wrong-account or actor-filtered reads
 stay unavailable, and database failures retry. A proven deletion closes the
 workflow without idle settlement, goal continuation, or parent notification.
 Old histories retain the unavailable result and timer command order until a live
-cycle records the patch. Idle/failure settlement retries also re-prove deletion
+cycle records the patch. Idle/failure, interruption/quiescence and goal-continuation retries also re-prove deletion
 after a failed lookup and return harmlessly if deletion won the race. Session
 tree deletion is quiescence-gated database deletion, not Temporal termination;
 the control observer provides closure without a cross-system delete transaction.
