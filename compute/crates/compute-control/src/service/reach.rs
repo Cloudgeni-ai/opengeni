@@ -152,13 +152,17 @@ impl<S: Store> Service<S> {
     }
 
     /// Gives a sandbox nobody owns, or whose owner refused it outright, to
-    /// `on`, or to a host placement picks outside `exclude`, and has it
-    /// adopt the latest archive. Returns once one did, or once the row
-    /// changed under it, for the caller to read again.
+    /// host `on`, or to a host placement picks outside `exclude`, and has
+    /// it adopt the latest archive. Each try takes its host's target from
+    /// the view as it is then, so the request carries that host's latest
+    /// renewal; a host named by `on` that refuses a request as too old or
+    /// under another registration is tried again. Returns once one
+    /// adopted it, or once the row changed under it, for the caller to read
+    /// again.
     pub(super) async fn adopt(
         &self,
         mut row: SandboxRow,
-        on: Option<Target>,
+        on: Option<HostId>,
         mut exclude: Vec<HostId>,
     ) -> Result<(), Failure> {
         if !self.archived(row.id).await? {
@@ -172,9 +176,12 @@ impl<S: Store> Service<S> {
             .and_then(|class| self.view.class(class))
             .map_or(Prefer::Any, Prefer::Class);
         let demand = self.demand(&row.spec.config, prefer);
+        let mut refused = None;
         for tries in 1..=self.settings.max_tries {
-            let target = match &on {
-                Some(target) => target.clone(),
+            let target = match on {
+                Some(host) => self.view.target(host).ok_or_else(|| {
+                    Failure::Unavailable("the host asked for was given up on".into())
+                })?,
                 None => self.place(&demand, &exclude)?,
             };
             row.ownership = row.ownership.give(target.host).set;
@@ -212,11 +219,23 @@ impl<S: Store> Service<S> {
                     exclude.push(target.host);
                     row = now;
                 }
+                // The host asked for refused it for when it was sent, so it
+                // holds nothing of it either: try it there again.
+                (Next::PlaceElsewhere, Some(now))
+                    if matches!(
+                        adopted.answered.code(),
+                        Some(ErrorCode::Expired | ErrorCode::Unavailable)
+                    ) =>
+                {
+                    refused = Some(host_failure(&adopted.answered));
+                    row = now;
+                    tokio::time::sleep(AGAIN_AFTER).await;
+                }
                 _ if adopted.answered.code() == Some(ErrorCode::Stale) => return Ok(()),
                 _ => return Err(host_failure(&adopted.answered)),
             }
         }
-        Err(Failure::NoCapacity)
+        Err(refused.unwrap_or(Failure::NoCapacity))
     }
 
     /// Sends the adopt `row`'s current owner epoch names to `target` and

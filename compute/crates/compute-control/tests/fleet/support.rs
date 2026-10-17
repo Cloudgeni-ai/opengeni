@@ -359,6 +359,8 @@ pub fn id(text: &str) -> Id {
 pub enum Act {
     /// What an ordinary host would.
     Ordinary,
+    /// What an ordinary host would, after this long.
+    After(Duration),
     /// Answers this.
     Reply(Reply),
 }
@@ -394,6 +396,9 @@ struct HostInner {
     renewing: AtomicBool,
     /// Whether it checks that callers keep their side open.
     check_open: AtomicBool,
+    /// Renewals a request's stamp may be behind its own before it refuses
+    /// the request as expired, as a real host does; 0 never refuses.
+    window: AtomicU64,
     attempt: AtomicU64,
 }
 
@@ -440,6 +445,7 @@ impl FakeHost {
             behaviour: Mutex::new(Arc::new(|_| Act::Ordinary)),
             renewing: AtomicBool::new(true),
             check_open: AtomicBool::new(false),
+            window: AtomicU64::new(0),
             attempt: AtomicU64::new(u64::from_le_bytes(random) >> 1),
         });
         let acceptor = TlsAcceptor::from(Arc::new(fleet.pki.host_server(name)));
@@ -493,6 +499,12 @@ impl FakeHost {
     /// side of the connection open.
     pub fn check_open(&self) {
         self.inner.check_open.store(true, Ordering::SeqCst);
+    }
+
+    /// Has it refuse, as expired, requests whose stamp is more than
+    /// `renewals` behind the last renewal it sent.
+    pub fn refuse_older_than(&self, renewals: u64) {
+        self.inner.window.store(renewals, Ordering::SeqCst);
     }
 
     /// Reports ready clones of the fleet's default image and shape from
@@ -694,9 +706,23 @@ async fn answer(
         open_until_answer,
     });
     let behaviour = Arc::clone(&inner.behaviour.lock().unwrap());
-    let reply = match behaviour(&envelope) {
-        Act::Reply(reply) => reply,
-        Act::Ordinary => ordinary(inner, &envelope).await,
+    let window = inner.window.load(Ordering::SeqCst);
+    let reply = if window > 0
+        && envelope.sent.stamp.saturating_add(window) < inner.seq.load(Ordering::SeqCst)
+    {
+        error(
+            ErrorCode::Expired,
+            "sent too long before this host's renewal",
+        )
+    } else {
+        match behaviour(&envelope) {
+            Act::Reply(reply) => reply,
+            Act::Ordinary => ordinary(inner, &envelope).await,
+            Act::After(wait) => {
+                tokio::time::sleep(wait).await;
+                ordinary(inner, &envelope).await
+            }
+        }
     };
     let answer = Answer {
         answered: Answered {

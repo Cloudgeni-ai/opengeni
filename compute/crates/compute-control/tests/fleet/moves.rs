@@ -1,9 +1,12 @@
 //! Moving sandboxes between hosts: to a named host, off a host for the
 //! next wake to place, and off a draining host.
 
+use std::time::Duration;
+
+use compute_protocol::host::Request;
 use serde_json::{Value, json};
 
-use super::support::{Fleet, OPERATOR_KEY, id};
+use super::support::{Act, Fleet, OPERATOR_KEY, id};
 
 async fn operator(fleet: &Fleet, method: reqwest::Method, path: &str) -> (u16, Value) {
     fleet.call(method, path, Some(OPERATOR_KEY), None).await
@@ -41,6 +44,34 @@ async fn a_move_to_a_named_host_hands_off_then_adopts_there_and_fences_the_old_o
         )
         .await;
     assert_eq!((status, again["owner_epoch"].as_u64()), (200, Some(epoch)));
+}
+
+/// A hand-off can take minutes (the owner archives first), far longer than
+/// a host accepts a request for. The named host still adopts: its adopt
+/// carries that host's renewal as it stands once the hand-off is done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_move_whose_hand_off_outlasts_the_request_window_still_adopts_on_the_named_host() {
+    let fleet = Fleet::start().await;
+    let a = fleet.host("host-a.example").await;
+    let sandbox = fleet.create(json!({})).await;
+    let b = fleet.host("host-b.example").await;
+    // Five renewals are a second here; the hand-off takes about ten.
+    b.refuse_older_than(5);
+    a.behave(|envelope| match envelope.request {
+        Request::HandOff { .. } => Act::After(Duration::from_secs(2)),
+        _ => Act::Ordinary,
+    });
+    let (status, moved) = fleet
+        .post(
+            &format!("/v1/sandboxes/{sandbox}/move"),
+            json!({ "to": "host-b.example" }),
+        )
+        .await;
+    assert_eq!(status, 200, "{moved}");
+    assert_eq!(moved["host"], "host-b.example", "{moved}");
+    let epoch = moved["owner_epoch"].as_u64().unwrap();
+    assert_eq!(b.holds(id(&sandbox)), Some(epoch));
+    assert_eq!(a.holds(id(&sandbox)), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
