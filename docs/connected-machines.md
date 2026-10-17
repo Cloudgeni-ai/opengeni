@@ -697,6 +697,27 @@ move adopted commands to `stopping`, after which the global reconciler issues
 affects future operations only. A connection blip detaches the stream without
 killing the command; replay or exact-instance reconciliation collects its
 terminal result after reconnect.
+
+The runner pushes an `OperationCompleted` event after exit and pipe drain,
+independently of the output consumer and its credit. API ingestion uses the
+authenticated control-workspace/enrollment/connection subject and operation ID
+to claim the original adopted command, even after its session changes routes.
+The collector durably captures retained output through the verified exit frontier
+before settlement, so a terminal read cannot race ahead of the final output.
+Duplicate events cannot steal an active collector's claim. The runner republishes
+unacknowledged terminal records on connection establishment and at its existing
+heartbeat cadence over the independent bulk connection, healing a full send queue
+or reconnect without waiting for reaper backoff. A delivery-only acknowledgement
+stops these notifications after the server durably owns reconciliation; it never
+releases retained output. Only the first notification bypasses polling backoff.
+Failed collections reuse reconciliation's exponential backoff, and pending
+duplicates coalesce per operation. Older agents and lost connections remain covered by
+reconciliation. Terminal publication
+does not discard retained output; release remains separately retryable after custody.
+Completion collectors have independent ingestion capacity, so even a saturated
+collection queue cannot delay machine heartbeats. A collector yields to reconciliation
+before its existing claim lease expires; this never cancels or time-limits the command.
+
 The session shell capability also preserves an explicit `exec_command.shell`
 selection: Opengeni sends that shell as direct argv, with the requested login or
 non-login semantics, instead of silently substituting the machine service's

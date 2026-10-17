@@ -51,8 +51,10 @@ import {
   observeSessionBackgroundCommandCompletion,
   recordConnectedCommandOutputConsumption,
 } from "@opengeni/db/session-background-commands";
-import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
-import type { OpStreamOutputFrame } from "@opengeni/runtime/sandbox";
+import {
+  appendSessionCommandOutput,
+  createConnectedCommandOutputCapture,
+} from "@opengeni/db/session-command-output";
 import type { EventBus } from "@opengeni/events";
 import { publishDurableSessionEvents } from "./session-event-fanout";
 import {
@@ -725,19 +727,15 @@ export function captureConnectedCommandOutput(
   ids: { accountId: string; workspaceId: string; sessionId: string },
   bus?: EventBus,
 ) {
-  return async (commandId: string, frames: OpStreamOutputFrame[]) => {
-    for (const frame of frames) {
-      const events = await appendSessionCommandOutput(db, {
-        ...ids,
-        commandId,
-        chunkId: `op-frame:${frame.sequence}`,
-        stream: frame.stream,
-        chunk: frame.chunk,
-      });
-      if (events.length && bus)
-        await bus.publish(ids.workspaceId, ids.sessionId, events).catch(() => undefined);
-    }
-  };
+  return createConnectedCommandOutputCapture(
+    db,
+    ids,
+    bus
+      ? async (events) => {
+          await bus.publish(ids.workspaceId, ids.sessionId, events);
+        }
+      : undefined,
+  );
 }
 
 function captureRetainedProcessOutputForTurn(
