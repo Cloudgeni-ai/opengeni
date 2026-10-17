@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, setSystemTime, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { OpenGeniClient } from "@opengeni/sdk";
 import {
   SITE_GATEWAY_BODY_SHA256_HEADER,
   SITE_GATEWAY_CALLBACK_PATH,
@@ -2284,8 +2285,34 @@ test("Site budgets hold across rotated visitors and addresses; requests are capp
   ])
     expect({ key, present: key in got.json }).toEqual({ key, present: false });
   const listed = await f.gateway(site.host, "GET", "/sessions", own);
-  expect(listed.json).toMatchObject({ pinned: [], nextCursor: null });
+  expect(listed.json).toMatchObject({
+    pinned: [],
+    nextCursor: null,
+    originSiteId: site.id,
+    filtersApplied: true,
+  });
   expect(Object.keys(listed.json.sessions[0]).sort()).toEqual(Object.keys(got.json).sort());
+  const sdk = new OpenGeniClient({
+    baseUrl: "https://site-sdk.example",
+    fetch: async (input) => {
+      const url = new URL(
+        typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      );
+      const result = await f.gateway(
+        site.host,
+        "GET",
+        `${url.pathname.slice(url.pathname.indexOf("/sessions"))}${url.search}`,
+        own,
+      );
+      return Response.json(result.json, { status: result.status, headers: result.headers });
+    },
+  });
+  const page = await sdk.listSessionPage("site-host", { originSiteId: "current" });
+  expect(page.originSiteId).toBe(site.id);
+  expect(page.sessions.map((entry) => entry.id)).toEqual([first.json.id]);
+  await expect(
+    sdk.listSessionPage("site-host", { originSiteId: "current", search: "not implemented" }),
+  ).rejects.toThrow("does not support filtered session lists");
   const events = await f.gateway(
     site.host,
     "GET",

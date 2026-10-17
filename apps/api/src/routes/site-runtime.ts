@@ -1359,7 +1359,18 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         if (response.ok) listed.push(siteSessionProjection(await response.json()));
         else await response.body?.cancel();
       }
-      return context.json({ pinned: [], sessions: listed, nextCursor: null });
+      return context.json({
+        pinned: [],
+        sessions: listed,
+        nextCursor: null,
+        originSiteId: host.site.id,
+        // The runtime lists this Site's current viewer only. Confirm that
+        // filter for the native SDK, not unsupported workspace search/filter
+        // semantics that this bounded projection does not implement.
+        filtersApplied: [...url.searchParams.keys()].every((key) =>
+          ["originSiteId", "view", "projection", "limit"].includes(key),
+        ),
+      });
     }
 
     if (id === "sessions.create") {
