@@ -1,8 +1,6 @@
 //! Periodic sampling of host memory and disk, and of VM processor use and
 //! traffic.
 
-use std::time::Duration;
-
 use compute_core::{DiskSpace, Input, Level, SandboxId, Step};
 use compute_engine::{Engine, PageSize};
 use tokio::time::Instant;
@@ -10,7 +8,7 @@ use tokio::time::Instant;
 use crate::step::Reading;
 use crate::store::Store;
 
-use super::{ActivityWindow, BusyRule, HostAgent};
+use super::{BusyRule, HostAgent};
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn sample(&mut self) {
@@ -72,28 +70,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.refill();
     }
 
-    /// Finds running sandboxes whose VMs used enough processor time, or
-    /// moved enough data, over the last window. A window starts afresh
-    /// whenever the sandbox is not simply running, and whenever a step
-    /// starts for it ([`HostAgent::start_step`]), so the work of waking,
-    /// pausing or saving never counts, even when a whole pause and resume
-    /// falls between two readings. A checkpoint holds the VM while its
-    /// guest runs, and sends what it reads from its resume on: those
-    /// readings stand in for the agent's own, timed when they were taken.
-    /// Each signal counts only when it was read
-    /// at both ends of the window, so one that cannot be read leaves the
-    /// other to decide alone. A sandbox none of whose watched signals could
-    /// be read counts as busy at once, whatever its window: putting a
-    /// working guest to sleep costs far more than keeping an idle one awake
-    /// a little longer. How many such sandboxes there are goes into the
+    /// Finds running sandboxes whose guests count as busy by `rule` (see
+    /// [`super::usage`]): the agent reads each VM that simply runs, and a
+    /// checkpoint lends what it reads of the VM it holds. How many
+    /// sandboxes count as busy because nothing could be read goes into the
     /// host's status.
     pub(super) fn sample_busy(&mut self, rule: BusyRule) -> Vec<SandboxId> {
         let now = Instant::now();
-        let watching = rule.watches_cpu() || rule.watches_io();
         let mut busy = Vec::new();
         for (id, slot) in &mut self.slots {
             let view = self.core.sandbox(*id);
-            let reading = match (&slot.vm, view) {
+            let own = match (&slot.vm, view) {
                 (Some(live), Some(view))
                     if view.state.level == Level::Running && view.step.is_none() =>
                 {
@@ -108,72 +95,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                             .watches_io()
                             .then(|| self.engine.io_bytes(&live.vm).ok())
                             .flatten(),
+                        last_before_pause: false,
                     })
                 }
-                (None, Some(view)) if view.runs() && view.step == Some(Step::Checkpoint) => {
-                    slot.lent
+                (None, Some(view)) if view.runs() && view.step == Some(Step::Checkpoint) => None,
+                _ => {
+                    slot.usage.stopped();
+                    continue;
                 }
-                _ => None,
             };
-            let Some(reading) = reading else {
-                slot.activity = None;
-                continue;
-            };
-            let cpu = reading.cpu.filter(|_| rule.watches_cpu());
-            let io = reading.io.filter(|_| rule.watches_io());
-            let mut fresh = ActivityWindow {
-                incarnation: reading.incarnation,
-                started: reading.at,
-                cpu,
-                io,
-                unseen: false,
-            };
-            if watching && cpu.is_none() && io.is_none() {
-                // Nothing to judge by, now or at the end of any window: a
-                // pause delay shorter than the window would otherwise let
-                // a working guest fall asleep first.
-                fresh.unseen = true;
+            if slot.usage.sample(own, rule) {
                 busy.push(*id);
-                slot.activity = Some(fresh);
-                continue;
-            }
-            match slot.activity {
-                // A window that began unreadable has nothing to compare
-                // against; one starts now.
-                Some(window)
-                    if window.incarnation == reading.incarnation
-                        && (window.cpu.is_some() || window.io.is_some()) =>
-                {
-                    let elapsed = reading.at.duration_since(window.started);
-                    if elapsed >= rule.window {
-                        let used = window
-                            .cpu
-                            .zip(cpu)
-                            .map(|(before, after)| after.saturating_sub(before));
-                        let moved = window
-                            .io
-                            .zip(io)
-                            .map(|(before, after)| after.saturating_sub(before));
-                        fresh.unseen = used.is_none() && moved.is_none() && watching;
-                        if fresh.unseen
-                            || rule.is_busy(
-                                used.unwrap_or(Duration::ZERO),
-                                moved.unwrap_or(0),
-                                elapsed,
-                            )
-                        {
-                            busy.push(*id);
-                        }
-                        slot.activity = Some(fresh);
-                    }
-                }
-                _ => slot.activity = Some(fresh),
             }
         }
         let unseen = self
             .slots
             .values()
-            .filter(|slot| slot.activity.is_some_and(|window| window.unseen))
+            .filter(|slot| slot.usage.unseen())
             .count();
         if unseen > self.unseen_activity {
             tracing::warn!(

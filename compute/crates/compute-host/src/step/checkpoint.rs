@@ -18,9 +18,12 @@
 //! only its `backed_up_ms` moves, to when the bundle was captured, once
 //! the store holds it. Protection starts there, not when the step began.
 //!
-//! From the resume on, the step sends readings of the VM's activity to the
-//! agent (see [`Meter`]): the guest's use while the image is made and
-//! uploaded counts, and the capture's own work does not.
+//! Whenever the guest runs, the step sends readings of the VM's activity
+//! to the agent (see [`Meter`]): while it waits for a lazily woken VM to
+//! settle, which can take as long as the hydration, and from the resume
+//! on, while the image is made and uploaded. Its last reading before the
+//! pause is marked as such and ends the guest's window, so the guest's use
+//! counts and the capture's own work does not.
 
 use std::convert::Infallible;
 use std::path::PathBuf;
@@ -43,9 +46,9 @@ use crate::store::{JailedFile, SavedFiles, SavedImage, Store};
 
 const OP: &str = "checkpoint";
 
-/// How long a checkpoint goes on resuming the VM it paused while the VMM
-/// answers that nothing changed: past that the VM is beyond control.
-const RESUME_FOR: Duration = Duration::from_secs(30);
+/// How long a checkpoint's resume may go on failing before it is reported
+/// as an error, not only a warning. It goes on trying past that.
+const RESUME_SLOW_AFTER: Duration = Duration::from_secs(30);
 
 /// The first wait between those tries; each doubles it, up to a second.
 const RESUME_AGAIN_AFTER: Duration = Duration::from_millis(10);
@@ -64,9 +67,16 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// Copies the running VM to object storage while it goes on running;
     /// see the module's documentation.
     pub(super) async fn checkpoint(&mut self, mut live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        let (meter, engine) = (self.meter.take(), Arc::clone(&self.engine));
         // A lazily woken VM's image must be whole, and its pager hold all of
-        // it, before a diff can be merged over it.
-        match self.settled(&live, OP).await {
+        // it, before a diff can be merged over it. The guest runs meanwhile.
+        let settled = tokio::select! {
+            settled = self.settled(&live, OP) => settled,
+            never = report_activity(&*engine, &live.vm, live.incarnation, meter.as_ref()) => {
+                match never {}
+            }
+        };
+        match settled {
             None => return (Outcome::Cancelled, After::Kept(live)),
             Some(Err(error)) => {
                 live.memory.base = Base::Unknown;
@@ -90,6 +100,10 @@ impl<E: Engine, S: Store> Job<E, S> {
         {
             return (failure(&EngineError::io(OP, error)), After::Kept(live));
         }
+        // The guest's window ends here: the capture's work is not its own.
+        if let Some(meter) = &meter {
+            (meter.send)(Reading::of(&*engine, &live.vm, live.incarnation).before_pause());
+        }
         // From asking for the pause until the resume is done: at most the
         // time the guest stood still.
         let paused = std::time::Instant::now();
@@ -98,14 +112,14 @@ impl<E: Engine, S: Store> Job<E, S> {
         }
         let captured = self.capture(&mut live, disk.clone()).await;
         // The VM runs again whatever the capture came to.
-        let resumed = self.resume_paused(&live.vm, RESUME_FOR).await;
+        let resumed = self.resume_paused(&live.vm).await;
         notes::paused(paused.elapsed());
         notes::phase("resume");
         let outcome = match (captured, resumed) {
             (_, Err(error)) => {
-                // Paused against the core's belief that it runs, and beyond
-                // control: the VM ends, and the sandbox goes back to what it
-                // has saved.
+                // The VM ended while paused, or the VMM failed in a way
+                // that may have changed it: the VM ends, and the sandbox
+                // goes back to what it has saved.
                 tracing::error!(id = %self.id, %error, "a checkpoint could not resume the VM");
                 notes::error(&error);
                 Outcome::Failed(Failure::MemoryLost)
@@ -124,8 +138,8 @@ impl<E: Engine, S: Store> Job<E, S> {
             (Ok(captured), Ok(())) => {
                 // The guest runs from here: what its VM does counts as its
                 // use, while the image is made and uploaded.
-                let (meter, engine) = (self.meter.take(), Arc::clone(&self.engine));
-                let metering = report_activity(&*engine, &live.vm, live.incarnation, meter);
+                let metering =
+                    report_activity(&*engine, &live.vm, live.incarnation, meter.as_ref());
                 let base = &mut live.memory.base;
                 let work = async {
                     match self.make_image(base, captured.image).await {
@@ -156,28 +170,42 @@ impl<E: Engine, S: Store> Job<E, S> {
         (outcome, After::Kept(live))
     }
 
-    /// Resumes the VM a checkpoint paused, trying again for up to `within`
-    /// while the VMM answers that nothing changed, cancelled or not: the
-    /// sandbox is in use, and the core believes it runs. Fails at once on
-    /// a failure that may have changed something.
-    pub(super) async fn resume_paused(
-        &self,
-        vm: &E::Vm,
-        within: Duration,
-    ) -> Result<(), EngineError> {
-        let deadline = Instant::now() + within;
+    /// Resumes the VM a checkpoint paused, cancelled or not: the sandbox is
+    /// in use, and the core believes it runs. While the VMM answers that
+    /// nothing changed it tries again for as long as the VM lives, since
+    /// giving up would end a VM that may yet run; an agent that stops
+    /// meanwhile leaves it paused, and its successor adopts it as paused.
+    /// Fails at once on a failure that may have changed something, and as
+    /// [`ErrorKind::MemoryLost`] once the VM has ended.
+    pub(super) async fn resume_paused(&self, vm: &E::Vm) -> Result<(), EngineError> {
+        let ended = || EngineError::new(ErrorKind::MemoryLost, OP, "the VM ended while paused");
+        let exited = self.engine.exited(vm);
+        tokio::pin!(exited);
+        let begin = Instant::now();
         let mut wait = RESUME_AGAIN_AFTER;
+        let (mut tries, mut slow) = (0_u64, false);
         loop {
-            match self.engine.resume(vm).await {
-                Err(error)
-                    if error.kind == ErrorKind::Transient && Instant::now() + wait < deadline =>
-                {
-                    tracing::warn!(id = %self.id, %error, "a checkpoint's resume failed; trying again");
-                    tokio::time::sleep(wait).await;
-                    wait = (wait * 2).min(Duration::from_secs(1));
-                }
-                resumed => return resumed,
+            let error = tokio::select! {
+                biased;
+                () = &mut exited => return Err(ended()),
+                resumed = self.engine.resume(vm) => match resumed {
+                    Err(error) if error.kind == ErrorKind::Transient => error,
+                    resumed => return resumed,
+                },
+            };
+            tries += 1;
+            if tries == 1 {
+                tracing::warn!(id = %self.id, %error, "a checkpoint's resume failed; trying again");
+            } else if !slow && begin.elapsed() >= RESUME_SLOW_AFTER {
+                slow = true;
+                tracing::error!(id = %self.id, %error, tries, "a checkpoint's paused VM still does not resume; trying on");
             }
+            tokio::select! {
+                biased;
+                () = &mut exited => return Err(ended()),
+                () = tokio::time::sleep(wait) => {}
+            }
+            wait = (wait * 2).min(Duration::from_secs(1));
         }
     }
 
@@ -265,7 +293,7 @@ async fn report_activity<E: Engine>(
     engine: &E,
     vm: &E::Vm,
     incarnation: u64,
-    meter: Option<Meter>,
+    meter: Option<&Meter>,
 ) -> Infallible {
     let Some(meter) = meter else {
         return std::future::pending().await;

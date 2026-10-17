@@ -316,16 +316,20 @@ impl Fleet {
     }
 
     /// Runs `script` in sandbox `id`'s shell, waking it, and returns its
-    /// output. Retries while the service cannot reach the sandbox yet.
+    /// output. Retries while the service cannot reach the sandbox yet; one
+    /// deadline covers every try, each from its connect to its last byte,
+    /// so a service that accepts and never answers fails the test too.
     pub async fn exec(&self, id: &str, script: &str) -> String {
-        let started = Instant::now();
+        let deadline = tokio::time::Instant::now() + EXEC_WITHIN;
         loop {
-            match self.try_exec(id, script).await {
-                Ok(output) => return output,
-                Err(error) => {
-                    assert!(started.elapsed() < EXEC_WITHIN, "{id}: {error}");
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+            match tokio::time::timeout_at(deadline, self.try_exec(id, script)).await {
+                Ok(Ok(output)) => return output,
+                Ok(Err(error)) => {
+                    let again = tokio::time::Instant::now() + Duration::from_millis(500);
+                    assert!(again < deadline, "{id}: {error}");
+                    tokio::time::sleep_until(again).await;
                 }
+                Err(elapsed) => panic!("{id}: no answer within {EXEC_WITHIN:?}: {elapsed}"),
             }
         }
     }

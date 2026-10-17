@@ -28,6 +28,8 @@ struct Counting {
     refuses: AtomicBool,
     /// How its next resumes fail, one each, before they succeed again.
     resume_failures: std::sync::Mutex<std::collections::VecDeque<ErrorKind>>,
+    /// Whether its VM has ended: [`Engine::exited`] resolves once it has.
+    ended: tokio::sync::watch::Sender<bool>,
 }
 
 impl Counting {
@@ -131,7 +133,11 @@ impl Engine for Counting {
     }
 
     fn exited(&self, (): &()) -> impl Future<Output = ()> + Send + 'static {
-        std::future::pending()
+        let mut ended = self.ended.subscribe();
+        async move {
+            // The fake outlives every test's VM, so the sender stays.
+            let _ = ended.wait_for(|ended| *ended).await;
+        }
     }
 }
 
@@ -737,8 +743,9 @@ async fn a_vm_whose_disk_cannot_be_vouched_for_is_kept_unsaved() {
 }
 
 /// A checkpoint resumes the VM it paused through failures that changed
-/// nothing, even once cancelled, since its sandbox is in use; one that may
-/// have changed something, or failures past the deadline, end the tries.
+/// nothing, even once cancelled, since its sandbox is in use, for as long
+/// as the VM lives; a failure that may have changed something, or the VM
+/// ending, ends the tries.
 #[tokio::test]
 async fn a_checkpoint_resumes_its_paused_vm_through_transient_failures() {
     let sandbox = Sandbox::new().await;
@@ -750,10 +757,9 @@ async fn a_checkpoint_resumes_its_paused_vm_through_transient_failures() {
         failures.clear();
         failures.extend(kinds);
     };
-    let within = Duration::from_secs(30);
 
     fail(&[ErrorKind::Transient; 3]);
-    job.resume_paused(&(), within).await.unwrap();
+    job.resume_paused(&()).await.unwrap();
     assert_eq!(Counting::count(&sandbox.engine.resumes), 4);
 
     fail(&[
@@ -761,24 +767,31 @@ async fn a_checkpoint_resumes_its_paused_vm_through_transient_failures() {
         ErrorKind::MemoryLost,
         ErrorKind::Transient,
     ]);
-    let error = job.resume_paused(&(), within).await.unwrap_err();
+    let error = job.resume_paused(&()).await.unwrap_err();
     assert_eq!(error.kind, ErrorKind::MemoryLost);
     assert_eq!(Counting::count(&sandbox.engine.resumes), 6);
 
-    fail(&[ErrorKind::Transient; 100]);
-    let begin = std::time::Instant::now();
-    let error = job
-        .resume_paused(&(), Duration::from_millis(100))
-        .await
-        .unwrap_err();
-    assert_eq!(error.kind, ErrorKind::Transient);
-    assert!(
-        begin.elapsed() < Duration::from_secs(1),
-        "{:?}",
-        begin.elapsed()
-    );
+    // A VMM that goes on answering that nothing changed is tried for as
+    // long as the VM lives, well past the point where that is an error,
+    // about once a second once the waits have grown.
+    tokio::time::pause();
+    fail(&[ErrorKind::Transient; 1_000]);
+    let begin = tokio::time::Instant::now();
+    let ends = async {
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        sandbox.engine.ended.send_replace(true);
+    };
+    let (resumed, ()) = tokio::join!(job.resume_paused(&()), ends);
+    // Once the VM ends, its memory is gone.
+    assert_eq!(resumed.unwrap_err().kind, ErrorKind::MemoryLost);
+    assert!(begin.elapsed() >= Duration::from_secs(120));
     let tries = Counting::count(&sandbox.engine.resumes) - 6;
-    assert!((2..10).contains(&tries), "{tries} tries");
+    assert!((115..135).contains(&tries), "{tries} tries");
+
+    // An ended VM is not asked to resume at all.
+    let error = job.resume_paused(&()).await.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::MemoryLost);
+    assert_eq!(Counting::count(&sandbox.engine.resumes), tries + 6);
 }
 
 fn written(jail: &Path) -> SnapshotFiles {

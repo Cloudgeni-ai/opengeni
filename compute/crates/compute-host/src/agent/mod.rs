@@ -50,6 +50,7 @@ mod recover;
 mod requests;
 mod sample;
 mod steps;
+mod usage;
 mod warm;
 
 /// Takes the host's lock at `path` for state root `root`; see
@@ -637,22 +638,6 @@ struct Running {
     before: Option<State>,
 }
 
-/// The start of one VM's current activity window. Each reading is kept only
-/// when the rule wants it and it worked, so one signal failing leaves the
-/// other to judge alone.
-#[derive(Clone, Copy, Debug)]
-struct ActivityWindow {
-    incarnation: u64,
-    started: Instant,
-    /// Processor time so far.
-    cpu: Option<Duration>,
-    /// Traffic so far.
-    io: Option<u64>,
-    /// Whether nothing the rule watches could be read over the window
-    /// before this one, so the sandbox counted as busy unseen.
-    unseen: bool,
-}
-
 #[derive(Debug)]
 struct Slot<V> {
     paths: Arc<Paths>,
@@ -675,11 +660,8 @@ struct Slot<V> {
     waiters: Vec<Waiter>,
     /// A step the core started that waits for a dead VM's teardown.
     deferred: Option<Step>,
-    /// Processor use and traffic measured so far, while the VM runs.
-    activity: Option<ActivityWindow>,
-    /// The latest reading of its VM's activity from a step that holds the
-    /// VM while its guest runs; see [`crate::step::Meter`].
-    lent: Option<Reading>,
+    /// Processor use and traffic measured so far, while its guest runs.
+    usage: usage::Usage,
     /// The incarnation of the running VM and its memory statistics when
     /// last sampled running; see [`HostAgent::check_uncompressed`].
     stats: Option<(u64, MemoryStats)>,
@@ -1209,8 +1191,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 waiters: Vec::new(),
                 hand_off: false,
                 deferred: None,
-                activity: None,
-                lent: None,
+                usage: usage::Usage::default(),
                 stats: None,
                 reported: None,
                 summarized: Instant::now(),

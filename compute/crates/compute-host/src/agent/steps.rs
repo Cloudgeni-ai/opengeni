@@ -22,7 +22,7 @@ use crate::pool::{Loaning, Template};
 use crate::protocol::Id;
 use crate::restore_notice::ask_commands;
 use crate::state::{Change, Disk, Fence, Record, Records};
-use crate::step::{After, Job, Live, LiveMemory, Meter, Report};
+use crate::step::{After, Job, Live, LiveMemory, Meter, Reading, Report};
 use crate::store::{Owned, Store};
 
 use super::holds::Closing;
@@ -65,8 +65,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             Event::Unthrottled { id, op } => self.input(Input::Unthrottled { sandbox: id.0, op }),
             Event::Reading { id, reading } => {
-                if let Some(slot) = self.slots.get_mut(&id.0) {
-                    slot.lent = Some(reading);
+                // The last reading before a checkpoint's capture is judged
+                // at once: the capture must not hide a busy guest.
+                if let Some(slot) = self.slots.get_mut(&id.0)
+                    && slot.usage.lend(reading, self.busy)
+                {
+                    self.input(Input::Busy { sandbox: id.0 });
                 }
             }
             Event::Exited { id, incarnation } => self.exited(id, incarnation),
@@ -316,9 +320,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return;
         };
         // What the VM does from here is the step's work, not the guest's,
-        // until a checkpoint lets the guest run again and reads it.
-        slot.activity = None;
-        slot.lent = None;
+        // unless it is a checkpoint, whose guest runs on while it reads it.
+        slot.usage.step_started(step == Step::Checkpoint);
         slot.op = Some(Running {
             op,
             step,
@@ -533,7 +536,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         outcome: Outcome,
         after: After<E::Vm>,
         mut report: Report,
-        busy: bool,
+        mut busy: bool,
     ) {
         let fresh = match after {
             After::New(vm, memory) => Some(self.own(id, vm, memory)),
@@ -596,6 +599,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
                 Some(live) => {
                     debug_assert_ne!(outcome, Outcome::Failed(Failure::MemoryLost));
+                    // A checkpoint's guest ran on: what it did since the
+                    // resume counts before the core picks the next step,
+                    // however short that was.
+                    if let Some(rule) = self.busy
+                        && finished_step
+                            .as_ref()
+                            .is_some_and(|running: &Running| running.step == Step::Checkpoint)
+                    {
+                        let reading = Reading::of(&*self.engine, &live.vm, live.incarnation);
+                        busy |= slot.usage.judge_now(&reading, rule);
+                    }
                     slot.incarnation = Some(live.incarnation);
                     slot.vm = Some(live);
                 }

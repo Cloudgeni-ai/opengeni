@@ -386,15 +386,21 @@ seconds, were gathered on one host by moves, and after 35 seconds that host
 was ended at once (no shutdown, nothing saved). Each came back on another
 host from its last checkpoint, its beater counting on from there:
 
-| Sandbox | Back after the kill | Work lost |
+| Sandbox | Back after the kill | Work lost (beats ÷ 20 a second) |
 | --- | --- | --- |
 | 1 | 69 s | 9.8 s |
 | 2 | 76 s | 17.0 s |
 | 3 | 85 s | 20.0 s |
 
-What each lost is what it did since its newest checkpoint reached the
-store, at most the period plus the upload times of its last two
-checkpoints (ADR 18); the test allows a period plus 5 seconds. The host was
+What each lost is what it did since the capture of its newest checkpoint
+in the store; the test allows a period plus 5 seconds. The period is when
+checkpoints are due, not a bound on that loss (ADR 18): the recovery point
+is the age of the newest published capture, which each sandbox's status
+reports. "Work lost" here counts the beats lost and divides by the
+beater's nominal 20 a second. Its shell loop beats a little slower than
+that, so the real time lost was somewhat longer; the test now also times
+the loss from when the witness received the old host's beats, and checks
+the larger of the two. The host was
 powered off from inside (`sysrq o`), and GCP went on reporting its instance
 as stopping for a while: the service's first fence once the lease had run
 out, an instance reset, was refused (`RESOURCE_NOT_READY`), and the next,
@@ -408,8 +414,11 @@ once, as the table above shows.
 37 in all, two more than the 3 starting hosts' 73,216 MiB of free memory
 holds. The service asked for a host when spare memory fell below 30 per
 cent of the group's; the new host was live 325 seconds in, after 31
-creates, when 13,824 MiB were still free, and all 37 creates succeeded, on 4
-hosts.
+creates, and all 37 creates succeeded, on 4 hosts. Until then spare memory
+never read below 13,824 MiB, room for six more sandboxes, so the group grew
+before it ran out. That run read spare memory only after each create; the
+test now reads it every second while the creates go on, and fails if it
+falls below one more sandbox's before the new host is live.
 
 **What the runs found.** Two defects showed only on fresh cloud hosts and
 are fixed with regression tests:

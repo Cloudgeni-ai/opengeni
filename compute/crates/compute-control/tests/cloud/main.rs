@@ -30,6 +30,7 @@
 
 mod support;
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use support::{Beat, Fleet, address, token};
@@ -221,14 +222,27 @@ async fn a_dead_hosts_sandboxes_come_back_elsewhere_losing_only_what_changed_sin
             "{id} counted on past what the host had: {last} -> {}",
             next.n
         );
+        // The work lost, timed by when the witness received the old host's
+        // beats: from the last one the new host also counted to the last
+        // the old host sent. The beater's shell loop beats a little slower
+        // than its nominal rate, so the count alone undercounts the time.
+        let rolled_back = || from(&beats, victim_ip).filter(|beat| beat.n + 1 >= next.n);
+        let missed = match (
+            rolled_back().map(|beat| beat.at).min(),
+            rolled_back().map(|beat| beat.at).max(),
+        ) {
+            (Some(first), Some(newest)) => newest.duration_since(first),
+            _ => Duration::ZERO,
+        };
         #[allow(clippy::cast_precision_loss)]
-        let missed = Duration::from_secs_f64((last + 1 - next.n) as f64 / RATE);
+        let nominal = Duration::from_secs_f64((last + 1 - next.n) as f64 / RATE);
         assert!(
-            missed <= EVERY + Duration::from_secs(5),
-            "{id} lost {missed:?} of work, more than a checkpoint period"
+            missed.max(nominal) <= EVERY + Duration::from_secs(5),
+            "{id} lost {missed:?} of work ({nominal:?} by its count), more than a checkpoint period"
         );
         eprintln!(
-            "{id}: back on {owner} {back:?} after the kill, {missed:?} of its work lost (count {last} -> {})",
+            "{id}: back on {owner} {back:?} after the kill, {missed:?} of its work lost \
+             ({nominal:?} by its count {last} -> {})",
             next.n
         );
     }
@@ -239,8 +253,12 @@ async fn a_dead_hosts_sandboxes_come_back_elsewhere_losing_only_what_changed_sin
 
 /// Busy sandboxes created one after another, more than the starting hosts
 /// have room for, all succeed: the service grows the instance group while
-/// spare memory is still left. Each runs a beater, so it stays awake and
-/// keeps its memory; idle ones would sleep and give theirs back.
+/// spare memory is still left. Spare memory is watched every second while
+/// the creates go on, and must never fall below one more sandbox's before
+/// the new host is live: growing only once the hosts are full would pass
+/// "all creates succeed" without growing in time. Each sandbox runs a
+/// beater, so it stays awake and keeps its memory; idle ones would sleep
+/// and give theirs back.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_group_grows_before_spare_capacity_runs_out() {
     let Some(fleet) = Fleet::from_env() else {
@@ -262,26 +280,47 @@ async fn the_group_grows_before_spare_capacity_runs_out() {
         started_with.len()
     );
     let started = Instant::now();
-    let mut created = Vec::new();
-    let mut grew = None;
-    let mut least = free;
-    for made in 0..count {
-        let id = fleet
-            .create(vcpus, memory_mib, None)
-            .await
-            .unwrap_or_else(|failed| panic!("create {made} of {count} failed: {failed:?}"));
-        fleet.start_beating(&id, &token()).await;
-        created.push(id);
-        let live = fleet.live().await;
-        if grew.is_none() && live.len() > started_with.len() {
-            grew = Some((started.elapsed(), made + 1));
+    let least = AtomicU64::new(free);
+    let made_so_far = AtomicU64::new(0);
+    let finished = AtomicBool::new(false);
+    // Spare memory until the new host is live, read apart from the creates
+    // so a create that waits is watched too.
+    let watch = async {
+        let mut grew = None;
+        while !finished.load(Ordering::Relaxed) {
+            let free = fleet.free_mib().await;
+            if fleet.live().await.len() > started_with.len() {
+                grew = Some((started.elapsed(), made_so_far.load(Ordering::Relaxed)));
+                break;
+            }
+            least.fetch_min(free, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        if grew.is_none() {
-            least = least.min(fleet.free_mib().await);
+        grew
+    };
+    let creating = async {
+        let mut created = Vec::new();
+        for made in 0..count {
+            let id = fleet
+                .create(vcpus, memory_mib, None)
+                .await
+                .unwrap_or_else(|failed| panic!("create {made} of {count} failed: {failed:?}"));
+            fleet.start_beating(&id, &token()).await;
+            created.push(id);
+            made_so_far.store(made + 1, Ordering::Relaxed);
+            tokio::time::sleep(every).await;
         }
-        tokio::time::sleep(every).await;
-    }
-    let (after, made) = grew.expect("the group never grew");
+        finished.store(true, Ordering::Relaxed);
+        created
+    };
+    let (grew, created) = tokio::join!(watch, creating);
+    let (after, made) = grew.expect("the group never grew while the creates went on");
+    let least = least.into_inner();
+    assert!(
+        least >= u64::from(memory_mib),
+        "spare memory fell to {least} MiB, under one more sandbox's {memory_mib} MiB, \
+         before the new host was live"
+    );
     eprintln!(
         "a new host was live {after:?} in, after {made} creates, with {least} MiB still free at least; \
          all {count} creates succeeded on {} hosts",

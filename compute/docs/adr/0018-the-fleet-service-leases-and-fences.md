@@ -252,12 +252,17 @@ can be built and tested.
   copy is in the store, not when it was captured, and the period counts
   running time from the later of when its newest copy got there and its
   last wake, so a sandbox that sleeps and is archived anyway takes none.
-  The period is therefore a target, not a bound: losing its host costs a
-  sandbox in use at most the period plus the upload times of its last
-  two checkpoints (the newest copy's capture may be one upload older than
-  its publication, and the next is published one upload after it is
-  taken). One with no copy yet gets its first within a minute of
-  running. One created and never run is archived at once, so it survives
+  The period is a scheduling target, not a bound on what a lost host
+  costs. A checkpoint is due once the sandbox has run for the period, and
+  one with no copy yet is due after a minute of running; it protects only
+  once it is published, and on its way it may wait for disk admission and
+  the step limit, for a lazily woken VM to settle, and for its capture,
+  merge and upload, and fail and be tried again later. None of those
+  waits has a bound. Losing its host costs a sandbox everything since
+  the capture of its newest published copy, so that capture's age is its
+  recovery point: the sandbox's status reports it as `backed_up_ms`, and
+  that, not the period, is what to watch and alert on.
+  One created and never run is archived at once, so it survives
   its host from then on; a wake meanwhile comes first and cancels that
   archive, and the sandbox is then protected only once its first
   checkpoint is in the store.

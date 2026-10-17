@@ -926,17 +926,19 @@ impl Host {
         }
         // What deleting local files freed shows only in a later reading.
         self.disk_fresh &= !matches!(flight.step, Step::Evict | Step::Forget);
-        // What a failed save or fetch wrote may stay, such as a failed
-        // copy kept in quarantine, while a retry books its writes afresh:
-        // it stays booked until a reading shows it.
-        if matches!(outcome, Outcome::Failed(_)) {
-            let wrote = match flight.step {
-                Step::Save | Step::Checkpoint => slot.save_space(),
-                Step::Fetch => DiskSpace::save(slot.size.fetch),
-                _ => DiskSpace::default(),
-            };
-            self.disk_spent = self.disk_spent.add(wrote);
-        }
+        // What a step wrote stays booked until a reading shows it. A
+        // failed save or fetch may leave what it wrote, such as a failed
+        // copy kept in quarantine, while a retry books its writes afresh.
+        // A checkpoint leaves its sandbox running, booking its next save as
+        // before, so what it wrote, its new memory image, is booked here
+        // whatever it came to: one cancelled while it uploads has written
+        // it too.
+        let wrote = match (flight.step, outcome) {
+            (Step::Checkpoint, _) | (Step::Save, Outcome::Failed(_)) => slot.save_space(),
+            (Step::Fetch, Outcome::Failed(_)) => DiskSpace::save(slot.size.fetch),
+            _ => DiskSpace::default(),
+        };
+        self.disk_spent = self.disk_spent.add(wrote);
         let before = slot.state;
         let backoff = if flight.step.wakes() {
             &self.policy.wake_backoff
