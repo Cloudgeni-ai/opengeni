@@ -1,8 +1,9 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`35e376ed509cb8eee49624279256a81da83df8cc`, including its non-invalidating preview
-capture and cursor support. `@trycua/cua-driver` 0.34.0 supplies the private-worker
+`e35fae2d24e53a4a88bd80dbac481878d78c4c81`: upstream `cua-driver-rs-v0.36.0`
+(`6d6c734c`) plus two Linux X11 coordinate fixes, including its non-invalidating
+preview capture and cursor support. `@trycua/cua-driver` 0.36.0 supplies the private-worker
 transport; the source-built executable performs desktop operations. Windows uses
 the published SDK's native runtime in process. CUA is the default on macOS, on
 Windows and for explicitly selected isolated Linux desktops. Linux host desktops
@@ -106,9 +107,13 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Upstream source](https://github.com/trycua/cua/tree/35e376ed509cb8eee49624279256a81da83df8cc/libs/cua-driver).
-The pin includes the focused X11 coordinate correction proposed in
-[CUA #4890](https://github.com/trycua/cua/pull/4890), on upstream `48cc491`.
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/e35fae2d24e53a4a88bd80dbac481878d78c4c81/libs/cua-driver).
+The two commits on top of upstream carry the X11 coordinate corrections proposed in
+[CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.36: only
+Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
+decorations rebuild element bounds from Window coordinates. Plain 0.36 still
+misplaces GTK4 controls after a window move, which the isolated Linux end-to-end
+tests catch.
 
 ## Native agent interface
 
@@ -117,8 +122,8 @@ The release catalog comes from the bundled worker's `listToolsJson()` via
 workflow tools; lifecycle, escalation, configuration, updates and browser tools
 stay outside this interface. macOS, Linux and Windows each have a generated
 catalog, produced by running the script on that platform after every CUA pin
-change; macOS defines the admitted set, and Windows omits `run_actions`, which
-its driver does not implement. Agent schemas preserve the union of the native
+change; macOS defines the admitted set, and a platform whose driver lacks a tool
+omits it. Agent schemas preserve the union of the native
 variants, and the selected runtime checks its exact platform schema.
 Each admitted tool's input/output schemas are checked against the running worker.
 
@@ -129,7 +134,9 @@ Agents use `interaction__cua_<upstream_name>` or Code Mode
 are required, including for read-like tools that can write screenshot files.
 No tool-enable UI or separate permission system is added.
 
-`run_actions` retains upstream batching and optional final observation;
+`run_steps` retains upstream batching, per-step waits and checks, and optional
+final observation diff; `run_script` runs upstream's sandboxed script engine, whose
+only API is the same CUA session, with no filesystem, network or process access;
 `get_window_state` retains compact Markdown, query limits and diff reads.
 MCP content, structured results and images survive the journal. Responses larger
 than 12 MiB carry an explicit bounded projection, retained operation status and

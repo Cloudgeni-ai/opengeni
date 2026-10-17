@@ -52,14 +52,12 @@ test("Windows native admission uses the Windows release schema", async () => {
   await expect(new CuaNativeTools(runtime, "owned", "macos").validate(click)).rejects.toThrow(
     "schema differs",
   );
-  // The Windows driver has no batch tool, so it is never admitted there.
-  await expect(
-    new CuaNativeTools(runtime, "owned", "windows").validate({
-      operationId: randomUUID(),
-      tool: "run_actions",
-      arguments: { steps: [] },
-    }),
-  ).rejects.toThrow("unavailable");
+  // CUA 0.36 gives Windows the batch tool too; it validates against its own schema.
+  await new CuaNativeTools(runtime, "owned", "windows").validate({
+    operationId: randomUUID(),
+    tool: "run_steps",
+    arguments: { steps: [{ tool: "press_key", args: { key: "return" } }] },
+  });
 });
 const command = (): ComputerNativeCommand => ({
   protocolVersion: 1,
@@ -68,10 +66,10 @@ const command = (): ComputerNativeCommand => ({
   controllerGeneration: "controller-fixture",
   targetId: null,
   actor: { kind: "agent", subjectId: "agent:fixture" },
-  tool: "run_actions",
+  tool: "run_steps",
   arguments: {
     steps: [{ tool: "click", args: { pid: 42, window_id: 1, element_token: "s1:0" } }],
-    observe: true,
+    observe: {},
   },
 });
 
@@ -153,7 +151,7 @@ test("native calls retain raw partial results and share one journal with legacy 
   expect(oversized.observation!.result.content).toHaveLength(3);
   expect(calls).toHaveLength(1);
   expect(calls[0]).toMatchObject({
-    args: { session: "private-controller-session", observe: true },
+    args: { session: "private-controller-session", observe: {} },
   });
   const restored = new ComputerInteractionController({
     ...options,
@@ -200,7 +198,7 @@ test("native admission refuses session escape, unselected host tools and schema 
   ])
     await expect(new CuaNativeTools(runtime, "owned").validate(request)).rejects.toThrow();
   tools = tools.map((tool) =>
-    tool.name === "run_actions" ? { ...tool, inputSchema: { type: "object" } } : tool,
+    tool.name === "run_steps" ? { ...tool, inputSchema: { type: "object" } } : tool,
   );
   await expect(new CuaNativeTools(runtime, "owned").validate(command())).rejects.toThrow(
     "schema differs",
