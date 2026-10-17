@@ -241,7 +241,7 @@ index 8d02fff468300317388d5f4dc2b9d9bdafd72abe..f7eb5c982b6585b4e5a7c70b42d50d21
  }
  export {};
 diff --git a/dist/sandbox/e2b/sandbox.js b/dist/sandbox/e2b/sandbox.js
-index a383d0a56ab09709dfdf20984a483940a34060b7..12f0edf1c6a041a5bba5cb9d8841aa60f6f039a1 100644
+index a383d0a56ab09709dfdf20984a483940a34060b7..f75e8773d3d797e0e0d6521c9f62b56afa424e4c 100644
 --- a/dist/sandbox/e2b/sandbox.js
 +++ b/dist/sandbox/e2b/sandbox.js
 @@ -43,6 +43,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
@@ -260,7 +260,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..12f0edf1c6a041a5bba5cb9d8841aa60
          this.state.pauseOnExitSupported = canPauseE2BSandbox(args.sandbox);
      }
      supportsPty() {
-@@ -84,7 +86,19 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+@@ -84,8 +86,23 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
              });
          }
          const start = Date.now();
@@ -268,20 +268,61 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..12f0edf1c6a041a5bba5cb9d8841aa60
 +        // E2B's PTY always runs an interactive login bash, which echoes what
 +        // is typed into it and goes on running once a typed command ends.
 +        // The command is staged in a file instead, and the one short line
-+        // typed replaces that bash with a plain shell running the file, so
-+        // the PTY ends when the command does, interrupted or not. That shell
-+        // runs the command as a job of its own, as an interactive shell
-+        // would: Ctrl-C reaches only the command, the shell exits with its
-+        // status, and processes it leaves in the background are not hung up
-+        // when the PTY ends.
-+        const scriptPath = `/tmp/agents-pty-${globalThis.crypto.randomUUID()}.sh`;
++        // typed replaces that bash with a plain shell running the file. That
++        // shell runs the command as a job of its own, as an interactive shell
++        // would: Ctrl-C reaches only the command, and processes it leaves in
++        // the background are not hung up when the shell exits. The shell
++        // marks where the command's output starts and reports its status
++        // (130 when Ctrl-C ended it) in the PTY, since a process left in the
++        // background keeps the PTY, and with it E2B's process, open.
++        const nonce = globalThis.crypto.randomUUID().replaceAll('-', '');
++        const scriptPath = `/tmp/agents-pty-${nonce}.sh`;
 +        const script = (0, shared_1.shellQuote)(scriptPath);
-+        await this.sandbox.files.write(scriptPath, `rm -f -- ${script}\nset -m\n${(0, shared_1.shellCommandForPty)(args)}\n`);
++        await this.sandbox.files.write(scriptPath, stagedPtyScript(script, nonce, (0, shared_1.shellCommandForPty)(args)));
 +        const command = `exec /bin/sh ${script}`;
          const entry = (0, shared_1.createPtyProcessEntry)({ tty: true });
++        const output = stagedPtyOutput(entry, nonce);
          const timeoutMs = typeof this.state.commandTimeoutMs === 'number'
              ? this.state.commandTimeoutMs
-@@ -179,21 +193,53 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+             : typeof this.state.timeout === 'number'
+@@ -98,7 +115,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+             cwd: this.resolveWorkdir(args.workdir),
+             envs: this.state.environment,
+             timeoutMs,
+-            onData: (data) => (0, shared_1.appendPtyOutput)(entry, data),
++            onData: (data) => output.write(data),
+         });
+         entry.terminate = async () => {
+             if (handle.kill) {
+@@ -122,9 +139,24 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+                 requestTimeoutMs: this.state.requestTimeoutMs,
+             });
+         };
+-        (0, shared_1.watchPtyProcess)(entry, async () => (handle.wait ? await handle.wait() : undefined), (result, error) => exitCodeFromE2BResult(result) ??
+-            exitCodeFromE2BResult(error) ??
+-            exitCodeFromE2BResult(handle));
++        // The command is over at its reported status. Its process left in
++        // the background may still hold the PTY, so stop following the PTY
++        // then, without killing anything. A PTY that ends with no status
++        // reported (its shell was killed) ends the command with E2B's status.
++        const reported = output.exited.then((exitCode) => {
++            void Promise.resolve()
++                .then(() => handle.disconnect?.())
++                .catch(() => { });
++            return exitCode;
++        });
++        const ended = (async () => (handle.wait ? await handle.wait() : undefined))().then((result) => {
++            output.end();
++            return exitCodeFromE2BResult(result) ?? exitCodeFromE2BResult(handle);
++        }, (error) => {
++            output.end();
++            return (exitCodeFromE2BResult(error) ?? exitCodeFromE2BResult(handle) ?? 1);
++        });
++        (0, shared_1.watchPtyProcess)(entry, async () => await Promise.race([reported, ended]), (exitCode) => exitCode);
+         try {
+             await entry.sendInput(`${command}\n`);
+         }
+@@ -179,21 +211,53 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
      }
      async prepareWorkspaceRoot() {
          const root = this.state.manifest.root;
@@ -345,7 +386,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..12f0edf1c6a041a5bba5cb9d8841aa60
      }
      async persistWorkspace() {
          if (this.state.workspacePersistence === 'snapshot') {
-@@ -251,7 +297,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
+@@ -251,7 +315,7 @@ class E2BSandboxSession extends shared_1.RemoteSandboxSessionBase {
          return this.state.manifest.ephemeralPersistencePaths().size > 0;
      }
      async replaceSandboxFromSnapshot(snapshotId) {
@@ -354,7 +395,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..12f0edf1c6a041a5bba5cb9d8841aa60
          const previousSandbox = this.sandbox;
          let sandbox;
          try {
-@@ -542,11 +588,12 @@ class E2BSandboxClient {
+@@ -542,11 +606,12 @@ class E2BSandboxClient {
              };
              validateOptions(resolvedOptions);
              (0, shared_1.assertSandboxManifestMetadataSupported)('E2BSandboxClient', manifest, shared_1.SANDBOX_MANIFEST_METADATA_SUPPORT);
@@ -368,7 +409,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..12f0edf1c6a041a5bba5cb9d8841aa60
                  concurrencyLimits: createArgs.concurrencyLimits,
                  archiveLimits: createArgs.archiveLimits,
                  state: {
-@@ -616,9 +663,9 @@ class E2BSandboxClient {
+@@ -616,9 +681,9 @@ class E2BSandboxClient {
              pauseOnExitSupported: (0, shared_1.readOptionalBoolean)(state, 'pauseOnExitSupported') ?? false,
          };
      }
@@ -380,7 +421,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..12f0edf1c6a041a5bba5cb9d8841aa60
          const connect = Sandbox.connect ?? Sandbox.resume;
          if (connect) {
              try {
-@@ -626,6 +673,7 @@ class E2BSandboxClient {
+@@ -626,6 +691,7 @@ class E2BSandboxClient {
                  return new E2BSandboxSession({
                      state,
                      sandbox,
@@ -388,7 +429,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..12f0edf1c6a041a5bba5cb9d8841aa60
                      archiveLimits: this.options.archiveLimits,
                  });
              }
-@@ -635,9 +683,15 @@ class E2BSandboxClient {
+@@ -635,9 +701,15 @@ class E2BSandboxClient {
                      provider: 'e2b',
                      details: { sandboxId: state.sandboxId },
                  });
@@ -404,7 +445,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..12f0edf1c6a041a5bba5cb9d8841aa60
          const manifest = state.manifest;
          const session = await this.create((0, shared_1.manifestWithMaterializedEnvironmentReferences)(manifest, state.environment), {
              ...stateToCreateOptions(state),
-@@ -646,6 +700,9 @@ class E2BSandboxClient {
+@@ -646,6 +718,9 @@ class E2BSandboxClient {
          session.state.manifest = manifest;
          return session;
      }
@@ -414,7 +455,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..12f0edf1c6a041a5bba5cb9d8841aa60
  }
  exports.E2BSandboxClient = E2BSandboxClient;
  function validateOptions(options) {
-@@ -714,7 +771,7 @@ function e2bReconnectOptions(state) {
+@@ -714,7 +789,7 @@ function e2bReconnectOptions(state) {
  function canPauseE2BSandbox(sandbox) {
      return typeof sandbox.pause === 'function';
  }
@@ -423,7 +464,7 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..12f0edf1c6a041a5bba5cb9d8841aa60
      const moduleName = sandboxType === 'e2b_code_interpreter' ? '@e2b/code-interpreter' : 'e2b';
      try {
          const Sandbox = sandboxType === 'e2b_code_interpreter'
-@@ -723,25 +780,44 @@ async function loadE2BSandboxClass(sandboxType) {
+@@ -723,25 +798,44 @@ async function loadE2BSandboxClass(sandboxType) {
          if (!Sandbox) {
              throw new Error(`Missing Sandbox export from ${moduleName}.`);
          }
@@ -473,8 +514,117 @@ index a383d0a56ab09709dfdf20984a483940a34060b7..12f0edf1c6a041a5bba5cb9d8841aa60
  async function createSandboxInstance(Sandbox, options, environment) {
      const createOptions = {};
      if (typeof options.timeout === 'number') {
+@@ -826,6 +920,108 @@ function commandResultFromRecord(value) {
+         stderr,
+     };
+ }
++/**
++ * The file a tty command runs from. It deletes itself, marks the start of
++ * the command's output, runs the command as a job of its own, and reports
++ * the command's status, or 130 for a Ctrl-C the shell itself receives.
++ * Each mark is an OSC sequence a terminal does not show, with a nonce no
++ * output carries by chance.
++ */
++function stagedPtyScript(script, nonce, command) {
++    const mark = (what) => `printf '\\033]agents-pty;${nonce};${what}\\007'`;
++    return [
++        `rm -f -- ${script}`,
++        mark('start'),
++        'set -m',
++        `trap "${mark('exit;130')}; exit 130" INT`,
++        command,
++        'status=$?',
++        `${mark('exit;%d')} "$status"`,
++        'exit "$status"',
++        '',
++    ].join('\n');
++}
++/**
++ * Reads a staged tty command's PTY: drops what E2B's bash shows before the
++ * start mark (its prompt and the typed line), passes the command's output
++ * on, and settles `exited` with the status in the exit mark, after which
++ * nothing more is passed on. A PTY that ends before the start mark passes
++ * all it showed on, so a failure to start the command is seen.
++ */
++function stagedPtyOutput(entry, nonce) {
++    const start = `\u001b]agents-pty;${nonce};start\u0007`;
++    const exit = `\u001b]agents-pty;${nonce};exit;`;
++    // Bash's prompt and typed line are short; keep at most this much of it.
++    const preambleMax = 65_536;
++    const decoder = new TextDecoder();
++    let pending = '';
++    let state = 'preamble';
++    let settle = () => { };
++    const exited = new Promise((resolve) => (settle = resolve));
++    const emit = (text) => {
++        if (text.length > 0) {
++            (0, shared_1.appendPtyOutput)(entry, text);
++        }
++    };
++    // How many characters at the end of `text` may begin `mark`.
++    const partial = (text, mark) => {
++        for (let length = Math.min(text.length, mark.length - 1); length > 0; length -= 1) {
++            if (mark.startsWith(text.slice(text.length - length))) {
++                return length;
++            }
++        }
++        return 0;
++    };
++    const scan = () => {
++        if (state === 'preamble') {
++            const at = pending.indexOf(start);
++            if (at < 0) {
++                if (pending.length > preambleMax) {
++                    pending = pending.slice(pending.length - preambleMax);
++                }
++                return;
++            }
++            pending = pending.slice(at + start.length);
++            state = 'running';
++        }
++        const at = pending.indexOf(exit);
++        if (at < 0) {
++            const kept = partial(pending, exit);
++            emit(pending.slice(0, pending.length - kept));
++            pending = pending.slice(pending.length - kept);
++            return;
++        }
++        emit(pending.slice(0, at));
++        pending = pending.slice(at);
++        const end = pending.indexOf('\u0007', exit.length);
++        if (end < 0) {
++            return;
++        }
++        const exitCode = Number.parseInt(pending.slice(exit.length, end), 10);
++        pending = '';
++        state = 'done';
++        settle(Number.isFinite(exitCode) ? exitCode : null);
++    };
++    return {
++        exited,
++        write(data) {
++            if (state === 'done') {
++                return;
++            }
++            pending += typeof data === 'string' ? data : decoder.decode(data, { stream: true });
++            scan();
++        },
++        end() {
++            if (state === 'done') {
++                return;
++            }
++            pending += decoder.decode();
++            emit(pending);
++            pending = '';
++            state = 'done';
++        },
++    };
++}
+ function exitCodeFromE2BResult(value) {
+     if (!(0, shared_1.isRecord)(value)) {
+         return undefined;
 diff --git a/dist/sandbox/e2b/sandbox.mjs b/dist/sandbox/e2b/sandbox.mjs
-index 6453de1e106fddcfe030beabf0056122dbe18566..888a213f35413e4cdd5e2dee8bd34a1b34f38fa1 100644
+index 6453de1e106fddcfe030beabf0056122dbe18566..d4335b26d3ec177aa94002cc6bb62e4f6a4c4d2c 100644
 --- a/dist/sandbox/e2b/sandbox.mjs
 +++ b/dist/sandbox/e2b/sandbox.mjs
 @@ -7,6 +7,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
@@ -493,7 +643,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..888a213f35413e4cdd5e2dee8bd34a1b
          this.state.pauseOnExitSupported = canPauseE2BSandbox(args.sandbox);
      }
      supportsPty() {
-@@ -48,7 +50,19 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+@@ -48,8 +50,23 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
              });
          }
          const start = Date.now();
@@ -501,20 +651,61 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..888a213f35413e4cdd5e2dee8bd34a1b
 +        // E2B's PTY always runs an interactive login bash, which echoes what
 +        // is typed into it and goes on running once a typed command ends.
 +        // The command is staged in a file instead, and the one short line
-+        // typed replaces that bash with a plain shell running the file, so
-+        // the PTY ends when the command does, interrupted or not. That shell
-+        // runs the command as a job of its own, as an interactive shell
-+        // would: Ctrl-C reaches only the command, the shell exits with its
-+        // status, and processes it leaves in the background are not hung up
-+        // when the PTY ends.
-+        const scriptPath = `/tmp/agents-pty-${globalThis.crypto.randomUUID()}.sh`;
++        // typed replaces that bash with a plain shell running the file. That
++        // shell runs the command as a job of its own, as an interactive shell
++        // would: Ctrl-C reaches only the command, and processes it leaves in
++        // the background are not hung up when the shell exits. The shell
++        // marks where the command's output starts and reports its status
++        // (130 when Ctrl-C ended it) in the PTY, since a process left in the
++        // background keeps the PTY, and with it E2B's process, open.
++        const nonce = globalThis.crypto.randomUUID().replaceAll('-', '');
++        const scriptPath = `/tmp/agents-pty-${nonce}.sh`;
 +        const script = shellQuote(scriptPath);
-+        await this.sandbox.files.write(scriptPath, `rm -f -- ${script}\nset -m\n${shellCommandForPty(args)}\n`);
++        await this.sandbox.files.write(scriptPath, stagedPtyScript(script, nonce, shellCommandForPty(args)));
 +        const command = `exec /bin/sh ${script}`;
          const entry = createPtyProcessEntry({ tty: true });
++        const output = stagedPtyOutput(entry, nonce);
          const timeoutMs = typeof this.state.commandTimeoutMs === 'number'
              ? this.state.commandTimeoutMs
-@@ -143,21 +157,53 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+             : typeof this.state.timeout === 'number'
+@@ -62,7 +79,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+             cwd: this.resolveWorkdir(args.workdir),
+             envs: this.state.environment,
+             timeoutMs,
+-            onData: (data) => appendPtyOutput(entry, data),
++            onData: (data) => output.write(data),
+         });
+         entry.terminate = async () => {
+             if (handle.kill) {
+@@ -86,9 +103,24 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+                 requestTimeoutMs: this.state.requestTimeoutMs,
+             });
+         };
+-        watchPtyProcess(entry, async () => (handle.wait ? await handle.wait() : undefined), (result, error) => exitCodeFromE2BResult(result) ??
+-            exitCodeFromE2BResult(error) ??
+-            exitCodeFromE2BResult(handle));
++        // The command is over at its reported status. Its process left in
++        // the background may still hold the PTY, so stop following the PTY
++        // then, without killing anything. A PTY that ends with no status
++        // reported (its shell was killed) ends the command with E2B's status.
++        const reported = output.exited.then((exitCode) => {
++            void Promise.resolve()
++                .then(() => handle.disconnect?.())
++                .catch(() => { });
++            return exitCode;
++        });
++        const ended = (async () => (handle.wait ? await handle.wait() : undefined))().then((result) => {
++            output.end();
++            return exitCodeFromE2BResult(result) ?? exitCodeFromE2BResult(handle);
++        }, (error) => {
++            output.end();
++            return (exitCodeFromE2BResult(error) ?? exitCodeFromE2BResult(handle) ?? 1);
++        });
++        watchPtyProcess(entry, async () => await Promise.race([reported, ended]), (exitCode) => exitCode);
+         try {
+             await entry.sendInput(`${command}\n`);
+         }
+@@ -143,21 +175,53 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
      }
      async prepareWorkspaceRoot() {
          const root = this.state.manifest.root;
@@ -578,7 +769,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..888a213f35413e4cdd5e2dee8bd34a1b
      }
      async persistWorkspace() {
          if (this.state.workspacePersistence === 'snapshot') {
-@@ -215,7 +261,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
+@@ -215,7 +279,7 @@ export class E2BSandboxSession extends RemoteSandboxSessionBase {
          return this.state.manifest.ephemeralPersistencePaths().size > 0;
      }
      async replaceSandboxFromSnapshot(snapshotId) {
@@ -587,7 +778,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..888a213f35413e4cdd5e2dee8bd34a1b
          const previousSandbox = this.sandbox;
          let sandbox;
          try {
-@@ -505,11 +551,12 @@ export class E2BSandboxClient {
+@@ -505,11 +569,12 @@ export class E2BSandboxClient {
              };
              validateOptions(resolvedOptions);
              assertSandboxManifestMetadataSupported('E2BSandboxClient', manifest, SANDBOX_MANIFEST_METADATA_SUPPORT);
@@ -601,7 +792,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..888a213f35413e4cdd5e2dee8bd34a1b
                  concurrencyLimits: createArgs.concurrencyLimits,
                  archiveLimits: createArgs.archiveLimits,
                  state: {
-@@ -579,9 +626,9 @@ export class E2BSandboxClient {
+@@ -579,9 +644,9 @@ export class E2BSandboxClient {
              pauseOnExitSupported: readOptionalBoolean(state, 'pauseOnExitSupported') ?? false,
          };
      }
@@ -613,7 +804,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..888a213f35413e4cdd5e2dee8bd34a1b
          const connect = Sandbox.connect ?? Sandbox.resume;
          if (connect) {
              try {
-@@ -589,6 +636,7 @@ export class E2BSandboxClient {
+@@ -589,6 +654,7 @@ export class E2BSandboxClient {
                  return new E2BSandboxSession({
                      state,
                      sandbox,
@@ -621,7 +812,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..888a213f35413e4cdd5e2dee8bd34a1b
                      archiveLimits: this.options.archiveLimits,
                  });
              }
-@@ -598,9 +646,15 @@ export class E2BSandboxClient {
+@@ -598,9 +664,15 @@ export class E2BSandboxClient {
                      provider: 'e2b',
                      details: { sandboxId: state.sandboxId },
                  });
@@ -637,7 +828,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..888a213f35413e4cdd5e2dee8bd34a1b
          const manifest = state.manifest;
          const session = await this.create(manifestWithMaterializedEnvironmentReferences(manifest, state.environment), {
              ...stateToCreateOptions(state),
-@@ -609,6 +663,9 @@ export class E2BSandboxClient {
+@@ -609,6 +681,9 @@ export class E2BSandboxClient {
          session.state.manifest = manifest;
          return session;
      }
@@ -647,7 +838,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..888a213f35413e4cdd5e2dee8bd34a1b
  }
  function validateOptions(options) {
      readE2BWorkspacePersistence(options.workspacePersistence);
-@@ -676,7 +733,7 @@ function e2bReconnectOptions(state) {
+@@ -676,7 +751,7 @@ function e2bReconnectOptions(state) {
  function canPauseE2BSandbox(sandbox) {
      return typeof sandbox.pause === 'function';
  }
@@ -656,7 +847,7 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..888a213f35413e4cdd5e2dee8bd34a1b
      const moduleName = sandboxType === 'e2b_code_interpreter' ? '@e2b/code-interpreter' : 'e2b';
      try {
          const Sandbox = sandboxType === 'e2b_code_interpreter'
-@@ -685,25 +742,44 @@ async function loadE2BSandboxClass(sandboxType) {
+@@ -685,25 +760,44 @@ async function loadE2BSandboxClass(sandboxType) {
          if (!Sandbox) {
              throw new Error(`Missing Sandbox export from ${moduleName}.`);
          }
@@ -706,6 +897,115 @@ index 6453de1e106fddcfe030beabf0056122dbe18566..888a213f35413e4cdd5e2dee8bd34a1b
  async function createSandboxInstance(Sandbox, options, environment) {
      const createOptions = {};
      if (typeof options.timeout === 'number') {
+@@ -788,6 +882,108 @@ function commandResultFromRecord(value) {
+         stderr,
+     };
+ }
++/**
++ * The file a tty command runs from. It deletes itself, marks the start of
++ * the command's output, runs the command as a job of its own, and reports
++ * the command's status, or 130 for a Ctrl-C the shell itself receives.
++ * Each mark is an OSC sequence a terminal does not show, with a nonce no
++ * output carries by chance.
++ */
++function stagedPtyScript(script, nonce, command) {
++    const mark = (what) => `printf '\\033]agents-pty;${nonce};${what}\\007'`;
++    return [
++        `rm -f -- ${script}`,
++        mark('start'),
++        'set -m',
++        `trap "${mark('exit;130')}; exit 130" INT`,
++        command,
++        'status=$?',
++        `${mark('exit;%d')} "$status"`,
++        'exit "$status"',
++        '',
++    ].join('\n');
++}
++/**
++ * Reads a staged tty command's PTY: drops what E2B's bash shows before the
++ * start mark (its prompt and the typed line), passes the command's output
++ * on, and settles `exited` with the status in the exit mark, after which
++ * nothing more is passed on. A PTY that ends before the start mark passes
++ * all it showed on, so a failure to start the command is seen.
++ */
++function stagedPtyOutput(entry, nonce) {
++    const start = `\u001b]agents-pty;${nonce};start\u0007`;
++    const exit = `\u001b]agents-pty;${nonce};exit;`;
++    // Bash's prompt and typed line are short; keep at most this much of it.
++    const preambleMax = 65_536;
++    const decoder = new TextDecoder();
++    let pending = '';
++    let state = 'preamble';
++    let settle = () => { };
++    const exited = new Promise((resolve) => (settle = resolve));
++    const emit = (text) => {
++        if (text.length > 0) {
++            appendPtyOutput(entry, text);
++        }
++    };
++    // How many characters at the end of `text` may begin `mark`.
++    const partial = (text, mark) => {
++        for (let length = Math.min(text.length, mark.length - 1); length > 0; length -= 1) {
++            if (mark.startsWith(text.slice(text.length - length))) {
++                return length;
++            }
++        }
++        return 0;
++    };
++    const scan = () => {
++        if (state === 'preamble') {
++            const at = pending.indexOf(start);
++            if (at < 0) {
++                if (pending.length > preambleMax) {
++                    pending = pending.slice(pending.length - preambleMax);
++                }
++                return;
++            }
++            pending = pending.slice(at + start.length);
++            state = 'running';
++        }
++        const at = pending.indexOf(exit);
++        if (at < 0) {
++            const kept = partial(pending, exit);
++            emit(pending.slice(0, pending.length - kept));
++            pending = pending.slice(pending.length - kept);
++            return;
++        }
++        emit(pending.slice(0, at));
++        pending = pending.slice(at);
++        const end = pending.indexOf('\u0007', exit.length);
++        if (end < 0) {
++            return;
++        }
++        const exitCode = Number.parseInt(pending.slice(exit.length, end), 10);
++        pending = '';
++        state = 'done';
++        settle(Number.isFinite(exitCode) ? exitCode : null);
++    };
++    return {
++        exited,
++        write(data) {
++            if (state === 'done') {
++                return;
++            }
++            pending += typeof data === 'string' ? data : decoder.decode(data, { stream: true });
++            scan();
++        },
++        end() {
++            if (state === 'done') {
++                return;
++            }
++            pending += decoder.decode();
++            emit(pending);
++            pending = '';
++            state = 'done';
++        },
++    };
++}
+ function exitCodeFromE2BResult(value) {
+     if (!isRecord(value)) {
+         return undefined;
 diff --git a/dist/sandbox/modal/sandbox.d.ts b/dist/sandbox/modal/sandbox.d.ts
 index 0d118abe05044cca502e167daaee6eb10b46793b..d36d1c9a82d3b38f5bd0cfdd6865aec68e27b00c 100644
 --- a/dist/sandbox/modal/sandbox.d.ts
