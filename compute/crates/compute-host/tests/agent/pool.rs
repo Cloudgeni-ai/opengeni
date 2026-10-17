@@ -653,17 +653,7 @@ async fn template_builds_respect_the_boot_limit() {
     let lab =
         Lab::start_configured(Lab::root(), Arc::default(), delays, policy, warm(shapes)).await;
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut most = 0;
     loop {
-        let builds = lab
-            .world
-            .live
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|name| name.starts_with("template-"))
-            .count();
-        most = most.max(builds);
         let status = lab.status().await;
         if status.templates.len() == 3
             && status
@@ -680,8 +670,15 @@ async fn template_builds_respect_the_boot_limit() {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     // One booting and one being saved; without the limits all three boot
-    // at once.
-    assert!(most <= 2, "{most} build VMs at once");
+    // at once. A build waiting for its turn to be saved is neither, so up
+    // to three may be alive at a time.
+    let booting = lab.world.max_booting.load(Ordering::SeqCst);
+    let saving = lab.world.max_snapshotting.load(Ordering::SeqCst);
+    assert_eq!(
+        (booting, saving),
+        (1, 1),
+        "build VMs booting and saved at once"
+    );
     lab.assert_clean();
 }
 

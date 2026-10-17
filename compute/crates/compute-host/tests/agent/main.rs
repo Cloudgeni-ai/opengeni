@@ -114,6 +114,10 @@ struct World {
     notices_out_of_order: AtomicUsize,
     restoring: AtomicUsize,
     max_restoring: AtomicUsize,
+    booting: AtomicUsize,
+    max_booting: AtomicUsize,
+    snapshotting: AtomicUsize,
+    max_snapshotting: AtomicUsize,
     compress_cancelled: AtomicUsize,
     /// Snapshots taken: full, then diff.
     snapshots: [AtomicUsize; 2],
@@ -497,7 +501,10 @@ impl Engine for Fake {
         while self.world.hold_boots.load(Ordering::SeqCst) {
             sleep(Duration::from_millis(5)).await;
         }
+        let now = self.world.booting.fetch_add(1, Ordering::SeqCst) + 1;
+        self.world.max_booting.fetch_max(now, Ordering::SeqCst);
         sleep(self.delays.boot).await;
+        self.world.booting.fetch_sub(1, Ordering::SeqCst);
         self.world.boots.fetch_add(1, Ordering::Relaxed);
         if self.world.stuck_boots.load(Ordering::SeqCst) {
             return Err(EngineError::new(
@@ -619,7 +626,10 @@ impl Engine for Fake {
     ) -> Result<(), EngineError> {
         Self::alive(vm, "snapshot")?;
         self.expect_paused(vm, "snapshot", true);
+        let now = self.world.snapshotting.fetch_add(1, Ordering::SeqCst) + 1;
+        self.world.max_snapshotting.fetch_max(now, Ordering::SeqCst);
         sleep(self.delays.snapshot).await;
+        self.world.snapshotting.fetch_sub(1, Ordering::SeqCst);
         Self::alive(vm, "snapshot")?;
         let memory = vm.memory.lock().unwrap().clone();
         std::fs::write(&files.state, "state").unwrap();
