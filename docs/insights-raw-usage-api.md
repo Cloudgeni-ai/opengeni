@@ -1,7 +1,7 @@
-# Insights unified DB API checkpoint
+# Insights unified DB API
 
-Migration `0604_insights_raw_usage_api.sql` is rolling and independent of the
-unfinished daily-rollup migration. It adds nullable captured class annotations
+Migration `0604_insights_raw_usage_api.sql` introduced the rolling endpoint
+checkpoint. It adds nullable captured class annotations
 and two scoped read capabilities. Released readers, authorization policies,
 permission checks, billing writes, pricing/catalog definitions and ledger rows
 are unchanged. No historical total is repriced.
@@ -63,17 +63,15 @@ visible facet metadata. Totals and ingestion watermarks retain every authorized
 source row. The prior and current windows run as separate statements in the same
 actor-scoped transaction, each retaining the 10-second statement timeout; this
 avoids spending one statement's entire allowance across both independent scans.
-It does not accelerate the raw authority functions or guarantee that larger
-periods fit within the bound.
+Migrations 0815–0818 accelerate the fact input with transactionally maintained
+hourly aggregates; the response query and its timeout stay unchanged.
 
 Captured class annotations must conserve the recorded provider estimate. NULL
 telemetry is not zero, including cache-write telemetry. This interim checkpoint
 does not perform historical allocation: eligible fixed-total allocation using
 the separately approved current-catalog snapshot remains the rollup follow-up.
 
-This is an intentionally raw-backed endpoint-first checkpoint: full-day/YTD
-scans are not yet accelerated and no staging p95 claim is made. Contract
-follow-up 3296 permits a money-only prior with zero recorded calls; the DB and
+Contract follow-up 3296 permits a money-only prior with zero recorded calls; the DB and
 routes retain that money rather than inventing calls or dropping it. A truly
 empty prior is null.
 
@@ -81,8 +79,90 @@ Focused real PostgreSQL coverage uses a NOSUPERUSER/NOBYPASSRLS migration owner
 and restricted application role, with historical facts before the migration,
 both scopes, all ranges/groupings, clipped/orphan debit conservation, strict
 privacy/authority ceilings, class snapshots, microsecond cursors, exact UTC
-midnight, grants, capability cleanup and runtime posture. Daily-rollup
-bootstrap/maintenance tests are retained in the separate rollup branch.
+midnight, grants, capability cleanup and runtime posture. The same owner/app
+fixture compares complete raw and rollup-backed responses over all supported
+ranges, groupings, filters and privacy kinds; it also covers additive maintenance,
+recorded-at maximum repair, rollback, idempotent rebuild and concurrent writers.
+
+## Hourly rollup lifecycle
+
+`opengeni_private.insights_usage_hourly_rollups` retains the exact additive
+measures captured on facts, keyed by account, workspace, UTC hour, session,
+provider, model, payer and scheduled task (`NULLS NOT DISTINCT`). Session keys
+are intentionally not foreign keys: deleted-session amounts remain billable.
+Workspace deletion cascades the rollups and the backfill queue. Neither table
+is granted to runtime roles. Maintenance routines live in the owner-only
+`opengeni_insights_internal` schema, outside old binaries' runtime-function
+inventory. No superuser or BYPASSRLS privilege is required.
+
+The four rolling migration files deliberately use separate transactions:
+
+1. **0815** installs the tables and AFTER INSERT/UPDATE/DELETE delta trigger.
+   It performs no historical scan under CREATE TRIGGER's table lock. Writers
+   take a shared transaction advisory fence per workspace/hour. The group
+   upsert serializes additive changes; removing the latest recorded fact repairs
+   its maximum from raw facts while holding the group row lock. Timing-only
+   updates whose usage projection is unchanged do no rollup write.
+2. **0816** queues historical hours from raw facts **and** provisional rollups
+   in the same snapshot. This includes an hour whose last historical fact was
+   deleted after trigger installation. Reads still use the original raw input.
+3. **0817** uses the existing batched migration runner to rebuild and commit
+   one hour at a time. Recompute requires READ COMMITTED, takes the exclusive
+   hourly fence, then obtains a fresh raw snapshot with the existing owner-only
+   fact capability. A failure leaves the batch pending; retry is idempotent.
+   Raw fact writes are never globally locked by the backfill. Writers for the
+   one hour being rebuilt wait until its short transaction commits.
+4. **0818** refuses activation with any pending hour, then replaces only the
+   fact branch of the existing input function. The credit-ledger branch, owner
+   attestation, ACLs and public signatures remain intact. Complete UTC hours
+   use rollups; ragged edges use exact raw predicates on the same statement
+   snapshot. UTC hour starts bucket identically for hourly and daily output;
+   `dataThrough` remains the maximum visible `recorded_at`, not the hour start.
+   Daily requests combine typed hourly measures into session/dimension/day
+   rows before building JSON, avoiding a second payload and sort expansion.
+   Private-session visibility keys are computed once per workspace statement.
+
+The migration's lock timeout is one second: contention fails safely instead
+of waiting behind a busy writer and creating a long insert queue. Resume the
+normal migration command after the contending transaction completes. Backfill
+duration depends on facts/hour, number of hours, storage and concurrent load;
+`scripts/bench-insights-hourly.ts` measures the exact response queries with
+4 million facts, 80 days and roughly 7,000 sessions on disposable local Postgres.
+It also prints trigger time separately from insert/index work. Rollup size is
+proportional to distinct session/model/payer/hour tuples, not just hours: very
+high-cardinality workloads compress less. Existing SQL functions and binaries
+remain compatible throughout; use a forward migration for database rollback.
+Changes to payer classification or captured-measure formulas must rebuild the
+affected historical hours before activating the corresponding reader.
+
+### Local scale evidence (2026-10-17)
+
+PostgreSQL 16, `work_mem=16MB`, JIT off, 4,000,000 facts over 80 days,
+about 7,000 sessions, 41,760 hourly rows. Each session is active for six hours;
+the fixture has no credit-ledger entries. These are individual EXPLAIN ANALYZE
+runs on a shared development machine, not production latency percentiles.
+
+| Range | Raw current window | Rollup current window | Rollup prior + current |
+| --- | ---: | ---: | ---: |
+| today | 11.155 s | 0.206 s | 0.676 s |
+| 30d | >300 s (cancelled) | 0.837 s | 1.271 s |
+| ytd | >300 s (cancelled) | 2.437 s | 2.513 s |
+
+All three final plans wrote zero temporary blocks. The raw today plan wrote
+49,104 8-KiB temporary blocks. Hourly-only JSON output still took 11.414 s for
+YTD, which is why daily typed aggregation is part of the reader, not a later
+optimization. Full backfill took 199 s for four million facts and 1,840 hours
+(about 108 ms per hour on average). At similar density, 1.8 million facts would
+take roughly 90 s; budget additional time for contention, workspace count and
+slower storage. A completed-queue replay scanned/enqueued history in 9.4 s
+without rebuilding completed hours.
+
+Two 10,000-row insert samples attributed 0.31–0.48 ms per fact to the hourly
+trigger. Latest-fact deletes/updates additionally repair the group's maximum
+by scanning its hour; they are not represented by that insert-only figure.
+Higher cardinality, large credit ledgers and unusually dense hours need their
+own measurements. Neither the statement timeout nor `work_mem` was increased
+for the final response timings.
 
 Historical staging API `2a5ab6f512a05bf28afce38ac4259dea861d3669` is also
 tested before/after this migration against the **complete** current catalog,
