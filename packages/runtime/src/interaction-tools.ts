@@ -2128,6 +2128,16 @@ async function openBrowser(
       });
       session = createdResponse.session;
       initialView = createdResponse.initialView;
+      // A browser that failed to start is not a result to act on: report why,
+      // so the caller fixes the cause instead of retrying an opaque failure.
+      const launchError = createdResponse.operation?.error;
+      if (launchError && session.lifecycle === "failed") {
+        throw new OpenGeniApiError(
+          launchError.code === "unsupported" ? 422 : 502,
+          `BrowserSession ${session.id} did not start: ${launchError.message}`,
+          { code: launchError.code, retryable: launchError.retryable },
+        );
+      }
     }
   }
   if (session.lifecycle === "suspended") {
