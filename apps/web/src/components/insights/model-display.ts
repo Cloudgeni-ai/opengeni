@@ -30,6 +30,7 @@ const PROVIDER_NAMES: Readonly<Record<string, string>> = {
   opper: "Opper",
   openai: "OpenAI API",
   "azure-openai": "Azure OpenAI",
+  "organization-azure-openai": "Azure OpenAI",
   anthropic: "Anthropic API",
   "workspace-anthropic": "Anthropic API",
   "organization-anthropic": "Anthropic API",

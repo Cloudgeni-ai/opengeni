@@ -261,6 +261,7 @@ function claudeWorkspaceConfig(
   return {
     ...meta,
     id: kind,
+    provider: kind,
     providerDomain: "api.anthropic.com",
     credentialRole: kind,
     credentialLabel: meta.title,
@@ -329,7 +330,6 @@ export type ProviderConnection = ProviderConnectionView;
 export type ProviderPresentation = Pick<
   ProviderConnectionConfig,
   | "title"
-  | "provider"
   | "summary"
   | "keyHelp"
   | "credentialLabelText"
@@ -345,10 +345,28 @@ export type ProviderPresentation = Pick<
   | "modelToastName"
   | "connectionManagerDescription"
 > & {
+  /** Azure OpenAI is connected for the organization only. */
+  provider: ProviderConnectionConfig["provider"] | "azure_openai";
   /** Where the key is billed, for the page's aside. */
   billedTo: string;
   analyticsAction?: AnalyticsAction | undefined;
+  /** A non-secret resource endpoint saved with the key (Azure OpenAI). */
+  endpointField?: ProviderEndpointField | undefined;
+  /** What a custom model is called here: "model", or "deployment" for Azure OpenAI. */
+  customModelNoun?: string | undefined;
+  /** Custom models can be added only once the key is connected (each is checked against it). */
+  customModelsAfterConnect?: string | undefined;
 };
+
+/** The endpoint input of a provider that needs one next to its key. */
+export interface ProviderEndpointField {
+  label: string;
+  ariaLabel: string;
+  placeholder: string;
+  hint: string;
+  /** Why the typed endpoint can't be used, or null when it can. */
+  validate(value: string): string | null;
+}
 
 export interface CustomModelLike {
   id: string;
@@ -398,8 +416,10 @@ export interface ProviderConnectionView {
   setModelPendingRemoval(model: CustomModelLike | null): void;
   refreshConnection(): Promise<unknown>;
   refreshCustomModels(): Promise<unknown>;
+  /** The non-secret endpoint the connected key uses, for providers that have one. */
+  endpoint?: string | undefined;
   /** Connects or replaces the key. Resolves true once it's saved; toasts on failure. */
-  saveKey(apiKey: string): Promise<boolean>;
+  saveKey(apiKey: string, options?: { endpoint?: string | undefined }): Promise<boolean>;
   /** Resolves true once no active key remains; toasts either way. */
   disconnect(): Promise<boolean>;
   addCustomModel(upstreamModelId?: string): Promise<void>;
@@ -1073,6 +1093,10 @@ export function ProviderCustomModels({
   const modelSlugHelpId = useId();
   if (readOnlyCatalog) return <ProviderCatalogModels state={state} catalog={readOnlyCatalog} />;
   const isClaude = config.provider === "anthropic" || config.provider === "claude_subscription";
+  const noun = config.customModelNoun ?? "model";
+  // Some providers check each model against the connected key, so it comes first.
+  const addAfterConnect =
+    config.customModelsAfterConnect && !state.connected ? config.customModelsAfterConnect : null;
   const readiness = state.error
     ? config.unavailableModelDescription
     : state.connected
@@ -1104,9 +1128,17 @@ export function ProviderCustomModels({
             ))}
           </SettingRowGroup>
         ) : null}
-        {state.canManageCustomModels ? (
+        {state.canManageCustomModels && addAfterConnect ? (
+          <p className="text-sm text-fg-muted">{addAfterConnect}</p>
+        ) : state.canManageCustomModels ? (
           <Disclosure
-            title={isClaude ? "Add another Claude model" : "Add a custom model"}
+            title={
+              isClaude
+                ? "Add another Claude model"
+                : noun === "model"
+                  ? "Add a custom model"
+                  : `Add a ${noun}`
+            }
             defaultOpen={!isClaude}
           >
             <div ref={state.addWorkflowRef} className="flex min-w-0 flex-col gap-1.5">
@@ -1145,7 +1177,7 @@ export function ProviderCustomModels({
                   ) : (
                     <PlusIcon aria-hidden="true" />
                   )}
-                  Add model
+                  {`Add ${noun}`}
                 </Button>
               </div>
               <p
@@ -1185,14 +1217,17 @@ export function ProviderCustomModels({
           </ErrorMessage>
         ) : null}
 
-        {state.customModelsLoaded && !state.customModelsError && state.customModels.length === 0 ? (
+        {state.customModelsLoaded &&
+        !state.customModelsError &&
+        state.customModels.length === 0 &&
+        !(state.canManageCustomModels && addAfterConnect) ? (
           <p className="text-sm text-fg-muted">{config.emptyCustomModelsDescription}</p>
         ) : null}
 
         {state.customModelsLoaded && !state.customModelsError && state.customModels.length > 0 ? (
           <SettingRowGroup
             role="list"
-            aria-label={`Custom models on ${config.title}`}
+            aria-label={`${config.customModelNoun ? config.customModelsHeading : "Custom models"} on ${config.title}`}
             className="-mb-3"
           >
             {state.customModels.map((model) => (
@@ -1256,7 +1291,7 @@ export function ProviderCustomModels({
           )
         }
         description="It disappears from new selections. Work already running and existing chats keep it."
-        confirmLabel="Remove model"
+        confirmLabel={`Remove ${noun}`}
         restoreFocusRef={state.removeFocusTargetRef}
         restoreFocusFallbackRef={state.modelInputRef}
         onConfirm={async () =>
@@ -1266,6 +1301,44 @@ export function ProviderCustomModels({
         }
       />
     </DetailSection>
+  );
+}
+
+/** The resource endpoint saved next to the key, for providers that need one. */
+function ProviderEndpointInput({
+  field,
+  value,
+  onChange,
+}: {
+  field: ProviderEndpointField;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  // Judged once the person leaves the field, not while the URL is half typed.
+  const [checked, setChecked] = useState(false);
+  const problem = value.trim() ? field.validate(value) : null;
+  return (
+    <Field
+      label={field.label}
+      hint={field.hint}
+      error={checked && problem ? problem : undefined}
+      required
+    >
+      <TextInput
+        mono
+        type="url"
+        inputMode="url"
+        value={value}
+        placeholder={field.placeholder}
+        aria-label={field.ariaLabel}
+        autoComplete="off"
+        autoCapitalize="none"
+        autoCorrect="off"
+        spellCheck={false}
+        onChange={(event) => onChange(event.target.value)}
+        onBlur={() => setChecked(true)}
+      />
+    </Field>
   );
 }
 
@@ -1280,11 +1353,14 @@ export function ReplaceKeyDialog({
 }) {
   const [key, setKey] = useState("");
   const { config } = state;
+  const [endpoint, setEndpoint] = useState(state.endpoint ?? "");
   useEffect(() => {
     if (!open) {
       setKey("");
+      setEndpoint(state.endpoint ?? "");
     }
-  }, [open]);
+  }, [open, state.endpoint]);
+  const endpointBlocked = Boolean(config.endpointField?.validate(endpoint));
   return (
     <FormDialog
       open={open}
@@ -1299,10 +1375,19 @@ export function ReplaceKeyDialog({
       description="New work uses the new credential right away. Work already running finishes on the old one."
       submitLabel={config.provider === "claude_subscription" ? "Replace token" : "Replace key"}
       pendingLabel="Saving…"
-      submitDisabled={!key.trim()}
-      onSubmit={async () => await state.saveKey(key)}
+      submitDisabled={!key.trim() || endpointBlocked}
+      onSubmit={async () =>
+        await state.saveKey(key, config.endpointField ? { endpoint: endpoint.trim() } : undefined)
+      }
       onSubmitted={() => onOpenChange(false)}
     >
+      {config.endpointField ? (
+        <ProviderEndpointInput
+          field={config.endpointField}
+          value={endpoint}
+          onChange={setEndpoint}
+        />
+      ) : null}
       <Field
         label={
           config.provider === "claude_subscription"
@@ -1481,6 +1566,11 @@ export function ProviderConnectionPage({
                     ? "Stored encrypted"
                     : "Not connected"}
             </DetailAsideItem>
+            {config.endpointField && state.connected && state.endpoint ? (
+              <DetailAsideItem label={config.endpointField.label}>
+                <span className="font-mono text-xs break-all">{state.endpoint}</span>
+              </DetailAsideItem>
+            ) : null}
             {/* Who it's for is in the header meta; the aside doesn't repeat it. */}
             <DetailAsideItem label="Billed to">{config.billedTo}</DetailAsideItem>
           </DetailAside>
@@ -1563,6 +1653,8 @@ export function ProviderConnectPage({
   const listLabel = useModelsListLabel();
   const { config } = state;
   const [key, setKey] = useState("");
+  const [endpoint, setEndpoint] = useState(state.endpoint ?? "");
+  const endpointBlocked = Boolean(config.endpointField?.validate(endpoint));
   if (config.provider === "claude_subscription")
     return (
       <ClaudeSignInPage
@@ -1586,7 +1678,9 @@ export function ProviderConnectPage({
       submitLabel={state.connected ? "Save replacement" : `Connect ${config.title}`}
       pendingLabel="Connecting…"
       submitAnalyticsAction={config.analyticsAction}
-      submitDisabled={!key.trim() || !state.canManageConnection || Boolean(blockedReason)}
+      submitDisabled={
+        !key.trim() || endpointBlocked || !state.canManageConnection || Boolean(blockedReason)
+      }
       disabledReason={
         state.canManageConnection
           ? (blockedReason ?? undefined)
@@ -1599,7 +1693,10 @@ export function ProviderConnectPage({
           : undefined)
       }
       onSubmit={async () => {
-        const saved = await state.saveKey(key);
+        const saved = await state.saveKey(
+          key,
+          config.endpointField ? { endpoint: endpoint.trim() } : undefined,
+        );
         if (saved) await afterSave?.();
         return saved;
       }}
@@ -1607,6 +1704,13 @@ export function ProviderConnectPage({
     >
       <FieldStack>
         {fields}
+        {config.endpointField ? (
+          <ProviderEndpointInput
+            field={config.endpointField}
+            value={endpoint}
+            onChange={setEndpoint}
+          />
+        ) : null}
         <Field
           label={config.credentialLabelText ?? "API key"}
           hint={`${config.keyHelp} It is stored encrypted. Connecting makes no model calls.`}

@@ -1,3 +1,4 @@
+import { AzureOpenAIEndpoint } from "@opengeni/contracts";
 import type { OrganizationModelProviderKind as ProviderKind } from "@opengeni/sdk";
 import type { ProviderPresentation } from "@/components/ai-gateway-connection";
 
@@ -111,6 +112,39 @@ export const ORGANIZATION_PROVIDER_META: Record<
     waitingModelDescription: "Waiting for an Opper key",
     unavailableModelDescription: "Connection status unavailable",
     modelToastName: "Opper model",
+    connectionManagerDescription: "",
+  },
+  azure_openai: {
+    title: "Azure OpenAI",
+    shortName: "Azure OpenAI",
+    provider: "azure_openai",
+    billedTo: "The organization's Azure OpenAI account",
+    summary:
+      "Use your Azure OpenAI deployments in shared workspaces, billed to the organization's Azure account.",
+    keyHelp: "Find it in the Azure portal under your Azure OpenAI resource, Keys and Endpoint.",
+    keyAriaLabel: "Organization Azure OpenAI API key",
+    endpointField: {
+      label: "Endpoint",
+      ariaLabel: "Azure OpenAI endpoint",
+      placeholder: "https://RESOURCE.openai.azure.com",
+      hint: "The Endpoint shown next to your key, such as https://RESOURCE.openai.azure.com.",
+      validate: (value) =>
+        AzureOpenAIEndpoint.safeParse(value).success
+          ? null
+          : "Enter the https://RESOURCE.openai.azure.com endpoint of your Azure OpenAI resource.",
+    },
+    customModelNoun: "deployment",
+    customModelsHeading: "Deployments",
+    customModelsDescription:
+      "Exact Azure deployment names shared workspaces can pick. Each one is checked against the organization's endpoint before it is saved.",
+    customModelsAfterConnect: "Deployments can be added after Azure OpenAI is connected.",
+    customModelInputAriaLabel: "Azure OpenAI deployment name",
+    customModelPlaceholder: "gpt-6.1-sol",
+    emptyCustomModelsDescription: "No deployments yet. Add one to offer it in shared workspaces.",
+    readyModelDescription: "Ready in shared workspaces",
+    waitingModelDescription: "Waiting for an Azure OpenAI key",
+    unavailableModelDescription: "Connection status unavailable",
+    modelToastName: "Azure OpenAI deployment",
     connectionManagerDescription: "",
   },
 };

@@ -127,6 +127,7 @@ import {
   accountKeyOf,
   connectStepOf,
   type GatewayId,
+  type WorkspaceGatewayId,
   type ModelsView,
 } from "@/lib/models-route";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
@@ -167,6 +168,7 @@ const ORGANIZATION_KIND: Record<GatewayId, OrganizationModelProviderKind> = {
   vercel: "vercel_gateway",
   openrouter: "openrouter",
   opper: "opper",
+  azure_openai: "azure_openai",
   anthropic: "anthropic",
   claude_subscription: "claude_subscription",
 };
@@ -214,6 +216,7 @@ export function useOrganizationModelAccounts({
     vercel: useOrganizationProviderConnection(organizationGateway("vercel")),
     openrouter: useOrganizationProviderConnection(organizationGateway("openrouter")),
     opper: useOrganizationProviderConnection(organizationGateway("opper")),
+    azure_openai: useOrganizationProviderConnection(organizationGateway("azure_openai")),
     anthropic: useOrganizationProviderConnection(organizationGateway("anthropic")),
     claude_subscription: useOrganizationProviderConnection({
       ...organizationGateway("claude_subscription", claudeEnabled),
@@ -332,7 +335,7 @@ export function WorkspaceModelsPageBody({
     canManage: canManageConnections,
     enabled: claudeEnabled,
   });
-  const workspaceGateway = (id: GatewayId, enabled = true) => ({
+  const workspaceGateway = (id: WorkspaceGatewayId, enabled = true) => ({
     client,
     config: PROVIDER_CONNECTION_CONFIGS[id],
     workspaceId,
@@ -345,6 +348,14 @@ export function WorkspaceModelsPageBody({
     vercel: useProviderConnection(workspaceGateway("vercel")),
     openrouter: useProviderConnection(workspaceGateway("openrouter")),
     opper: useProviderConnection(workspaceGateway("opper")),
+    // Azure OpenAI keys are the organization's here; a workspace's own Azure key
+    // is a direct connection (OpenAI and Azure OpenAI below). Hidden, reads nothing.
+    azure_openai: useOrganizationProviderConnection({
+      client,
+      organizationId: organizationId ?? "",
+      providerKind: "azure_openai",
+      enabled: false,
+    }),
     anthropic: useProviderConnection(workspaceGateway("anthropic")),
     claude_subscription: useProviderConnection({
       ...workspaceGateway("claude_subscription", claudeEnabled),
@@ -768,6 +779,7 @@ export function WorkspaceModelsPageBody({
         {workspacePage &&
         personal &&
         canManageConnections &&
+        provider !== "azure_openai" &&
         (GATEWAYS as readonly string[]).includes(provider) ? (
           // An organization key can't reach a Personal workspace, so a key for
           // your own chats here is connected for this workspace instead.
@@ -1081,7 +1093,7 @@ export function WorkspaceModelsPageBody({
         state={orgGateways[key.id]}
         labels={labels}
         footnote={
-          organizationAdmin && canManageConnections ? (
+          organizationAdmin && canManageConnections && key.id !== "azure_openai" ? (
             <WorkspaceKeyFootnote
               title={orgGateways[key.id].config.title}
               workspaceName={workspaceName}
@@ -1697,7 +1709,8 @@ type ConnectChoice =
   | "supergrok"
   | "vercel"
   | "openrouter"
-  | "opper";
+  | "opper"
+  | "azure_openai";
 
 /**
  * Connect account: every provider as a row (logo, name, how you pay). A row
@@ -1815,6 +1828,7 @@ export function ConnectPickerPage({
               (choice.id === "vercel" ||
                 choice.id === "openrouter" ||
                 choice.id === "opper" ||
+                choice.id === "azure_openai" ||
                 choice.id === "anthropic" ||
                 choice.id === "claude_subscription")
                 ? onOpenConnected?.(choice.id)
