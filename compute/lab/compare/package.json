@@ -1,0 +1,9 @@
+{
+  "name": "compute-compare",
+  "private": true,
+  "type": "module",
+  "description": "Comparison benchmark harness for sandbox systems; see README.md",
+  "dependencies": {
+    "e2b": "2.56.0"
+  }
+}
