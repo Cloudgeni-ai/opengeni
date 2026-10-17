@@ -793,9 +793,15 @@ async fn a_named_hold_wakes_a_sandbox_and_keeps_it_awake_until_it_lapses() {
         ttl_ms,
         priority: PriorityName::Interactive,
     };
+    // Long enough that a host busy with every other test (where a wake was
+    // seen to take 0.7 s) still wakes it well within the hold.
+    let ttl = Duration::from_secs(3);
     let started = Instant::now();
     assert_eq!(
-        lab.client.call(&hold(Some(600))).await.unwrap(),
+        lab.client
+            .call(&hold(Some(u64::try_from(ttl.as_millis()).unwrap())))
+            .await
+            .unwrap(),
         Reply::Done
     );
     // Holding wakes it: a turn starting is a good moment to boot.
@@ -803,14 +809,14 @@ async fn a_named_hold_wakes_a_sandbox_and_keeps_it_awake_until_it_lapses() {
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
     // Midway through the hold, counted from when it was taken: a slow boot
     // must not use up the time the hold still has.
-    sleep_until(started + Duration::from_millis(300)).await;
+    sleep_until(started + ttl / 2).await;
     let status = lab.status().await;
     assert_eq!(Lab::sandbox(&status, sandbox).level, LevelName::Running);
     assert_eq!(Lab::sandbox(&status, sandbox).holds, 1);
     // Nobody refreshed it: it lapses, and the idle clock runs from there.
     lab.wait_level(sandbox, LevelName::Paused).await;
     assert!(
-        started.elapsed() >= Duration::from_millis(800),
+        started.elapsed() >= ttl + Duration::from_millis(200),
         "{:?}",
         started.elapsed()
     );
