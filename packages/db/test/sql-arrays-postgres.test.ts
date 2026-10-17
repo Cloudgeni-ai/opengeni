@@ -67,6 +67,29 @@ test("anyOf matches text values containing array literal punctuation exactly", a
   expect(await statementsFor("label")).toBe(1);
 });
 
+test("anyOf binds one value as a scalar whose generic plan is reused", async () => {
+  const id = rows[0]!.id;
+  for (let run = 0; run < 8; run++) {
+    const found = await pool.db
+      .select({ id: probe.id })
+      .from(probe)
+      .where(anyOf(probe.id, [id]));
+    expect(found).toEqual([{ id }]);
+  }
+  const [scalar] = await rawRows<{ generic: number; custom: number }>(
+    pool.db,
+    sql`select generic_plans::int as generic, custom_plans::int as custom
+      from pg_prepared_statements
+      where statement like ${'%"sql_array_probe"."id" = $1::uuid%'}`,
+  );
+  // Five custom plans, then the cached generic plan for every later run
+  // (the first test already ran this statement once).
+  expect(scalar!.custom).toBe(5);
+  expect(scalar!.generic).toBeGreaterThanOrEqual(3);
+  // The one-value list did not add an array statement.
+  expect(await statementsFor("id")).toBe(1);
+});
+
 test("anyOf refuses column types it does not cast", () => {
   const other = pgTable("sql_array_other", { count: text("count").array() });
   expect(() => anyOf(other.count, ["1"])).toThrow();
