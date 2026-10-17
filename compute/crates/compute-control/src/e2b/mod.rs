@@ -39,7 +39,7 @@ use axum::Router;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use compute_protocol::host::{Id, SleepConfig};
+use compute_protocol::host::Id;
 use tokio::time::Instant;
 use tower::ServiceExt as _;
 
@@ -138,8 +138,6 @@ pub struct Settings {
     pub domain: String,
     /// The templates creates may name, by id.
     pub templates: BTreeMap<String, Template>,
-    /// How E2B's sandboxes sleep while E2B calls them running.
-    pub sleep: SleepConfig,
     /// The envd version answers report.
     pub envd_version: String,
     /// How long a pause may take before its caller is answered that it
@@ -166,7 +164,6 @@ impl Default for Settings {
                     disk_mib: 4096,
                 },
             )]),
-            sleep: SleepConfig::RECOMMENDED,
             envd_version: ENVD_VERSION.into(),
             pause_within: Duration::from_secs(120),
             sweep_every: Duration::from_secs(1),

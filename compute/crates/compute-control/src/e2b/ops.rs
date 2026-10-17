@@ -153,7 +153,13 @@ pub async fn create<S: Store>(
     };
     let spec = Spec {
         image: template.image.clone(),
-        config: SandboxConfig::new(template.vcpus, template.memory_mib, front.settings.sleep),
+        // E2B's running sandbox sleeps and checkpoints like any other
+        // fleet sandbox whose create says nothing.
+        config: SandboxConfig::new(
+            template.vcpus,
+            template.memory_mib,
+            front.service.settings().sleep,
+        ),
     };
     let metadata: BTreeMap<String, String> = body.metadata.unwrap_or_default();
     let started = async {

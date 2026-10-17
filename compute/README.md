@@ -7,19 +7,22 @@ and gives up its memory only when the host needs the room. Using it wakes it.
 
 ## Status
 
-Opengeni does not use this yet.
+Opengeni does not use this yet. Its e2b backend can run sessions on it,
+with fixes to its E2B adapter that are still on a branch ([ADR 20](docs/adr/0020-opengeni-runs-on-the-fabric-through-its-e2b-backend.md)).
 
 | Piece | State |
 | --- | --- |
 | Host agent: jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite | on `feat/compute-lab` |
 | Templates and a ready pool for new sandboxes | on `feat/compute-lab` |
 | Admission with requests and limits, memory guarantees for running VMs | on `feat/compute-lab` |
-| Fleet decisions: placement, host leases with a safety budget, the VM guard, fences on every archive write, recovery and moves, with a seeded simulation of the whole protocol | on `feat/compute-fleet` |
-| A host in a fleet: registering and renewing over mutual TLS, the guard service, owner epochs on every request, adopt, hand-off and reconcile, no decisions while the lease has run out | on `feat/compute-fleet` |
+| Fleet decisions: placement, host leases with a safety budget, the VM guard, fences on every archive write, recovery and moves, with a seeded simulation of the whole protocol | on `feat/compute-lab` |
+| A host in a fleet: registering and renewing over mutual TLS, the guard service, owner epochs on every request, adopt, hand-off and reconcile, no decisions while the lease has run out | on `feat/compute-lab` |
+| The fleet service: Postgres store, public API and proxy, placement from the capacity hosts push, moves and recovery through object storage, checkpoints of running sandboxes, growing a Google Cloud host group; tested on three to five GCP hosts | on `feat/compute-lab` |
 | Observability: wide events, bounded metrics, zero alarms, per-sandbox host pressure, a canary, an OTLP exporter | on `feat/compute-lab` |
-| Sandbox images from OCI images, with our init and E2B's envd in every guest | on `feat/compute-e2b` |
-| An E2B-compatible front door: E2B's REST API and sandbox traffic, for unchanged E2B clients | on `feat/compute-e2b` |
-| The fleet service (Postgres store, public API, proxy), multi-host runs, autoscaling, Opengeni integration | in progress |
+| Sandbox images from OCI images, with our init and E2B's envd in every guest | on `feat/compute-lab` |
+| An E2B-compatible front door: E2B's REST API and sandbox traffic, for unchanged E2B clients | on `feat/compute-lab` |
+| An activations-per-second and latency benchmark against Kubernetes Agent Sandbox on GKE ([docs/benchmark.md](docs/benchmark.md), `lab/compare/`) | on `feat/compute-lab` |
+| Opengeni's E2B adapter fixes: terminal commands that finish, a workspace E2B's default user can write | on Opengeni's `feat/opengeni-e2b-endpoint`, in review |
 
 Decisions and their reasons are in [docs/adr](docs/adr/README.md). Numbers
 below are observations from our lab runs, with workloads and hosts in
@@ -272,6 +275,30 @@ image no create used for as long as a template may go unused, and whose
 template is gone, is removed. A create without an image uses the host's
 base image, as before.
 
+## The fleet
+
+`compute-control` is the fleet service ([ADR 15](docs/adr/0015-placement-and-moves-between-hosts.md),
+[ADR 18](docs/adr/0018-the-fleet-service-leases-and-fences.md)). Its
+Postgres store holds each sandbox's configuration, the host that owns it
+with that host's owner epoch, and its latest archive. Hosts register over
+mutual TLS, renew a lease and push their capacity; creates and wakes are
+placed from that capacity, and the public API reaches a sandbox through its
+owner. A host runs only what its current lease covers: its guard stops its
+VMs when renewals stop, before the service may let another host run them,
+and every archive write carries the owner epoch, so a cut-off host cannot
+overwrite what the new owner stored. Replicas keep no state of their own;
+one at a time leads, gives up on hosts whose renewals stopped and grows the
+host group.
+
+A sandbox moves between hosts while it sleeps, through object storage, and
+a lost host's sandboxes come back on others from their newest stored copy.
+A running sandbox is checkpointed to object storage too: by default once it
+has run ten minutes since its last stored copy (`checkpoint_every_ms` in
+its sleep rules). Losing its host costs a sandbox what it did since that
+copy was captured, which its status reports as `backed_up_ms`. With
+`--gcp-group` the leader grows a Google Cloud managed instance group before
+spare memory runs out (`--scale-spare-per-mille`, `--scale-spare-largest`).
+
 ## The E2B front door
 
 `compute-control` can also serve E2B's API, so clients built for E2B use
@@ -309,6 +336,7 @@ template builds, metrics and logs. A create asking for those is refused.
 | `crates/compute-host/src/observe` | What the agent reports: wide events, metrics, the canary and the OTLP/HTTP exporter ([ADR 16](docs/adr/0016-observability.md)). |
 | `crates/compute-guest` | The guest's init (PID 1): mounts, network, hostname, envd kept running, the image's command, clean shutdown, and the host's vsock ports. |
 | `crates/compute-image` | Turns an OCI image into a sandbox image: pull, checked layers, our init and envd added, an ext4 file. Run as `compute-host build-image`. |
+| `crates/compute-control` | The fleet service: its store, public API and proxy, the hosts' API, placement, moves and recovery, the leader and the host group. |
 | `crates/compute-control/src/e2b` | The E2B front door: REST API, lifecycle states and their sweeper, traffic routing with kept streams and holds, TLS. |
 | `guest/` | Builds the guest's files: compute-guest, envd from a pinned E2B commit, and a static bash. |
 | `crates/compute-pager` | The userfaultfd pager, with a pure, separately tested memory-layout core. |
@@ -441,11 +469,18 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
 
 ## Not built yet
 
-- **A control plane**: placement, moving sandboxes between hosts, recovery
-  after losing a host, autoscaling ([ADR 15](docs/adr/0015-placement-and-moves-between-hosts.md)).
-- **The Opengeni integration**.
-- **Comparisons**: an activations-per-second benchmark, to measure this
-  fabric directly against other sandbox systems through the E2B front door.
+- **Moving a running sandbox.** Sandboxes move between hosts only while they
+  sleep; a live move would copy memory while the guest runs.
+- **Releasing a paused sandbox's disk booking at once.** A running sandbox
+  books room for its disk to grow, and a pause gives that room back only at
+  the host's next disk sample, once a second. That stops one host near 80
+  wakes and pauses a second, with its disk nearly empty
+  ([docs/measurements.md](docs/measurements.md), the comparison's sustained
+  activations).
+- **More than one region**: placement across regions, and a fleet service
+  in more than one.
+- **E2B's other features**: what the front door leaves out, listed above.
+- **A benchmark through the front door**, and against E2B's own cloud.
 
 ## Credits
 
