@@ -4,11 +4,18 @@ import { z } from "zod";
 import { RetainedArtifactReferenceSchema } from "./retained-output";
 
 /**
- * Channel-A currently returns one bounded binary-safe read. Keep publication
+ * Largest publishable sandbox file: one object-storage PUT. Files up to
+ * SANDBOX_FILE_ARTIFACT_INLINE_MAX_BYTES are read through Channel-A; larger
+ * files are hashed and uploaded by the box itself.
+ */
+export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 5_000_000_000;
+
+/**
+ * Channel-A returns one bounded binary-safe read. Keep inline publication
  * below that ceiling so an extra sentinel byte can distinguish an exact file
  * from a truncated prefix.
  */
-export const SANDBOX_FILE_ARTIFACT_MAX_BYTES = 25 * 1024 * 1024 - 1;
+export const SANDBOX_FILE_ARTIFACT_INLINE_MAX_BYTES = 25 * 1024 * 1024 - 1;
 
 export const PublishSandboxFileArtifactRequest = /* @__PURE__ */ defineSchema(() =>
   z
