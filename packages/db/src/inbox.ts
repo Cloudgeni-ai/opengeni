@@ -1,5 +1,6 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
+import { anyOf } from "./sql-arrays";
 import * as schema from "./schema";
 
 // The inbox (0655). Session events open and close items in the event writer's
@@ -365,7 +366,7 @@ export async function getSessionTitles(
       .where(
         and(
           eq(schema.sessions.workspaceId, workspaceId),
-          inArray(schema.sessions.id, [...sessionIds]),
+          anyOf(schema.sessions.id, [...sessionIds]),
         ),
       );
     return new Map(rows.map((row) => [row.id, row.title]));
