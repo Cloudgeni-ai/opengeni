@@ -85,6 +85,10 @@ const forwardMigrations = [
   "0730_maintenance_work_probes.sql",
   // Rewrites the visibility transition installed by withheld 0501; replay after it.
   "0738_private_sessions_share_sandboxes.sql",
+  // Rewrite Knowledge and Skill routines from withheld 0461 by exact anchor.
+  "0813_preserve_accepted_learning_scope.sql",
+  "0819_explicit_workspace_learning_destination.sql",
+  "0824_explicit_learning_destination_symmetry.sql",
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;

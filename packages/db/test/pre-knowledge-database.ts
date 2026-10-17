@@ -18,6 +18,12 @@ const sessionStorageMigrationTail = [
   "0660_session_archive_preference_snapshot_export.sql",
 ] as const;
 
+const learningDestinationMigrations = [
+  "0813_preserve_accepted_learning_scope.sql",
+  "0819_explicit_workspace_learning_destination.sql",
+  "0824_explicit_learning_destination_symmetry.sql",
+] as const;
+
 /** Historical migration proofs run against the last schema that owned Memory.
  * Current-runtime denial and conversion are exercised by migration-0461 and
  * unified-knowledge-postgres; never disable retirement triggers in those tests. */
@@ -54,6 +60,10 @@ export async function acquirePreKnowledgeTestDatabase(
     // that the withheld 0501/0738 migrations shape differently here. Their
     // standalone routines are installed after the replay below.
     await admin`INSERT INTO schema_migrations(name) VALUES('0768_private_visibility_ignores_leftovers.sql'), ('0769_private_visibility_never_blocks.sql')`;
+    // These rewrite Knowledge and Skill routines that the withheld 0461
+    // migration shapes, by exact anchor; replay them after it.
+    for (const name of learningDestinationMigrations)
+      await admin`INSERT INTO schema_migrations(name) VALUES(${name})`;
     await migrate(blank.databaseUrl);
     // The current visibility transition reads the routines 0768 and 0769 add,
     // so install everything before their exact-text rewrite blocks.
@@ -87,6 +97,8 @@ export async function acquirePreKnowledgeTestDatabase(
     await admin`DELETE FROM schema_migrations WHERE name='0730_maintenance_work_probes.sql'`;
     await admin`DELETE FROM schema_migrations WHERE name='0738_private_sessions_share_sandboxes.sql'`;
     await admin`DELETE FROM schema_migrations WHERE name='0560_archived_session_imports.sql'`;
+    for (const name of learningDestinationMigrations)
+      await admin`DELETE FROM schema_migrations WHERE name=${name}`;
     for (const name of sessionStorageMigrationTail)
       await admin`DELETE FROM schema_migrations WHERE name=${name}`;
     if (!blank.appPassword)

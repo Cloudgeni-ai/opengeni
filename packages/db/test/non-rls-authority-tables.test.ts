@@ -107,6 +107,10 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
     `;
     expect(Array.from(rows)).toEqual([
       { table: "workspace_memberships", policy: "personal_document_authority_capability_read" },
+      // Personal machine consent (0823) locks the membership row it reads for
+      // reach. Owner-only and capability-gated like the read lane beside it,
+      // and WITH CHECK (false), so it can lock a row but never write one.
+      { table: "workspace_memberships", policy: "scoped_compute_capability_lock" },
       { table: "workspace_memberships", policy: "scoped_compute_capability_read" },
       { table: "workspace_memberships", policy: "variable_set_authority_capability_read" },
       // Vault routines (0739) read memberships and workspaces for reach. Same
