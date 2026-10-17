@@ -168,6 +168,43 @@ describe("Connected Machine event ingestion scheduling", () => {
     expect(coalesced).toBe(197);
   });
 
+  test("a terminal output collector does not block its runner's liveness or other completions", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let progressed!: () => void;
+    const progress = new Promise<void>((resolve) => {
+      progressed = resolve;
+    });
+    const seen: string[] = [];
+    const scheduler = createAgentEventIngestionScheduler(async (payload, subject) => {
+      expect(subject).toBe(subjectA);
+      const event = AgentEvent.decode(payload).event;
+      if (event?.$case === "operationCompleted") {
+        seen.push(event.operationCompleted.opId);
+        if (event.operationCompleted.opId === "slow") await gate;
+        else progressed();
+      } else if (event?.$case === "heartbeat") seen.push("heartbeat");
+    });
+    const completed = (opId: string) =>
+      AgentEvent.encode({
+        event: {
+          $case: "operationCompleted",
+          operationCompleted: { opId },
+        },
+      }).finish();
+    scheduler.enqueue(completed("slow"), subjectA);
+    scheduler.enqueue(completed("slow"), subjectA);
+    scheduler.enqueue(heartbeat(1), subjectA);
+    scheduler.enqueue(completed("fast"), subjectA);
+    await progress;
+    expect(seen).toEqual(["slow", "heartbeat", "fast"]);
+    release();
+    await scheduler.whenIdle();
+    expect(seen).toEqual(["slow", "heartbeat", "fast", "slow"]);
+  });
+
   test("a rejected event does not strand later liveness for the same runner", async () => {
     const handled: string[] = [];
     const scheduler = createAgentEventIngestionScheduler(async (payload) => {

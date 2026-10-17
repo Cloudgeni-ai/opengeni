@@ -685,10 +685,12 @@ terminal result after reconnect.
 The runner pushes an `OperationCompleted` event after exit and pipe drain,
 independently of the output consumer and its credit. API ingestion uses the
 authenticated control-workspace/enrollment/connection subject and operation ID
-to settle the original adopted command, even after its session changes routes.
-Duplicate events are harmless. Missed events, older agents and lost connections
-remain covered by reconciliation. Terminal publication does not acknowledge or
-discard retained output; the separate output-custody path still collects it.
+to claim the original adopted command, even after its session changes routes.
+The collector durably captures retained output through the verified exit frontier
+before settlement, so a terminal read cannot race ahead of the final output.
+Duplicate events cannot steal an active collector's claim. Missed events, older
+agents and lost connections remain covered by reconciliation. Terminal publication
+does not discard retained output; release remains separately retryable after custody.
 
 The session shell capability also preserves an explicit `exec_command.shell`
 selection: Opengeni sends that shell as direct argv, with the requested login or

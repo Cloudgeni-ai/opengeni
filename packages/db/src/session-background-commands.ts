@@ -728,6 +728,64 @@ function connectedClaimIdentityWhere(claim: ConnectedMachineBackgroundCommandCla
   );
 }
 
+/** A push bypasses retry backoff, but never steals an active output collector.
+ * If a collector is already running, its next defer must preserve this wake. */
+export async function claimPushedConnectedCommandCompletion(
+  db: Database,
+  input: ConnectedCommandOutputIdentity & { claimTtlMs: number },
+): Promise<ConnectedMachineBackgroundCommandClaim | null> {
+  if (!Number.isSafeInteger(input.claimTtlMs) || input.claimTtlMs <= 0)
+    throw new Error("Connected command completion claim TTL is invalid");
+  return withRlsContext(db, input, async (tx) => {
+    const table = schema.sessionBackgroundCommands;
+    const identity = and(
+      eq(table.id, input.commandId),
+      eq(table.accountId, input.accountId),
+      eq(table.workspaceId, input.workspaceId),
+      eq(table.sessionId, input.sessionId),
+      eq(table.provider, "connected_machine"),
+      eq(table.controlWorkspaceId, input.controlWorkspaceId),
+      eq(table.enrollmentId, input.enrollmentId),
+      eq(table.connectionInstanceId, input.connectionInstanceId),
+      eq(table.opId, input.opId),
+      inArray(table.state, ["running", "stopping"]),
+    );
+    const [row] = await tx.select().from(table).where(identity).for("update").limit(1);
+    if (!row) return null;
+    const now = new Date();
+    await tx
+      .update(table)
+      .set({ reconcileAfter: now, lastReconcileOutcome: "exit_pushed" })
+      .where(identity);
+    if (
+      row.reconcileProofOutcome !== null ||
+      (row.reconcileClaimId !== null &&
+        row.reconcileClaimedAt !== null &&
+        row.reconcileClaimedAt.getTime() > now.getTime() - input.claimTtlMs)
+    )
+      return null;
+    const claimId = crypto.randomUUID();
+    await tx
+      .update(table)
+      .set({
+        reconcileClaimId: claimId,
+        reconcileClaimedAt: now,
+        reconcileAfter: new Date(now.getTime() + input.claimTtlMs),
+        reconcileAttempts: row.reconcileAttempts + 1,
+        lastReconcileOutcome: "claimed",
+        updatedAt: now,
+      })
+      .where(identity);
+    return {
+      ...input,
+      claimId,
+      state: row.state as "running" | "stopping",
+      reconcileAttempts: row.reconcileAttempts + 1,
+      proof: null,
+    };
+  });
+}
+
 /** Checkpoint one exact terminal provider observation before lifecycle settlement.
  * A retry may reuse an identical proof; a divergent proof is a hard identity fault. */
 export async function recordConnectedMachineBackgroundCommandProof(
@@ -814,7 +872,8 @@ export async function deferConnectedMachineBackgroundCommandReconciliation(
       const rows = await scopedDb
         .update(schema.sessionBackgroundCommands)
         .set({
-          reconcileAfter: new Date(Date.now() + input.retryAfterMs),
+          reconcileAfter: sql`case when ${schema.sessionBackgroundCommands.lastReconcileOutcome} = 'exit_pushed'
+            then now() else ${new Date(Date.now() + input.retryAfterMs).toISOString()}::timestamptz end`,
           reconcileClaimId: null,
           reconcileClaimedAt: null,
           lastReconcileOutcome: outcome,

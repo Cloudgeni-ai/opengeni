@@ -240,9 +240,11 @@ Reconciliation batches a fixed due-time frontier, sharing per-instance offline
 observations. Historical retirement retains records without input/wakes.
 Terminal proof atomically commits settlement/audit. Connected Machine runners
 push `OperationCompleted` independently of output attachment and credit; API
-ingestion locates the original process/operation and uses the same fenced
-settlement. Reaping remains the lost-event fallback. Completion does not grant
-output custody or acknowledge retained bytes. Unobserved nonterminal
+ingestion claims the original process/operation, captures retained output through
+its verified exit frontier, then uses the same fenced settlement. Pushes cannot
+steal an active reaper claim; a racing push preserves an immediate retry. Reaping
+remains the lost-event fallback. The event alone does not grant output custody
+or acknowledge retained bytes. Unobserved nonterminal
 sessions receive fallback input. Terminal reads suppress pending notifications,
 not history; running reads suppress neither. Failed/cancelled sessions retain
 audit only. Replaceable fanout follows commit. Separate conversation history

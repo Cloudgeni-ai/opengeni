@@ -135,6 +135,8 @@ import {
   NatsControlRpc,
   NatsOpStreamTransport,
   OpStreamExecClient,
+  replayConnectedCommandOutput,
+  connectedCommandExitProof,
   defaultSelfhostedRetryClock,
   stripExecBanner,
   parseExecBannerExitCode,
@@ -1756,32 +1758,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
   } while (Date.now() < deadline);
 }
 
-export async function replayConnectedCommandOutput(
-  client: Pick<OpStreamExecClient, "readExisting">,
-  opId: string,
-  terminalKnown: boolean,
-  capture: Parameters<OpStreamExecClient["readExisting"]>[2],
-): Promise<Awaited<ReturnType<OpStreamExecClient["readExisting"]>>> {
-  // A completed operation can need several bounded reads to replay its retained
-  // frames. Keep the reader's integrity checkpoint until the exit is verified;
-  // replacing it after each partial read would restart forever at frame one.
-  let capturedThrough = 0n;
-  while (true) {
-    const before = capturedThrough;
-    const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, capture);
-    if (!terminalKnown || replay.status === "completed" || replay.terminal) return replay;
-    // Quiet jobs can retain many heartbeat frames (or an incomplete UTF-8
-    // chunk). These are real replay progress even when capture receives no
-    // stdout/stderr. Use the reader's verified, contiguous protocol frontier.
-    capturedThrough = BigInt(replay.replaySequence);
-    // This is a finite terminal drain, not a poller for a running command.
-    // Failed persistence, transport/integrity errors, and no-progress reads
-    // return control to normal reconciliation without licensing settlement.
-    if (capturedThrough === before) {
-      throw new Error("Connected command terminal output replay has not reached its exit frontier");
-    }
-  }
-}
+export { replayConnectedCommandOutput } from "@opengeni/runtime/sandbox";
 
 /** Drain the durable terminal-output obligation independently of the launching
  * attempt or model completion notice. Existing terminal rows receive no inferred
@@ -1970,25 +1947,7 @@ export function connectedCommandProofFromStatus(
       if (!exit) {
         throw new Error("Connected command completed without an exit record");
       }
-      const failureCode = exit.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128);
-      const reason = failureCode
-        ? `op_failure_${failureCode}`
-        : exit.cancelled
-          ? "op_cancelled"
-          : exit.timedOut
-            ? "op_timed_out"
-            : "op_exit";
-      return {
-        outcome: "exited",
-        exitCode: exit.exitCode,
-        reason,
-        ...(failureCode
-          ? {
-              failure: { code: failureCode, detail: exit.failureDetail, retryable: false as const },
-            }
-          : {}),
-        observedAt,
-      };
+      return connectedCommandExitProof(exit, observedAt);
     }
     case OpState.OP_STATE_LOST:
       return {

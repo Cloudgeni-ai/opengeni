@@ -125,7 +125,9 @@ function payloadIsHeartbeat(payload: Uint8Array): boolean {
  * deployment-wide serial DB queue. Each exact process subject retains FIFO order;
  * separate subjects drain concurrently. Consecutive pending heartbeats for one
  * subject are latest-wins because they are point-in-time liveness/metrics samples,
- * while GoingOffline and update-progress events remain ordered barriers.
+ * while GoingOffline and update-progress events remain ordered barriers. Exit
+ * collectors use a separate exact-operation lane: draining retained output must
+ * not hold that machine's heartbeats or unrelated command completions hostage.
  */
 export function createAgentEventIngestionScheduler(
   handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
@@ -192,10 +194,18 @@ export function createAgentEventIngestionScheduler(
     enqueue(payload, subject) {
       if (!accepting) return;
       const heartbeat = payloadIsHeartbeat(payload);
-      let state = states.get(subject);
+      let queueKey = subject;
+      try {
+        const event = AgentEvent.decode(payload).event;
+        if (event?.$case === "operationCompleted")
+          queueKey = `${subject}:operation:${event.operationCompleted.opId}`;
+      } catch {
+        /* The handler owns malformed payload diagnostics. */
+      }
+      let state = states.get(queueKey);
       if (!state) {
         state = { scheduled: false, pending: [] };
-        states.set(subject, state);
+        states.set(queueKey, state);
       }
 
       const queued = { payload, subject, heartbeat };
@@ -207,7 +217,7 @@ export function createAgentEventIngestionScheduler(
         state.pending.push(queued);
       }
 
-      schedule(subject, state);
+      schedule(queueKey, state);
     },
     async whenIdle() {
       if (states.size === 0) return;
