@@ -55,6 +55,21 @@ describe("managed browser profile cryptography", () => {
       "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
       "--screen-info={1920x1080 devicePixelRatio=1 workAreaLeft=0 workAreaRight=0 workAreaTop=30 workAreaBottom=88}",
     ]);
+    // Chrome reads --screen-info in device pixels: a Retina display measured
+    // in points is passed at its pixel size so pages see its point size.
+    expect(
+      await macosOffscreenChromeArguments("/Applications/Fixture", {
+        chromeMajorVersion: async () => 155,
+        mainDisplay: async () => ({
+          width: 1728,
+          height: 1117,
+          scale: 2,
+          insets: { left: 0, right: 0, top: 33, bottom: 0 },
+        }),
+      }),
+    ).toContain(
+      "--screen-info={3456x2234 devicePixelRatio=2 workAreaLeft=0 workAreaRight=0 workAreaTop=66 workAreaBottom=0}",
+    );
   });
 
   test("headless Linux browsers present an ordinary desktop User-Agent and screen", async () => {
