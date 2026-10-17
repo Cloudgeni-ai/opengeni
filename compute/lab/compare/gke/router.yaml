@@ -1,13 +1,15 @@
 # The sandbox router, as Agent Sandbox's own deployment files at v1.0.7 set
 # it up (namespace agent-sandbox-system, label app=sandbox-router, which the
 # template's managed network policy lets in), plus an internal load balancer
-# so the benchmark client, on its own VM in the zone, reaches it.
+# so the benchmark client, on its own VM in the zone, reaches it. The load
+# balancer admits only the client's internal address: without source ranges
+# GKE opens the port on every node to 0.0.0.0/0.
 #
 #   base=https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/v1.0.7/sandbox-router/deploy
 #   kubectl create namespace agent-sandbox-system
 #   for f in serviceaccount rbac service; do kubectl apply -f $base/$f.yaml; done
 #   curl -fsSL $base/deployment.yaml | sed 's|sandbox-router-go:latest|sandbox-router-go:v1.0.7|' | kubectl apply -f -
-#   kubectl apply -f router.yaml
+#   sed "s|CLIENT_IP|$client_internal_ip|" router.yaml | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
@@ -18,6 +20,8 @@ metadata:
 spec:
   type: LoadBalancer
   externalTrafficPolicy: Local
+  loadBalancerSourceRanges:
+    - CLIENT_IP/32
   selector:
     app.kubernetes.io/name: sandbox-router
     app.kubernetes.io/component: sandbox-router
