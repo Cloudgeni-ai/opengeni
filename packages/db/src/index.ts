@@ -8215,6 +8215,27 @@ export type PrepareRetainedScreenshotArtifactInput = {
 };
 
 /**
+ * Queue the workspace's oldest ready images for cleanup until at least
+ * `neededBytes` are on their way out, counting images already queued. Runs
+ * inside the caller's workspace-scoped transaction, which holds the quota row
+ * lock, through the migration's workspace-checked SECURITY DEFINER seam: the
+ * quota is workspace-wide, so eviction must see images in every session.
+ * Returns the bytes leaving, which may be less than needed.
+ */
+async function makeRoomForRetainedScreenshot(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; neededBytes: number },
+): Promise<number> {
+  const [row] = await rawRows<{ leaving: string | number }>(
+    tx,
+    sql`select opengeni_private.make_room_for_retained_screenshot(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.neededBytes}::bigint
+    ) as leaving`,
+  );
+  return Number(row?.leaving ?? 0);
+}
+
+/**
  * Reserve quota and create one deterministic pending file/artifact pair.
  * Replays return the original row only when every immutable identity and byte
  * fact matches; a UUID/settlement collision fails closed.
@@ -8287,12 +8308,26 @@ export async function prepareRetainedScreenshotArtifact(
           throw new Error(`Screenshot quota row not found: ${input.workspaceId}`);
         }
         const usedBytes = quota.reservedBytes + quota.readyBytes;
-        if (usedBytes + input.sizeBytes > input.workspaceQuotaBytes) {
-          throw new RetainedScreenshotQuotaExceededError(
-            input.workspaceQuotaBytes,
-            usedBytes,
-            input.sizeBytes,
-          );
+        const neededBytes = usedBytes + input.sizeBytes - input.workspaceQuotaBytes;
+        if (neededBytes > 0) {
+          // A full quota keeps the newest images: the workspace's oldest
+          // images are queued for cleanup to make room. Only an image larger
+          // than the whole quota is refused.
+          const leavingBytes =
+            input.sizeBytes > input.workspaceQuotaBytes
+              ? 0
+              : await makeRoomForRetainedScreenshot(tx, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  neededBytes,
+                });
+          if (leavingBytes < neededBytes) {
+            throw new RetainedScreenshotQuotaExceededError(
+              input.workspaceQuotaBytes,
+              usedBytes - leavingBytes,
+              input.sizeBytes,
+            );
+          }
         }
 
         const [file] = await tx

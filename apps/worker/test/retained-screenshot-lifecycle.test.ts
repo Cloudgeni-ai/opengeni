@@ -1159,6 +1159,99 @@ describe("retained screenshot lifecycle fences", () => {
     expect(JSON.stringify(unrecoveredOutput)).not.toContain("base64");
   }, 180_000);
 
+  test("claims that keep failing never starve fresh expiry work", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const expired = async (expiresAt: Date) => {
+      const prepared = await prepareArtifact(fixture, memory.storage, { expiresAt });
+      await memory.storage.putObject({
+        key: prepared.objectKey,
+        contentType: "image/png",
+        body: PNG,
+        sha256: SCREENSHOT.sha256,
+      });
+      await settleRetainedScreenshotArtifactReady(db, {
+        ...fixture,
+        artifactId: prepared.artifactId,
+        settlementKey: prepared.settlementKey,
+      });
+      return prepared.artifactId;
+    };
+    const stuck = [
+      await expired(new Date("2000-01-01T00:00:00Z")),
+      await expired(new Date("2000-01-02T00:00:00Z")),
+    ];
+    const fresh = await expired(new Date(Date.now() - 1_000));
+    const claim = async () =>
+      (
+        await claimRetainedScreenshotMaintenance(db, {
+          pendingGraceMs: 0,
+          claimTimeoutMs: 0,
+          limit: 2,
+        })
+      ).map((row) => row.artifactId);
+    // The oldest-expiring images are claimed first and their completion never lands.
+    expect((await claim()).sort()).toEqual([...stuck].sort());
+    // Their timed-out claims are reclaimed only after fresh work.
+    const next = await claim();
+    expect(next[0]).toBe(fresh);
+    expect(stuck).toContain(next[1]!);
+  }, 180_000);
+
+  test("a full quota stores the newest image by evicting the oldest", async () => {
+    if (!available) return;
+    const fixture = await freshTurn();
+    const memory = storageFixture();
+    const retain = (callId: string, retentionMs: number) =>
+      retainComputerScreenshot({
+        db,
+        objectStorage: memory.storage,
+        ...fixture,
+        output: { callId, toolOutputId: callId, bytes: PNG, mediaType: "image/png" },
+        retentionMs,
+        workspaceQuotaBytes: 2 * PNG.byteLength,
+      });
+    const oldest = await retain("call-oldest", 60_000);
+    const middle = await retain("call-middle", 120_000);
+    const newest = await retain("call-newest", 180_000);
+    expect([oldest.available, middle.available, newest.available]).toEqual([true, true, true]);
+    expect(await artifactRow(oldest.artifactId)).toMatchObject({
+      status: "cleanup_queued",
+      quotaState: "ready",
+      cleanupReason: "evicted",
+    });
+    expect(await artifactRow(middle.artifactId)).toMatchObject({ status: "ready" });
+    // Bytes queued for cleanup count as free; the quota counter follows the sweep.
+    const activity = maintenanceActivity(memory.storage);
+    expect(await activity.maintainRetainedScreenshots()).toMatchObject({
+      claimed: 1,
+      deleted: 1,
+      retryable: 0,
+    });
+    expect(await artifactRow(oldest.artifactId)).toBeNull();
+    expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
+      reservedBytes: 0,
+      readyBytes: 2 * PNG.byteLength,
+    });
+    // An image larger than the whole quota is still refused, and nothing is evicted for it.
+    const tooLarge = await retainComputerScreenshot({
+      db,
+      objectStorage: memory.storage,
+      ...fixture,
+      output: {
+        callId: "call-too-large",
+        toolOutputId: "call-too-large",
+        bytes: PNG,
+        mediaType: "image/png",
+      },
+      retentionMs: 60_000,
+      workspaceQuotaBytes: PNG.byteLength - 1,
+    });
+    expect(tooLarge).toMatchObject({ available: false, reason: "quota_exceeded" });
+    expect(await artifactRow(middle.artifactId)).toMatchObject({ status: "ready" });
+  }, 180_000);
+
   test("FORCE-RLS denies cross-workspace rows while the fixed SECURITY DEFINER claim sees both", async () => {
     if (!available) return;
     const first = await freshTurn();
