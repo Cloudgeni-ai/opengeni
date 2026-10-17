@@ -62599,6 +62599,17 @@ export type ActiveSandboxPointer = {
   workingDir: string | null;
 };
 
+/**
+ * Why a swap did not happen. Only `epoch_changed` is a lost race; the rest are
+ * decisions about the target or the chat that a retry alone will not change.
+ */
+export type ActiveSandboxSwapRefusal =
+  | "epoch_changed"
+  | "chat_busy"
+  | "chat_unavailable"
+  | "not_permitted"
+  | "target_unavailable";
+
 // The INVERSE of readActiveSandbox: every session in a workspace whose ACTIVE
 // SANDBOX resolves to enrollment X AND that has a RUNNING TURN — i.e. "sessions
 // with an active op on machine X". This is the fan-out target set for the
@@ -62695,7 +62706,11 @@ export async function setActiveSandbox(
     // working dir is seeded create-time through this CAS, not the row INSERT.
     workingDir?: string | null;
   },
-): Promise<{ swapped: boolean; pointer: ActiveSandboxPointer | null }> {
+): Promise<{
+  swapped: boolean;
+  pointer: ActiveSandboxPointer | null;
+  refusal?: ActiveSandboxSwapRefusal;
+}> {
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -62718,7 +62733,7 @@ export async function setActiveSandbox(
             ) as authorized`,
           );
           if (authorization?.authorized !== true) {
-            return { swapped: false, pointer: null };
+            return { swapped: false, pointer: null, refusal: "not_permitted" };
           }
           const [target] = await rawRows<{
             value: { scope?: string; enrollmentId?: string | null } | null;
@@ -62730,11 +62745,11 @@ export async function setActiveSandbox(
             ) as value`,
           );
           if (!target?.value) {
-            return { swapped: false, pointer: null };
+            return { swapped: false, pointer: null, refusal: "target_unavailable" };
           }
           if (target.value.scope === "user") {
             if (!target.value.enrollmentId) {
-              return { swapped: false, pointer: null };
+              return { swapped: false, pointer: null, refusal: "target_unavailable" };
             }
             personalEnrollmentId = target.value.enrollmentId;
             if (input.personalMachineAttempt) {
@@ -62749,7 +62764,7 @@ export async function setActiveSandbox(
                 ) as authorized`,
               );
               if (admission?.authorized !== true) {
-                return { swapped: false, pointer: null };
+                return { swapped: false, pointer: null, refusal: "not_permitted" };
               }
             } else {
               const [session] = await scopedDb.execute<{
@@ -62759,8 +62774,14 @@ export async function setActiveSandbox(
                 where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
                 for no key update
               `);
-              if (!session || session.active_turn_id !== null) {
-                return { swapped: false, pointer: null };
+              if (!session) {
+                return { swapped: false, pointer: null, refusal: "chat_unavailable" };
+              }
+              // Consent to use a personal machine travels with the person's next
+              // message, so a turn that is already running has none. The chat
+              // moves once that turn has settled.
+              if (session.active_turn_id !== null) {
+                return { swapped: false, pointer: null, refusal: "chat_busy" };
               }
             }
           }
@@ -62775,14 +62796,14 @@ export async function setActiveSandbox(
           for share
         `);
           if (!target) {
-            return { swapped: false, pointer: null };
+            return { swapped: false, pointer: null, refusal: "target_unavailable" };
           }
           if (target.kind === "selfhosted") {
             // SHARE conflicts with removeEnrollment's UPDATE lock. If removal
             // wins first, this read observes revoked; if attach wins first,
             // removal observes the committed pointer and blocks safely.
             if (!target.enrollment_id) {
-              return { swapped: false, pointer: null };
+              return { swapped: false, pointer: null, refusal: "target_unavailable" };
             }
             const [enrollment] = await scopedDb.execute<{ status: string }>(sql`
             select status
@@ -62791,7 +62812,7 @@ export async function setActiveSandbox(
             for share
           `);
             if (!enrollment || enrollment.status !== "active") {
-              return { swapped: false, pointer: null };
+              return { swapped: false, pointer: null, refusal: "target_unavailable" };
             }
           }
         }
@@ -62812,7 +62833,7 @@ export async function setActiveSandbox(
     `);
       const row = rows[0];
       if (!row) {
-        return { swapped: false, pointer: null };
+        return { swapped: false, pointer: null, refusal: "epoch_changed" };
       }
       if (personalEnrollmentId && input.personalMachineAttempt) {
         const [preUse] = await rawRows<{ authorized: boolean }>(

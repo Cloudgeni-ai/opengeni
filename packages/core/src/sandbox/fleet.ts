@@ -32,6 +32,7 @@ import {
   resolvePersonalMachineConnectionForAttempt,
   requireSession,
   setActiveSandbox,
+  type ActiveSandboxSwapRefusal,
   type Database,
   type EnrollmentRecord,
   type SandboxRecord,
@@ -205,11 +206,45 @@ export type FleetSwapResult = {
     | BackendUnresolvableCode
     | "invalid_working_directory"
     | "concurrent_swap"
+    | "chat_busy"
     | PersonalMachineRefusalCode
     | "recovery_in_progress"
     | "recovery_degraded"
     | "recovery_unrecoverable";
 };
+
+/** The typed code and plain reason for a swap the pointer write refused. */
+function swapRefusal(refusal: ActiveSandboxSwapRefusal): {
+  code: NonNullable<FleetSwapResult["code"]>;
+  reason: string;
+} {
+  switch (refusal) {
+    case "chat_busy":
+      return {
+        code: "chat_busy",
+        reason:
+          "This chat is running a turn. A personal machine can only be chosen between turns, " +
+          "so the move can be made once the current turn has finished or the chat is paused.",
+      };
+    case "not_permitted":
+      return {
+        code: "personal_machine_not_permitted",
+        reason: "This machine is not available to this chat.",
+      };
+    case "target_unavailable":
+      return {
+        code: "stale_pointer",
+        reason: "This machine is no longer connected to the workspace.",
+      };
+    case "chat_unavailable":
+      return { code: "stale_pointer", reason: "This chat no longer exists." };
+    case "epoch_changed":
+      return {
+        code: "concurrent_swap",
+        reason: "The chat was moved by another request at the same time. Try again.",
+      };
+  }
+}
 
 export type PersonalMachineRefusalCode =
   | "personal_machine_permission_required"
@@ -847,7 +882,16 @@ export async function swapActiveSandbox(
           activeEpoch: result.pointer.activeEpoch,
         };
       }
-      // CAS lost (a concurrent swap won) — re-read + retry once.
+      // Only a lost epoch race is worth re-reading and retrying; every other
+      // refusal is a decision about the chat or the target and is final.
+      if (result.refusal !== undefined && result.refusal !== "epoch_changed") {
+        return {
+          swapped: false,
+          activeSandboxId: pointer.activeSandboxId,
+          activeEpoch: pointer.activeEpoch,
+          ...swapRefusal(result.refusal),
+        };
+      }
     }
     const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
       activeSandboxId: null,
@@ -857,8 +901,7 @@ export async function swapActiveSandbox(
       swapped: false,
       activeSandboxId: pointer.activeSandboxId,
       activeEpoch: pointer.activeEpoch,
-      reason: "a concurrent swap won the epoch fence; re-read and retry",
-      code: "concurrent_swap",
+      ...swapRefusal("epoch_changed"),
     };
   } finally {
     // Do not let a cleanup failure turn an already-committed route CAS into a
