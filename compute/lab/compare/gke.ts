@@ -74,6 +74,16 @@ export class Gke implements System<GkeSandbox> {
       spec: { warmPoolRef: { name: kind === "pool" ? this.options.warmPool : this.options.coldPool } },
     });
     const postedMs = performance.now() - started;
+    try {
+      return await this.claimed(claim, script, started, postedMs);
+    } catch (error) {
+      // The caller never learns the claim, so it cannot remove it.
+      await this.kube.request("DELETE", `${CLAIMS}/namespaces/${this.options.namespace}/sandboxclaims/${claim}`).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async claimed(claim: string, script: string, started: number, postedMs: number) {
     const ready = await this.claims.wait(
       claim,
       (object) => Boolean(object && (object.status?.sandbox as { name?: string } | undefined)?.name && condition(object, "Ready")?.status === "True"),

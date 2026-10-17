@@ -62,7 +62,9 @@ Each create or activation runs one of two commands:
 
 For each operation and resting state: a warm-up of five operations that
 are discarded, then at least 30 measured operations, one at a time, in each
-of three runs. A run is a fresh set of sandboxes. We report p50, p90, p99
+of three runs. A run is a fresh set of sandboxes, created before its
+first sample and removed after its last; the next run starts 5 seconds
+later, so what they held is free again. We report p50, p90, p99
 and max over all measured operations, and the spread of p50 between runs.
 
 Percentiles use the nearest-rank rule: p99 of 90 samples is the 90th
@@ -71,7 +73,8 @@ few samples it errs high, which is the safe side for a tail.
 
 ## Activations per second
 
-N sandboxes are created and put to rest. The client then offers
+N sandboxes are created and put to rest, each as soon as it is made, so a
+host never has to hold all N awake at once. The client then offers
 activations as an open-loop Poisson process: arrival times are drawn from an
 exponential distribution at the offered rate, fixed before the step starts,
 and each arrival is sent at its time whether or not earlier ones have
@@ -86,13 +89,20 @@ seconds discarded. A step **holds** when every activation succeeded, p99 is
 under 1 second, and the completed rate is at least 95 percent of the
 offered rate. After the first step that does not hold, the search halves
 the gap between the last step that held and the first that did not, three
-times. The result is the highest rate that held, and separately the lowest
-rate at which any error appeared. If no resting sandbox is free when an
-arrival comes, the step is reported as client-limited and N is raised; it
-never counts as the system's limit.
+times. A resting state whose activation p99 without load is already above
+half a second is judged against twice that p99, rounded up to the next
+second, instead of 1 second; the bound is reported with its result. Its
+number then says how many activations a second it sustains without
+queueing, not that it is fast. The result is the highest rate that held,
+and separately the lowest rate at which any error appeared. If no resting
+sandbox is free when an arrival comes, the step is reported as
+client-limited and N is raised; it never counts as the system's limit.
 
 N is large enough that, at the highest rate tried, a sandbox is picked
 about once every 30 seconds, so most of the time between uses is rest.
+States that keep a sandbox's memory on the host (running, paused) are the
+exception: N is then what one host holds comfortably, the same for both
+systems, and sandboxes are picked more often.
 
 We report the sustained rate per host, per host vCPU, and per dollar-hour of
 the hosts at on-demand list prices for the region. For GKE the hosts are

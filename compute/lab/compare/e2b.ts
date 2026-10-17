@@ -70,9 +70,15 @@ export class E2b implements System<E2bSandbox> {
     const handle = await sdk.create(this.template, { ...this.connection, timeoutMs: 3_600_000 });
     const createdMs = performance.now() - started;
     const sandbox: E2bSandbox = { id: handle.sandboxId, handle, paused: false };
-    const run = await this.command(sandbox, script, started);
-    run.phases.created_ms = createdMs;
-    return { sandbox, run };
+    try {
+      const run = await this.command(sandbox, script, started);
+      run.phases.created_ms = createdMs;
+      return { sandbox, run };
+    } catch (error) {
+      // The caller never learns the sandbox, so it cannot remove it.
+      await this.remove(sandbox).catch(() => undefined);
+      throw error;
+    }
   }
 
   async run(sandbox: E2bSandbox, script: string, started: number): Promise<RunResult> {

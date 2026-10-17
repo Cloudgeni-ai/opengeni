@@ -145,6 +145,7 @@ export function runOnStream(socket: Socket, rest: Buffer, script: string, starte
       // Let the guest close its side outside the timing; drop the
       // connection if it does not, so nothing keeps the sandbox awake.
       socket.resume();
+      socket.end();
       const drop = setTimeout(() => socket.destroy(), 5000);
       socket.once("close", () => clearTimeout(drop));
       resolve(result as RunResult);
@@ -296,9 +297,15 @@ export class Ours implements System<OursSandbox> {
     const id = randomBytes(16).toString("hex");
     check(await call(this.address, { op: "create", id, config: this.config }), "done");
     const createdMs = performance.now() - started;
-    const run = await this.run({ id }, script, started);
-    run.phases.create_ms = createdMs;
-    return { sandbox: { id }, run };
+    try {
+      const run = await this.run({ id }, script, started);
+      run.phases.create_ms = createdMs;
+      return { sandbox: { id }, run };
+    } catch (error) {
+      // The caller never learns the id, so it cannot remove the sandbox.
+      await this.remove({ id }).catch(() => undefined);
+      throw error;
+    }
   }
 
   async run(sandbox: OursSandbox, script: string, started: number): Promise<RunResult> {
