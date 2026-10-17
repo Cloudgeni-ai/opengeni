@@ -1168,6 +1168,7 @@ export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
 export * from "./preference-registry";
 export * from "./skills";
+export * from "./learning-refusals";
 export * from "./session-tool-results";
 export type { SkillSourceReleaseReceipt } from "./skill-source-release";
 export { SkillSourceRemovalAuthorityError } from "./skill-source-release";
@@ -84466,14 +84467,13 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                         .where(
                           and(
                             eq(schema.sessionEvents.workspaceId, workspaceId),
-                            eq(schema.sessionEvents.sessionId, sessionId),
                             eq(schema.sessionEvents.turnId, turnId),
+                            // session_events_usage_source_key_idx: a plain
+                            // column stays indexable under row-level security.
+                            inArray(schema.sessionEvents.usageSourceKey, incomingUsageKeys),
+                            eq(schema.sessionEvents.sessionId, sessionId),
                             eq(schema.sessionEvents.type, "agent.model.usage"),
                             eq(schema.sessionEvents.turnAssociation, "current"),
-                            inArray(
-                              sql<string>`${schema.sessionEvents.payload} ->> 'sourceKey'`,
-                              incomingUsageKeys,
-                            ),
                           ),
                         )
                     : [],

@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
 import { DrizzleQueryError } from "drizzle-orm";
 import { ToolCallError } from "@openai/agents";
-import { DatabaseTransactionError, SessionEventPersistenceError } from "@opengeni/db";
+import {
+  DatabaseTransactionError,
+  SessionEventPersistenceError,
+  KnowledgeLearningScopeChangedError,
+} from "@opengeni/db";
 import { RoutingMutationOutcomeUnknownError } from "@opengeni/runtime";
 import { MandatoryHistoryPersistenceError } from "../src/activities/agent-turn/quiescence";
 import {
@@ -56,6 +60,18 @@ test("plain domain failures and provider retry classification stay unchanged", (
     retryable: true,
   });
   expect(agentRunFailurePayload(rateLimit)).not.toHaveProperty("database");
+});
+
+test("incompatible frozen learning is actionable, non-retryable and contains no database details", () => {
+  const error = new KnowledgeLearningScopeChangedError(
+    rawDatabaseFailure("42501", "Learning scope changed after acceptance"),
+  );
+  expect(agentRunFailurePayload(error)).toEqual({
+    error:
+      "This turn's Knowledge scope no longer matches this chat. Send a new message to continue with the current settings.",
+    code: "knowledge_learning_scope_changed",
+    retryable: false,
+  });
 });
 
 test("database transport failures add no raw driver cause or automatic retry", () => {

@@ -100,6 +100,7 @@ export function FailedSessionBanner({
   const retryActions =
     trackedActions &&
     !failure.safetyRefusal &&
+    failure.failureCode !== "knowledge_learning_scope_changed" &&
     (!(unavailableModel || retryUnhelpful) || modelChanged || actions.retryInput) ? (
       <FailedSessionActions {...trackedActions} />
     ) : null;

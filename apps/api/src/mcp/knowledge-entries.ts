@@ -7,6 +7,8 @@ import {
   KnowledgeEntrySaveRequest,
   KnowledgeTaskNotePromotionRequest,
   type AccessGrant,
+  type LearningRefusal,
+  withLearningRefusalMeta,
 } from "@opengeni/contracts";
 import {
   prepareKnowledgeFile,
@@ -20,10 +22,12 @@ import {
 } from "@opengeni/core";
 import {
   archiveKnowledgeEntry,
+  classifyLearningRefusal,
   confirmLegacyKnowledge,
   confirmLegacyInstruction,
   getKnowledgeEntry,
   listKnowledgeEntries,
+  nestedAuthorityRefusalMessage,
   nestedPostgresSqlState,
   saveKnowledgeEntry,
   saveAgentInstruction,
@@ -56,15 +60,18 @@ export function registerKnowledgeEntryTools(
       const message = siteClampedAgentMessage(
         surface === "instruction" ? "workspace instructions" : "Knowledge",
       );
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({ error: { code: "site_agent_clamped", message } }),
-          },
-        ],
-      };
+      return withLearningRefusalMeta(
+        {
+          isError: true,
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ error: { code: "site_agent_clamped", message } }),
+            },
+          ],
+        },
+        { destination: surface, reason: "site_agent" },
+      );
     }
     try {
       const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
@@ -123,7 +130,7 @@ export function registerKnowledgeEntryTools(
                 : state === "22023" || state === "23514"
                   ? "Invalid Knowledge entry or relationship. Check the referenced IDs and revision before retrying."
                   : "Knowledge is temporarily unavailable. Your task can continue; retry the same operation ID if saving may have succeeded.";
-      return {
+      const result = {
         isError: true,
         content: [
           {
@@ -132,6 +139,15 @@ export function registerKnowledgeEntryTools(
           },
         ],
       };
+      // A definite authority refusal of a write also carries the content-free
+      // refusal fact in `_meta`, which the model never sees, so the timeline
+      // tells the person it was not saved.
+      const refusalMessage =
+        mode === "write" && state === "42501" ? nestedAuthorityRefusalMessage(error) : null;
+      const refusal: LearningRefusal | null = refusalMessage
+        ? classifyLearningRefusal({ destination: surface, message: refusalMessage })
+        : null;
+      return refusal ? withLearningRefusalMeta(result, refusal) : result;
     }
   }
   // Compatibility recovery for tool selections persisted before the cutover.

@@ -46,7 +46,7 @@ e2e(
     // A fixed, transparent layer covers the whole page at every scroll
     // offset. "Near" is in view; "Far" needs a (smooth) scroll first.
     const fixture = `data:text/html,${encodeURIComponent(
-      '<!doctype html><title>Covered proof</title><style>html{scroll-behavior:smooth}</style><button>Near</button><div style="height:3000px"></div><button>Far</button><div id="layer" style="position:fixed;inset:0"></div><script>globalThis.clicks=0;globalThis.scrolls=0;document.addEventListener("click",()=>clicks++);addEventListener("scroll",()=>scrolls++);</script>',
+      '<!doctype html><title>Covered proof</title><style>html{scroll-behavior:smooth}</style><button>Near</button><button onclick="saved=1">Save</button><button>Save as draft</button><button>Delete</button><button>Delete</button><div style="height:3000px"></div><button>Far</button><div id="layer" role="listbox" aria-label="Suggestions" style="position:fixed;inset:0"></div><script>globalThis.clicks=0;globalThis.scrolls=0;document.addEventListener("click",()=>clicks++);addEventListener("scroll",()=>scrolls++);</script>',
     )}`;
     const command = (
       observation: BrowserObservation,
@@ -92,7 +92,7 @@ e2e(
         const refused = await controller.run(command(initial, action));
         expect(refused.state).toBe("failed");
         expect(refused.error?.code).toBe("invalid_action");
-        expect(refused.error?.message).toContain("covered");
+        expect(refused.error?.message).toContain('covered by listbox "Suggestions" at its center');
       }
       expect(await evaluate("[clicks, scrollY]")).toEqual([0, 0]);
 
@@ -112,6 +112,22 @@ e2e(
       const accepted = await controller.run(command(view, { type: "click", locator: near }));
       expect(accepted.state).toBe("completed");
       expect(await evaluate("clicks")).toBe(1);
+
+      // "Save" also matches "Save as draft"; the one whose whole name is
+      // "Save" is the element the caller named.
+      const save = await controller.run(
+        command(view, { type: "click", locator: { kind: "role", role: "button", name: "Save" } }),
+      );
+      expect(save.state).toBe("completed");
+      expect(await evaluate("globalThis.saved")).toBe(1);
+      // Two equally named buttons stay ambiguous, and the error lists them.
+      const ambiguous = await controller.run(
+        command(view, { type: "click", locator: { kind: "role", role: "button", name: "Delete" } }),
+      );
+      expect(ambiguous.error?.code).toBe("locator_ambiguous");
+      expect(ambiguous.error?.message).toMatch(
+        /^browser locator matched 2 elements: button "Delete" \[e[0-9a-f]+\], button "Delete" \[e[0-9a-f]+\]; act on one ref or make the locator exact$/,
+      );
     } finally {
       await cdp?.close();
       await driver.close();
