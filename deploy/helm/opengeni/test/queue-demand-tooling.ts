@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // Test tools only. Never modify application dependencies or the Bun lockfile.
 // CI discovers deployment tests automatically; do not silently skip promtool.
@@ -13,6 +13,45 @@ export async function run(command: string[], cwd?: string, env?: NodeJS.ProcessE
     child.exited,
   ]);
   return { stdout, stderr, code };
+}
+
+// Server-side Helm test fixtures must not inherit cluster/auth/proxy overrides:
+// HELM_KUBEAPISERVER takes precedence even over an explicit --kubeconfig.
+// Keep normal tool calls unchanged; this environment is only for owned fixtures.
+export function helmFixtureEnvironment(
+  kubeconfig: string,
+  inherited: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const dir = dirname(kubeconfig);
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of [
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "SYSTEMROOT",
+    "SystemRoot",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+  ]) {
+    if (inherited[key] !== undefined) env[key] = inherited[key];
+  }
+  return {
+    ...env,
+    HOME: dir,
+    USERPROFILE: dir,
+    TMPDIR: dir,
+    TMP: dir,
+    TEMP: dir,
+    KUBECONFIG: kubeconfig,
+    XDG_CACHE_HOME: join(dir, "cache"),
+    XDG_CONFIG_HOME: join(dir, "config"),
+    XDG_DATA_HOME: join(dir, "data"),
+    HELM_CACHE_HOME: join(dir, "helm", "cache"),
+    HELM_CONFIG_HOME: join(dir, "helm", "config"),
+    HELM_DATA_HOME: join(dir, "helm", "data"),
+    HELM_PLUGINS: join(dir, "helm", "plugins"),
+  };
 }
 
 async function download(url: string): Promise<Uint8Array> {

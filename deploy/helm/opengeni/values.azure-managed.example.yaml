@@ -17,7 +17,8 @@ worker:
   turns:
     replicaCount: 2
     # Example floor only, not production recovery/downscale acceptance. Private
-    # production overlays retain their own floor/ceiling (currently 14/28).
+    # desired bounds are production 2/28 and staging 2/16; rollout and native
+    # lifecycle qualification remain separate from these source targets.
     # A configured ceiling of 32 is not proof of 32 executable mixed-activity
     # slots, nor evidence that a two-replica fleet is safe for production.
     strategy:
