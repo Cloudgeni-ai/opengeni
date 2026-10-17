@@ -95,13 +95,18 @@ an init system of its own.
   the record says running, but nothing bounds when it reaches the host: a
   retry, a slow network or a host that was cut off for a while can deliver
   it after a pause completed, from a replica that has stopped since. So
-  the record alone is not trusted. Every replica asks, once a minute, the
-  hosts of all paused sandboxes how deep they sleep, one status request
-  per host, and pauses again any sandbox found awake. The new pause is
-  conditional on the record read before the host was asked, so a resume
-  meanwhile wins. A paused sandbox woken this way runs for at most about a
-  minute before it is saved again, and the read after each call above
-  repairs the usual case at once.
+  the record alone is not trusted. Every replica checks the paused
+  sandboxes' hosts, apart from its sweeper so neither holds up the other.
+  A check starts every minute, or as soon as the previous one ends if it
+  took longer. It reads the paused records 256 at a time, reads each one's
+  fleet row (16 at once), and asks each owner host once per page how deep
+  its sandboxes sleep, all hosts at once, each within 10 s. A sandbox found
+  awake is recorded as pausing again, conditional on the record read
+  before its host was asked, so a resume meanwhile wins; the sweeper then
+  saves it like any other pause. So a paused sandbox woken this way is
+  found within about a minute plus the length of a check, and runs until
+  its save is done. Nothing is written while hosts and records agree. The
+  read after each call above repairs the usual case at once.
 - **TLS: either the front door or a terminator in front.** The SDK uses
   HTTPS for the API and for `<port>-<id>.<domain>`. With `--e2b-tls-cert`
   and `--e2b-tls-key` the front door serves HTTPS itself, with one

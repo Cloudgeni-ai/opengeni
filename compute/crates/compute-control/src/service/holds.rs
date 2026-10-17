@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use compute_fleet::{HostId, Outcome};
 use compute_protocol::host::{HostStatus, Id, LevelName, PriorityName, Reply, Request};
+use futures::StreamExt as _;
 
 use super::{Failure, Service, host_failure};
 use crate::store::{SandboxRow, Store};
@@ -14,6 +15,8 @@ use crate::view::Target;
 
 /// How long a host may take to answer a hold, a release or a status.
 const ASK_WAIT: Duration = Duration::from_secs(10);
+/// How many sandbox rows [`Service::depths`] reads at once.
+const READ_AT_ONCE: usize = 16;
 
 /// Where a sandbox is, as far as sleeping goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,27 +137,38 @@ impl<S: Store> Service<S> {
         Ok(depth_in(&status, id))
     }
 
-    /// How deep each of these teams' sandboxes sleeps, asking each owner
-    /// host once for all of them it owns. A sandbox gone, or whose host
-    /// cannot be asked, gets that failure.
+    /// How deep each of these teams' sandboxes sleeps. Their rows are read
+    /// a few at a time, then each owner host is asked once for all it
+    /// owns, every host at once, so a slow host holds up no other. A
+    /// sandbox gone, or whose host cannot be asked, gets that failure.
     pub async fn depths(&self, sandboxes: &[(String, Id)]) -> Vec<(Id, Result<Depth, Failure>)> {
-        let mut found = Vec::with_capacity(sandboxes.len());
+        let rows: Vec<(Id, Result<SandboxRow, Failure>)> =
+            futures::stream::iter(sandboxes.to_vec())
+                .map(|(team, id)| async move { (id, self.get(&team, id).await) })
+                .buffer_unordered(READ_AT_ONCE)
+                .collect()
+                .await;
+        let mut found = Vec::with_capacity(rows.len());
         let mut owned: HashMap<HostId, Vec<SandboxRow>> = HashMap::new();
-        for (team, id) in sandboxes {
-            match self.get(team, *id).await {
+        for (id, row) in rows {
+            match row {
                 Ok(row) => match row.ownership.owner {
                     Some(host) => owned.entry(host).or_default().push(row),
-                    None => found.push((*id, Ok(Depth::Unowned))),
+                    None => found.push((id, Ok(Depth::Unowned))),
                 },
-                Err(failure) => found.push((*id, Err(failure))),
+                Err(failure) => found.push((id, Err(failure))),
             }
         }
-        for rows in owned.into_values() {
+        let answers = futures::future::join_all(owned.into_values().map(|rows| async move {
             let asked = match self.owner(&rows[0]) {
                 Ok(Some(target)) => self.ask(&rows[0], &target, &Request::Status).await,
                 Ok(None) => Ok(Reply::Done),
                 Err(failure) => Err(failure),
             };
+            (rows, asked)
+        }))
+        .await;
+        for (rows, asked) in answers {
             for row in rows {
                 let depth = match &asked {
                     Ok(Reply::Status(status)) => Ok(depth_in(status, row.id)),

@@ -358,9 +358,11 @@ async fn finish_pause<S: Store>(
 /// Checks that the hosts of paused sandboxes keep them saved, and pauses
 /// again any found awake: a wake-capable call that started before a pause
 /// may reach its host after the pause completed, from a replica that has
-/// stopped since too. Each host is asked once for all it owns. Pausing
-/// again is conditional on the record read before the host was asked, so
-/// a resume meanwhile wins.
+/// stopped since too. Reads paused records a page at a time; each owner
+/// host is asked once per page for all it owns. A sandbox found awake is
+/// recorded as pausing again, conditional on the record read before its
+/// host was asked, so a resume meanwhile wins; the sweeper then finishes
+/// that pause like any other, so no pause is waited for here.
 pub async fn check_paused<S: Store>(front: &Front<S>) {
     let mut after = None;
     loop {
@@ -385,7 +387,7 @@ pub async fn check_paused<S: Store>(front: &Front<S>) {
         for row in paused {
             match depths.get(&row.id) {
                 Some(Ok(depth)) if !depth.saved() => {
-                    if let Err(refused) = Box::pin(pause_again(front, row)).await {
+                    if let Err(refused) = pause_again(front, row).await {
                         tracing::debug!(error = %refused.message, "pausing again a paused sandbox found awake");
                     }
                 }
@@ -403,18 +405,14 @@ pub async fn check_paused<S: Store>(front: &Front<S>) {
     }
 }
 
-/// Pauses again a sandbox recorded paused that its host was found to run.
+/// Records as pausing again a sandbox recorded paused that its host was
+/// found to run, for the sweeper to finish, unless the record changed
+/// since it was read.
 async fn pause_again<S: Store>(front: &Front<S>, mut row: LifecycleRow) -> Result<(), Refused> {
     tracing::info!(id = %row.id, "a paused sandbox was found awake; pausing it again");
-    let team = row.team.clone();
     row.record.set(State::Pausing, now_ms());
-    if !replace_lifecycle(front.store(), &mut row).await? {
-        return Ok(());
-    }
-    match finish_pause(front, &team, row.id, front.settings.pause_within).await {
-        Err(refused) if refused.status == 404 => Ok(()),
-        other => other,
-    }
+    replace_lifecycle(front.store(), &mut row).await?;
+    Ok(())
 }
 
 /// After traffic that may have woken sandbox `id` (a connect through its
@@ -613,20 +611,31 @@ pub async fn set_timeout<S: Store>(
 /// as long as it runs. Every replica runs one; a sandbox two replicas work
 /// on at once ends the same way, since every step is idempotent. Each round
 /// reads every due record, a page at a time, so records it cannot finish
-/// yet (a host away, say) never keep it from later ones. Between rounds
-/// it checks paused sandboxes' hosts ([`check_paused`]).
+/// yet (a host away, say) never keep it from later ones. Alongside, and
+/// apart, so neither holds up the other, it checks paused sandboxes'
+/// hosts ([`check_paused`]): a check starts every period, or as soon as
+/// the previous one ends if that took longer.
 pub async fn sweep<S: Store>(front: Arc<Front<S>>) {
-    let mut every = tokio::time::interval(front.settings.sweep_every);
-    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut check_at = Instant::now() + front.settings.check_paused_every;
-    loop {
-        every.tick().await;
-        sweep_round(&front).await;
-        if Instant::now() >= check_at {
-            check_paused(&front).await;
-            check_at = Instant::now() + front.settings.check_paused_every;
+    let rounds = async {
+        let mut every = tokio::time::interval(front.settings.sweep_every);
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            every.tick().await;
+            sweep_round(&front).await;
         }
-    }
+    };
+    let checks = async {
+        let mut every = tokio::time::interval_at(
+            Instant::now() + front.settings.check_paused_every,
+            front.settings.check_paused_every,
+        );
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            every.tick().await;
+            check_paused(&front).await;
+        }
+    };
+    tokio::join!(rounds, checks);
 }
 
 /// One round of the sweeper: starts the work due for every due record it

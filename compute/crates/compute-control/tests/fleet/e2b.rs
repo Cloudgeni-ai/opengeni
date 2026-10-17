@@ -978,6 +978,50 @@ async fn paused_sandboxes_found_awake_are_paused_again() {
     }
 }
 
+/// A paused sandbox found awake whose host never saves it again holds up
+/// neither the sweeper's timeouts nor later checks.
+#[tokio::test]
+async fn a_pause_again_that_cannot_finish_holds_up_no_timeout() {
+    let (fleet, _host, levels, _seen, door) = fleet_with_guest().await;
+    let sandbox = door.create(json!({"templateID": "base"})).await;
+    let stuck = sandbox["sandboxID"].as_str().unwrap().to_owned();
+    let stuck_id: Id = stuck.parse().unwrap();
+    let (status, _) = door
+        .post(&format!("/sandboxes/{stuck}/pause"), json!({}))
+        .await;
+    assert_eq!(status, 204);
+    {
+        let mut levels = levels.lock().unwrap();
+        levels.at.insert(stuck_id, LevelName::Running);
+        levels.stuck.insert(stuck_id);
+    }
+    until(
+        Duration::from_secs(5),
+        "the awake one is pausing again",
+        async || {
+            fleet
+                .store
+                .lifecycle(stuck_id)
+                .await
+                .unwrap()
+                .is_some_and(|row| row.record.state == e2b::lifecycle::State::Pausing)
+        },
+    )
+    .await;
+    let killed = door
+        .create(json!({"templateID": "base", "timeout": 1}))
+        .await;
+    let killed = killed["sandboxID"].as_str().unwrap().to_owned();
+    until(
+        Duration::from_secs(3),
+        "the timeout is applied meanwhile",
+        async || door.get(&format!("/sandboxes/{killed}")).await.0 == 404,
+    )
+    .await;
+    let row = fleet.store.lifecycle(stuck_id).await.unwrap().unwrap();
+    assert_eq!(row.record.state, e2b::lifecycle::State::Pausing);
+}
+
 /// An explicit connect whose wake lands only after a later pause
 /// completed does not leave the sandbox running under a paused record:
 /// the connect sees the pause, and resumes the sandbox again.
