@@ -530,9 +530,14 @@ async fn traffic_reaches_guest_ports_over_kept_streams() {
 
 #[tokio::test]
 async fn user_ports_need_the_traffic_token_when_public_traffic_is_off() {
-    let (_fleet, _host, _levels, _seen, door) = fleet_with_guest().await;
+    let (_fleet, _host, levels, _seen, door) = fleet_with_guest().await;
     let sandbox = door
-        .create(json!({"templateID": "base", "network": {"allowPublicTraffic": false}}))
+        .create(json!({
+            "templateID": "base",
+            "network": {"allowPublicTraffic": false},
+            "autoPause": true,
+            "autoResume": {"enabled": true},
+        }))
         .await;
     let id = sandbox["sandboxID"].as_str().unwrap().to_owned();
     let traffic = sandbox["trafficAccessToken"].as_str().unwrap().to_owned();
@@ -557,6 +562,20 @@ async fn user_ports_need_the_traffic_token_when_public_traffic_is_off() {
     // envd checks its own token, so its port needs none.
     let (status, _) = door.text(door.traffic(&id, ENVD_PORT, "/")).await;
     assert_eq!(status, 200);
+
+    // A request without the token does not resume a paused sandbox.
+    let (status, _) = door
+        .post(&format!("/sandboxes/{id}/pause"), json!({}))
+        .await;
+    assert_eq!(status, 204);
+    let (status, _) = door.text(door.traffic(&id, 8080, "/")).await;
+    assert_eq!(status, 403);
+    let (_, detail) = door.get(&format!("/sandboxes/{id}")).await;
+    assert_eq!(detail["state"], "paused");
+    assert_eq!(
+        levels.lock().unwrap().at[&id.parse::<Id>().unwrap()],
+        LevelName::Saved
+    );
 }
 
 #[tokio::test]
