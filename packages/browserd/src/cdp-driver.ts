@@ -267,6 +267,14 @@ type TargetState = {
   emulatedViewport?: { width: number; height: number; deviceScaleFactor: number } | undefined;
 };
 
+/** A page size the agent set with the viewport action. */
+type ViewportEmulation = {
+  width: number;
+  height: number;
+  deviceScaleFactor: number;
+  mobile: boolean;
+};
+
 type OopifSession = {
   frameId: string;
   sessionId: string;
@@ -417,6 +425,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly downloadEvents: AgentBrowserDriverOptions["downloadEvents"];
   private readonly connect: (endpoint: string) => Promise<BrowserCdpConnection>;
   private readonly states = new Map<string, TargetState>();
+  /** The size the agent last set. Tabs that open afterwards get it too, as
+   * they would from a resized window; tabs that already existed keep theirs. */
+  private sessionViewport: { viewport: ViewportEmulation; preexisting: Set<string> } | null = null;
+  /** Each tab's own emulated size, re-applied when the tab is attached again
+   * (Chromium drops the override with the attachment). */
+  private readonly targetViewports = new Map<string, ViewportEmulation>();
   private readonly firstSeenAt = new Map<string, string>();
   private readonly attaching = new Map<string, Promise<TargetState>>();
   private readonly attachingSessions = new Map<string, string>();
@@ -2041,6 +2055,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // replace the real initialization outcome.
     void connection.send("Inspector.enable", {}, { sessionId }).catch(() => undefined);
     let frame: MainFrame;
+    const viewport = this.viewportFor(info.targetId);
     try {
       const initialized = (async () => {
         await Promise.all([
@@ -2052,6 +2067,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           connection.send("Log.enable", {}, { sessionId }),
         ]);
         await this.applyEmulation(connection, sessionId);
+        if (viewport) await this.applyViewport(connection, sessionId, viewport);
         return await this.mainFrame(sessionId);
       })();
       const outcome = await Promise.race([initialized, crashed]);
@@ -2127,6 +2143,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       unsubscribe: [],
       oopifs: new Map(),
       nodeRoute: null,
+      ...(viewport
+        ? {
+            emulatedViewport: {
+              width: viewport.width,
+              height: viewport.height,
+              deviceScaleFactor: viewport.deviceScaleFactor,
+            },
+          }
+        : {}),
     };
     state.unsubscribe.push(
       connection.on("Inspector.targetCrashed", () => this.onTargetCrashed(state), sessionId),
@@ -2529,6 +2554,41 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         { sessionId: frame.parentSessionId },
       );
     }
+  }
+
+  /** The size a tab being attached should have: its own, or the session's
+   * when the tab opened after the agent set one. */
+  private viewportFor(targetId: string): ViewportEmulation | null {
+    const own = this.targetViewports.get(targetId);
+    if (own) return own;
+    const session = this.sessionViewport;
+    if (!session || session.preexisting.has(targetId)) return null;
+    this.targetViewports.set(targetId, session.viewport);
+    return session.viewport;
+  }
+
+  private async applyViewport(
+    connection: BrowserCdpConnection,
+    sessionId: string,
+    viewport: ViewportEmulation,
+  ): Promise<void> {
+    await connection.send(
+      "Emulation.setDeviceMetricsOverride",
+      {
+        width: viewport.width,
+        height: viewport.height,
+        deviceScaleFactor: viewport.deviceScaleFactor,
+        mobile: viewport.mobile,
+        screenWidth: viewport.width,
+        screenHeight: viewport.height,
+      },
+      { sessionId },
+    );
+    await connection.send(
+      "Emulation.setTouchEmulationEnabled",
+      { enabled: viewport.mobile, ...(viewport.mobile ? { maxTouchPoints: 1 } : {}) },
+      { sessionId },
+    );
   }
 
   private async applyEmulation(connection: BrowserCdpConnection, sessionId: string): Promise<void> {
@@ -3346,6 +3406,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           height: action.height,
           deviceScaleFactor: action.deviceScaleFactor ?? 1,
         };
+        {
+          const viewport = { ...state.emulatedViewport, mobile: action.mobile };
+          this.targetViewports.set(state.targetId, viewport);
+          this.sessionViewport = {
+            viewport,
+            preexisting: new Set([...this.firstSeenAt.keys(), ...this.states.keys()]),
+          };
+        }
         // Let the page lay out and present one frame at the new size, so the
         // next read or capture sees it. Bounded: a throttled page never blocks.
         await this.sendTarget(
@@ -5504,7 +5572,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.failAllScreencasts(state, new CdpTransportError("browser target closed"));
     for (const unsubscribe of state.unsubscribe) unsubscribe();
     this.states.delete(targetId);
-    if (!preserveFirstSeen) this.firstSeenAt.delete(targetId);
+    if (!preserveFirstSeen) {
+      this.firstSeenAt.delete(targetId);
+      this.targetViewports.delete(targetId);
+    }
   }
 
   /**
