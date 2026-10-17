@@ -35,6 +35,7 @@ import {
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
   OrganizationOpperUnavailableError,
+  OrganizationAzureOpenAIUnavailableError,
   WorkspaceGatewayUnavailableError,
   WorkspaceOpenRouterUnavailableError,
   WorkspaceOpperUnavailableError,
@@ -364,12 +365,35 @@ function withoutAuthenticationHeaders(inner: typeof fetch): typeof fetch {
   }) as typeof fetch;
 }
 
+/**
+ * Send the key as Azure OpenAI's documented `api-key` header instead of the
+ * SDK's bearer, the same authentication the setup check uses, so a verified
+ * organization deployment is called exactly as it was checked.
+ */
+function azureApiKeyHeaderFetch(inner: typeof fetch): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const headers = new Headers(input instanceof Request ? input.headers : undefined);
+    new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
+    const authorization = headers.get("authorization");
+    if (authorization && /^bearer /iu.test(authorization)) {
+      headers.set("api-key", authorization.slice("bearer ".length));
+      headers.delete("authorization");
+    }
+    return await inner(input, { ...init, headers });
+  }) as typeof fetch;
+}
+
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
   if (
     (provider.kind === "direct-openai-workspace" || provider.kind === "direct-azure-workspace") &&
     !provider.apiKey?.trim()
   ) {
     throw new Error("OpenAI or Azure OpenAI workspace key is unavailable");
+  }
+  // A missing or revoked organization connection fails closed; it never
+  // falls back to the deployment's own Azure or OpenAI credentials.
+  if (provider.kind === "direct-azure-organization" && !provider.apiKey?.trim()) {
+    throw new OrganizationAzureOpenAIUnavailableError();
   }
   const workspaceGateway = provider.kind === "vercel-gateway-workspace";
   const scopedCredentialProvider =
@@ -538,7 +562,12 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                           instrumentedModelFetch(provider.id, globalThis.fetch),
                           gatewayPolicies,
                         )
-                      : instrumentedModelFetch(provider.id, openAIResponsesFetch(settings)),
+                      : provider.kind === "direct-azure-organization"
+                        ? instrumentedModelFetch(
+                            provider.id,
+                            azureApiKeyHeaderFetch(openAIResponsesFetch(settings)),
+                          )
+                        : instrumentedModelFetch(provider.id, openAIResponsesFetch(settings)),
                 ),
               ),
             },

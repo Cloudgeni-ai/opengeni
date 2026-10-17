@@ -499,7 +499,9 @@ export async function loadWorkspaceModelSelectionInput(
       getOrganizationModelProviderCatalogForWorkspace(db, {
         accountId,
         workspaceId,
-        providerKinds,
+        // Organization Azure OpenAI has no workspace custom-model rail, so it
+        // is read here beside the shared kinds.
+        providerKinds: [...providerKinds, "azure_openai"],
       }),
     ]))();
   // Observe both batches before admission resumes or fails. Retain the previous
@@ -554,6 +556,11 @@ export async function loadWorkspaceModelSelectionInput(
     workspaceOpperCustomModels: workspaceCustomModels.opper ?? [],
     organizationOpperConnectionActive: organizationProviders.opper?.active === true,
     organizationOpperCustomModels: organizationProviders.opper?.models ?? [],
+    organizationAzureOpenAI: {
+      active: organizationProviders.azure_openai?.active === true,
+      endpoint: organizationProviders.azure_openai?.endpoint ?? null,
+      models: organizationProviders.azure_openai?.models ?? [],
+    },
   };
 }
 

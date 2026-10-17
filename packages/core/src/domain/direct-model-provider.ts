@@ -60,3 +60,27 @@ export async function verifyDirectModelAccess(
     });
   }
 }
+
+/**
+ * Check that an organization Azure OpenAI deployment answers on the
+ * organization's own endpoint and key before the deployment is saved as a
+ * curated model. Same short Responses call and safe errors as the workspace
+ * direct-connection setup check; nothing upstream is reflected or persisted.
+ */
+export async function verifyOrganizationAzureOpenAIDeployment(
+  input: { endpoint: string; deployment: string },
+  apiKey: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const config = DirectModelProviderMetadata.safeParse({
+    provider: "azure_openai",
+    model: input.deployment,
+    endpoint: input.endpoint,
+  });
+  if (!config.success) {
+    throw new HTTPException(422, {
+      message: "Enter the exact Azure OpenAI deployment name.",
+    });
+  }
+  await verifyDirectModelAccess(config.data, apiKey, fetchImpl);
+}
