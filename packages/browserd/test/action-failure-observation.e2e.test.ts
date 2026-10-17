@@ -115,8 +115,8 @@ e2e(
     try {
       let observed = await driver.start(fixture);
 
-      // Fill on a custom combobox is refused before any input, says to click
-      // it, and returns the page so the next step can act at once.
+      // Fill on a custom combobox is refused before any input, points to
+      // select, and returns the page so the next step can act at once.
       const combo = node(observed, "combobox", "Country");
       let failure = await rejection(
         dispatch(observed, {
@@ -126,7 +126,7 @@ e2e(
         }),
       );
       expect(failure.code).toBe("invalid_action");
-      expect(failure.message).toContain("click it to open its options");
+      expect(failure.message).toContain("use the select action with the option's label");
       expect(failure.observation).not.toBeNull();
       expect(node(failure.observation!, "combobox", "Country").name).toBe("Country");
 
