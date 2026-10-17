@@ -23,6 +23,7 @@ afterAll(async () => {
 }, 60_000);
 
 const TURNS = 1500;
+const BACKGROUND_SESSIONS = 6000;
 // Leave room for whatever events session creation appended.
 const FIRST_SEQUENCE = 1000;
 
@@ -73,6 +74,25 @@ test("effective session policy reads recent history only, however long the sessi
         case when step.offset_value = 0 then 'turn.queued' else 'turn.started' end, '{}'::jsonb
       from session_turns turn cross join (values (0), (1)) step(offset_value)
       where turn.workspace_id = ${grant.workspaceId}::uuid and turn.session_id = ${session.id}::uuid`;
+    // Production-like statistics: most sessions in a workspace are short, so
+    // a generic plan estimates a handful of turns per session. That estimate
+    // must not turn the newest-first walk into a scan of every turn.
+    await tx`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+        status, source, position, prompt, model, reasoning_effort, latency_mode,
+        sandbox_backend, resources, tools, metadata, started_at, finished_at
+      ) select gen_random_uuid(), ${grant.accountId}::uuid, ${grant.workspaceId}::uuid,
+        gen_random_uuid(), gen_random_uuid(), 'background', 'completed', 'user', 1, 'turn',
+        'background-model', 'medium', 'standard', 'none', '[]'::jsonb, '[]'::jsonb,
+        '{}'::jsonb, now(), now()
+      from generate_series(1, ${BACKGROUND_SESSIONS})`;
+    await tx`
+      insert into session_events (account_id, workspace_id, session_id, turn_id, sequence, type, payload)
+      select turn.account_id, turn.workspace_id, turn.session_id, turn.id, step.offset_value,
+        case when step.offset_value = 1 then 'turn.queued' else 'turn.started' end, '{}'::jsonb
+      from session_turns turn cross join (values (1), (2)) step(offset_value)
+      where turn.workspace_id = ${grant.workspaceId}::uuid and turn.temporal_workflow_id = 'background'`;
   });
   await shared.admin`analyze session_events`;
   await shared.admin`analyze session_turns`;
