@@ -71,10 +71,15 @@ sandboxes created at once all pay it at the same time.
   than the shape. That bounds a fill because the template was saved right
   after its guest answered on the same port, so a fill's guest only resumes
   where it left off; once ready it is measured, and from then on counts at
-  what it holds. Should a guest touch more meanwhile, the core's memory
-  readings show it within a sample. On huge-page hosts, where no guest
-  gives memory back and every sandbox reserves its whole shape, a fill does
-  too. A fill also books disk until it is ready: its copy of the template's
+  what it holds. The booking is also the fill VM's `memory.max`, so it is
+  a bound and not only an estimate: a guest that needs more is ended by the
+  kernel, its fill fails and is tried again later, and no other VM loses
+  memory it was promised. A ready clone stays paused, so it takes nothing
+  more, and a claim lifts the limit before its guest runs again; a clone
+  whose limit cannot be lifted is removed like one that cannot take its
+  guarantees. On huge-page hosts, where no guest gives memory back and
+  every sandbox reserves its whole shape, a fill does too, unlimited. A
+  fill also books disk until it is ready: its copy of the template's
   disk and what its guest writes to it, together at most the disk's full
   length in allocation units. A ready clone writes nothing while paused and
   books no disk.
@@ -86,8 +91,9 @@ sandboxes created at once all pay it at the same time.
 - A create claims a ready clone whenever it asks for the clone's processors
   and memory, whatever its request: before the claim is recorded, the
   clone's VM is given the request's guarantees (`cpu.weight` at once,
-  `memory.low` from its first resume, which is when a VM gets it). These
-  are the only VM settings a request changes; sleep settings and the rest
+  `memory.low` from its first resume, which is when a VM gets it), and its
+  fill's memory limit is lifted. These are the only VM settings a claim
+  changes; sleep settings and the rest
   live in the record, and the identity and reseed contract is unchanged,
   since the guest still learns who it is at that resume. A clone whose VM
   cannot take them is removed, and the create starts without a ready clone.
