@@ -1,8 +1,8 @@
 //! A small disk: every VM whose state is not saved yet books what its next
-//! save may write, a wake the disk cannot book is refused at once as host
-//! full, saying so, and goes through once another VM's state is saved. A
-//! save that cannot be written shows in the sandbox's status and succeeds
-//! once there is room.
+//! save may write and what its disk may still grow by, a wake the disk
+//! cannot book is refused at once as host full, saying so, and goes through
+//! once another VM's state is saved. A save that cannot be written shows in
+//! the sandbox's status and succeeds once there is room.
 
 use super::*;
 
@@ -11,6 +11,27 @@ const MIB: u64 = 1 << 20;
 /// What one save of a lab sandbox books where files share extents: its
 /// 512 MiB of memory and 64 MiB for the rest.
 const SAVE: u64 = 576 * MIB;
+
+/// What a guest's boot writes to its disk alone, which its disk then no
+/// longer books: less than this.
+const BOOT_WRITES: u64 = 256 * MIB;
+
+/// The most an awake sandbox's disk, a copy of `base`, may grow by on XFS:
+/// its length in 4 KiB blocks and a 256th more for metadata.
+fn disk_bound(base: &Path) -> u64 {
+    let len = std::fs::metadata(base).unwrap().len();
+    len.div_ceil(4096) * 4096 + len / 256
+}
+
+/// The bytes a host-full message says the sandbox needs.
+fn needed(message: &str) -> u64 {
+    message
+        .split_whitespace()
+        .skip_while(|word| *word != "needs")
+        .nth(1)
+        .and_then(|word| word.parse().ok())
+        .unwrap_or_else(|| panic!("says how much: {message}"))
+}
 
 fn run(command: &mut Command) {
     let status = command.status().unwrap();
@@ -89,7 +110,12 @@ async fn a_small_disk_books_saves_and_reports_a_save_it_cannot_write() {
         return;
     };
     let host = Host::new(&lab, "disk", &["--disk-reserve-mib", "256"]);
-    let disk = SmallDisk::mount(&lab, &host.root, 4);
+    // Room for two awake sandboxes of a 6 GiB base image, not three.
+    let disk = SmallDisk::mount(&lab, &host.root, 20);
+    let growth = disk_bound(&disk.mount.join("base.ext4"));
+    // What an awake sandbox books: its next save and its disk's growth,
+    // less what its guest wrote alone since it booted.
+    let books = |booked: u64| (SAVE + growth - BOOT_WRITES..=SAVE + growth).contains(&booked);
     let host = host.with_state(disk.mount.join("state"), disk.mount.join("base.ext4"));
     let agent = host.start().await;
     agent
@@ -114,12 +140,23 @@ async fn a_small_disk_books_saves_and_reports_a_save_it_cannot_write() {
         "says what it is short of: {message}"
     );
     assert!(
-        message.contains(&SAVE.to_string()),
-        "and how much: {message}"
+        books(needed(&message)),
+        "a save and a disk's growth: {message}"
     );
+    let count = awake.len() as u64;
+    // The refused sandbox's first files stay booked until a reading after
+    // they were written.
+    let awake_books = count * (SAVE + growth - BOOT_WRITES)..=count * (SAVE + growth);
+    agent
+        .wait_until("only the awake sandboxes booked", |status| {
+            status
+                .disk
+                .as_ref()
+                .is_some_and(|disk| awake_books.contains(&disk.booked))
+        })
+        .await;
     let booked = agent.status().await.disk.unwrap();
-    assert_eq!(booked.booked, SAVE * awake.len() as u64);
-    assert!(booked.free < SAVE, "{booked:?}");
+    assert!(booked.free < SAVE + growth, "{booked:?}");
     eprintln!(
         "{} awake booked {} MiB; the next refused in {refusal:?}: {message}",
         awake.len(),
@@ -136,13 +173,12 @@ async fn a_small_disk_books_saves_and_reports_a_save_it_cannot_write() {
         })
         .await;
     let saved = begin.elapsed();
-    let others = SAVE * (awake.len() as u64 - 1);
     agent
         .wait_until("a reading to show the save", |status| {
             status
                 .disk
                 .as_ref()
-                .is_some_and(|disk| disk.booked == others)
+                .is_some_and(|disk| disk.booked + SAVE + growth - BOOT_WRITES <= booked.booked)
         })
         .await;
     let read = begin.elapsed();

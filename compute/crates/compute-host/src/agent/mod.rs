@@ -288,9 +288,10 @@ pub enum HostError {
     /// Host storage failed.
     #[error("host I/O failed: {0}")]
     Io(String),
-    /// The host cannot take on the sandbox's memory, or the disk its next
-    /// save may need, now: even ending every idle VM already saved would
-    /// not free enough. Retryable.
+    /// The host cannot take on the sandbox's memory, or the local disk it
+    /// may write (its next save, its disk's growth, its first files), now:
+    /// even ending every idle VM already saved would not free enough.
+    /// Retryable.
     #[error(
         "host full: sandbox {id} needs {needed} {what} and only {free} are free",
         what = shortage(*.resource)
@@ -354,8 +355,8 @@ fn allocation_unit(root: &std::path::Path) -> Result<u64, HostError> {
 fn shortage(resource: Resource) -> &'static str {
     match resource {
         Resource::Memory => "bytes of memory reserved",
-        Resource::Disk => "bytes of disk booked for its next save",
-        Resource::Inodes => "disk inodes booked for its next save",
+        Resource::Disk => "bytes of local disk booked",
+        Resource::Inodes => "local disk inodes booked",
     }
 }
 
