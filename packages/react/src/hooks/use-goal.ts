@@ -1,8 +1,15 @@
-import { OpenGeniApiError, type SessionEvent, type SessionGoal } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  observedSessionSequence,
+  type SessionEvent,
+  type SessionGoal,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedGoal, type EmbeddedGoalClientOverride } from "../session-context";
 import { normalizeError } from "../lib/error-message";
+import { useRetainedSessionView } from "./session-view-cache";
 import {
+  projectionReadThrough,
   useDebouncedCallback,
   useMutationRunner,
   usePageLiveActivity,
@@ -114,6 +121,7 @@ export function useGoal(
     loadAbort.current?.abort();
     const controller = new AbortController();
     loadAbort.current = controller;
+    let fetchedGoal: SessionGoal | null = null;
     try {
       // findGoal reads a goal-less session as a successful null, so no failed
       // request reaches the browser console. Custom clients without it keep
@@ -122,6 +130,7 @@ export function useGoal(
         typeof client.findGoal === "function"
           ? await client.findGoal(workspaceId, sessionId, { signal: controller.signal })
           : await client.getGoal(workspaceId, sessionId, { signal: controller.signal });
+      fetchedGoal = fetched;
       if (ticket === generation.current) {
         goalAbsentRef.current = fetched === null;
         setGoal(fetched);
@@ -146,6 +155,17 @@ export function useGoal(
     }
     if (ticket !== generation.current || pendingRefreshRef.current === "none") {
       return;
+    }
+    // Events arrived during this read, but a goal read that reports the session
+    // sequence it reflects already includes every one at or below it.
+    const readThrough = fetchedGoal ? observedSessionSequence(fetchedGoal) : undefined;
+    if (readThrough !== undefined) {
+      const events = sharedEventsRef.current ?? [];
+      const newest = events[events.length - 1];
+      if (!newest || newest.sequence <= readThrough) {
+        pendingRefreshRef.current = "none";
+        return;
+      }
     }
     // Events arrived during this read. A shared feed's first batch reports only
     // its latest match, so a goal.* event behind newer turn traffic is visible
@@ -251,7 +271,20 @@ export function useGoal(
   useSessionEventTrigger(client, workspaceId, sessionId, isRefreshEvent, onRefreshEvent, {
     enabled,
     ...(sharedEvents !== undefined ? { events: sharedEvents } : {}),
+    // The load settles events that arrive during its read itself (above).
+    readThrough: projectionReadThrough(goal, false),
   });
+  // Until the first read lands, show the goal as it was when this conversation
+  // was last left (only when the host retains reads).
+  const retainedGoal = useRetainedSessionView(
+    client,
+    workspaceId,
+    sessionId,
+    "goal",
+    loading ? null : goal,
+    { enabled },
+  );
+  const visibleGoal = loading ? (goal ?? retainedGoal) : goal;
 
   const pause = useCallback(
     async (rationale?: string): Promise<SessionGoal | null> => {
@@ -304,11 +337,11 @@ export function useGoal(
   }, [client, workspaceId, sessionId, run, retireLoads]);
 
   return {
-    goal,
-    isActive: goal?.status === "active",
-    isPaused: goal?.status === "paused",
-    isCompleted: goal?.status === "completed",
-    loading,
+    goal: visibleGoal,
+    isActive: visibleGoal?.status === "active",
+    isPaused: visibleGoal?.status === "paused",
+    isCompleted: visibleGoal?.status === "completed",
+    loading: loading && retainedGoal === null,
     error,
     refresh: load,
     pause,

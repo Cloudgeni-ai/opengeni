@@ -4,7 +4,13 @@ import {
   useEmbeddedSessionLineage,
   type EmbeddedSessionLineageClientOverride,
 } from "../session-context";
-import { useDebouncedCallback, usePolledValue, useSessionEventTrigger } from "./internal";
+import { useRetainedSessionView } from "./session-view-cache";
+import {
+  projectionReadThrough,
+  useDebouncedCallback,
+  usePolledValue,
+  useSessionEventTrigger,
+} from "./internal";
 
 export type UseSessionLineageOptions = EmbeddedSessionLineageClientOverride & {
   events?: SessionEvent[] | undefined;
@@ -123,6 +129,9 @@ export function useSessionLineage(
       void refresh();
     }, 2500);
   }, [refresh]);
+  // Lineage reflects this session's events through the sequence its read
+  // observed; only a later spawn or status change can add or move children.
+  const readThrough = projectionReadThrough(state.data?.lineage, state.loading);
   useSessionEventTrigger(
     client,
     workspaceId,
@@ -133,7 +142,7 @@ export function useSessionLineage(
     // open its OWN streamEvents tail — a second live SSE connection next to the
     // session route's useSessionEvents. A caller with no feed opts into polling
     // (pollIntervalMs), never a duplicate stream.
-    { events: options.events, enabled: enabled && options.events !== undefined },
+    { events: options.events, enabled: enabled && options.events !== undefined, readThrough },
   );
   useSessionEventTrigger(
     client,
@@ -141,11 +150,21 @@ export function useSessionLineage(
     sessionId,
     isSessionCreateToolCallCreated,
     refreshAfterChildCreate,
-    { events: options.events, enabled: enabled && options.events !== undefined },
+    { events: options.events, enabled: enabled && options.events !== undefined, readThrough },
+  );
+  // Until the first read lands, show the lineage as it was when this
+  // conversation was last left (only when the host retains reads).
+  const retainedLineage = useRetainedSessionView(
+    client,
+    workspaceId,
+    sessionId,
+    "lineage",
+    state.data?.lineage ?? null,
+    { enabled },
   );
   return {
-    lineage: state.data?.lineage ?? null,
-    loading: state.loading,
+    lineage: state.data?.lineage ?? retainedLineage,
+    loading: state.loading && retainedLineage === null,
     error: state.error,
     readGeneration: state.data?.readGeneration ?? 0,
     refresh,

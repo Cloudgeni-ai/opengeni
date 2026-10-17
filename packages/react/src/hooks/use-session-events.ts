@@ -12,6 +12,7 @@ import type { TimelineItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
+import { useRetainedSessionView } from "./session-view-cache";
 import type { LatestQuestionOptions } from "./latest-question";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
@@ -210,6 +211,8 @@ export function useSessionEvents(
   const loadingLatestRef = useRef(false);
   const viewModeRef = useRef<"live" | "history">("live");
   const initialWindowLoadedRef = useRef(false);
+  // The stream key whose live stream has opened at least once in this mount.
+  const openedStreamKeyRef = useRef<string | null>(null);
   const reconcileAfterPageResumeRef = useRef(false);
   const streamAbortRef = useRef<AbortController | null>(null);
   const streamKeyRef = useRef<string | null>(null);
@@ -494,11 +497,17 @@ export function useSessionEvents(
           after: streamResumeSequenceRef.current,
           signal: controller.signal,
           onOpen: () => {
+            // The first open after this mount's initial tail: every read hook
+            // read its projection alongside that tail, and the shared feed
+            // re-reads one only for a later event. Later opens (reconnects,
+            // foreground resumes) repair every projection.
+            const initialOpen = openedStreamKeyRef.current !== streamKey;
+            openedStreamKeyRef.current = streamKey;
             // Reconciliation repairs projections, but it must not block reading
             // the already-open SSE body. Otherwise live events accumulate in the
             // browser and appear as one delayed burst after every reconciler ends.
             void Promise.resolve()
-              .then(() => reconcileSession(sessionId))
+              .then(() => reconcileSession(sessionId, { initialOpen }))
               .catch((cause) => {
                 if (isCurrent()) {
                   setError(normalizeError(cause));
@@ -1080,7 +1089,31 @@ export function useSessionEvents(
   }, [after, sessionId, ownsNavigation]);
 
   const identityMatches = stateStreamKey === streamKey;
-  const visibleEvents = identityMatches ? eventWindow.events : EMPTY_EVENTS;
+  const freshTail =
+    identityMatches && initialHistoryReady && viewMode === "live" && !fullReplay
+      ? {
+          events: eventWindow.events,
+          hasOlder,
+          truncated: eventWindow.truncated,
+          bytes: eventWindow.bytes,
+          sessionStatus: sessionStatusProjection,
+        }
+      : null;
+  // Reopening a conversation draws the tail it showed when it was left (only
+  // when the host retains reads for `client`) until its own fresh tail lands.
+  const retainedTail = useRetainedSessionView(client, workspaceId, sessionId, "events", freshTail, {
+    enabled: !fullReplay,
+    bytes: (tail) => tail.bytes,
+    budgetBytes: SESSION_EVENT_BROWSER_MAX_BYTES,
+  });
+  const showRetained = retainedTail !== null && !(identityMatches && initialHistoryReady);
+  const visibleEvents = showRetained
+    ? retainedTail.events
+    : identityMatches
+      ? eventWindow.events
+      : EMPTY_EVENTS;
+  const visibleHasOlder = showRetained ? retainedTail.hasOlder : identityMatches && hasOlder;
+  const visibleTruncated = showRetained ? retainedTail.truncated : eventWindow.truncated;
   const timeline = useMemo(() => {
     const witness =
       questionEvidence?.client === client &&
@@ -1088,7 +1121,7 @@ export function useSessionEvents(
       visibleEvents.some((event) => event.sequence === questionEvidence.anchor)
         ? questionEvidence.events
         : EMPTY_EVENTS;
-    const timelineOptions = { partialStart: hasOlder || eventWindow.truncated || after > 0 };
+    const timelineOptions = { partialStart: visibleHasOlder || visibleTruncated || after > 0 };
     if (witness.length === 0) return buildTimeline(t, visibleEvents, timelineOptions);
     const ids = new Set(visibleEvents.map((event) => event.id));
     return buildTimeline(
@@ -1098,8 +1131,8 @@ export function useSessionEvents(
     );
   }, [
     visibleEvents,
-    hasOlder,
-    eventWindow.truncated,
+    visibleHasOlder,
+    visibleTruncated,
     after,
     questionEvidence,
     client,
@@ -1110,15 +1143,19 @@ export function useSessionEvents(
   return {
     events: visibleEvents,
     timeline,
-    sessionStatus: identityMatches ? sessionStatusProjection : null,
+    sessionStatus: showRetained
+      ? retainedTail.sessionStatus
+      : identityMatches
+        ? sessionStatusProjection
+        : null,
     sessionStatusSequence: identityMatches ? sessionStatusRef.current.sequence : 0,
     connectionState: identityMatches ? connectionState : "idle",
     lastSequence: identityMatches ? lastSequenceRef.current : after,
     windowBytes: identityMatches ? eventWindow.bytes : 2,
     windowTruncated: identityMatches ? eventWindow.truncated : false,
-    initialLoading: fullReplay ? false : identityMatches ? initialLoading : true,
+    initialLoading: fullReplay || showRetained ? false : identityMatches ? initialLoading : true,
     initialHistoryReady: identityMatches && initialHistoryReady,
-    hasOlder: !identityMatches ? false : hasOlder,
+    hasOlder: visibleHasOlder,
     loadingOlder: !identityMatches ? false : loadingOlder,
     loadOlder,
     hasNewer: !identityMatches ? false : hasNewer,

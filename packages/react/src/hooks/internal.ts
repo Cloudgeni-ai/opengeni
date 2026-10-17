@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@opengeni/sdk";
+import { observedSessionSequence, type SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { EmbeddedSessionEventClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
@@ -298,6 +298,34 @@ export type SessionEventFeedOptions = {
 };
 
 /**
+ * What a read hook's authoritative value reflects, for {@link useSessionEventTrigger}:
+ *
+ * - a number: every session event at or below this sequence (the session
+ *   detail's `lastSequence`, or a projection's `observedSessionSequence`);
+ * - `"reading"`: the first read for this conversation is still in flight;
+ * - `null` (or omitted): unknown, so every matching event refreshes.
+ */
+export type SessionReadThrough = number | "reading" | null;
+
+/** The sequence a projection read reflects, as {@link SessionReadThrough}. */
+export function projectionReadThrough(
+  value: unknown,
+  firstReadInFlight: boolean,
+): SessionReadThrough {
+  if (value === null || value === undefined) return firstReadInFlight ? "reading" : null;
+  return observedSessionSequence(value) ?? null;
+}
+
+export type SessionEventTriggerOptions = SessionEventFeedOptions & {
+  /**
+   * Shared-feed mode: deliver an event only when the hook's own read does not
+   * already reflect it. While the first read is in flight, matching events
+   * wait for it and the newest is delivered once if the read predates it.
+   */
+  readThrough?: SessionReadThrough | undefined;
+};
+
+/**
  * Invoke `onEvent` for every session event matching `match` — the live-update
  * primitive behind `useTurnQueue` and `useGoal`. Either watches a shared
  * `events` log or tails the stream directly (reconnect handled by the SDK).
@@ -308,7 +336,7 @@ export function useSessionEventTrigger(
   sessionId: string | null | undefined,
   match: (event: SessionEvent) => boolean,
   onEvent: (event: SessionEvent) => void,
-  options: SessionEventFeedOptions = {},
+  options: SessionEventTriggerOptions = {},
   reconcileBeforeLive?: (() => void | Promise<void>) | undefined,
 ): void {
   const enabled = options.enabled ?? true;
@@ -316,17 +344,39 @@ export function useSessionEventTrigger(
   const liveEnabled = enabled && pageLive;
   const events = options.events;
   const sharedFeed = events !== undefined;
+  const readThrough = options.readThrough ?? null;
   const matchRef = useRef(match);
   const onEventRef = useRef(onEvent);
   const reconcileBeforeLiveRef = useRef(reconcileBeforeLive);
+  const readThroughRef = useRef(readThrough);
   useLayoutEffect(() => {
     matchRef.current = match;
     onEventRef.current = onEvent;
     reconcileBeforeLiveRef.current = reconcileBeforeLive;
-  }, [match, onEvent, reconcileBeforeLive]);
+    readThroughRef.current = readThrough;
+  }, [match, onEvent, reconcileBeforeLive, readThrough]);
   const consumedRef = useRef(0);
   const feedKeyRef = useRef<string | null>(null);
   const sharedFeedHasEventsRef = useRef(false);
+  // The newest matching event that arrived while the first read was in flight.
+  const awaitingReadRef = useRef<SessionEvent | null>(null);
+  const deliver = useCallback((event: SessionEvent) => {
+    const through = readThroughRef.current;
+    if (through === "reading") {
+      const waiting = awaitingReadRef.current;
+      if (!waiting || event.sequence >= waiting.sequence) awaitingReadRef.current = event;
+      return;
+    }
+    if (typeof through === "number" && event.sequence <= through) return;
+    onEventRef.current(event);
+  }, []);
+  // The first read landed: deliver what waited for it only if the read predates it.
+  useEffect(() => {
+    if (readThrough === "reading") return;
+    const waiting = awaitingReadRef.current;
+    awaitingReadRef.current = null;
+    if (waiting && sharedFeed && liveEnabled) deliver(waiting);
+  }, [deliver, liveEnabled, readThrough, sharedFeed]);
 
   // Shared-log mode: scan only the unseen tail on every append.
   useEffect(() => {
@@ -337,6 +387,7 @@ export function useSessionEventTrigger(
     const firstSequence = events[0]?.sequence ?? 0;
     if (feedKeyRef.current !== feedKey) {
       feedKeyRef.current = feedKey;
+      awaitingReadRef.current = null;
       sharedFeedHasEventsRef.current = events.length > 0;
       // The caller has already loaded its authoritative initial projection.
       // Seed from the shared log's current tail so mounting a large historical
@@ -361,7 +412,7 @@ export function useSessionEventTrigger(
         }
       }
       if (latestMatch) {
-        onEventRef.current(latestMatch);
+        deliver(latestMatch);
       }
       return;
     }
@@ -372,10 +423,10 @@ export function useSessionEventTrigger(
       }
       consumedRef.current = event.sequence;
       if (matchRef.current(event)) {
-        onEventRef.current(event);
+        deliver(event);
       }
     }
-  }, [sharedFeed, liveEnabled, events, workspaceId, sessionId]);
+  }, [sharedFeed, liveEnabled, events, workspaceId, sessionId, deliver]);
 
   // Self-stream mode: tail from the session's current lastSequence.
   useEffect(() => {

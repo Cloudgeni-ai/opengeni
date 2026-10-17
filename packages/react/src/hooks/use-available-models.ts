@@ -2,6 +2,7 @@ import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useCallback } from "react";
 import { projectPickerRows, sortPickerRows, type PickerModelRow } from "../model-policy";
 import { useOpenGeniClient, type ClientOverride } from "../session-context";
+import { joinClientConfigRead } from "../lib/client-config-read";
 import { useSharedQuery } from "./shared-query";
 import { useOpenGeniText } from "../messages/runtime";
 
@@ -79,7 +80,9 @@ export function useWorkspaceModelCatalog(
       }
       const [catalog, config] = await Promise.all([
         client.getWorkspaceModelCatalog(options.workspaceId, { signal }),
-        client.getClientConfig({ signal, workspaceId: options.workspaceId }),
+        // Joins the same workspace's config read already in flight (for
+        // example the composer's voice availability).
+        joinClientConfigRead(client, options.workspaceId),
       ]);
       return {
         models: catalog.models,
