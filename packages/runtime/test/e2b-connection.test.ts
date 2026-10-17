@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { Manifest } from "@openai/agents/sandbox";
 
 // The E2B SDK is replaced by a recorder: these tests check what the adapter
@@ -171,13 +172,43 @@ describe("E2B adapter workspace root", () => {
 
   test("a root owned by someone else is handed to the default user as root", async () => {
     takeCommands();
-    answer = (call) =>
-      call.command.includes("[ -w") ? { ...ok, stdout: "owner 1000:1000\n" } : ok;
+    // Unusable until the handover, usable after it.
+    let handedOver = false;
+    answer = (call) => {
+      if (call.options.user === "root") {
+        handedOver = true;
+        return ok;
+      }
+      if (call.command.includes("[ -w")) {
+        return { ...ok, stdout: handedOver ? "writable\n" : "owner 1000:1000\n" };
+      }
+      return ok;
+    };
     await new E2BSandboxClient({ connection }).create(new Manifest({ root: "/workspace" }));
-    const [probe, handover] = takeCommands();
+    const [probe, handover, recheck] = takeCommands();
     expect(probe?.options.user).toBeUndefined();
     expect(handover?.options.user).toBe("root");
-    expect(handover?.command).toBe("mkdir -p -- '/workspace' && chown -- 1000:1000 '/workspace'");
+    expect(handover?.command).toBe(
+      "mkdir -p -- '/workspace' && chown -- 1000:1000 '/workspace' && chmod u+rwx -- '/workspace'",
+    );
+    // The default user checks again that it can now write and enter it.
+    expect(recheck?.options.user).toBeUndefined();
+    expect(recheck?.command).toContain("[ -w '/workspace' ] && [ -x '/workspace' ]");
+    answer = writable;
+  });
+
+  test("a root still unusable after the handover fails the create", async () => {
+    takeCommands();
+    answer = (call) => {
+      if (call.command.includes("[ -w")) {
+        return { ...ok, stdout: "owner 1000:1000\n" };
+      }
+      return ok;
+    };
+    const client = new E2BSandboxClient({ connection });
+    await expect(client.create(new Manifest({ root: "/workspace" }))).rejects.toThrow(
+      "the default user still cannot write it after it was handed over",
+    );
     answer = writable;
   });
 
@@ -201,29 +232,136 @@ describe("E2B adapter workspace root", () => {
 });
 
 describe("E2B adapter tty commands", () => {
-  test("a command runs from a staged file, and the shell exits with it", async () => {
+  // Runs a tty command through the adapter, and returns the file it staged
+  // and the line it typed into the PTY.
+  async function stage(cmd: string): Promise<{ path: string; content: string; typed: string }> {
     RecordingSandbox.written.clear();
     RecordingSandbox.typed.length = 0;
     const session = await new E2BSandboxClient({ connection }).create(
       new Manifest({ root: "/workspace" }),
     );
-    const output = await session.execCommand({
-      cmd: "echo 'hi there'",
-      tty: true,
-      yieldTimeMs: 1000,
-    });
-
-    // E2B's PTY is an interactive bash: the command goes to a file, and the
-    // one line typed runs it and leaves the shell with its status.
+    const output = await session.execCommand({ cmd, tty: true, yieldTimeMs: 1000 });
+    // The fake PTY ended with the command, so its exit status is reported.
+    expect(output).toContain("exited with code 0");
+    expect(output).toContain("done");
     const staged = [...RecordingSandbox.written].filter(([path]) =>
       /^\/tmp\/agents-pty-[0-9a-f-]{36}\.sh$/.test(path),
     );
     expect(staged).toHaveLength(1);
+    expect(RecordingSandbox.typed).toHaveLength(1);
     const [path, content] = staged[0]!;
-    expect(content).toBe(`rm -f -- '${path}'\nexec /bin/sh -c 'echo '\\''hi there'\\'''\n`);
-    expect(RecordingSandbox.typed).toEqual([`/bin/sh '${path}'; exit\n`]);
-    // The PTY ended with the command, so its exit status is reported.
-    expect(output).toContain("exited with code 0");
-    expect(output).toContain("done");
+    return { path, content, typed: RecordingSandbox.typed[0]! };
+  }
+
+  test("a command runs from a staged file that replaces the shell", async () => {
+    const { path, content, typed } = await stage("echo 'hi there'");
+    // E2B's PTY is an interactive bash: the command goes to a file, and the
+    // one line typed replaces that bash with a shell running the file.
+    expect(content).toBe(`rm -f -- '${path}'\nset -m\n/bin/sh -c 'echo '\\''hi there'\\'''\n`);
+    expect(typed).toBe(`exec /bin/sh '${path}'\n`);
   });
+
+  // Types the adapter's line into a real interactive bash in a real PTY, as
+  // E2B's PTY does, after waiting for `ready` in its output when given, and
+  // optionally pressing Ctrl-C once it appears, and again every 100 ms, as
+  // a person would: dash holds a Ctrl-C that lands between two of its
+  // commands until the next one ends. Returns how the PTY's process ended,
+  // or "still running" after five seconds.
+  async function runInPty(
+    cmd: string,
+    options: { ready?: string; interrupt?: boolean } = {},
+  ): Promise<number | "still running"> {
+    const { path, content, typed } = await stage(cmd);
+    writeFileSync(path, content);
+    let output = "";
+    let sawReady: () => void = () => {};
+    const ready = new Promise<void>((resolve) => (sawReady = resolve));
+    const shell = Bun.spawn(["bash", "--noprofile", "--norc", "-i"], {
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", TERM: "dumb", PS1: "$ " },
+      terminal: {
+        cols: 200,
+        rows: 24,
+        data: (_terminal, data) => {
+          output += new TextDecoder().decode(data);
+          if (options.ready && output.includes(`${options.ready}\r\n`)) {
+            sawReady();
+          }
+        },
+      },
+    });
+    let interrupting: ReturnType<typeof setInterval> | undefined;
+    try {
+      shell.terminal!.write(typed);
+      if (options.ready) {
+        await ready;
+      }
+      if (options.interrupt) {
+        const press = () => {
+          try {
+            shell.terminal!.write("\x03");
+          } catch {
+            // The PTY has just ended.
+          }
+        };
+        press();
+        interrupting = setInterval(press, 100);
+      }
+      return await Promise.race([
+        shell.exited,
+        Bun.sleep(5_000).then(() => "still running" as const),
+      ]);
+    } finally {
+      clearInterval(interrupting);
+      shell.kill(9);
+    }
+  }
+
+  const posix = test.skipIf(process.platform === "win32");
+
+  posix(
+    "in a real PTY the shell ends with the command's status",
+    async () => {
+      expect(await runInPty("exit 3")).toBe(3);
+      expect(await runInPty("echo hi there")).toBe(0);
+    },
+    15_000,
+  );
+
+  posix(
+    "in a real PTY Ctrl-C ends the command and the PTY with it",
+    async () => {
+      // An interrupted command used to leave bash at its prompt: the PTY
+      // never ended, and the command never reported an exit status.
+      expect(await runInPty("echo started; sleep 30", { ready: "started", interrupt: true })).toBe(
+        130,
+      );
+      // A command that handles Ctrl-C itself keeps control, and its own
+      // status is the one reported.
+      expect(
+        await runInPty(`sleep 30 & trap 'kill $!; echo caught; exit 4' INT; echo started; wait`, {
+          ready: "started",
+          interrupt: true,
+        }),
+      ).toBe(4);
+    },
+    15_000,
+  );
+
+  posix(
+    "in a real PTY a process left in the background outlives the PTY",
+    async () => {
+      const pidFile = `/tmp/agents-pty-test-${globalThis.crypto.randomUUID()}`;
+      try {
+        expect(await runInPty(`sleep 60 & echo $! > ${pidFile}`)).toBe(0);
+        const pid = Number(readFileSync(pidFile, "utf8"));
+        // A moment for a hangup sent as the PTY ended to take effect.
+        await Bun.sleep(200);
+        expect(() => process.kill(pid, 0)).not.toThrow();
+        process.kill(pid, "SIGKILL");
+      } finally {
+        rmSync(pidFile, { force: true });
+      }
+    },
+    15_000,
+  );
 });
