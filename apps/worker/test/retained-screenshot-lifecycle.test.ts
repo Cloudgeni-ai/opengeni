@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import {
   claimRetainedScreenshotMaintenance,
   withSessionRlsActorContext,
+  ensureManagedAccessForUser,
   getFile,
   claimSessionWorkForAttempt,
   completeRetainedScreenshotMaintenance,
@@ -151,10 +152,47 @@ async function freshWorkspace(): Promise<WorkspaceFixture> {
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
-async function freshTurn(): Promise<TurnFixture> {
-  const workspace = await freshWorkspace();
+async function freshPrivateWorkspace(): Promise<WorkspaceFixture & { owner: string }> {
+  const ownerUserId = `screenshot-private-${crypto.randomUUID()}`;
+  const access = await ensureManagedAccessForUser(db, {
+    userId: ownerUserId,
+    email: `${ownerUserId}@example.test`,
+    name: "Private chat owner",
+  });
+  const grant = access.workspaceGrants.find(
+    (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+  );
+  if (!grant) throw new Error("private chat owner has no workspace grant");
+  await admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (${grant.accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'retained-screenshot-test')`;
+  await admin`
+    insert into organization_private_session_settings (
+      account_id, enabled, version, updated_by_membership_id
+    ) values (${grant.accountId}, true, 1, null)
+    on conflict (account_id) do update set enabled = true`;
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    owner: `user:${ownerUserId}`,
+  };
+}
+
+async function freshTurn(privateChat = false): Promise<TurnFixture> {
+  const privateWorkspace = privateChat ? await freshPrivateWorkspace() : null;
+  const workspace = privateWorkspace
+    ? { accountId: privateWorkspace.accountId, workspaceId: privateWorkspace.workspaceId }
+    : await freshWorkspace();
   const session = await createSession(db, {
     ...workspace,
+    ...(privateWorkspace
+      ? ({
+          createdBy: { kind: "subject", subjectId: privateWorkspace.owner },
+          subjectId: privateWorkspace.owner,
+          visibility: "user_private",
+        } as never)
+      : {}),
     initialMessage: "retain this screenshot",
     resources: [],
     metadata: {},
@@ -504,6 +542,44 @@ describe("retained screenshot lifecycle fences", () => {
       status: "expired",
       quotaState: "released",
       cleanupReason: "expired",
+      maintenanceClaimId: null,
+    });
+    expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
+      reservedBytes: 0,
+      readyBytes: 0,
+    });
+  }, 180_000);
+
+  test("expiry reaps a screenshot from another member's private session", async () => {
+    if (!available) return;
+    const fixture = await freshTurn(true);
+    const memory = storageFixture();
+    const prepared = await prepareArtifact(fixture, memory.storage, {
+      expiresAt: new Date(Date.now() - 1_000),
+    });
+    await memory.storage.putObject({
+      key: prepared.objectKey,
+      contentType: "image/png",
+      body: PNG,
+      sha256: SCREENSHOT.sha256,
+    });
+    await settleRetainedScreenshotArtifactReady(db, {
+      ...fixture,
+      artifactId: prepared.artifactId,
+      settlementKey: prepared.settlementKey,
+    });
+    // A private chat is invisible to any other acting subject, including a
+    // service subject; maintenance must still settle its expiry.
+    const [session] = await admin<Array<{ visibility: string }>>`
+      select visibility from sessions where id = ${fixture.sessionId}`;
+    expect(session?.visibility).toBe("user_private");
+    const maintenance = maintenanceActivity(memory.storage);
+    const result = await maintenance.maintainRetainedScreenshots();
+    expect(maintenance.warnings).toEqual([]);
+    expect(result).toMatchObject({ deleted: 1, retryable: 0 });
+    expect(await artifactRow(prepared.artifactId)).toMatchObject({
+      status: "expired",
+      quotaState: "released",
       maintenanceClaimId: null,
     });
     expect(await getWorkspaceScreenshotQuota(db, fixture.workspaceId)).toEqual({
@@ -997,17 +1073,22 @@ describe("retained screenshot lifecycle fences", () => {
       await asMember(participant, () => getFile(db, fixture.workspaceId, prepared.artifactId)),
     ).toBeNull();
 
-    // Lifecycle failures behave exactly as for a readable screenshot.
+    // A screenshot that is no longer retained projects as the same neutral
+    // receipt for every requester instead of failing the turn.
     const afterExpiry = new Date(Date.now() + 120_000);
-    await expect(
-      asMember(owner, () => materialize(prepared.artifactId, afterExpiry)),
-    ).rejects.toThrow("unavailable: expired");
-    await expect(
-      asMember(participant, () => materialize(prepared.artifactId, afterExpiry)),
-    ).rejects.toThrow("unavailable: expired");
-    await expect(asMember(participant, () => materialize(crypto.randomUUID()))).rejects.toThrow(
-      "unavailable: deleted",
+    const ownExpired = await asMember(owner, () => materialize(prepared.artifactId, afterExpiry));
+    expect(ownExpired[0]?.output).toBe(direct);
+    expect(ownExpired[2]?.output).toEqual({ content: [{ type: "input_text", text: direct }] });
+    const participantExpired = await asMember(participant, () =>
+      materialize(prepared.artifactId, afterExpiry),
     );
+    expect(participantExpired[0]?.output).toBe(direct);
+    const neverRetainedId = crypto.randomUUID();
+    const neverRetained = await asMember(participant, () => materialize(neverRetainedId));
+    expect(String(neverRetained[0]?.output)).toBe(
+      direct.replace(prepared.artifactId, neverRetainedId),
+    );
+    expect(String(neverRetained[0]?.output)).not.toContain("base64");
   }, 180_000);
 
   test("recovers a truncated screenshot receipt by exact session and tool call", async () => {
@@ -1061,15 +1142,21 @@ describe("retained screenshot lifecycle fences", () => {
     expect(
       String((recoveredOutput[1] as { image?: string }).image).startsWith("data:image/png;base64,"),
     ).toBeTrue();
-    await expect(
-      materializeRetainedScreenshotHistory({
-        db,
-        objectStorage: memory.storage,
-        workspaceId: other.workspaceId,
-        sessionId: other.sessionId,
-        history: corruptedHistory,
-      }),
-    ).rejects.toThrow("cannot be recovered");
+    // Another session cannot recover it: a neutral receipt, never the image.
+    const unrecovered = await materializeRetainedScreenshotHistory({
+      db,
+      objectStorage: memory.storage,
+      workspaceId: other.workspaceId,
+      sessionId: other.sessionId,
+      history: corruptedHistory,
+    });
+    const unrecoveredOutput = unrecovered[0]?.output;
+    if (!Array.isArray(unrecoveredOutput)) throw new Error("expected content array");
+    expect(unrecoveredOutput[1]).toEqual({
+      type: "input_text",
+      text: expect.stringContaining("not available to the current requester"),
+    });
+    expect(JSON.stringify(unrecoveredOutput)).not.toContain("base64");
   }, 180_000);
 
   test("FORCE-RLS denies cross-workspace rows while the fixed SECURITY DEFINER claim sees both", async () => {
