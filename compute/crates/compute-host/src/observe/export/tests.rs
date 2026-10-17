@@ -232,7 +232,26 @@ fn retry_after_is_read_in_seconds_or_as_a_date() {
     assert_eq!(retry_delay("Sun Nov  6 08:49:37 1994", 0), None);
     assert_eq!(retry_delay("Sun, 06 Nov 1994 08:49:37 PST", 0), None);
     assert_eq!(retry_delay("Sun, 32 Nov 1994 08:49:37 GMT", 0), None);
+    assert_eq!(
+        retry_delay("Sun, 06 Nov 18446744073709551615 08:49:37 GMT", 0),
+        None
+    );
     assert_eq!(retry_delay("soon", 0), None);
+}
+
+#[tokio::test]
+async fn any_delay_a_collector_asks_for_fails_the_batch_without_harm() {
+    // Seconds that overflow an instant, however far it is from now.
+    for asked in [u64::MAX, u64::MAX / 1_000_000_000] {
+        let (endpoint, mut received) = collector(vec![Answer(503, Some(asked), "")]).await;
+        let exporter = exporter(&endpoint, Duration::from_secs(60));
+        let (sent, _) = send(&exporter, &mut events(1)).await;
+        assert!(
+            matches!(sent, Sent::Failed(ref why) if why.contains("beyond the time left")),
+            "{sent:?}"
+        );
+        received.recv().await.unwrap();
+    }
 }
 
 #[tokio::test]

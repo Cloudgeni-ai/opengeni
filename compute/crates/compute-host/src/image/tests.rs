@@ -283,6 +283,40 @@ fn recovery_keeps_an_image_it_cannot_read_for_now() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn an_image_gone_whole_is_damaged_but_nothing_is_kept() {
+    let dir = scratch("gone");
+    let images = Images::new(dir.join("images"));
+    let (memory, state) = (dir.join("memory"), dir.join("state"));
+    write_diff(&memory, &[(1, 7)]);
+    write_state(&state, b"s");
+    let image = images
+        .publish(Parts::Whole {
+            state: &state,
+            memory: &memory,
+            len: LEN,
+        })
+        .unwrap();
+    fs::remove_dir_all(images.path(image.generation())).unwrap();
+    let recovered = images.recover().unwrap();
+    assert!(
+        matches!(
+            recovered,
+            Recovered::Damaged {
+                quarantined: false,
+                ..
+            }
+        ),
+        "{recovered:?}"
+    );
+    assert_eq!(images.current().unwrap(), None);
+    assert_eq!(
+        fs::read_dir(images.dir().join(QUARANTINE)).map_or(0, Iterator::count),
+        0
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 /// Simulates many save cycles in which the host crashes at any point of
 /// publishing or retiring, and in which stored files get corrupted. After
 /// every recovery, the current image is either exactly the last

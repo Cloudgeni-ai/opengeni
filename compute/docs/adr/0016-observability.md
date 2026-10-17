@@ -58,9 +58,10 @@ for activity ([3](0003-activity-idle-and-sleep-levels.md)).
   at a thousand sandboxes and one request per second per host, including
   sampling, encoding and export but not the canary. Measured on a nested
   host at 1,000 running sandboxes ([measurements](../measurements.md)):
-  processor time within the baselines' spread of about 0.1% of a core, and
-  1.1 MiB more heap while exporting, plus 1.2 MiB of resident code for
-  HTTP and TLS.
+  processor time within the baselines' spread of about 0.1% of a core, so
+  the target is neither shown met nor missed at that precision; 1.1 MiB
+  more heap while exporting, plus 1.2 MiB of resident code for HTTP and
+  TLS.
 
 ## What building it taught us
 

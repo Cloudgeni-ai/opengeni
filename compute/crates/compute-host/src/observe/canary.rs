@@ -58,35 +58,52 @@ impl CanaryIds {
 
     /// The ids of the host whose agent keeps its state in `root`: made up
     /// at random the first time and kept there, so a restarted agent finds
-    /// its canary sandbox again.
+    /// its canary sandbox again. Two agents starting at once on the same
+    /// root agree: the first to publish its ids wins, and the other reads
+    /// them.
     ///
     /// # Errors
     ///
     /// When the file cannot be read or written, or holds something else.
     pub fn for_host(root: &Path) -> io::Result<Self> {
         let path = root.join(IDS_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let bits = u64::from_str_radix(text.trim(), 16).map_err(|error| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("{}: {error}", path.display()),
-                    )
-                })?;
-                return Ok(Self::for_bits(bits));
-            }
+        match Self::read(&path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+            read => return read,
         }
         let mut bits = [0; 8];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut bits)?;
         let bits = u64::from_le_bytes(bits);
         std::fs::create_dir_all(root)?;
-        let partial = root.join(format!("{IDS_FILE}.partial"));
-        let mut file = std::fs::File::create(&partial)?;
-        writeln!(file, "{bits:016x}")?;
-        file.sync_all()?;
-        std::fs::rename(&partial, &path)?;
+        // Written whole under a name of its own, then linked into place,
+        // which never replaces ids already there.
+        let partial = root.join(format!("{IDS_FILE}.{bits:016x}.partial"));
+        let written = (|| {
+            let mut file = std::fs::File::create_new(&partial)?;
+            writeln!(file, "{bits:016x}")?;
+            file.sync_all()?;
+            std::fs::hard_link(&partial, &path)
+        })();
+        let _ = std::fs::remove_file(&partial);
+        match written {
+            Ok(()) => {
+                std::fs::File::open(root)?.sync_all()?;
+                Ok(Self::for_bits(bits))
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Self::read(&path),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The ids kept at `path`.
+    fn read(path: &Path) -> io::Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        let bits = u64::from_str_radix(text.trim(), 16).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: {error}", path.display()),
+            )
+        })?;
         Ok(Self::for_bits(bits))
     }
 }
@@ -343,5 +360,38 @@ mod tests {
         let ids = CanaryIds::for_bits(0x0123_4567_89ab_cdef);
         assert_eq!(ids.sandbox.0.0, 0xca4a_7900_0000_0001_2345_6789_abcd_ef01);
         assert_eq!(ids.fresh.0.0, 0xca4a_7900_0000_0001_2345_6789_abcd_ef02);
+    }
+
+    #[test]
+    fn agents_starting_at_once_agree_on_the_ids() {
+        for round in 0..20 {
+            let root = root(&format!("race-{round}"));
+            let start = std::sync::Barrier::new(8);
+            let found: Vec<CanaryIds> = std::thread::scope(|scope| {
+                let racers: Vec<_> = (0..8)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            start.wait();
+                            CanaryIds::for_host(&root).unwrap()
+                        })
+                    })
+                    .collect();
+                racers
+                    .into_iter()
+                    .map(|racer| racer.join().unwrap())
+                    .collect()
+            });
+            let kept = CanaryIds::for_host(&root).unwrap();
+            assert!(
+                found.iter().all(|ids| *ids == kept),
+                "round {round}: {found:?}"
+            );
+            let left: Vec<_> = std::fs::read_dir(&root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(left, [IDS_FILE], "round {round}: nothing else is left");
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }

@@ -627,15 +627,17 @@ impl Images {
     }
 
     /// Moves a suspect generation aside, out of every path that could use
-    /// it, and clears `current` if it named it.
-    pub fn quarantine(&self, generation: Generation, why: &Suspect) -> io::Result<()> {
+    /// it, and clears `current` if it named it. Returns whether there was
+    /// anything to keep: a generation already gone leaves none.
+    pub fn quarantine(&self, generation: Generation, why: &Suspect) -> io::Result<bool> {
         let quarantine = self.dir.join(QUARANTINE);
         fs::create_dir_all(&quarantine)?;
         if self.current()? == Some(generation) {
             remove_durably(&self.dir.join(CURRENT))?;
         }
         let from = self.path(generation);
-        if from.exists() {
+        let kept_one = from.exists();
+        if kept_one {
             let mut to = quarantine.join(format!("{generation}-{}", why.tag()));
             let mut attempt = 0;
             while to.exists() {
@@ -656,7 +658,8 @@ impl Images {
                 let _ = fs::remove_dir_all(old);
             }
         }
-        sync_dir(&self.dir)
+        sync_dir(&self.dir)?;
+        Ok(kept_one)
     }
 
     /// Makes the directory consistent after a crash: unfinished builds are
@@ -708,7 +711,7 @@ impl Images {
                         .map_err(|error| {
                             tracing::error!(%error, %why, "could not quarantine a bad image");
                         })
-                        .is_ok()
+                        .unwrap_or(false)
                 });
                 return Ok(Recovered::Damaged {
                     why: why.to_string(),

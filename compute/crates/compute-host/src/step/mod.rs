@@ -1088,7 +1088,8 @@ impl<E: Engine, S: Store> Job<E, S> {
         notes::alarm(Alarm::VerificationFailed, suspect);
         if let Ok(Some(generation)) = images.current() {
             match images.quarantine(generation, suspect) {
-                Ok(()) => notes::alarm(Alarm::Quarantined, &format!("memory image: {suspect}")),
+                Ok(true) => notes::alarm(Alarm::Quarantined, &format!("memory image: {suspect}")),
+                Ok(false) => {}
                 Err(error) => {
                     tracing::error!(id = %self.id, %error, "could not quarantine a bad image");
                 }

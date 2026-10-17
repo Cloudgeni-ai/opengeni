@@ -294,7 +294,9 @@ impl Exporter {
     async fn post(&self, path: &str, body: Vec<u8>) -> Sent {
         let url = format!("{}{path}", self.config.endpoint);
         let body = bytes::Bytes::from(body);
-        let give_up = tokio::time::Instant::now() + self.config.retry_for;
+        // Durations only: a collector may ask for any delay, and adding
+        // one that large to an instant would overflow.
+        let started = tokio::time::Instant::now();
         let mut delay = Duration::from_millis(500);
         loop {
             let mut request = self
@@ -324,7 +326,7 @@ impl Exporter {
             };
             let asked = wait.is_some();
             let wait = wait.unwrap_or(delay);
-            if tokio::time::Instant::now() + wait > give_up {
+            if wait > self.config.retry_for.saturating_sub(started.elapsed()) {
                 return Sent::Failed(if asked {
                     format!(
                         "{problem}, and asked to wait {} s, beyond the time left to retry",
@@ -431,10 +433,12 @@ pub(crate) fn http_date(text: &str) -> Option<u64> {
     let month = MONTHS.iter().position(|name| *name == month)? as u64 + 1;
     let mut clock = time.split(':').map(|part| part.parse::<u64>().ok());
     let (hour, minute, second) = (clock.next()??, clock.next()??, clock.next()??);
-    if clock.next().is_some() || !(1..=31).contains(&day) || year < 1970 || hour > 23 {
+    // Four-digit years, as the format has: the arithmetic below cannot
+    // overflow then.
+    if clock.next().is_some() || !(1..=31).contains(&day) || !(1970..=9999).contains(&year) {
         return None;
     }
-    if minute > 59 || second > 60 {
+    if hour > 23 || minute > 59 || second > 60 {
         return None;
     }
     // Days since the epoch of a proleptic Gregorian date (Howard

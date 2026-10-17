@@ -178,16 +178,18 @@ observability work started from. No canary ran.
 
 Processor time with observability is within the baselines' own spread
 (0.1% of a core between the two here, 0.14% across both runs below), so
-its cost is below what this method resolves, under ADR 16's 0.1% target.
-An earlier run of the same method, before every sample read `memory.stat`
-in one pass, measured 0.16% (journal only) and 0.20% (exporting) of a
-core above the mean of its baselines (10.20 and 10.23). A profile of that
-build (perf at 499 Hz over 120 s, with export on) put 84% of the agent's
-samples in system calls reading cgroup and `/proc` files, which the
-baseline's per-VM sampling already does; the observability code's own
-functions held under 0.1% of its samples. Its added cost was a second
-scan of each VM's `memory.stat` for `pgmajfault`, every second, which the
-one pass removed.
+this method does not resolve its cost, and whether it is under ADR 16's
+0.1% target is unresolved at this precision. An earlier run of the same
+method, on the build before each sample read `memory.stat` in one pass,
+measured 0.16% (journal only) and 0.20% (exporting) of a core above the
+mean of its baselines (10.20 and 10.23). A profile of that build (perf at
+499 Hz over 120 s, with export on) put 84% of the agent's samples in
+system calls reading cgroup and `/proc` files, which the baseline's
+per-VM sampling already does, and under 0.1% of them in the
+observability code's own functions; that bounds those functions, not
+the work they add inside shared code. The one addition it pointed to
+was a second scan of each VM's `memory.stat` for `pgmajfault`, every
+second, which the one pass removed.
 
 Exporting held 1.1 MiB more anonymous memory than the mean of the
 baselines, within ADR 16's 2 MiB target, and 1.2 MiB more file-backed
