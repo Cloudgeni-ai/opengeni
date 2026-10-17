@@ -1719,6 +1719,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 0820 adds retained browser downloads: read, insert and update, FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_UPDATE_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1761,7 +1767,8 @@ describe("runtime database posture evaluator", () => {
         4 + // 0790 Site platform usage tables: full-DML, FORCE-RLS.
         1 + // 0792 schedule blocker reviews: full-DML, FORCE-RLS.
         2 + // 0797 subscription plan state and periods: read-only, FORCE-RLS.
-        1; // 0796 subscription operation receipts: read-only, FORCE-RLS.
+        1 + // 0796 subscription operation receipts: read-only, FORCE-RLS.
+        1; // 0820 retained browser downloads: read, insert and update, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_FULL_DML_TABLES).toContain("organization_model_defaults");
       expect(RUNTIME_TABLE_PRIVILEGES.organization_model_defaults).toEqual([
