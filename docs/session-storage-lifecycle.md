@@ -69,14 +69,15 @@ works but holds an exclusive lock for the duration.
 
 ## Idle-session archive
 
-Off by default. Enable it per deployment:
+On by default. Turn it off per deployment to keep every session in PostgreSQL:
 
 | Setting | Helm value | Default |
 | --- | --- | --- |
-| `OPENGENI_SESSION_ARCHIVE_ENABLED` | `sessionArchive.enabled` | `false` |
+| `OPENGENI_SESSION_ARCHIVE_ENABLED` | `sessionArchive.enabled` | `true` |
 | `OPENGENI_SESSION_ARCHIVE_IDLE_DAYS` | `sessionArchive.idleDays` | `30` |
 
-The archive requires the deployment's object storage. The same maintenance
+The archive requires the deployment's object storage; a deployment without it
+never archives (the worker logs a warning each pass). The same maintenance
 Schedule runs it after content compaction; each pass keeps archiving batches
 of eligible sessions until its ten-minute budget ends or none remain, so a
 backlog drains steadily after the archive is first enabled.

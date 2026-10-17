@@ -24,7 +24,9 @@ data:
   {{- end }}
   {{- if not (hasKey .Values.config "OPENGENI_SESSION_ARCHIVE_ENABLED") }}
   # Idle-session archive (docs/session-storage-lifecycle.md); requires object storage.
-  OPENGENI_SESSION_ARCHIVE_ENABLED: {{ (default false (.Values.sessionArchive).enabled) | quote }}
+  # On unless sessionArchive.enabled is explicitly false (`default` would turn false into true).
+  {{- $sessionArchive := .Values.sessionArchive | default dict }}
+  OPENGENI_SESSION_ARCHIVE_ENABLED: {{ ternary $sessionArchive.enabled true (hasKey $sessionArchive "enabled") | toString | quote }}
   {{- end }}
   {{- if not (hasKey .Values.config "OPENGENI_SESSION_ARCHIVE_IDLE_DAYS") }}
   OPENGENI_SESSION_ARCHIVE_IDLE_DAYS: {{ (default 30 (.Values.sessionArchive).idleDays) | quote }}

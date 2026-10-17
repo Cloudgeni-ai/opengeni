@@ -782,8 +782,11 @@ const SettingsSchema = z.object({
     .positive()
     .max(25 * 1024 * 1024)
     .default(8 * 1024 * 1024),
-  /** Move idle sessions' bulky content to object storage (docs/session-storage-lifecycle.md). */
-  sessionArchiveEnabled: EnvBoolean.default(false),
+  /**
+   * Move idle sessions' bulky content to object storage (docs/session-storage-lifecycle.md).
+   * On by default; without object storage the worker skips archiving.
+   */
+  sessionArchiveEnabled: EnvBoolean.default(true),
   /** Days without a new turn before a session becomes eligible for the archive. */
   sessionArchiveIdleDays: z.coerce.number().int().min(1).max(3650).default(30),
   voiceInputResumableRetentionSeconds: z.coerce
