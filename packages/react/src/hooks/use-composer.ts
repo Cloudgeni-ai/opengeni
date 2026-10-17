@@ -2553,10 +2553,6 @@ export function useComposer(
 
   const addAnnotation = useCallback(
     (annotation: DraftTimelineAnnotation) => {
-      if (annotationsRef.current.length >= 12) {
-        setError(new ComposerStateError("A message can include at most 12 timeline annotations."));
-        return;
-      }
       const next = [...annotationsRef.current, annotation];
       updateAnnotations(next, annotation.id);
     },

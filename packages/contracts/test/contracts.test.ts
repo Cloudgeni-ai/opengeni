@@ -2595,6 +2595,32 @@ describe("contracts", () => {
     expect(SubmittedTimelineAnnotations.safeParse([annotation, annotation]).success).toBe(false);
   });
 
+  test("accepts any number of annotations within the total size bound", () => {
+    const annotation = (index: number) => ({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      source: {
+        kind: "user_message" as const,
+        eventId: "00000000-0000-4000-8000-000000000212",
+        eventType: "user.message" as const,
+        sequence: 1,
+        turnId: null,
+        startOffset: 0,
+        endOffset: 2,
+        contextBefore: "",
+        contextAfter: "",
+      },
+      quote: "hi",
+      note: `note ${index}`,
+    });
+    const many = Array.from({ length: 200 }, (_, index) => annotation(index + 1));
+    expect(SubmittedTimelineAnnotations.safeParse(many).success).toBe(true);
+    const oversized = Array.from({ length: 80 }, (_, index) => ({
+      ...annotation(index + 1),
+      quote: "q".repeat(16 * 1024),
+    }));
+    expect(SubmittedTimelineAnnotations.safeParse(oversized).success).toBe(false);
+  });
+
   test("accepts null skill review for ordinary questions without accepting malformed review references", () => {
     const question = {
       id: "choice",

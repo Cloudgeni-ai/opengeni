@@ -8755,12 +8755,11 @@ export type SessionAuthorizationPort = {
   ): Promise<SessionAuthorizationListScope>;
 };
 
-export const TIMELINE_ANNOTATION_MAX_COUNT = 12;
 export const TIMELINE_ANNOTATION_QUOTE_MAX_BYTES = 16 * 1024;
 export const TIMELINE_ANNOTATION_NOTE_MAX_BYTES = 2 * 1024;
 export const TIMELINE_ANNOTATION_CONTEXT_MAX_BYTES = 512;
 export const TIMELINE_ANNOTATION_LABEL_MAX_BYTES = 256;
-export const TIMELINE_ANNOTATIONS_MAX_BYTES = 64 * 1024;
+export const TIMELINE_ANNOTATIONS_MAX_BYTES = 1024 * 1024;
 
 export const TimelineAnnotationSourceKind = /* @__PURE__ */ defineSchema(() =>
   z.enum(["user_message", "assistant_message", "tool_output"]),
@@ -8891,7 +8890,6 @@ export type TimelineAnnotation = z.infer<typeof TimelineAnnotation>;
 function timelineAnnotationArray<T extends z.ZodTypeAny>(item: T) {
   return z
     .array(item)
-    .max(TIMELINE_ANNOTATION_MAX_COUNT)
     .superRefine((annotations, ctx) => {
       const ids = new Set<string>();
       for (let index = 0; index < annotations.length; index += 1) {
