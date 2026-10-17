@@ -113,6 +113,7 @@ import {
 } from "./working-copy-adoption";
 import { SqliteBrowserOperationJournal } from "./journal";
 import { BrowserWorkspaceFileStager } from "./workspace-files";
+import { markProfileExitedCleanly } from "./profile-exit-state";
 import {
   captureEncryptedBrowserProfile,
   restoreEncryptedBrowserProfile,
@@ -1469,6 +1470,9 @@ export class BrowserSupervisor {
       }
     }
     let recoveredReceipt: BrowserWorkingRuntimeReceipt | null = null;
+    // Whether this launch starts a new browser on a profile a previous browser
+    // already ran, rather than reattaching to a live one.
+    let relaunchesProfile = false;
     if (options.recoverExistingWorkingDirectory) {
       try {
         await assertDirectory(this.rootDirectory);
@@ -1526,12 +1530,14 @@ export class BrowserSupervisor {
           await this.assertProfileUnused(profileDirectory).catch(() => {
             throw workingRuntimeUnavailable("process_state_unknown");
           });
+          relaunchesProfile = true;
         } else {
           const state = await this.inspectOwnedProcess(receipt.process).catch(() => {
             throw workingRuntimeUnavailable("process_state_unknown");
           });
           if (state === "exited" && !receipt.directoryLaunchAllowed)
             throw workingRuntimeUnavailable("receipt_not_adoptable");
+          relaunchesProfile = state === "exited";
         }
         recoveredReceipt = receipt;
         // Validate every path consumed by the existing writers before opening
@@ -1570,6 +1576,13 @@ export class BrowserSupervisor {
         "proxy authority is unavailable for a new browser launch",
         true,
       );
+    }
+    if (relaunchesProfile) {
+      // When the previous browser on this profile never shut down (it was
+      // lost, killed, or this is an adopted copy of a running one), Chromium
+      // would skip restoring its tabs. A failure here costs only the tabs,
+      // never the launch.
+      await markProfileExitedCleanly(profileDirectory).catch(() => false);
     }
     for (const directory of [
       sessionDirectory,
