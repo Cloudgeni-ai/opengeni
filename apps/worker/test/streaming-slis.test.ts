@@ -281,6 +281,56 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
     expect(metrics).not.toContain("opengeni_model_provider_ttft_seconds_count{");
     expect(metrics).not.toContain("opengeni_model_request_pre_dispatch_seconds_count{");
   });
+
+  test("completeResponse returns each dispatched call's timing exactly once", () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "openai",
+      now: () => now,
+    });
+
+    // No dispatch observed: no timing.
+    expect(timing.completeResponse()).toBeNull();
+
+    now = 1_000;
+    timing.onModelRequestEntry();
+    now = 1_040;
+    timing.onProviderDispatch();
+    now = 1_300;
+    timing.onEvent("agent.reasoning.delta");
+    now = 1_900;
+    timing.onEvent("agent.message.delta");
+    now = 2_000;
+    timing.onEvent("agent.message.delta");
+    now = 3_040;
+    expect(timing.completeResponse()).toEqual({
+      preDispatchMs: 40,
+      timeToFirstTokenMs: 260,
+      timeToFirstTextMs: 860,
+      durationMs: 2_000,
+    });
+    // A mirrored terminal event for the same call gets nothing.
+    expect(timing.completeResponse()).toBeNull();
+
+    // A tool-call-only response has no first text; a transport retry keeps the
+    // request's own pre-dispatch work and measures from the latest dispatch.
+    now = 5_000;
+    timing.onModelRequestEntry();
+    now = 5_010;
+    timing.onProviderDispatch();
+    now = 5_500;
+    timing.onProviderDispatch();
+    now = 5_700;
+    timing.onEvent("agent.toolCall.output");
+    now = 6_000;
+    expect(timing.completeResponse()).toEqual({
+      preDispatchMs: 10,
+      timeToFirstTokenMs: null,
+      timeToFirstTextMs: null,
+      durationMs: 500,
+    });
+  });
 });
 
 describe("provider request lifecycle diagnostics", () => {

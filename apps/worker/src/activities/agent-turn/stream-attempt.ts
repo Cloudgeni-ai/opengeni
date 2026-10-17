@@ -1247,6 +1247,7 @@ export async function runTurnStreamAttempt(
           leaseLostMessage: "Provider credential lease expired during the active turn",
           setLastInputTokens: setLastInputTokensFenced,
           contextContributions: eventing.companyBrainContextContributions,
+          responseTiming: () => streamTiming.completeResponse(),
         });
         assertModelResponseLatencyMode({
           event: next.value,
