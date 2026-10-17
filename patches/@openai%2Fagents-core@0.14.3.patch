@@ -10,6 +10,9 @@ index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2
 diff --git a/node_modules/@openai/agents-core/.bun-tag-2da6ec976600e880 b/.bun-tag-2da6ec976600e880
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@openai/agents-core/.bun-tag-36e825f6e7410141 b/.bun-tag-36e825f6e7410141
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@openai/agents-core/.bun-tag-7c21d377cb19cf3e b/.bun-tag-7c21d377cb19cf3e
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -42,6 +45,38 @@ index 21b58188472152339a1747df5cfe8dd256356cd1..1ecb7bff25d73312059991d05d44978f
  export type { TracingConfig } from './tracing';
  export { HostedTool, attachClientToolSearchExecutor, ComputerTool, computerTool, ShellTool, shellTool, ApplyPatchTool, applyPatchTool, HostedMCPTool, hostedMcpTool, FunctionTool, FunctionToolResult, FunctionToolTimeoutBehavior, ToolTimeoutErrorFunction, Tool, tool, toolNamespace, invokeFunctionTool, getClientToolSearchExecutor, getToolSearchRuntimeToolKey, ToolExecuteArgument, ToolEnabledFunction, ToolOptionsWithGuardrails, ToolAllowedCaller, ToolAllowedCallers, } from './tool';
  export type { ClientToolSearchExecutor, ClientToolSearchExecutorArgs, ClientToolSearchExecutorResult, ComputerOnSafetyCheckFunction, ComputerSafetyCheck, ComputerSafetyCheckResult, ShellToolEnvironment, ShellToolLocalEnvironment, ShellToolLocalSkill, ShellToolHostedEnvironment, ShellToolContainerAutoEnvironment, ShellToolContainerReferenceEnvironment, ShellToolContainerSkill, ShellToolSkillReference, ShellToolInlineSkill, ShellToolInlineSkillSource, ShellToolContainerNetworkPolicy, ShellToolContainerNetworkPolicyAllowlist, ShellToolContainerNetworkPolicyDisabled, ShellToolContainerNetworkPolicyDomainSecret, ToolInputParameters, ToolOutputSchema, ToolOptions, ToolNamespaceOptions, ToolOutputCustomData, FunctionToolCustomDataContext, FunctionToolCustomDataExtractor, ComputerToolCustomDataContext, ComputerToolCustomDataExtractor, ApplyPatchToolCustomDataContext, ApplyPatchToolCustomDataExtractor, } from './tool';
+diff --git a/dist/mcp.d.ts b/dist/mcp.d.ts
+index aa0b62edaa91a10ab64d7daa6a736ae22a35fa0b..e4eed13aacb0d060041fd8bc0629a8eee7a81d7e 100644
+--- a/dist/mcp.d.ts
++++ b/dist/mcp.d.ts
+@@ -294,6 +294,27 @@ export interface MCPServerStreamableHttpOptions {
+     fetch?: any;
+     reconnectionOptions?: any;
+     sessionId?: string;
++    /**
++     * Loads `@modelcontextprotocol/client` (MCP TypeScript SDK v2). Supply it
++     * when this package cannot resolve the v2 client on its own.
++     */
++    mcpClientModule?: () => Promise<unknown>;
++    /**
++     * MCP protocol-era negotiation passed to the v2 client. Defaults to
++     * `{ mode: 'auto' }`: probe with `server/discover`, fall back to the
++     * 2025-era `initialize` handshake for legacy servers.
++     */
++    versionNegotiation?: {
++        mode?: 'legacy' | 'auto' | {
++            pin: string;
++        };
++        probe?: {
++            timeoutMs?: number;
++            maxRetries?: number;
++        };
++    };
++    /** Maximum `tools/list` pages to follow (default 64). */
++    maxListPages?: number;
+ }
+ export interface MCPServerSSEOptions {
+     url: string;
 diff --git a/dist/mcpServers.js b/dist/mcpServers.js
 index af947813fbe90ec3c275f6a1fd5e0793fb2ed720..40b75986657cc1399b69942373da7818bcb44fa8 100644
 --- a/dist/mcpServers.js
@@ -2677,6 +2712,1227 @@ index fc2aa3141933c96cc080d65b05f7cffb13ee18d7..c4324d271c7bc90128dad0285198f687
 +}
  //# sourceMappingURL=workspacePaths.mjs.map
 \ No newline at end of file
+diff --git a/dist/shims/mcp-server/node.js b/dist/shims/mcp-server/node.js
+index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c7281247610fe01 100644
+--- a/dist/shims/mcp-server/node.js
++++ b/dist/shims/mcp-server/node.js
+@@ -35,6 +35,8 @@ var __importStar = (this && this.__importStar) || (function () {
+ Object.defineProperty(exports, "__esModule", { value: true });
+ exports.NodeMCPServerStreamableHttp = exports.NodeMCPServerSSE = exports.NodeMCPServerStdio = void 0;
+ const protocol_js_1 = require("@modelcontextprotocol/sdk/shared/protocol.js");
++const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
++const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/client/streamableHttp.js");
+ const mcpShared_1 = require("../../mcpShared.js");
+ const mcpToolCache_1 = require("../../mcpToolCache.js");
+ const logger_1 = __importStar(require("../../logger.js"));
+@@ -211,7 +213,8 @@ async function runMcpTransportOperation(endpoint, operation, action, sourceSigna
+         return await action();
+     }
+     catch (error) {
+-        if (isCallerAbortReason(error, sourceSignal)) {
++        if (error instanceof ToolListPageLimitError ||
++            isCallerAbortReason(error, sourceSignal)) {
+             throw error;
+         }
+         throw (0, mcpLogging_1.sanitizeMcpTransportError)(error, endpoint, operation);
+@@ -573,6 +576,215 @@ class NodeMCPServerSSE extends mcpShared_1.BaseMCPServerSSE {
+     }
+ }
+ exports.NodeMCPServerSSE = NodeMCPServerSSE;
++const errors_1 = require("../../errors.js");
++// MCP spec 2026-07-28 client for streamable HTTP, backported from
++// @openai/agents-core 0.20.0 onto @modelcontextprotocol/client v2. The v2
++// module is injected through `params.mcpClientModule` (falling back to a bare
++// import) because this package does not declare the v2 client as a dependency.
++// Stdio and SSE above stay on @modelcontextprotocol/sdk v1.
++async function loadMcpClientModule(params) {
++    const load = typeof params.mcpClientModule === 'function'
++        ? params.mcpClientModule
++        : () => Promise.resolve().then(() => __importStar(require('@modelcontextprotocol/client')));
++    return await Promise.resolve()
++        .then(load)
++        .catch((error) => {
++        logger_1.default.error(`
++Failed to load the MCP client. Please install the @modelcontextprotocol/client package.
++
++npm install @modelcontextprotocol/client
++    `.trim());
++        throw error;
++    });
++}
++function buildCacheableRequestOptions(clientSessionTimeoutSeconds, cacheMode = 'refresh') {
++    return {
++        ...buildRequestOptions(clientSessionTimeoutSeconds),
++        cacheMode,
++    };
++}
++// Errors leaving this server keep the @modelcontextprotocol/sdk v1 shapes
++// (`McpError` with "MCP error <code>: <message>", numeric -32000/-32001 for
++// closed/timed-out requests, `StreamableHTTPError` for HTTP failures). Callers
++// classify on those shapes and tool-failure text reaches the model, so the v2
++// client must not change either. Errors without a v1 counterpart pass through.
++function toLegacyMcpError(clientModule, error) {
++    if (!clientModule || error === null || typeof error !== 'object') {
++        return error;
++    }
++    let legacy;
++    try {
++        if (clientModule.ProtocolError.isInstance(error)) {
++            legacy = types_js_1.McpError.fromError(error.code, error.message, error.data);
++        }
++        else if (clientModule.SdkError.isInstance(error)) {
++            const { SdkErrorCode } = clientModule;
++            if (error.code === SdkErrorCode.RequestTimeout) {
++                legacy = new types_js_1.McpError(types_js_1.ErrorCode.RequestTimeout, error.message, error.data);
++            }
++            else if (error.code === SdkErrorCode.ConnectionClosed) {
++                legacy = new types_js_1.McpError(types_js_1.ErrorCode.ConnectionClosed, error.message, error.data);
++            }
++            else if (error.code === SdkErrorCode.NotConnected) {
++                legacy = new Error(error.message);
++            }
++            else if (clientModule.SdkHttpError.isInstance(error)) {
++                const status = error.data?.status;
++                legacy = new streamableHttp_js_1.StreamableHTTPError(typeof status === 'number' ? status : -1, error.message);
++            }
++            else if (error.code === SdkErrorCode.ClientHttpUnexpectedContent) {
++                legacy = new streamableHttp_js_1.StreamableHTTPError(-1, error.message);
++            }
++        }
++    }
++    catch {
++        return error;
++    }
++    if (!legacy) {
++        return error;
++    }
++    if (error.stack) {
++        legacy.stack = error.stack;
++    }
++    if (error.cause !== undefined) {
++        legacy.cause = error.cause;
++    }
++    return legacy;
++}
++// Endpoints that negotiated the 2025 era recently skip the `server/discover`
++// probe on later connects, so a legacy server costs one extra round trip per
++// process and window instead of one per connect. The verdict expires so an
++// upgraded server is picked up again.
++const LEGACY_ERA_MEMORY_MS = 10 * 60 * 1000;
++const LEGACY_ERA_MEMORY_MAX_ENTRIES = 1024;
++const legacyEraByEndpoint = new Map();
++function rememberedLegacyEra(endpoint) {
++    const rememberedAt = legacyEraByEndpoint.get(endpoint);
++    if (rememberedAt === undefined) {
++        return false;
++    }
++    if (Date.now() - rememberedAt > LEGACY_ERA_MEMORY_MS) {
++        legacyEraByEndpoint.delete(endpoint);
++        return false;
++    }
++    return true;
++}
++function rememberNegotiatedEra(endpoint, client) {
++    let era;
++    try {
++        era = client.getProtocolEra();
++    }
++    catch {
++        return;
++    }
++    legacyEraByEndpoint.delete(endpoint);
++    if (era !== 'legacy') {
++        return;
++    }
++    if (legacyEraByEndpoint.size >= LEGACY_ERA_MEMORY_MAX_ENTRIES) {
++        const oldest = legacyEraByEndpoint.keys().next().value;
++        legacyEraByEndpoint.delete(oldest);
++    }
++    legacyEraByEndpoint.set(endpoint, Date.now());
++}
++function validateMaxListPages(value) {
++    if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
++        throw new errors_1.UserError('maxListPages must be a positive integer.');
++    }
++    return value ?? 64;
++}
++class ToolListPageLimitError extends errors_1.UserError {
++    constructor() {
++        super('MCP tool listing exceeded maxListPages. Increase maxListPages or check the server pagination.');
++    }
++}
++async function listAllMcpToolsV2(client, requestOptions, maxListPages) {
++    const tools = [];
++    const seenCursors = new Set();
++    let cursor;
++    let pages = 0;
++    while (true) {
++        let response;
++        try {
++            response = (await client.request({
++                method: 'tools/list',
++                ...(cursor === undefined ? {} : { params: { cursor } }),
++            }, requestOptions));
++        }
++        catch (error) {
++            if (cursor === undefined) {
++                throw error;
++            }
++            throw new Error('MCP tool listing failed while fetching a continuation page.');
++        }
++        pages += 1;
++        tools.push(...response.tools);
++        const nextCursor = response.nextCursor;
++        if (nextCursor === undefined) {
++            return { tools };
++        }
++        if (seenCursors.has(nextCursor)) {
++            throw new Error('MCP server returned a repeated cursor while listing tools.');
++        }
++        if (maxListPages !== undefined && pages >= maxListPages) {
++            throw new ToolListPageLimitError();
++        }
++        seenCursors.add(nextCursor);
++        cursor = nextCursor;
++    }
++}
++function getNegotiatedModernCapabilities(client) {
++    const capabilities = client.getServerCapabilities();
++    return client.getProtocolEra() === 'modern' && capabilities !== undefined
++        ? capabilities
++        : undefined;
++}
++async function listMcpTools(clientModule, client, requestOptions, maxListPages) {
++    if (getNegotiatedModernCapabilities(client) !== undefined) {
++        try {
++            const response = await client.listTools(undefined, {
++                ...requestOptions,
++                cacheMode: 'bypass',
++            });
++            return { tools: response.tools };
++        }
++        catch (error) {
++            if (error instanceof clientModule.SdkError &&
++                error.code === clientModule.SdkErrorCode.ListPaginationExceeded) {
++                throw new ToolListPageLimitError();
++            }
++            throw error;
++        }
++    }
++    return listAllMcpToolsV2(client, requestOptions, maxListPages);
++}
++function getListedToolForCall(clientModule, tools, toolName) {
++    const tool = tools.find((tool) => tool.name === toolName);
++    if (tool?.execution?.taskSupport === 'required') {
++        throw new clientModule.ProtocolError(clientModule.ProtocolErrorCode.InvalidRequest, `Tool "${toolName}" requires task-based execution. Use client.experimental.tasks.callToolStream() instead.`);
++    }
++    return tool;
++}
++function listResourcesPage(client, params, requestOptions) {
++    const capabilities = getNegotiatedModernCapabilities(client);
++    if (capabilities !== undefined && capabilities.resources === undefined) {
++        return Promise.resolve({ resources: [] });
++    }
++    return client.request({
++        method: 'resources/list',
++        ...(params === undefined ? {} : { params }),
++    }, requestOptions);
++}
++function listResourceTemplatesPage(client, params, requestOptions) {
++    const capabilities = getNegotiatedModernCapabilities(client);
++    if (capabilities !== undefined && capabilities.resources === undefined) {
++        return Promise.resolve({ resourceTemplates: [] });
++    }
++    return client.request({
++        method: 'resources/templates/list',
++        ...(params === undefined ? {} : { params }),
++    }, requestOptions);
++}
+ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHttp {
+     session = null;
+     _cacheDirty = true;
+@@ -581,6 +793,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+     serverInitializeResult = null;
+     clientSessionTimeoutSeconds;
+     timeout;
++    maxListPages;
+     params;
+     _name;
+     transport = null;
+@@ -590,18 +803,25 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+     connectionStateVersion = 0;
+     constructor(params) {
+         super(params);
++        this.maxListPages = validateMaxListPages(params.maxListPages);
+         this.clientSessionTimeoutSeconds = params.clientSessionTimeoutSeconds ?? 5;
+         this.params = params;
+         this._name = params.name || `streamable-http: ${this.params.url}`;
+         this.timeout = params.timeout ?? protocol_js_1.DEFAULT_REQUEST_TIMEOUT_MSEC;
+     }
+     async loadStreamableHttpRuntime() {
+-        const [clientModule, transportModule, typesModule] = await Promise.all([
+-            Promise.resolve().then(() => __importStar(require('@modelcontextprotocol/sdk/client/index.js'))).catch(failedToImport),
+-            Promise.resolve().then(() => __importStar(require('@modelcontextprotocol/sdk/client/streamableHttp.js'))).catch(failedToImport),
+-            Promise.resolve().then(() => __importStar(require('@modelcontextprotocol/sdk/types.js'))).catch(failedToImport),
+-        ]);
+-        return { clientModule, transportModule, typesModule };
++        const clientModule = (this.mcpClientModule ??= await loadMcpClientModule(this.params));
++        return { clientModule, transportModule: clientModule };
++    }
++    runLegacyMcpTransportOperation(operation, action, sourceSignal) {
++        return runMcpTransportOperation(this.params.url, operation, async () => {
++            try {
++                return await action();
++            }
++            catch (error) {
++                throw toLegacyMcpError(this.mcpClientModule, error);
++            }
++        }, sourceSignal);
+     }
+     createStreamableHttpTransport(StreamableHTTPClientTransport, options = {}) {
+         const transportOptions = {
+@@ -620,16 +840,44 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+     }
+     async createConnectedStreamableHttpClient(options = {}) {
+         const { clientModule, transportModule } = await this.loadStreamableHttpRuntime();
++        const configured = this.params.versionNegotiation ?? { mode: 'auto' };
++        const probing = (configured.mode ?? 'legacy') === 'auto';
++        const remembered = probing ? rememberedLegacyEra(this.params.url) : false;
++        try {
++            return await this.connectStreamableHttpClientOnce(clientModule, transportModule, options, remembered ? { ...configured, mode: 'legacy' } : configured);
++        }
++        catch (error) {
++            // A 2025-era server may answer the unrecognized `server/discover`
++            // probe with a 5xx. Connecting with the plain `initialize`
++            // handshake keeps every server that worked before working.
++            if (!probing ||
++                remembered ||
++                !(clientModule.SdkError.isInstance(error) &&
++                    error.code === clientModule.SdkErrorCode.EraNegotiationFailed)) {
++                throw error;
++            }
++            const connected = await this.connectStreamableHttpClientOnce(clientModule, transportModule, options, { ...configured, mode: 'legacy' });
++            rememberNegotiatedEra(this.params.url, connected.client);
++            return connected;
++        }
++    }
++    async connectStreamableHttpClientOnce(clientModule, transportModule, options, versionNegotiation) {
+         const { Client } = clientModule;
+         const { StreamableHTTPClientTransport } = transportModule;
+         const transport = this.createStreamableHttpTransport(StreamableHTTPClientTransport, options);
+         const client = new Client({
+             name: this._name,
+             version: '1.0.0',
++        }, {
++            versionNegotiation,
++            listMaxPages: this.maxListPages ?? 0,
+         });
+         try {
+             const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
+             await client.connect(transport, requestOptions);
++            if ((versionNegotiation.mode ?? 'legacy') === 'auto') {
++                rememberNegotiatedEra(this.params.url, client);
++            }
+             return { client, transport };
+         }
+         catch (error) {
+@@ -647,25 +895,13 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+     getClientSessionTimeoutMs() {
+         return Math.max(1, (this.clientSessionTimeoutSeconds ?? 5) * 1000);
+     }
+-    resetClientToolMetadataCache(client) {
+-        getOptionalClientToolMetadataCache(client)?.call(client, []);
+-    }
+     async publishConnectedStreamableHttpClient(args) {
+-        const previousClient = this.session;
+-        const previousSessionId = getSessionId(args.previousTransport);
+-        const nextSessionId = getSessionId(args.transport);
+-        const preservesCommittedToolState = previousClient === args.client &&
+-            previousSessionId !== undefined &&
+-            previousSessionId === nextSessionId;
+-        if (!preservesCommittedToolState) {
+-            this.resetClientToolMetadataCache(args.client);
+-        }
+         this.transport = args.transport;
+         this.session = args.client;
+         this.connectionStateVersion += 1;
+         this._toolsCacheGeneration += 1;
+         this._cacheDirty = true;
+-        if (!preservesCommittedToolState) {
++        if (!args.preserveTools) {
+             this._toolsList = [];
+         }
+         await (0, mcpToolCache_1.invalidateServerToolsCache)(this.name);
+@@ -698,7 +934,10 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+             });
+             try {
+                 if (typeof detachedTransport.terminateSession === 'function') {
+-                    await detachedTransport.terminateSession();
++                    // start() installs the abort controller used by terminateSession().
++                    // Closing this detached transport then cancels a stalled DELETE too.
++                    await detachedTransport.start();
++                    await withTimeout(detachedTransport.terminateSession(), this.getClientSessionTimeoutMs(), () => new Error('Timed out terminating streamable HTTP MCP session.'));
+                 }
+             }
+             finally {
+@@ -740,18 +979,20 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+         await this.terminateDetachedStreamableHttpSession(transport, terminateWarningMessage);
+     }
+     async callToolWithClient(client, toolName, args, meta, options) {
+-        const { CallToolResultSchema } = await Promise.resolve().then(() => __importStar(require('@modelcontextprotocol/sdk/types.js'))).catch(failedToImport);
++        const { clientModule } = await this.loadStreamableHttpRuntime();
+         const params = {
+             name: toolName,
+             arguments: args ?? {},
+             ...(meta != null ? { _meta: meta } : {}),
+         };
+-        const response = await callWithMCPRequestSignal(options?.signal, (requestSignal) => client.callTool(params, undefined, buildRequestOptions(this.clientSessionTimeoutSeconds, {
+-            timeout: this.timeout,
+-            signal: requestSignal,
+-        })));
+-        const parsed = CallToolResultSchema.parse(response);
+-        return attachParsedCallToolResultMetadata(parsed);
++        const response = await callWithMCPRequestSignal(options?.signal, (requestSignal) => client.callTool(params, {
++            ...buildRequestOptions(this.clientSessionTimeoutSeconds, {
++                timeout: this.timeout,
++                signal: requestSignal,
++            }),
++            toolDefinition: getListedToolForCall(clientModule, this._toolsList, toolName),
++        }));
++        return attachParsedCallToolResultMetadata(response);
+     }
+     async closeStreamableHttpClient(args, options) {
+         const { client, transport } = args;
+@@ -771,6 +1012,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+             logMcpTransportWarning(this.logger, this.params.url, 'streamable HTTP cleanup', options.closeWarningMessage, error);
+         });
+     }
++    async closeStreamableHttpTransport(transport, warningMessage) {
++        await transport.close().catch((error) => {
++            logMcpTransportWarning(this.logger, this.params.url, 'streamable HTTP cleanup', warningMessage, error);
++        });
++    }
+     async reconnectExistingStreamableHttpClient(args) {
+         const { transportModule } = await this.loadStreamableHttpRuntime();
+         const { StreamableHTTPClientTransport } = transportModule;
+@@ -781,7 +1027,8 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+         try {
+             const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
+             await args.client.connect(transport, requestOptions);
+-            if (args.sessionId !== undefined) {
++            if (args.sessionId !== undefined &&
++                args.client.getProtocolEra() === 'legacy') {
+                 // Reconnecting with an existing session skips initialize(), so resend
+                 // initialized to reopen the shared SSE stream for async responses.
+                 await this.reopenSharedStreamableHttpSession(args.client);
+@@ -838,14 +1085,21 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+                 throw new Error('Cannot reconnect streamable HTTP MCP server without an active client.');
+             }
+             try {
+-                await this.closeStreamableHttpClient({
+-                    client: previousClient,
+-                    transport: previousTransport,
+-                }, {
+-                    terminateSession: false,
+-                    closeWarningMessage: 'Failed to close stale MCP client:',
+-                    terminateWarningMessage: 'Failed to terminate stale MCP session:',
+-                });
++                if (sessionId === undefined) {
++                    await this.closeStreamableHttpClient({
++                        client: previousClient,
++                        transport: previousTransport,
++                    }, {
++                        terminateSession: false,
++                        closeWarningMessage: 'Failed to close stale MCP client:',
++                        terminateWarningMessage: 'Failed to terminate stale MCP session:',
++                    });
++                }
++                else {
++                    // Keep the v2 Client's negotiated capabilities and tool metadata when
++                    // resuming the same server session on a replacement transport.
++                    await this.closeStreamableHttpTransport(previousTransport, 'Failed to close stale MCP transport:');
++                }
+                 const recovered = await this.reconnectExistingStreamableHttpClient({
+                     client: previousClient,
+                     protocolVersion,
+@@ -872,7 +1126,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+                 await this.publishConnectedStreamableHttpClient({
+                     client: recovered.client,
+                     transport: recovered.transport,
+-                    previousTransport,
++                    preserveTools: sessionId !== undefined,
+                 });
+                 return recovered.client;
+             }
+@@ -909,13 +1163,20 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+         if (this.params.sessionId !== undefined) {
+             return 'none';
+         }
+-        if (isNotConnectedError(error, client)) {
++        const { clientModule } = await this.loadStreamableHttpRuntime();
++        const { SdkError, SdkErrorCode } = clientModule;
++        if (error instanceof SdkError && error.code === SdkErrorCode.NotConnected) {
++            return client.transport == null ? 'reconnect-and-retry' : 'none';
++        }
++        // MCP SDK v2 currently throws this plain Error after a transport detaches.
++        // Guard the message match with the actual disconnected client state.
++        if (client.transport == null &&
++            error instanceof Error &&
++            error.message === 'Not connected') {
+             return 'reconnect-and-retry';
+         }
+-        const { typesModule } = await this.loadStreamableHttpRuntime();
+-        const { ErrorCode, McpError } = typesModule;
+-        return error instanceof McpError &&
+-            error.code === ErrorCode.ConnectionClosed
++        return error instanceof SdkError &&
++            error.code === SdkErrorCode.ConnectionClosed
+             ? 'reconnect-only'
+             : 'none';
+     }
+@@ -948,7 +1209,6 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+             await this.publishConnectedStreamableHttpClient({
+                 client,
+                 transport,
+-                previousTransport,
+             });
+             this.serverInitializeResult = {
+                 serverInfo: { name: this._name, version: '1.0.0' },
+@@ -967,7 +1227,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+         catch (e) {
+             // A losing concurrent connect can fail after another connect already
+             // published a healthy shared session, so avoid closing shared state here.
+-            const error = (0, mcpLogging_1.sanitizeMcpTransportError)(e, this.params.url, 'streamable HTTP connect');
++            const error = (0, mcpLogging_1.sanitizeMcpTransportError)(toLegacyMcpError(this.mcpClientModule, e), this.params.url, 'streamable HTTP connect');
+             (0, logger_1.logToolActionError)(this.logger, 'Error initializing MCP server:', error);
+             throw error;
+         }
+@@ -975,11 +1235,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+     }
+     async invalidateToolsCache() {
+         this._toolsCacheGeneration += 1;
+-        await (0, mcpToolCache_1.invalidateServerToolsCache)(this.name);
+         this._cacheDirty = true;
++        this._toolsList = [];
++        await (0, mcpToolCache_1.invalidateServerToolsCache)(this.name);
+     }
+     async listTools() {
+-        const { ListToolsResultSchema } = await Promise.resolve().then(() => __importStar(require('@modelcontextprotocol/sdk/types.js'))).catch(failedToImport);
+         if (!this.session) {
+             throw new Error('Server not initialized. Make sure you call connect() first.');
+         }
+@@ -988,19 +1248,17 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+         }
+         const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
+         const session = this.session;
+-        getClientToolMetadataCache(session);
+         const cacheGeneration = this._toolsCacheGeneration;
+-        const tools = await listAllMcpTools({
+-            fetchPage: (cursor) => runMcpTransportOperation(this.params.url, 'streamable HTTP list tools', () => requestMcpToolsPage(session, ListToolsResultSchema, requestOptions, cursor)),
+-            onPage: (response) => this.debugLog(() => `Listed tools: ${JSON.stringify(response)}`),
+-        });
++        const { clientModule } = await this.loadStreamableHttpRuntime();
++        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list tools', () => listMcpTools(clientModule, session, requestOptions, this.maxListPages));
++        this.debugLog(() => `Listed tools: ${JSON.stringify(response)}`);
+         assertMcpToolListingIsCurrent({
+             listedClient: session,
+             currentClient: this.session,
+             listedGeneration: cacheGeneration,
+             currentGeneration: this._toolsCacheGeneration,
+         });
+-        replaceClientToolMetadata(session, tools, this._toolsList);
++        const tools = response.tools;
+         this._toolsList = tools;
+         this._cacheDirty = false;
+         return tools;
+@@ -1022,18 +1280,18 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+             if (isCallerAbortReason(error, options?.signal)) {
+                 throw error;
+             }
+-            const recoveryStrategy = await runMcpTransportOperation(this.params.url, 'streamable HTTP tool call recovery classification', () => this.shouldReconnectClosedStreamableHttpClient(error, client));
++            const recoveryStrategy = await this.runLegacyMcpTransportOperation('streamable HTTP tool call recovery classification', () => this.shouldReconnectClosedStreamableHttpClient(error, client));
+             if (recoveryStrategy === 'none') {
+-                throw (0, mcpLogging_1.sanitizeMcpTransportError)(error, this.params.url, 'streamable HTTP tool call');
++                throw (0, mcpLogging_1.sanitizeMcpTransportError)(toLegacyMcpError(this.mcpClientModule, error), this.params.url, 'streamable HTTP tool call');
+             }
+             this.debugLog(() => `Reconnecting closed streamable HTTP MCP session for ${toolName}.`);
+-            const recoveredClient = await runMcpTransportOperation(this.params.url, 'streamable HTTP reconnect', () => this.reconnectClosedStreamableHttpClient({
++            const recoveredClient = await this.runLegacyMcpTransportOperation('streamable HTTP reconnect', () => this.reconnectClosedStreamableHttpClient({
+                 cause: error,
+                 failedClient: client,
+                 failedStateVersion: callToolStateVersion,
+             }));
+             if (recoveryStrategy === 'reconnect-only') {
+-                throw (0, mcpLogging_1.sanitizeMcpTransportError)(error, this.params.url, 'streamable HTTP tool call');
++                throw (0, mcpLogging_1.sanitizeMcpTransportError)(toLegacyMcpError(this.mcpClientModule, error), this.params.url, 'streamable HTTP tool call');
+             }
+             try {
+                 result = await this.callToolWithClient(recoveredClient, toolName, args, meta, options);
+@@ -1042,41 +1300,38 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+                 if (isCallerAbortReason(retryError, options?.signal)) {
+                     throw retryError;
+                 }
+-                throw (0, mcpLogging_1.sanitizeMcpTransportError)(attachCause(retryError, error), this.params.url, 'streamable HTTP tool call retry');
++                throw (0, mcpLogging_1.sanitizeMcpTransportError)(attachCause(toLegacyMcpError(this.mcpClientModule, retryError), toLegacyMcpError(this.mcpClientModule, error)), this.params.url, 'streamable HTTP tool call retry');
+             }
+         }
+         this.debugLog(() => `Called tool ${toolName} (args: ${JSON.stringify(args)}, result: ${JSON.stringify(result)})`);
+         return result;
+     }
+     async listResources(params) {
+-        const { ListResourcesResultSchema } = await Promise.resolve().then(() => __importStar(require('@modelcontextprotocol/sdk/types.js'))).catch(failedToImport);
+         if (!this.session) {
+             throw new Error('Server not initialized. Make sure you call connect() first.');
+         }
+         const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
+-        const response = await runMcpTransportOperation(this.params.url, 'streamable HTTP list resources', () => this.session.listResources(params, requestOptions));
++        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list resources', () => listResourcesPage(this.session, params, requestOptions));
+         this.debugLog(() => `Listed resources: ${JSON.stringify(response)}`);
+-        return ListResourcesResultSchema.parse(response);
++        return response;
+     }
+     async listResourceTemplates(params) {
+-        const { ListResourceTemplatesResultSchema } = await Promise.resolve().then(() => __importStar(require('@modelcontextprotocol/sdk/types.js'))).catch(failedToImport);
+         if (!this.session) {
+             throw new Error('Server not initialized. Make sure you call connect() first.');
+         }
+         const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
+-        const response = await runMcpTransportOperation(this.params.url, 'streamable HTTP list resource templates', () => this.session.listResourceTemplates(params, requestOptions));
++        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list resource templates', () => listResourceTemplatesPage(this.session, params, requestOptions));
+         this.debugLog(() => `Listed resource templates: ${JSON.stringify(response)}`);
+-        return ListResourceTemplatesResultSchema.parse(response);
++        return response;
+     }
+     async readResource(uri) {
+-        const { ReadResourceResultSchema } = await Promise.resolve().then(() => __importStar(require('@modelcontextprotocol/sdk/types.js'))).catch(failedToImport);
+         if (!this.session) {
+             throw new Error('Server not initialized. Make sure you call connect() first.');
+         }
+-        const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
+-        const response = await runMcpTransportOperation(this.params.url, 'streamable HTTP read resource', () => this.session.readResource({ uri }, requestOptions));
++        const requestOptions = buildCacheableRequestOptions(this.clientSessionTimeoutSeconds);
++        const response = await this.runLegacyMcpTransportOperation('streamable HTTP read resource', () => this.session.readResource({ uri }, requestOptions));
+         this.debugLog(() => `Read resource ${uri}: ${JSON.stringify(response)}`);
+-        return ReadResourceResultSchema.parse(response);
++        return response;
+     }
+     get name() {
+         return this._name;
+@@ -1130,4 +1385,3 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+     }
+ }
+ exports.NodeMCPServerStreamableHttp = NodeMCPServerStreamableHttp;
+-//# sourceMappingURL=node.js.map
+\ No newline at end of file
+diff --git a/dist/shims/mcp-server/node.mjs b/dist/shims/mcp-server/node.mjs
+index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df403b651c8 100644
+--- a/dist/shims/mcp-server/node.mjs
++++ b/dist/shims/mcp-server/node.mjs
+@@ -1,9 +1,12 @@
+ import { DEFAULT_REQUEST_TIMEOUT_MSEC } from '@modelcontextprotocol/sdk/shared/protocol.js';
++import { ErrorCode as LegacyErrorCode, McpError as LegacyMcpError, } from '@modelcontextprotocol/sdk/types.js';
++import { StreamableHTTPError as LegacyStreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+ import { BaseMCPServerStdio, BaseMCPServerStreamableHttp, BaseMCPServerSSE, attachCallToolResultMetadata, } from "../../mcpShared.mjs";
+ import { invalidateServerToolsCache } from "../../mcpToolCache.mjs";
+ import logger, { getSafeErrorType, logToolActionError, logToolActionWarning, } from "../../logger.mjs";
+ import { sanitizeMcpTransportError } from "../../mcpLogging.mjs";
+ import { combineAbortSignals } from "../../utils/abortSignals.mjs";
++import { UserError } from "../../errors.mjs";
+ function failedToImport(error) {
+     logger.error(`
+ Failed to load the MCP SDK. Please install the @modelcontextprotocol/sdk package.
+@@ -175,7 +178,8 @@ async function runMcpTransportOperation(endpoint, operation, action, sourceSigna
+         return await action();
+     }
+     catch (error) {
+-        if (isCallerAbortReason(error, sourceSignal)) {
++        if (error instanceof ToolListPageLimitError ||
++            isCallerAbortReason(error, sourceSignal)) {
+             throw error;
+         }
+         throw sanitizeMcpTransportError(error, endpoint, operation);
+@@ -535,6 +539,214 @@ export class NodeMCPServerSSE extends BaseMCPServerSSE {
+         });
+     }
+ }
++// MCP spec 2026-07-28 client for streamable HTTP, backported from
++// @openai/agents-core 0.20.0 onto @modelcontextprotocol/client v2. The v2
++// module is injected through `params.mcpClientModule` (falling back to a bare
++// import) because this package does not declare the v2 client as a dependency.
++// Stdio and SSE above stay on @modelcontextprotocol/sdk v1.
++async function loadMcpClientModule(params) {
++    const load = typeof params.mcpClientModule === 'function'
++        ? params.mcpClientModule
++        : () => import('@modelcontextprotocol/client');
++    return await Promise.resolve()
++        .then(load)
++        .catch((error) => {
++        logger.error(`
++Failed to load the MCP client. Please install the @modelcontextprotocol/client package.
++
++npm install @modelcontextprotocol/client
++    `.trim());
++        throw error;
++    });
++}
++function buildCacheableRequestOptions(clientSessionTimeoutSeconds, cacheMode = 'refresh') {
++    return {
++        ...buildRequestOptions(clientSessionTimeoutSeconds),
++        cacheMode,
++    };
++}
++// Errors leaving this server keep the @modelcontextprotocol/sdk v1 shapes
++// (`McpError` with "MCP error <code>: <message>", numeric -32000/-32001 for
++// closed/timed-out requests, `StreamableHTTPError` for HTTP failures). Callers
++// classify on those shapes and tool-failure text reaches the model, so the v2
++// client must not change either. Errors without a v1 counterpart pass through.
++function toLegacyMcpError(clientModule, error) {
++    if (!clientModule || error === null || typeof error !== 'object') {
++        return error;
++    }
++    let legacy;
++    try {
++        if (clientModule.ProtocolError.isInstance(error)) {
++            legacy = LegacyMcpError.fromError(error.code, error.message, error.data);
++        }
++        else if (clientModule.SdkError.isInstance(error)) {
++            const { SdkErrorCode } = clientModule;
++            if (error.code === SdkErrorCode.RequestTimeout) {
++                legacy = new LegacyMcpError(LegacyErrorCode.RequestTimeout, error.message, error.data);
++            }
++            else if (error.code === SdkErrorCode.ConnectionClosed) {
++                legacy = new LegacyMcpError(LegacyErrorCode.ConnectionClosed, error.message, error.data);
++            }
++            else if (error.code === SdkErrorCode.NotConnected) {
++                legacy = new Error(error.message);
++            }
++            else if (clientModule.SdkHttpError.isInstance(error)) {
++                const status = error.data?.status;
++                legacy = new LegacyStreamableHTTPError(typeof status === 'number' ? status : -1, error.message);
++            }
++            else if (error.code === SdkErrorCode.ClientHttpUnexpectedContent) {
++                legacy = new LegacyStreamableHTTPError(-1, error.message);
++            }
++        }
++    }
++    catch {
++        return error;
++    }
++    if (!legacy) {
++        return error;
++    }
++    if (error.stack) {
++        legacy.stack = error.stack;
++    }
++    if (error.cause !== undefined) {
++        legacy.cause = error.cause;
++    }
++    return legacy;
++}
++// Endpoints that negotiated the 2025 era recently skip the `server/discover`
++// probe on later connects, so a legacy server costs one extra round trip per
++// process and window instead of one per connect. The verdict expires so an
++// upgraded server is picked up again.
++const LEGACY_ERA_MEMORY_MS = 10 * 60 * 1000;
++const LEGACY_ERA_MEMORY_MAX_ENTRIES = 1024;
++const legacyEraByEndpoint = new Map();
++function rememberedLegacyEra(endpoint) {
++    const rememberedAt = legacyEraByEndpoint.get(endpoint);
++    if (rememberedAt === undefined) {
++        return false;
++    }
++    if (Date.now() - rememberedAt > LEGACY_ERA_MEMORY_MS) {
++        legacyEraByEndpoint.delete(endpoint);
++        return false;
++    }
++    return true;
++}
++function rememberNegotiatedEra(endpoint, client) {
++    let era;
++    try {
++        era = client.getProtocolEra();
++    }
++    catch {
++        return;
++    }
++    legacyEraByEndpoint.delete(endpoint);
++    if (era !== 'legacy') {
++        return;
++    }
++    if (legacyEraByEndpoint.size >= LEGACY_ERA_MEMORY_MAX_ENTRIES) {
++        const oldest = legacyEraByEndpoint.keys().next().value;
++        legacyEraByEndpoint.delete(oldest);
++    }
++    legacyEraByEndpoint.set(endpoint, Date.now());
++}
++function validateMaxListPages(value) {
++    if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
++        throw new UserError('maxListPages must be a positive integer.');
++    }
++    return value ?? 64;
++}
++class ToolListPageLimitError extends UserError {
++    constructor() {
++        super('MCP tool listing exceeded maxListPages. Increase maxListPages or check the server pagination.');
++    }
++}
++async function listAllMcpToolsV2(client, requestOptions, maxListPages) {
++    const tools = [];
++    const seenCursors = new Set();
++    let cursor;
++    let pages = 0;
++    while (true) {
++        let response;
++        try {
++            response = (await client.request({
++                method: 'tools/list',
++                ...(cursor === undefined ? {} : { params: { cursor } }),
++            }, requestOptions));
++        }
++        catch (error) {
++            if (cursor === undefined) {
++                throw error;
++            }
++            throw new Error('MCP tool listing failed while fetching a continuation page.');
++        }
++        pages += 1;
++        tools.push(...response.tools);
++        const nextCursor = response.nextCursor;
++        if (nextCursor === undefined) {
++            return { tools };
++        }
++        if (seenCursors.has(nextCursor)) {
++            throw new Error('MCP server returned a repeated cursor while listing tools.');
++        }
++        if (maxListPages !== undefined && pages >= maxListPages) {
++            throw new ToolListPageLimitError();
++        }
++        seenCursors.add(nextCursor);
++        cursor = nextCursor;
++    }
++}
++function getNegotiatedModernCapabilities(client) {
++    const capabilities = client.getServerCapabilities();
++    return client.getProtocolEra() === 'modern' && capabilities !== undefined
++        ? capabilities
++        : undefined;
++}
++async function listMcpTools(clientModule, client, requestOptions, maxListPages) {
++    if (getNegotiatedModernCapabilities(client) !== undefined) {
++        try {
++            const response = await client.listTools(undefined, {
++                ...requestOptions,
++                cacheMode: 'bypass',
++            });
++            return { tools: response.tools };
++        }
++        catch (error) {
++            if (error instanceof clientModule.SdkError &&
++                error.code === clientModule.SdkErrorCode.ListPaginationExceeded) {
++                throw new ToolListPageLimitError();
++            }
++            throw error;
++        }
++    }
++    return listAllMcpToolsV2(client, requestOptions, maxListPages);
++}
++function getListedToolForCall(clientModule, tools, toolName) {
++    const tool = tools.find((tool) => tool.name === toolName);
++    if (tool?.execution?.taskSupport === 'required') {
++        throw new clientModule.ProtocolError(clientModule.ProtocolErrorCode.InvalidRequest, `Tool "${toolName}" requires task-based execution. Use client.experimental.tasks.callToolStream() instead.`);
++    }
++    return tool;
++}
++function listResourcesPage(client, params, requestOptions) {
++    const capabilities = getNegotiatedModernCapabilities(client);
++    if (capabilities !== undefined && capabilities.resources === undefined) {
++        return Promise.resolve({ resources: [] });
++    }
++    return client.request({
++        method: 'resources/list',
++        ...(params === undefined ? {} : { params }),
++    }, requestOptions);
++}
++function listResourceTemplatesPage(client, params, requestOptions) {
++    const capabilities = getNegotiatedModernCapabilities(client);
++    if (capabilities !== undefined && capabilities.resources === undefined) {
++        return Promise.resolve({ resourceTemplates: [] });
++    }
++    return client.request({
++        method: 'resources/templates/list',
++        ...(params === undefined ? {} : { params }),
++    }, requestOptions);
++}
+ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+     session = null;
+     _cacheDirty = true;
+@@ -543,6 +755,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+     serverInitializeResult = null;
+     clientSessionTimeoutSeconds;
+     timeout;
++    maxListPages;
+     params;
+     _name;
+     transport = null;
+@@ -552,18 +765,25 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+     connectionStateVersion = 0;
+     constructor(params) {
+         super(params);
++        this.maxListPages = validateMaxListPages(params.maxListPages);
+         this.clientSessionTimeoutSeconds = params.clientSessionTimeoutSeconds ?? 5;
+         this.params = params;
+         this._name = params.name || `streamable-http: ${this.params.url}`;
+         this.timeout = params.timeout ?? DEFAULT_REQUEST_TIMEOUT_MSEC;
+     }
+     async loadStreamableHttpRuntime() {
+-        const [clientModule, transportModule, typesModule] = await Promise.all([
+-            import('@modelcontextprotocol/sdk/client/index.js').catch(failedToImport),
+-            import('@modelcontextprotocol/sdk/client/streamableHttp.js').catch(failedToImport),
+-            import('@modelcontextprotocol/sdk/types.js').catch(failedToImport),
+-        ]);
+-        return { clientModule, transportModule, typesModule };
++        const clientModule = (this.mcpClientModule ??= await loadMcpClientModule(this.params));
++        return { clientModule, transportModule: clientModule };
++    }
++    runLegacyMcpTransportOperation(operation, action, sourceSignal) {
++        return runMcpTransportOperation(this.params.url, operation, async () => {
++            try {
++                return await action();
++            }
++            catch (error) {
++                throw toLegacyMcpError(this.mcpClientModule, error);
++            }
++        }, sourceSignal);
+     }
+     createStreamableHttpTransport(StreamableHTTPClientTransport, options = {}) {
+         const transportOptions = {
+@@ -582,16 +802,44 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+     }
+     async createConnectedStreamableHttpClient(options = {}) {
+         const { clientModule, transportModule } = await this.loadStreamableHttpRuntime();
++        const configured = this.params.versionNegotiation ?? { mode: 'auto' };
++        const probing = (configured.mode ?? 'legacy') === 'auto';
++        const remembered = probing ? rememberedLegacyEra(this.params.url) : false;
++        try {
++            return await this.connectStreamableHttpClientOnce(clientModule, transportModule, options, remembered ? { ...configured, mode: 'legacy' } : configured);
++        }
++        catch (error) {
++            // A 2025-era server may answer the unrecognized `server/discover`
++            // probe with a 5xx. Connecting with the plain `initialize`
++            // handshake keeps every server that worked before working.
++            if (!probing ||
++                remembered ||
++                !(clientModule.SdkError.isInstance(error) &&
++                    error.code === clientModule.SdkErrorCode.EraNegotiationFailed)) {
++                throw error;
++            }
++            const connected = await this.connectStreamableHttpClientOnce(clientModule, transportModule, options, { ...configured, mode: 'legacy' });
++            rememberNegotiatedEra(this.params.url, connected.client);
++            return connected;
++        }
++    }
++    async connectStreamableHttpClientOnce(clientModule, transportModule, options, versionNegotiation) {
+         const { Client } = clientModule;
+         const { StreamableHTTPClientTransport } = transportModule;
+         const transport = this.createStreamableHttpTransport(StreamableHTTPClientTransport, options);
+         const client = new Client({
+             name: this._name,
+             version: '1.0.0',
++        }, {
++            versionNegotiation,
++            listMaxPages: this.maxListPages ?? 0,
+         });
+         try {
+             const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
+             await client.connect(transport, requestOptions);
++            if ((versionNegotiation.mode ?? 'legacy') === 'auto') {
++                rememberNegotiatedEra(this.params.url, client);
++            }
+             return { client, transport };
+         }
+         catch (error) {
+@@ -609,25 +857,13 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+     getClientSessionTimeoutMs() {
+         return Math.max(1, (this.clientSessionTimeoutSeconds ?? 5) * 1000);
+     }
+-    resetClientToolMetadataCache(client) {
+-        getOptionalClientToolMetadataCache(client)?.call(client, []);
+-    }
+     async publishConnectedStreamableHttpClient(args) {
+-        const previousClient = this.session;
+-        const previousSessionId = getSessionId(args.previousTransport);
+-        const nextSessionId = getSessionId(args.transport);
+-        const preservesCommittedToolState = previousClient === args.client &&
+-            previousSessionId !== undefined &&
+-            previousSessionId === nextSessionId;
+-        if (!preservesCommittedToolState) {
+-            this.resetClientToolMetadataCache(args.client);
+-        }
+         this.transport = args.transport;
+         this.session = args.client;
+         this.connectionStateVersion += 1;
+         this._toolsCacheGeneration += 1;
+         this._cacheDirty = true;
+-        if (!preservesCommittedToolState) {
++        if (!args.preserveTools) {
+             this._toolsList = [];
+         }
+         await invalidateServerToolsCache(this.name);
+@@ -660,7 +896,10 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+             });
+             try {
+                 if (typeof detachedTransport.terminateSession === 'function') {
+-                    await detachedTransport.terminateSession();
++                    // start() installs the abort controller used by terminateSession().
++                    // Closing this detached transport then cancels a stalled DELETE too.
++                    await detachedTransport.start();
++                    await withTimeout(detachedTransport.terminateSession(), this.getClientSessionTimeoutMs(), () => new Error('Timed out terminating streamable HTTP MCP session.'));
+                 }
+             }
+             finally {
+@@ -702,18 +941,20 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+         await this.terminateDetachedStreamableHttpSession(transport, terminateWarningMessage);
+     }
+     async callToolWithClient(client, toolName, args, meta, options) {
+-        const { CallToolResultSchema } = await import('@modelcontextprotocol/sdk/types.js').catch(failedToImport);
++        const { clientModule } = await this.loadStreamableHttpRuntime();
+         const params = {
+             name: toolName,
+             arguments: args ?? {},
+             ...(meta != null ? { _meta: meta } : {}),
+         };
+-        const response = await callWithMCPRequestSignal(options?.signal, (requestSignal) => client.callTool(params, undefined, buildRequestOptions(this.clientSessionTimeoutSeconds, {
+-            timeout: this.timeout,
+-            signal: requestSignal,
+-        })));
+-        const parsed = CallToolResultSchema.parse(response);
+-        return attachParsedCallToolResultMetadata(parsed);
++        const response = await callWithMCPRequestSignal(options?.signal, (requestSignal) => client.callTool(params, {
++            ...buildRequestOptions(this.clientSessionTimeoutSeconds, {
++                timeout: this.timeout,
++                signal: requestSignal,
++            }),
++            toolDefinition: getListedToolForCall(clientModule, this._toolsList, toolName),
++        }));
++        return attachParsedCallToolResultMetadata(response);
+     }
+     async closeStreamableHttpClient(args, options) {
+         const { client, transport } = args;
+@@ -733,6 +974,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+             logMcpTransportWarning(this.logger, this.params.url, 'streamable HTTP cleanup', options.closeWarningMessage, error);
+         });
+     }
++    async closeStreamableHttpTransport(transport, warningMessage) {
++        await transport.close().catch((error) => {
++            logMcpTransportWarning(this.logger, this.params.url, 'streamable HTTP cleanup', warningMessage, error);
++        });
++    }
+     async reconnectExistingStreamableHttpClient(args) {
+         const { transportModule } = await this.loadStreamableHttpRuntime();
+         const { StreamableHTTPClientTransport } = transportModule;
+@@ -743,7 +989,8 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+         try {
+             const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
+             await args.client.connect(transport, requestOptions);
+-            if (args.sessionId !== undefined) {
++            if (args.sessionId !== undefined &&
++                args.client.getProtocolEra() === 'legacy') {
+                 // Reconnecting with an existing session skips initialize(), so resend
+                 // initialized to reopen the shared SSE stream for async responses.
+                 await this.reopenSharedStreamableHttpSession(args.client);
+@@ -800,14 +1047,21 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+                 throw new Error('Cannot reconnect streamable HTTP MCP server without an active client.');
+             }
+             try {
+-                await this.closeStreamableHttpClient({
+-                    client: previousClient,
+-                    transport: previousTransport,
+-                }, {
+-                    terminateSession: false,
+-                    closeWarningMessage: 'Failed to close stale MCP client:',
+-                    terminateWarningMessage: 'Failed to terminate stale MCP session:',
+-                });
++                if (sessionId === undefined) {
++                    await this.closeStreamableHttpClient({
++                        client: previousClient,
++                        transport: previousTransport,
++                    }, {
++                        terminateSession: false,
++                        closeWarningMessage: 'Failed to close stale MCP client:',
++                        terminateWarningMessage: 'Failed to terminate stale MCP session:',
++                    });
++                }
++                else {
++                    // Keep the v2 Client's negotiated capabilities and tool metadata when
++                    // resuming the same server session on a replacement transport.
++                    await this.closeStreamableHttpTransport(previousTransport, 'Failed to close stale MCP transport:');
++                }
+                 const recovered = await this.reconnectExistingStreamableHttpClient({
+                     client: previousClient,
+                     protocolVersion,
+@@ -834,7 +1088,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+                 await this.publishConnectedStreamableHttpClient({
+                     client: recovered.client,
+                     transport: recovered.transport,
+-                    previousTransport,
++                    preserveTools: sessionId !== undefined,
+                 });
+                 return recovered.client;
+             }
+@@ -871,13 +1125,20 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+         if (this.params.sessionId !== undefined) {
+             return 'none';
+         }
+-        if (isNotConnectedError(error, client)) {
++        const { clientModule } = await this.loadStreamableHttpRuntime();
++        const { SdkError, SdkErrorCode } = clientModule;
++        if (error instanceof SdkError && error.code === SdkErrorCode.NotConnected) {
++            return client.transport == null ? 'reconnect-and-retry' : 'none';
++        }
++        // MCP SDK v2 currently throws this plain Error after a transport detaches.
++        // Guard the message match with the actual disconnected client state.
++        if (client.transport == null &&
++            error instanceof Error &&
++            error.message === 'Not connected') {
+             return 'reconnect-and-retry';
+         }
+-        const { typesModule } = await this.loadStreamableHttpRuntime();
+-        const { ErrorCode, McpError } = typesModule;
+-        return error instanceof McpError &&
+-            error.code === ErrorCode.ConnectionClosed
++        return error instanceof SdkError &&
++            error.code === SdkErrorCode.ConnectionClosed
+             ? 'reconnect-only'
+             : 'none';
+     }
+@@ -910,7 +1171,6 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+             await this.publishConnectedStreamableHttpClient({
+                 client,
+                 transport,
+-                previousTransport,
+             });
+             this.serverInitializeResult = {
+                 serverInfo: { name: this._name, version: '1.0.0' },
+@@ -929,7 +1189,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+         catch (e) {
+             // A losing concurrent connect can fail after another connect already
+             // published a healthy shared session, so avoid closing shared state here.
+-            const error = sanitizeMcpTransportError(e, this.params.url, 'streamable HTTP connect');
++            const error = sanitizeMcpTransportError(toLegacyMcpError(this.mcpClientModule, e), this.params.url, 'streamable HTTP connect');
+             logToolActionError(this.logger, 'Error initializing MCP server:', error);
+             throw error;
+         }
+@@ -937,11 +1197,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+     }
+     async invalidateToolsCache() {
+         this._toolsCacheGeneration += 1;
+-        await invalidateServerToolsCache(this.name);
+         this._cacheDirty = true;
++        this._toolsList = [];
++        await invalidateServerToolsCache(this.name);
+     }
+     async listTools() {
+-        const { ListToolsResultSchema } = await import('@modelcontextprotocol/sdk/types.js').catch(failedToImport);
+         if (!this.session) {
+             throw new Error('Server not initialized. Make sure you call connect() first.');
+         }
+@@ -950,19 +1210,17 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+         }
+         const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
+         const session = this.session;
+-        getClientToolMetadataCache(session);
+         const cacheGeneration = this._toolsCacheGeneration;
+-        const tools = await listAllMcpTools({
+-            fetchPage: (cursor) => runMcpTransportOperation(this.params.url, 'streamable HTTP list tools', () => requestMcpToolsPage(session, ListToolsResultSchema, requestOptions, cursor)),
+-            onPage: (response) => this.debugLog(() => `Listed tools: ${JSON.stringify(response)}`),
+-        });
++        const { clientModule } = await this.loadStreamableHttpRuntime();
++        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list tools', () => listMcpTools(clientModule, session, requestOptions, this.maxListPages));
++        this.debugLog(() => `Listed tools: ${JSON.stringify(response)}`);
+         assertMcpToolListingIsCurrent({
+             listedClient: session,
+             currentClient: this.session,
+             listedGeneration: cacheGeneration,
+             currentGeneration: this._toolsCacheGeneration,
+         });
+-        replaceClientToolMetadata(session, tools, this._toolsList);
++        const tools = response.tools;
+         this._toolsList = tools;
+         this._cacheDirty = false;
+         return tools;
+@@ -984,18 +1242,18 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+             if (isCallerAbortReason(error, options?.signal)) {
+                 throw error;
+             }
+-            const recoveryStrategy = await runMcpTransportOperation(this.params.url, 'streamable HTTP tool call recovery classification', () => this.shouldReconnectClosedStreamableHttpClient(error, client));
++            const recoveryStrategy = await this.runLegacyMcpTransportOperation('streamable HTTP tool call recovery classification', () => this.shouldReconnectClosedStreamableHttpClient(error, client));
+             if (recoveryStrategy === 'none') {
+-                throw sanitizeMcpTransportError(error, this.params.url, 'streamable HTTP tool call');
++                throw sanitizeMcpTransportError(toLegacyMcpError(this.mcpClientModule, error), this.params.url, 'streamable HTTP tool call');
+             }
+             this.debugLog(() => `Reconnecting closed streamable HTTP MCP session for ${toolName}.`);
+-            const recoveredClient = await runMcpTransportOperation(this.params.url, 'streamable HTTP reconnect', () => this.reconnectClosedStreamableHttpClient({
++            const recoveredClient = await this.runLegacyMcpTransportOperation('streamable HTTP reconnect', () => this.reconnectClosedStreamableHttpClient({
+                 cause: error,
+                 failedClient: client,
+                 failedStateVersion: callToolStateVersion,
+             }));
+             if (recoveryStrategy === 'reconnect-only') {
+-                throw sanitizeMcpTransportError(error, this.params.url, 'streamable HTTP tool call');
++                throw sanitizeMcpTransportError(toLegacyMcpError(this.mcpClientModule, error), this.params.url, 'streamable HTTP tool call');
+             }
+             try {
+                 result = await this.callToolWithClient(recoveredClient, toolName, args, meta, options);
+@@ -1004,41 +1262,38 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+                 if (isCallerAbortReason(retryError, options?.signal)) {
+                     throw retryError;
+                 }
+-                throw sanitizeMcpTransportError(attachCause(retryError, error), this.params.url, 'streamable HTTP tool call retry');
++                throw sanitizeMcpTransportError(attachCause(toLegacyMcpError(this.mcpClientModule, retryError), toLegacyMcpError(this.mcpClientModule, error)), this.params.url, 'streamable HTTP tool call retry');
+             }
+         }
+         this.debugLog(() => `Called tool ${toolName} (args: ${JSON.stringify(args)}, result: ${JSON.stringify(result)})`);
+         return result;
+     }
+     async listResources(params) {
+-        const { ListResourcesResultSchema } = await import('@modelcontextprotocol/sdk/types.js').catch(failedToImport);
+         if (!this.session) {
+             throw new Error('Server not initialized. Make sure you call connect() first.');
+         }
+         const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
+-        const response = await runMcpTransportOperation(this.params.url, 'streamable HTTP list resources', () => this.session.listResources(params, requestOptions));
++        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list resources', () => listResourcesPage(this.session, params, requestOptions));
+         this.debugLog(() => `Listed resources: ${JSON.stringify(response)}`);
+-        return ListResourcesResultSchema.parse(response);
++        return response;
+     }
+     async listResourceTemplates(params) {
+-        const { ListResourceTemplatesResultSchema } = await import('@modelcontextprotocol/sdk/types.js').catch(failedToImport);
+         if (!this.session) {
+             throw new Error('Server not initialized. Make sure you call connect() first.');
+         }
+         const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
+-        const response = await runMcpTransportOperation(this.params.url, 'streamable HTTP list resource templates', () => this.session.listResourceTemplates(params, requestOptions));
++        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list resource templates', () => listResourceTemplatesPage(this.session, params, requestOptions));
+         this.debugLog(() => `Listed resource templates: ${JSON.stringify(response)}`);
+-        return ListResourceTemplatesResultSchema.parse(response);
++        return response;
+     }
+     async readResource(uri) {
+-        const { ReadResourceResultSchema } = await import('@modelcontextprotocol/sdk/types.js').catch(failedToImport);
+         if (!this.session) {
+             throw new Error('Server not initialized. Make sure you call connect() first.');
+         }
+-        const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
+-        const response = await runMcpTransportOperation(this.params.url, 'streamable HTTP read resource', () => this.session.readResource({ uri }, requestOptions));
++        const requestOptions = buildCacheableRequestOptions(this.clientSessionTimeoutSeconds);
++        const response = await this.runLegacyMcpTransportOperation('streamable HTTP read resource', () => this.session.readResource({ uri }, requestOptions));
+         this.debugLog(() => `Read resource ${uri}: ${JSON.stringify(response)}`);
+-        return ReadResourceResultSchema.parse(response);
++        return response;
+     }
+     get name() {
+         return this._name;
 diff --git a/dist/tool.d.ts b/dist/tool.d.ts
 index b0e0743ce55d1e5475ea91eb652879a9cdc0cf0f..ef965a36fe56c8419ab99d49d96b26b0101c1ca3 100644
 --- a/dist/tool.d.ts

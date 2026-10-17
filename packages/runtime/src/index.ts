@@ -2,6 +2,7 @@ import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge"
 import { measureMcpPhase } from "@opengeni/observability";
 import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
 import { createMcpTransportLogger } from "./mcp-transport-logger";
+import { mcpStreamableHttpClientOptions } from "./mcp-client";
 import {
   withPreparedCompactionRequest,
   deferCompactionToModelBoundary,
@@ -5298,6 +5299,7 @@ export async function prepareAgentTools(
             // sanitize the response on the wire before validation. The namespace Set
             // also captures each tool's original connector namespace (P4 Part B.1).
             fetch: fetchImpl,
+            ...mcpStreamableHttpClientOptions({ firstParty }),
             ...(await mcpServerRequestInit(settings, config)),
             ...(config.timeoutMs ? { timeout: config.timeoutMs } : {}),
             ...mcpSessionTimeoutOptions(config),

@@ -4,9 +4,6 @@ import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
 } from "@opengeni/db/organization-integration-policy";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   findIntegrationsOauthClient,
   parseIntegrationsOauthClientsJson,
@@ -18,7 +15,13 @@ import {
   type ConnectionOwnership,
   type OAuthStartRequest,
 } from "@opengeni/contracts";
-import { requireEnvironmentEncryption, integrationKeyForConnectProvider } from "@opengeni/core";
+import {
+  connectMcpStreamableHttpClient,
+  integrationKeyForConnectProvider,
+  legacyMcpClientError,
+  requireEnvironmentEncryption,
+  type McpStreamableHttpClient,
+} from "@opengeni/core";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import type { Observability } from "@opengeni/observability";
 import {
@@ -2641,12 +2644,13 @@ async function verifyMcpToolsList(
   token: TokenResponse,
   signal: AbortSignal,
 ): Promise<Array<{ name: string; description?: string }>> {
-  const client = new Client(
-    { name: "opengeni-integration-verify", version: "0.1.0" },
-    { capabilities: {} },
-  );
+  let client: McpStreamableHttpClient | undefined;
   try {
-    const transport = new StreamableHTTPClientTransport(new URL(resource), {
+    client = await connectMcpStreamableHttpClient({
+      url: resource,
+      clientName: "opengeni-integration-verify",
+      clientVersion: "0.1.0",
+      timeoutMs: 10_000,
       requestInit: {
         headers: {
           authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}`,
@@ -2658,20 +2662,20 @@ async function verifyMcpToolsList(
           signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
         }),
     });
-    await client.connect(transport as unknown as Transport, {
-      timeout: 10_000,
-      maxTotalTimeout: 10_000,
-    });
-    const listed = await client.listTools(undefined, {
-      timeout: 10_000,
-      maxTotalTimeout: 10_000,
-    });
+    const listed = await client
+      .listTools(undefined, {
+        timeout: 10_000,
+        maxTotalTimeout: 10_000,
+      })
+      .catch((error: unknown) => {
+        throw legacyMcpClientError(error);
+      });
     return listed.tools.map((tool) => ({
       name: tool.name,
       ...(tool.description ? { description: tool.description } : {}),
     }));
   } finally {
-    await client.close().catch(() => undefined);
+    await client?.close().catch(() => undefined);
   }
 }
 

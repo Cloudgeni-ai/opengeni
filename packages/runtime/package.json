@@ -70,6 +70,7 @@
   "dependencies": {
     "@alibaba-group/opensandbox": "0.1.11",
     "@grpc/grpc-js": "1.14.4",
+    "@modelcontextprotocol/client": "2.3.1",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@noble/hashes": "^1.8.0",
     "@openai/agents": "0.14.3",
@@ -99,6 +100,7 @@
   },
   "devDependencies": {
     "@daytonaio/sdk": "0.162.0",
+    "@modelcontextprotocol/server": "2.3.1",
     "@opengeni/ogtool": "workspace:*",
     "@runloop/api-client": "1.16.2",
     "tsup": "^8.5.0",
