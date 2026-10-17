@@ -623,6 +623,7 @@ export {
   normalizeVercelGatewayRequestBody,
   resolveTurnModel,
   vercelGatewayRoutingFetch,
+  warmCodexResponsesWebSocket,
 } from "./model-provider";
 export {
   appendWorkspaceGovernance,

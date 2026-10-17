@@ -15,7 +15,11 @@ import { hasMeaningfulCodexOutput } from "./meaningful-output";
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
 import { opaqueProviderArtifactFingerprints } from "./opaque-artifact";
-import { CODEX_TRANSPORT_HEADER, parseCodexRequestTransport } from "./responses-websocket";
+import {
+  CODEX_TRANSPORT_HEADER,
+  parseCodexRequestTransport,
+  type CodexResponsesTransport,
+} from "./responses-websocket";
 import { CODEX_FIVE_HOUR_WINDOW_SECONDS, CODEX_WEEKLY_WINDOW_SECONDS } from "./usage-normalize";
 import {
   codexRequestStorage,
@@ -743,6 +747,75 @@ function timeoutErrorResponse(info: {
   );
 }
 
+/** Rewrites the SDK's /responses URL to the backend's /codex/responses. */
+function codexResponsesUrl(rawUrl: string): string {
+  // Idempotent: the negative lookbehind skips URLs whose base already includes
+  // /codex (avoids /codex/codex/responses).
+  return rawUrl.replace(/(?<!\/codex)\/responses(\b|$)/, "/codex/responses$1");
+}
+
+/**
+ * The headers that identify a Codex request's account, client and
+ * conversation. Every request carries them, and the Responses WebSocket
+ * handshake is opened with them.
+ */
+function setCodexIdentityHeaders(
+  headers: Headers,
+  ctx: CodexRequestContext,
+  auth: CodexTokenSnapshot,
+): void {
+  headers.set("Authorization", `Bearer ${auth.accessToken}`);
+  if (auth.chatgptAccountId) {
+    headers.set("ChatGPT-Account-ID", auth.chatgptAccountId);
+  }
+  headers.set("originator", CODEX_ORIGINATOR);
+  headers.set("User-Agent", `${CODEX_ORIGINATOR}/${ctx.clientVersion}`);
+  headers.set("version", ctx.clientVersion);
+  if (ctx.sessionId) {
+    // Backend sticky cache-routing key (see CodexRequestContext.sessionId):
+    // without it, byte-identical resends miss the prompt cache ~half the
+    // time; with it they pin to a warm shard and hit at the ceiling.
+    headers.set("session_id", ctx.sessionId);
+  }
+  if (auth.isFedramp) {
+    headers.set("X-OpenAI-Fedramp", "true");
+  }
+  // Codex CLI advertises betas via x-codex-beta-features (not OpenAI-Beta).
+  if (ctx.betaFeatures && ctx.betaFeatures.length > 0) {
+    headers.set("x-codex-beta-features", ctx.betaFeatures.join(","));
+  }
+  // Turn analytics / request_kind live in x-codex-turn-metadata — body
+  // metadata is stripped by normalizeCodexRequestBody and rejected upstream.
+  if (ctx.turnMetadata && Object.keys(ctx.turnMetadata).length > 0) {
+    headers.set("x-codex-turn-metadata", JSON.stringify(ctx.turnMetadata));
+  }
+}
+
+/**
+ * Opens the current Codex conversation's Responses WebSocket ahead of its first
+ * model request, so the handshake overlaps the rest of turn preparation rather
+ * than delaying the first response. Call inside the turn's Codex request
+ * context with the transport and base URL the model client uses. It sends no
+ * model request and never throws; a transport without WebSockets ignores it,
+ * and the first request still resolves and checks its own credential.
+ */
+export async function warmCodexResponsesConnection(
+  transport: FetchLike,
+  baseUrl: string,
+): Promise<void> {
+  const ctx = codexRequestStorage.getStore();
+  const warm = (transport as Partial<CodexResponsesTransport>).warm;
+  if (!ctx || typeof warm !== "function") return;
+  try {
+    const auth = await ctx.getToken();
+    const headers = new Headers();
+    setCodexIdentityHeaders(headers, ctx, auth);
+    warm(codexResponsesUrl(`${baseUrl.replace(/\/+$/, "")}/responses`), headers);
+  } catch {
+    // Only an optimization: the first request opens its own connection.
+  }
+}
+
 export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): FetchLike {
   return async (input, init) => {
     const ctx = codexRequestStorage.getStore();
@@ -753,9 +826,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
 
     const rawUrl =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    // /responses -> /codex/responses, idempotent: the negative lookbehind skips
-    // URLs whose base already includes /codex (avoids /codex/codex/responses).
-    const rewritten = rawUrl.replace(/(?<!\/codex)\/responses(\b|$)/, "/codex/responses$1");
+    const rewritten = codexResponsesUrl(rawUrl);
 
     const policy = resolveCodexResponseTimeoutPolicy(ctx.responseTimeoutPolicy);
     const handedRequestId = new Headers(init?.headers).get(CODEX_REQUEST_ID_HEADER);
@@ -775,35 +846,11 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       headers.delete(CODEX_REQUEST_MODEL_HEADER);
       headers.delete(CODEX_REQUEST_ID_HEADER);
       headers.delete(CODEX_REQUEST_CALLER_STREAM_HEADER);
-      headers.set("Authorization", `Bearer ${auth.accessToken}`);
-      if (auth.chatgptAccountId) {
-        headers.set("ChatGPT-Account-ID", auth.chatgptAccountId);
-      }
-      headers.set("originator", CODEX_ORIGINATOR);
-      headers.set("User-Agent", `${CODEX_ORIGINATOR}/${ctx.clientVersion}`);
-      headers.set("version", ctx.clientVersion);
+      setCodexIdentityHeaders(headers, ctx, auth);
       headers.set("accept", "text/event-stream");
       headers.set("content-type", "application/json");
-      if (ctx.sessionId) {
-        // Backend sticky cache-routing key (see CodexRequestContext.sessionId):
-        // without it, byte-identical resends miss the prompt cache ~half the
-        // time; with it they pin to a warm shard and hit at the ceiling.
-        headers.set("session_id", ctx.sessionId);
-      }
-      if (auth.isFedramp) {
-        headers.set("X-OpenAI-Fedramp", "true");
-      }
       headers.delete("OpenAI-Beta"); // omit on SSE (spec §1.2); fallback: "responses=experimental" if backend 400s
       headers.delete("x-api-key");
-      // Codex CLI advertises betas via x-codex-beta-features (not OpenAI-Beta).
-      if (ctx.betaFeatures && ctx.betaFeatures.length > 0) {
-        headers.set("x-codex-beta-features", ctx.betaFeatures.join(","));
-      }
-      // Turn analytics / request_kind live in x-codex-turn-metadata — body
-      // metadata is stripped by normalizeCodexRequestBody and rejected upstream.
-      if (ctx.turnMetadata && Object.keys(ctx.turnMetadata).length > 0) {
-        headers.set("x-codex-turn-metadata", JSON.stringify(ctx.turnMetadata));
-      }
 
       // The backend is streaming-only; force stream=true on the wire but remember
       // the caller's intent for legacy/unowned non-streaming consumers. The owned

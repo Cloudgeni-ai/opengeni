@@ -31,6 +31,7 @@ export {
   configureRuntimeMetricsHooks,
   recordRuntimeMcpLifecycleMetric,
   recordRuntimeMcpToolCallMetric,
+  warmCodexResponsesWebSocket,
 } from "./model-provider-client";
 export {
   modelRequestPolicyForProvider,

@@ -46,7 +46,7 @@ class FakeSocket implements CodexWebSocketLike {
   }
 }
 
-function harness(options: { autoOpen?: boolean } = {}) {
+function harness(options: { autoOpen?: boolean; now?: () => number } = {}) {
   const sockets: FakeSocket[] = [];
   const httpCalls: string[] = [];
   const transport = codexResponsesTransport(
@@ -62,8 +62,8 @@ function harness(options: { autoOpen?: boolean } = {}) {
         return socket;
       },
       connectTimeoutMs: 1_000,
-      // A fixed clock: a new connection's handshake reports 0 ms.
-      now: () => 1_000,
+      // A fixed clock by default: a new connection's handshake reports 0 ms.
+      now: options.now ?? (() => 1_000),
     },
   );
   return { transport, sockets, httpCalls };
@@ -158,6 +158,84 @@ test("streams a response over one reused connection as SSE with usage headers", 
   await reused.text();
   expect(sockets).toHaveLength(1);
   expect(httpCalls).toEqual([]);
+});
+
+test("a connection warmed ahead of the first request carries it without another handshake", async () => {
+  const { transport, sockets, httpCalls } = harness();
+  const { headers } = request();
+  // The model SDK's telemetry headers never split a conversation's connection.
+  transport.warm(URL, { ...headers, "x-stainless-os": "Linux" });
+  transport.warm(URL, headers);
+  expect(sockets).toHaveLength(1);
+  expect(sockets[0]!.url).toBe("wss://chatgpt.example/backend-api/codex/responses");
+  expect(sockets[0]!.headers).toEqual({
+    authorization: "Bearer token",
+    "chatgpt-account-id": "acct",
+    session_id: "conversation",
+    "openai-beta": CODEX_RESPONSES_WEBSOCKET_BETA,
+  });
+  await Bun.sleep(1);
+  transport.warm(URL, headers);
+  expect(sockets).toHaveLength(1);
+
+  const pending = transport(
+    URL,
+    request(undefined, { headers: { ...headers, "x-stainless-retry-count": "0" } }),
+  );
+  const socket = await nextSend(() => sockets[0]);
+  socket.emit({ type: "response.completed", response: { id: "r1" } });
+  const response = await pending;
+  // The request waited for none of the handshake.
+  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+    "websocket; connection=new; handshake_ms=0",
+  );
+  await response.text();
+  expect(sockets).toHaveLength(1);
+  expect(httpCalls).toEqual([]);
+});
+
+test("a request waits for its conversation's handshake already in progress", async () => {
+  let clock = 1_000;
+  const { transport, sockets, httpCalls } = harness({ autoOpen: false, now: () => clock });
+  transport.warm(URL, request().headers);
+  const pending = transport(URL, request());
+  await Bun.sleep(2);
+  expect(sockets).toHaveLength(1);
+  clock += 120;
+  sockets[0]!.open();
+  const socket = await nextSend(() => sockets[0]);
+  socket.emit({ type: "response.completed", response: { id: "r1" } });
+  const response = await pending;
+  expect(response.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+    "websocket; connection=new; handshake_ms=120",
+  );
+  await response.text();
+  expect(sockets).toHaveLength(1);
+  expect(httpCalls).toEqual([]);
+});
+
+test("a failed warm handshake sends the waiting request over HTTP and backs off", async () => {
+  const { transport, sockets, httpCalls } = harness({ autoOpen: false });
+  transport.warm(URL, request().headers);
+  const pending = transport(URL, request());
+  await Bun.sleep(1);
+  sockets[0]!.drop(1006);
+  const failed = await pending;
+  expect(failed.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=handshake_failed");
+  expect(await failed.text()).toBe("http");
+  transport.warm(URL, request().headers);
+  const backedOff = await transport(URL, request());
+  expect(backedOff.headers.get(CODEX_TRANSPORT_HEADER)).toBe("http; reason=handshake_backoff");
+  expect(sockets).toHaveLength(1);
+  expect(httpCalls).toHaveLength(2);
+});
+
+test("warming ignores other URLs and transports without WebSockets", async () => {
+  const { transport, sockets } = harness();
+  transport.warm("https://chatgpt.example/backend-api/codex/models", request().headers);
+  expect(sockets).toHaveLength(0);
+  const plain = codexResponsesTransport(async () => new Response("http"), { createSocket: null });
+  expect(() => plain.warm(URL, request().headers)).not.toThrow();
 });
 
 function streamedRequest(body: Record<string, unknown>) {

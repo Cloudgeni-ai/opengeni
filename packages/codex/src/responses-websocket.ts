@@ -151,7 +151,9 @@ const DEFAULT_HANDSHAKE_BACKOFF_MS = 5 * 60_000;
 
 // Per-request headers stay off the shared handshake: they would split every
 // request onto its own connection, and the WebSocket protocol has no
-// per-message equivalent the backend reads.
+// per-message equivalent the backend reads. The model SDK's own client
+// telemetry headers (x-stainless-*) are not sent either, so a connection opened
+// ahead of the first request has the same identity as the request itself.
 const PER_REQUEST_HEADERS = new Set([
   "accept",
   "content-type",
@@ -159,6 +161,22 @@ const PER_REQUEST_HEADERS = new Set([
   "idempotency-key",
   "openai-beta",
 ]);
+
+function isPerRequestHeader(name: string): boolean {
+  return PER_REQUEST_HEADERS.has(name) || name.startsWith("x-stainless-");
+}
+
+const CODEX_RESPONSES_URL = /^https:\/\/[^/]+\/.*\/codex\/responses(?:\?|$)/;
+
+/**
+ * A Codex Responses FetchLike that can also open a conversation's connection
+ * before its first request. `warm` takes the URL and headers that request will
+ * carry; it never throws, and the request reuses the connection (or waits for
+ * its handshake to finish) instead of opening its own.
+ */
+export type CodexResponsesTransport = FetchLike & {
+  warm(url: string, headers: HeadersInit): void;
+};
 
 const TERMINAL_EVENTS = new Set([
   "response.completed",
@@ -184,6 +202,8 @@ type Connection = {
   closed: boolean;
   /** Requests this connection has started carrying. */
   requests: number;
+  /** Opened ahead of its first request by {@link CodexResponsesTransport.warm}. */
+  warmed: boolean;
   idleTimer: ReturnType<typeof setTimeout> | null;
   /** Receives every message while a request is in flight. */
   onEvent: ((event: Record<string, unknown>) => void) | null;
@@ -280,10 +300,14 @@ function requestUrl(input: string | URL | Request): string | null {
 export function codexResponsesTransport(
   http: FetchLike,
   options: CodexResponsesTransportOptions = {},
-): FetchLike {
+): CodexResponsesTransport {
   const createSocket =
     options.createSocket === undefined ? bunWebSocketFactory() : options.createSocket;
-  if (!createSocket) return http;
+  if (!createSocket) {
+    return Object.assign((input: string | URL | Request, init?: RequestInit) => http(input, init), {
+      warm: () => undefined,
+    });
+  }
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
   const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
@@ -291,6 +315,8 @@ export function codexResponsesTransport(
   const now = options.now ?? Date.now;
   const pool = new Map<string, Connection>();
   const backoffUntil = new Map<string, number>();
+  // Handshakes started by `warm`, keyed like the pool, until they settle.
+  const warming = new Map<string, Promise<Connection | null>>();
 
   const retire = (connection: Connection) => {
     if (connection.idleTimer) clearTimeout(connection.idleTimer);
@@ -332,6 +358,7 @@ export function codexResponsesTransport(
         busy: false,
         closed: false,
         requests: 0,
+        warmed: false,
         idleTimer: null,
         onEvent: null,
         onClose: null,
@@ -387,11 +414,64 @@ export function codexResponsesTransport(
       };
     });
 
-  return async (input, init) => {
+  const identity = (url: string, headers: HeadersInit | undefined) => {
+    const handshake: Record<string, string> = {};
+    for (const [name, value] of new Headers(headers).entries()) {
+      if (!isPerRequestHeader(name)) handshake[name] = value;
+    }
+    handshake["openai-beta"] = CODEX_RESPONSES_WEBSOCKET_BETA;
+    const wsUrl = url.replace(/^https:/, "wss:");
+    return { wsUrl, handshake, key: JSON.stringify([wsUrl, Object.entries(handshake).sort()]) };
+  };
+
+  // The pooled connection a request may start on, retiring one that closed or
+  // aged out.
+  const pooled = (key: string): Connection | undefined => {
+    const connection = pool.get(key);
+    if (connection && (connection.closed || now() - connection.openedAt > maxAgeMs)) {
+      if (!connection.busy) retire(connection);
+      return undefined;
+    }
+    return connection;
+  };
+
+  const warm = (url: string, headers: HeadersInit): void => {
+    try {
+      if (!CODEX_RESPONSES_URL.test(url)) return;
+      const { wsUrl, handshake, key } = identity(url, headers);
+      if ((backoffUntil.get(key) ?? 0) > now() || pooled(key) || warming.has(key)) return;
+      const opening = connect(wsUrl, key, handshake).then(
+        (connection) => {
+          const existing = pooled(key);
+          if (existing) {
+            // A request opened this conversation's connection first.
+            retire(connection);
+            return existing;
+          }
+          connection.warmed = true;
+          pool.set(key, connection);
+          release(connection);
+          return connection;
+        },
+        () => {
+          backoffUntil.set(key, now() + handshakeBackoffMs);
+          return null;
+        },
+      );
+      warming.set(key, opening);
+      void opening.finally(() => {
+        if (warming.get(key) === opening) warming.delete(key);
+      });
+    } catch {
+      // Warming is an optimization; the request opens its own connection.
+    }
+  };
+
+  const send = async (input: string | URL | Request, init?: RequestInit) => {
     const url = requestUrl(input);
     const method = (init?.method ?? "GET").toUpperCase();
     const body = init?.body;
-    if (!url || method !== "POST" || !/^https:\/\/[^/]+\/.*\/codex\/responses(?:\?|$)/.test(url)) {
+    if (!url || method !== "POST" || !CODEX_RESPONSES_URL.test(url)) {
       return await http(input, init);
     }
     // The model client streams its JSON body so it can be sent again; a socket
@@ -413,24 +493,30 @@ export function codexResponsesTransport(
     }
     if (payload.stream !== true) return await viaHttp("not_eligible");
 
-    const handshake: Record<string, string> = {};
-    for (const [name, value] of new Headers(init?.headers).entries()) {
-      if (!PER_REQUEST_HEADERS.has(name)) handshake[name] = value;
+    const { wsUrl, handshake, key } = identity(url, init?.headers);
+    let handshakeMs: number | undefined;
+    const opening = warming.get(key);
+    if (opening && !pool.has(key)) {
+      // This conversation's connection is already being opened; wait for it
+      // rather than racing a second handshake.
+      const waitStartedAt = now();
+      const warmed = await opening;
+      if (!warmed) return await viaHttp("handshake_failed");
+      handshakeMs = now() - waitStartedAt;
     }
-    handshake["openai-beta"] = CODEX_RESPONSES_WEBSOCKET_BETA;
-    const wsUrl = url.replace(/^https:/, "wss:");
-    const key = JSON.stringify([wsUrl, Object.entries(handshake).sort()]);
     if ((backoffUntil.get(key) ?? 0) > now()) return await viaHttp("handshake_backoff");
 
     const signal = init?.signal ?? null;
     signal?.throwIfAborted();
-    let connection = pool.get(key);
-    if (connection && (connection.closed || now() - connection.openedAt > maxAgeMs)) {
-      if (!connection.busy) retire(connection);
-      connection = undefined;
-    }
+    let connection = pooled(key);
     if (connection?.busy) return await viaHttp("connection_busy");
-    let handshakeMs: number | undefined;
+    if (connection?.warmed && connection.requests === 0) {
+      // The first request on a connection opened ahead of it waited only for
+      // whatever of the handshake was still left.
+      handshakeMs ??= 0;
+    } else if (connection) {
+      handshakeMs = undefined;
+    }
     if (!connection) {
       const handshakeStartedAt = now();
       try {
@@ -562,4 +648,5 @@ export function codexResponsesTransport(
       }
     });
   };
+  return Object.assign(send, { warm });
 }
