@@ -33,6 +33,7 @@ function fixture(
   latencyMode: "standard" | "fast" | "priority" = "standard",
 ) {
   const goal = spyOn(db, "getSessionGoal").mockResolvedValue({ status: "active" } as never);
+  const deletion = spyOn(db, "isSessionDefinitivelyDeleted").mockResolvedValue(false);
   const session = spyOn(db, "requireSession").mockResolvedValue({
     model,
     status,
@@ -53,12 +54,14 @@ function fixture(
   const materialize = spyOn(db, "materializeGoalContinuation");
   const publish = spyOn({ publish: async () => {} }, "publish");
   restores.push(
-    ...[goal, session, catalog, policy, workspace, materialize].map(
+    ...[goal, deletion, session, catalog, policy, workspace, materialize].map(
       (spy) => () => spy.mockRestore(),
     ),
   );
   const services = { db: {}, bus: { publish }, settings } as unknown as ControlActivityServices;
   return {
+    goal,
+    deletion,
     catalog,
     policy,
     materialize,
@@ -66,6 +69,21 @@ function fixture(
     activities: createGoalActivities(async () => services),
   };
 }
+
+test.each([true, false])(
+  "goal lookup retries finish only after proven deletion (%s)",
+  async (deleted) => {
+    const value = fixture("scripted-model", "idle");
+    const error = new Error("Workspace unavailable");
+    value.goal.mockRejectedValue(error);
+    value.deletion.mockResolvedValue(deleted);
+    if (deleted)
+      await expect(value.activities.maybeContinueGoal(input)).resolves.toEqual({ action: "none" });
+    else await expect(value.activities.maybeContinueGoal(input)).rejects.toBe(error);
+    expect(value.materialize).not.toHaveBeenCalled();
+    expect(value.publish).not.toHaveBeenCalled();
+  },
+);
 
 function codexSettings(): Settings {
   const settings = withCodexCatalogProvider(testSettings({ codexSubscriptionEnabled: true }));

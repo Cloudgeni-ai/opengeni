@@ -12,6 +12,7 @@ import {
 import {
   enqueueSessionWorkflowWakeIfRunnable,
   getSessionGoal,
+  isSessionDefinitivelyDeleted,
   getSessionTurn,
   materializeGoalContinuation,
   requireSession,
@@ -200,7 +201,23 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
 
   return {
     enqueueGoalRetryWake,
-    maybeContinueGoal,
+    maybeContinueGoal: async (input: MaybeContinueGoalInput): Promise<MaybeContinueGoalResult> => {
+      try {
+        return await maybeContinueGoal(input);
+      } catch (error) {
+        const { db } = await services();
+        if (
+          await isSessionDefinitivelyDeleted(
+            db,
+            input.workspaceId,
+            input.sessionId,
+            input.accountId,
+          )
+        )
+          return { action: "none" };
+        throw error;
+      }
+    },
   };
 }
 

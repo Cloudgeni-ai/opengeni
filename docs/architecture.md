@@ -110,6 +110,11 @@ validation active while restoring wide-session locking and compatibility writes.
 
 Task-tree [locking invariants](run-lifecycle.md).
 
+Deleted session workflows close only after a worker-scoped absence proof;
+actor-filtered or wrong-tenant observations stay retryable. The versioned
+control peek and deletion-safe terminal activities are described in the
+[run lifecycle](run-lifecycle.md).
+
 The macOS Connected Machine LaunchAgent starts in the installing user's home;
 explicit session folders remain authoritative. Service rendering is owned by
 `agent/crates/opengeni-agent-platform/src/service.rs`.

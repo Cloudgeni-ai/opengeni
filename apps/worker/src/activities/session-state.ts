@@ -10,6 +10,7 @@ import {
   reconcileSessionAttemptQuiescence,
   reconcileCompletedSandboxSetup,
   peekSessionWork as peekSessionWorkDb,
+  isSessionDefinitivelyDeleted,
   settleSessionInputWait as settleSessionInputWaitDb,
   countQueuedTurns,
   getSessionAttemptActivityRef,
@@ -78,6 +79,7 @@ export type SessionStateActivityOverrides = Partial<{
   reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
   reconcileCompletedSandboxSetup: typeof reconcileCompletedSandboxSetup;
   peekSessionWork: typeof peekSessionWorkDb;
+  isSessionDefinitivelyDeleted: typeof isSessionDefinitivelyDeleted;
   settleSessionInputWait: typeof settleSessionInputWaitDb;
   countQueuedTurns: typeof countQueuedTurns;
   getSessionAttemptActivityRef: typeof getSessionAttemptActivityRef;
@@ -125,6 +127,8 @@ export function createSessionStateActivities(
   const reconcileSessionAttemptQuiescenceFn =
     overrides.reconcileSessionAttemptQuiescence ?? reconcileSessionAttemptQuiescence;
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
+  const isSessionDefinitivelyDeletedFn =
+    overrides.isSessionDefinitivelyDeleted ?? isSessionDefinitivelyDeleted;
   const reconcileCompletedSandboxSetupFn =
     overrides.reconcileCompletedSandboxSetup ?? reconcileCompletedSandboxSetup;
   const settleSessionInputWaitFn = overrides.settleSessionInputWait ?? settleSessionInputWaitDb;
@@ -158,7 +162,21 @@ export function createSessionStateActivities(
     input: FailSessionAttemptInput,
   ): Promise<FailSessionAttemptResult> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
-    const session = await requireSessionFn(db, input.workspaceId, input.sessionId);
+    let session: Awaited<ReturnType<typeof requireSession>>;
+    try {
+      session = await requireSessionFn(db, input.workspaceId, input.sessionId);
+    } catch (error) {
+      if (
+        await isSessionDefinitivelyDeletedFn(
+          db,
+          input.workspaceId,
+          input.sessionId,
+          input.accountId,
+        )
+      )
+        return { action: "terminal" };
+      throw error;
+    }
     if (session.status === "failed" || session.status === "cancelled") {
       // The activity may be retried after failure settlement committed but its
       // response or event fanout was lost. Preserve terminal session truth so
@@ -683,7 +701,17 @@ export function createSessionStateActivities(
     // observer path so absent rows and a still-owned attempt are observations.
     const observerAccountId =
       input.observerAccountId ?? (await getWorkspaceFn(db, input.workspaceId))?.accountId;
-    if (!observerAccountId) return { kind: "unavailable" as const };
+    const unavailable = async () =>
+      input.includeDeletion &&
+      (await isSessionDefinitivelyDeletedFn(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        observerAccountId,
+      ))
+        ? ({ kind: "deleted" } as const)
+        : ({ kind: "unavailable" } as const);
+    if (!observerAccountId) return await unavailable();
     let peek = await peekSessionWorkFn(
       db,
       input.workspaceId,
@@ -691,7 +719,7 @@ export function createSessionStateActivities(
       input.includeAdmissionFence,
       observerAccountId,
     );
-    if (peek.kind === "unavailable") return peek;
+    if (peek.kind === "unavailable") return await unavailable();
     if (peek.kind === "admission-blocked" && peek.reason === "sandbox_setup_outcome_unknown") {
       const ref = peek.ref;
       if (ref && "turnId" in ref && "attemptId" in ref) {
@@ -819,11 +847,16 @@ export function createSessionStateActivities(
 
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
-    const settled = await settleSessionIdleWithParentOutboxFn(
-      db,
-      input.workspaceId,
-      input.sessionId,
-    );
+    let settled: Awaited<ReturnType<typeof settleSessionIdleWithParentOutbox>>;
+    try {
+      settled = await settleSessionIdleWithParentOutboxFn(db, input.workspaceId, input.sessionId);
+    } catch (error) {
+      // Deletion can commit after the last workflow peek, including while this
+      // activity is already retrying. Do not parse error text or turn an RLS-
+      // hidden row into a terminal result: re-prove absence in worker scope.
+      if (await isSessionDefinitivelyDeletedFn(db, input.workspaceId, input.sessionId)) return;
+      throw error;
+    }
     if (settled.events.length > 0) {
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, settled.events);
     }
@@ -842,16 +875,46 @@ export function createSessionStateActivities(
     );
   }
 
+  async function settleUnlessDeleted<T>(
+    input: { workspaceId: string; sessionId: string; accountId?: string },
+    deletedResult: T,
+    settle: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await settle();
+    } catch (error) {
+      const { db } = await services();
+      if (
+        await isSessionDefinitivelyDeletedFn(
+          db,
+          input.workspaceId,
+          input.sessionId,
+          input.accountId,
+        )
+      )
+        return deletedResult;
+      throw error;
+    }
+  }
+
   return {
     failSessionAttempt,
-    settleSessionInterruptions,
-    persistSessionAttemptQuiescence,
+    // These can already be scheduled when quiescent deletion commits. In
+    // particular, a late proof signal must not pin the workflow before its peek.
+    settleSessionInterruptions: (input: SettleSessionInterruptionsInput) =>
+      settleUnlessDeleted(input, { action: "stale" as const }, () =>
+        settleSessionInterruptions(input),
+      ),
+    persistSessionAttemptQuiescence: (input: PersistSessionAttemptQuiescenceInput) =>
+      settleUnlessDeleted(input, undefined, () => persistSessionAttemptQuiescence(input)),
     reconcileSessionAttemptQuiescence: reconcileSessionAttemptQuiescenceActivity,
     reconcileSettledSessionAttempt: reconcileSettledSessionAttemptActivity,
-    recoverDispatch,
+    recoverDispatch: (input: RecoverDispatchInput) =>
+      settleUnlessDeleted(input, { action: "stale" as const }, () => recoverDispatch(input)),
     recoverEscapedMcpTimeout,
     peekSessionWork,
-    settleSessionInputWait,
+    settleSessionInputWait: (input: SettleSessionInputWaitInput) =>
+      settleUnlessDeleted(input, { action: "stale" as const }, () => settleSessionInputWait(input)),
     expireSessionHumanInput,
     expireSessionInteractionIntervention,
     expireScheduledRunHumanWait,
