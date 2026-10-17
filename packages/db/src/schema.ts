@@ -8885,6 +8885,9 @@ export const sessionAttemptInterruptions = pgTable(
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
     settledAt: timestamp("settled_at", { withTimezone: true }),
+    // Monotonic hint maintained by triggers from the attempt's quiesced_at.
+    // Indexes the open settlement set only; readers still check the attempt.
+    attemptQuiesced: boolean("attempt_quiesced").notNull().default(false),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -8914,6 +8917,11 @@ export const sessionAttemptInterruptions = pgTable(
     unsettled: index("session_attempt_interruptions_unsettled_idx")
       .on(table.workspaceId, table.sessionId, table.requestedAt)
       .where(sql`${table.state} in ('pending', 'delivered', 'acknowledged')`),
+    openSettlement: index("session_attempt_interruptions_open_settlement_idx")
+      .on(table.workspaceId, table.sessionId)
+      .where(
+        sql`${table.state} in ('pending', 'delivered', 'acknowledged') or not ${table.attemptQuiesced}`,
+      ),
     kindValid: check(
       "session_attempt_interruptions_kind_check",
       sql`${table.kind} in ('session_pause', 'workspace_pause', 'steer', 'maintenance', 'authority_change', 'organization_membership_revoked')`,
@@ -9643,6 +9651,11 @@ export const sessionEvents = pgTable(
     producerSeq: integer("producer_seq"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Filled by a BEFORE INSERT trigger from payload ->> 'sourceKey' for
+    // agent.model.usage rows (migration 0810). Never written by application
+    // code; a plain column keeps the usage idempotency lookup indexable under
+    // row-level security, where the payload expression index cannot be used.
+    usageSourceKey: text("usage_source_key"),
   },
   (table) => ({
     workspaceAttempt: foreignKey({
@@ -9689,6 +9702,9 @@ export const sessionEvents = pgTable(
     workspaceTurnType: index("session_events_workspace_turn_type_idx")
       .on(table.workspaceId, table.turnId, table.type)
       .where(sql`${table.turnId} is not null`),
+    usageSourceKey: index("session_events_usage_source_key_idx")
+      .on(table.workspaceId, table.turnId, table.usageSourceKey)
+      .where(sql`${table.usageSourceKey} is not null`),
     commandOutputPage: index("session_events_command_output_page_idx")
       .on(
         table.workspaceId,

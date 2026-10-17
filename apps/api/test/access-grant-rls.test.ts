@@ -224,6 +224,66 @@ describe("access-grant session RLS context", () => {
     ).rejects.toBe(failed);
   });
 
+  test("reuses an attempt's frozen learning policy while still checking liveness every time", async () => {
+    const actors: unknown[] = [];
+    spyOn(db, "withSessionRlsActorContext").mockImplementation(async (actor, fn) => {
+      actors.push(actor);
+      return await fn();
+    });
+    const policyReads: unknown[] = [];
+    spyOn(db, "freezeAgentLearningPolicy").mockImplementation(async (_db, context) => {
+      policyReads.push(context.actor);
+      return { defaultScope: "personal", subjectId: "user:owner" } as never;
+    });
+    const attempt = (attemptId: string) => ({
+      subjectId: "worker:first-party-mcp",
+      callerSessionId: sessionId,
+      turnId,
+      attemptId,
+      executionGeneration: 2,
+      initiatingHumanSubjectId: "user:owner",
+    });
+    const liveness = spyOn(core, "requireLiveAgentAttemptAuthorization");
+    const first = "66666666-6666-4666-8666-666666666666";
+    const second = "77777777-7777-4777-8777-777777777777";
+    const access = (attemptId: string) =>
+      grant({
+        subjectId: "worker:first-party-mcp",
+        principalKind: "agent_attempt",
+        metadata: { sessionId, turnId, attemptId, executionGeneration: 2 },
+      });
+    const deps = { db: {} } as never;
+
+    for (let request = 0; request < 3; request += 1) {
+      liveness.mockResolvedValueOnce(attempt(first) as never);
+      await expect(
+        withAccessGrantSessionRlsContext(deps, access(first), async () => "ok"),
+      ).resolves.toBe("ok");
+    }
+    expect(liveness).toHaveBeenCalledTimes(3);
+    expect(policyReads).toHaveLength(1);
+    expect(actors.at(-1)).toMatchObject({ privateFileOwnerSubjectId: "user:owner" });
+
+    // A different attempt of the same turn reads its own policy.
+    liveness.mockResolvedValueOnce(attempt(second) as never);
+    await withAccessGrantSessionRlsContext(deps, access(second), async () => "ok");
+    expect(policyReads).toHaveLength(2);
+
+    // A remembered policy never bypasses a refused liveness check.
+    liveness.mockRejectedValueOnce(new core.SessionAuthorizationDeniedError("caller_stale"));
+    const contexts = actors.length;
+    await expect(
+      withAccessGrantSessionRlsContext(deps, access(first), async () => "unreachable"),
+    ).rejects.toBeInstanceOf(ApiHttpError);
+    expect(actors).toHaveLength(contexts);
+    expect(policyReads).toHaveLength(2);
+
+    // Another database (deployment) never shares remembered policies.
+    liveness.mockResolvedValueOnce(attempt(first) as never);
+    await withAccessGrantSessionRlsContext({ db: {} } as never, access(first), async () => "ok");
+    expect(policyReads).toHaveLength(3);
+  });
+
   test("API-key grants retain pure-service billing attribution, not a human subject", async () => {
     spyOn(db, "withSessionRlsActorContext").mockImplementation(async (_actor, fn) => fn());
     await withAccessGrantSessionRlsContext(
