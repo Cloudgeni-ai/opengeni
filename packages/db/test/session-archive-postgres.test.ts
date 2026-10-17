@@ -162,6 +162,16 @@ async function countRows(table: string, scope: SessionArchiveScope): Promise<num
   return (row as unknown as { count: number }).count;
 }
 
+/** The export reader's refusals surface as the query error's cause. */
+async function expectArchiveReadRefused(read: Promise<unknown>, pattern: RegExp) {
+  const error = await read.then(
+    () => null,
+    (caught: unknown) => caught as Error & { cause?: { message?: string } },
+  );
+  expect(error).not.toBeNull();
+  expect(`${error!.message} ${error!.cause?.message ?? ""}`).toMatch(pattern);
+}
+
 function manifest(keys: string[]): SessionArchiveManifest {
   return {
     format: "opengeni.session-archive",
@@ -217,6 +227,17 @@ describe("idle-session archive lifecycle", () => {
       expect(page.rows.map((row) => JSON.parse(row))).toEqual(
         reference.map((row) => JSON.parse((row as unknown as { row: string }).row)),
       );
+      // Paging one row at a time yields the same rows: the keyset is unique
+      // and the cursor resumes exactly after the last row.
+      const paged: string[] = [];
+      let after: string[] | null = null;
+      for (;;) {
+        const step = await readSessionArchiveRows(exporter.db, scope, spec, { after, limit: 1 });
+        paged.push(...step.rows);
+        if (step.rows.length < 1) break;
+        after = step.last;
+      }
+      expect(paged).toEqual(page.rows);
     }
     expect(exported.session_events).toBeGreaterThan(3);
     expect(exported.session_history_items).toBeGreaterThanOrEqual(1);
@@ -224,6 +245,33 @@ describe("idle-session archive lifecycle", () => {
     expect(exported.session_turns).toBeGreaterThanOrEqual(1);
     // Visible only to the initiating human under RLS, yet part of the bundle.
     expect(exported.preference_registry_snapshots).toBe(1);
+    const historySpec = SESSION_ARCHIVE_EXPORT_TABLES.find(
+      (spec) => spec.table === "session_history_items",
+    )!;
+    // A page size the reader would silently clamp could end a table early.
+    await expectArchiveReadRefused(
+      readSessionArchiveRows(exporter.db, scope, historySpec, { after: null, limit: 1001 }),
+      /outside 1\.\.1000/,
+    );
+    // Only export tables and their real columns are accepted.
+    await expectArchiveReadRefused(
+      readSessionArchiveRows(
+        exporter.db,
+        scope,
+        { table: "sessions", keys: [{ column: "id", cast: "uuid" }] },
+        { after: null, limit: 10 },
+      ),
+      /not an export table/,
+    );
+    await expectArchiveReadRefused(
+      readSessionArchiveRows(
+        exporter.db,
+        scope,
+        { table: "session_history_items", keys: [{ column: "id; drop", cast: "uuid" }] },
+        { after: null, limit: 10 },
+      ),
+      /has no column/,
+    );
     await exporter.close();
 
     const transcript = await readSessionArchiveTranscriptEvents(client.db, scope, {
@@ -382,6 +430,15 @@ describe("idle-session archive lifecycle", () => {
     expect(await abandonSessionArchive(client.db, scope)).toBe(false);
     const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
     expect(session?.retention?.archive).toBeNull();
+    // Once abandoned, the export reader refuses instead of returning an empty
+    // page that could be recorded as a complete bundle and then purged.
+    const historySpec = SESSION_ARCHIVE_EXPORT_TABLES.find(
+      (spec) => spec.table === "session_history_items",
+    )!;
+    await expectArchiveReadRefused(
+      readSessionArchiveRows(client.db, scope, historySpec, { after: null, limit: 10 }),
+      /is not being archived/,
+    );
     await send(scope, subjectId, "back to work");
     const claims = await claimSessionArchiveObjectDeletions(client.db, {
       claimTimeoutSeconds: 600,

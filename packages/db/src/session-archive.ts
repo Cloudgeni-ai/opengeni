@@ -1,5 +1,5 @@
 import type { SessionEvent, SessionEventType } from "@opengeni/contracts";
-import { and, asc, eq, gt, isNull, notInArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, notInArray, sql } from "drizzle-orm";
 import {
   rawRows,
   withRlsContext,
@@ -61,9 +61,12 @@ type KeyColumn = { column: string; cast: string };
 export type SessionArchiveExportTable = { table: string; keys: KeyColumn[] };
 
 /**
- * Everything the bundle carries, in bundle order. Keyset columns follow an
- * index on (workspace_id, session_id, ...) for the large tables, so exporting a
- * very long session stays linear.
+ * Everything the bundle carries, in bundle order. Keyset columns are unique per
+ * session and follow an index on (workspace_id, session_id, ...) for the large
+ * tables, so each page is an index seek and exporting a very long session stays
+ * linear. Pages are read by session_archive_export_rows, outside row-level
+ * security, because PostgreSQL will not seek on a numeric or row comparison
+ * under a policy.
  */
 export const SESSION_ARCHIVE_EXPORT_TABLES: readonly SessionArchiveExportTable[] = [
   { table: "session_turns", keys: [{ column: "position", cast: "bigint" }, uuidKey("id")] },
@@ -74,10 +77,8 @@ export const SESSION_ARCHIVE_EXPORT_TABLES: readonly SessionArchiveExportTable[]
   { table: "session_goals", keys: [uuidKey("id")] },
   { table: "session_goal_revisions", keys: [uuidKey("id")] },
   { table: "session_events", keys: [{ column: "sequence", cast: "integer" }] },
-  {
-    table: "session_history_items",
-    keys: [{ column: "position", cast: "numeric" }, uuidKey("id")],
-  },
+  // position is unique per session (session_history_items_position_idx).
+  { table: "session_history_items", keys: [{ column: "position", cast: "numeric" }] },
   { table: "session_system_updates", keys: [{ column: "dedupe_key", cast: "text" }] },
   { table: "session_realtime_entries", keys: [uuidKey("id")] },
   {
@@ -314,40 +315,30 @@ export async function readSessionArchiveRows(
     const lastRow = rows.at(-1);
     return { rows: rows.map((row) => row.row_json), last: lastRow ? [lastRow.id] : null };
   }
-  const keyColumns = spec.keys.map((key) => sql`t.${sql.identifier(key.column)}`);
-  const order = sql.join(keyColumns, sql`, `);
-  const keyText = sql.join(
-    spec.keys.map(
-      (key, index) => sql`t.${sql.identifier(key.column)}::text as ${sql.identifier(`k${index}`)}`,
-    ),
-    sql`, `,
-  );
-  let after: SQL = sql`true`;
-  if (input.after) {
-    const values = sql.join(
-      spec.keys.map((key, index) => sql`${input.after![index]}::${sql.raw(key.cast)}`),
+  const textArray = (values: string[]) =>
+    sql`array[${sql.join(
+      values.map((value) => sql`${value}::text`),
       sql`, `,
-    );
-    after = sql`(${order}) > (${values})`;
-  }
+    )}]::text[]`;
   return await withRlsContext(
     db,
     { accountId: scope.accountId, workspaceId: scope.workspaceId },
     async (scoped) => {
-      const rows = await rawRows<Record<string, string>>(
+      const rows = await rawRows<{ row_json: string; key_values: string[] }>(
         scoped,
-        sql`select row_to_json(t)::text as row, ${keyText}
-          from ${sql.identifier(spec.table)} t
-          where t.workspace_id = ${scope.workspaceId}::uuid
-            and t.session_id = ${scope.sessionId}::uuid
-            and ${after}
-          order by ${order}
-          limit ${input.limit}`,
+        sql`select row_json, key_values
+          from opengeni_private.session_archive_export_rows(
+            ${scope.accountId}::uuid, ${scope.workspaceId}::uuid, ${scope.sessionId}::uuid,
+            ${spec.table}::text,
+            ${textArray(spec.keys.map((key) => key.column))},
+            ${textArray(spec.keys.map((key) => key.cast))},
+            ${input.after ? textArray(input.after) : sql`null::text[]`},
+            ${input.limit}::integer)`,
       );
       const lastRow = rows.at(-1);
       return {
-        rows: rows.map((row) => row.row!),
-        last: lastRow ? spec.keys.map((_, index) => lastRow[`k${index}`]!) : null,
+        rows: rows.map((row) => row.row_json),
+        last: lastRow ? lastRow.key_values : null,
       };
     },
   );

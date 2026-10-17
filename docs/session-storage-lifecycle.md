@@ -122,6 +122,13 @@ all of these hold for the idle period:
      catalogs, model-request snapshots, content blobs, pending tool calls and
      preference snapshots, each as `{"table": ..., "row": <exact row JSON>}`,
      then a footer with row counts. Full fidelity, for analysis and audit.
+     Rows are read in pages of 200 by
+     `opengeni_private.session_archive_export_rows`, only while the session is
+     `archiving`, on a key that is unique per session and indexed, so each
+     page is an index seek and a session with hundreds of thousands of rows
+     exports in linear time. It reads outside row-level security on purpose:
+     under a policy PostgreSQL cannot seek on numeric or row comparisons, and
+     every page re-filtered all earlier rows.
    - `transcript.jsonl.zst`: a header, then the readable timeline as public
      `SessionEvent` objects (`{"event": ...}`), then a footer. This is the
      stable, documented readable section and does not require Opengeni's
