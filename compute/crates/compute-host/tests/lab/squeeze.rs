@@ -226,6 +226,7 @@ async fn busy_sandboxes_above_their_request_give_way_when_the_host_runs_short() 
     let agent = host.start().await;
     let (heavy, light) = (id(0), id(1));
     let config = SandboxConfig {
+        image: None,
         memory_request_mib: Some(256),
         ..SandboxConfig::new(1, 2048, NEVER)
     };

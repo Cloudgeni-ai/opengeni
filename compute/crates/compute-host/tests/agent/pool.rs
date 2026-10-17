@@ -15,6 +15,7 @@ use super::{Delays, Lab, NEVER, World, id, vm_name};
 
 /// The shape [`Lab::create`] gives every sandbox.
 const SHAPE: Shape = Shape {
+    image: None,
     vcpus: 1,
     memory_mib: 256,
 };
@@ -483,6 +484,7 @@ async fn a_surviving_build_keeps_its_claim_on_memory_across_a_restart() {
         return;
     }
     let big = Shape {
+        image: None,
         vcpus: 1,
         memory_mib: mib,
     };
@@ -633,10 +635,12 @@ async fn template_builds_respect_the_boot_limit() {
     let shapes = vec![
         SHAPE,
         Shape {
+            image: None,
             vcpus: 2,
             memory_mib: 256,
         },
         Shape {
+            image: None,
             vcpus: 1,
             memory_mib: 512,
         },

@@ -264,6 +264,7 @@ async fn a_full_host_says_so_and_makes_room_from_idle_sandboxes() {
         agent.create(*sandbox, SAVE_SOON).await;
     }
     let third = SandboxConfig {
+        image: None,
         cpu_request_millis: Some(250),
         ..SandboxConfig::new(1, 512, SAVE_SOON)
     };
