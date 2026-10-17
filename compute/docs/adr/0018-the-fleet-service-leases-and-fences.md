@@ -276,10 +276,12 @@ can be built and tested.
     same owner stamp and fences as an archive. The guest stands still
     only from the pause to the resume (`compute.paused_us`): the merge
     and the upload run while it works. A resume the VMM refuses having
-    changed nothing is tried again for up to 30 seconds, cancelled or
-    not; only a VM that cannot be resumed by then, or whose resume may
-    have changed something, ends, and the sandbox goes back to its last
-    saved copy.
+    changed nothing is tried again for as long as the VM lives,
+    cancelled or not, with an error logged once it has failed for
+    30 seconds; giving up would end a VM that may yet run. Only a VM
+    whose resume may have changed something, or that ends while paused,
+    ends the step that way, and the sandbox goes back to its last saved
+    copy.
   - *Admitted for its disk.* While the clone shares the disk's blocks,
     any guest write may take a new one, so a running checkpoint books
     the disk's whole growth bound. A checkpoint starts only when the

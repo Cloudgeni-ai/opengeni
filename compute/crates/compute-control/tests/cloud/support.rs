@@ -274,28 +274,26 @@ impl Fleet {
         value.as_array().cloned().unwrap_or_default()
     }
 
-    /// The live hosts' names, sorted.
-    pub async fn live(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .all_hosts()
-            .await
-            .iter()
-            .filter(|host| host["state"] == "live")
+    /// The live hosts' names, sorted, and the memory free for sandboxes on
+    /// them in MiB as they last reported it, both from one reading of the
+    /// hosts, so the two always describe the same fleet.
+    pub async fn capacity(&self) -> (Vec<String>, u64) {
+        let hosts = self.all_hosts().await;
+        let live = hosts.iter().filter(|host| host["state"] == "live");
+        let free = live
+            .clone()
+            .filter_map(|host| host["memory_free_mib"].as_u64())
+            .sum();
+        let mut names: Vec<String> = live
             .filter_map(|host| host["name"].as_str().map(str::to_owned))
             .collect();
         names.sort();
-        names
+        (names, free)
     }
 
-    /// Memory free for sandboxes on the live hosts, in MiB, as they last
-    /// reported it.
-    pub async fn free_mib(&self) -> u64 {
-        self.all_hosts()
-            .await
-            .iter()
-            .filter(|host| host["state"] == "live")
-            .filter_map(|host| host["memory_free_mib"].as_u64())
-            .sum()
+    /// The live hosts' names, sorted.
+    pub async fn live(&self) -> Vec<String> {
+        self.capacity().await.0
     }
 
     /// Waits until at least the fleet's fewest hosts are live.

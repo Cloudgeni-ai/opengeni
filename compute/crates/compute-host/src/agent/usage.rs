@@ -10,9 +10,11 @@
 //! agent those readings (see [`crate::step::Meter`]). The window open as it
 //! began goes on; its last reading before the capture pauses the VM is
 //! judged at once and ends the window, and the next window starts from the
-//! resume, so the capture's own work never counts as the guest's. As the
+//! first reading lent after the resume, without waiting for the agent's
+//! next tick, so the capture's own work never counts as the guest's. As the
 //! checkpoint ends, the window is judged at once again, so the core knows a
-//! guest is busy before it picks the next step.
+//! guest is busy before it picks the next step, even when the checkpoint
+//! ends before the agent's next tick.
 //!
 //! Each signal counts only when it was read at both ends of a window, so
 //! one that cannot be read leaves the other to decide alone. A sandbox none
@@ -113,18 +115,35 @@ impl Usage {
         self.window = None;
     }
 
-    /// Takes a reading the step holding the VM lent. The last before it
-    /// pauses the VM is judged at once and ends the window; returns
-    /// whether that judged the guest busy.
+    /// Takes a reading the step holding the VM lent. One lent while no
+    /// window is open, as the first after a checkpoint's resume is, starts
+    /// the window at once. The last before it pauses the VM is judged at
+    /// once and ends the window. Returns whether either judged the guest
+    /// busy.
     pub fn lend(&mut self, reading: Reading, rule: Option<BusyRule>) -> bool {
         if !reading.last_before_pause {
+            let busy = match rule {
+                Some(rule) if self.window.is_none() => self.open(&reading, rule),
+                _ => false,
+            };
             self.lent = Some(reading);
-            return false;
+            return busy;
         }
         let busy = rule.is_some_and(|rule| self.judge_now(&reading, rule));
         self.window = None;
         self.lent = None;
         busy
+    }
+
+    /// Starts the window at `reading`. Returns whether that alone makes the
+    /// guest busy: nothing the rule watches could be read, now or at the
+    /// end of any window, and a pause delay shorter than the window would
+    /// otherwise let a working guest fall asleep first.
+    fn open(&mut self, reading: &Reading, rule: BusyRule) -> bool {
+        let mut fresh = Window::starting(reading, rule);
+        fresh.unseen = watches(rule) && fresh.blind();
+        self.window = Some(fresh);
+        fresh.unseen
     }
 
     /// Takes the next reading by `rule` and returns whether the guest
@@ -137,12 +156,7 @@ impl Usage {
         };
         let mut fresh = Window::starting(&reading, rule);
         if watches(rule) && fresh.blind() {
-            // Nothing to judge by, now or at the end of any window: a
-            // pause delay shorter than the window would otherwise let a
-            // working guest fall asleep first.
-            fresh.unseen = true;
-            self.window = Some(fresh);
-            return true;
+            return self.open(&reading, rule);
         }
         let Some((window, (busy, unseen))) = self
             .window
@@ -150,8 +164,7 @@ impl Usage {
         else {
             // A window that began unreadable has nothing to compare
             // against; one starts now.
-            self.window = Some(fresh);
-            return false;
+            return self.open(&reading, rule);
         };
         if fresh.started.duration_since(window.started) < rule.window {
             return false;

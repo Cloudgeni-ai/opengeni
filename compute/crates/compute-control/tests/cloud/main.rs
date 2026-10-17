@@ -273,7 +273,7 @@ async fn the_group_grows_before_spare_capacity_runs_out() {
     let (vcpus, memory_mib): (u8, u32) = (vcpus.parse().unwrap(), memory_mib.parse().unwrap());
     let every = Duration::from_secs(every.parse().unwrap());
     let started_with = fleet.ready().await;
-    let free = fleet.free_mib().await;
+    let (_, free) = fleet.capacity().await;
     let count = free / u64::from(memory_mib) + 2;
     eprintln!(
         "{} hosts with {free} MiB free; creating {count} sandboxes of {shape}",
@@ -284,16 +284,18 @@ async fn the_group_grows_before_spare_capacity_runs_out() {
     let made_so_far = AtomicU64::new(0);
     let finished = AtomicBool::new(false);
     // Spare memory until the new host is live, read apart from the creates
-    // so a create that waits is watched too.
+    // so a create that waits is watched too. Each reading of the hosts
+    // counts before it is checked for the new host, so a reading that saw
+    // none to spare is never dropped.
     let watch = async {
         let mut grew = None;
         while !finished.load(Ordering::Relaxed) {
-            let free = fleet.free_mib().await;
-            if fleet.live().await.len() > started_with.len() {
+            let (live, free) = fleet.capacity().await;
+            least.fetch_min(free, Ordering::Relaxed);
+            if live.len() > started_with.len() {
                 grew = Some((started.elapsed(), made_so_far.load(Ordering::Relaxed)));
                 break;
             }
-            least.fetch_min(free, Ordering::Relaxed);
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         grew

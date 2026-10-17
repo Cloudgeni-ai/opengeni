@@ -151,6 +151,58 @@ fn a_short_window_at_a_checkpoint_s_end_is_judged_at_once() {
     assert!(usage.window.is_some());
 }
 
+/// The regression the third review found: the last reading before the
+/// capture ends the window, and a checkpoint can end before the agent's
+/// next tick after the resume. The first reading lent after the resume
+/// starts the next window by itself, so the checkpoint's end judges what
+/// the guest did since the resume.
+#[test]
+fn a_checkpoint_ending_before_the_next_tick_judges_the_guest_since_the_resume() {
+    let start = Instant::now();
+    let ended = |cpu_ms: u64| {
+        let mut usage = Usage::default();
+        assert!(!usage.sample(Some(quiet_at(start, 0)), RULE));
+        usage.step_started(true);
+        assert!(!usage.lend(quiet_at(start, 2).before_pause(), Some(RULE)));
+        assert!(usage.window.is_none());
+        // Resumed at 3 s, after a capture that cost the VM 4 s of
+        // processor time; no sample() follows before the checkpoint ends.
+        let resumed = reading(start, 3, 1, 3 * 10 + 4_000, 0);
+        assert!(!usage.lend(resumed, Some(RULE)));
+        assert!(usage.window.is_some(), "the resume did not start a window");
+        let end = Reading {
+            at: resumed.at + Duration::from_millis(200),
+            cpu: resumed.cpu.map(|cpu| cpu + Duration::from_millis(cpu_ms)),
+            ..resumed
+        };
+        usage.judge_now(&end, RULE)
+    };
+    // 200 ms of full-processor work since the resume is busy.
+    assert!(ended(200));
+    // Next to none is not, and the capture's 4 s never counts.
+    assert!(!ended(1));
+    // Without a busy rule nothing starts or is judged.
+    let mut unruled = Usage::default();
+    assert!(!unruled.lend(quiet_at(start, 3), None));
+    assert!(unruled.window.is_none());
+}
+
+#[test]
+fn a_resumed_guest_nothing_can_be_read_of_counts_as_busy_at_once() {
+    let start = Instant::now();
+    let mut usage = Usage::default();
+    usage.step_started(true);
+    let blind = Reading {
+        cpu: None,
+        io: None,
+        ..quiet_at(start, 3)
+    };
+    assert!(usage.lend(blind, Some(RULE)));
+    assert!(usage.unseen());
+    // The window it opened is not opened again by the next reading lent.
+    assert!(!usage.lend(quiet_at(start, 4), Some(RULE)));
+}
+
 #[test]
 fn readings_of_another_vm_process_are_not_compared() {
     let start = Instant::now();
