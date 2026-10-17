@@ -1183,10 +1183,10 @@ describe.skipIf(!realDb)("0716 compatibility rules after a provider's own receip
     ).toStartWith("23514");
   });
 
-  test("the copy must run inside the same activity scope as the carrier insert", async () => {
-    // A session-activity scope flushes deferred constraints when it
-    // finalizes (SET CONSTRAINTS ALL IMMEDIATE), so the deferred check runs
-    // there, not at commit.
+  test("the deferred check runs at commit, inside or after an activity scope", async () => {
+    // Session-activity scopes no longer finalize (and so no longer flush
+    // deferred constraints) since activity is tracked by transaction id; the
+    // compatibility check is deferred to commit for every writer.
     const session = await newSession();
     const causal = await acceptedTurn(session, org!.subjectId);
     await cutoverRecord("session_turn", causal.turnId);
@@ -1205,23 +1205,26 @@ describe.skipIf(!realDb)("0716 compatibility rules after a provider's own receip
       }),
     );
     expect(await records("session_system_update", inside)).toEqual([kept()]);
-    // Copied after the scope finalized, still in the same transaction: the
-    // finalizer's flush already rejected the carrier, the copy is never reached.
-    let reachedCopy = false;
-    const after = await failure(() =>
+    // Copied after the scope, still in the same transaction: still in time.
+    const after = await withSessionRlsActorContext({ subjectId: org!.subjectId }, () =>
+      withRlsContext(client!.db, scope, async (outer) => {
+        const id = await withRestoredSessionActivityRlsContext(outer, scope, timeout);
+        await copy(outer, "session_system_update", id);
+        return id;
+      }),
+    );
+    expect(await records("session_system_update", after)).toEqual([kept()]);
+    // Never copied: the commit rejects the carrier.
+    const missing = await failure(() =>
       withSessionRlsActorContext({ subjectId: org!.subjectId }, () =>
         withRlsContext(client!.db, scope, async (outer) => {
-          const id = await withRestoredSessionActivityRlsContext(outer, scope, timeout);
-          reachedCopy = true;
-          await copy(outer, "session_system_update", id);
+          await withRestoredSessionActivityRlsContext(outer, scope, timeout);
         }),
       ),
     );
-    expect(after).toStartWith("23514");
-    expect(after).toContain("subscription authority compatibility record mismatch");
-    expect(reachedCopy).toBe(false);
-    // Without an activity scope the check is deferred to commit, so a later
-    // copy in the same transaction is still in time.
+    expect(missing).toStartWith("23514");
+    expect(missing).toContain("subscription authority compatibility record mismatch");
+    // Without an activity scope the same holds.
     const plain = await asOwner(async (db) => {
       const id = await timeout(db);
       await rawRows(db, sql`select 1`);
