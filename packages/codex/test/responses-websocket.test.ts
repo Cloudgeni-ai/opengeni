@@ -63,6 +63,7 @@ function harness(
     endpoint?: ResponsesWebSocketEndpoint;
     observe?: (event: ResponsesTransportDiagnostic) => void;
     httpOnly?: boolean;
+    httpResponse?: () => Response;
     onFallback?: () => Promise<void>;
   } = {},
 ) {
@@ -71,7 +72,7 @@ function harness(
   const transport = codexResponsesTransport(
     async (input) => {
       httpCalls.push(String(input));
-      return new Response("http", { status: 200 });
+      return options.httpResponse?.() ?? new Response("http", { status: 200 });
     },
     {
       createSocket: (url, headers) => {
@@ -185,6 +186,72 @@ test("a recovered HTTP-only turn skips warming and opens again on the next turn"
   const socket = await nextSend(() => sockets[0]);
   socket.emit({ type: "response.completed", response: { id: "new-turn" } });
   await (await pending).text();
+});
+
+test.each([
+  'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+  'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+])("HTTP reader cancellation is not a model failure: %s", async (body) => {
+  const events: ResponsesTransportDiagnostic[] = [];
+  const cancellations: unknown[] = [];
+  const { transport } = harness({
+    httpOnly: true,
+    observe: (event) => events.push(event),
+    httpResponse: () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(body));
+          },
+          cancel(reason) {
+            cancellations.push(reason);
+          },
+        }),
+      ),
+  });
+  const reader = (await transport(URL, request())).body!.getReader();
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe(body);
+  const pending = reader.read();
+  const reason = new Error("consumer finished reading");
+  await reader.cancel(reason);
+  expect((await pending).done).toBe(true);
+  expect(cancellations).toEqual([reason]);
+  expect(events.filter((event) => event.phase === "terminal")).toMatchObject([
+    { transport: { kind: "http" }, outcome: "cancelled" },
+  ]);
+});
+
+test.each([200, 503])("HTTP EOF retains status-based outcome for %s", async (status) => {
+  const events: ResponsesTransportDiagnostic[] = [];
+  const { transport } = harness({
+    httpOnly: true,
+    observe: (event) => events.push(event),
+    httpResponse: () => new Response("body", { status }),
+  });
+  expect(await (await transport(URL, request())).text()).toBe("body");
+  expect(events.filter((event) => event.phase === "terminal")).toMatchObject([
+    { outcome: status === 200 ? "completed" : "failed" },
+  ]);
+});
+
+test("HTTP read errors still record one failure", async () => {
+  const events: ResponsesTransportDiagnostic[] = [];
+  const { transport } = harness({
+    httpOnly: true,
+    observe: (event) => events.push(event),
+    httpResponse: () =>
+      new Response(
+        new ReadableStream({
+          pull(controller) {
+            controller.error(new Error("broken response"));
+          },
+        }),
+      ),
+  });
+  await expect((await transport(URL, request())).text()).rejects.toThrow("broken response");
+  expect(events.filter((event) => event.phase === "terminal")).toMatchObject([
+    { outcome: "failed" },
+  ]);
 });
 
 test("diagnostics separate first/later calls, wire bytes, cache usage, and final prefix readiness", async () => {

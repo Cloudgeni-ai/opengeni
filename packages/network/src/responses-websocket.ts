@@ -214,7 +214,9 @@ export type ResponsesTransportDiagnostic = {
   position: "first" | "later";
   transport: ModelRequestTransport;
   durationMs: number;
-  outcome?: "completed" | "failed";
+  /** Transport termination, not the model's semantic outcome. HTTP consumers
+   * may cancel after reading a successful terminal event but before wire EOF. */
+  outcome?: "completed" | "failed" | "cancelled";
   inputBytes?: number;
   fullInputBytes?: number;
   promptTokens?: number;
@@ -864,7 +866,7 @@ export function responsesTransport(
       if (!turn?.observe || !response.body) return response;
       const reader = response.body.getReader();
       let settled = false;
-      const settle = (outcome: "completed" | "failed") => {
+      const settle = (outcome: NonNullable<ResponsesTransportDiagnostic["outcome"]>) => {
         if (settled) return;
         settled = true;
         observe({
@@ -891,7 +893,9 @@ export function responsesTransport(
             }
           },
           async cancel(cancelReason) {
-            settle("failed");
+            // A reader may stop at response.completed without draining to EOF.
+            // Cancellation alone proves neither model success nor failure.
+            settle("cancelled");
             try {
               await reader.cancel(cancelReason);
             } finally {

@@ -1689,6 +1689,12 @@ fresh processes; the echo server runs separately.
 Responses provider: connection/input mode, first/later request, outcome and
 fallback reason. They include wire versus full-input bytes, provider-reported
 first-request cache ratio, and the interval from final normalized prefix to send.
+Transport outcomes are not semantic model outcomes: HTTP reader cancellation is
+`cancelled`, including when an SDK stops after `response.completed` before wire
+EOF. Use the provider model-request lifecycle for semantic success or failure;
+HTTP transport `completed` means a successful-status body reached EOF, not that
+the model succeeded. The transport does not parse HTTP SSE a second time just
+for telemetry.
 Handshake-only warming sends no model request. Speculative `generate:false`
 prewarm is not enabled: final tools/instructions emerge at request construction,
 after startup preparation, and the remaining credential and custody checks
