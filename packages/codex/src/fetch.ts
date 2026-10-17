@@ -11,6 +11,14 @@
 // Stream parsing is delegated to the SDK (SSE passthrough; spec §0(d)).
 
 import { randomUUID } from "node:crypto";
+import {
+  withResponsesContinuationAdmission,
+  withModelTransportObservation,
+  markModelSocketFailure,
+  isModelSocketTransportError,
+  MODEL_SOCKET_FAILURE_HEADER,
+  type ModelRequestTransport,
+} from "@opengeni/network/responses-websocket";
 import { hasMeaningfulCodexOutput } from "./meaningful-output";
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
@@ -245,6 +253,8 @@ export function parseCodexUsageHeaders(headers: Headers): CodexUsageHeaderSnapsh
 }
 
 type RequestAudit = {
+  transport?: ModelRequestTransport;
+  nextTransportAttempt: () => number;
   ctx: CodexRequestContext;
   requestId: string;
   transportAttempt: number;
@@ -488,6 +498,7 @@ async function fetchBeforeHeaders(
   // The one-shot admission is the last awaited step before the physical fetch.
   // Neither a diagnostic `started` nor token loading is dispatch authority.
   let basePromise: Promise<Response>;
+  let continuationPending: Promise<void> | undefined;
   try {
     await audit.ctx.beforeProviderDispatch?.({
       requestId: audit.requestId,
@@ -504,7 +515,42 @@ async function fetchBeforeHeaders(
       controller.signal.throwIfAborted();
       throw new CodexResponseTimeoutError("whole_request", audit.requestId, false);
     }
-    basePromise = base(input, { ...init, redirect: "error", signal: controller.signal });
+    basePromise = withResponsesContinuationAdmission(
+      (replacementSignal) =>
+        (continuationPending = (async () => {
+          await emitRequestEvent(audit, { phase: "failed", responseObserved: true, status: 400 });
+          replacementSignal.throwIfAborted();
+          controller.signal.throwIfAborted();
+          if (Date.now() - audit.logicalStartedAt >= audit.policy.wholeRequestTimeoutMs) {
+            throw new CodexResponseTimeoutError("whole_request", audit.requestId, false);
+          }
+          audit.transportAttempt = audit.nextTransportAttempt();
+          audit.terminalOutcome = null;
+          audit.settlement = null;
+          audit.admitted = false;
+          audit.attemptStartedAtMonotonic = performance.now();
+          await emitRequestEvent(audit, { phase: "started", responseObserved: false });
+          replacementSignal.throwIfAborted();
+          controller.signal.throwIfAborted();
+          await audit.ctx.beforeProviderDispatch?.({
+            requestId: audit.requestId,
+            transportAttempt: audit.transportAttempt,
+          });
+          audit.admitted = true;
+          if (controller.signal.aborted || replacementSignal.aborted) {
+            await settleProviderRequest(audit, "refused");
+            controller.signal.throwIfAborted();
+            replacementSignal.throwIfAborted();
+          }
+        })()),
+      () =>
+        withModelTransportObservation(
+          (transport) => {
+            audit.transport = transport;
+          },
+          () => base(input, { ...init, redirect: "error", signal: controller.signal }),
+        ),
+    );
   } catch (error) {
     externalSignal?.removeEventListener("abort", forwardAbort);
     throw error;
@@ -521,7 +567,11 @@ async function fetchBeforeHeaders(
     return await Promise.race([basePromise, deadline]);
   } catch (error) {
     if (deadlineError) {
+      if (audit.transport?.kind === "websocket") markModelSocketFailure(deadlineError);
       controller.abort(deadlineError);
+      // A timeout may race replacement admission; join its refused settlement
+      // before the enclosing request audit or turn recovery can finish.
+      await continuationPending?.catch(() => undefined);
       void basePromise
         .then((late) => late.body?.cancel(deadlineError ?? undefined))
         .catch(() => undefined);
@@ -576,6 +626,10 @@ async function observedResponse(
         const semanticPhase = semanticTerminal?.phase;
         const phase = semanticPhase ?? "timed_out";
         const error = new CodexResponseTimeoutError(klass, audit.requestId, true);
+        if (
+          parseCodexRequestTransport(res.headers.get(CODEX_TRANSPORT_HEADER))?.kind === "websocket"
+        )
+          markModelSocketFailure(error);
         void reader.cancel(error).catch(() => undefined);
         void emitRequestEvent(audit, {
           phase,
@@ -910,6 +964,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         ctx,
         requestId,
         transportAttempt,
+        nextTransportAttempt: () => ++transportAttempt,
         ...(model ? { model } : {}),
         logicalStartedAt,
         attemptStartedAtMonotonic: performance.now(),
@@ -967,7 +1022,9 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
           timeoutClass: klass,
           willRetry: false,
         }).catch(() => undefined);
-        throw new CodexResponseTimeoutError(klass, requestId, false);
+        const timeoutError = new CodexResponseTimeoutError(klass, requestId, false);
+        if (audit.transport?.kind === "websocket") markModelSocketFailure(timeoutError);
+        throw timeoutError;
       }
       // Multi-account P4 (Part A): scrape the usage headers ONCE, before the
       // OK/!res.ok branch, so the same fire-and-forget read also covers the 429
@@ -1050,12 +1107,15 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
     } catch (error) {
       const timeout = classifyCodexResponseTimeoutError(error);
       if (!timeout) throw error;
-      return timeoutErrorResponse({
+      const response = timeoutErrorResponse({
         timeoutClass: timeout.timeoutClass,
         requestId: timeout.requestId ?? requestId,
         responseObserved: timeout.responseObserved,
         message: timeout.message,
       });
+      if (isModelSocketTransportError(error))
+        response.headers.set(MODEL_SOCKET_FAILURE_HEADER, "1");
+      return response;
     }
   };
 }

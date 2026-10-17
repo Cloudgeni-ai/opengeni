@@ -41024,6 +41024,38 @@ export async function nextSessionHistoryPosition(
   });
 }
 
+/** Persist socket refusal before HTTP dispatch, under the current attempt fence.
+ * Every recovery path and worker replacement then inherits the same turn policy. */
+export async function markSessionTurnModelTransportHttpOnly(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+  },
+): Promise<boolean> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (tx) => {
+      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      if (!fence.allowed) return false;
+      await tx
+        .update(schema.sessionTurns)
+        .set({
+          metadata: sql`${schema.sessionTurns.metadata} || '{"persistentModelTransportHttpOnly":true}'::jsonb`,
+        })
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        );
+      return true;
+    }),
+  );
+}
+
 /**
  * Replace the input-token count for the most recent authoritative terminal
  * response. Null means that response supplied no usable final-call count, so
@@ -79048,6 +79080,8 @@ import { stageSubscriptionCorePendingServingPolicyTx } from "./subscription-core
 import { assertSubscriptionServingRecoverySettledTx } from "./subscription-core/serving-runtime";
 
 export type RequestSessionTurnRecoveryInput = {
+  /** Route selection only: keep this logical turn on HTTP after socket refusal/exhaustion. */
+  persistentModelTransportHttpOnly?: true;
   /** C2 only: proposal is persisted atomically with recovery, never placement. */
   subscriptionServingTarget?: {
     crossProviderFailoverEnabled: true;
@@ -79480,6 +79514,9 @@ export async function requestSessionTurnRecovery(
           version: turn.version + 1,
           metadata: {
             ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
+            ...(input.persistentModelTransportHttpOnly
+              ? { persistentModelTransportHttpOnly: true }
+              : {}),
             ...(retryNotBefore
               ? {
                   [RECOVERY_RETRY_METADATA_KEY]: {
