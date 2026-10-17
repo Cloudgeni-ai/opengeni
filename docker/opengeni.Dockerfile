@@ -302,4 +302,6 @@ COPY --from=web-build --chown=bun:bun /app/web-server/server.ts ./apps/web/src/s
 COPY --from=web-build --chown=bun:bun /workspace /workspace
 USER bun
 EXPOSE 3000
-CMD ["bun", "run", "--cwd", "apps/web", "start"]
+# Run the server as PID 1 directly, like the API and worker images. A
+# `bun run` wrapper as PID 1 crashed with SIGSEGV on every SIGTERM at rollout.
+CMD ["bun", "apps/web/src/server.ts"]
