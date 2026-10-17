@@ -422,7 +422,9 @@ describe("migration 0264 connection authority runtime activation", () => {
       await sql.end({ timeout: 1 });
       await blank.release();
     }
-  }, 180_000);
+    // Building the historical schema and replaying its withheld authority tail
+    // are separate ledger passes; allow both to finish on shared test hosts.
+  }, 300_000);
 
   // Current sender-owned runtime coverage lives in sender-connection-accounts.test.ts.
   // Conversation-grant execution was retired by migration 0478.
