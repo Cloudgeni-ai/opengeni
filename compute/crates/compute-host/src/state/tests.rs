@@ -44,6 +44,7 @@ fn allocation() -> Allocation {
         uid: 4_000_000,
         gid: 4_000_000,
         link: None,
+        disk_bytes: None,
     }
 }
 

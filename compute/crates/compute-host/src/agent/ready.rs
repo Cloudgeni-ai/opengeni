@@ -65,6 +65,10 @@ use super::{Event, HostAgent, HostError, Reply};
 const FILL_AT_ONCE: usize = 4;
 /// How long a shape waits after a failed fill before the next.
 const FILL_RETRY: Duration = Duration::from_secs(10);
+/// Host memory a fill books beyond its template's footprint: its VMM's
+/// own memory and the pages its guest touches between its restore and
+/// answering on the ready port, which the template was saved right after.
+const FILL_SLACK: u64 = 64 << 20;
 
 /// A ready sandbox waiting for a create.
 #[derive(Debug)]
@@ -214,19 +218,21 @@ impl<E: Engine, S: Store> Fill<E, S> {
                 {
                     net.ensure(link)?;
                 }
-                Ok::<_, std::io::Error>(start)
+                Ok::<_, std::io::Error>((start, std::fs::metadata(&paths.disk)?.len()))
             })
             .await
             .unwrap_or_else(|error| Err(std::io::Error::other(error)))
         };
-        let stale = matches!(prepared, Ok(Start::Stale));
+        let stale = matches!(prepared, Ok((Start::Stale, _)));
         let inserted = match prepared {
-            Ok(Start::Template) => self
-                .records
-                .insert(self.job.record.clone())
-                .await
-                .map_err(|error| error.to_string()),
-            Ok(start) => Err(format!("the template could not be copied ({start:?})")),
+            Ok((Start::Template, disk_bytes)) => {
+                self.job.record.allocation.disk_bytes = Some(disk_bytes);
+                self.records
+                    .insert(self.job.record.clone())
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            Ok((start, _)) => Err(format!("the template could not be copied ({start:?})")),
             Err(error) => Err(error.to_string()),
         };
         match inserted {
@@ -321,6 +327,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             || self.ready.filling.contains_key(&id.0)
             || self.ready.spares.contains_key(&id.0)
             || self.ready.left_builds.values().any(|name| *name == id)
+            || self.fetching.values().any(|fetch| fetch.key() == id)
             || self.records.get(id).is_some()
     }
 
@@ -361,17 +368,40 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             };
             while self.ready.filling.len() < FILL_AT_ONCE
                 && self.ready.count(shape) < target as usize
-                && self.memory_allows(shape)
+                && self.memory_allows(&template)
                 && self.fill(shape, &template)
             {}
         }
     }
 
-    /// Whether the core leaves room for one more ready sandbox of `shape`:
-    /// room no wake wants, above the admission buffer and the high
-    /// watermark, counting every spare booked already.
-    pub(super) fn memory_allows(&self, shape: Shape) -> bool {
-        self.core.spare_fits(shape.bytes(), DiskSpace::default())
+    /// Whether the core leaves room for one more ready sandbox filled from
+    /// `template`: room no wake wants, above the admission buffer and the
+    /// high watermark, counting every spare booked already, and disk for
+    /// its fill (see [`HostAgent::fill_disk`]).
+    pub(super) fn memory_allows(&self, template: &Template) -> bool {
+        self.core.spare_fits(
+            self.fill_memory(template),
+            self.fill_disk(template.shape().image),
+        )
+    }
+
+    /// What a ready sandbox filled from `template` books of host memory
+    /// until it is ready and measured: what its VM holds once the
+    /// template's whole image is in (see [`Template::footprint`]), and
+    /// [`FILL_SLACK`] for its VMM and what its guest touches before it
+    /// answers, never more than its whole guest memory. With huge pages,
+    /// which no guest gives back, every sandbox reserves its whole size,
+    /// and so does a fill. Below its whole size, the booking is the fill
+    /// VM's memory limit too (see [`compute_engine::VmSpec::memory_limit`]), so it is a
+    /// bound and not an estimate: a guest that needs more is ended and its
+    /// fill fails, to be tried again, rather than take memory no one
+    /// booked. A claim lifts the limit before the guest runs again.
+    fn fill_memory(&self, template: &Template) -> u64 {
+        let whole = template.shape().bytes();
+        if self.reserve_whole {
+            return whole;
+        }
+        template.footprint().saturating_add(FILL_SLACK).min(whole)
     }
 
     /// Books `bytes` for the spare VM `host` with the core: `filling` until
@@ -493,11 +523,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         record.image = true;
         record.identity = Identity::Pending;
         let paths = Paths::of(&self.root, &record);
-        let spec = vm_spec(&record, &paths, &self.images);
+        let (memory, disk) = (
+            self.fill_memory(template),
+            self.fill_disk(template.shape().image),
+        );
+        let mut spec = vm_spec(&record, &paths, &self.images);
+        spec.memory_limit = (memory < shape.bytes()).then_some(memory);
         let link = Images::link(&record);
         self.ready.filling.insert(host.0, shape);
         // Booked before it starts, so no wake takes the same room.
-        self.book_spare(host, shape.bytes(), DiskSpace::default(), true);
+        self.book_spare(host, memory, disk, true);
         let fill = Fill {
             job: self.job(record, spec, paths, CancellationToken::new()),
             template: Arc::clone(template),
@@ -661,6 +696,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Gives the oldest ready sandbox of `config`'s shape to the new
     /// sandbox `id`, if there is one. Takes `reply` only then.
+    ///
+    /// Ready sandboxes are filled guaranteed their whole shape. A request
+    /// for less, of memory or processor, takes one all the same: its VM is
+    /// given the request's guarantees before the claim is recorded (see
+    /// [`Engine::set_guarantees`]), processor share at once and memory
+    /// protection from its first resume, which also tells its guest which
+    /// sandbox it is. Everything else a request sets is the sandbox's
+    /// record, not its VM's. A VM that cannot be given them goes, and the
+    /// create starts without a ready sandbox.
     pub(super) fn claim(
         &mut self,
         id: Id,
@@ -668,13 +712,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         reply: Reply<()>,
     ) -> Option<(SandboxConfig, Reply<()>)> {
         let shape = Shape::of(&config);
-        // Ready sandboxes are filled guaranteed their whole shape; one that
-        // asks for less starts afresh.
-        if config.memory_request() != config.memory_mib
-            || config.cpu_weight() != u16::from(config.vcpus) * 100
-        {
-            return Some((config, reply));
-        }
         let Some(at) = self
             .ready
             .idle
@@ -691,6 +728,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.preparing.insert(id.0);
         let records = Arc::clone(&self.records);
         let events = self.events_tx.clone();
+        let engine = Arc::clone(&self.engine);
         let (host, fence) = (idle.record.id, idle.record.fence());
         self.ready.claiming.insert(host.0, false);
         // No longer spare, but its VM holds what it did until the claimed
@@ -709,6 +747,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             },
         ]);
         let template = Arc::clone(&idle.template);
+        let filled = &idle.record.config;
+        let guarantees = (config.memory_request(), config.cpu_weight());
+        let change = guarantees != (filled.memory_request(), filled.cpu_weight());
         tokio::spawn(async move {
             // A template that no longer fits today's kernel, image or VMM
             // makes its ready sandboxes stale too.
@@ -716,15 +757,32 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .await
                 .map_err(std::io::Error::other)
                 .and_then(|fits| fits);
+            let fits = fits.map(|fits| {
+                if !fits {
+                    return Fit::Stale;
+                }
+                // Filled under its booking as a limit; the claimed sandbox
+                // may use what its shape allows.
+                if let Err(error) = engine.set_memory_limit(&idle.live.vm, None) {
+                    return Fit::Unfit(error.to_string());
+                }
+                let (memory, weight) = guarantees;
+                match change.then(|| engine.set_guarantees(&idle.live.vm, memory, weight)) {
+                    Some(Err(error)) => Fit::Unfit(error.to_string()),
+                    _ => Fit::Fits,
+                }
+            });
             let result = match fits {
-                Ok(true) => Some(
+                Ok(Fit::Fits) => ClaimResult::Claimed(
                     records
                         .claim(host, fence, id, config.clone())
                         .await
+                        .map(Box::new)
                         .map_err(HostError::from),
                 ),
-                Ok(false) => None,
-                Err(error) => Some(Err(HostError::Io(error.to_string()))),
+                Ok(Fit::Stale) => ClaimResult::Stale,
+                Ok(Fit::Unfit(error)) => ClaimResult::Unfit(error),
+                Err(error) => ClaimResult::Claimed(Err(HostError::Io(error.to_string()))),
             };
             let _ = events.send(Event::Claimed {
                 id,
@@ -750,8 +808,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let host = idle.record.id;
         let died = self.ready.claiming.remove(&host.0).unwrap_or(false);
         let record = match result {
-            Some(Ok(record)) => record,
-            None => {
+            ClaimResult::Claimed(Ok(record)) => *record,
+            ClaimResult::Stale => {
                 // Stale: every ready sandbox of the template goes, and the
                 // create starts over without one.
                 let template = Arc::clone(&idle.template);
@@ -760,7 +818,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.create(id, config, reply);
                 return;
             }
-            Some(Err(error)) => {
+            ClaimResult::Unfit(error) => {
+                // Nothing was written: it goes, and the create starts
+                // without a ready sandbox, so the next one is not tried.
+                tracing::warn!(%id, %host, %error, "a ready sandbox could not be given the request's guarantees");
+                self.discard(idle);
+                self.create_from(id, config, reply, false);
+                return;
+            }
+            ClaimResult::Claimed(Err(error)) => {
                 tracing::error!(%id, %host, %error, "could not claim a ready sandbox");
                 // Whichever name its record answers to now, it goes.
                 let Idle { record, live, .. } = idle;
@@ -806,7 +872,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let last_activity = record
             .last_used_ms
             .map_or_else(|| self.now(), |unix_ms| self.at_unix_ms(unix_ms));
-        let size = self.size(&record.config);
+        let size = self.record_size(&record);
         self.inputs([
             Input::Add {
                 sandbox: id.0,
@@ -832,7 +898,24 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 #[derive(Debug)]
 pub(super) struct Claimed<V> {
     idle: Idle<V>,
-    /// The claimed record, why the claim failed, or `None` when the
-    /// template turned out stale and nothing was written.
-    result: Option<Result<Record, HostError>>,
+    result: ClaimResult,
+}
+
+/// How a claim ended.
+#[derive(Debug)]
+enum ClaimResult {
+    /// The claimed record, or why the claim failed.
+    Claimed(Result<Box<Record>, HostError>),
+    /// The template turned out stale; nothing was written.
+    Stale,
+    /// Its VM could not be given the request's guarantees, for the reason
+    /// given; nothing was written.
+    Unfit(String),
+}
+
+/// Whether a ready sandbox can be claimed.
+enum Fit {
+    Fits,
+    Stale,
+    Unfit(String),
 }

@@ -50,6 +50,7 @@ use crate::image::{Hash, ZERO, chunk_count, chunk_range, hash_chunks};
 use crate::lanes::Lanes;
 use crate::protocol::{Id, ImageId};
 use crate::store::{Archive, FetchInto, FetchedMemory, Prefilled, Receipt, SavedFiles, Store};
+use crate::threads::Threads;
 use crate::working_set::{self, WakeProfile};
 
 /// Chunk uploads in flight per file.
@@ -121,6 +122,9 @@ pub struct Chunked {
     seed: Arc<Mutex<Option<Arc<Seed>>>>,
     /// Permits for chunk transfers, shared by every sandbox.
     transfers: Arc<Semaphore>,
+    /// Permits for compressing chunks, shared by every sandbox: each holds
+    /// a processor while it runs.
+    compress: Arc<Semaphore>,
     /// A wake's transfers are foreground: background ones give way.
     lanes: Arc<Lanes>,
 }
@@ -191,8 +195,16 @@ impl Chunked {
             chunks,
             seed: Arc::default(),
             transfers: Arc::new(Semaphore::new(TRANSFERS_PER_HOST)),
+            compress: Arc::new(Semaphore::new(Threads::for_host().compress)),
             lanes: Arc::default(),
         }
+    }
+
+    /// Compresses at most `chunks` chunks at once (at least one).
+    #[must_use]
+    pub fn with_compress_threads(mut self, chunks: usize) -> Self {
+        self.compress = Arc::new(Semaphore::new(chunks.max(1)));
+        self
     }
 
     /// Opens the object storage `url` names: `gs://bucket/prefix`,
@@ -201,6 +213,15 @@ impl Chunked {
     /// is not an object storage URL.
     pub fn from_url(url: &str) -> Result<Option<Self>, compute_storage::Error> {
         Ok(ChunkStore::from_url(url)?.map(Self::new))
+    }
+
+    /// The same store telling `watch` about every object it quarantines.
+    #[must_use]
+    pub fn with_watch(self, watch: Arc<dyn compute_storage::store::QuarantineWatch>) -> Self {
+        Self {
+            chunks: self.chunks.with_watch(watch),
+            ..self
+        }
     }
 
     /// Refuses a store this release cannot read every copy in; see
@@ -483,10 +504,14 @@ impl Chunked {
         }
         let chunk = EncodedChunk::encode(bytes, ZSTD_LEVEL)
             .map_err(|error| storage_error("archive", error))?;
-        self.chunks
+        let stored = self
+            .chunks
             .put_chunk(&chunk)
             .await
             .map_err(|error| storage_error("archive", error))?;
+        if stored {
+            crate::observe::notes::bytes("uploaded", chunk.bytes.len() as u64);
+        }
         Ok(Some(chunk.reference))
     }
 
@@ -510,6 +535,7 @@ impl Chunked {
         match working_set::put(
             &self.chunks,
             &self.transfers,
+            &self.compress,
             &image.memory,
             image.chunks.clone(),
             &profile,
@@ -698,6 +724,10 @@ impl Store for Chunked {
         // A sandbox waits on all of it: its disk, state and pack.
         let _waited_on = self.lanes.foreground();
         let Some(head) = self.head(OP, id).await? else {
+            crate::observe::notes::alarm(
+                crate::observe::Alarm::CopyLost,
+                &"the store holds no copy of this sandbox",
+            );
             return Err(EngineError::new(
                 ErrorKind::Fatal,
                 OP,
@@ -738,15 +768,32 @@ impl Store for Chunked {
             .map_err(|error| storage_error("delete", error))
     }
 
+    async fn disk_len(&self, id: Id) -> Result<Option<u64>, EngineError> {
+        const OP: &str = "disk_len";
+        let Some(head) = self.head(OP, id).await? else {
+            return Ok(None);
+        };
+        let manifest = self
+            .chunks
+            .get_manifest(&head.disk)
+            .await
+            .map_err(|error| storage_error(OP, error))?;
+        Ok(Some(manifest.disk_len))
+    }
+
+    async fn image_len(&self, image: ImageId) -> Result<Option<u64>, EngineError> {
+        self.rootfs_len(image).await
+    }
+
+    async fn fetch_image(&self, image: ImageId, path: &Path) -> Result<bool, EngineError> {
+        self.get_rootfs(image, path).await
+    }
+
     /// Points the sandbox at its disk alone, without the memory image or
     /// the working-set pack of its pages. Their chunks stay until a sweep
     /// finds nothing names them. The new pointer lands only on the version
     /// read, so a write held up past a newer copy never replaces it; a
     /// sweep's fence meanwhile means reading it again.
-    async fn fetch_image(&self, image: ImageId, path: &Path) -> Result<bool, EngineError> {
-        self.get_rootfs(image, path).await
-    }
-
     async fn forget_memory(&self, id: Id) -> Result<Option<Receipt>, EngineError> {
         const OP: &str = "forget";
         /// Reads before giving up for now: each fence a sweep stored since

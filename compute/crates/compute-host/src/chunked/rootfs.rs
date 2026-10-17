@@ -84,20 +84,46 @@ impl Chunked {
         Err(storage_error(OP, StorageError::Superseded))
     }
 
-    /// Writes the stored image `image` to `path`. False if the store does
-    /// not hold it.
-    pub async fn get_rootfs(&self, image: ImageId, path: &Path) -> Result<bool, EngineError> {
-        const OP: &str = "fetch image";
+    /// The head of the stored image `image`, if the store holds it.
+    async fn rootfs_head(
+        &self,
+        op: &'static str,
+        image: ImageId,
+    ) -> Result<Option<Head>, EngineError> {
         let Some(pointer) = self
             .chunks
             .get_pointer(&rootfs_pointer(image))
             .await
-            .map_err(|error| storage_error(OP, error))?
+            .map_err(|error| storage_error(op, error))?
             .filter(|pointer| !pointer.is_empty())
         else {
+            return Ok(None);
+        };
+        parse_head(op, &pointer).map(Some)
+    }
+
+    /// The length of the stored image `image`'s file, if the store holds
+    /// it.
+    pub async fn rootfs_len(&self, image: ImageId) -> Result<Option<u64>, EngineError> {
+        const OP: &str = "image length";
+        let Some(head) = self.rootfs_head(OP, image).await? else {
+            return Ok(None);
+        };
+        let manifest = self
+            .chunks
+            .get_manifest(&head.disk)
+            .await
+            .map_err(|error| storage_error(OP, error))?;
+        Ok(Some(manifest.disk_len))
+    }
+
+    /// Writes the stored image `image` to `path`. False if the store does
+    /// not hold it.
+    pub async fn get_rootfs(&self, image: ImageId, path: &Path) -> Result<bool, EngineError> {
+        const OP: &str = "fetch image";
+        let Some(head) = self.rootfs_head(OP, image).await? else {
             return Ok(false);
         };
-        let head = parse_head(OP, &pointer)?;
         self.get_file(&head.disk, path, None).await?;
         let fetched = file_id(path).await?;
         if fetched != image {

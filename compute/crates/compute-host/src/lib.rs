@@ -13,6 +13,7 @@
 mod agent;
 mod chunked;
 pub mod client;
+mod disk_growth;
 pub mod guest_ports;
 pub mod host_memory;
 mod image;
@@ -23,6 +24,7 @@ mod lazy;
 #[cfg(target_os = "linux")]
 mod logs;
 pub mod net;
+pub mod observe;
 #[cfg(target_os = "linux")]
 mod paging;
 mod pool;
@@ -33,6 +35,7 @@ mod server;
 mod state;
 mod step;
 mod store;
+mod threads;
 mod working_set;
 
 pub use agent::{BusyRule, Handle, HostAgent, HostConfig, HostError, Lease, PagerConfig};
@@ -46,3 +49,4 @@ pub use store::{
     Archive, Directory, FetchInto, FetchedMemory, JailedFile, NoStore, Prefilled, Receipt,
     SavedFiles, SavedImage, Store,
 };
+pub use threads::Threads;

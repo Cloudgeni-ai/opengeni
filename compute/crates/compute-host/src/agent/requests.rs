@@ -9,26 +9,30 @@ use compute_core::{Durability, HoldId, Input, Level, Priority, Resource, Step};
 use compute_engine::Engine;
 
 use crate::layout::{Images, Paths, sync_parent};
+use crate::observe::Cause;
 use crate::pool::{Shape, Sources, Start, Template, first_files};
 use crate::protocol::{
     BlockedSandbox, CapacityStatus, DiskStatus, FailedStep, HostStatus, Id, MemoryStatus,
     SandboxConfig, SandboxStatus, step_name,
 };
+use crate::rootfs::Missing;
 use crate::state::{Identity, Record, check_generation};
 use crate::step::images_of;
 use crate::store::Store;
 
 use super::holds::{Write, hold_id};
+use super::observe::Why;
 use super::{Command, Event, HostAgent, HostError, Reply, Waiter, Woke, unix_ms_now};
 
 /// Replies to `reply` once the write in `outcome` has made a change
 /// durable, or with why the change was refused or could not be kept.
-fn answer_once_written(outcome: Result<Write, HostError>, reply: Reply<()>) {
+fn answer_once_written<T: Send + 'static>(outcome: Result<(Write, T), HostError>, reply: Reply<T>) {
     match outcome {
-        Ok(write) => {
+        Ok((write, answer)) => {
             tokio::spawn(async move {
                 let result = write
                     .await
+                    .map(|()| answer)
                     .map_err(|error| HostError::Io(format!("keeping the holds failed: {error}")));
                 let _ = reply.send(result);
             });
@@ -63,6 +67,11 @@ pub(super) fn new_files(
 impl<E: Engine, S: Store> HostAgent<E, S> {
     pub(super) fn on_command(&mut self, command: Command) {
         match command {
+            Command::Traced(trace, command) => {
+                self.trace = Some(trace);
+                self.on_command(*command);
+                self.trace = None;
+            }
             Command::Create { id, config, reply } => self.create(id, config, reply),
             Command::Remove {
                 id,
@@ -124,7 +133,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let outcome = self
                     .check(id, generation)
                     .and_then(|()| self.unhold(id, &name));
-                answer_once_written(outcome, reply);
+                answer_once_written(outcome.map(|write| (write, ())), reply);
             }
             Command::Acquire {
                 id,
@@ -144,6 +153,24 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Command::Status { reply } => {
                 let _ = reply.send(self.status());
             }
+            Command::Inspect { id, reply } => {
+                let _ = reply.send(
+                    self.core
+                        .sandbox(id.0)
+                        .map(|view| (view.state.level, view.step)),
+                );
+            }
+        }
+    }
+
+    /// Notes that a request asks about `id`, for the step it causes.
+    fn note_ask(&mut self, id: Id) {
+        let trace = self.trace;
+        if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.asked = Some(Why {
+                cause: Cause::Request,
+                trace,
+            });
         }
     }
 
@@ -196,6 +223,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         if !self.slots.contains_key(&id.0) {
             return Err(HostError::NotFound(id));
         }
+        self.note_ask(id);
         self.input(Input::Touch {
             sandbox: id.0,
             priority,
@@ -243,8 +271,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         slot.waiters.push(Waiter {
             generation,
             during,
+            queued: false,
             reply,
         });
+        self.note_ask(id);
         self.input(Input::Hold {
             sandbox: id.0,
             hold,
@@ -252,6 +282,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             priority,
         });
         self.settle(id);
+        // Still waiting: whatever wake runs now is the one it joins.
+        if let Some(waiter) = self
+            .slots
+            .get_mut(&id.0)
+            .and_then(|slot| slot.waiters.last_mut())
+        {
+            waiter.queued = true;
+        }
     }
 
     /// Refuses a request that names an execution the sandbox no longer
@@ -291,6 +329,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 "this host cannot compress memory; ask for saved instead".into(),
             ));
         }
+        let trace = self.trace;
+        if let Some(slot) = self.slots.get_mut(&id.0) {
+            slot.sleep_asked = Some(Why {
+                cause: Cause::Request,
+                trace,
+            });
+        }
         self.input(Input::Sleep {
             sandbox: id.0,
             level,
@@ -299,18 +344,19 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Holds sandbox `id` awake for `name`, returning the write that makes
-    /// the hold durable.
+    /// the hold durable, and whether the hold was already there.
     pub(super) fn hold(
         &mut self,
         id: Id,
         name: String,
         ttl: Option<Duration>,
         priority: Priority,
-    ) -> Result<Write, HostError> {
+    ) -> Result<(Write, bool), HostError> {
         if self.slots.get(&id.0).is_none_or(|slot| slot.destroy) {
             return Err(HostError::NotFound(id));
         }
         let until = ttl.map(|ttl| self.now() + ttl);
+        self.note_ask(id);
         self.input(Input::Hold {
             sandbox: id.0,
             hold: hold_id(&name),
@@ -321,8 +367,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let lapses_ms = ttl
             .map(|ttl| now_ms.saturating_add(u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)));
         let slot = self.slots.get_mut(&id.0).ok_or(HostError::NotFound(id))?;
-        slot.holds.set(name, lapses_ms);
-        Ok(slot.holds.write(now_ms))
+        let renewed = slot.holds.set(name, lapses_ms);
+        Ok((slot.holds.write(now_ms), renewed))
     }
 
     /// The refusal of a request for blocked sandbox `id`.
@@ -392,7 +438,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // One that could never run here is refused at once, so it can be
         // placed elsewhere.
         if let Some(capacity) = self.core.capacity() {
-            let needed = self.size(config).request;
+            let needed = self.size(config, None).request;
             if needed > capacity.budget {
                 return Err(HostError::HostFull {
                     id,
@@ -406,6 +452,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     pub(super) fn create(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
+        self.create_from(id, config, reply, true);
+    }
+
+    /// Creates sandbox `id`, from a ready sandbox if `ready` and there is
+    /// one.
+    pub(super) fn create_from(
+        &mut self,
+        id: Id,
+        config: SandboxConfig,
+        reply: Reply<()>,
+        ready: bool,
+    ) {
         if let Some(answer) = self.create_answer(id, &config) {
             let _ = reply.send(answer);
             return;
@@ -414,10 +472,36 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let _ = reply.send(Err(error));
             return;
         }
-        let shape = Shape::of(&config);
-        self.template_used(shape);
-        let Some((config, reply)) = self.claim(id, config, reply) else {
+        self.template_used(Shape::of(&config));
+        let unclaimed = if ready {
+            self.claim(id, config, reply)
+        } else {
+            Some((config, reply))
+        };
+        let Some((config, reply)) = unclaimed else {
             return;
+        };
+        self.create_fresh(id, config, reply);
+    }
+
+    /// Creates sandbox `id` from its shape's template, or cold, once the
+    /// host has its image.
+    pub(super) fn create_fresh(&mut self, id: Id, config: SandboxConfig, reply: Reply<()>) {
+        if let Some(image) = config.image.filter(|image| !self.rootfs.has(*image)) {
+            self.create_after_fetch(image, id, config, reply);
+            return;
+        }
+        let shape = Shape::of(&config);
+        let template = self.template_for(shape);
+        // Its first files are written before the core knows it: they are
+        // booked from before the copy until a reading shows them.
+        let template_disk = template.as_ref().map(|t| t.disk());
+        let disk = match self.first_files_fit(id, shape.image, template_disk.as_deref()) {
+            Ok(disk) => disk,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
         };
         let ordinal = match self.take_ordinal() {
             Ok(ordinal) => ordinal,
@@ -436,37 +520,39 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return;
             }
         };
-        self.prepare(Record::new(id, ordinal, allocation, config), reply);
+        self.input(Input::Writes { key: id.0, disk });
+        self.prepare(
+            Record::new(id, ordinal, allocation, config),
+            template,
+            reply,
+        );
     }
 
     /// Makes the files of the new sandbox `record` describes in the
-    /// background, then records it; [`Event::Prepared`] says how it went.
-    fn prepare(&mut self, mut record: Record, reply: Reply<()>) {
+    /// background, from `template` if it has one, then records it;
+    /// [`Event::Prepared`] says how it went.
+    fn prepare(&self, mut record: Record, template: Option<Arc<Template>>, reply: Reply<()>) {
         let (id, ordinal) = (record.id, record.ordinal);
-        let shape = Shape::of(&record.config);
-        // A template of an image the host has yet to fetch is asked for
-        // once it has it (see `prepared`).
-        let template = if shape.image.is_none_or(|image| self.rootfs.has(image)) {
-            self.template_for(shape)
-        } else {
-            None
-        };
+        let image = record.config.image;
         let sources = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources));
         let link = Images::link(&record);
         let paths = Paths::new(&self.root, id);
         let dir = paths.dir.clone();
         let base = self.base_image.clone();
-        let (rootfs, store) = (Arc::clone(&self.rootfs), Arc::clone(&self.store));
+        let rootfs = Arc::clone(&self.rootfs);
         let records = Arc::clone(&self.records);
         let net = self.net.clone();
         let events = self.events_tx.clone();
         tokio::spawn(async move {
             // Held until its disk is copied, so it is not removed meanwhile.
-            let image = match shape.image {
-                Some(image) => match rootfs.get(image, &*store).await {
-                    Ok(held) => Some(held),
-                    Err(missing) => {
-                        tracing::warn!(%id, %missing, "a create's image is not to be had");
+            let held = match image {
+                Some(image) => {
+                    let Some(held) = rootfs.hold(image).await else {
+                        let missing = Missing::Failed {
+                            image,
+                            error: "it was removed before the create could copy it".into(),
+                        };
+                        tracing::warn!(%id, %missing, "a create's image is gone");
                         let _ = events.send(Event::Prepared {
                             id,
                             ordinal,
@@ -475,11 +561,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                             stale: None,
                         });
                         return;
-                    }
-                },
+                    };
+                    Some(held)
+                }
                 None => None,
             };
-            let first = image.as_ref().map_or(base, |held| held.path.clone());
+            let first = held.as_ref().map_or(base, |held| held.path.clone());
             let networks = net.clone();
             let from = template.clone();
             let prepared = tokio::task::spawn_blocking(move || {
@@ -488,19 +575,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 if let (Some(net), Some(link)) = (&networks, &link) {
                     net.ensure(link)?;
                 }
-                Ok(start)
+                Ok((start, std::fs::metadata(&paths.disk)?.len()))
             })
             .await
             .unwrap_or_else(|error| Err(io::Error::other(error)));
-            drop(image);
+            drop(held);
             let stale = match prepared {
-                Ok(Start::Stale) => template,
+                Ok((Start::Stale, _)) => template,
                 _ => None,
             };
             // The record goes last: a directory without one is an
             // unfinished creation and is cleaned up on recovery.
             let result = match prepared {
-                Ok(start) => {
+                Ok((start, disk_bytes)) => {
+                    record.allocation.disk_bytes = Some(disk_bytes);
                     // A sandbox started from a template holds a memory image
                     // of a guest that never ran as it: its first wake
                     // restores it.

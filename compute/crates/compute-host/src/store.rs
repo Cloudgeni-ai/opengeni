@@ -203,6 +203,13 @@ pub trait Store: Send + Sync + 'static {
     /// Deletes the stored copy; succeeds when there is none.
     fn delete(&self, id: Id) -> impl Future<Output = Result<(), EngineError>> + Send;
 
+    /// The length of the disk in the stored copy, `None` if nothing is
+    /// stored.
+    fn disk_len(&self, id: Id) -> impl Future<Output = Result<Option<u64>, EngineError>> + Send {
+        let _ = id;
+        std::future::ready(unconfigured("disk_len"))
+    }
+
     /// The chunk store that remote memory images page in from, if this store
     /// keeps memory as chunks, and the host's transfer lanes, which the
     /// agent's own fetches from it share with the store's.
@@ -217,6 +224,17 @@ pub trait Store: Send + Sync + 'static {
         &self,
         id: Id,
     ) -> impl Future<Output = Result<Option<Receipt>, EngineError>> + Send;
+
+    /// The length of the stored sandbox image `image`'s file, `None` if
+    /// the store does not hold it, which a store that keeps no images
+    /// never does.
+    fn image_len(
+        &self,
+        image: ImageId,
+    ) -> impl Future<Output = Result<Option<u64>, EngineError>> + Send {
+        let _ = image;
+        ready(Ok(None))
+    }
 
     /// Copies the stored sandbox image `image` (ADR 19) to `path`, a new
     /// file, checked against its id. False if the store does not hold it,
@@ -559,6 +577,26 @@ impl Store for Directory {
         blocking("delete", move || match fs::remove_dir_all(&stored) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
+        })
+        .await
+    }
+
+    async fn disk_len(&self, id: Id) -> Result<Option<u64>, EngineError> {
+        let disk = self.dir(id).join("disk");
+        blocking("disk_len", move || match fs::metadata(&disk) {
+            Ok(metadata) => Ok(Some(metadata.len())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        })
+        .await
+    }
+
+    async fn image_len(&self, image: ImageId) -> Result<Option<u64>, EngineError> {
+        let file = self.rootfs(image);
+        blocking("image length", move || match fs::metadata(&file) {
+            Ok(metadata) => Ok(Some(metadata.len())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
         })
         .await
     }

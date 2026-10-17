@@ -95,6 +95,21 @@ impl LiveMemory {
         }
     }
 
+    /// Whether the image this VM's memory comes from may still be written
+    /// to local disk: while it is filled from object storage, and after a
+    /// failed fill until every write it started has landed.
+    pub fn hydrating(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(hydration) = self
+            .paging
+            .as_ref()
+            .and_then(|paging| paging.hydration.as_ref())
+        {
+            return hydration.is_writing();
+        }
+        false
+    }
+
     /// Waits until the image this VM's memory comes from is whole and its
     /// pager, if it has one, holds every byte: until then the image must
     /// stay the current one, unsealed and in place, so an agent that

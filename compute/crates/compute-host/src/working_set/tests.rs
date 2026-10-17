@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use futures::TryStreamExt as _;
 use object_store::memory::InMemory;
@@ -31,6 +32,10 @@ fn store() -> (Arc<InMemory>, ChunkStore) {
 
 fn transfers() -> Arc<Semaphore> {
     Arc::new(Semaphore::new(4))
+}
+
+fn compress() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(2))
 }
 
 fn profile(offsets: Vec<u64>, page_size: u64) -> WakeProfile {
@@ -130,6 +135,7 @@ async fn a_pack_brings_back_the_working_set_in_growing_parts() {
     let index = put(
         &chunks,
         &transfers(),
+        &compress(),
         &memory,
         None,
         &profile(offsets, PAGE),
@@ -210,6 +216,7 @@ async fn pages_the_file_holds_differently_from_the_stored_image_are_not_packed()
     let index = put(
         &chunks,
         &transfers(),
+        &compress(),
         &memory,
         Some(Arc::new(map)),
         &profile(order, PAGE),
@@ -235,6 +242,7 @@ async fn a_damaged_part_is_left_out_and_the_rest_still_fills() {
     let index = put(
         &chunks,
         &transfers(),
+        &compress(),
         &memory,
         None,
         &profile(order, PAGE),
@@ -284,6 +292,7 @@ async fn a_bad_index_gives_no_pack() {
     let index = put(
         &chunks,
         &transfers(),
+        &compress(),
         &memory,
         None,
         &profile(vec![0, PAGE, 63 * PAGE], PAGE),
@@ -324,6 +333,7 @@ async fn a_part_with_data_in_a_chunk_of_zeros_is_left_out() {
     let index = put(
         &chunks,
         &transfers(),
+        &compress(),
         &memory,
         None,
         &profile(order, PAGE),
@@ -426,6 +436,7 @@ async fn a_cancelled_pack_stores_nothing() {
     let packed = put(
         &chunks,
         &transfers(),
+        &compress(),
         &memory,
         None,
         &profile(order, PAGE),
@@ -440,6 +451,7 @@ async fn a_cancelled_pack_stores_nothing() {
     let none = put(
         &chunks,
         &transfers(),
+        &compress(),
         &memory,
         None,
         &outside,
@@ -447,6 +459,103 @@ async fn a_cancelled_pack_stores_nothing() {
     )
     .await;
     assert!(matches!(none, Ok(None)), "{none:?}");
+}
+
+/// Compressing the pack's parts takes the permits every sandbox's
+/// compression shares: with none free, packing waits, and it goes on once
+/// one is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn packing_waits_for_a_compression_permit() {
+    let dir = tempfile::tempdir().unwrap();
+    let memory = image(dir.path(), 64, &[]);
+    let (_backend, chunks) = store();
+    let compress = Arc::new(Semaphore::new(1));
+    let held = Arc::clone(&compress).acquire_owned().await.unwrap();
+    let order = (0..64).map(|page| page * PAGE).collect();
+    let packing = tokio::spawn(async move {
+        put(
+            &chunks,
+            &transfers(),
+            &compress,
+            &memory,
+            None,
+            &profile(order, PAGE),
+            &CancellationToken::new(),
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !packing.is_finished(),
+        "packing compressed without a permit"
+    );
+    drop(held);
+    let packed = tokio::time::timeout(Duration::from_secs(10), packing)
+        .await
+        .expect("packing went on once a permit was free")
+        .unwrap();
+    assert!(packed.unwrap().is_some());
+}
+
+/// Packing never holds a blocking thread while it waits for a compression
+/// permit: with one blocking thread and one permit, it and other
+/// compression that takes a permit and then a blocking thread, as an
+/// archive's does, both finish.
+#[test]
+fn packing_and_other_compression_share_one_blocking_thread() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let finished = runtime.block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = image(dir.path(), 1024, &[]);
+        let (_backend, chunks) = store();
+        let compress = Arc::new(Semaphore::new(1));
+        let order = (0..1024).map(|page| page * PAGE).collect();
+        let packing = {
+            let compress = Arc::clone(&compress);
+            tokio::spawn(async move {
+                put(
+                    &chunks,
+                    &transfers(),
+                    &compress,
+                    &memory,
+                    None,
+                    &profile(order, PAGE),
+                    &CancellationToken::new(),
+                )
+                .await
+            })
+        };
+        let others: Vec<_> = (0..50)
+            .map(|_| {
+                let compress = Arc::clone(&compress);
+                tokio::spawn(async move {
+                    let _permit = compress.acquire().await.unwrap();
+                    tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(2)))
+                        .await
+                        .unwrap();
+                })
+            })
+            .collect();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            for other in others {
+                other.await.unwrap();
+            }
+            packing.await.unwrap().unwrap().is_some()
+        })
+        .await
+    });
+    // A stuck blocking thread must not hold the test up.
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    assert_eq!(
+        finished.ok(),
+        Some(true),
+        "packing and compression deadlocked"
+    );
 }
 
 #[test]

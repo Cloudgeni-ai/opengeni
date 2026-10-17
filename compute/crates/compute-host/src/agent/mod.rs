@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use compute_core::{
     Action, At, BalloonRequest, HoldId, Host, HostPolicy, Input, Level, LoanId, MemoryPolicy, OpId,
-    Outcome, Priority, Resource, SandboxId, Size, SleepPolicy, Step,
+    Outcome, Priority, Resource, SandboxId, Size, SleepPolicy, State, Step,
 };
-use compute_engine::{CancellationToken, Engine, PageSize, VmSpec};
+use compute_engine::{CancellationToken, Engine, MemoryStats, PageSize, VmSpec};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
@@ -30,16 +30,20 @@ use tokio::time::{Instant, sleep_until};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
+use crate::observe::{Observer, TraceContext};
 use crate::pool::{Built, Lender, Loaning, Pool, PoolConfig, Shape, Sources, Template, Uses};
 
-use crate::protocol::{About, HostStatus, Id, SandboxConfig, StepStats};
+use crate::protocol::{About, HostStatus, Id, ImageId, SandboxConfig, StepStats};
 use crate::rootfs::{Cache, Missing};
 use crate::state::{Record, Records, StateError, claim_host, unix_ms_now};
-use crate::step::{After, Live};
+use crate::step::{After, Live, Report};
 use crate::store::Store;
 
+mod disk;
+mod fetch;
 mod handle;
 mod holds;
+mod observe;
 mod ready;
 mod recover;
 mod requests;
@@ -127,11 +131,18 @@ pub struct HostConfig {
     /// What the host runs, as status reports it. The runtime is the
     /// engine's; whatever is set here is replaced.
     pub about: About,
+    /// Where the host's events and metrics go (see [`crate::observe`]).
+    pub observer: Observer,
+    /// How long a sandbox stays awake before it reports what it went
+    /// through since its last step or summary.
+    pub summary_every: Duration,
 }
 
 impl HostConfig {
     /// The default for [`HostConfig::stream_idle`].
     pub const STREAM_IDLE: Duration = Duration::from_secs(10 * 60);
+    /// The default for [`HostConfig::summary_every`].
+    pub const SUMMARY_EVERY: Duration = Duration::from_secs(3600);
 }
 
 /// How VMs whose memory needs a fault handler get one: a pager process of
@@ -288,9 +299,10 @@ pub enum HostError {
     /// Host storage failed.
     #[error("host I/O failed: {0}")]
     Io(String),
-    /// The host cannot take on the sandbox's memory, or the disk its next
-    /// save may need, now: even ending every idle VM already saved would
-    /// not free enough. Retryable.
+    /// The host cannot take on the sandbox's memory, or the local disk it
+    /// may write (its next save, its disk's growth, its first files), now:
+    /// even ending every idle VM already saved would not free enough.
+    /// Retryable.
     #[error(
         "host full: sandbox {id} needs {needed} {what} and only {free} are free",
         what = shortage(*.resource)
@@ -365,8 +377,8 @@ fn allocation_unit(root: &std::path::Path) -> Result<u64, HostError> {
 fn shortage(resource: Resource) -> &'static str {
     match resource {
         Resource::Memory => "bytes of memory reserved",
-        Resource::Disk => "bytes of disk booked for its next save",
-        Resource::Inodes => "disk inodes booked for its next save",
+        Resource::Disk => "bytes of local disk booked",
+        Resource::Inodes => "local disk inodes booked",
     }
 }
 
@@ -403,7 +415,8 @@ enum Command {
         name: String,
         ttl: Option<Duration>,
         priority: Priority,
-        reply: Reply<()>,
+        /// Told whether the hold was already there.
+        reply: Reply<bool>,
     },
     /// Ends a named hold from the API.
     Unhold {
@@ -432,6 +445,14 @@ enum Command {
     Status {
         reply: oneshot::Sender<HostStatus>,
     },
+    /// One sandbox's level and the step under way, if it has one: for the
+    /// canary.
+    Inspect {
+        id: Id,
+        reply: oneshot::Sender<Option<(Level, Option<Step>)>>,
+    },
+    /// A command from a caller that sent trace context.
+    Traced(TraceContext, Box<Command>),
 }
 
 #[derive(Debug)]
@@ -470,10 +491,7 @@ enum Event<V> {
         op: OpId,
         outcome: Outcome,
         after: After<V>,
-        /// VM processes the step started, including ones it ended again.
-        launches: u32,
-        /// What went wrong, when it failed.
-        error: Option<String>,
+        report: Box<Report>,
     },
     /// Work outside any sandbox asks for or gives back a place under a
     /// step limit.
@@ -515,6 +533,16 @@ enum Event<V> {
         host: Id,
         filled: Box<ready::Filled<V>>,
     },
+    /// The store told the length of an image creates wait for.
+    ImageSized {
+        image: ImageId,
+        length: Result<Option<u64>, compute_engine::EngineError>,
+    },
+    /// The fetch of an image creates wait for ended.
+    ImageFetched {
+        image: ImageId,
+        result: Result<(), HostError>,
+    },
     /// A create's claim of a ready sandbox ended.
     Claimed {
         id: Id,
@@ -540,6 +568,10 @@ struct Running {
     step: Step,
     cancel: CancellationToken,
     started: Instant,
+    /// Why it runs.
+    why: observe::Why,
+    /// Where the sandbox's state was when it started.
+    before: Option<State>,
 }
 
 /// The start of one VM's current activity window. Each reading is kept only
@@ -582,9 +614,22 @@ struct Slot<V> {
     deferred: Option<Step>,
     /// Processor use and traffic measured so far, while the VM runs.
     activity: Option<ActivityWindow>,
-    /// The incarnation of the running VM and the pages compressed out of it
-    /// when last sampled running; see [`HostAgent::check_uncompressed`].
-    compressed: Option<(u64, u64)>,
+    /// The incarnation of the running VM and its memory statistics when
+    /// last sampled running; see [`HostAgent::check_uncompressed`].
+    stats: Option<(u64, MemoryStats)>,
+    /// The reading the last event about the sandbox's pressure counted up
+    /// to.
+    reported: Option<(u64, MemoryStats)>,
+    /// When the sandbox last reported what it went through awake.
+    summarized: Instant,
+    /// The latest request to wake or hold it since its last sleep step
+    /// began.
+    asked: Option<observe::Why>,
+    /// The latest request to sleep since its last wake step began: every
+    /// step down to the level it asked for carries its trace.
+    sleep_asked: Option<observe::Why>,
+    /// The wake step started since its last sleep step began, if any.
+    woke_by: Option<OpId>,
     /// The last step that failed and has not succeeded since, with its
     /// error, such as a save that could not be written.
     failed: Option<(Step, String)>,
@@ -599,6 +644,9 @@ struct Waiter {
     generation: Option<u64>,
     /// The step under way when it arrived.
     during: Option<Step>,
+    /// Whether it had to wait for a step: then the wake step that ran, if
+    /// any, is the one it joined.
+    queued: bool,
     reply: Reply<Woke>,
 }
 
@@ -609,6 +657,8 @@ struct Woke {
     during: Option<Step>,
     /// The execution that is running.
     generation: u64,
+    /// The wake step it waited for, if one ran.
+    op: Option<OpId>,
 }
 
 /// Talks to a running host agent. Cheap to clone.
@@ -617,6 +667,9 @@ pub struct Handle {
     commands: mpsc::UnboundedSender<Command>,
     holds: Arc<AtomicU64>,
     stream_idle: Duration,
+    observer: Observer,
+    /// Trace context every command carries, if any.
+    trace: Option<TraceContext>,
 }
 
 /// Keeps a sandbox awake while it lives. Dropping it lets the sandbox go
@@ -629,6 +682,8 @@ pub struct Lease {
     waited: Duration,
     /// The step under way when the wake arrived.
     during: Option<Step>,
+    /// The wake step it waited for, if one ran.
+    op: Option<OpId>,
     /// The execution the lease reaches: the one asked for, if any.
     generation: u64,
     /// Whether the caller asked for that execution. A lease that was not
@@ -657,6 +712,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     rootfs: Arc<Cache>,
     /// When unused images were last looked for.
     rootfs_retired: Instant,
+    /// Images being fetched for the creates that wait for them.
+    fetching: HashMap<ImageId, fetch::Fetch>,
     images: Images,
     warm: Option<Warm>,
     core: Host,
@@ -723,6 +780,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Copies of guest memory a save may write at most: one where files
     /// share extents, otherwise also the merged image.
     save_copies: u64,
+    /// The base image's length when the agent started, for when it
+    /// cannot be read later; see [`HostAgent::disk_bound`].
+    base_length: u64,
     /// The bytes the state root's filesystem allocates at a time.
     allocation_unit: u64,
     pager: PagerConfig,
@@ -731,6 +791,13 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Lets guest connections report activity without keeping the agent
     /// alive once every [`Handle`] is gone.
     commands_tx: mpsc::WeakUnboundedSender<Command>,
+    observer: Observer,
+    summary_every: Duration,
+    /// Whether the agent is still taking over its state root: steps it
+    /// starts meanwhile are for recovery.
+    recovering: bool,
+    /// The trace context of the command being handled, if it carried one.
+    trace: Option<TraceContext>,
 }
 
 /// Checks that this host's settings fit every recorded sandbox: a sandbox
@@ -872,7 +939,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let core =
             Host::new(config.policy).map_err(|error| HostError::Invalid(format!("{error:?}")))?;
         check_config(&config).map_err(HostError::Invalid)?;
-        let stream_idle = config.stream_idle;
         let host_lock = match config.host_lock.clone() {
             Some(path) => Some(claim(path, config.root.clone()).await?),
             None => None,
@@ -912,9 +978,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             net,
             images,
             root: config.root,
+            base_length: std::fs::metadata(&config.base_image).map_or(0, |found| found.len()),
             base_image: config.base_image,
             rootfs,
             rootfs_retired: Instant::now(),
+            fetching: HashMap::new(),
             warm,
             memory_policy: config.policy.memory,
             ready: ready::Ready::new(ready),
@@ -953,6 +1021,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             allocation_unit,
             about,
             commands_tx: commands_tx.downgrade(),
+            observer: config.observer,
+            summary_every: config.summary_every,
+            recovering: true,
+            trace: None,
         };
         agent.hold_builds(held);
         agent.recover(strays).await;
@@ -960,12 +1032,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // spare VMs wait for a memory reading too, so one is taken before
         // any build starts or request is served.
         agent.sample();
+        agent.recovering = false;
         agent.start_templates(warm_shapes);
-        let handle = Handle {
-            commands: commands_tx,
-            holds: Arc::new(AtomicU64::new(1)),
-            stream_idle,
-        };
+        let handle = Handle::new(commands_tx, config.stream_idle, agent.observer.clone());
         Ok((handle, tokio::spawn(agent.run())))
     }
 
@@ -1033,7 +1102,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 waiters: Vec::new(),
                 deferred: None,
                 activity: None,
-                compressed: None,
+                stats: None,
+                reported: None,
+                summarized: Instant::now(),
+                asked: None,
+                sleep_asked: None,
+                woke_by: None,
                 failed: None,
                 holds,
             },
@@ -1049,22 +1123,39 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         SleepPolicy::new(rules).map_err(|error| format!("invalid sleep settings: {error}"))
     }
 
-    /// What a sandbox of `config` reserves and may use of host memory, and
-    /// what one save of it may write: the memory that changed, the merged
-    /// image where files cannot share extents, and its device state and
-    /// chunk map.
-    fn size(&self, config: &SandboxConfig) -> Size {
+    /// What a sandbox of `config` whose disk is `disk_bytes` long reserves
+    /// and may use of host memory, and what one save of it may write: the
+    /// memory that changed, the merged image where files cannot share
+    /// extents, and its device state and chunk map; what its disk may grow
+    /// by while it runs; and what a wake from object storage writes
+    /// locally: its disk, the memory image its pager fills, and its device
+    /// state. A disk of unknown length counts as a copy of its image as it
+    /// is today, as a new sandbox's is.
+    fn size(&self, config: &SandboxConfig, disk_bytes: Option<u64>) -> Size {
         let limit = u64::from(config.memory_mib) << 20;
         let request = if self.reserve_whole {
             limit
         } else {
             u64::from(config.memory_request()) << 20
         };
+        let disk = disk_bytes.map_or_else(
+            || self.disk_bound(config.image),
+            |length| crate::disk_growth::disk_bound(length, self.allocation_unit),
+        );
         Size {
             request,
             limit,
             save: limit * self.save_copies + SAVE_EXTRA,
+            disk,
+            fetch: disk
+                .saturating_add(limit.next_multiple_of(self.allocation_unit.max(1)))
+                .saturating_add(SAVE_EXTRA),
         }
+    }
+
+    /// [`Self::size`] for the sandbox `record` describes.
+    fn record_size(&self, record: &Record) -> Size {
+        self.size(&record.config, record.allocation.disk_bytes)
     }
 
     async fn run(mut self) {

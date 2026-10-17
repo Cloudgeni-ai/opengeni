@@ -369,6 +369,7 @@ dependencies = [
  "hyper-util",
  "memmap2",
  "object_store",
+ "reqwest",
  "rustix",
  "serde",
  "serde_json",

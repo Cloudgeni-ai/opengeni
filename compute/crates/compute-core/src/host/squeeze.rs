@@ -283,11 +283,11 @@ impl Host {
 
     /// Whether a sandbox that held `bytes` when it was paused for host
     /// memory may wake: they fit with the high watermark still free, next
-    /// to what sandboxes let through before claim.
+    /// to what sandboxes let through before claim. Not before the first
+    /// reading, as for one given back after a restart.
     pub(super) fn room_returned(&self, bytes: u64) -> bool {
         self.policy.memory.is_none()
-            || self.available_memory.is_none()
-            || bytes <= self.free_above_watermark()
+            || (self.available_memory.is_some() && bytes <= self.free_above_watermark())
     }
 
     /// Bytes available above the high watermark that no sandbox let
@@ -401,6 +401,52 @@ impl Host {
         {
             slot.squeeze = Squeeze::None;
         }
+        // Told from before its pause and save start until its VM runs
+        // again, so a host agent that keeps it never finds the sandbox
+        // saved for memory without knowing it waits. So is a wait the
+        // agent kept for a VM found paused.
+        if slot.state.level == Level::Running {
+            slot.kept_wait = None;
+        }
+        let waiting = match slot.squeeze {
+            Squeeze::Leaving { bytes, .. } | Squeeze::Waiting { bytes } => Some(bytes),
+            Squeeze::Returning { bytes } if slot.state.level != Level::Running => Some(bytes),
+            _ => None,
+        }
+        .or(slot.kept_wait);
+        if waiting.is_some() != slot.wait_told {
+            slot.wait_told = waiting.is_some();
+            out.push(Action::Notify {
+                sandbox: id,
+                notice: Notice::PausedForMemory(waiting),
+            });
+        }
         self.unread_claims += claim.saturating_sub(slot.squeeze.claim());
+    }
+
+    /// Takes in [`crate::Input::PausedForMemory`]: `id` waits again, as it
+    /// did before a restart, wanted awake, for `bytes` to fit above the
+    /// high watermark. One whose VM is still there was never saved: one
+    /// running waits no more, and one paused wakes, still told it waits
+    /// until it runs.
+    pub(super) fn paused_for_memory(&mut self, now: At, id: SandboxId, bytes: u64) {
+        let Some(slot) = self.sandboxes.get_mut(&id) else {
+            return;
+        };
+        if slot.state.level.has_process() {
+            // Told it waits, so it is told once the wait is over.
+            slot.wait_told = true;
+            if slot.state.level != Level::Running {
+                slot.kept_wait = Some(bytes);
+                slot.request_wake(Priority::Background, now);
+            }
+        } else if slot.in_flight.is_none() && !slot.is_broken() {
+            slot.squeeze = Squeeze::Waiting { bytes };
+            slot.wait_told = true;
+            slot.request_wake(Priority::Background, now);
+            slot.room = WakeRoom::Refused;
+            self.refused.insert(id);
+        }
+        self.mark(id);
     }
 }

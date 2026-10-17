@@ -203,6 +203,82 @@ async fn a_create_claims_a_ready_sandbox_that_learns_its_id_before_use() {
     lab.assert_clean();
 }
 
+/// A ready sandbox's VM is filled limited to the memory its fill books,
+/// so the booking is a bound, and a claim lifts the limit before its
+/// guest runs for the create.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fill_is_limited_to_its_booking_until_it_is_claimed() {
+    let lab = ready_lab(Lab::root(), Arc::default(), 1).await;
+    wait_filled(&lab, 1).await;
+    let filled = ready_dirs(&lab);
+    let limit = lab
+        .world
+        .started_limits
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(name, _)| filled.contains(name))
+        .and_then(|(_, limit)| *limit)
+        .expect("the fill's VM started under a memory limit");
+    assert!(
+        limit < SHAPE.bytes(),
+        "the limit is the booking, not the shape"
+    );
+    assert!(lab.world.limits_set.lock().unwrap().is_empty());
+    assert_eq!(create(&lab, id(1)).await, Reply::Done);
+    let (dir, _) = record_of(&lab, id(1));
+    assert!(filled.contains(&dir), "it took the ready sandbox");
+    assert_eq!(*lab.world.limits_set.lock().unwrap(), [(dir, None)]);
+}
+
+/// A ready sandbox is filled guaranteed its whole shape, but a create of
+/// its shape asking for less takes it all the same: its VM is given the
+/// request's guarantees before the claim is kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_create_that_asks_for_less_still_claims_a_ready_sandbox_given_its_guarantees() {
+    let lab = ready_lab(Lab::root(), Arc::default(), 2).await;
+    wait_filled(&lab, 2).await;
+    let asking = |sandbox| Request::Create {
+        id: sandbox,
+        config: SandboxConfig {
+            memory_request_mib: Some(128),
+            cpu_request_millis: Some(250),
+            ..SandboxConfig::new(SHAPE.vcpus, SHAPE.memory_mib, NEVER)
+        },
+    };
+    let filled = ready_dirs(&lab);
+    assert_eq!(lab.client.call(&asking(id(1))).await.unwrap(), Reply::Done);
+    assert_eq!(
+        lab.world.restores.load(Ordering::Relaxed),
+        2,
+        "the claim restored nothing"
+    );
+    let (dir, record) = record_of(&lab, id(1));
+    assert!(filled.contains(&dir), "it took a ready sandbox");
+    assert_eq!(record["config"]["memory_request_mib"], 128);
+    assert_eq!(
+        *lab.world.guarantees.lock().unwrap(),
+        [(dir.clone(), 128, 25)],
+        "its VM was given the request's guarantees"
+    );
+    assert_eq!(lab.run(id(1), &["sandbox?"]).await, [id(1).to_string()]);
+
+    // One that cannot be given them goes, and the create starts without
+    // a ready sandbox: it does not try the next one.
+    wait_filled(&lab, 2).await;
+    lab.world.refuse_guarantees.store(true, Ordering::SeqCst);
+    let ready = ready_dirs(&lab);
+    assert_eq!(lab.client.call(&asking(id(2))).await.unwrap(), Reply::Done);
+    let (dir, record) = record_of(&lab, id(2));
+    assert!(!ready.contains(&dir), "it started afresh");
+    assert_eq!(record["config"]["memory_request_mib"], 128);
+    assert_eq!(lab.run(id(2), &["sandbox?"]).await, [id(2).to_string()]);
+    lab.world.refuse_guarantees.store(false, Ordering::SeqCst);
+    assert_eq!(lab.world.guarantees.lock().unwrap().len(), 1);
+    wait_filled(&lab, 2).await;
+    lab.assert_clean();
+}
+
 /// Ready sandboxes share the host's one memory book: they count against
 /// admission, a wake that needs their room ends one first, and a fill
 /// waits until there is room no wake wants.
@@ -272,7 +348,7 @@ async fn ready_sandboxes_give_their_room_to_a_wake_and_refill_only_into_free_roo
 async fn a_fill_that_finishes_under_pressure_gives_its_room_to_a_held_sandbox() {
     let policy = HostPolicy {
         admission: Some(Admission {
-            budget: 450 << 20,
+            budget: 440 << 20,
             buffer: 0,
             busy_grace: Duration::from_millis(100),
         }),
@@ -286,7 +362,8 @@ async fn a_fill_that_finishes_under_pressure_gives_its_room_to_a_held_sandbox() 
     lab.wait_until("a fill under way", |status| pool(status) == (0, 1, 1))
         .await;
 
-    // 384 MiB do not fit next to the fill's 256: the hold waits.
+    // 384 MiB do not fit next to the fill, which books what its template
+    // holds and 64 MiB more until it is ready: the hold waits.
     let created = lab
         .client
         .call(&Request::Create {

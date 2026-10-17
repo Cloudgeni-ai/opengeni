@@ -5,11 +5,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use compute_core::{Durability, Input, Level, Priority, SandboxId, State};
+use compute_core::{DiskSpace, Durability, Input, Level, Priority, SandboxId, Size, State};
 use compute_engine::{Engine, EngineError, ErrorKind, Found, VmSpec};
 use futures::StreamExt;
 
+use crate::image::Recovered;
 use crate::layout::{Images, Paths, vm_spec};
+use crate::observe::{Alarm, alarm_event};
 use crate::protocol::{Id, MAX_MEMORY_MIB, SandboxConfig};
 use crate::state::{Change, Disk, Identity, Record, StateError, Stray};
 use crate::step::{DiskWatch, LiveMemory, Reconnected};
@@ -41,7 +43,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 tracing::error!(%id, ordinal = record.ordinal, "ordinal taken twice; leaving the sandbox on disk");
                 self.block(id, format!("ordinal {} is taken twice", record.ordinal));
                 // Its VM may still run.
-                self.unmanaged(id, &record.config);
+                let size = self.retained_size(&record).await;
+                self.unmanaged(id, size);
                 continue;
             }
             // Nothing is done for a sandbox, not even looking at its VM,
@@ -52,7 +55,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Err(error) => {
                     tracing::error!(%id, %error, "record not known to be durable; blocking the sandbox and leaving it alone");
                     self.block(id, format!("record not known to be durable: {error}"));
-                    self.unmanaged(id, &record.config);
+                    let size = self.retained_size(&record).await;
+                    self.unmanaged(id, size);
                     continue;
                 }
             };
@@ -63,13 +67,60 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // and the pool fills again.
             if record.removing || record.ready {
                 // Its VM may still run until the removal ends it.
-                self.unmanaged(id, &record.config);
+                let size = self.retained_size(&record).await;
+                self.unmanaged(id, size);
                 self.remove_recorded(&record, None, Vec::new(), None);
                 continue;
             }
             recovering.push(record);
         }
+        let recovering = self.learn_disk_lengths(recovering).await;
         self.recover_recorded(recovering).await;
+    }
+
+    /// Records the disk length of every sandbox whose record predates
+    /// keeping it, before anything of it is admitted: from its local disk,
+    /// or from the store's copy of one that is only there. One whose length
+    /// cannot be learned is blocked, since today's base image may be
+    /// shorter than its disk.
+    async fn learn_disk_lengths(&mut self, recovering: Vec<Record>) -> Vec<Record> {
+        let mut known = Vec::with_capacity(recovering.len());
+        for record in recovering {
+            if record.allocation.disk_bytes.is_some() {
+                known.push(record);
+                continue;
+            }
+            let id = record.id;
+            let length = match record.disk {
+                Disk::Local => tokio::fs::metadata(Paths::of(&self.root, &record).disk)
+                    .await
+                    .map(|metadata| metadata.len())
+                    .map_err(|error| error.to_string()),
+                Disk::Remote => match self.store.disk_len(id).await {
+                    Ok(Some(length)) => Ok(length),
+                    Ok(None) => Err("the store holds no copy".to_owned()),
+                    Err(error) => Err(error.to_string()),
+                },
+            };
+            let learned = match length {
+                Ok(length) => self
+                    .records
+                    .commit(id, record.fence(), Change::new().disk_bytes(length))
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error),
+            };
+            match learned {
+                Ok(record) => known.push(record),
+                Err(error) => {
+                    tracing::error!(%id, %error, "disk length unknown; blocking the sandbox and leaving it alone");
+                    self.block(id, format!("disk length unknown: {error}"));
+                    let size = self.retained_size(&record).await;
+                    self.unmanaged(id, size);
+                }
+            }
+        }
+        known
     }
 
     /// Tidies the sandboxes whose records are missing, and blocks those
@@ -127,10 +178,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         .map_or(MAX_MEMORY_MIB, |mib| {
                             u32::try_from(mib).map_or(MAX_MEMORY_MIB, |mib| mib.min(MAX_MEMORY_MIB))
                         });
-                    self.input(Input::Unmanaged {
-                        sandbox: stray.id.0,
-                        bytes: u64::from(mib) << 20,
-                    });
+                    let config =
+                        SandboxConfig::new(1, mib, crate::protocol::SleepConfig::default());
+                    // Only a sandbox whose disk is in the store has no VM
+                    // that may hold its local disk open.
+                    let remote = loose
+                        .as_ref()
+                        .and_then(|record| record.get("disk")?.as_str())
+                        == Some("remote");
+                    let disk = Paths::new(&self.root, stray.id).disk;
+                    let size = self.retained_size_of(&config, None, disk, !remote).await;
+                    self.unmanaged(stray.id, size);
                 }
             }
         }
@@ -154,7 +212,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // A VM found, or not known to be gone, keeps its memory even if
             // the sandbox cannot be taken back.
             let live = !matches!(vm, Ok(None));
-            let config = live.then(|| record.config.clone());
+            let size = live.then(|| self.record_size(&record));
             let result = match broken_networks.get(&id.0) {
                 // A VM found running is left as it is: its guest's programs
                 // matter more than its network, and its memory keeps coming.
@@ -170,8 +228,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 Err(error) => {
                     tracing::error!(%id, %error, "could not recover sandbox; blocking it and leaving it on disk");
                     self.block(id, format!("not recovered: {error}"));
-                    if let Some(config) = config {
-                        self.unmanaged(id, &config);
+                    if let Some(size) = size {
+                        self.unmanaged(id, size);
                     }
                 }
             }
@@ -207,15 +265,58 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.blocked.insert(id.0, problem);
     }
 
-    /// Counts the VM of sandbox `id`, configured as `config`, which may
-    /// still run, against the admission budget at its full size while this
-    /// agent does not manage it: until a removal ends it.
-    fn unmanaged(&mut self, id: Id, config: &SandboxConfig) {
-        let bytes = self.size(config).limit;
-        self.input(Input::Unmanaged {
-            sandbox: id.0,
-            bytes,
-        });
+    /// [`Self::retained_size_of`] for the sandbox `record` describes.
+    async fn retained_size(&self, record: &Record) -> Size {
+        let disk = Paths::of(&self.root, record).disk;
+        // A sandbox is recorded as remote only once its VM has ended.
+        let may_be_open = record.disk == Disk::Local;
+        self.retained_size_of(
+            &record.config,
+            record.allocation.disk_bytes,
+            disk,
+            may_be_open,
+        )
+        .await
+    }
+
+    /// [`Self::size`] for a sandbox of `config` whose VM this agent leaves
+    /// running unmanaged, with the disk at `disk` it may still write booked
+    /// by that disk's own length, or the length its record keeps if longer:
+    /// never by today's base image, which may be shorter. A length that
+    /// cannot be read, or a missing disk a VM `may_be_open` on, books more
+    /// than any host holds, so nothing else is admitted to the disk
+    /// meanwhile; see [`crate::disk_growth::retained_disk_len`].
+    async fn retained_size_of(
+        &self,
+        config: &SandboxConfig,
+        recorded: Option<u64>,
+        disk: std::path::PathBuf,
+        may_be_open: bool,
+    ) -> Size {
+        let length = tokio::task::spawn_blocking(move || {
+            crate::disk_growth::retained_disk_len(&disk, may_be_open)
+        })
+        .await
+        .unwrap_or(crate::disk_growth::UNKNOWN_DISK);
+        self.size(config, Some(length.max(recorded.unwrap_or(0))))
+    }
+
+    /// Counts the VM of sandbox `id`, of `size`, which may still run,
+    /// against the admission budget at its full size while this agent does
+    /// not manage it, and books what it may still write to local disk: a
+    /// save an earlier agent may have started, and its guest disk's growth.
+    /// Both last until a removal ends it.
+    fn unmanaged(&mut self, id: Id, size: Size) {
+        self.inputs([
+            Input::Unmanaged {
+                sandbox: id.0,
+                bytes: size.limit,
+            },
+            Input::Writes {
+                key: id.0,
+                disk: DiskSpace::save(size.save.saturating_add(size.disk)),
+            },
+        ]);
     }
 
     /// Looks for every recorded sandbox's VM, taking back those still
@@ -391,7 +492,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 return Err(HostError::Invalid(error));
             }
         };
-        let size = self.size(&record.config);
+        let size = self.record_size(&record);
         let paths = Paths::of(&self.root, &record);
         let spec = vm_spec(&record, &paths, &self.images);
         let found = match found? {
@@ -508,9 +609,10 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .named()
             .map(|(name, lapses)| (name.to_owned(), lapses))
             .collect();
+        let paused_for_memory = holds.paused_for_memory();
         slot.holds = holds;
         let now = self.now();
-        named
+        let mut inputs: Vec<Input> = named
             .into_iter()
             .map(|(name, lapses_ms)| Input::Hold {
                 sandbox: id.0,
@@ -520,7 +622,36 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 // taken, and wakes only if it has since gone to sleep.
                 priority: Priority::Background,
             })
-            .collect()
+            .collect();
+        // It still waits for room after a pause for memory, and wakes by
+        // itself once there is; the core ignores this for one whose VM
+        // still runs.
+        if let Some(bytes) = paused_for_memory {
+            inputs.push(Input::PausedForMemory {
+                sandbox: id.0,
+                bytes,
+            });
+        }
+        inputs
+    }
+
+    /// Keeps whether sandbox `id` waits for room after a pause for memory
+    /// (see [`compute_core::Notice::PausedForMemory`]) in its holds file,
+    /// in the background, so a restart does not lose the wait. If the write
+    /// fails, a restart finds it saved and waiting only for use.
+    pub(super) fn keep_memory_wait(&mut self, id: Id, bytes: Option<u64>) {
+        let Some(slot) = self.slots.get_mut(&id.0) else {
+            return;
+        };
+        if !slot.holds.set_paused_for_memory(bytes) {
+            return;
+        }
+        let write = slot.holds.write(unix_ms_now());
+        tokio::spawn(async move {
+            if let Err(error) = write.await {
+                tracing::warn!(%id, %error, "could not keep that the sandbox waits for memory");
+            }
+        });
     }
 
     /// Where a sandbox whose VM was found still running stands. A paused
@@ -615,9 +746,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                             .await
                             .map_err(|error| HostError::Io(error.to_string()))?;
                     match recovered {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            tracing::warn!(id = %record.id, "recorded memory image is missing; its programs are lost");
+                        Ok(Recovered::Good(generation)) => {
+                            tracing::debug!(id = %record.id, %generation, "memory image checks out");
+                        }
+                        Ok(lost) => {
+                            self.image_lost(record.id, &lost);
                             let lost = Change::new().image(false);
                             self.records.commit(record.id, record.fence(), lost).await?;
                             image = false;
@@ -637,6 +770,27 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     State::new(Level::Saved, Durability::Local, image)
                 })
             }
+        }
+    }
+
+    /// Raises the alarms for a recorded memory image found missing or
+    /// damaged at start: its programs are lost.
+    fn image_lost(&self, id: Id, lost: &Recovered) {
+        let mut alarms = vec![Alarm::CopyLost, Alarm::ProgramsLost];
+        let what = match lost {
+            Recovered::Damaged { why, quarantined } => {
+                alarms.push(Alarm::VerificationFailed);
+                if *quarantined {
+                    alarms.push(Alarm::Quarantined);
+                }
+                format!("the recorded memory image failed its check: {why}")
+            }
+            Recovered::Good(_) | Recovered::Absent => "the recorded memory image is missing".into(),
+        };
+        tracing::warn!(%id, what, "its programs are lost");
+        for alarm in alarms {
+            let event = alarm_event(what.clone()).with("compute.sandbox.id", id.to_string());
+            self.observer.alarm(alarm, event);
         }
     }
 }

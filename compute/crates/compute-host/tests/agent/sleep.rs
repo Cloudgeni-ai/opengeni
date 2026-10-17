@@ -74,7 +74,7 @@ async fn a_save_keeps_the_paused_vm_ready_to_resume() {
 }
 
 /// The memory file of the sandbox's current image, made writable.
-fn current_image_memory(lab: &Lab, sandbox: Id) -> PathBuf {
+pub(super) fn current_image_memory(lab: &Lab, sandbox: Id) -> PathBuf {
     let images = lab.sandbox_dir(sandbox).join("images");
     let newest = std::fs::read_dir(&images)
         .unwrap()

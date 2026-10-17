@@ -14,7 +14,8 @@ Opengeni does not use this yet.
 | Host agent: jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite | on `feat/compute-lab` |
 | Templates and a ready pool for new sandboxes | on `feat/compute-lab` |
 | Admission with requests and limits, memory guarantees for running VMs | on `feat/compute-lab` |
-| Control plane (placement, moves between hosts, autoscaling), observability, Opengeni integration | planned |
+| Observability: wide events, bounded metrics, zero alarms, per-sandbox host pressure, a canary, an OTLP exporter | on `feat/compute-observe` |
+| Control plane (placement, moves between hosts, autoscaling), Opengeni integration | planned |
 
 Decisions and their reasons are in [docs/adr](docs/adr/README.md). Numbers
 below are observations from our lab runs, with workloads and hosts in
@@ -146,8 +147,10 @@ its commands keep running but can no longer be listed, read or waited for.
 A host takes on only the memory it can hold. Each sandbox has a memory
 request, what it is guaranteed while awake (`memory_request_mib`, all of
 `memory_mib` unless set lower), and a limit, its VM size; on huge-page hosts
-the request is always the whole VM, since a guest never gives huge pages
-back. The requests of awake and waking sandboxes, together with what paused
+the request is always the whole VM: a guest that takes memory back from an
+empty huge-page pool stalls until a page is free, so the pool is never
+overcommitted (free page reporting does return freed huge pages, but they
+stay booked). The requests of awake and waking sandboxes, together with what paused
 ones still hold and any use above a request, stay within the host's
 capacity (`--memory-capacity-mib`; by default the huge-page pool, or the
 host's memory less `--memory-headroom-mib`).
@@ -193,16 +196,23 @@ twice, plus 64 MiB), and bookings plus `--disk-reserve-mib` and
 `--disk-reserve-inodes` (default a twentieth of the filesystem) stay within
 what is free. A booking stays until a reading after its save shows what
 the save used, and nothing needing disk is admitted before the first
-reading. A template build books its copies of the base image and kernel
-(in the state filesystem's allocation unit, learned at start) and its
-snapshot like a save before it starts and waits without the room. The
-state root must be on ext4, XFS or btrfs, where that unit bounds what any
-write takes; the agent refuses to start on any other filesystem. Ready
-sandboxes' disk copies and guests' disk growth are not booked. A wake the
-disk cannot book gets `host_full` naming disk or inodes; archived idle
-sandboxes give up their local copies in the background to make room. The
-status shows the disk (available, booked, reserve, free), and a sandbox's
-`failed_step` with the error while a step such as a save keeps failing.
+reading. Everything else that writes is booked the same way, before it can
+write: an awake VM books what its disk may still grow by (its length in
+whole allocation units, less what it holds alone, measured every sample;
+on XFS and btrfs only blocks no template or base image shares count); a
+wake from object storage books its local disk, the memory image its pager
+fills and its device state until the image is whole; a new sandbox's
+first files and a ready sandbox's fill book their copies before they
+start; and a template build books its disk at its full length, its kernel
+copy and its snapshot. Each of these that cannot be booked waits or is
+refused with `host_full` rather than start. The state filesystem's
+allocation unit is learned at start; the state root must be on ext4, XFS
+or btrfs, where that unit bounds what any write takes, and the agent
+refuses to start on any other filesystem. A wake the disk cannot book gets
+`host_full` naming disk or inodes; archived idle sandboxes give up their
+local copies in the background to make room. The status shows the disk
+(available, booked, reserve, free), and a sandbox's `failed_step` with the
+error while a step such as a save keeps failing.
 
 The request also sets the VM's guarantees in its cgroup: `memory.low` while
 it runs (zero while paused, so the kernel takes from idle VMs first; not
@@ -240,10 +250,13 @@ For each shape (processors and memory) the host keeps a template: a guest
 booted once, paused and saved. A new sandbox gets a copy-on-write copy of its
 disk and shares its memory image, so creating one is a restore, not a boot. A
 ready pool keeps clones already restored and paused, so a create is a resume
-([ADR 12](docs/adr/0012-templates-and-ready-pool.md)). A clone is used only
-once its guest has taken its own id, random seed, machine id and hostname. A
-shape unused for a week gives up its template and ready clones until its
-next create.
+([ADR 12](docs/adr/0012-templates-and-ready-pool.md)). Any create of a clone's
+processors and memory takes it, whatever it requests: the clone's VM is given
+the request's `memory.low` and `cpu.weight` before the claim is recorded. A
+clone is used only once its guest has taken its own id, random seed, machine
+id and hostname. A fill books its template's memory footprint and its disk
+copy until it is ready and measured. A shape unused for a week gives up its
+template and ready clones until its next create.
 
 ## Code map
 
@@ -252,6 +265,7 @@ next create.
 | `crates/compute-core` | Pure decisions: levels, sleep policy, each sandbox's state machine, memory pressure. No I/O, clock or randomness. |
 | `crates/compute-engine` | VM operations (boot, pause, resume, compress, snapshot, restore, stop) behind one trait; Firecracker with its jailer, cgroups. |
 | `crates/compute-host` | The agent: API, records, steps, images, archives, network, activity, templates. |
+| `crates/compute-host/src/observe` | What the agent reports: wide events, metrics, the canary and the OTLP/HTTP exporter ([ADR 16](docs/adr/0016-observability.md)). |
 | `crates/compute-pager` | The userfaultfd pager, with a pure, separately tested memory-layout core. |
 | `crates/compute-storage` | Content-addressed chunks, manifests and stores. |
 | `crates/archcheck` | Structure rules from `ARCHITECTURE.toml`, run as `cargo arch`. |
@@ -296,6 +310,16 @@ VMs' -900, so the host's out-of-memory killer takes VMs before the agent
 that would bring them back, yet the agent stays killable inside its own
 unit. A host that compresses paused VMs needs zswap on; the agent refuses
 to start otherwise.
+
+## Observing a host
+
+Every step, request and stream writes one wide event to the agent's log,
+and with `--otlp-endpoint` the agent sends events and metrics to an
+OpenTelemetry collector over OTLP/HTTP with JSON encoding. Metrics never
+carry a sandbox id. Six alarm counters must stay at zero; each occurrence
+also writes an event naming the sandbox. `--canary-every` runs a canary
+that wakes a small sandbox of the host's own through every path. What to
+alert on is in [docs/operations.md](docs/operations.md#observing).
 
 ## Testing
 
@@ -344,9 +368,6 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
 
 - **A control plane**: placement, moving sandboxes between hosts, recovery
   after losing a host, autoscaling ([ADR 15](docs/adr/0015-placement-and-moves-between-hosts.md)).
-- **Observability**: wide events, bounded-cardinality metrics, zero-alarm
-  safety counters and a canary per host, exported as OpenTelemetry
-  ([ADR 16](docs/adr/0016-observability.md)).
 - **The Opengeni integration**.
 - **Comparisons**: an E2B-compatible API and an activations-per-second
   benchmark, to measure this fabric directly against other sandbox systems.

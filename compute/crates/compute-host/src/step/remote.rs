@@ -14,6 +14,7 @@ use super::{
 };
 use crate::image::{Parts, Suspect};
 use crate::layout::{remove_if_present, write_atomic};
+use crate::observe::{Alarm, notes};
 use crate::state::{Change, Disk, unix_ms_now};
 use crate::store::{Archive, FetchInto, FetchedMemory, JailedFile, SavedFiles, SavedImage, Store};
 
@@ -53,11 +54,12 @@ impl<E: Engine, S: Store> Job<E, S> {
                     Ok(()) => Outcome::Done,
                     Err(error) => state_failure(&error),
                 },
-                Ok(false) => failure(&EngineError::new(
-                    ErrorKind::Fatal,
-                    OP,
-                    "memory image is only partly local and the store no longer holds it",
-                )),
+                Ok(false) => {
+                    const LOST: &str =
+                        "memory image is only partly local and the store no longer holds it";
+                    notes::alarm(Alarm::CopyLost, &LOST);
+                    failure(&EngineError::new(ErrorKind::Fatal, OP, LOST))
+                }
                 Err(error) => failure(&error),
             };
         }
@@ -129,16 +131,16 @@ impl<E: Engine, S: Store> Job<E, S> {
         match holds {
             Ok(true) => {}
             Ok(false) => {
+                const KEPT: &str =
+                    "the store does not hold the archived copy; keeping the local one";
                 // The local files may be the only good copy: keep them, and
                 // forget the archive so the next one starts afresh.
+                notes::alarm(Alarm::OnlyCopyKept, &KEPT);
                 if self.record.archived {
+                    notes::alarm(Alarm::CopyLost, &"the store lost the archived copy");
                     let _ = self.commit(Change::new().archived(false)).await;
                 }
-                return failure(&EngineError::new(
-                    ErrorKind::Fatal,
-                    OP,
-                    "the store does not hold the archived copy; keeping the local one",
-                ));
+                return failure(&EngineError::new(ErrorKind::Fatal, OP, KEPT));
             }
             Err(error) => return failure(&error),
         }

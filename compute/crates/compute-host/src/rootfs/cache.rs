@@ -156,6 +156,21 @@ impl Cache {
                 .insert(image);
             tracing::info!(%image, "image fetched from the store");
         }
+        Ok(Self::used(image, path, lock).await)
+    }
+
+    /// The image `image` if the host has it, marked used now; never
+    /// fetches.
+    pub async fn hold(&self, image: ImageId) -> Option<Held> {
+        let lock = self.lock(image).lock_owned().await;
+        if !self.has(image) {
+            return None;
+        }
+        Some(Self::used(image, self.path(image), lock).await)
+    }
+
+    /// Marks the image at `path` used now and holds it with `lock`.
+    async fn used(image: ImageId, path: PathBuf, lock: OwnedMutexGuard<()>) -> Held {
         // Only the retirement clock depends on it.
         let marked = blocking({
             let path = path.clone();
@@ -170,7 +185,7 @@ impl Cache {
         if let Err(error) = marked {
             tracing::warn!(%image, %error, "could not mark an image used");
         }
-        Ok(Held { path, _lock: lock })
+        Held { path, _lock: lock }
     }
 
     /// Removes the images no create used for long, except those in `keep`.

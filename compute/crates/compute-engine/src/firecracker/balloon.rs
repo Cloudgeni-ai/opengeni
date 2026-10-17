@@ -6,7 +6,12 @@
 //! needs the memory takes pages back from the balloon rather than run out.
 //! It also has statistics, the only way its API tells how many pages the
 //! guest actually holds in it: a request to let it go resolves once that
-//! is none, not when the target is set.
+//! is none, not when the target is set. A VM restored from an image booted
+//! without statistics cannot tell, and they cannot be turned on after
+//! boot: its let-go resolves once it has run for as long as one with
+//! statistics may take to report empty ([`EMPTYING_LIMIT`]). A guest's
+//! driver gives pages back as soon as it sees the new target, in batches
+//! of a megabyte, far faster than that.
 //!
 //! A request outlives nothing: once its VM is stopped or dropped, a
 //! request still on its way does nothing and fails, so it never reaches a
@@ -19,7 +24,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, sleep_until};
 
 use super::api::Api;
 use crate::error::{EngineError, ErrorKind};
@@ -29,7 +34,8 @@ use crate::error::{EngineError, ErrorKind};
 const EMPTYING_POLL: Duration = Duration::from_millis(50);
 
 /// How long a guest may take to take back every page of a balloon let go
-/// before the request fails, to be asked again later.
+/// before the request fails, to be asked again later; and how long one
+/// that cannot report it is given before it counts as done.
 const EMPTYING_LIMIT: Duration = Duration::from_secs(10);
 
 /// One VM's balloon.
@@ -47,6 +53,8 @@ struct Inner {
     state: Mutex<State>,
     /// Set once its VM is stopped or dropped; read under `state`.
     ended: AtomicBool,
+    /// [`EMPTYING_LIMIT`], shorter in tests.
+    limit: Duration,
 }
 
 #[derive(Debug)]
@@ -64,6 +72,10 @@ impl Balloon {
     /// its pause, or one an earlier agent ran, keeps that balloon. The
     /// first request sets it either way.
     pub(super) fn unknown(api: &Api, device: bool) -> Self {
+        Self::with_limit(api, device, EMPTYING_LIMIT)
+    }
+
+    fn with_limit(api: &Api, device: bool, limit: Duration) -> Self {
         Self {
             inner: device.then(|| {
                 Arc::new(Inner {
@@ -73,6 +85,7 @@ impl Balloon {
                         paused: false,
                     }),
                     ended: AtomicBool::new(false),
+                    limit,
                 })
             }),
         }
@@ -182,11 +195,13 @@ impl Inner {
     }
 
     /// Waits, within [`EMPTYING_LIMIT`], until the guest holds no page in
-    /// the balloon, as the device reports. Each look is made under `state`,
-    /// so none reaches a later VM, and fails once the VM no longer runs or
-    /// its balloon was set again.
+    /// the balloon, as the device reports. One without statistics counts
+    /// as emptied once that limit has passed with the VM running and the
+    /// balloon still let go. Each look is made under `state`, so none
+    /// reaches a later VM, and fails once the VM no longer runs or its
+    /// balloon was set again.
     async fn emptied(&self) -> Result<(), EngineError> {
-        let deadline = Instant::now() + EMPTYING_LIMIT;
+        let deadline = Instant::now() + self.limit;
         loop {
             let held = {
                 let state = self.state.lock().await;
@@ -200,20 +215,22 @@ impl Inner {
                 }
                 held_pages(&self.api).await?
             };
-            if held == 0 {
-                return Ok(());
+            match (held, Instant::now() >= deadline) {
+                (Some(0), _) | (None, true) => return Ok(()),
+                // Nothing to look at until the limit has passed.
+                (None, false) => sleep_until(deadline).await,
+                (Some(held), true) => {
+                    return Err(EngineError::new(
+                        ErrorKind::Transient,
+                        "balloon",
+                        format!(
+                            "the guest still holds {held} pages in its balloon after {}s",
+                            self.limit.as_secs()
+                        ),
+                    ));
+                }
+                (Some(_), false) => sleep(EMPTYING_POLL).await,
             }
-            if Instant::now() >= deadline {
-                return Err(EngineError::new(
-                    ErrorKind::Transient,
-                    "balloon",
-                    format!(
-                        "the guest still holds {held} pages in its balloon after {}s",
-                        EMPTYING_LIMIT.as_secs()
-                    ),
-                ));
-            }
-            sleep(EMPTYING_POLL).await;
         }
     }
 }
@@ -233,16 +250,31 @@ async fn patch(api: &Api, mib: u32) -> Result<(), EngineError> {
         .map_err(|error| EngineError::caused_by(ErrorKind::Transient, "balloon", error))
 }
 
-/// Pages the guest holds in the balloon now, from the device's statistics.
-/// Fails for a VM booted without them.
-async fn held_pages(api: &Api) -> Result<u64, EngineError> {
-    let body = api
-        .call("GET", "/balloon/statistics", None)
-        .await
-        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, "balloon", error))?;
+/// Pages the guest holds in the balloon now, from the device's statistics;
+/// `None` for a VM booted without them, whose device reports a polling
+/// interval of 0.
+async fn held_pages(api: &Api) -> Result<Option<u64>, EngineError> {
+    let body = match api.call("GET", "/balloon/statistics", None).await {
+        Ok(body) => body,
+        Err(error) => {
+            let config = api.call("GET", "/balloon", None).await.ok();
+            let polling = config
+                .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+                .and_then(|config| config.get("stats_polling_interval_s")?.as_u64());
+            if polling == Some(0) {
+                return Ok(None);
+            }
+            return Err(EngineError::caused_by(
+                ErrorKind::Transient,
+                "balloon",
+                error,
+            ));
+        }
+    };
     serde_json::from_slice::<Value>(&body)
         .ok()
         .and_then(|stats| stats.get("actual_pages")?.as_u64())
+        .map(Some)
         .ok_or_else(|| {
             EngineError::new(
                 ErrorKind::Transient,
@@ -265,10 +297,20 @@ mod tests {
 
     use super::*;
 
-    /// A VMM's API that keeps every request but those for statistics and
-    /// answers them all. Statistics report the pages in `held`, one
-    /// reading each, the last for good; none at all as when disabled.
+    /// A VMM's API that keeps every request but reads and answers them
+    /// all. Statistics report the pages in `held`, one reading each, the
+    /// last for good; none at all as when disabled, when the device's
+    /// configuration reports a polling interval of 0.
     fn device(held: &[u64]) -> (tempfile::TempDir, Api, Arc<Shared<Vec<String>>>) {
+        device_polling(held, u64::from(!held.is_empty()))
+    }
+
+    /// [`device`], its configuration reporting `polling` whatever its
+    /// statistics answer.
+    fn device_polling(
+        held: &[u64],
+        polling: u64,
+    ) -> (tempfile::TempDir, Api, Arc<Shared<Vec<String>>>) {
         let dir = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
         let socket = dir.path().join("api.sock");
         let listener = UnixListener::bind(&socket).unwrap();
@@ -284,6 +326,17 @@ mod tests {
                     continue;
                 }
                 let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                if request.starts_with("GET /balloon ") {
+                    let body = format!(
+                        "{{\"amount_mib\":0,\"deflate_on_oom\":true,\"stats_polling_interval_s\":{polling}}}"
+                    );
+                    let answer = format!(
+                        "HTTP/1.1 200 \r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(answer.as_bytes()).await.unwrap();
+                    continue;
+                }
                 if !request.starts_with("GET /balloon/statistics ") {
                     kept.lock().unwrap().push(request);
                     stream.write_all(b"HTTP/1.1 204 \r\n\r\n").await.unwrap();
@@ -372,15 +425,40 @@ mod tests {
         balloon.set(0).await.unwrap();
     }
 
+    /// A VM booted without statistics cannot tell how much it holds: its
+    /// let-go is done once it has run, let go, for as long as one with
+    /// statistics may take to report empty, and not before.
     #[tokio::test]
-    async fn a_balloon_let_go_without_statistics_is_never_taken_for_done() {
-        // A VM booted without statistics cannot tell how much it holds.
+    async fn a_balloon_let_go_without_statistics_is_done_after_the_limit() {
+        let limit = Duration::from_millis(300);
         let (_dir, api, seen) = device(&[]);
-        let balloon = Balloon::unknown(&api, true);
-        balloon.set(0).await.unwrap_err();
+        let balloon = Balloon::with_limit(&api, true, limit);
+        let started = Instant::now();
+        balloon.set(0).await.unwrap();
+        assert!(started.elapsed() >= limit, "{:?}", started.elapsed());
         assert_eq!(seen.lock().unwrap().len(), 1, "set once");
         // Setting it to take memory needs no statistics.
         balloon.set(1 << 30).await.unwrap();
+
+        // Paused meanwhile, it is not done.
+        let balloon = Balloon::with_limit(&api, true, limit);
+        let waiting = balloon.set(0);
+        let pausing = async {
+            sleep(limit / 3).await;
+            balloon.pausing(async { Ok(()) }).await
+        };
+        let (waited, paused) = tokio::join!(waiting, pausing);
+        paused.unwrap();
+        waited.unwrap_err();
+    }
+
+    /// Statistics that fail to answer on a VM that has them are no reason
+    /// to take a let-go for done.
+    #[tokio::test]
+    async fn statistics_that_fail_on_a_vm_with_them_do_not_confirm_a_let_go() {
+        let (_dir, api, _seen) = device_polling(&[], 1);
+        let balloon = Balloon::with_limit(&api, true, Duration::from_millis(100));
+        balloon.set(0).await.unwrap_err();
     }
 
     #[tokio::test]

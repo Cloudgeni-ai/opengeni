@@ -274,7 +274,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Keeps the ordinals of builds an earlier agent left running taken,
-    /// and their memory counted as unmanaged until a build of the same
+    /// and their memory and what they may write counted as unmanaged until a build of the same
     /// name proves them gone or the next start of the agent ends them.
     /// Such a VM may have stopped part way through coming up, so what it
     /// may still take stays claimed above the high watermark meanwhile,
@@ -292,11 +292,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             let name = self.spare_name();
+            // What it may still write until it is gone: its own disk, as
+            // far as it may grow, and a snapshot of its guest memory.
+            let disk = DiskSpace::save(
+                crate::disk_growth::disk_bound(build.disk_bytes, self.allocation_unit)
+                    .saturating_add(build.bytes.saturating_mul(self.save_copies))
+                    .saturating_add(SAVE_EXTRA),
+            );
             self.inputs([
                 Input::Spare {
                     sandbox: name.0,
                     bytes: build.bytes,
-                    disk: DiskSpace::default(),
+                    disk,
                     filling: true,
                 },
                 Input::Unmanaged {
@@ -326,7 +333,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let disk = pool::build_disk(
             shape,
-            &[&sources.image(shape), &sources.kernel],
+            &sources.image(shape),
+            &sources.kernel,
             self.allocation_unit,
             self.save_copies,
             SAVE_EXTRA,
