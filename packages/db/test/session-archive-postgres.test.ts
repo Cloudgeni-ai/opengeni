@@ -192,21 +192,18 @@ type PlanNode = {
   Plans?: PlanNode[];
 };
 
-/** EXPLAIN ANALYZE as the application role under the session's RLS context. */
+/**
+ * EXPLAIN ANALYZE as the application role under the session's RLS context,
+ * with the planner's own choices: the point is whether the page's bound is an
+ * index condition or a filter applied after the policy.
+ */
 async function explainUnderRls(db: Database, scope: SessionArchiveScope, query: SQL) {
-  const [row] = await withRlsContext(db, scope, async (scoped) => {
-    // Fix the plan shape on a small table; the point is whether the cursor is
-    // an index condition or a filter applied after the policy.
-    await rawRows(
-      scoped,
-      drizzleSql`select set_config('enable_seqscan', 'off', true),
-        set_config('enable_bitmapscan', 'off', true)`,
-    );
-    return await rawRows<{ "QUERY PLAN": [{ Plan: PlanNode }] }>(
+  const [row] = await withRlsContext(db, scope, async (scoped) =>
+    rawRows<{ "QUERY PLAN": [{ Plan: PlanNode }] }>(
       scoped,
       drizzleSql`explain (analyze, format json) ${query}`,
-    );
-  });
+    ),
+  );
   const nodes: PlanNode[] = [];
   const walk = (node: PlanNode) => {
     nodes.push(node);
@@ -507,31 +504,59 @@ describe("idle-session archive lifecycle", () => {
 });
 
 describe("idle-session archive export reads", () => {
-  test("keyset cursors compare only with leakproof operators; numeric-ordered tables page by id", async () => {
+  test("every export table pages by a unique id or seeks a single leakproof key", async () => {
+    // Unique, non-partial btree indexes on a table, as ordered key column names.
+    const uniqueIndexes = async (table: string) =>
+      (
+        await shared.admin<{ columns: string[] }[]>`select array(
+            select a.attname::text from unnest(i.indkey) with ordinality k(attnum, ord)
+            join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
+            where k.ord <= i.indnkeyatts order by k.ord) as columns
+          from pg_index i
+          where i.indrelid = ${table}::regclass and i.indisunique and i.indpred is null`
+      ).map((row) => row.columns.join(","));
     for (const spec of SESSION_ARCHIVE_EXPORT_TABLES) {
       // Read through its own archive-only definer.
       if (spec.table === "preference_registry_snapshots") continue;
-      if (spec.pageByIdList) {
-        expect(spec.keys.map((key) => key.cast)).toContain("numeric");
+      if (spec.idColumn) {
+        // Each id page is a seek on the id's own unique index.
+        const [column] = await shared.admin<
+          { type: string }[]
+        >`select format_type(atttypid, atttypmod) as type
+          from pg_attribute where attrelid = ${spec.table}::regclass and attname = ${spec.idColumn}`;
+        expect({ table: spec.table, type: column?.type }).toEqual({
+          table: spec.table,
+          type: "uuid",
+        });
+        expect({ table: spec.table, unique: await uniqueIndexes(spec.table) }).toEqual({
+          table: spec.table,
+          unique: expect.arrayContaining([spec.idColumn]),
+        });
         continue;
       }
-      for (const key of spec.keys) {
-        const operators = await shared.admin`select o.oprname, p.proleakproof
+      // A keyset cursor only seeks on one leakproof column, so a keyset table has
+      // exactly one key, unique within the session.
+      expect({ table: spec.table, keys: spec.keys.length }).toEqual({ table: spec.table, keys: 1 });
+      const key = spec.keys[0]!;
+      expect({ table: spec.table, unique: await uniqueIndexes(spec.table) }).toEqual({
+        table: spec.table,
+        unique: expect.arrayContaining([`workspace_id,session_id,${key.column}`]),
+      });
+      const operators = await shared.admin`select o.oprname, p.proleakproof
           from pg_operator o join pg_proc p on p.oid = o.oprcode
           where o.oprname in ('=', '>', '>=')
             and o.oprleft = ${key.cast}::regtype and o.oprright = ${key.cast}::regtype`;
-        expect({ table: spec.table, key: key.column, operators: operators.length }).toEqual({
+      expect({ table: spec.table, key: key.column, operators: operators.length }).toEqual({
+        table: spec.table,
+        key: key.column,
+        operators: 3,
+      });
+      for (const operator of operators) {
+        expect({ table: spec.table, key: key.column, leakproof: operator.proleakproof }).toEqual({
           table: spec.table,
           key: key.column,
-          operators: 3,
+          leakproof: true,
         });
-        for (const operator of operators) {
-          expect({ table: spec.table, key: key.column, leakproof: operator.proleakproof }).toEqual({
-            table: spec.table,
-            key: key.column,
-            leakproof: true,
-          });
-        }
       }
     }
   });
@@ -557,9 +582,29 @@ describe("idle-session archive export reads", () => {
         from generate_series(1, ${rows}) n,
           (select max(sequence) as base from session_events
             where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) b`;
+      // Copies of the session's turn at later positions, so turns (ordered by
+      // two keys) also need many pages.
+      const turnColumns = (
+        await tx<{ name: string }[]>`select column_name as name from information_schema.columns
+          where table_schema = current_schema() and table_name = 'session_turns'
+            and column_name not in ('id', 'position') and is_generated = 'NEVER'
+          order by ordinal_position`
+      ).map((row) => tx(row.name));
+      const columnList = turnColumns.reduce(
+        (list, column) => tx`${list}, ${column}`,
+        tx`id, position`,
+      );
+      const copyList = turnColumns.reduce(
+        (list, column) => tx`${list}, ${column}`,
+        tx`gen_random_uuid(), position + n`,
+      );
+      await tx`insert into session_turns (${columnList})
+        select ${copyList} from session_turns, generate_series(1, ${rows}) n
+        where id = ${turn!.id}::uuid`;
     });
     await shared.admin`analyze session_history_items`;
     await shared.admin`analyze session_events`;
+    await shared.admin`analyze session_turns`;
     const exporter = createDb(shared.appUrl);
     try {
       const history = exportSpec("session_history_items");
@@ -595,6 +640,30 @@ describe("idle-session archive export reads", () => {
       );
       expect(idPage.indexConds.some((cond) => cond.includes("id = ANY"))).toBe(true);
       expect(idPage.rowsRemoved).toBe(0);
+
+      // Turns are ordered by (position, id): a two-key cursor would only bound
+      // its first key, so they also page by id, in order, each page a seek.
+      const turns = exportSpec("session_turns");
+      const turnPages = await exportAll(exporter.db, scope, turns, 100);
+      const turnReference = await shared.admin<{ id: string }[]>`select id::text as id
+        from session_turns
+        where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}
+        order by position, id`;
+      expect(turnReference.length).toBeGreaterThan(rows);
+      expect(turnPages.flat().map((row) => (JSON.parse(row) as { id: string }).id)).toEqual(
+        turnReference.map((row) => row.id),
+      );
+      const turnPage = await explainUnderRls(
+        exporter.db,
+        scope,
+        sessionArchiveExportSql.idPage(
+          scope,
+          turns,
+          turnReference.slice(-100).map((row) => row.id),
+        ),
+      );
+      expect(turnPage.indexConds.some((cond) => cond.includes("id = ANY"))).toBe(true);
+      expect(turnPage.rowsRemoved).toBe(0);
 
       // An integer keyset cursor is an index condition under the policy.
       const events = exportSpec("session_events");

@@ -127,10 +127,12 @@ all of these hold for the idle period:
      of rows exports in linear time. Under a policy PostgreSQL only uses
      leakproof comparisons as index conditions; numeric and row comparisons
      are not leakproof and become a filter after the policy, which re-reads
-     every earlier row. Keyset cursors therefore compare integer, uuid, text
-     and timestamptz keys column by column, and model history (ordered by a
-     numeric position) reads its ordered row ids once and then fetches each
-     page by primary key.
+     every earlier row, and a multi-column cursor only bounds its first column.
+     So tables ordered by several keys or by a numeric key (turns, attempts,
+     model history, code-mode calls and the like) read their ordered row ids
+     once and then fetch each page by primary key. Events, machine inputs and
+     content blobs page by one integer or text key that leads a unique
+     `(workspace_id, session_id, key)` index.
    - `transcript.jsonl.zst`: a header, then the readable timeline as public
      `SessionEvent` objects (`{"event": ...}`), then a footer. This is the
      stable, documented readable section and does not require Opengeni's

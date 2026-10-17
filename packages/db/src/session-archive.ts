@@ -63,39 +63,47 @@ export type SessionArchiveExportTable = {
   /** Bundle order; unique per session. */
   keys: KeyColumn[];
   /**
-   * Page by a prefetched list of row ids instead of a keyset cursor. For tables
-   * ordered by a numeric key: PostgreSQL's numeric comparisons are not
-   * leakproof, so under row-level security a numeric cursor is applied after the
-   * policy and every page re-filters all earlier rows.
+   * A uuid column with its own unique index (the primary key). The table is
+   * paged by a prefetched, ordered list of these ids instead of a keyset cursor.
+   * Tables without one page by keyset on a single key that leads a unique
+   * (workspace_id, session_id, key) index.
    */
-  pageByIdList?: true;
+  idColumn?: string;
 };
 
 /**
- * Everything the bundle carries, in bundle order. Export reads run under
- * row-level security, where PostgreSQL only evaluates leakproof comparisons
- * before the policy or as index conditions. Keyset cursors therefore use only
- * integer, uuid, text and timestamptz keys, compared column by column (a row
- * comparison is not leakproof either), so a page seeks instead of re-filtering
- * the rows before it. Model history is ordered by a numeric position and pages
- * by id list instead; see readSessionArchiveTablePages.
+ * Everything the bundle carries, in bundle order, read so that every page is an
+ * index seek and a very long session exports in linear time.
+ *
+ * Export reads run under row-level security, where PostgreSQL only uses
+ * leakproof comparisons as index conditions; numeric and row comparisons are
+ * not leakproof and become a filter after the policy that re-reads every
+ * earlier row. A multi-column cursor also only bounds its first column. So
+ * tables ordered by several keys, or by a numeric key, page by id list (see
+ * readSessionArchiveTablePages), and keyset tables use one integer, uuid, text
+ * or timestamptz key that an index on (workspace_id, session_id, key) seeks.
  */
 export const SESSION_ARCHIVE_EXPORT_TABLES: readonly SessionArchiveExportTable[] = [
-  { table: "session_turns", keys: [{ column: "position", cast: "bigint" }, uuidKey("id")] },
+  {
+    table: "session_turns",
+    keys: [{ column: "position", cast: "bigint" }, uuidKey("id")],
+    idColumn: "id",
+  },
   {
     table: "session_turn_attempts",
     keys: [{ column: "turn_id", cast: "uuid" }, uuidKey("id")],
+    idColumn: "id",
   },
-  { table: "session_goals", keys: [uuidKey("id")] },
-  { table: "session_goal_revisions", keys: [uuidKey("id")] },
+  { table: "session_goals", keys: [uuidKey("id")], idColumn: "id" },
+  { table: "session_goal_revisions", keys: [uuidKey("id")], idColumn: "id" },
   { table: "session_events", keys: [{ column: "sequence", cast: "integer" }] },
   {
     table: "session_history_items",
     keys: [{ column: "position", cast: "numeric" }, uuidKey("id")],
-    pageByIdList: true,
+    idColumn: "id",
   },
   { table: "session_system_updates", keys: [{ column: "dedupe_key", cast: "text" }] },
-  { table: "session_realtime_entries", keys: [uuidKey("id")] },
+  { table: "session_realtime_entries", keys: [uuidKey("id")], idColumn: "id" },
   {
     table: "session_attempt_codemode_calls",
     keys: [
@@ -103,20 +111,25 @@ export const SESSION_ARCHIVE_EXPORT_TABLES: readonly SessionArchiveExportTable[]
       { column: "created_at", cast: "timestamptz" },
       uuidKey("operation_id"),
     ],
+    idColumn: "operation_id",
   },
   {
     table: "session_attempt_tool_catalogs",
     keys: [{ column: "turn_id", cast: "uuid" }, uuidKey("attempt_id")],
+    idColumn: "attempt_id",
   },
   {
     table: "session_attempt_model_context_snapshots",
     keys: [{ column: "captured_at", cast: "timestamptz" }, uuidKey("attempt_id")],
+    idColumn: "attempt_id",
   },
   { table: "session_content_blobs", keys: [{ column: "digest", cast: "text" }] },
   {
     table: "session_pending_tool_calls",
     keys: [{ column: "turn_id", cast: "uuid" }, uuidKey("id")],
+    idColumn: "id",
   },
+  // Read through its own archive-only definer (visible only to its initiator).
   { table: "preference_registry_snapshots", keys: [uuidKey("id")] },
 ];
 
@@ -352,8 +365,14 @@ function keyColumns(spec: SessionArchiveExportTable): SQL[] {
 }
 
 function sessionRows(scope: SessionArchiveScope): SQL {
-  return sql`t.workspace_id = ${scope.workspaceId}::uuid
+  return sql`t.account_id = ${scope.accountId}::uuid
+    and t.workspace_id = ${scope.workspaceId}::uuid
     and t.session_id = ${scope.sessionId}::uuid`;
+}
+
+function idColumnOf(spec: SessionArchiveExportTable): SQL {
+  if (!spec.idColumn) throw new Error(`session archive export: ${spec.table} has no id column`);
+  return sql`t.${sql.identifier(spec.idColumn)}`;
 }
 
 /**
@@ -386,7 +405,7 @@ export const sessionArchiveExportSql = {
   },
   /** Every row id of the session's rows, in bundle order. */
   idList(scope: SessionArchiveScope, spec: SessionArchiveExportTable): SQL {
-    return sql`select t.id::text as id
+    return sql`select ${idColumnOf(spec)}::text as id
       from ${sql.identifier(spec.table)} t
       where ${sessionRows(scope)}
       order by ${sql.join(keyColumns(spec), sql`, `)}`;
@@ -395,7 +414,7 @@ export const sessionArchiveExportSql = {
   idPage(scope: SessionArchiveScope, spec: SessionArchiveExportTable, ids: string[]): SQL {
     return sql`select row_to_json(t)::text as row
       from ${sql.identifier(spec.table)} t
-      where t.id = any(${`{${ids.join(",")}}`}::uuid[]) and ${sessionRows(scope)}
+      where ${idColumnOf(spec)} = any(${`{${ids.join(",")}}`}::uuid[]) and ${sessionRows(scope)}
       order by ${sql.join(keyColumns(spec), sql`, `)}`;
   },
 };
@@ -420,7 +439,7 @@ function keysetAfter(keys: SQL[], values: SQL[]): SQL {
  * Every row of one export table, as exact JSON text in bundle order, in pages
  * of at most `pageRows`. Each page is a bounded, indexed read, so exporting a
  * session with hundreds of thousands of rows stays linear. Tables marked
- * `pageByIdList` first read their ordered row ids in one pass, then fetch each
+ * with an `idColumn` first read their ordered ids in one pass, then fetch each
  * page by primary key; the session is frozen while archiving, and a row that
  * disappears in between fails the export rather than shortening the bundle.
  */
@@ -430,7 +449,7 @@ export async function* readSessionArchiveTablePages(
   spec: SessionArchiveExportTable,
   input: { pageRows: number },
 ): AsyncGenerator<string[]> {
-  if (!spec.pageByIdList) {
+  if (!spec.idColumn) {
     let after: string[] | null = null;
     for (;;) {
       const page = await readSessionArchiveRows(db, scope, spec, {
