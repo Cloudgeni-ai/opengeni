@@ -1655,6 +1655,9 @@ describe("scheduled task personal MCP authority", () => {
         ('0813_preserve_accepted_learning_scope.sql'),
         ('0819_explicit_workspace_learning_destination.sql'),
         ('0824_explicit_learning_destination_symmetry.sql')`;
+      // 0832 also extends the producer fence (generated default tool policy).
+      await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
+        ('0832_schedule_defaults_and_turn_notifications.sql')`;
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
         ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql'),('0582_scheduled_setup_policy_identity.sql'),('0717_subscription_authority_fences.sql'),('0747_subscription_core_xai_cutover.sql'), ('0748_subscription_core_claude_cutover.sql'), ('0751_subscription_core_legacy_retirement.sql'), ('0746_subscription_failover_readiness_and_request_fence.sql'), ('0749_subscription_shared_personal_choice.sql'), ('0750_subscription_waiter_candidates.sql')`;
       // Allowance policy/attribution compiles against the same withheld
