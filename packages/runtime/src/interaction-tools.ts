@@ -1341,13 +1341,11 @@ export function createInteractionAttemptToolDefinitions(
         input.workspaceId,
         value.browserSessionId,
       );
+      // Downloads kept from before a suspension keep the controller generation
+      // that fetched them, so only the browser binding must match.
       if (
         response.browserSessionId !== value.browserSessionId ||
-        response.downloads.some(
-          (download) =>
-            download.browserSessionId !== value.browserSessionId ||
-            download.controllerGeneration !== response.controllerGeneration,
-        )
+        response.downloads.some((download) => download.browserSessionId !== value.browserSessionId)
       ) {
         throw new Error("Browser downloads belong to another session binding");
       }

@@ -101,6 +101,7 @@ export * from "./session-authorization";
 
 // Billing / usage-limit admission (checkLimit / requireLimit / recordWorkspaceUsage).
 export * from "./billing/limits";
+export * from "./domain/browser-retained-downloads";
 export * from "./billing/agent-run-admission";
 export * from "./billing/model-usage-settlement";
 export * from "./billing/model-call-admission";
