@@ -6160,8 +6160,8 @@ function decodeAgentTopologyCursor(value: string): AgentTopologyCursorEnvelope {
     if (
       !/^(?:0|[1-9]\d*)$/.test(parsed.cursor.sortRevision) ||
       !/^(?:0|[1-9]\d*)$/.test(parsed.cursor.snapshotRevision) ||
-      BigInt(parsed.cursor.sortRevision) > 9_223_372_036_854_775_807n ||
-      BigInt(parsed.cursor.snapshotRevision) > 9_223_372_036_854_775_807n ||
+      BigInt(parsed.cursor.sortRevision) > (1n << 65n) - 1n ||
+      BigInt(parsed.cursor.snapshotRevision) > (1n << 65n) - 1n ||
       Number.isNaN(Date.parse(parsed.cursor.sortAt)) ||
       Number.isNaN(Date.parse(parsed.cursor.snapshotAt))
     ) {

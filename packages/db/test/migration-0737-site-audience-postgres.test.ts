@@ -33,7 +33,12 @@ beforeAll(async () => {
   database = await acquireOwnerMigratedTestDatabase("site-audience-migration");
   if (!database) throw new Error("Real PostgreSQL is required");
   const heldBack = (await readdir(join(import.meta.dir, "../drizzle")))
-    .filter((file) => file.endsWith(".sql") && file >= MIGRATION)
+    // Current session writers need the real additive xid trigger, independently
+    // of the Site migration whose historical behavior this fixture exercises.
+    .filter(
+      (file) =>
+        file.endsWith(".sql") && file >= MIGRATION && file !== "0834_session_activity_xid.sql",
+    )
     .sort();
   const staging = postgres(database.ownerUrl, {
     max: 1,

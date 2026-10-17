@@ -2326,6 +2326,9 @@ export const RUNTIME_READ_ONLY_TABLES = [
 ] as const;
 
 /** Existing runtime authorities that may be observed and advanced, never created or deleted. */
+// Rolling compatibility only: old replicas and legacy SQL lifecycle routines
+// still finalize this counter. New writers use sessions.activity_xid. Keep its
+// exact FORCE-RLS/grant posture until a later contract release retires it.
 export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions"] as const;
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */

@@ -90,6 +90,12 @@ Hosted tool-call `status` survives replay; other annotations are stripped
 Postgres commits precede notifications. NATS carries fanout, invalidations,
 request/reply and machine streams, never commit evidence.
 
+Session activity uses row-stamped transaction IDs rather than a shared workspace
+counter. Incremental discovery uses same-snapshot xmin watermarks for at-least-once
+monitoring; list pagination is a live xid keyset, not a retained historical view.
+The [activity protocol](session-activity-xid.md) covers rollout compatibility,
+decimal token namespaces, relevance ceilings and the later gate-object contract.
+
 `session_event_cursors` transactionally verifies appends/monotonic sequencing/public
 `lastSequence`; `sessions.last_sequence` is compatibility-only. Semantic writers
 lock sessions for atomic state/events. Exact-attempt raw batches fence attempts,

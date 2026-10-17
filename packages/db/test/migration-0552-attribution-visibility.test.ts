@@ -34,6 +34,7 @@ const repair = "0552_usage_allowances.sql";
 const currentWriterMigrations = [
   "0559_session_agent_config.sql",
   "0598_claude_subscription_account_pools.sql",
+  "0834_session_activity_xid.sql",
 ];
 const visibilityPlanningMigration = "0591_insights_aggregate_query_plans.sql";
 const directory = fileURLToPath(new URL("../drizzle/", import.meta.url));

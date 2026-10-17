@@ -254,7 +254,7 @@ test("native member and guest cancellation keeps the actor, cancels descendants,
     expect(wake!.count).toBeGreaterThan(0);
     const [activity] = await shared.admin<{ pending: number; stamped: number }[]>`
       select count(*) filter(where activity_revision_pending_xid is not null)::int as pending,
-        count(*) filter(where activity_revision>0)::int as stamped from sessions
+        count(*) filter(where activity_xid>'0'::xid8)::int as stamped from sessions
       where id in (${c.sessionId},${c.childId})`;
     expect(activity).toEqual({ pending: 0, stamped: 2 });
   }
