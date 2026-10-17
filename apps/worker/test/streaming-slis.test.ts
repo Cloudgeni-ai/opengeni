@@ -368,15 +368,22 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
 describe("provider request lifecycle diagnostics", () => {
   test("labels Codex request phases with how the request was carried", async () => {
     const observability = worker();
-    expect(codexRequestTransportLabel({ kind: "websocket", connection: "new" })).toBe(
-      "websocket_new",
-    );
+    expect(
+      codexRequestTransportLabel({ kind: "websocket", connection: "new", input: "full" }),
+    ).toBe("websocket_new");
+    expect(
+      codexRequestTransportLabel({ kind: "websocket", connection: "reused", input: "incremental" }),
+    ).toBe("websocket_incremental");
     expect(codexRequestTransportLabel({ kind: "http" })).toBe("http");
     recordModelRequestPhase(observability, {
       provider: "codex-subscription",
       phase: "first_byte",
       durationSeconds: 0.2,
-      transport: codexRequestTransportLabel({ kind: "websocket", connection: "reused" }),
+      transport: codexRequestTransportLabel({
+        kind: "websocket",
+        connection: "reused",
+        input: "full",
+      }),
     });
     recordModelRequestPhase(observability, {
       provider: "codex-subscription",

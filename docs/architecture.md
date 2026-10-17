@@ -1302,6 +1302,14 @@ Managed 1Password creation preflights canonical link policy without retaining
 trial rows or holding DB locks over provider I/O; post-create failures retain
 the upstream identity for Link/Refresh recovery, never destructive compensation.
 
+Persistent Responses connections share `packages/network/src/responses-websocket.ts`:
+one conversation lifecycle, continuation fingerprints and transport diagnostics for
+Codex, OpenAI API and Azure. Providers supply endpoint/authentication and framing;
+providers without socket support retain HTTP keep-alive. The durable worker owns
+the step retry budget, with its last retry reserved for HTTP. Turn-only HTTP
+selection survives recovery in turn metadata and never carries into a new turn.
+The transport does not replay partial streams or bypass request custody.
+
 Canonical: [`model-providers.md`](model-providers.md),
 [`mcp-surfaces.md`](mcp-surfaces.md),
 [`session-mcp-servers.md`](session-mcp-servers.md), and
@@ -1381,11 +1389,14 @@ Insights retains private/deleted/unmatched amounts. Details require actor
 visibility and canonical selected-key/explicit-permission ceilings. Mask before
 identity filters; hide session/Personal facets. Unknowns stay unknown; allocations
 conserve totals. Unified GET usage/calls use `@opengeni/contracts/insights-usage`;
-the [checkpoint](insights-raw-usage-api.md) documents gates, residuals, privacy and
-interim performance. Its bounded 60-second successful-response cache reauthorizes
+the [DB API](insights-raw-usage-api.md) documents gates, residuals, privacy and
+hourly rollups and online backfill. Model-fact deltas maintain owner-only UTC-hour
+aggregates; readers use exact raw predicates only at ragged edges and keep the
+credit ledger independent. Its bounded 60-second successful-response cache reauthorizes
 every hit and fences live permissions/visibility; normal statement cancellation
 returns an actionable range-too-large error rather than a hung request.
-Canonical: `packages/db/src/insights-usage-bundle.ts`,
+Canonical unified reader: `packages/db/src/insights-unified.ts`. Legacy bundles:
+`packages/db/src/insights-usage-bundle.ts`,
 `packages/db/src/insights-model-bundle.ts`,
 `packages/core/src/domain/insights-usage.ts`, and
 `apps/api/src/routes/insights-usage.ts`.

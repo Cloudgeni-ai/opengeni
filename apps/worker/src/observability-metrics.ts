@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ResponsesTransportDiagnostic } from "@opengeni/network/responses-websocket";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
 import {
   BundledSkillId,
@@ -2197,16 +2198,25 @@ const MODEL_REQUEST_PHASE_BUCKETS = [
  */
 /**
  * How a model request reached its provider, where the provider has more than
- * one transport (Codex: a new or reused Responses WebSocket, or HTTP). Empty
- * for providers with a single transport.
+ * one transport (Codex: a new or reused Responses WebSocket, a reused one
+ * continuing the previous response with only new input, or HTTP). Empty for
+ * providers with a single transport.
  */
-export type ModelRequestTransportLabel = "" | "websocket_new" | "websocket_reused" | "http";
+export type ModelRequestTransportLabel =
+  | ""
+  | "websocket_new"
+  | "websocket_reused"
+  | "websocket_incremental"
+  | "http";
 
 /** The bounded metric label for how a Codex request was carried. */
 export function codexRequestTransportLabel(
-  transport: { kind: "websocket"; connection: "new" | "reused" } | { kind: "http" },
+  transport:
+    | { kind: "websocket"; connection: "new" | "reused"; input: "full" | "incremental" }
+    | { kind: "http" },
 ): ModelRequestTransportLabel {
   if (transport.kind === "http") return "http";
+  if (transport.input === "incremental") return "websocket_incremental";
   return transport.connection === "reused" ? "websocket_reused" : "websocket_new";
 }
 
@@ -2235,6 +2245,64 @@ export function recordModelRequestPhase(
     labels: { provider: input.provider, phase: input.phase, transport },
     value: Math.max(0, input.durationSeconds),
   });
+}
+
+/** One bounded metric family shared by every persistent Responses provider. */
+export function recordResponsesTransportDiagnostic(
+  observability: Observability,
+  provider: string,
+  event: ResponsesTransportDiagnostic,
+): void {
+  const labels = {
+    provider,
+    phase: event.phase,
+    position: event.position,
+    transport: codexRequestTransportLabel(event.transport),
+  };
+  observability.observeHistogram({
+    name: "opengeni_model_transport_phase_seconds",
+    help: "Persistent model transport phase duration, including final-prefix startup overlap.",
+    buckets: MODEL_REQUEST_PHASE_BUCKETS,
+    labels,
+    value: Math.max(0, event.durationMs / 1000),
+  });
+  if (event.phase === "terminal") {
+    observability.incrementCounter({
+      name: "opengeni_model_transport_requests_total",
+      help: "Persistent model transport request outcomes.",
+      labels: {
+        ...labels,
+        outcome: event.outcome ?? "completed",
+        reason: event.transport.kind === "http" ? event.transport.reason : "",
+      },
+    });
+    if (
+      event.promptTokens !== undefined &&
+      event.promptTokens > 0 &&
+      event.cachedTokens !== undefined
+    ) {
+      observability.observeHistogram({
+        name: "opengeni_model_transport_cache_ratio",
+        help: "Provider-reported cache ratio on completed persistent requests, first versus later in a turn.",
+        labels: { provider, position: event.position },
+        buckets: MODEL_CACHE_HIT_RATIO_BUCKETS,
+        value: Math.min(1, event.cachedTokens / event.promptTokens),
+      });
+    }
+  }
+  if (event.inputBytes !== undefined && event.fullInputBytes !== undefined) {
+    for (const [kind, value] of [
+      ["wire", event.inputBytes],
+      ["full", event.fullInputBytes],
+    ] as const) {
+      observability.incrementCounter({
+        name: "opengeni_model_transport_input_bytes_total",
+        help: "Wire and equivalent full request bytes for persistent model transport.",
+        labels: { provider, kind },
+        amount: value,
+      });
+    }
+  }
 }
 
 export type TurnStartupPhase =

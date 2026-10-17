@@ -50,7 +50,16 @@ const migrationName = "0604_insights_raw_usage_api.sql";
 // 0794 rewrites the two scoped readers introduced by 0604 and checks the
 // complete nine-reader family. Defer it while those prerequisites are absent,
 // then replay both in migration order without weakening that source contract.
-const deferredMigrations = [migrationName, "0794_site_ai_insights.sql"];
+const deferredMigrations = [
+  migrationName,
+  "0794_site_ai_insights.sql",
+  "0815_insights_usage_hourly.sql",
+  "0816_insights_usage_hourly_queue.sql",
+  "0817_insights_usage_hourly_backfill.sql",
+  "0818_insights_usage_hourly_reader.sql",
+];
+let rawInputDefinition: string;
+let rawScopedDefinition: string;
 const stagingRevision = "2a5ab6f512a05bf28afce38ac4259dea861d3669";
 const servingCompatibleRevision = "f893cb5a4f226b8568bcd3078b48c8c573e86b92";
 const preMigrationRevision = "a15e7a5f4d7322903b614992a09973ebab268721";
@@ -216,7 +225,43 @@ beforeAll(async () => {
       baselineViolations.set(revision, { current, old, restored });
     });
   }
-  await fixture.admin`delete from schema_migrations where name in ${fixture.admin(deferredMigrations)}`;
+  await fixture.admin`delete from schema_migrations where name in ${fixture.admin(deferredMigrations.slice(0, 2))}`;
+  await migrate(fixture.ownerUrl, undefined, {
+    applicationDatabaseRoles: ["opengeni_app"],
+    preinstalledVector: true,
+  });
+  const [definitions] = await fixture.admin`select
+    pg_get_functiondef('opengeni_private.insights_raw_amount_inputs(uuid,uuid,timestamptz,timestamptz)'::regprocedure) as input,
+    pg_get_functiondef('opengeni_private.insights_scoped_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean)'::regprocedure) as scoped`;
+  rawInputDefinition = definitions!.input;
+  rawScopedDefinition = definitions!.scoped;
+  // This historical hour disappears between trigger installation and queue
+  // discovery. Its provisional negative delta must not survive activation.
+  await fixture.admin`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,billing_path,occurred_at)
+    values(${accountId},${workspaceId},${sessionId},gen_random_uuid(),'deleted-during-install','install-gap','responses','fixture','external','2026-08-01T02:00:00Z')`;
+  await fixture.admin`delete from schema_migrations where name=${deferredMigrations[2]!}`;
+  await migrate(fixture.ownerUrl, undefined, {
+    applicationDatabaseRoles: ["opengeni_app"],
+    preinstalledVector: true,
+  });
+  await fixture.admin`delete from model_call_facts where workspace_id=${workspaceId} and source_key='deleted-during-install'`;
+  const [partial] =
+    await fixture.admin`select calls from opengeni_private.insights_usage_hourly_rollups
+    where workspace_id=${workspaceId} and provider='install-gap'`;
+  expect(partial!.calls).toBe("-1");
+  await fixture.admin`insert into opengeni_private.insights_usage_hourly_backfill(account_id,workspace_id,hour)
+    values(${accountId},${workspaceId},'2026-08-01T02:00:00Z')`;
+  const activationSource = await Bun.file(
+    new URL("../drizzle/0818_insights_usage_hourly_reader.sql", import.meta.url),
+  ).text();
+  await expect((async () => await fixture.admin.unsafe(activationSource))()).rejects.toMatchObject({
+    code: "55000",
+  });
+  const [stillRaw] =
+    await fixture.admin`select pg_get_functiondef('opengeni_private.insights_raw_amount_inputs(uuid,uuid,timestamptz,timestamptz)'::regprocedure) body`;
+  expect(stillRaw!.body).toBe(rawInputDefinition);
+  expect((await usage({ range: "month" })).totals.calls).toBe(6);
+  await fixture.admin`delete from schema_migrations where name in ${fixture.admin(deferredMigrations.slice(3))}`;
   await migrate(fixture.ownerUrl, undefined, {
     applicationDatabaseRoles: ["opengeni_app"],
     preinstalledVector: true,
@@ -895,4 +940,241 @@ test("a fact keeps the first measured timing, and a replay only fills what was u
   expect(await read("timing-b")).toEqual([null, null, null, null]);
   await actor(() => recordModelCallFact(client.db, { ...base, sourceKey: "timing-b", timing }));
   expect(await read("timing-b")).toEqual([8, 250, 700, 1_900]);
+});
+
+test("hourly reader is an exact raw-response oracle across ranges, groupings, filters and privacy ceilings", async () => {
+  const projectId = crypto.randomUUID(),
+    scheduleId = crypto.randomUUID();
+  // Catalog metadata is fixture setup, not a schedule execution. Facts below
+  // still run through the ordinary hourly maintenance trigger.
+  await fixture.admin.begin(async (tx) => {
+    await tx`set local session_replication_role=replica`;
+    await tx`insert into channels(id,account_id,workspace_id,name) values(${projectId},${accountId},${workspaceId},'Oracle project')`;
+    await tx`update sessions set channel_id=${projectId} where id=${sessionId}`;
+    await tx`insert into scheduled_tasks(id,account_id,workspace_id,name,schedule,temporal_schedule_id,agent_config,execution_digest)
+      values(${scheduleId},${accountId},${workspaceId},'Oracle schedule','{"type":"manual"}',${`oracle-${scheduleId}`},
+        '{"prompt":"Fixture"}',repeat('0',64))`;
+  });
+  const personKey = (await usage({ range: "month" })).facets.people.find(
+    (person) => person.you,
+  )!.key;
+  // Full hours, both ragged edges (including the prior window), microseconds,
+  // repeated groups, a future fact in the same hour, and all payer classes.
+  await fixture.admin`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,
+    provider,provider_api,model,billing_path,input_tokens,output_tokens,cached_tokens,cache_write_tokens,total_tokens,
+    estimated_provider_cost_micros,list_uncached_input_cost_micros,list_cache_read_cost_micros,
+    list_cache_write_cost_micros,list_output_cost_micros,list_cost_is_approx,occurred_at,recorded_at,scheduled_task_id)
+    select ${accountId},${workspaceId},${sessionId},gen_random_uuid(),'oracle-'||n,
+      case when n%3=0 then 'codex-subscription' else 'openai' end,'responses','oracle',
+      case when n%3=1 then 'opengeni_credits' else 'external' end,10,5,2,1,15,
+      20,10,2,1,7,n%2=0,
+      '2026-09-06T22:13:00Z'::timestamptz+n*interval '19 minutes 0.000001 seconds',
+      '2026-09-15T01:00:00Z'::timestamptz+n*interval '1 second',
+      case when n%2=0 then ${scheduleId}::uuid end from generate_series(1,100)n`;
+  const [optimized] = await fixture.admin`select
+    pg_get_functiondef('opengeni_private.insights_raw_amount_inputs(uuid,uuid,timestamptz,timestamptz)'::regprocedure) as input,
+    pg_get_functiondef('opengeni_private.insights_scoped_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean)'::regprocedure) as scoped`;
+  const owner = postgres(fixture.ownerUrl, { max: 1 });
+  const requests: Parameters<typeof readInsightsUsage>[1][] = [];
+  for (const range of ["today", "week", "month", "30d", "90d", "ytd"] as const)
+    for (const groupBy of [
+      "model",
+      "provider",
+      "payer",
+      "workspace",
+      "project",
+      "rootSession",
+      "person",
+      "schedule",
+    ] as const)
+      requests.push({
+        accountId,
+        workspaceId: groupBy === "workspace" ? null : workspaceId,
+        detailsWorkspaceIds: [workspaceId],
+        now: new Date("2026-09-07T11:37:21.123Z"),
+        query: InsightsUsageQuery.parse({ range, groupBy, limit: 1, seriesGroups: true }),
+      });
+  const filters = [
+    { provider: "openai" },
+    { model: "openai/oracle" },
+    { payer: "subscription" },
+    { projectId: "unfiled" },
+    { projectId },
+    { rootSessionId: sessionId },
+    { scheduleId: crypto.randomUUID() },
+    { scheduleId },
+    { person: "absent-person" },
+    { person: personKey },
+    { workspaceId },
+    { provider: "missing" },
+  ];
+  for (const filter of filters)
+    for (const detailsWorkspaceIds of [[], [workspaceId]])
+      requests.push({
+        accountId,
+        workspaceId: null,
+        detailsWorkspaceIds,
+        now,
+        query: InsightsUsageQuery.parse({ range: "month", groupBy: "model", ...filter }),
+      });
+  for (const at of ["2026-09-07T00:00:00Z", "2026-09-07T00:17:00Z", "2026-09-07T01:00:00Z"])
+    requests.push({
+      accountId,
+      workspaceId,
+      detailsWorkspaceIds: [workspaceId],
+      now: new Date(at),
+      query: InsightsUsageQuery.parse({ range: "today", seriesGroups: true }),
+    });
+  try {
+    await owner.unsafe(rawInputDefinition);
+    await owner.unsafe(rawScopedDefinition);
+    const baseline = [];
+    for (const request of requests)
+      baseline.push(await actor(() => readInsightsUsage(client.db, request)));
+    expect((await usage({ range: "month", scheduleId })).totals.calls).toBe(50);
+    expect((await usage({ range: "month", projectId })).totals.calls).toBeGreaterThan(100);
+    const outsider = "user:oracle-outsider";
+    const hiddenInput = {
+      accountId,
+      workspaceId: null,
+      now,
+      detailsWorkspaceIds: [workspaceId],
+      query: InsightsUsageQuery.parse({ range: "month", groupBy: "person" }),
+    };
+    const hidden = await actor(() => readInsightsUsage(client.db, hiddenInput), outsider);
+    expect(hidden.groups.some((g) => g.kind === "private")).toBe(true);
+    expect(hidden.groups.some((g) => g.kind === "personal")).toBe(true);
+    expect(hidden.groups.some((g) => g.kind === "deleted")).toBe(true);
+    await owner.unsafe(optimized!.input);
+    await owner.unsafe(optimized!.scoped);
+    for (let index = 0; index < requests.length; index++)
+      expect(await actor(() => readInsightsUsage(client.db, requests[index]!))).toEqual(
+        baseline[index]!,
+      );
+    expect(await actor(() => readInsightsUsage(client.db, hiddenInput), outsider)).toEqual(hidden);
+  } finally {
+    await owner.unsafe(optimized!.input);
+    await owner.unsafe(optimized!.scoped);
+    await owner.end();
+  }
+});
+
+async function assertHourlyRowsMatchRaw() {
+  const owner = postgres(fixture.ownerUrl, { max: 1 });
+  try {
+    const [result] = await owner`with expected as (
+      select to_jsonb(r) value from opengeni_insights_internal.insights_usage_hourly_raw(
+        ${accountId},${workspaceId},'2026-01-01','2027-01-01') r
+    ), actual as (
+      select to_jsonb(r) value from opengeni_private.insights_usage_hourly_rollups r
+        where account_id=${accountId} and workspace_id=${workspaceId}
+    ) select (select jsonb_agg(value order by value::text) from expected) expected,
+      (select jsonb_agg(value order by value::text) from actual) actual`;
+    expect(result!.actual).toEqual(result!.expected);
+  } finally {
+    await owner.end();
+  }
+}
+
+test("hourly deltas preserve every measure and max across multi-row insert, updates, moves, deletes and rollback", async () => {
+  await assertHourlyRowsMatchRaw();
+  await fixture.admin`update model_call_facts set occurred_at=occurred_at+interval '1 day',model='moved',
+    recorded_at=recorded_at-interval '2 days',input_tokens=30,total_tokens=35
+    where workspace_id=${workspaceId} and source_key in('oracle-1','oracle-2','oracle-3')`;
+  await assertHourlyRowsMatchRaw();
+  await fixture.admin`update model_call_facts set recorded_at=recorded_at-interval '3 days',estimated_provider_cost_micros=21,
+    list_output_cost_micros=8 where workspace_id=${workspaceId} and source_key like 'oracle-%'`;
+  await assertHourlyRowsMatchRaw();
+  await fixture.admin`delete from model_call_facts where workspace_id=${workspaceId} and source_key in('oracle-99','oracle-100')`;
+  await assertHourlyRowsMatchRaw();
+  await expect(
+    fixture.admin.begin(async (tx) => {
+      await tx`delete from model_call_facts where workspace_id=${workspaceId} and source_key like 'oracle-%'`;
+      throw new Error("rollback fixture");
+    }),
+  ).rejects.toThrow("rollback fixture");
+  await assertHourlyRowsMatchRaw();
+  await fixture.admin`delete from model_call_facts where workspace_id=${workspaceId} and source_key like 'oracle-%'`;
+  await assertHourlyRowsMatchRaw();
+});
+
+test("hour rebuild is idempotent, serializes with inserts in either order, and leaves no private capability", async () => {
+  const owner = postgres(fixture.ownerUrl, { max: 1 });
+  const writer = postgres(fixture.adminUrl, { max: 1 });
+  const hour = "2026-09-13T10:00:00Z";
+  const insert = async (tx: postgres.TransactionSql, key: string) => tx`
+    insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,billing_path,occurred_at)
+    values(${accountId},${workspaceId},${sessionId},gen_random_uuid(),${key},'concurrency','responses','model','external',${hour})`;
+  const blocked = async (pid: number) => {
+    for (let attempts = 0; attempts < 100; attempts++) {
+      const [row] =
+        await fixture.admin`select exists(select 1 from pg_locks where pid=${pid} and locktype='advisory' and not granted) waiting`;
+      if (row!.waiting) return;
+      await Bun.sleep(10);
+    }
+    throw new Error("Expected the other transaction to wait on the hourly advisory fence");
+  };
+  try {
+    const [ownerPid] = await owner`select pg_backend_pid() pid`;
+    await owner`set timezone='Pacific/Auckland'`;
+    const [writerPid] = await writer`select pg_backend_pid() pid`;
+    for (const first of ["writer", "recompute"] as const) {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const holding =
+        first === "writer"
+          ? writer.begin(async (tx) => {
+              await insert(tx, "concurrent-first");
+              entered.resolve();
+              await release.promise;
+            })
+          : owner.begin(async (tx) => {
+              await tx`select opengeni_insights_internal.insights_usage_hourly_recompute(${accountId},${workspaceId},${hour})`;
+              entered.resolve();
+              await release.promise;
+            });
+      await entered.promise;
+      const waiting =
+        first === "writer"
+          ? owner`select opengeni_insights_internal.insights_usage_hourly_recompute(${accountId},${workspaceId},${hour})`.execute()
+          : writer.begin(async (tx) => {
+              await insert(tx, "concurrent-second");
+            });
+      try {
+        await blocked(first === "writer" ? ownerPid!.pid : writerPid!.pid);
+      } finally {
+        release.resolve();
+      }
+      await Promise.all([holding, waiting]);
+      await assertHourlyRowsMatchRaw();
+    }
+    for (let n = 0; n < 2; n++) {
+      await owner`select opengeni_insights_internal.insights_usage_hourly_recompute(${accountId},${workspaceId},${hour})`;
+      await assertHourlyRowsMatchRaw();
+    }
+    const [caps] =
+      await fixture.admin`select count(*)::int count from opengeni_private.insights_fact_read_runtime_capabilities`;
+    expect(caps!.count).toBe(0);
+    const [acl] = await fixture.admin`select
+      has_table_privilege('opengeni_app','opengeni_private.insights_usage_hourly_rollups','SELECT') can_read,
+      has_function_privilege('opengeni_app','opengeni_insights_internal.insights_usage_hourly_recompute(uuid,uuid,timestamptz)','EXECUTE') can_rebuild`;
+    expect(acl).toEqual({ can_read: false, can_rebuild: false });
+  } finally {
+    await owner.end();
+    await writer.end();
+  }
+});
+
+test("workspace deletion cascades hourly state without resurrecting fact deltas", async () => {
+  const workspace = crypto.randomUUID();
+  await fixture.admin`insert into workspaces(id,account_id,name) values(${workspace},${accountId},'Cascade fixture')`;
+  await fixture.admin`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,billing_path,occurred_at)
+    values(${accountId},${workspace},${crypto.randomUUID()},gen_random_uuid(),'cascade','openai','responses','fixture','external','2026-09-01T00:00:00Z')`;
+  await fixture.admin`insert into opengeni_private.insights_usage_hourly_backfill(account_id,workspace_id,hour)
+    values(${accountId},${workspace},'2026-09-01T00:00:00Z')`;
+  await fixture.admin`delete from workspaces where id=${workspace}`;
+  const [remaining] = await fixture.admin`select
+    (select count(*)::int from opengeni_private.insights_usage_hourly_rollups where workspace_id=${workspace}) rollups,
+    (select count(*)::int from opengeni_private.insights_usage_hourly_backfill where workspace_id=${workspace}) pending`;
+  expect(remaining).toEqual({ rollups: 0, pending: 0 });
 });
