@@ -15,7 +15,10 @@ import {
   requestSessionCompaction,
   appendSessionHistoryItems,
   sessionHasToolRouterHistory,
+  withWorkspaceRls,
 } from "../src/index";
+import { toolRouterHistoryProbe } from "../src/session-tool-router-history";
+import { sql, type SQL } from "drizzle-orm";
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
 beforeAll(async () => {
@@ -155,6 +158,46 @@ test("router protocol history remains visible after compaction and is session-sc
       accountId: other.accountId,
       workspaceId: other.workspaceId,
       sessionId: other.sessionId,
+    }),
+  ).toBe(false);
+}, 180_000);
+
+test("the router probe is a partial-index lookup that never visits ordinary history", async () => {
+  const f = await fixture();
+  const turn = await f.claim();
+  expect(
+    await appendSessionHistoryItems(client.db, {
+      ...f.identity(turn),
+      items: Array.from({ length: 200 }, (_, index) => ({
+        position: 100 + index,
+        item: { type: "function_call", name: "exec_command", call_id: `ordinary-${index}` },
+      })),
+    }),
+  ).toBe(true);
+  await shared.admin`analyze session_history_items`;
+  type PlanNode = { "Index Name"?: string; "Node Type": string; Plans?: PlanNode[] };
+  const indexes: string[] = [];
+  await withWorkspaceRls(client.db, f.workspaceId, async (tx) => {
+    const query = toolRouterHistoryProbe(tx, f).toSQL();
+    const fragments: SQL[] = query.sql
+      .split(/\$(\d+)/g)
+      .map((part, index) =>
+        index % 2 === 0 ? sql.raw(part) : sql`${query.params[Number(part) - 1]}`,
+      );
+    const result = await tx.execute(sql`explain (format json) ${sql.join(fragments, sql``)}`);
+    const plan = (result[0]?.["QUERY PLAN"] as { Plan: PlanNode }[])[0]!.Plan;
+    const walk = (node: PlanNode) => {
+      if (node["Index Name"]) indexes.push(node["Index Name"]);
+      node.Plans?.forEach(walk);
+    };
+    walk(plan);
+  });
+  expect(indexes).toContain("session_history_items_tool_router_idx");
+  expect(
+    await sessionHasToolRouterHistory(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      sessionId: f.sessionId,
     }),
   ).toBe(false);
 }, 180_000);
