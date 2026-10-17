@@ -759,21 +759,29 @@ export function decodeCodemodeDispatchAck(input: Uint8Array): CodemodeDispatchAc
 }
 
 export function parseVerifiedAttemptToolCatalog(input: unknown): AttemptToolCatalogValue {
+  return verifyAttemptToolCatalog(input).catalog;
+}
+
+/** Verifies a catalog and also reports its serialized UTF-8 size. */
+export function verifyAttemptToolCatalog(input: unknown): {
+  catalog: AttemptToolCatalogValue;
+  byteLength: number;
+} {
   const catalog = AttemptToolCatalog.parse(input);
-  assertCatalogSize(catalog);
+  const byteLength = assertCatalogSize(catalog);
   const { digest, ...unsigned } = catalog;
   if (digestAttemptToolCatalog(unsigned) !== digest) {
     throw new AttemptToolCatalogIntegrityError();
   }
-  return catalog;
+  return { catalog, byteLength };
 }
 
-function assertCatalogSize(catalog: AttemptToolCatalogValue): void {
-  if (
-    new TextEncoder().encode(JSON.stringify(catalog)).byteLength > ATTEMPT_TOOL_CATALOG_MAX_BYTES
-  ) {
+function assertCatalogSize(catalog: AttemptToolCatalogValue): number {
+  const byteLength = new TextEncoder().encode(JSON.stringify(catalog)).byteLength;
+  if (byteLength > ATTEMPT_TOOL_CATALOG_MAX_BYTES) {
     throw new AttemptToolCatalogTooLargeError();
   }
+  return byteLength;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
