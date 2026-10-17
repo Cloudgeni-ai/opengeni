@@ -64,15 +64,7 @@ fn at(epoch: u64, save: u64) -> Stamp {
 #[tokio::test]
 async fn a_former_owner_writes_nothing_once_a_later_one_claims_the_copy() {
     let dir = tempfile::tempdir().unwrap();
-    let saved = files(dir.path(), true);
-    sparse(saved.disk.path(), CHUNK_BYTES, &[(0, b"disk")]);
-    let image = saved.memory.clone().unwrap();
-    sparse(&image.state, 100, &[(0, b"state")]);
-    sparse(&image.memory, CHUNK_BYTES, &[(9, b"memory")]);
-    let store = Chunked::new(ChunkStore::new(
-        Arc::new(InMemory::new()),
-        ObjectPath::from("t"),
-    ));
+    let (saved, store) = owned_fixture(dir.path());
     let sandbox = id("0123456789abcdef0123456789abcde0");
     let cancel = CancellationToken::new();
 
@@ -120,7 +112,7 @@ async fn a_former_owner_writes_nothing_once_a_later_one_claims_the_copy() {
         Archive::Fenced { by: OwnerEpoch(2) }
     );
     assert_eq!(
-        store.forget_memory(sandbox, OwnerEpoch(1)).await.unwrap(),
+        store.forget_memory(sandbox, at(1, 5)).await.unwrap(),
         fenced
     );
     assert_eq!(
@@ -141,17 +133,67 @@ async fn a_former_owner_writes_nothing_once_a_later_one_claims_the_copy() {
         .await
         .unwrap();
     assert!(matches!(next, Archive::Stored(_)), "{next:?}");
+}
+
+/// A host's files to archive with a memory image, and a store to archive
+/// them to.
+fn owned_fixture(dir: &std::path::Path) -> (SavedFiles, Chunked) {
+    let saved = files(dir, true);
+    sparse(saved.disk.path(), CHUNK_BYTES, &[(0, b"disk")]);
+    let image = saved.memory.clone().unwrap();
+    sparse(&image.state, 100, &[(0, b"state")]);
+    sparse(&image.memory, CHUNK_BYTES, &[(9, b"memory")]);
+    let store = Chunked::new(ChunkStore::new(
+        Arc::new(InMemory::new()),
+        ObjectPath::from("t"),
+    ));
+    (saved, store)
+}
+
+/// Forgetting the memory is a change of its own: tried again after its
+/// answer was lost it finds itself done, and the archive it followed,
+/// tried again, no longer lands over it. A delete is final: a later
+/// archive stores nothing, and says so.
+#[tokio::test]
+async fn a_forget_is_a_change_of_its_own_and_a_delete_is_final() {
+    let dir = tempfile::tempdir().unwrap();
+    let (saved, store) = owned_fixture(dir.path());
+    let sandbox = id("0123456789abcdef0123456789abcde1");
+    let cancel = CancellationToken::new();
+    let first = store
+        .archive(sandbox, at(2, 4), &saved, &cancel)
+        .await
+        .unwrap();
+    assert!(matches!(first, Archive::Stored(_)), "{first:?}");
+    let Owned::Done(Some(disk_only)) = store.forget_memory(sandbox, at(2, 5)).await.unwrap() else {
+        panic!("the disk stays");
+    };
+    assert_eq!(
+        store.forget_memory(sandbox, at(2, 5)).await.unwrap(),
+        Owned::Done(Some(disk_only.clone()))
+    );
+    assert_eq!(
+        store
+            .archive(sandbox, at(2, 4), &saved, &cancel)
+            .await
+            .unwrap(),
+        Archive::Outdated
+    );
+    assert!(store.verify(sandbox, &disk_only).await.unwrap());
     assert_eq!(
         store.delete(sandbox, OwnerEpoch(2)).await.unwrap(),
         Owned::Done(())
     );
-    // Deleted for good: a later archive of it stores nothing.
     assert_eq!(
         store
-            .archive(sandbox, at(2, 5), &saved, &cancel)
+            .archive(sandbox, at(2, 6), &saved, &cancel)
             .await
             .unwrap(),
-        Archive::Outdated
+        Archive::Deleted
+    );
+    assert_eq!(
+        store.forget_memory(sandbox, at(2, 7)).await.unwrap(),
+        Owned::Done(None)
     );
     assert_eq!(
         store.claim(sandbox, OwnerEpoch(3)).await.unwrap(),
@@ -799,10 +841,7 @@ async fn a_sweep_keeps_what_stored_copies_name() {
     assert_eq!((report.pointers, report.unnamed), (2, 0), "{report:?}");
     assert_eq!(report.named, report.stored);
 
-    store
-        .forget_memory(with_memory, OwnerEpoch::FIRST)
-        .await
-        .unwrap();
+    store.forget_memory(with_memory, save()).await.unwrap();
     let pointer = chunks
         .get_pointer(&with_memory.to_string())
         .await

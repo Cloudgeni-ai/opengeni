@@ -308,6 +308,7 @@ dependencies = [
  "compute-engine",
  "compute-fleet",
  "compute-pager",
+ "compute-protocol",
  "compute-storage",
  "futures",
  "memmap2",
@@ -335,6 +336,15 @@ dependencies = [
  "serde_json",
  "signal-hook",
  "tempfile",
+]
+
+[[package]]
+name = "compute-protocol"
+version = "0.0.0"
+dependencies = [
+ "compute-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

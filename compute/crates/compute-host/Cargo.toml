@@ -21,6 +21,7 @@ compute-core = { path = "../compute-core" }
 compute-engine = { path = "../compute-engine" }
 compute-fleet = { path = "../compute-fleet" }
 compute-pager = { path = "../compute-pager" }
+compute-protocol = { path = "../compute-protocol" }
 compute-storage = { path = "../compute-storage" }
 futures = "0.3"
 object_store = { version = "0.12.4", features = ["aws", "azure", "gcp"] }

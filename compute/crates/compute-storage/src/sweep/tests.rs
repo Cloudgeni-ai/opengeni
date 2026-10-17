@@ -127,7 +127,7 @@ async fn an_archive_begins_by_storing_an_empty_pointer() {
     assert!(unstamped(&tombstone).unwrap().1.is_empty());
     assert_eq!(store.get_pointer("a").await.unwrap(), None);
     let late = store.begin("a", next_save()).await.unwrap();
-    assert!(matches!(late, Begun::Done), "{late:?}");
+    assert!(matches!(late, Begun::Deleted), "{late:?}");
 
     let young = sweep(&store, listed_names, true).await.unwrap();
     assert_eq!((young.tombstones, young.tombstones_deleted), (1, 0));
@@ -219,11 +219,7 @@ async fn a_change_held_up_past_a_newer_copy_never_lands() {
     let both = pointer(&[memory.reference.key(), disk.reference.key()]);
     store.publish(first, both).await.unwrap();
 
-    let (_, change) = store
-        .read_for_change("a", TEST_EPOCH)
-        .await
-        .unwrap()
-        .unwrap();
+    let (_, change) = store.rewrite_test("a").await.unwrap().unwrap();
     *fake.stall.lock().unwrap() = Some(("pointers/", 300 * SECOND));
     let forgetting = tokio::spawn({
         let (store, key) = (store.clone(), disk.reference.key());

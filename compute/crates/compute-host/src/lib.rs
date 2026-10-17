@@ -26,7 +26,6 @@ pub mod net;
 #[cfg(target_os = "linux")]
 mod paging;
 mod pool;
-pub mod protocol;
 pub mod restore_notice;
 mod server;
 mod state;
@@ -36,6 +35,7 @@ mod working_set;
 
 pub use agent::{BusyRule, Handle, HostAgent, HostConfig, HostError, Lease, PagerConfig};
 pub use chunked::{CHUNK_BYTES, Chunked};
+pub use compute_protocol::host as protocol;
 pub use guest_ports::{GuestPort, Route};
 pub use lanes::Lanes;
 pub use layout::check_filesystem;

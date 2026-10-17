@@ -2,15 +2,15 @@
 //!
 //! Hosts with drifting clocks renew leases with a store, run sandboxes,
 //! archive them to a pointer store with conditional writes, and suffer
-//! partitions, lost and late messages, agent restarts and power losses,
-//! some for good. A service creates, wakes, moves and recovers sandboxes
+//! partitions, lost and late messages, agent restarts, suspends and power
+//! losses, some for good. A service creates, wakes, moves and recovers sandboxes
 //! with the crate's own decisions. Throughout, the simulation checks:
 //!
 //! - a sandbox never runs on two hosts: each run happens at an owner epoch
 //!   no lower than any run before it, and a different host runs it only
 //!   at a higher one;
-//! - a host given up on stopped its VMs at least most of the margin before
-//!   its sandboxes could go elsewhere;
+//! - a host given up on stopped its VMs before its sandboxes could go
+//!   elsewhere, by at least what the lease terms leave to spare;
 //! - an archive pointer's stamp never goes back, so a former owner never
 //!   publishes over a new one and an older save never over a newer one;
 //! - a move loses nothing: the archive holds every write when the host
@@ -21,16 +21,18 @@
 //! before their first archive.
 //!
 //! `FLEET_SIM_SEEDS` sets how many seeds run (default 6) and
-//! `FLEET_SIM_FIRST_SEED` the first.
+//! `FLEET_SIM_FIRST_SEED` the first; `FLEET_SIM_PRINT` prints what each
+//! run exercised.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::time::Duration;
 
 use compute_fleet::{
-    At, Capacity, ClassId, Demand, Expiry, Fence, Fleet, Guard, GuardAction, HostEpoch, HostId,
-    HostInfo, HostLease, HostState, LeaseRecord, LeaseTerms, Listed, Observed, OwnerEpoch,
-    Ownership, Renewal, Rng, SandboxId, Stamp, Verdict, ZoneId, fence, reconcile,
+    At, Capacity, ClassId, Demand, Expiry, Fence, Fleet, Found, Guard, GuardAction, HostEpoch,
+    HostId, HostInfo, HostLease, HostState, LeaseRecord, LeaseTerms, Listed, Mutation, Observed,
+    OwnerEpoch, Ownership, Prefer, Renewal, Rng, SandboxId, Stamp, Verdict, ZoneId, fence,
+    reconcile,
 };
 
 const TERMS: LeaseTerms = LeaseTerms::RECOMMENDED;
@@ -39,9 +41,6 @@ const MS: u64 = 1_000_000;
 const SEC: u64 = 1_000 * MS;
 const HOST_MEMORY_MIB: u64 = 256 * 1024;
 const SANDBOX_MIB: u64 = 1024;
-/// The kernel watchdog's timeout: a host whose guard stops feeding it
-/// reboots this long after the last feed.
-const WATCHDOG_NS: u64 = 3 * SEC;
 /// How long a host waits for an archive's answer before it starts another.
 const ARCHIVE_GIVE_UP: Duration = Duration::from_secs(30);
 
@@ -90,6 +89,8 @@ struct Local {
 /// What the kernel does with the VMs' cgroup.
 #[derive(Clone, Copy, Debug, Default)]
 struct Kernel {
+    /// A freeze is asked for (`cgroup.freeze` is 1).
+    freezing: bool,
     frozen: bool,
     /// When a freeze asked for completes; `u64::MAX` if it never does.
     freeze_at: Option<u64>,
@@ -98,6 +99,10 @@ struct Kernel {
 }
 
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a simulated host's independent switches"
+)]
 struct Host {
     id: HostId,
     clock: Clock,
@@ -118,6 +123,13 @@ struct Host {
     fed: u64,
     /// The agent and the guard get no processor time until then; VMs do.
     stalled_until: u64,
+    /// Suspended until then: nothing runs, and the watchdog's clock stops.
+    suspended_until: Option<u64>,
+    /// The sleep hook's mark that a suspend is under way.
+    suspending: bool,
+    /// The registration attempt under way and what it lists, fixed for
+    /// every copy.
+    registering: Option<(u64, Vec<Listed>)>,
     sandboxes: BTreeMap<SandboxId, Local>,
 }
 
@@ -128,7 +140,13 @@ impl Host {
 
     /// Whether VMs run now: the machine is up and their cgroup not frozen.
     fn vms_run(&self) -> bool {
-        self.machine_up && !self.kernel.frozen
+        self.machine_up && self.suspended_until.is_none() && !self.kernel.frozen
+    }
+
+    /// Whether its agent takes in what reaches it: it runs, and the machine
+    /// is not suspended.
+    fn listens(&self) -> bool {
+        self.agent_up && self.suspended_until.is_none()
     }
 
     fn awake(&self) -> u64 {
@@ -146,7 +164,7 @@ impl Host {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct HostRow {
     epoch: HostEpoch,
     state: HostState,
@@ -155,6 +173,10 @@ struct HostRow {
     /// The highest renewal number accepted under this registration:
     /// what requests are stamped with.
     seq: u64,
+    /// The attempt this registration answered, and its answer, given
+    /// again to every copy of that attempt.
+    attempt: u64,
+    answer: Vec<(SandboxId, Verdict)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,7 +262,9 @@ enum Event {
         id: SandboxId,
         epoch: OwnerEpoch,
         answer: Answer,
-        /// The host's last renewal when it answered.
+        /// The registration the host answered under, and its last renewal
+        /// then.
+        host_epoch: Option<HostEpoch>,
         seq: u64,
         tries: u32,
     },
@@ -273,6 +297,7 @@ enum Event {
     NewLeader,
     AgentStarts(usize),
     PowerOn(usize),
+    Resume(usize),
 }
 
 #[derive(Debug, Default)]
@@ -286,6 +311,13 @@ struct Stats {
     superseded: u64,
     watchdog_reboots: u64,
     kills: u64,
+    suspends: u64,
+    /// Registration answers that arrived after the host had sent the
+    /// attempt again, and counted.
+    slow_registrations: u64,
+    /// Hosts that died for good, and the sandboxes lost with them.
+    dead_hosts: u64,
+    lost_sandboxes: u64,
     min_stop_gap_ns: Option<u64>,
 }
 
@@ -355,6 +387,9 @@ struct Sim {
     /// The create or adopt last sent for each sandbox and not answered
     /// yet: its epoch and stamp.
     requested: BTreeMap<SandboxId, (OwnerEpoch, u64)>,
+    /// The epoch of each sandbox's last create or adopt the service heard
+    /// had landed, and the registration and renewal it was answered at.
+    landed: BTreeMap<SandboxId, (OwnerEpoch, Answered)>,
     ghost: Ghost,
     stats: Stats,
     /// What happened to the sandbox `FLEET_SIM_TRACE` names, and to every
@@ -418,12 +453,15 @@ impl Sim {
                     agent_up: true,
                     incarnation: 0,
                     cut_until: 0,
-                    lease: HostLease::new(TERMS),
+                    lease: HostLease::new(TERMS, rng.next_u64()),
                     file: LeaseRecord::NONE,
                     guard: Guard::new(),
                     kernel: Kernel::default(),
                     fed: 0,
                     stalled_until: 0,
+                    suspended_until: None,
+                    suspending: false,
+                    registering: None,
                     sandboxes: BTreeMap::new(),
                 }
             })
@@ -447,6 +485,7 @@ impl Sim {
             faults: true,
             confirmed: BTreeSet::new(),
             requested: BTreeMap::new(),
+            landed: BTreeMap::new(),
             ghost: Ghost::default(),
             stats: Stats::default(),
             trace: std::env::var("FLEET_SIM_TRACE")
@@ -540,9 +579,10 @@ impl Sim {
                 id,
                 epoch,
                 answer,
+                host_epoch,
                 seq,
                 tries,
-            } => self.service_answer(host, op, id, epoch, answer, seq, tries),
+            } => self.service_answer(host, op, id, epoch, answer, (host_epoch, seq), tries),
             Event::ArchiveReads {
                 host,
                 incarnation,
@@ -572,6 +612,7 @@ impl Sim {
             Event::Fault => self.fault(),
             Event::AgentStarts(host) => self.agent_starts(host),
             Event::PowerOn(host) => self.power_on(host),
+            Event::Resume(host) => self.resume(host),
         }
     }
 
@@ -581,7 +622,7 @@ impl Sim {
         let now = self.now;
         let next = now + self.hosts[index].clock.true_span(TICK_NS);
         self.at(next, Event::HostTick(index));
-        if !self.hosts[index].machine_up {
+        if !self.hosts[index].machine_up || self.hosts[index].suspended_until.is_some() {
             return;
         }
         self.kernel_tick(index);
@@ -666,7 +707,9 @@ impl Sim {
             }
             self.stats.kills += 1;
         }
-        if now.saturating_sub(host.fed) >= WATCHDOG_NS {
+        // The watchdog counts on the host's own clock.
+        let watchdog = u64::try_from(TERMS.watchdog.as_nanos()).unwrap();
+        if now.saturating_sub(host.fed) >= host.clock.true_span(watchdog) {
             self.stats.watchdog_reboots += 1;
             self.host_note(index, "watchdog reboots");
             self.power_off(index);
@@ -679,8 +722,10 @@ impl Sim {
         let now = self.now;
         let host = &mut self.hosts[index];
         let observed = Observed {
+            freezing: host.kernel.freezing,
             frozen: host.kernel.frozen,
             empty: host.awake() == 0,
+            suspending: host.suspending,
         };
         let step = host.guard.step(host.now(now), host.file.deadline, observed);
         if let Some(action) = step.action {
@@ -694,9 +739,12 @@ impl Sim {
                 } else {
                     now + MS + self.rng.below(100 * MS)
                 };
+                host.kernel.freezing = true;
                 host.kernel.freeze_at = Some(at);
             }
-            Some(GuardAction::Kill) => {
+            // Asked again on every step; the first ask is the one that
+            // completes, or hangs.
+            Some(GuardAction::Kill) if host.kernel.kill_at.is_none() => {
                 let at = if self.rng.chance(1, 100) {
                     u64::MAX
                 } else {
@@ -705,10 +753,11 @@ impl Sim {
                 host.kernel.kill_at = Some(at);
             }
             Some(GuardAction::Thaw) => {
+                host.kernel.freezing = false;
                 host.kernel.frozen = false;
                 host.kernel.freeze_at = None;
             }
-            None => {}
+            Some(GuardAction::Kill) | None => {}
         }
         if step.feed {
             host.fed = now;
@@ -720,14 +769,34 @@ impl Sim {
         let incarnation = host.incarnation;
         if host.lease.epoch().is_none() {
             let renewal = host.lease.send(local_now);
-            let listed = host
-                .sandboxes
-                .iter()
-                .map(|(id, local)| Listed {
-                    sandbox: *id,
-                    epoch: local.epoch,
-                })
-                .collect();
+            if host.lease.attempt_started(renewal) {
+                let listed = host
+                    .sandboxes
+                    .iter()
+                    .map(|(id, local)| Listed {
+                        sandbox: *id,
+                        epoch: local.epoch,
+                    })
+                    .collect();
+                host.registering = Some((renewal.attempt, listed));
+            }
+            let (attempt, listed) = host.registering.clone().unwrap();
+            assert_eq!(attempt, renewal.attempt, "a copy of another attempt");
+            // Nothing is added to what the attempt lists, nor any epoch
+            // changed, before it is answered. A copy may go (an archive
+            // still in flight finds a later owner): the answer's keep for
+            // it then changes nothing.
+            for (id, local) in &host.sandboxes {
+                assert!(
+                    listed
+                        .iter()
+                        .any(|item| item.sandbox == *id && item.epoch == local.epoch),
+                    "seed {}: {id:?} on {:?} at {} is not as its registration listed it",
+                    self.seed,
+                    host.id,
+                    local.epoch
+                );
+            }
             self.send(
                 index,
                 Event::Register {
@@ -771,9 +840,14 @@ impl Sim {
         verdicts: &[(SandboxId, Verdict)],
     ) {
         let host = &mut self.hosts[index];
-        if !host.agent_up || host.incarnation != incarnation || !host.lease.awaits(renewal) {
+        if !host.listens() || host.incarnation != incarnation || !host.lease.awaits(renewal) {
             return;
         }
+        if host.lease.due() > renewal.sent + TERMS.register_every {
+            self.stats.slow_registrations += 1;
+        }
+        let host = &mut self.hosts[index];
+        host.registering = None;
         // Drop and refetch before the new deadline lets anything run, and
         // keep nothing the answer does not name.
         let mut refetch = Vec::new();
@@ -808,7 +882,7 @@ impl Sim {
 
     fn host_renewed(&mut self, index: usize, incarnation: u64, renewal: Renewal, accepted: bool) {
         let host = &mut self.hosts[index];
-        if !host.agent_up || host.incarnation != incarnation {
+        if !host.listens() || host.incarnation != incarnation {
             return;
         }
         if accepted {
@@ -834,7 +908,7 @@ impl Sim {
         tries: u32,
     ) {
         let host = &self.hosts[index];
-        if !host.agent_up || host.stalled_until > self.now {
+        if !host.listens() || host.stalled_until > self.now {
             return;
         }
         let local_now = host.now(self.now);
@@ -864,7 +938,8 @@ impl Sim {
             id,
             &format!("{host_id:?} {op:?} at {epoch} (sent under {sent:?}): {answer:?}"),
         );
-        let seq = self.hosts[index].lease.seq();
+        let lease = &self.hosts[index].lease;
+        let (host_epoch, seq) = (lease.epoch(), lease.seq());
         self.send(
             index,
             Event::Answered {
@@ -873,6 +948,7 @@ impl Sim {
                 id,
                 epoch,
                 answer,
+                host_epoch,
                 seq,
                 tries,
             },
@@ -1038,6 +1114,7 @@ impl Sim {
                 id,
                 epoch: local.epoch,
                 answer: Answer::Ok,
+                host_epoch: self.hosts[index].lease.epoch(),
                 seq: self.hosts[index].lease.seq(),
                 tries: 0,
             },
@@ -1082,7 +1159,7 @@ impl Sim {
         // The agent reads the pointer itself: one that stopped reads
         // nothing more.
         let host = &self.hosts[index];
-        if !host.agent_up || host.incarnation != incarnation {
+        if !host.listens() || host.incarnation != incarnation {
             return;
         }
         let found = self.objects.get(&id).copied();
@@ -1090,7 +1167,8 @@ impl Sim {
             epoch,
             save: content,
         };
-        match fence(own, found.map(Pointer::stamp)) {
+        let read = found.map_or(Found::Nothing, |pointer| Found::Copy(pointer.stamp()));
+        match fence(Mutation::Archive(own), read) {
             Fence::Superseded { .. } => {
                 // Someone else owns it now.
                 self.stats.fenced += 1;
@@ -1105,8 +1183,9 @@ impl Sim {
                 }
                 return;
             }
-            Fence::Done => {
-                // An earlier try landed, or an overlapping later save did.
+            // An earlier try landed, or an overlapping later save did, which
+            // holds every write this one does.
+            Fence::Done | Fence::Outdated => {
                 self.send(
                     index,
                     Event::Published {
@@ -1120,7 +1199,8 @@ impl Sim {
                 );
                 return;
             }
-            Fence::Publish => {}
+            Fence::Write => {}
+            Fence::Deleted | Fence::Nothing => unreachable!("nothing deletes or rewrites here"),
         }
         let version = found.map_or(0, |pointer| pointer.version);
         // The upload takes a while, sometimes very long.
@@ -1190,7 +1270,7 @@ impl Sim {
         landed: bool,
     ) {
         let host = &mut self.hosts[index];
-        if !host.agent_up || host.incarnation != incarnation {
+        if !host.listens() || host.incarnation != incarnation {
             return;
         }
         if let Some(local) = host.sandboxes.get_mut(&id)
@@ -1234,10 +1314,41 @@ impl Sim {
         }
         host.agent_up = true;
         host.incarnation += 1;
-        host.lease = HostLease::resume(TERMS, host.file);
+        host.lease = HostLease::resume(TERMS, host.file, self.rng.next_u64());
+        host.registering = None;
         for local in host.sandboxes.values_mut() {
             local.archiving = None;
         }
+    }
+
+    /// The machine suspends: the sleep hook marks it and waits for the VMs
+    /// to freeze first, then nothing runs and nothing reaches it.
+    fn suspend(&mut self, index: usize, span: u64) {
+        self.host_note(index, &format!("suspends for {}s", span / SEC));
+        self.stats.suspends += 1;
+        let until = self.now + span;
+        let host = &mut self.hosts[index];
+        host.suspending = true;
+        host.kernel.freezing = true;
+        host.kernel.frozen = true;
+        host.kernel.freeze_at = None;
+        host.suspended_until = Some(until);
+        host.cut_until = host.cut_until.max(until);
+        // The watchdog's clock stops while suspended: it fires as much
+        // later. Nothing steps meanwhile, so shifting it now is the same.
+        host.fed += span;
+        self.at(until, Event::Resume(index));
+    }
+
+    /// The machine resumes. Its boot clock counted the suspend; the
+    /// watchdog's did not. The sleep hook lifts its mark.
+    fn resume(&mut self, index: usize) {
+        let host = &mut self.hosts[index];
+        if host.suspended_until.take().is_none() {
+            return;
+        }
+        host.suspending = false;
+        self.host_note(index, "resumes");
     }
 
     fn power_off(&mut self, index: usize) {
@@ -1261,11 +1372,14 @@ impl Sim {
         host.clock.boot = now;
         host.clock.offset = SEC;
         host.file = LeaseRecord::NONE;
-        host.lease = HostLease::new(TERMS);
+        host.lease = HostLease::new(TERMS, self.rng.next_u64());
         host.guard = Guard::new();
         host.kernel = Kernel::default();
         host.fed = now;
         host.stalled_until = 0;
+        host.suspended_until = None;
+        host.suspending = false;
+        host.registering = None;
         host.incarnation += 1;
         host.agent_up = true;
         for local in host.sandboxes.values_mut() {
@@ -1284,13 +1398,27 @@ impl Sim {
         listed: &[Listed],
     ) {
         let id = self.hosts[index].id;
-        // A host registers again only once its last registration lapsed:
-        // until then that one may still be running its VMs.
-        if self
-            .host_rows
-            .get(&id)
-            .is_some_and(|row| row.state == HostState::Live)
+        if let Some(row) = self.host_rows.get(&id)
+            && row.state == HostState::Live
         {
+            // Another copy of the attempt this registration answered: the
+            // same answer again.
+            if row.attempt == renewal.attempt {
+                let (epoch, verdicts) = (row.epoch, row.answer.clone());
+                self.send(
+                    index,
+                    Event::Registered {
+                        host: index,
+                        incarnation,
+                        renewal,
+                        epoch,
+                        verdicts,
+                    },
+                );
+                return;
+            }
+            // A host registers again only once its last registration
+            // lapsed: until then that one may still be running its VMs.
             self.send(
                 index,
                 Event::Renewed {
@@ -1309,15 +1437,6 @@ impl Sim {
         let epoch = HostEpoch(self.next_host_epoch);
         self.next_host_epoch += 1;
         let renewals = self.host_rows.get(&id).map_or(0, |row| row.renewals) + 1;
-        self.host_rows.insert(
-            id,
-            HostRow {
-                epoch,
-                state: HostState::Live,
-                renewals,
-                seq: 0,
-            },
-        );
         let mut verdicts = Vec::new();
         for item in listed {
             let row = self.rows.get(&item.sandbox).copied();
@@ -1335,6 +1454,17 @@ impl Sim {
             };
             verdicts.push((item.sandbox, verdict));
         }
+        self.host_rows.insert(
+            id,
+            HostRow {
+                epoch,
+                state: HostState::Live,
+                renewals,
+                seq: 0,
+                attempt: renewal.attempt,
+                answer: verdicts.clone(),
+            },
+        );
         let info = HostInfo {
             zone: ZoneId(u16::try_from(index % 3).unwrap()),
             class: ClassId(0),
@@ -1497,8 +1627,7 @@ impl Sim {
             memory_mib: SANDBOX_MIB,
             memory_max_mib: SANDBOX_MIB,
             disk_mib: 1,
-            shape: None,
-            class: None,
+            prefer: Prefer::Any,
         };
         let Some(placement) = self.fleet.place(&demand, &[], &mut self.rng) else {
             return;
@@ -1520,9 +1649,10 @@ impl Sim {
         id: SandboxId,
         epoch: OwnerEpoch,
         answer: Answer,
-        seq: u64,
+        answered: Answered,
         tries: u32,
     ) {
+        let seq = answered.1;
         let host_id = self.hosts[host].id;
         let Some(row) = self.rows.get(&id).copied() else {
             return;
@@ -1537,12 +1667,21 @@ impl Sim {
             // Answered: it can no longer land later.
             self.requested.remove(&id);
         }
+        if matches!(op, Op::Create | Op::Adopt) && answer == Answer::Ok && still {
+            self.landed.insert(id, (epoch, answered));
+        }
         // That the host holds nothing under this epoch is final only once
-        // no create or adopt for it can still reach the host.
+        // no create or adopt for it can still reach the host, and once the
+        // host said so after every one that landed: an answer given before
+        // one landed can arrive after it.
         let settled = self
             .requested
             .get(&id)
-            .is_none_or(|&(sent, stamp)| sent != epoch || TERMS.settles(stamp, seq));
+            .is_none_or(|&(sent, stamp)| sent != epoch || TERMS.settles(stamp, seq))
+            && self
+                .landed
+                .get(&id)
+                .is_none_or(|&(at, landed)| at != epoch || later(answered, landed));
         if op == Op::Create && answer == Answer::Ok {
             self.confirmed.insert(id);
         }
@@ -1597,6 +1736,10 @@ impl Sim {
                 self.host_note(index, &format!("stalled for {}s", span / SEC));
             }
             9 if self.rng.chance(1, 5) => self.at(self.now, Event::NewLeader),
+            9 if self.hosts[index].machine_up && self.hosts[index].suspended_until.is_none() => {
+                let span = 2 * SEC + self.rng.below(60 * SEC);
+                self.suspend(index, span);
+            }
             5..=7 => {
                 let host = &mut self.hosts[index];
                 if host.agent_up {
@@ -1631,12 +1774,32 @@ impl Sim {
             if host.dead {
                 continue;
             }
-            if !host.machine_up {
+            if host.suspended_until.is_some() {
+                self.resume(index);
+            }
+            if !self.hosts[index].machine_up {
                 self.power_on(index);
             } else if !self.hosts[index].agent_up {
                 self.agent_starts(index);
             }
         }
+    }
+}
+
+/// The registration a host answered under and its last renewal then.
+type Answered = (Option<HostEpoch>, u64);
+
+/// Whether the host gave `answer` after `than`: under a later registration,
+/// or at a later renewal of the same one. Answers between two renewals do
+/// not order.
+fn later(answer: Answered, than: Answered) -> bool {
+    match (answer.0, than.0) {
+        (Some(answer_epoch), Some(than_epoch)) if answer_epoch != than_epoch => {
+            answer_epoch > than_epoch
+        }
+        (Some(_), None) => true,
+        (None, _) => false,
+        _ => answer.1 > than.1,
     }
 }
 
@@ -1688,8 +1851,11 @@ fn simulate(seed: u64, params: Params) -> Stats {
         }
         gone += 1;
     }
+    // Each one lost was checked above to be allowed to be; this only
+    // catches a run whose faults left too little to check (seed 767 of the
+    // drifting run loses 11 of 200 to two hosts that died for good).
     assert!(
-        gone * 20 <= ids.len(),
+        gone * 10 <= ids.len(),
         "seed {seed}: {gone} of {} lost",
         ids.len()
     );
@@ -1706,6 +1872,8 @@ fn simulate(seed: u64, params: Params) -> Stats {
         holders.values().all(|&count| count == 1),
         "seed {seed}: a sandbox runs twice"
     );
+    sim.stats.dead_hosts = sim.hosts.iter().filter(|host| host.dead).count() as u64;
+    sim.stats.lost_sandboxes = gone as u64;
     sim.stats
 }
 
@@ -1715,14 +1883,12 @@ fn seeds() -> impl Iterator<Item = u64> {
     first..first + count
 }
 
-#[test]
-fn the_protocol_keeps_every_sandbox_on_one_host_through_faults() {
-    let params = Params {
-        hosts: 16,
-        sandboxes: 600,
-        seconds: 600,
-        max_ppm: 500,
-    };
+/// Runs every seed and checks that a host given up on had stopped its VMs
+/// at least what the lease terms leave to spare before: with no time to
+/// stop the machine here and the service's clock exact, the term and
+/// margin less the term and watchdog on the slowest host clock, less the
+/// steps' granularity.
+fn run_seeds(params: Params) -> Stats {
     let mut total = Stats::default();
     for seed in seeds() {
         let stats = simulate(seed, params);
@@ -1735,11 +1901,43 @@ fn the_protocol_keeps_every_sandbox_on_one_host_through_faults() {
         total.superseded += stats.superseded;
         total.watchdog_reboots += stats.watchdog_reboots;
         total.kills += stats.kills;
+        total.suspends += stats.suspends;
+        total.slow_registrations += stats.slow_registrations;
+        total.dead_hosts += stats.dead_hosts;
+        total.lost_sandboxes += stats.lost_sandboxes;
         if let Some(gap) = stats.min_stop_gap_ns {
             let min = total.min_stop_gap_ns.get_or_insert(gap);
             *min = (*min).min(gap);
         }
     }
+    let slowest = 1_000_000 - i128::from(params.max_ppm);
+    let host =
+        i128::try_from((TERMS.term + TERMS.watchdog).as_nanos()).unwrap() * 1_000_000 / slowest;
+    let spare = i128::try_from((TERMS.term + TERMS.margin).as_nanos()).unwrap() - host;
+    assert!(
+        spare > 0,
+        "the simulated clocks are outside the lease terms"
+    );
+    if let Some(gap) = total.min_stop_gap_ns {
+        assert!(
+            i128::from(gap + 3 * TICK_NS) >= spare,
+            "a VM ran {gap} ns before its host was given up on; the terms leave {spare} ns"
+        );
+    }
+    if std::env::var_os("FLEET_SIM_PRINT").is_some() {
+        eprintln!("{params:?}: {total:?}, spare {spare} ns");
+    }
+    total
+}
+
+#[test]
+fn the_protocol_keeps_every_sandbox_on_one_host_through_faults() {
+    let total = run_seeds(Params {
+        hosts: 16,
+        sandboxes: 600,
+        seconds: 600,
+        max_ppm: 500,
+    });
     // The run exercised every path it checks.
     assert!(
         total.recoveries > 0 && total.reclaims > 0 && total.adopts > 0,
@@ -1749,27 +1947,24 @@ fn the_protocol_keeps_every_sandbox_on_one_host_through_faults() {
         total.moves > 0 && total.fenced > 0 && total.superseded > 0,
         "{total:?}"
     );
-    assert!(total.watchdog_reboots > 0 && total.kills > 0, "{total:?}");
-    // VMs stopped at least the margin less the watchdog's timeout before
-    // recovery, even when the guard stalled or could not stop them.
-    let gap = total.min_stop_gap_ns.unwrap();
-    let margin = u64::try_from(TERMS.margin.as_nanos()).unwrap();
     assert!(
-        gap + WATCHDOG_NS + 3 * TICK_NS >= margin,
-        "a VM ran {gap} ns before its host was given up on"
+        total.watchdog_reboots > 0 && total.kills > 0 && total.suspends > 0,
+        "{total:?}"
+    );
+    assert!(
+        total.slow_registrations > 0 && total.min_stop_gap_ns.is_some(),
+        "{total:?}"
     );
 }
 
 #[test]
-fn even_fast_drifting_clocks_stay_safe() {
-    // 0.5 % drift: far past any real clock, still inside the margin.
-    let params = Params {
+fn clocks_drifting_as_far_as_the_terms_allow_stay_safe() {
+    // 1 %: a hundred times what an unsynchronised server clock drifts.
+    let total = run_seeds(Params {
         hosts: 8,
         sandboxes: 200,
         seconds: 300,
-        max_ppm: 5_000,
-    };
-    for seed in seeds().take(3) {
-        simulate(seed, params);
-    }
+        max_ppm: i64::from(TERMS.rate_error_ppm),
+    });
+    assert!(total.recoveries > 0, "{total:?}");
 }

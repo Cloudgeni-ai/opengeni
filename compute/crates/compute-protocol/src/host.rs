@@ -583,12 +583,15 @@ pub struct MemoryStatus {
     pub pressure_some_avg10_hundredths: Option<u32>,
 }
 
-impl From<compute_engine::MemoryStats> for MemoryStatus {
-    fn from(stats: compute_engine::MemoryStats) -> Self {
+impl MemoryStatus {
+    /// From a VM cgroup's zswap counters and its `some avg10` memory
+    /// pressure in percent.
+    #[must_use]
+    pub fn new(zswpout: u64, zswpin: u64, pressure_some_avg10: Option<f64>) -> Self {
         Self {
-            zswpout: stats.zswpout,
-            zswpin: stats.zswpin,
-            pressure_some_avg10_hundredths: stats.pressure_some_avg10.map(|percent| {
+            zswpout,
+            zswpin,
+            pressure_some_avg10_hundredths: pressure_some_avg10.map(|percent| {
                 // At most 100 percent: 10 000 hundredths.
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let hundredths = (percent * 100.0).round().clamp(0.0, 10_000.0) as u32;

@@ -539,7 +539,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         .vm
                         .as_ref()
                         .and_then(|live| self.engine.memory_stats(&live.vm).ok())
-                        .map(MemoryStatus::from),
+                        .map(memory_status),
                     failed_step: slot.failed.as_ref().map(|(step, error)| FailedStep {
                         step: step_name(*step).to_owned(),
                         error: error.clone(),
@@ -610,4 +610,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             about: self.about.clone(),
         }
     }
+}
+
+/// What the API reports of a VM cgroup's memory counters.
+fn memory_status(stats: compute_engine::MemoryStats) -> MemoryStatus {
+    MemoryStatus::new(stats.zswpout, stats.zswpin, stats.pressure_some_avg10)
 }

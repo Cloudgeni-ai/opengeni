@@ -33,7 +33,7 @@ mode = "advisory"
 # ownership, fences and placement) are pure: inputs in, actions out. They
 # never touch files, sockets, threads, processes, the environment or the
 # clock, so the seeded simulations can drive them exactly and replay any
-# failure.
+# failure. compute-protocol holds only wire types, and is held to the same.
 # Time arrives as an input. Every other crate is allowed; a new crate must be
 # added here on purpose.
 #

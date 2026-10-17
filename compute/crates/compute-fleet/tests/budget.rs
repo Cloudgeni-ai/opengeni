@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use compute_fleet::{
     At, Capacity, ClassId, Demand, Expiry, Fleet, HostId, HostInfo, HostState, LeaseTerms,
-    OwnerEpoch, Ownership, Rng, SandboxId, ShapeKey, Verdict, ZoneId, reconcile,
+    OwnerEpoch, Ownership, Prefer, Rng, SandboxId, ShapeKey, Verdict, ZoneId, reconcile,
 };
 
 const HOSTS: u64 = 5_000;
@@ -99,10 +99,12 @@ fn demand(rng: &mut Rng) -> Demand {
         memory_mib,
         memory_max_mib: memory_mib * 2,
         disk_mib: 1_024,
-        shape: Some(ShapeKey(rng.below(SHAPES))),
-        class: rng
-            .chance(1, 2)
-            .then(|| ClassId(u16::try_from(rng.below(2)).unwrap())),
+        // Creates and adopts in equal parts.
+        prefer: if rng.chance(1, 2) {
+            Prefer::ReadyClone(ShapeKey(rng.below(SHAPES)))
+        } else {
+            Prefer::Class(ClassId(u16::try_from(rng.below(2)).unwrap()))
+        },
     }
 }
 

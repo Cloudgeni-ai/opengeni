@@ -1,4 +1,6 @@
-use super::{Capacity, ClassId, Demand, Fleet, HostId, HostInfo, HostState, Rng, ShapeKey, ZoneId};
+use super::{
+    Capacity, ClassId, Demand, Fleet, HostId, HostInfo, HostState, Prefer, Rng, ShapeKey, ZoneId,
+};
 
 const SHAPE: ShapeKey = ShapeKey(42);
 
@@ -25,8 +27,7 @@ fn demand(memory_mib: u64) -> Demand {
         memory_mib,
         memory_max_mib: memory_mib * 2,
         disk_mib: 1_000,
-        shape: None,
-        class: None,
+        prefer: Prefer::Any,
     }
 }
 
@@ -78,7 +79,7 @@ fn a_host_with_a_ready_clone_is_preferred() {
     ready.ready = vec![(SHAPE, 2)];
     fleet.update(HostId(7), ready);
     let mut wanted = demand(1_000);
-    wanted.shape = Some(SHAPE);
+    wanted.prefer = Prefer::ReadyClone(SHAPE);
     let mut rng = Rng::new(3);
     let placed = fleet.place(&wanted, &[], &mut rng).unwrap();
     assert_eq!(placed.host, HostId(7));
@@ -104,13 +105,47 @@ fn the_class_of_the_memory_image_is_preferred_then_any() {
     };
     fleet.upsert(HostId(99), other, HostState::Live, capacity(1_000));
     let mut wanted = demand(500);
-    wanted.class = Some(ClassId(5));
+    wanted.prefer = Prefer::Class(ClassId(5));
     let mut rng = Rng::new(4);
     let placed = fleet.place(&wanted, &[], &mut rng).unwrap();
     assert_eq!(placed.host, HostId(99));
     assert!(placed.same_class);
     let placed = fleet.place(&wanted, &[HostId(99)], &mut rng).unwrap();
     assert!(!placed.same_class);
+}
+
+#[test]
+fn an_adopt_goes_to_its_class_even_past_ready_clones_and_more_memory() {
+    // Every host of class 0 has a ready clone and eight times the memory;
+    // the one of the image's class has neither.
+    let mut fleet = Fleet::new();
+    for id in 0..30 {
+        let mut roomy = capacity(8_000);
+        roomy.ready = vec![(SHAPE, 4)];
+        fleet.upsert(
+            HostId(id),
+            info(u16::try_from(id % 3).unwrap()),
+            HostState::Live,
+            roomy,
+        );
+    }
+    let image_class = HostInfo {
+        class: ClassId(5),
+        ..info(1)
+    };
+    fleet.upsert(HostId(99), image_class, HostState::Live, capacity(1_000));
+    let mut wanted = demand(500);
+    wanted.prefer = Prefer::Class(ClassId(5));
+    let mut rng = Rng::new(9);
+    for _ in 0..50 {
+        let placed = fleet.place(&wanted, &[], &mut rng).unwrap();
+        assert_eq!(
+            placed.host,
+            HostId(99),
+            "a ready clone won over the image's class"
+        );
+        assert!(placed.same_class && !placed.ready);
+    }
 }
 
 #[test]
@@ -167,7 +202,7 @@ fn removed_and_replaced_hosts_leave_no_trace_in_the_indexes() {
     fleet.remove(HostId(3));
     assert_eq!(fleet.len(), 9);
     let mut wanted = demand(100);
-    wanted.shape = Some(SHAPE);
+    wanted.prefer = Prefer::ReadyClone(SHAPE);
     let mut rng = Rng::new(2);
     for _ in 0..100 {
         let placed = fleet.place(&wanted, &[], &mut rng).unwrap();

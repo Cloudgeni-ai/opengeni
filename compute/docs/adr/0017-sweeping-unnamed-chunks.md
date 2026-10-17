@@ -71,7 +71,11 @@ would delete a chunk the new copy needs, after its local copy may be gone.
   sweep window, on condition that it is still the same write; by then no
   archive of that sandbox is still trying.
 - Forgetting a memory image also drops its working-set pack, which holds
-  memory pages; a copy without memory names no pack.
+  memory pages; a copy without memory names no pack. The forget carries a
+  change number of its own, as an archive does
+  ([18](0018-the-fleet-service-leases-and-fences.md)): tried again after
+  its answer was lost it finds itself done, and an archive begun before it
+  can no longer land over it.
 - Anything a sweep cannot read stops it before it deletes anything; only a
   damaged working-set pack does not, since a wake without it is slower.
 - Without `--delete` a sweep only reports what it would delete, and writes

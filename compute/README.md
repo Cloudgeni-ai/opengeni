@@ -14,7 +14,8 @@ Opengeni does not use this yet.
 | Host agent: jailed VMs, durable records, restart recovery, sleep levels, activity-based idle, per-sandbox network, pager process, working-set packs, chunk checksums, smoke suite | on `feat/compute-lab` |
 | Templates and a ready pool for new sandboxes | on `feat/compute-lab` |
 | Admission with requests and limits, memory guarantees for running VMs | on `feat/compute-lab` |
-| Control plane (placement, moves between hosts, autoscaling), observability, Opengeni integration | planned |
+| Fleet decisions: placement, host leases with a safety budget, the VM guard, fences on every archive write, recovery and moves, with a seeded simulation of the whole protocol | on `feat/compute-fleet` |
+| The fleet service (Postgres store, host API, proxy), multi-host runs, autoscaling, observability, Opengeni integration | in progress |
 
 Decisions and their reasons are in [docs/adr](docs/adr/README.md). Numbers
 below are observations from our lab runs, with workloads and hosts in
@@ -253,7 +254,9 @@ next create.
 | `crates/compute-engine` | VM operations (boot, pause, resume, compress, snapshot, restore, stop) behind one trait; Firecracker with its jailer, cgroups. |
 | `crates/compute-host` | The agent: API, records, steps, images, archives, network, activity, templates. |
 | `crates/compute-pager` | The userfaultfd pager, with a pure, separately tested memory-layout core. |
-| `crates/compute-storage` | Content-addressed chunks, manifests and stores. |
+| `crates/compute-storage` | Content-addressed chunks, manifests and stores; archive pointers stamped with their owner. |
+| `crates/compute-fleet` | Pure fleet decisions: placement, host leases, the guard that stops a cut-off host's VMs, the fence rule for archive writes, recovery and moves. No I/O, clock or randomness. |
+| `crates/compute-protocol` | The wire forms: the host agent's API and the fleet service's host API. |
 | `crates/archcheck` | Structure rules from `ARCHITECTURE.toml`, run as `cargo arch`. |
 | `smoke/` | End-to-end scenarios against a real agent, real VMs and a real guest. |
 | `lab/` | Measurement scripts used to size the design. Not production code. |
@@ -311,6 +314,11 @@ cargo clippy --workspace --all-targets -- -D warnings   # pedantic is on
   of 600 events (delays, failures, crashes, removals, memory pressure) against
   a fake engine and checks the core against an independent model after every
   input.
+- `crates/compute-fleet/tests/protocol.rs` runs the whole fleet protocol,
+  seeded, with the crate's own decisions under clock drift, partitions,
+  lost and late messages, stalls, restarts, suspends, power losses and
+  leader failovers, and checks that no sandbox ever runs on two hosts
+  (`FLEET_SIM_SEEDS` sets how many seeds; it runs on any platform).
 - Record writes are crash-tested at every boundary (staged, renamed, synced).
 - Tests with real Firecracker run as root on a host prepared by
   `lab/host-setup.sh`, only when `COMPUTE_TEST_LAB` names it:

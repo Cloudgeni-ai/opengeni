@@ -66,15 +66,40 @@ pub struct Demand {
     pub memory_max_mib: u64,
     /// Disk in MiB it needs.
     pub disk_mib: u64,
-    /// Its kind, for a create that a ready clone could serve.
-    pub shape: Option<ShapeKey>,
-    /// The class its saved memory image restores on, for an adopt. Hosts of
-    /// that class are preferred: anywhere else it boots afresh from its
-    /// files and loses its programs.
-    pub class: Option<ClassId>,
+    /// The hosts it would rather go to.
+    pub prefer: Prefer,
+}
+
+/// The hosts a sandbox to place would rather go to: one kind of preference
+/// at a time, so a ready clone never outweighs the class a memory image
+/// needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Prefer {
+    /// Any host that fits.
+    Any,
+    /// For a create: one with a ready clone of this shape.
+    ReadyClone(ShapeKey),
+    /// For an adopt of a saved memory image: one of the class it restores
+    /// on. Anywhere else the sandbox boots afresh from its files and loses
+    /// its programs.
+    Class(ClassId),
 }
 
 impl Demand {
+    fn shape(&self) -> Option<ShapeKey> {
+        match self.prefer {
+            Prefer::ReadyClone(shape) => Some(shape),
+            Prefer::Any | Prefer::Class(_) => None,
+        }
+    }
+
+    fn class(&self) -> Option<ClassId> {
+        match self.prefer {
+            Prefer::Class(class) => Some(class),
+            Prefer::Any | Prefer::ReadyClone(_) => None,
+        }
+    }
+
     fn memory_on(&self, info: HostInfo) -> u64 {
         if info.huge_pages {
             self.memory_max_mib
@@ -261,7 +286,7 @@ impl Fleet {
             capacity.free_disk_mib = capacity.free_disk_mib.saturating_sub(demand.disk_mib);
             capacity.sandboxes = capacity.sandboxes.saturating_add(1);
             if placement.ready
-                && let Some(shape) = demand.shape
+                && let Some(shape) = demand.shape()
                 && let Some((_, count)) = capacity.ready.iter_mut().find(|(key, _)| *key == shape)
             {
                 *count = count.saturating_sub(1);
@@ -282,8 +307,8 @@ impl Fleet {
             })
         };
         let pools = [
-            demand.shape.and_then(|shape| self.ready.get(&shape)),
-            demand.class.and_then(|class| self.by_class.get(&class)),
+            demand.shape().and_then(|shape| self.ready.get(&shape)),
+            demand.class().and_then(|class| self.by_class.get(&class)),
             Some(&self.live),
         ];
         let chosen = pools
@@ -294,7 +319,9 @@ impl Fleet {
         Some(Placement {
             host: entry.id,
             ready: has_ready(entry, demand),
-            same_class: demand.class.is_some_and(|class| class == entry.info.class),
+            same_class: demand
+                .class()
+                .is_some_and(|class| class == entry.info.class),
         })
     }
 
@@ -414,7 +441,7 @@ impl Fleet {
 }
 
 fn has_ready(entry: &Slot, demand: &Demand) -> bool {
-    demand.shape.is_some_and(|shape| {
+    demand.shape().is_some_and(|shape| {
         entry
             .capacity
             .ready

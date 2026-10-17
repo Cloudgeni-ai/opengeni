@@ -7,20 +7,10 @@ use super::*;
 async fn pointers_are_replaced_read_and_deleted() {
     let store = ChunkStore::new(Arc::new(InMemory::new()), Path::from("tenant/test"));
     assert_eq!(store.get_pointer("a1").await.unwrap(), None);
-    assert!(
-        store
-            .read_for_change("a1", TEST_EPOCH)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(store.rewrite_test("a1").await.unwrap().is_none());
     let first = store.begin_test("a1").await.unwrap();
     store.publish(first, b"one two".to_vec()).await.unwrap();
-    let (read, part) = store
-        .read_for_change("a1", TEST_EPOCH)
-        .await
-        .unwrap()
-        .unwrap();
+    let (read, part) = store.rewrite_test("a1").await.unwrap().unwrap();
     assert_eq!(read, b"one two".to_vec());
     store.publish(part, b"two".to_vec()).await.unwrap();
     assert_eq!(
@@ -30,13 +20,7 @@ async fn pointers_are_replaced_read_and_deleted() {
     store.delete_pointer("a1", TEST_EPOCH).await.unwrap();
     store.delete_pointer("a1", TEST_EPOCH).await.unwrap();
     assert_eq!(store.get_pointer("a1").await.unwrap(), None);
-    assert!(
-        store
-            .read_for_change("a1", TEST_EPOCH)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(store.rewrite_test("a1").await.unwrap().is_none());
     assert!(store.begin_test("../escape").await.is_err());
     let big = store.begin_test("big").await.unwrap();
     assert!(
@@ -55,11 +39,7 @@ async fn changes_land_only_on_the_version_they_read() {
     let store = ChunkStore::new(backend.clone(), Path::from("p"));
     let first = store.begin_test("a").await.unwrap();
     store.publish(first, b"old".to_vec()).await.unwrap();
-    let (_, stale) = store
-        .read_for_change("a", TEST_EPOCH)
-        .await
-        .unwrap()
-        .unwrap();
+    let (_, stale) = store.rewrite_test("a").await.unwrap().unwrap();
     let newer = store.begin_test("a").await.unwrap();
     store.publish(newer, b"new".to_vec()).await.unwrap();
     let refused = store.publish(stale, b"part of old".to_vec()).await;
@@ -79,13 +59,7 @@ async fn changes_land_only_on_the_version_they_read() {
         unstamped(&left).unwrap().1.is_empty(),
         "the empty pointer stays"
     );
-    assert!(
-        store
-            .read_for_change("a", TEST_EPOCH)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(store.rewrite_test("a").await.unwrap().is_none());
 }
 
 /// Every write of a pointer is stored differently, even of the same
@@ -103,14 +77,13 @@ async fn every_pointer_write_has_its_own_stamp() {
     let empty = stored().await;
     store.publish(first, b"same".to_vec()).await.unwrap();
     let once = stored().await;
-    let (_, again) = store
-        .read_for_change("a", TEST_EPOCH)
-        .await
-        .unwrap()
-        .unwrap();
+    let (_, again) = store.rewrite_test("a").await.unwrap().unwrap();
     store.publish(again, b"same".to_vec()).await.unwrap();
     let twice = stored().await;
-    assert_eq!(unstamped(&once).unwrap(), unstamped(&twice).unwrap());
+    let (once_owner, once_body) = unstamped(&once).unwrap();
+    let (twice_owner, twice_body) = unstamped(&twice).unwrap();
+    assert_eq!(once_body, twice_body);
+    assert!(twice_owner > once_owner, "a rewrite takes a later number");
     assert_ne!(once, twice);
     store.fence("pointers/v3/a").await.unwrap();
     assert_ne!(stored().await, twice, "a fence stores it anew");
@@ -168,7 +141,7 @@ async fn a_former_owner_writes_nothing_after_a_claim() -> Result<()> {
     let refused = store.publish(held, b"stale".to_vec()).await;
     assert!(matches!(refused, Err(Error::Superseded)), "{refused:?}");
     fenced_by(&store.begin("a", at(1, 3)).await, 2);
-    fenced_by(&store.read_for_change("a", OwnerEpoch(1)).await, 2);
+    fenced_by(&store.read_for_change("a", at(1, 3)).await, 2);
     fenced_by(&store.delete_pointer("a", OwnerEpoch(1)).await, 2);
     fenced_by(&store.claim("a", OwnerEpoch(1)).await, 2);
     assert_eq!(
@@ -190,10 +163,11 @@ async fn a_former_owner_writes_nothing_after_a_claim() -> Result<()> {
     Ok(())
 }
 
-/// An archive of a save the pointer already names, or an earlier one by
-/// the same owner, has nothing to publish; a later save publishes.
+/// An archive of a save the pointer already names finds it stored, one of
+/// an earlier save by the same owner finds it outdated, and neither
+/// publishes; a later save publishes.
 #[tokio::test]
-async fn an_earlier_or_the_same_save_is_done() -> Result<()> {
+async fn the_same_save_is_stored_and_an_earlier_one_outdated() -> Result<()> {
     let store = ChunkStore::new(Arc::new(InMemory::new()), Path::from("p"));
     let fifth = store
         .begin("a", at(1, 5))
@@ -201,8 +175,11 @@ async fn an_earlier_or_the_same_save_is_done() -> Result<()> {
         .into_publication()
         .unwrap();
     store.publish(fifth, b"five".to_vec()).await?;
-    assert!(matches!(store.begin("a", at(1, 3)).await?, Begun::Done));
-    assert!(matches!(store.begin("a", at(1, 5)).await?, Begun::Done));
+    assert!(matches!(store.begin("a", at(1, 3)).await?, Begun::Outdated));
+    assert!(matches!(
+        store.begin("a", at(1, 5)).await?,
+        Begun::Stored(bytes) if bytes == b"five"
+    ));
     let sixth = store
         .begin("a", at(1, 6))
         .await?
@@ -250,9 +227,9 @@ async fn a_claim_again_and_a_fence_keep_the_owner() -> Result<()> {
 }
 
 /// A tombstone is final: the owner that deleted the sandbox finds any
-/// archive it still has in flight done, a later owner neither archives
-/// over it nor takes anything by claiming it, and a former owner is
-/// fenced. Deleting again changes nothing.
+/// archive it still has in flight deleted, not done, a later owner neither
+/// archives over it nor takes anything by claiming it, and a former owner
+/// is fenced. Deleting again changes nothing.
 #[tokio::test]
 async fn a_tombstone_is_final() -> Result<()> {
     let backend = Arc::new(InMemory::new());
@@ -274,8 +251,12 @@ async fn a_tombstone_is_final() -> Result<()> {
 
     let refused = store.publish(in_flight, b"two".to_vec()).await;
     assert!(matches!(refused, Err(Error::Superseded)), "{refused:?}");
-    assert!(matches!(store.begin("a", at(2, 2)).await?, Begun::Done));
-    assert!(matches!(store.begin("a", at(3, 1)).await?, Begun::Done));
+    assert!(matches!(store.begin("a", at(2, 2)).await?, Begun::Deleted));
+    assert!(matches!(store.begin("a", at(3, 1)).await?, Begun::Deleted));
+    assert!(matches!(
+        store.read_for_change("a", at(2, 3)).await?,
+        Rewrite::Nothing
+    ));
     assert_eq!(store.claim("a", OwnerEpoch(3)).await?, None);
     fenced_by(&store.begin("a", at(1, 9)).await, 2);
     fenced_by(&store.delete_pointer("a", OwnerEpoch(1)).await, 2);
@@ -289,7 +270,10 @@ async fn a_tombstone_is_final() -> Result<()> {
         "never fenced"
     );
     assert_eq!(store.get_owned_pointer("a").await?, None);
-    assert!(store.read_for_change("a", OwnerEpoch(2)).await?.is_none());
+    assert!(matches!(
+        store.read_for_change("a", at(2, 4)).await?,
+        Rewrite::Nothing
+    ));
     Ok(())
 }
 
@@ -498,4 +482,57 @@ async fn manifest_round_trip_rejects_corruption_and_invalid_digest() {
         store.get_manifest(&digest).await,
         Err(Error::Integrity)
     ));
+}
+
+/// Forgetting a memory image takes its own number, so an archive of the
+/// save before it, tried again after a lost answer, finds the pointer
+/// outdated rather than taking the copy without memory as its own; the
+/// rewrite tried again finds itself done.
+#[tokio::test]
+async fn a_rewrite_outdates_the_save_it_rewrote() -> Result<()> {
+    let store = ChunkStore::new(Arc::new(InMemory::new()), Path::from("p"));
+    let save = store
+        .begin("a", at(1, 1))
+        .await?
+        .into_publication()
+        .unwrap();
+    store.publish(save, b"disk and memory".to_vec()).await?;
+    let Rewrite::Change(read, change) = store.read_for_change("a", at(1, 2)).await? else {
+        panic!("nothing to rewrite");
+    };
+    assert_eq!(read, b"disk and memory");
+    store.publish(change, b"disk".to_vec()).await?;
+    assert!(matches!(store.begin("a", at(1, 1)).await?, Begun::Outdated));
+    assert!(matches!(
+        store.read_for_change("a", at(1, 2)).await?,
+        Rewrite::Done(bytes) if bytes == b"disk"
+    ));
+    assert!(matches!(
+        store.read_for_change("a", at(1, 1)).await?,
+        Rewrite::Outdated
+    ));
+    Ok(())
+}
+
+/// A claim where there is no pointer yet stores an empty one under the new
+/// owner, so an archive a former owner begins afterwards is fenced
+/// instead of publishing a copy nobody claimed.
+#[tokio::test]
+async fn a_claim_of_nothing_still_fences_a_former_owner() -> Result<()> {
+    let store = ChunkStore::new(Arc::new(InMemory::new()), Path::from("p"));
+    assert_eq!(store.claim("a", OwnerEpoch(2)).await?, None);
+    fenced_by(&store.begin("a", at(1, 1)).await, 2);
+    assert_eq!(store.get_pointer("a").await?, None);
+    // The new owner archives over its own empty pointer.
+    let first = store
+        .begin("a", at(2, 1))
+        .await?
+        .into_publication()
+        .unwrap();
+    store.publish(first, b"one".to_vec()).await?;
+    assert_eq!(
+        store.get_owned_pointer("a").await?,
+        Some((at(2, 1), b"one".to_vec()))
+    );
+    Ok(())
 }

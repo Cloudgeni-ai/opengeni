@@ -102,9 +102,11 @@ pub enum Archive {
     /// Cancelled before anything was published: the store's earlier copy,
     /// if any, is still the one it names.
     Cancelled,
-    /// The store holds a later save by the same owner, or the sandbox was
-    /// deleted: this one changes nothing.
+    /// The store holds a later change by the same owner: this save
+    /// changes nothing.
     Outdated,
+    /// The sandbox was deleted: nothing of it is archived again.
+    Deleted,
     /// A later owner holds the copy: the sandbox is no longer this host's.
     Fenced {
         /// The owner epoch that holds it.
@@ -118,7 +120,7 @@ impl Archive {
     pub fn stored(self) -> Option<Receipt> {
         match self {
             Self::Stored(receipt) => Some(receipt),
-            Self::Cancelled | Self::Outdated | Self::Fenced { .. } => None,
+            Self::Cancelled | Self::Outdated | Self::Deleted | Self::Fenced { .. } => None,
         }
     }
 }
@@ -272,12 +274,15 @@ pub trait Store: Send + Sync + 'static {
     }
 
     /// Deletes the memory image from the stored copy and keeps its disk,
-    /// as its owner under `own`. Returns the receipt of what is stored
+    /// as the change `change` of its owner: a number no other change of
+    /// that owner has used, which the copy carries afterwards, so a try
+    /// whose answer was lost finds itself done and an archive begun
+    /// earlier no longer lands. Returns the receipt of what is stored
     /// afterwards, `None` if nothing is.
     fn forget_memory(
         &self,
         id: Id,
-        own: OwnerEpoch,
+        change: Stamp,
     ) -> impl Future<Output = Result<Owned<Option<Receipt>>, EngineError>> + Send;
 }
 
@@ -339,7 +344,7 @@ impl Store for NoStore {
     fn forget_memory(
         &self,
         _: Id,
-        _: OwnerEpoch,
+        _: Stamp,
     ) -> impl Future<Output = Result<Owned<Option<Receipt>>, EngineError>> + Send {
         ready(Ok(Owned::Done(None)))
     }
@@ -624,11 +629,7 @@ impl Store for Directory {
         .await
     }
 
-    async fn forget_memory(
-        &self,
-        id: Id,
-        _: OwnerEpoch,
-    ) -> Result<Owned<Option<Receipt>>, EngineError> {
+    async fn forget_memory(&self, id: Id, _: Stamp) -> Result<Owned<Option<Receipt>>, EngineError> {
         let stored = self.dir(id);
         blocking("forget", move || {
             // The device state goes first: without it, what remains of the
@@ -748,8 +749,7 @@ mod tests {
 
         let second = archive().await;
         assert!(store.verify(id, &second).await.unwrap());
-        let Owned::Done(Some(disk_only)) = store.forget_memory(id, SAVE.epoch).await.unwrap()
-        else {
+        let Owned::Done(Some(disk_only)) = store.forget_memory(id, SAVE).await.unwrap() else {
             panic!("the disk stays");
         };
         assert!(!store.verify(id, &second).await.unwrap());

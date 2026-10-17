@@ -39,7 +39,7 @@ pub const MAX_POINTER_BYTES: usize = 64 * 1024;
 
 mod pointers;
 
-pub use pointers::{Begun, Publication, Stock};
+pub use pointers::{Begun, Publication, Rewrite, Stock};
 #[cfg(test)]
 pub(crate) use pointers::{TEST_EPOCH, next_save, unstamped};
 

@@ -2,13 +2,17 @@
 //! from the service, and when the service may give up on it.
 //!
 //! The two sides measure on their own clocks, which need not agree, only
-//! run at about the same rate. A host stamps each renewal with its clock
+//! run at about the right rate. A host stamps each renewal with its clock
 //! when it sends it, and may run its VMs until that time plus the term T.
-//! The service accepts the renewal later than it was sent, and treats the
-//! host as lost only once T plus a margin has passed since the last renewal
-//! it accepted. So the host stops at least the margin before the service
-//! hands its sandboxes to others, whatever the network delays, as long as
-//! the clocks' rates differ by less than margin / (T + margin).
+//! If its guard cannot stop them by then, the kernel watchdog it stops
+//! feeding at the deadline stops the machine W later, which takes at most
+//! S. The service accepts the renewal later than it was sent, and treats
+//! the host as lost only once T plus a margin M has passed on its clock
+//! since it saw the renewal. With every clock within a rate error ρ of
+//! true time, the host's VMs have stopped within (T + W) / (1 − ρ) + S of
+//! the send, and the service waits at least (T + M) / (1 + ρ), whatever
+//! the network delays. [`LeaseTerms::validate`] refuses a margin that does
+//! not keep the first shorter than the second.
 //!
 //! Renewals also bound how long a request from the service stays good. The
 //! host numbers its renewals under each registration, and the service
@@ -41,36 +45,78 @@ pub struct LeaseTerms {
     /// For how many renewals after it was stamped a host still takes a
     /// request.
     pub request_window: u64,
+    /// How long after the guard last fed it the kernel watchdog stops the
+    /// machine, on the host's clock: W. Whole seconds, as `softdog`
+    /// counts them.
+    pub watchdog: Duration,
+    /// How long the machine takes, at most, from the watchdog firing to no
+    /// VM running: S.
+    pub stop: Duration,
+    /// How far, in parts per million, any host's or the service's clock
+    /// may run fast or slow against true time: ρ.
+    pub rate_error_ppm: u32,
 }
 
 /// Why [`LeaseTerms`] are refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LeaseError {
-    /// The term, margin, an interval or the request window is zero.
+    /// The term, margin, an interval, the watchdog or the request window
+    /// is zero.
     Zero,
     /// Fewer than two renewals fit in a term, so one lost renewal would
     /// stop every VM on the host.
     RenewTooRare,
+    /// The watchdog's timeout is not a whole number of seconds.
+    WatchdogNotWholeSeconds,
+    /// The clock rate error is 10 % or more: no clock that bad is fit to
+    /// run a lease on.
+    RateErrorTooLarge,
+    /// With this margin a host's VMs might still run when the service
+    /// hands its sandboxes to others.
+    MarginTooSmall {
+        /// The smallest margin that is safe with the other terms.
+        needed: Duration,
+    },
 }
 
 impl fmt::Display for LeaseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Zero => "the lease term, margin, intervals and request window must not be zero",
-            Self::RenewTooRare => "a host must renew at least twice per lease term",
-        })
+        match self {
+            Self::Zero => f.write_str(
+                "the lease term, margin, intervals, watchdog and request window must not be zero",
+            ),
+            Self::RenewTooRare => f.write_str("a host must renew at least twice per lease term"),
+            Self::WatchdogNotWholeSeconds => {
+                f.write_str("the watchdog's timeout must be whole seconds")
+            }
+            Self::RateErrorTooLarge => f.write_str("the clock rate error must be under 10 %"),
+            Self::MarginTooSmall { needed } => write!(
+                f,
+                "the margin must be at least {} ms for VMs to stop before their sandboxes move",
+                needed.as_millis()
+            ),
+        }
     }
 }
+
+/// Parts per million in one.
+const MILLION: u128 = 1_000_000;
 
 impl LeaseTerms {
     /// A ten-second term, renewed every third of it, with a five-second
     /// margin; requests stay good for two renewals, about seven seconds.
+    /// A three-second watchdog and a second to stop leave the margin about
+    /// 0.7 s to spare with clocks 1 % off, a hundred times what an
+    /// unsynchronised server clock drifts.
     pub const RECOMMENDED: Self = Self {
         term: Duration::from_secs(10),
         margin: Duration::from_secs(5),
         renew_every: Duration::from_millis(3_333),
         register_every: Duration::from_secs(1),
         request_window: 2,
+        watchdog: Duration::from_secs(3),
+        stop: Duration::from_secs(1),
+        rate_error_ppm: 10_000,
     };
 
     /// These terms, if they are safe to run with.
@@ -79,6 +125,7 @@ impl LeaseTerms {
             || self.margin.is_zero()
             || self.renew_every.is_zero()
             || self.register_every.is_zero()
+            || self.watchdog.is_zero()
             || self.request_window == 0
         {
             return Err(LeaseError::Zero);
@@ -86,7 +133,32 @@ impl LeaseTerms {
         if self.renew_every.saturating_mul(2) > self.term {
             return Err(LeaseError::RenewTooRare);
         }
+        if self.watchdog.subsec_nanos() != 0 {
+            return Err(LeaseError::WatchdogNotWholeSeconds);
+        }
+        if u128::from(self.rate_error_ppm) * 10 >= MILLION {
+            return Err(LeaseError::RateErrorTooLarge);
+        }
+        let needed = self.needed_margin();
+        if self.margin < needed {
+            return Err(LeaseError::MarginTooSmall { needed });
+        }
         Ok(self)
+    }
+
+    /// The smallest margin with which a host's VMs have stopped before the
+    /// service gives up on it: the least M with
+    /// (T + M) / (1 + ρ) > (T + W) / (1 − ρ) + S, rounded up.
+    #[must_use]
+    pub fn needed_margin(self) -> Duration {
+        let rate = u128::from(self.rate_error_ppm).min(MILLION - 1);
+        let (fast, slow) = (MILLION + rate, MILLION - rate);
+        // The latest a VM still runs, in true time after the send, and the
+        // service's wait that must exceed it, both scaled by 1 + ρ.
+        let host = (self.term + self.watchdog).as_nanos() * fast;
+        let stopped = host.div_ceil(slow) + (self.stop.as_nanos() * fast).div_ceil(MILLION);
+        let needed = (stopped + 1).saturating_sub(self.term.as_nanos());
+        Duration::from_nanos(u64::try_from(needed).unwrap_or(u64::MAX))
     }
 
     /// When, on the service's clock, a host whose last accepted renewal
@@ -117,7 +189,8 @@ impl LeaseTerms {
 /// arrives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Renewal {
-    /// When the host sent it.
+    /// When the host sent it; for a registration sent again, when it sent
+    /// the first copy, the earliest the service can have registered it.
     pub sent: At,
     /// The registration it renews; `None` for a registration.
     pub epoch: Option<HostEpoch>,
@@ -125,6 +198,10 @@ pub struct Renewal {
     /// The service keeps the highest it accepted and stamps requests
     /// with it.
     pub seq: u64,
+    /// For a registration, the attempt it belongs to: every copy of one
+    /// attempt lists the same sandboxes, and the service answers each the
+    /// same. 0 for a renewal.
+    pub attempt: u64,
 }
 
 /// What a host keeps of its lease where a restarted agent and the guard
@@ -148,6 +225,17 @@ impl LeaseRecord {
     };
 }
 
+/// A registration a host is waiting on: one attempt, sent again unchanged
+/// until it is answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Attempt {
+    id: u64,
+    /// When its first copy was sent.
+    first_sent: At,
+    /// Copies sent so far.
+    copies: u64,
+}
+
 /// A host's side of its lease, on the host's own monotonic clock (one that
 /// keeps counting while the machine is suspended, such as the boot clock).
 ///
@@ -156,6 +244,15 @@ impl LeaseRecord {
 /// Answers may arrive late, out of order or not at all. Whenever
 /// [`Self::record`] changes the caller stores it before it sends anything
 /// or answers any request.
+///
+/// A host without a registration registers in attempts. An attempt lists
+/// what the host has when it starts, and every copy sent again, each
+/// [`LeaseTerms::register_every`], lists the same: the host runs nothing
+/// and takes no request until it is registered, so that list stays true.
+/// The service answers every copy of one attempt with the same
+/// registration, so a slow answer still counts however many copies were
+/// sent since. An attempt ends only when it is answered; a restarted agent
+/// starts a new one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostLease {
     terms: LeaseTerms,
@@ -165,25 +262,34 @@ pub struct HostLease {
     /// The number of the last renewal sent under `epoch`.
     seq: u64,
     last_sent: Option<At>,
+    /// The registration under way, while `epoch` is `None`.
+    attempt: Option<Attempt>,
+    /// The id the next attempt takes.
+    next_attempt: u64,
 }
 
 impl HostLease {
-    /// A host that has not registered: it may run nothing.
+    /// A host that has not registered: it may run nothing. Its attempts
+    /// are numbered from `attempts_from`, which must differ between runs of
+    /// the agent (a random number does), so the service never mistakes a
+    /// new attempt for one an earlier run made.
     #[must_use]
-    pub fn new(terms: LeaseTerms) -> Self {
-        Self::resume(terms, LeaseRecord::NONE)
+    pub fn new(terms: LeaseTerms, attempts_from: u64) -> Self {
+        Self::resume(terms, LeaseRecord::NONE, attempts_from)
     }
 
     /// Takes over the lease a previous run of the agent held, as it left it
     /// on disk, so a restarted agent keeps renewing the same registration.
     #[must_use]
-    pub fn resume(terms: LeaseTerms, record: LeaseRecord) -> Self {
+    pub fn resume(terms: LeaseTerms, record: LeaseRecord, attempts_from: u64) -> Self {
         Self {
             terms,
             epoch: record.epoch,
             deadline: record.deadline,
             seq: record.seq,
             last_sent: None,
+            attempt: None,
+            next_attempt: attempts_from.max(1),
         }
     }
 
@@ -249,16 +355,47 @@ impl HostLease {
     /// Notes that a renewal, or a registration when it holds none, is sent
     /// at `now`, and returns what to keep until its answer. A renewal
     /// raises [`Self::record`]'s number, to be stored before it is sent.
+    /// A registration is the attempt under way sent again, or a new one;
+    /// [`Self::attempt_started`] tells which, so the caller lists what it
+    /// has only for a new one.
     pub fn send(&mut self, now: At) -> Renewal {
         self.last_sent = Some(now);
         if self.epoch.is_some() {
             self.seq += 1;
+            return Renewal {
+                sent: now,
+                epoch: self.epoch,
+                seq: self.seq,
+                attempt: 0,
+            };
         }
+        let attempt = self.attempt.get_or_insert_with(|| {
+            let id = self.next_attempt;
+            self.next_attempt = self.next_attempt.wrapping_add(1).max(1);
+            Attempt {
+                id,
+                first_sent: now,
+                copies: 0,
+            }
+        });
+        attempt.copies += 1;
+        let attempt = *attempt;
         Renewal {
-            sent: now,
-            epoch: self.epoch,
-            seq: self.seq,
+            sent: attempt.first_sent,
+            epoch: None,
+            seq: 0,
+            attempt: attempt.id,
         }
+    }
+
+    /// Whether `renewal`, just returned by [`Self::send`], is the first copy
+    /// of a new registration attempt.
+    #[must_use]
+    pub fn attempt_started(&self, renewal: Renewal) -> bool {
+        renewal.epoch.is_none()
+            && self
+                .attempt
+                .is_some_and(|attempt| attempt.id == renewal.attempt && attempt.copies == 1)
     }
 
     /// The service accepted `renewal`. Returns whether the deadline moved.
@@ -271,14 +408,18 @@ impl HostLease {
         self.extend(renewal.sent)
     }
 
-    /// Whether `renewal` is the registration this host sent last and still
-    /// waits on. Only its answer counts: an earlier registration's answer
-    /// listed what the host had then, not now, so the caller ignores the
-    /// whole answer, and the service refuses a second registration until
-    /// the first lapses.
+    /// Whether `renewal` belongs to the registration attempt this host
+    /// waits on. Only its answers count: an earlier attempt's listed what
+    /// the host had then, not now, so the caller ignores the whole answer,
+    /// and the service refuses another attempt while the registration it
+    /// gave an earlier one may still run VMs.
     #[must_use]
     pub fn awaits(&self, renewal: Renewal) -> bool {
-        self.epoch.is_none() && renewal.epoch.is_none() && self.last_sent == Some(renewal.sent)
+        self.epoch.is_none()
+            && renewal.epoch.is_none()
+            && self
+                .attempt
+                .is_some_and(|attempt| attempt.id == renewal.attempt)
     }
 
     /// The service registered the host under `epoch` in answer to
@@ -291,6 +432,9 @@ impl HostLease {
         }
         self.epoch = Some(epoch);
         self.seq = 0;
+        self.attempt = None;
+        // From the first copy's send: the service may have registered that
+        // one, and counts from when it did.
         self.extend(renewal.sent);
         true
     }
@@ -303,6 +447,7 @@ impl HostLease {
             self.epoch = None;
             self.seq = 0;
             self.last_sent = None;
+            self.attempt = None;
         }
     }
 
@@ -395,11 +540,94 @@ mod tests {
             ..T
         };
         assert_eq!(zero.validate(), Err(LeaseError::Zero));
+        let fractional = LeaseTerms {
+            watchdog: Duration::from_millis(2_500),
+            ..T
+        };
+        assert_eq!(
+            fractional.validate(),
+            Err(LeaseError::WatchdogNotWholeSeconds)
+        );
+        let wild = LeaseTerms {
+            rate_error_ppm: 250_000,
+            ..T
+        };
+        assert_eq!(wild.validate(), Err(LeaseError::RateErrorTooLarge));
+    }
+
+    /// The latest true time after a send that a VM still runs, and the
+    /// earliest the service gives up, for a host clock `host_ppm` off and a
+    /// service clock `service_ppm` off (negative: slow).
+    fn stop_and_give_up(terms: LeaseTerms, host_ppm: f64, service_ppm: f64) -> (f64, f64) {
+        let host_rate = 1.0 + host_ppm / 1e6;
+        let service_rate = 1.0 + service_ppm / 1e6;
+        let stopped =
+            (terms.term + terms.watchdog).as_secs_f64() / host_rate + terms.stop.as_secs_f64();
+        let given_up = (terms.term + terms.margin).as_secs_f64() / service_rate;
+        (stopped, given_up)
+    }
+
+    #[test]
+    fn the_margin_covers_the_watchdog_the_stop_and_the_worst_clocks() {
+        let needed = T.needed_margin();
+        assert!(needed < T.margin, "{needed:?}");
+        assert!(
+            needed > Duration::from_millis(4_200) && needed < Duration::from_millis(4_300),
+            "{needed:?}"
+        );
+        let ppm = f64::from(T.rate_error_ppm);
+        let (stopped, given_up) = stop_and_give_up(T, -ppm, ppm);
+        assert!(stopped < given_up, "{stopped} s against {given_up} s");
+        // Just the needed margin is safe; a millisecond less is not, and
+        // is refused.
+        let tight = LeaseTerms {
+            margin: needed,
+            ..T
+        };
+        assert_eq!(tight.validate(), Ok(tight));
+        let (stopped, given_up) = stop_and_give_up(tight, -ppm, ppm);
+        assert!(stopped < given_up);
+        let short = LeaseTerms {
+            margin: needed.checked_sub(Duration::from_millis(1)).unwrap(),
+            ..T
+        };
+        assert_eq!(short.validate(), Err(LeaseError::MarginTooSmall { needed }));
+        let (stopped, given_up) = stop_and_give_up(short, -ppm, ppm);
+        assert!(stopped > given_up, "the refused margin was safe");
+    }
+
+    #[test]
+    fn a_short_margin_and_a_slow_clock_are_refused() {
+        // A second's margin does not cover a three-second watchdog.
+        let one = LeaseTerms {
+            margin: Duration::from_secs(1),
+            ..T
+        };
+        assert!(matches!(
+            one.validate(),
+            Err(LeaseError::MarginTooSmall { .. })
+        ));
+        let (stopped, given_up) = stop_and_give_up(one, 0.0, 0.0);
+        assert!(
+            stopped > given_up,
+            "the refused terms let a VM outlast the margin"
+        );
+        // A host clock 25 % slow is outside any terms that validate.
+        let slow = LeaseTerms {
+            rate_error_ppm: 250_000,
+            ..T
+        };
+        assert_eq!(slow.validate(), Err(LeaseError::RateErrorTooLarge));
+        let (stopped, given_up) = stop_and_give_up(T, -250_000.0, 0.0);
+        assert!(
+            stopped > given_up,
+            "such a clock lets a VM outlast the margin"
+        );
     }
 
     #[test]
     fn a_host_runs_until_term_after_it_sent_the_renewal_not_after_the_answer() {
-        let mut lease = HostLease::new(T);
+        let mut lease = HostLease::new(T, 1);
         assert!(!lease.may_run(at(0)), "an unregistered host runs nothing");
         let register = lease.send(at(1_000));
         // The answer arrives four seconds later.
@@ -412,7 +640,7 @@ mod tests {
 
     #[test]
     fn answers_out_of_order_never_shorten_the_deadline() {
-        let mut lease = HostLease::new(T);
+        let mut lease = HostLease::new(T, 1);
         let register = lease.send(at(0));
         lease.registered(register, HostEpoch(3));
         let first = lease.send(at(3_333));
@@ -427,8 +655,9 @@ mod tests {
 
     #[test]
     fn answers_for_another_registration_change_nothing() {
-        let mut lease = HostLease::new(T);
+        let mut lease = HostLease::new(T, 1);
         let old = lease.send(at(0));
+        assert!(lease.attempt_started(old));
         lease.registered(old, HostEpoch(1));
         let renewal = lease.send(at(1_000));
         lease.refused(renewal);
@@ -437,24 +666,43 @@ mod tests {
         // The renewal of the lost registration is answered late.
         assert!(!lease.renewed(renewal));
         assert_eq!(lease.deadline(), at(10_000));
-        let earlier = lease.send(at(2_000));
-        let register = lease.send(at(3_000));
-        assert!(
-            !lease.awaits(earlier),
-            "an earlier registration's answer counts"
-        );
-        assert!(!lease.registered(earlier, HostEpoch(2)));
-        assert!(lease.registered(register, HostEpoch(3)));
+        let register = lease.send(at(2_000));
+        assert!(lease.attempt_started(register));
+        assert_ne!(register.attempt, old.attempt);
+        assert!(!lease.awaits(old), "an earlier attempt's answer counts");
         assert!(
             !lease.registered(old, HostEpoch(1)),
             "an older registration came back"
         );
+        assert!(lease.registered(register, HostEpoch(3)));
         assert_eq!(lease.epoch(), Some(HostEpoch(3)));
     }
 
     #[test]
+    fn a_slow_registration_is_still_taken_however_often_it_was_sent_again() {
+        // Answers take 1.5 s and copies go every second: the answer to the
+        // first copy arrives after the second was sent, and counts.
+        let mut lease = HostLease::new(T, 40);
+        let first = lease.send(at(0));
+        assert!(lease.attempt_started(first));
+        assert_eq!(lease.due(), at(1_000));
+        let second = lease.send(at(1_000));
+        assert!(!lease.attempt_started(second), "a copy started an attempt");
+        assert_eq!(second, first, "a copy differs from the attempt's first");
+        assert!(lease.awaits(first));
+        assert!(lease.registered(first, HostEpoch(7)));
+        // The deadline counts from the first copy, the earliest the
+        // service can have registered it.
+        assert_eq!(lease.deadline(), at(10_000));
+        assert!(!lease.registered(second, HostEpoch(7)), "taken twice");
+        // A restarted agent numbers its attempts afresh.
+        let restarted = HostLease::new(T, 900).send(at(5_000));
+        assert_ne!(restarted.attempt, first.attempt);
+    }
+
+    #[test]
     fn renewals_are_due_every_third_of_the_term_and_registrations_every_second() {
-        let mut lease = HostLease::new(T);
+        let mut lease = HostLease::new(T, 1);
         lease.send(at(500));
         assert_eq!(lease.due(), at(1_500));
         let register = lease.send(at(1_500));
@@ -465,7 +713,7 @@ mod tests {
 
     #[test]
     fn renewals_are_numbered_per_registration_and_bound_requests() {
-        let mut lease = HostLease::new(T);
+        let mut lease = HostLease::new(T, 1);
         let register = lease.send(at(0));
         assert_eq!(register.seq, 0);
         lease.registered(register, HostEpoch(1));
@@ -481,7 +729,7 @@ mod tests {
         assert!(T.settles(0, lease.seq()));
         assert!(!T.settles(1, lease.seq()));
         // A restarted agent goes on from what it stored.
-        let resumed = HostLease::resume(T, lease.record());
+        let resumed = HostLease::resume(T, lease.record(), 2);
         assert_eq!(resumed.record(), lease.record());
         assert!(!resumed.admits(0));
         // A new registration counts from 0 again.
