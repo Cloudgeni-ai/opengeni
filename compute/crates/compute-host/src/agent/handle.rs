@@ -17,7 +17,7 @@ use crate::protocol::{HostStatus, Id, SandboxConfig};
 use crate::store::OwnerEpoch;
 
 use super::{Command, Handle, HostError, Lease, Origin, ReleaseOnDrop};
-use crate::fleet::LeaseGate;
+use crate::fleet::{Admission, LeaseGate};
 
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
@@ -51,8 +51,9 @@ impl Handle {
     ) -> Result<T, HostError> {
         let (reply, answer) = oneshot::channel();
         let command = match self.origin {
-            Origin::Fleet(owner) => Command::Owned {
+            Origin::Fleet(owner, admission) => Command::Owned {
                 owner,
+                admission,
                 command: Box::new(make(reply)),
             },
             Origin::Local | Origin::LocalToFleet => make(reply),
@@ -79,9 +80,30 @@ impl Handle {
     #[must_use]
     pub fn owned(&self, owner: OwnerEpoch) -> Self {
         Self {
-            origin: Origin::Fleet(owner),
+            origin: Origin::Fleet(owner, None),
             ..self.clone()
         }
+    }
+
+    /// Like [`Handle::owned`], for a request the fleet listener admitted
+    /// under `admission`: the agent carries it out only while the lease
+    /// would still admit it ([`LeaseGate::admits`]).
+    #[must_use]
+    pub fn admitted(&self, owner: OwnerEpoch, admission: Admission) -> Self {
+        Self {
+            origin: Origin::Fleet(owner, Some(admission)),
+            ..self.clone()
+        }
+    }
+
+    /// What the host holds, for the renewer's registration. `Err` counts
+    /// the creates, adopts and changes of owner still under way.
+    pub async fn inventory(&self) -> Result<Result<HostStatus, usize>, HostError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Inventory { reply })
+            .map_err(|_| HostError::Stopped)?;
+        answer.await.map_err(|_| HostError::Stopped)
     }
 
     /// A handle for the host's own tools on a host in a fleet, which
@@ -109,7 +131,7 @@ impl Handle {
     pub async fn create(&self, id: Id, config: SandboxConfig) -> Result<(), HostError> {
         self.fleet_only("create")?;
         let owner = match self.origin {
-            Origin::Fleet(owner) => owner,
+            Origin::Fleet(owner, _) => owner,
             Origin::Local | Origin::LocalToFleet => OwnerEpoch::FIRST,
         };
         self.ask(|reply| Command::Create {

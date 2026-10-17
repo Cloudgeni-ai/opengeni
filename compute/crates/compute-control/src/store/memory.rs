@@ -2,6 +2,7 @@
 //! can afford to forget everything when it stops.
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::{Future, ready};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -141,40 +142,35 @@ impl MemoryStore {
     }
 }
 
-impl Store for MemoryStore {
-    type Lead = MemoryLead;
-
-    async fn register(&self, register: &Register) -> Result<Admission> {
-        Ok(self.register_now(register))
-    }
-
-    async fn renew(&self, renew: &Renew, names: &[String]) -> Result<bool> {
+/// The store's operations, done at once.
+impl MemoryStore {
+    fn renew_now(&self, renew: &Renew, names: &[String]) -> bool {
         let mut inner = self.lock();
         let changed = inner.changes + 1;
         let Some(row) = inner.current(renew.host, renew.epoch, names) else {
-            return Ok(false);
+            return false;
         };
         row.renewals += 1;
         row.seq = row.seq.max(renew.seq);
         row.capacity = renew.capacity.clone();
         row.changed = changed;
         inner.changes = changed;
-        Ok(true)
+        true
     }
 
-    async fn report(&self, report: &Report, names: &[String]) -> Result<bool> {
+    fn report_now(&self, report: &Report, names: &[String]) -> bool {
         let mut inner = self.lock();
         let changed = inner.changes + 1;
         let Some(row) = inner.current(report.host, report.epoch, names) else {
-            return Ok(false);
+            return false;
         };
         row.capacity = report.capacity.clone();
         row.changed = changed;
         inner.changes = changed;
-        Ok(true)
+        true
     }
 
-    async fn hosts_changed(&self, after: u64) -> Result<Vec<HostRow>> {
+    fn hosts_changed_now(&self, after: u64) -> Vec<HostRow> {
         let inner = self.lock();
         let mut rows: Vec<HostRow> = inner
             .hosts
@@ -183,27 +179,25 @@ impl Store for MemoryStore {
             .map(|host| host.row.clone())
             .collect();
         rows.sort_by_key(|row| row.changed);
-        Ok(rows)
+        rows
     }
 
-    async fn renewals(&self) -> Result<Vec<(HostId, u64)>> {
+    fn renewals_now(&self) -> Vec<(HostId, u64)> {
         let inner = self.lock();
-        Ok(inner
+        inner
             .hosts
             .values()
             .filter(|host| host.row.state != HostState::Lost)
             .map(|host| (host.row.id, host.row.renewals))
-            .collect())
+            .collect()
     }
 
-    async fn give_up(&self, host: HostId, renewals: u64) -> Result<Option<usize>> {
+    fn give_up_now(&self, host: HostId, renewals: u64) -> Option<usize> {
         let mut inner = self.lock();
         let changed = inner.changes + 1;
-        let Some(entry) = inner.hosts.get_mut(&host) else {
-            return Ok(None);
-        };
+        let entry = inner.hosts.get_mut(&host)?;
         if entry.row.state == HostState::Lost || entry.row.renewals != renewals {
-            return Ok(None);
+            return None;
         }
         entry.row.state = HostState::Lost;
         entry.row.changed = changed;
@@ -216,82 +210,74 @@ impl Store for MemoryStore {
                 cleared += 1;
             }
         }
-        Ok(Some(cleared))
+        Some(cleared)
     }
 
-    async fn set_state(&self, host: HostId, from: HostState, to: HostState) -> Result<bool> {
+    fn set_state_now(&self, host: HostId, from: HostState, to: HostState) -> bool {
         let mut inner = self.lock();
         let changed = inner.changes + 1;
         let Some(entry) = inner.hosts.get_mut(&host) else {
-            return Ok(false);
+            return false;
         };
         if entry.row.state != from {
-            return Ok(false);
+            return false;
         }
         entry.row.state = to;
         entry.row.changed = changed;
         inner.changes = changed;
-        Ok(true)
+        true
     }
 
-    async fn try_lead(&self) -> Result<Option<MemoryLead>> {
+    fn try_lead_now(&self) -> Option<MemoryLead> {
         let taken = self
             .leader
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok();
-        Ok(taken.then(|| MemoryLead(Arc::clone(&self.leader))))
+        taken.then(|| MemoryLead(Arc::clone(&self.leader)))
     }
 
-    async fn leads(&self, _lead: &mut MemoryLead) -> bool {
+    fn insert_now(&self, row: &SandboxRow) -> bool {
+        let mut inner = self.lock();
+        if inner.sandboxes.contains_key(&row.id) {
+            return false;
+        }
+        inner.sandboxes.insert(row.id, row.clone());
         true
     }
 
-    async fn insert(&self, row: &SandboxRow) -> Result<bool> {
-        let mut inner = self.lock();
-        if inner.sandboxes.contains_key(&row.id) {
-            return Ok(false);
-        }
-        inner.sandboxes.insert(row.id, row.clone());
-        Ok(true)
+    fn sandbox_now(&self, id: Id) -> Option<SandboxRow> {
+        self.lock().sandboxes.get(&id).cloned()
     }
 
-    async fn sandbox(&self, id: Id) -> Result<Option<SandboxRow>> {
-        Ok(self.lock().sandboxes.get(&id).cloned())
-    }
-
-    async fn replace(&self, row: &SandboxRow) -> Result<bool> {
+    fn replace_now(&self, row: &SandboxRow) -> bool {
         let mut inner = self.lock();
         let Some(stored) = inner.sandboxes.get_mut(&row.id) else {
-            return Ok(false);
+            return false;
         };
         if stored.version != row.version {
-            return Ok(false);
+            return false;
         }
         *stored = row.clone();
         stored.version += 1;
-        Ok(true)
+        true
     }
 
-    async fn delete(&self, id: Id, version: u64) -> Result<bool> {
+    fn delete_now(&self, id: Id, version: u64) -> bool {
         let mut inner = self.lock();
         if inner
             .sandboxes
             .get(&id)
             .is_none_or(|row| row.version != version)
         {
-            return Ok(false);
+            return false;
         }
         inner.sandboxes.remove(&id);
-        Ok(true)
+        true
     }
 
-    async fn list(
-        &self,
-        team: &str,
-        metadata: &BTreeMap<String, String>,
-    ) -> Result<Vec<SandboxRow>> {
+    fn list_now(&self, team: &str, metadata: &BTreeMap<String, String>) -> Vec<SandboxRow> {
         let inner = self.lock();
-        Ok(inner
+        inner
             .sandboxes
             .values()
             .filter(|row| row.team == team)
@@ -301,25 +287,114 @@ impl Store for MemoryStore {
                     .all(|(key, value)| row.metadata.get(key) == Some(value))
             })
             .cloned()
-            .collect())
+            .collect()
     }
 
-    async fn owned_by(&self, host: HostId) -> Result<Vec<SandboxRow>> {
+    fn owned_by_now(&self, host: HostId) -> Vec<SandboxRow> {
         let inner = self.lock();
-        Ok(inner
+        inner
             .sandboxes
             .values()
             .filter(|row| row.ownership.owner == Some(host))
             .cloned()
-            .collect())
+            .collect()
     }
 
-    async fn team_of(&self, digest: &str) -> Result<Option<String>> {
-        Ok(self.lock().keys.get(digest).cloned())
+    fn team_of_now(&self, digest: &str) -> Option<String> {
+        self.lock().keys.get(digest).cloned()
     }
 
-    async fn add_key(&self, digest: &str, team: &str) -> Result<()> {
+    fn add_key_now(&self, digest: &str, team: &str) {
         self.lock().keys.insert(digest.to_owned(), team.to_owned());
-        Ok(())
+    }
+}
+
+impl Store for MemoryStore {
+    type Lead = MemoryLead;
+
+    fn register(&self, register: &Register) -> impl Future<Output = Result<Admission>> + Send {
+        ready(Ok(self.register_now(register)))
+    }
+
+    fn renew(&self, renew: &Renew, names: &[String]) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.renew_now(renew, names)))
+    }
+
+    fn report(
+        &self,
+        report: &Report,
+        names: &[String],
+    ) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.report_now(report, names)))
+    }
+
+    fn hosts_changed(&self, after: u64) -> impl Future<Output = Result<Vec<HostRow>>> + Send {
+        ready(Ok(self.hosts_changed_now(after)))
+    }
+
+    fn renewals(&self) -> impl Future<Output = Result<Vec<(HostId, u64)>>> + Send {
+        ready(Ok(self.renewals_now()))
+    }
+
+    fn give_up(
+        &self,
+        host: HostId,
+        renewals: u64,
+    ) -> impl Future<Output = Result<Option<usize>>> + Send {
+        ready(Ok(self.give_up_now(host, renewals)))
+    }
+
+    fn set_state(
+        &self,
+        host: HostId,
+        from: HostState,
+        to: HostState,
+    ) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.set_state_now(host, from, to)))
+    }
+
+    fn try_lead(&self) -> impl Future<Output = Result<Option<MemoryLead>>> + Send {
+        ready(Ok(self.try_lead_now()))
+    }
+
+    fn leads(&self, _lead: &mut MemoryLead) -> impl Future<Output = bool> + Send {
+        ready(true)
+    }
+
+    fn insert(&self, row: &SandboxRow) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.insert_now(row)))
+    }
+
+    fn sandbox(&self, id: Id) -> impl Future<Output = Result<Option<SandboxRow>>> + Send {
+        ready(Ok(self.sandbox_now(id)))
+    }
+
+    fn replace(&self, row: &SandboxRow) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.replace_now(row)))
+    }
+
+    fn delete(&self, id: Id, version: u64) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.delete_now(id, version)))
+    }
+
+    fn list(
+        &self,
+        team: &str,
+        metadata: &BTreeMap<String, String>,
+    ) -> impl Future<Output = Result<Vec<SandboxRow>>> + Send {
+        ready(Ok(self.list_now(team, metadata)))
+    }
+
+    fn owned_by(&self, host: HostId) -> impl Future<Output = Result<Vec<SandboxRow>>> + Send {
+        ready(Ok(self.owned_by_now(host)))
+    }
+
+    fn team_of(&self, digest: &str) -> impl Future<Output = Result<Option<String>>> + Send {
+        ready(Ok(self.team_of_now(digest)))
+    }
+
+    fn add_key(&self, digest: &str, team: &str) -> impl Future<Output = Result<()>> + Send {
+        self.add_key_now(digest, team);
+        ready(Ok(()))
     }
 }

@@ -27,12 +27,13 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use compute_fleet::{HostLease, LeaseTerms};
-use compute_protocol::fleet::HostInfo;
+use compute_protocol::fleet::{Answered, HostInfo};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
+pub use gate::Admission;
 pub use gate::{LeaseGate, boot_now};
-pub use guard::{GuardConfig, STEP as GUARD_STEP, guard_runs, hold_lock, run_guard};
+pub use guard::{GuardConfig, STEP as GUARD_STEP, guard_ready, hold_lock, ready_lock, run_guard};
 pub use lease::{terms_of, wire_terms};
 pub use leased::Leased;
 pub use record::LeaseFile;
@@ -70,6 +71,18 @@ pub struct Prepared {
     file: LeaseFile,
 }
 
+/// Checks the service's URL is HTTPS: its lease answers and rulings must
+/// come over mutual TLS.
+fn control_url(control: &str) -> anyhow::Result<()> {
+    let url = reqwest::Url::parse(control)
+        .with_context(|| format!("the fleet service's URL {control:?}"))?;
+    anyhow::ensure!(
+        url.scheme() == "https" && url.host().is_some(),
+        "the fleet service's URL must be https://host[:port], not {control:?}"
+    );
+    Ok(())
+}
+
 impl FleetConfig {
     /// Checks the host is fit to join (valid terms, a running guard) and
     /// reads the lease a previous run of the agent left. A lease file that
@@ -79,10 +92,12 @@ impl FleetConfig {
         self.terms
             .validate()
             .map_err(|error| anyhow::anyhow!("lease terms: {error}"))?;
+        control_url(&self.control)?;
         anyhow::ensure!(
-            guard_runs(&self.guard_lock)
+            guard_ready(&self.guard_lock)
                 .with_context(|| format!("checking {}", self.guard_lock.display()))?,
-            "no guard holds {}: start `compute-host guard` before joining a fleet",
+            "no guard is ready at {}: start `compute-host guard`, and let it arm the \
+             watchdog, before joining a fleet",
             self.guard_lock.display()
         );
         if let Some(dir) = self.lease_file.parent() {
@@ -90,8 +105,12 @@ impl FleetConfig {
         }
         let file = LeaseFile::read(&self.lease_file)
             .with_context(|| format!("reading {}", self.lease_file.display()))?;
+        let held = Answered {
+            host_epoch: file.epoch,
+            seq: file.seq,
+        };
         Ok(Prepared {
-            gate: LeaseGate::new(file.deadline()),
+            gate: LeaseGate::holding(file.deadline(), held, self.terms.request_window),
             file,
         })
     }
@@ -100,7 +119,6 @@ impl FleetConfig {
     pub async fn run(self, prepared: Prepared, handle: Handle) -> anyhow::Result<()> {
         let Prepared { gate, file } = prepared;
         let tls = Tls::load(&self.tls)?;
-        let current = Arc::new(lease::Current::new(file, self.terms.request_window));
         let listener = TcpListener::bind(self.listen)
             .await
             .with_context(|| format!("listening on {}", self.listen))?;
@@ -109,10 +127,13 @@ impl FleetConfig {
             acceptor: TlsAcceptor::from(Arc::clone(&tls.server)),
             handle: handle.clone(),
             gate: gate.clone(),
-            current: Arc::clone(&current),
         };
+        // Lease answers and rulings come only over mutual TLS, from the
+        // address given: never in the clear, and never redirected.
         let http = reqwest::Client::builder()
             .use_preconfigured_tls(tls.client)
+            .https_only(true)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("building the fleet service client")?;
         let mut attempts_from = [0; 8];
@@ -124,7 +145,6 @@ impl FleetConfig {
             host: file.host,
             file: self.lease_file,
             gate,
-            current,
             handle,
             info: self.info,
             image: self.image,
@@ -132,6 +152,25 @@ impl FleetConfig {
         tokio::select! {
             result = renewer.run() => result,
             result = listen::listen(listener, listening) => result.context("serving the fleet service"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_service_is_reached_only_over_https() {
+        assert!(control_url("https://control.example:8443").is_ok());
+        assert!(control_url("https://10.0.0.2:8443/").is_ok());
+        for bad in [
+            "http://control.example:8443",
+            "control.example:8443",
+            "https://",
+            "",
+        ] {
+            assert!(control_url(bad).is_err(), "{bad}");
         }
     }
 }

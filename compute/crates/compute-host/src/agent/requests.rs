@@ -77,7 +77,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             } => self.adopt(id, config, owner, reply),
             Command::HandOff { id, owner, reply } => self.hand_off(id, owner, reply),
             Command::Reconcile { rulings, reply } => self.reconcile(rulings, reply),
-            Command::Owned { owner, command } => self.owned(owner, *command),
+            command @ (Command::Owned { .. } | Command::Inventory { .. }) => {
+                self.on_fleet_command(command);
+            }
             Command::Remove {
                 id,
                 generation,

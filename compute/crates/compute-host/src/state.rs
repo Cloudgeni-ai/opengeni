@@ -407,6 +407,17 @@ pub enum StateError {
     /// No record for this sandbox.
     #[error("no record for sandbox {0}")]
     NotFound(Id),
+    /// The write would give the sandbox an earlier owner epoch than the
+    /// one its record holds.
+    #[error("sandbox {id} is held under owner epoch {held}, not {asked}")]
+    Superseded {
+        /// The sandbox.
+        id: Id,
+        /// The owner epoch the record holds.
+        held: u64,
+        /// The owner epoch the write names.
+        asked: u64,
+    },
     /// A record for this sandbox already exists.
     #[error("a record for sandbox {0} already exists")]
     Exists(Id),
@@ -451,6 +462,18 @@ pub(crate) fn apply(
             id,
             expected,
             found,
+        });
+    }
+    // Ownership only moves forward, whatever order the writes that move it
+    // land in: a new owner checked against an earlier record must not undo
+    // a later one committed since.
+    if let Some(owner) = change.owner
+        && owner < current.owner()
+    {
+        return Err(StateError::Superseded {
+            id,
+            held: current.owner_epoch,
+            asked: owner.0,
         });
     }
     let mut next = current.clone();

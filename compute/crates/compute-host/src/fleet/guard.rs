@@ -3,9 +3,11 @@
 //!
 //! It runs as a service of its own (`compute-host guard`), in a cgroup of
 //! its own, so it outlives the agent as the VMs do and is never frozen
-//! with them. It holds an exclusive lock on its lock file while it runs:
-//! a second guard refuses to start, and the agent refuses to join a fleet
-//! unless a guard holds it.
+//! with them. It holds an exclusive lock on its lock file while it runs,
+//! so a second guard refuses to start, and a second lock ([`ready_lock`])
+//! once its watchdog is armed and it has stepped once: the agent refuses
+//! to join a fleet unless a guard holds that one. A guard that fails to
+//! arm its watchdog never takes it.
 
 use std::fs::File;
 use std::io;
@@ -55,8 +57,21 @@ pub fn hold_lock(path: &Path) -> anyhow::Result<File> {
     Ok(file)
 }
 
-/// Whether a guard holds the lock at `path`.
-pub fn guard_runs(path: &Path) -> io::Result<bool> {
+/// The lock a guard whose lock is `lock` holds once it guards the VMs.
+#[must_use]
+pub fn ready_lock(lock: &Path) -> PathBuf {
+    let mut name = lock.file_name().unwrap_or_default().to_owned();
+    name.push(".ready");
+    lock.with_file_name(name)
+}
+
+/// Whether a guard is ready: it holds the ready lock of `lock`.
+pub fn guard_ready(lock: &Path) -> io::Result<bool> {
+    held(&ready_lock(lock))
+}
+
+/// Whether some process holds the lock at `path`.
+fn held(path: &Path) -> io::Result<bool> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -88,11 +103,16 @@ pub fn run_guard(config: &GuardConfig) -> anyhow::Result<()> {
     let cgroup = Cgroup::at(&config.cgroup);
     let guard = Guard::new();
     let mut last = None;
+    let mut ready = None;
     tracing::info!(cgroup = %config.cgroup.display(), "guard running");
     loop {
         let step = step_once(&guard, &cgroup, config, &mut last);
         if step && let Some(watchdog) = &mut watchdog {
             watchdog.feed().context("feeding the watchdog")?;
+        }
+        if ready.is_none() {
+            // Armed and stepped once: the VMs are guarded from here on.
+            ready = Some(hold_lock(&ready_lock(&config.lock))?);
         }
         std::thread::sleep(STEP);
     }
@@ -149,11 +169,56 @@ mod tests {
     fn one_guard_at_a_time_and_the_agent_sees_it() {
         let dir = tempfile::tempdir().unwrap();
         let lock = dir.path().join("guard.lock");
-        assert!(!guard_runs(&lock).unwrap(), "no lock file, no guard");
-        let held = hold_lock(&lock).unwrap();
-        assert!(guard_runs(&lock).unwrap());
+        assert_eq!(ready_lock(&lock), dir.path().join("guard.lock.ready"));
+        assert!(!held(&lock).unwrap(), "no lock file, no guard");
+        let one = hold_lock(&lock).unwrap();
+        assert!(held(&lock).unwrap());
         assert!(hold_lock(&lock).is_err(), "a second guard refuses");
-        drop(held);
-        assert!(!guard_runs(&lock).unwrap());
+        assert!(!guard_ready(&lock).unwrap(), "running is not yet guarding");
+        drop(one);
+        assert!(!held(&lock).unwrap());
+    }
+
+    fn config(dir: &Path, watchdog: Option<(PathBuf, Duration)>) -> GuardConfig {
+        GuardConfig {
+            cgroup: dir.join("no-cgroup"),
+            lease_file: dir.join("lease.json"),
+            lock: dir.join("guard.lock"),
+            suspending: dir.join("suspending"),
+            watchdog,
+        }
+    }
+
+    /// A guard whose watchdog cannot be armed exits without ever looking
+    /// ready, while one that guards does.
+    #[test]
+    fn a_guard_is_ready_only_once_its_watchdog_is_armed() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken = config(
+            dir.path(),
+            Some((dir.path().join("no-watchdog"), Duration::from_secs(3))),
+        );
+        let watcher = {
+            let lock = broken.lock.clone();
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                while started.elapsed() < Duration::from_millis(300) {
+                    assert!(!guard_ready(&lock).unwrap(), "ready before armed");
+                }
+            })
+        };
+        assert!(run_guard(&broken).is_err());
+        watcher.join().unwrap();
+        assert!(!guard_ready(&broken.lock).unwrap());
+        assert!(!held(&broken.lock).unwrap(), "its lock went with it");
+
+        let working = config(dir.path(), None);
+        let lock = working.lock.clone();
+        std::thread::spawn(move || run_guard(&working));
+        let started = std::time::Instant::now();
+        while !guard_ready(&lock).unwrap() {
+            assert!(started.elapsed() < Duration::from_secs(5), "never ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

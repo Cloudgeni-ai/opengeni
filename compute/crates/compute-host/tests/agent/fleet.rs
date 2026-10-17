@@ -2,18 +2,24 @@
 //! fenced by owner epoch, and the rulings a registering host takes in. Two
 //! labs sharing one directory store stand for two hosts of a fleet.
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use std::time::Duration;
 
 use compute_core::{HostPolicy, Level, Priority};
-use compute_host::fleet::{LeaseGate, boot_now};
+use compute_engine::{CancellationToken, EngineError};
+use compute_host::fleet::{Admission, LeaseGate, boot_now};
 use compute_host::protocol::{
     ErrorCode, Id, LevelName, Reply, Request, SandboxConfig, SleepConfig,
 };
-use compute_host::{Directory, HostError, OwnerEpoch};
-use compute_protocol::fleet::Verdict;
+use compute_host::{
+    Archive, Claimed, Directory, FetchInto, FetchedMemory, HostError, Owned, OwnerEpoch, Receipt,
+    SavedFiles, Stamp, Store,
+};
+use compute_protocol::fleet::{Answered, Verdict};
+use tokio::sync::Semaphore;
 use tokio::time::sleep;
 
 use super::{Delays, Lab, NEVER, PAUSE_SOON, id};
@@ -340,5 +346,273 @@ async fn a_host_whose_lease_ran_out_decides_nothing_by_time_and_its_tools_only_r
     lab.wait_level(sandbox, LevelName::Paused).await;
     assert!(local.sleep(sandbox, None, Level::Saved).await.is_ok());
     lab.wait_level(sandbox, LevelName::Saved).await;
+    lab.assert_clean();
+}
+
+/// A gate under registration 3 at renewal `seq`, open for a minute,
+/// admitting requests two renewals old.
+fn registered(seq: u64) -> LeaseGate {
+    LeaseGate::holding(
+        boot_now() + Duration::from_secs(60),
+        Answered {
+            host_epoch: Some(3),
+            seq,
+        },
+        2,
+    )
+}
+
+fn renewed(gate: &LeaseGate, host_epoch: u64, seq: u64) {
+    gate.hold(
+        Answered {
+            host_epoch: Some(host_epoch),
+            seq,
+        },
+        boot_now() + Duration::from_secs(60),
+    );
+}
+
+/// The listener admits a request when it arrives; the agent carries it
+/// out only if the lease would still admit it when it acts, so one that
+/// waited across renewals or a new registration does nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_that_waited_past_its_admission_does_nothing() {
+    let gate = registered(10);
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        |config| config.lease = Some(gate.clone()),
+    )
+    .await;
+    let (sandbox, other) = (id(21), id(22));
+    let admitted = |host_epoch, stamp| {
+        lab.handle
+            .admitted(OwnerEpoch::FIRST, Admission { host_epoch, stamp })
+    };
+    admitted(3, 10)
+        .create(sandbox, config(NEVER))
+        .await
+        .unwrap();
+    renewed(&gate, 3, 13);
+    let stale = admitted(3, 10);
+    assert!(matches!(
+        stale.create(other, config(NEVER)).await,
+        Err(HostError::NotAdmitted)
+    ));
+    assert!(matches!(
+        stale.touch(sandbox, None, Priority::Interactive).await,
+        Err(HostError::NotAdmitted)
+    ));
+    assert!(
+        admitted(3, 11)
+            .touch(sandbox, None, Priority::Interactive)
+            .await
+            .is_ok()
+    );
+    renewed(&gate, 4, 1);
+    assert!(
+        matches!(
+            admitted(3, 13).remove(sandbox, None).await,
+            Err(HostError::NotAdmitted)
+        ),
+        "nothing sent under an earlier registration acts"
+    );
+    assert!(
+        admitted(4, 1)
+            .touch(sandbox, None, Priority::Interactive)
+            .await
+            .is_ok()
+    );
+    gate.set(boot_now());
+    assert!(matches!(
+        admitted(4, 1)
+            .touch(sandbox, None, Priority::Interactive)
+            .await,
+        Err(HostError::NotAdmitted)
+    ));
+    assert_eq!(
+        lab.status().await.sandboxes.len(),
+        1,
+        "{other} was never created"
+    );
+    lab.assert_clean();
+}
+
+/// A store whose claims wait until the test lets them go, so an adopt
+/// stays under way for as long as the test needs.
+struct Gated {
+    inner: Directory,
+    claims: Arc<Semaphore>,
+}
+
+impl Store for Gated {
+    fn archive(
+        &self,
+        id: Id,
+        save: Stamp,
+        files: &SavedFiles,
+        cancel: &CancellationToken,
+    ) -> impl Future<Output = Result<Archive, EngineError>> + Send {
+        self.inner.archive(id, save, files, cancel)
+    }
+
+    fn verify(
+        &self,
+        id: Id,
+        receipt: &Receipt,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send {
+        self.inner.verify(id, receipt)
+    }
+
+    fn fetch(
+        &self,
+        id: Id,
+        into: &FetchInto,
+    ) -> impl Future<Output = Result<FetchedMemory, EngineError>> + Send {
+        self.inner.fetch(id, into)
+    }
+
+    fn delete(
+        &self,
+        id: Id,
+        own: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<()>, EngineError>> + Send {
+        self.inner.delete(id, own)
+    }
+
+    fn claim(
+        &self,
+        id: Id,
+        own: OwnerEpoch,
+    ) -> impl Future<Output = Result<Owned<Option<Claimed>>, EngineError>> + Send {
+        let claims = Arc::clone(&self.claims);
+        async move {
+            let _go = claims.acquire().await;
+            self.inner.claim(id, own).await
+        }
+    }
+
+    fn forget_memory(
+        &self,
+        id: Id,
+        change: Stamp,
+    ) -> impl Future<Output = Result<Owned<Option<Receipt>>, EngineError>> + Send {
+        self.inner.forget_memory(id, change)
+    }
+}
+
+/// What a registering host lists must be everything it holds, so the list
+/// waits for an adopt under way, and a wake asked meanwhile is told to try
+/// again rather than that the sandbox is not here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_registering_host_lists_an_adopt_under_way_once_it_lands() {
+    let root = Lab::root();
+    let shelf = root.join("shelf");
+    let one = Lab::start_stored(root, Arc::default(), Directory::new(&shelf)).await;
+    let sandbox = id(23);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set moved"]).await;
+    one.sleep_to(sandbox, LevelName::Archived).await;
+    one.wait_level(sandbox, LevelName::Archived).await;
+
+    let claims = Arc::new(Semaphore::new(0));
+    let gated = Gated {
+        inner: Directory::new(&shelf),
+        claims: Arc::clone(&claims),
+    };
+    let two = Lab::start_stored(Lab::root(), Arc::default(), gated).await;
+    let owned = two.handle.owned(OwnerEpoch(2));
+    let adopting = tokio::spawn({
+        let owned = owned.clone();
+        async move { owned.adopt(sandbox, config(NEVER), OwnerEpoch(2)).await }
+    });
+    let unsettled = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match two.handle.inventory().await.unwrap() {
+                Err(unsettled) => break unsettled,
+                Ok(_) => sleep(Duration::from_millis(5)).await,
+            }
+        }
+    })
+    .await
+    .expect("the adopt starts");
+    assert_eq!(unsettled, 1);
+    assert!(
+        matches!(
+            owned.touch(sandbox, None, Priority::Interactive).await,
+            Err(HostError::Busy(_))
+        ),
+        "never \"not found\" while the adopt may land"
+    );
+    claims.add_permits(1);
+    adopting.await.unwrap().unwrap();
+    let listed = two
+        .handle
+        .inventory()
+        .await
+        .unwrap()
+        .expect("nothing under way");
+    assert!(
+        listed
+            .sandboxes
+            .iter()
+            .any(|held| held.id == sandbox && held.owner_epoch == 2),
+        "{listed:?}"
+    );
+    assert_eq!(two.run(sandbox, &["get"]).await, ["moved"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// While the lease has run out the agent decides nothing of its own on
+/// any input, not only on time: a hold let go long after the sandbox went
+/// idle pauses nothing, nor does a restart that finds it, until renewal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_whose_lease_ran_out_decides_nothing_on_events_or_after_a_restart() {
+    let gate = LeaseGate::new(boot_now() + Duration::from_secs(60));
+    let configure = |config: &mut compute_host::HostConfig| config.lease = Some(gate.clone());
+    let lab = Lab::start_configured(
+        Lab::root(),
+        Arc::default(),
+        Delays::default(),
+        HostPolicy::default(),
+        configure,
+    )
+    .await;
+    let sandbox = id(24);
+    lab.create(sandbox, PAUSE_SOON).await;
+    lab.handle
+        .hold(sandbox, None, "turn", None, Priority::Interactive)
+        .await
+        .unwrap();
+    gate.set(boot_now());
+    lab.handle.release(sandbox, None, "turn").await.unwrap();
+    // Well past the idle pause the release would otherwise lead to.
+    sleep(Duration::from_millis(800)).await;
+    let still = |status: &compute_host::protocol::HostStatus| {
+        let held = Lab::sandbox(status, sandbox);
+        (held.level, held.step.clone())
+    };
+    assert_eq!(still(&lab.status().await), (LevelName::Running, None));
+
+    let (root, world) = lab.stop().await;
+    let lab = Lab::start_configured(
+        root,
+        world,
+        Delays::default(),
+        HostPolicy::default(),
+        configure,
+    )
+    .await;
+    sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        still(&lab.status().await),
+        (LevelName::Running, None),
+        "recovered into a lapsed lease, it decides nothing either"
+    );
+    gate.set(boot_now() + Duration::from_secs(60));
+    lab.wait_level(sandbox, LevelName::Paused).await;
     lab.assert_clean();
 }

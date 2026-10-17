@@ -10,7 +10,6 @@
 //! brings is written: until then the guard keeps the VMs frozen.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use compute_core::At;
@@ -28,41 +27,6 @@ use super::gate::{LeaseGate, boot_now};
 use super::record::LeaseFile;
 use crate::agent::Handle;
 
-/// The registration and latest renewal, as answers to the service name
-/// them, and how many renewals old a request may be.
-#[derive(Debug)]
-pub(crate) struct Current {
-    held: Mutex<Answered>,
-    window: u64,
-}
-
-impl Current {
-    pub(crate) fn new(file: LeaseFile, window: u64) -> Self {
-        Self {
-            held: Mutex::new(Answered {
-                host_epoch: file.epoch,
-                seq: file.seq,
-            }),
-            window,
-        }
-    }
-
-    /// When an answer given now was given.
-    pub(crate) fn answered(&self) -> Answered {
-        *self.held.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Whether a request stamped `stamp` under the registration held is
-    /// still good.
-    pub(crate) fn admits(&self, stamp: u64) -> bool {
-        stamp.saturating_add(self.window) >= self.answered().seq
-    }
-
-    fn set(&self, answered: Answered) {
-        *self.held.lock().unwrap_or_else(PoisonError::into_inner) = answered;
-    }
-}
-
 /// The service's answer to one request, or why there is none.
 enum Answer {
     Registered(Registered),
@@ -79,7 +43,6 @@ pub(crate) struct Renewer {
     pub(crate) host: Option<u64>,
     pub(crate) file: PathBuf,
     pub(crate) gate: LeaseGate,
-    pub(crate) current: Arc<Current>,
     pub(crate) handle: Handle,
     pub(crate) info: HostInfo,
     /// The name the fleet gives the image this host's sandboxes start
@@ -149,6 +112,19 @@ impl Running {
             return Ok(());
         }
         if renewer.lease.attempt_started(renewal) || self.attempt.is_none() {
+            // What the host lists must be all it holds: a create, adopt or
+            // change of owner still under way could land after the list
+            // and run unruled. None can start now, with no registration
+            // held, so the list waits for those under way to end.
+            let status = match renewer.handle.inventory().await {
+                Ok(Ok(status)) => status,
+                Ok(Err(unsettled)) => {
+                    tracing::info!(unsettled, "registering once requests under way end");
+                    self.attempt = None;
+                    return Ok(());
+                }
+                Err(_) => anyhow::bail!("the agent stopped"),
+            };
             if !status.blocked.is_empty() {
                 // It cannot rule on what it cannot manage: wait until they
                 // can be read again, or someone removes them.
@@ -308,11 +284,13 @@ impl Running {
             .map_err(|error| {
                 anyhow::anyhow!("writing the lease file {}: {error}", renewer.file.display())
             })?;
-        renewer.current.set(Answered {
-            host_epoch: record.epoch.map(|epoch| epoch.0),
-            seq: record.seq,
-        });
-        renewer.gate.set(record.deadline);
+        renewer.gate.hold(
+            Answered {
+                host_epoch: record.epoch.map(|epoch| epoch.0),
+                seq: record.seq,
+            },
+            record.deadline,
+        );
         Ok(())
     }
 

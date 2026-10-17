@@ -476,6 +476,7 @@ fn error_reply(error: &HostError) -> Reply {
             HostError::HostFull { .. } => ErrorCode::HostFull,
             HostError::Io(_) | HostError::Stopped => ErrorCode::Internal,
             HostError::LeaseLapsed => ErrorCode::Unavailable,
+            HostError::NotAdmitted => ErrorCode::Expired,
         },
     }
 }

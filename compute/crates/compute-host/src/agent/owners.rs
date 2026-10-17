@@ -31,6 +31,7 @@ use crate::state::{Change, Disk, Record};
 use crate::store::{Claimed, Owned, OwnerEpoch, Store};
 
 use super::{Command, Event, HostAgent, HostError, Reply};
+use crate::fleet::Admission;
 
 /// What waits for a sandbox's copy here to go: an adopt of a later
 /// ownership, which then goes on.
@@ -39,6 +40,10 @@ pub(super) struct Then {
     config: SandboxConfig,
     owner: OwnerEpoch,
     reply: Reply<()>,
+    /// The registration the request was admitted under, for one from the
+    /// fleet service: the adopt goes on only while the host still holds it
+    /// and its lease runs. `None` for the rulings' own adopts.
+    under: Option<u64>,
 }
 
 /// Hand-offs under way, with who waits for each.
@@ -61,6 +66,7 @@ impl Command {
             | Self::Check { id, .. } => Some(*id),
             Self::Release { .. }
             | Self::Status { .. }
+            | Self::Inventory { .. }
             | Self::Adopt { .. }
             | Self::HandOff { .. }
             | Self::Reconcile { .. }
@@ -90,17 +96,61 @@ impl Command {
             Self::Acquire { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
-            Self::Release { .. } | Self::Status { .. } | Self::Owned { .. } => {}
+            Self::Release { .. }
+            | Self::Status { .. }
+            | Self::Inventory { .. }
+            | Self::Owned { .. } => {}
         }
     }
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
+    /// Carries out a request only a host in a fleet gets.
+    pub(super) fn on_fleet_command(&mut self, command: Command) {
+        match command {
+            Command::Owned {
+                owner,
+                admission,
+                command,
+            } => self.owned(owner, admission, *command),
+            Command::Inventory { reply } => {
+                let _ = reply.send(self.inventory());
+            }
+            other => self.on_command(other),
+        }
+    }
+
     /// Carries out `command`, sent for the ownership of its sandbox under
     /// `owner`, only if that is the one this host holds. One under an
     /// earlier epoch is refused as stale; one under a later epoch finds
     /// nothing here, since this host's copy may be behind the store's.
-    pub(super) fn owned(&mut self, owner: OwnerEpoch, command: Command) {
+    ///
+    /// The listener admitted it under `admission`; it may have waited
+    /// since, so it is carried out only if the lease would still admit it.
+    /// Nothing sent under a registration the host no longer holds then
+    /// acts here, and no create or adopt starts once the host lists what
+    /// it holds to register again.
+    pub(super) fn owned(
+        &mut self,
+        owner: OwnerEpoch,
+        admission: Option<Admission>,
+        command: Command,
+    ) {
+        if let (Some(admission), Some(gate)) = (admission, &self.lease)
+            && !gate.admits(admission)
+        {
+            command.refuse(HostError::NotAdmitted);
+            return;
+        }
+        // A create, adopt or change of owner under way may yet land: until
+        // it has, nothing about the sandbox is answered "not found", which
+        // the service could take as final.
+        if let Some(id) = command.sandbox()
+            && self.settling(id)
+        {
+            command.refuse(HostError::Busy(id));
+            return;
+        }
         let Some(record) = command.sandbox().and_then(|id| self.records.get(id)) else {
             self.on_command(command);
             return;
@@ -139,14 +189,54 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// then take a save number of the ownership before.
     fn take_owner(&mut self, id: Id, owner: OwnerEpoch, reply: Reply<()>) {
         let records = Arc::clone(&self.records);
+        let events = self.events_tx.clone();
+        *self.owning.entry(id.0).or_insert(0) += 1;
         tokio::spawn(async move {
             let result = records
                 .amend(id, Change::new().owner(owner))
                 .await
                 .map(|_| ())
                 .map_err(HostError::from);
-            let _ = reply.send(result);
+            let _ = events.send(Event::OwnerTaken { id, result, reply });
         });
+    }
+
+    /// A change of owner of sandbox `id` landed or failed.
+    pub(super) fn owner_taken(&mut self, id: Id, result: Result<(), HostError>, reply: Reply<()>) {
+        if let Some(count) = self.owning.get_mut(&id.0) {
+            *count -= 1;
+            if *count == 0 {
+                self.owning.remove(&id.0);
+            }
+        }
+        let _ = reply.send(result);
+    }
+
+    /// Whether a create, adopt or change of owner of sandbox `id` is under
+    /// way, or an adopt waits to start.
+    fn settling(&self, id: Id) -> bool {
+        self.preparing.contains(&id.0)
+            || self.owning.contains_key(&id.0)
+            || self.then_adopt.contains_key(&id.0)
+    }
+
+    /// What the host holds, for a registration, once nothing that could
+    /// still give it a sandbox is under way; otherwise how many such are.
+    /// Hand-offs that have not begun their removal end now, unfinished:
+    /// the sandbox stays this host's, listed, and the service asks again
+    /// under the new registration. None of these can start meanwhile, with
+    /// no registration held.
+    pub(super) fn inventory(&mut self) -> Result<crate::protocol::HostStatus, usize> {
+        let handing_off: Vec<SandboxId> = self.handing_off.keys().copied().collect();
+        for id in handing_off {
+            self.fail_hand_off(Id(id), &HostError::NotAdmitted);
+        }
+        let unsettled =
+            self.preparing.len() + self.owning.values().sum::<usize>() + self.then_adopt.len();
+        if unsettled > 0 {
+            return Err(unsettled);
+        }
+        Ok(self.status())
     }
 
     /// Takes sandbox `id` over from the store's latest copy as its owner
@@ -192,14 +282,21 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
                 // The copy of an earlier ownership goes first, leaving the
                 // store's; then the adopt goes on.
-                Ordering::Less => self.drop_copy(
-                    id,
-                    Some(Then {
-                        config,
-                        owner,
-                        reply,
-                    }),
-                ),
+                Ordering::Less => {
+                    let under = self
+                        .lease
+                        .as_ref()
+                        .and_then(|gate| gate.answered().host_epoch);
+                    self.drop_copy(
+                        id,
+                        Some(Then {
+                            config,
+                            owner,
+                            reply,
+                            under,
+                        }),
+                    );
+                }
             }
             return;
         }
@@ -439,10 +536,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             config,
             owner,
             reply,
+            under,
         }) = self.then_adopt.remove(&id.0)
         else {
             return;
         };
+        let held =
+            |gate: &crate::fleet::LeaseGate| gate.is_open() && gate.answered().host_epoch == under;
+        if under.is_some() && !self.lease.as_ref().is_some_and(held) {
+            let _ = reply.send(Err(HostError::NotAdmitted));
+            return;
+        }
         match result {
             Ok(()) => self.adopt(id, config, owner, reply),
             Err(error) => {
@@ -508,6 +612,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                         config: record.config.clone(),
                         owner: OwnerEpoch(owner_epoch),
                         reply: done,
+                        under: None,
                     };
                     self.drop_copy(id, Some(then));
                 }

@@ -5,25 +5,40 @@
 //! names, its lease has not run out, and it is no more than the request
 //! window of renewals old; anything else is answered `unavailable` or
 //! `expired` without reaching the agent. One that does is served exactly
-//! as on the Unix socket, under the owner epoch it names, through a
-//! socket pair: its first reply line is wrapped in an [`Answer`] saying
-//! when it was given, and a connection's stream after that is relayed as
-//! it is.
+//! as on the Unix socket, under the owner epoch it names and the
+//! [`Admission`] it passed, which the agent checks again when it acts,
+//! through a socket pair: its first reply line is wrapped in an [`Answer`]
+//! saying when it was given, and a connection's stream after that is
+//! relayed as it is.
+//!
+//! When an answer was given orders it against the host's other answers
+//! ([`compute_fleet::AnsweredAt`]), and the agent decides somewhere
+//! between the request's admission and its reply reaching the relay. A
+//! refusal or "not found" is final for the service only if given late
+//! enough, so it carries the earliest the agent can have decided it: the
+//! time of admission. A success counts against answers given after it, so
+//! it carries the latest: the time the relay reads it.
+//!
+//! A caller keeps its side open until it has its answer: one that ends it
+//! before has given the request up, and the agent is told so by the whole
+//! socket pair closing, so a wake it waits on lets go. After the answer a
+//! caller's end is the end of what it sends on the stream, and is passed
+//! on as that.
 
 use std::io;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use compute_protocol::fleet::{Answer, Envelope, Sent};
+use compute_protocol::fleet::{Answer, Answered, Envelope, Sent};
 use compute_protocol::host::{ErrorCode, Reply, Request};
 use tokio::io::{
     AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader,
 };
 use tokio::net::{TcpListener, TcpStream, UnixStream};
+use tokio::sync::oneshot;
 use tokio_rustls::TlsAcceptor;
 
-use super::gate::LeaseGate;
-use super::lease::Current;
+use super::gate::{Admission, LeaseGate};
 use crate::agent::Handle;
 use crate::server::serve_one;
 use crate::store::OwnerEpoch;
@@ -43,7 +58,6 @@ pub(crate) struct Listening {
     /// owner epoch it names.
     pub(crate) handle: Handle,
     pub(crate) gate: LeaseGate,
-    pub(crate) current: Arc<Current>,
 }
 
 /// Accepts the service's connections for as long as the agent runs.
@@ -89,81 +103,114 @@ impl Listening {
             Ok(envelope) => envelope,
             Err(error) => {
                 let reply = refused(ErrorCode::Invalid, format!("bad request: {error}"));
-                return self.answer(&mut caller, reply).await;
+                return answer(&mut caller, reply, self.gate.answered()).await;
             }
         };
-        if let Some(reply) = refusal(&self.current, &self.gate, &envelope.sent, &envelope.request) {
-            return self.answer(&mut caller, reply).await;
+        // Sampled before the check, so no later registration or renewal
+        // can be in it.
+        let admitted = self.gate.answered();
+        if let Some(reply) = refusal(&self.gate, &envelope.sent, &envelope.request) {
+            return answer(&mut caller, reply, admitted).await;
         }
         let owner = OwnerEpoch(envelope.sent.owner_epoch.unwrap_or(OwnerEpoch::FIRST.0));
+        let admission = Admission {
+            host_epoch: envelope.sent.host_epoch,
+            stamp: envelope.sent.stamp,
+        };
         let (ours, theirs) = UnixStream::pair()?;
-        let handle = self.handle.owned(owner);
+        let handle = self.handle.admitted(owner, admission);
         tokio::spawn(async move {
             if let Err(error) = serve_one(&handle, theirs).await {
                 tracing::debug!(%error, "fleet request ended with an error");
             }
         });
-        self.relay(caller, ours, &envelope.request).await
+        relay(&self.gate, caller, ours, &envelope.request, admitted).await
     }
+}
 
-    async fn answer(&self, caller: &mut (impl AsyncWrite + Unpin), reply: Reply) -> io::Result<()> {
-        let answer = Answer {
-            answered: self.current.answered(),
-            reply,
-        };
-        let mut line = serde_json::to_vec(&answer).map_err(io::Error::other)?;
-        line.push(b'\n');
-        caller.write_all(&line).await?;
-        caller.flush().await
-    }
+/// Writes `reply`, given `answered`, to `caller` as one answer line.
+async fn answer(
+    caller: &mut (impl AsyncWrite + Unpin),
+    reply: Reply,
+    answered: Answered,
+) -> io::Result<()> {
+    let mut line = serde_json::to_vec(&Answer { answered, reply }).map_err(io::Error::other)?;
+    line.push(b'\n');
+    caller.write_all(&line).await?;
+    caller.flush().await
+}
 
-    /// Passes `request` to the agent through `ours`, answers its first
-    /// reply line, then relays both ways until both are done.
-    async fn relay<C>(&self, caller: C, ours: UnixStream, request: &Request) -> io::Result<()>
-    where
-        C: AsyncRead + AsyncWrite + Unpin,
-    {
-        let (mut from_caller, mut to_caller) = tokio::io::split(caller);
-        let (from_agent, mut to_agent) = ours.into_split();
-        let mut line = serde_json::to_vec(request).map_err(io::Error::other)?;
-        line.push(b'\n');
-        to_agent.write_all(&line).await?;
-        let upstream = async move {
-            let copied = tokio::io::copy(&mut from_caller, &mut to_agent).await;
+/// Passes `request`, admitted when the host had sent `admitted`, to the
+/// agent through `ours`, answers its first reply line, then relays both
+/// ways until both are done.
+async fn relay<C>(
+    gate: &LeaseGate,
+    caller: C,
+    ours: UnixStream,
+    request: &Request,
+    admitted: Answered,
+) -> io::Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut from_caller, mut to_caller) = tokio::io::split(caller);
+    let (from_agent, mut to_agent) = ours.into_split();
+    let mut line = serde_json::to_vec(request).map_err(io::Error::other)?;
+    line.push(b'\n');
+    to_agent.write_all(&line).await?;
+    let answered = AtomicBool::new(false);
+    let (abandon, abandoned) = oneshot::channel::<()>();
+    let upstream = async {
+        let copied = tokio::io::copy(&mut from_caller, &mut to_agent).await;
+        if answered.load(Ordering::Acquire) {
             let _ = to_agent.shutdown().await;
-            copied
-        };
-        let downstream = async move {
-            let mut from_agent = BufReader::new(from_agent);
-            let mut reply = String::new();
-            if from_agent.read_line(&mut reply).await? == 0 {
-                return Ok(0);
+        } else {
+            // Given up before its answer: the agent's side of the pair
+            // closes whole once both halves here are dropped.
+            let _ = abandon.send(());
+        }
+        drop(to_agent);
+        copied
+    };
+    let downstream = async {
+        let mut from_agent = BufReader::new(from_agent);
+        let mut reply = String::new();
+        tokio::select! {
+            read = from_agent.read_line(&mut reply) => {
+                if read? == 0 {
+                    return Ok(0);
+                }
             }
-            let reply: Reply = serde_json::from_str(&reply).map_err(io::Error::other)?;
-            self.answer(&mut to_caller, reply).await?;
-            let copied = tokio::io::copy_buf(&mut from_agent, &mut to_caller).await;
-            let _ = to_caller.shutdown().await;
-            copied
+            _ = abandoned => return Ok(0),
+        }
+        answered.store(true, Ordering::Release);
+        let reply: Reply = serde_json::from_str(&reply).map_err(io::Error::other)?;
+        let at = if matches!(reply, Reply::Error { .. }) {
+            admitted
+        } else {
+            gate.answered()
         };
-        // A caller gone both ways ends the stream: dropping the socket pair
-        // tells the agent it hung up, so a wake it waited on is given up.
-        let (up, down) = tokio::join!(upstream, downstream);
-        down.and(up).map(drop)
-    }
+        answer(&mut to_caller, reply, at).await?;
+        let copied = tokio::io::copy_buf(&mut from_agent, &mut to_caller).await;
+        let _ = to_caller.shutdown().await;
+        copied
+    };
+    let (up, down) = tokio::join!(upstream, downstream);
+    down.and(up).map(drop)
 }
 
 /// Why the host refuses a request sent under `sent`, if it does: it does
 /// not hold the registration named, its lease has run out, the request is
 /// too many renewals old, or it names two owner epochs.
-fn refusal(current: &Current, gate: &LeaseGate, sent: &Sent, request: &Request) -> Option<Reply> {
-    let held = current.answered();
+fn refusal(gate: &LeaseGate, sent: &Sent, request: &Request) -> Option<Reply> {
+    let held = gate.answered();
     if held.host_epoch != Some(sent.host_epoch) || !gate.is_open() {
         return Some(refused(
             ErrorCode::Unavailable,
             "this host does not hold that registration, or its lease has run out".to_owned(),
         ));
     }
-    if !current.admits(sent.stamp) {
+    if !gate.admits_stamp(sent.stamp) {
         return Some(refused(
             ErrorCode::Expired,
             format!(
@@ -195,8 +242,9 @@ mod tests {
 
     use compute_protocol::host::Id;
 
+    use tokio::io::{AsyncBufReadExt, DuplexStream};
+
     use super::*;
-    use crate::fleet::LeaseFile;
     use crate::fleet::gate::boot_now;
 
     fn sent(host_epoch: u64, stamp: u64, owner_epoch: Option<u64>) -> Sent {
@@ -216,18 +264,9 @@ mod tests {
 
     #[test]
     fn a_request_passes_only_under_the_registration_held_while_the_lease_runs() {
-        let current = Current::new(
-            LeaseFile {
-                host: Some(7),
-                epoch: Some(3),
-                deadline_ns: 0,
-                seq: 10,
-            },
-            2,
-        );
-        let gate = LeaseGate::new(boot_now() + Duration::from_secs(60));
+        let gate = registered(10);
         let status = Request::Status;
-        let check = |sent: Sent, request: &Request| code(refusal(&current, &gate, &sent, request));
+        let check = |sent: Sent, request: &Request| code(refusal(&gate, &sent, request));
         assert_eq!(check(sent(3, 10, None), &status), None);
         assert_eq!(check(sent(3, 8, None), &status), None, "within the window");
         assert_eq!(
@@ -258,12 +297,157 @@ mod tests {
             check(sent(3, 10, None), &status),
             Some(ErrorCode::Unavailable)
         );
-        let unregistered = Current::new(LeaseFile::NONE, 2);
-        let gate = LeaseGate::new(boot_now() + Duration::from_secs(60));
+        let unregistered = LeaseGate::new(boot_now() + Duration::from_secs(60));
         assert_eq!(
-            code(refusal(&unregistered, &gate, &sent(0, 0, None), &status)),
+            code(refusal(&unregistered, &sent(0, 0, None), &status)),
             Some(ErrorCode::Unavailable),
             "a host that never registered serves nothing"
         );
+    }
+
+    /// Registration 3, last renewal `seq`, open for a minute.
+    fn registered(seq: u64) -> LeaseGate {
+        LeaseGate::holding(
+            boot_now() + Duration::from_secs(60),
+            Answered {
+                host_epoch: Some(3),
+                seq,
+            },
+            2,
+        )
+    }
+
+    /// A relay of `request` admitted at renewal 10, between a caller and an
+    /// agent this test plays.
+    fn relayed(
+        gate: &LeaseGate,
+        request: Request,
+    ) -> (
+        DuplexStream,
+        UnixStream,
+        tokio::task::JoinHandle<io::Result<()>>,
+    ) {
+        let (caller, ours) = tokio::io::duplex(1 << 16);
+        let (agent, theirs) = UnixStream::pair().unwrap();
+        let gate = gate.clone();
+        let relay = tokio::spawn(async move {
+            let admitted = Answered {
+                host_epoch: Some(3),
+                seq: 10,
+            };
+            relay(&gate, ours, agent, &request, admitted).await
+        });
+        (caller, theirs, relay)
+    }
+
+    async fn line(reader: &mut (impl AsyncBufReadExt + Unpin)) -> String {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("a line")
+            .unwrap();
+        line
+    }
+
+    async fn answered(caller: &mut BufReader<DuplexStream>) -> Answer {
+        serde_json::from_str(&line(caller).await).unwrap()
+    }
+
+    /// A refusal or "not found" carries the time of admission, however
+    /// late it reaches the relay; a success the time it does.
+    #[tokio::test]
+    async fn an_answer_carries_the_bound_on_when_the_agent_decided_it() {
+        for (reply, seq) in [
+            (refused(ErrorCode::NotFound, "gone".to_owned()), 10),
+            (Reply::Done, 15),
+        ] {
+            let gate = registered(10);
+            let (caller, theirs, relay) = relayed(&gate, Request::Status);
+            let mut agent = BufReader::new(theirs);
+            assert!(line(&mut agent).await.contains("status"));
+            // Renewals go out while the agent decides.
+            gate.hold(
+                Answered {
+                    host_epoch: Some(3),
+                    seq: 15,
+                },
+                boot_now() + Duration::from_secs(60),
+            );
+            let mut sent = serde_json::to_vec(&reply).unwrap();
+            sent.push(b'\n');
+            agent.get_mut().write_all(&sent).await.unwrap();
+            let mut caller = BufReader::new(caller);
+            let answer = answered(&mut caller).await;
+            assert_eq!(answer.reply, reply);
+            assert_eq!(
+                answer.answered,
+                Answered {
+                    host_epoch: Some(3),
+                    seq
+                },
+                "{reply:?}"
+            );
+            drop((caller, agent));
+            relay.await.unwrap().unwrap();
+        }
+    }
+
+    /// A caller that goes away before its answer closes the agent's side
+    /// whole, so a wake it waited on lets go; the relay ends.
+    #[tokio::test]
+    async fn a_caller_gone_before_its_answer_closes_the_agents_side() {
+        let gate = registered(10);
+        let (caller, theirs, relay) = relayed(&gate, Request::Status);
+        let mut agent = BufReader::new(theirs);
+        line(&mut agent).await;
+        drop(caller);
+        tokio::time::timeout(Duration::from_secs(5), relay)
+            .await
+            .expect("the relay ends")
+            .unwrap()
+            .unwrap();
+        let mut rest = Vec::new();
+        assert_eq!(agent.read_to_end(&mut rest).await.unwrap(), 0);
+        let mut agent = agent.into_inner();
+        let mut write = Ok(());
+        for _ in 0..8 {
+            write = agent.write_all(&[0; 4096]).await;
+            if write.is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(write.is_err(), "nobody is left to read the reply");
+    }
+
+    /// After the answer, a caller's end is the end of what it sends: the
+    /// agent reads it as such and can still send the rest of the stream.
+    #[tokio::test]
+    async fn after_its_answer_a_callers_end_is_a_half_close() {
+        let gate = registered(10);
+        let (caller, theirs, relay) = relayed(&gate, Request::Status);
+        let mut agent = BufReader::new(theirs);
+        line(&mut agent).await;
+        agent
+            .get_mut()
+            .write_all(b"{\"result\":\"done\"}\n")
+            .await
+            .unwrap();
+        let (from, mut to) = tokio::io::split(caller);
+        let mut from = BufReader::new(from);
+        let mut answer = String::new();
+        from.read_line(&mut answer).await.unwrap();
+        assert!(answer.contains("done"), "{answer}");
+        to.write_all(b"last words").await.unwrap();
+        to.shutdown().await.unwrap();
+        let mut heard = Vec::new();
+        agent.read_to_end(&mut heard).await.unwrap();
+        assert_eq!(heard, b"last words");
+        agent.get_mut().write_all(b"the rest").await.unwrap();
+        drop(agent);
+        let mut rest = Vec::new();
+        from.read_to_end(&mut rest).await.unwrap();
+        assert_eq!(rest, b"the rest");
+        relay.await.unwrap().unwrap();
     }
 }

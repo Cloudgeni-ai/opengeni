@@ -39,6 +39,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 reply,
                 stale,
             } => self.prepared(id, ordinal, result, reply, stale.as_ref()),
+            Event::OwnerTaken { id, result, reply } => self.owner_taken(id, result, reply),
             Event::StepDone {
                 id,
                 op,

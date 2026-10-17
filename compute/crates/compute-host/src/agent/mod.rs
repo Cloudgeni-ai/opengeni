@@ -27,7 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
 
-use crate::fleet::LeaseGate;
+use crate::fleet::{Admission, LeaseGate};
 use crate::guest_ports::{self, Activity, GuestPort, Listeners};
 use crate::layout::{Images, Paths, check_root};
 use crate::net::{NetworkConfig, Networks};
@@ -342,6 +342,12 @@ pub enum HostError {
     /// nothing until it is renewed.
     #[error("this host's lease from the fleet service has run out")]
     LeaseLapsed,
+    /// A request from the fleet service waited in the agent until the
+    /// lease no longer admitted it: it was sent under a registration this
+    /// host no longer holds or too many renewals ago, or the lease ran
+    /// out.
+    #[error("the request is no longer admitted under this host's lease")]
+    NotAdmitted,
 }
 
 impl From<StateError> for HostError {
@@ -358,6 +364,7 @@ impl From<StateError> for HostError {
             },
             StateError::NotFound(id) => Self::NotFound(id),
             StateError::Exists(id) => Self::Exists(id),
+            StateError::Superseded { id, held, asked } => Self::Superseded { id, held, asked },
             other => Self::Io(other.to_string()),
         }
     }
@@ -421,10 +428,17 @@ enum Command {
         rulings: Vec<(Id, Verdict)>,
         reply: Reply<()>,
     },
-    /// `command`, sent for the ownership of its sandbox under `owner`.
+    /// `command`, sent for the ownership of its sandbox under `owner`, and
+    /// carried out only while `admission` still holds.
     Owned {
         owner: OwnerEpoch,
+        admission: Option<Admission>,
         command: Box<Command>,
+    },
+    /// What the host holds, for a registration: answered once no create,
+    /// adopt or change of owner is under way, or with how many are.
+    Inventory {
+        reply: oneshot::Sender<Result<HostStatus, usize>>,
     },
     Remove {
         id: Id,
@@ -485,6 +499,12 @@ enum Command {
 
 #[derive(Debug)]
 enum Event<V> {
+    /// A change of owner of `id` landed or failed; `reply` waits for it.
+    OwnerTaken {
+        id: Id,
+        result: Result<(), HostError>,
+        reply: Reply<()>,
+    },
     Prepared {
         id: Id,
         ordinal: u32,
@@ -684,8 +704,9 @@ enum Origin {
     /// hand off nothing, since only the fleet service tracks sandboxes.
     LocalToFleet,
     /// The fleet service, for the ownership under this owner epoch of the
-    /// sandbox each request is about.
-    Fleet(OwnerEpoch),
+    /// sandbox each request is about, under the admission its listener
+    /// gave the request, if it came through one.
+    Fleet(OwnerEpoch, Option<Admission>),
 }
 
 /// Keeps a sandbox awake while it lives. Dropping it lets the sandbox go
@@ -728,6 +749,8 @@ pub struct HostAgent<E: Engine, S: Store> {
     origin: Instant,
     slots: HashMap<SandboxId, Slot<E::Vm>>,
     preparing: HashSet<SandboxId>,
+    /// Changes of owner under way, by sandbox (see [`owners`]).
+    owning: HashMap<SandboxId, usize>,
     ordinals: BTreeSet<u32>,
     /// Sandboxes on disk the host does not manage, with why: their ids are
     /// refused and their files and VMs left alone.
@@ -928,7 +951,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let core =
             Host::new(config.policy).map_err(|error| HostError::Invalid(format!("{error:?}")))?;
         check_config(&config).map_err(HostError::Invalid)?;
-        let stream_idle = config.stream_idle;
         let host_lock = match config.host_lock.clone() {
             Some(path) => Some(claim(path, config.root.clone()).await?),
             None => None,
@@ -986,6 +1008,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             origin: Instant::now(),
             slots: HashMap::new(),
             preparing: HashSet::new(),
+            owning: HashMap::new(),
             ordinals: BTreeSet::new(),
             blocked: BTreeMap::new(),
             destroying: HashMap::new(),
@@ -1026,7 +1049,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         agent.sample();
         agent.start_templates(warm_shapes);
         Ok((
-            Handle::new(commands_tx, stream_idle, agent.lease.clone()),
+            Handle::new(commands_tx, config.stream_idle, agent.lease.clone()),
             tokio::spawn(agent.run()),
         ))
     }
@@ -1147,7 +1170,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             // While the lease has run out, time decides nothing: the VMs
             // are frozen, and the service may be giving their sandboxes to
             // other hosts. Events and requests still come in, so the
-            // service's rulings can be carried out.
+            // service's rulings can be carried out; the core decides
+            // nothing of its own on them either (see `inputs`).
             let acting = self.may_act();
             tokio::select! {
                 biased;
@@ -1160,7 +1184,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     None => break,
                 },
                 () = sleep_until_some(deadline), if acting => self.input(Input::Tick),
-                () = lease_changed(lease.as_ref()) => {}
+                // Renewed, the core reconsiders every sandbox.
+                () = lease_changed(lease.as_ref()) => self.input(Input::Tick),
             }
         }
         tracing::info!("every handle dropped; host agent stopping, VMs keep running");
@@ -1201,7 +1226,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// Feeds inputs observed together to the core, which decides once after
     /// all of them.
+    /// On a host in a fleet whose lease has run out the core is suspended
+    /// ([`Host::suspend`]): it takes the inputs in and carries out removals,
+    /// but nothing it would decide of its own, such as pausing a sandbox
+    /// that went idle, starts until the lease is renewed.
     fn inputs(&mut self, inputs: impl IntoIterator<Item = Input>) {
+        let acting = self.may_act();
+        if acting == self.core.is_suspended() {
+            self.core.suspend(!acting);
+        }
         let now = self.now();
         let mut actions = std::mem::take(&mut self.actions);
         self.core.handle_all(now, inputs, &mut actions);
