@@ -2278,6 +2278,96 @@ describe("interaction attempt tools", () => {
     });
   });
 
+  test("compact view leads with an opened menu, live messages and the focus group on a dense page", async () => {
+    const target = browserTarget();
+    const observation = browserObservation(target);
+    const node = (
+      ref: string,
+      role: string,
+      extra: { name?: string; actions?: string[]; states?: string[]; children?: unknown[] } = {},
+    ) => ({ ref, role, states: [], actions: [], ...extra });
+    const navigation = node("nav", "navigation", {
+      name: "Site",
+      children: Array.from({ length: 30 }, (_, index) =>
+        node(`nav-${index}`, "link", { name: `Section ${index}`, actions: ["click"] }),
+      ),
+    });
+    const rows = Array.from({ length: 400 }, (_, index) =>
+      node(`row-${index}`, "row", {
+        children: [
+          node(`row-${index}-edit`, "button", { name: `Edit row ${index}`, actions: ["click"] }),
+          node(`row-${index}-qty`, "button", { name: `${index} m`, actions: ["click"] }),
+        ],
+      }),
+    );
+    const inspector = node("inspector", "group", {
+      name: "Row",
+      children: [
+        node("total", "text", { name: "Total 2 091 kr" }),
+        node("more", "button", {
+          name: "More",
+          actions: ["click"],
+          states: ["focused", "expanded", "hasPopup=menu"],
+        }),
+      ],
+    });
+    const roots = [
+      node("document", "document", {
+        name: "Calculation",
+        children: [
+          navigation,
+          node("main", "main", { children: [node("grid", "grid", { children: rows }), inspector] }),
+          node("empty-status", "status", { states: ["live=polite"] }),
+          node("toast", "status", {
+            states: ["live=polite"],
+            children: [node("toast-text", "text", { name: "Row added" })],
+          }),
+          node("menu", "menu", {
+            name: "More",
+            children: [
+              node("menu-open", "menuitem", { name: "Open tariff choices", actions: ["click"] }),
+              node("menu-delete", "menuitem", { name: "Delete", actions: ["click"] }),
+            ],
+          }),
+        ],
+      }),
+    ];
+    observation.semantic = { kind: "snapshot", roots: roots as never, nodeCount: 900 };
+    observation.focusedRef = "more";
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({ observeBrowserTarget: async () => observation }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId, targetId: target.id },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    const view = (
+      result.structuredContent as {
+        agentView: {
+          nodes: Array<{ ref: string }>;
+          omittedNodeCount: number;
+          omittedRegions: Array<{ role: string; name?: string; count: number }>;
+        };
+      }
+    ).agentView;
+    const shown = new Set(view.nodes.map((entry) => entry.ref));
+    for (const ref of ["menu", "menu-open", "menu-delete", "toast", "toast-text", "total", "more"])
+      expect(shown.has(ref)).toBe(true);
+    expect(shown.has("empty-status")).toBe(false);
+    expect(shown.has("nav-0")).toBe(false);
+    expect(shown.has("row-0-edit")).toBe(true);
+    expect(view.omittedRegions[0]).toMatchObject({ role: "main" });
+    expect(view.omittedRegions).toContainEqual({ role: "navigation", name: "Site", count: 31 });
+    const text = result.content.find((entry) => entry.type === "text");
+    expect(text && "text" in text ? text.text : "").toContain(
+      `elements not shown: ${view.omittedRegions[0]!.count} in main, 31 in navigation "Site"`,
+    );
+  });
+
   test("keeps a dense ten-thousand-node page within the compact output budget", async () => {
     const target = browserTarget();
     const observation = browserObservation(target);
