@@ -11,10 +11,11 @@
 //!
 //! A pause or kill cuts a sandbox's traffic: every stream through the
 //! front door ends, and kept streams are dropped. A Connect stream (an
-//! Another replica's pause cuts nothing here, so a request re-reads the
-//! lifecycle once its stream to the guest is open: if the sandbox is no
-//! longer running, the request is not forwarded, and a sandbox its connect
-//! woke after a pause is saved again.
+//! Another replica's pause cuts nothing here, and a connect to the guest,
+//! or a stream hold, may wake a sandbox paused meanwhile. So however one
+//! ends, the pause is fenced against it ([`ops::fence_wake`]): nothing is
+//! forwarded unless the sandbox still runs, and one paused meanwhile is
+//! recorded as pausing again, for the sweeper to save again.
 //!
 //! A Connect stream (an
 //! envd command's or PTY's output, say) holds the sandbox awake while it
@@ -36,7 +37,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use compute_guest::{ENVD_PORT, GATEWAY_PORT};
-use compute_protocol::host::{Id, LevelName, PriorityName};
+use compute_protocol::host::{Id, PriorityName};
 use http_body_util::{BodyExt as _, StreamBody};
 use hyper::body::{Body as _, Frame, Incoming};
 use hyper::client::conn::http1::{self, SendRequest};
@@ -407,7 +408,7 @@ enum Dialed {
 /// Sends `request` on a kept stream, or on a new one when there is none
 /// or the kept one closed before taking it.
 async fn send<S: Store>(
-    front: &Front<S>,
+    front: &Arc<Front<S>>,
     lane: &Lane,
     team: &str,
     target: Target,
@@ -432,15 +433,18 @@ async fn send<S: Store>(
             },
         }
     }
-    let Some(mut sender) = dial(front, team, target).await? else {
+    // The lifecycle was read before the connect, which may take long enough
+    // for a pause on another replica to complete, and then wake the sandbox
+    // again. So however the connect ends (opened, refused, failed, or given
+    // up when the caller goes away), the pause is fenced against it; and
+    // nothing is forwarded unless the sandbox still runs.
+    let fence = Fence::new(front, target.id);
+    let dialed = dial(front, team, target).await;
+    let running = fence.now().await?;
+    let Some(mut sender) = dialed? else {
         return Ok(Dialed::PortClosed);
     };
-    // The lifecycle was read before the connect, which may have taken long
-    // enough for a pause or kill on another replica to complete, and then
-    // woke the sandbox again. So it is read again now that the stream is
-    // open: nothing is forwarded unless it still runs, and a sandbox paused
-    // meanwhile is put back to sleep.
-    if !still_running(front, team, target.id).await? {
+    if !running {
         return Ok(Dialed::NotRunning);
     }
     let response = sender.send_request(request).await.map_err(|error| {
@@ -452,27 +456,56 @@ async fn send<S: Store>(
     Ok(Dialed::Sent(Sent { response, sender }))
 }
 
-/// Whether `id` is still recorded running. When it is pausing or paused,
-/// asks its host to save it again, undoing a wake this replica's connect
-/// may have made.
-async fn still_running<S: Store>(front: &Front<S>, team: &str, id: Id) -> Result<bool, Refused> {
-    let state = front
-        .store()
-        .lifecycle(id)
-        .await?
-        .map(|row| row.record.state);
-    if state == Some(State::Running) {
-        return Ok(true);
+/// Fences a pause against something that may wake a sandbox (see
+/// [`ops::fence_wake`]): [`Fence::now`] once it is done, or, if it is
+/// dropped first or the store fails, in the background until the store
+/// takes it.
+struct Fence<S: Store> {
+    front: Option<Arc<Front<S>>>,
+    id: Id,
+}
+
+impl<S: Store> Fence<S> {
+    fn new(front: &Arc<Front<S>>, id: Id) -> Self {
+        Self {
+            front: Some(Arc::clone(front)),
+            id,
+        }
     }
-    if matches!(state, Some(State::Pausing | State::Paused)) {
-        match front.service.sleep(team, id, LevelName::Saved).await {
-            Ok(()) | Err(crate::service::Failure::NotFound) => {}
-            Err(failure) => {
-                tracing::debug!(%id, %failure, "saving again a sandbox paused meanwhile");
+
+    /// Fences now; answers whether the sandbox still runs.
+    async fn now(mut self) -> Result<bool, Refused> {
+        let Some(front) = self.front.take() else {
+            return Ok(false);
+        };
+        match ops::fence_wake(&front, self.id).await {
+            Ok(running) => Ok(running),
+            Err(refused) => {
+                fence_later(front, self.id);
+                Err(refused)
             }
         }
     }
-    Ok(false)
+}
+
+impl<S: Store> Drop for Fence<S> {
+    fn drop(&mut self) {
+        if let Some(front) = self.front.take() {
+            fence_later(front, self.id);
+        }
+    }
+}
+
+/// Fences a pause for `id` in the background, until the store takes it.
+fn fence_later<S: Store>(front: Arc<Front<S>>, id: Id) {
+    tokio::spawn(async move {
+        let mut wait = Duration::from_millis(100);
+        while let Err(refused) = ops::fence_wake(&front, id).await {
+            tracing::warn!(%id, error = %refused.message, "fencing a pause against a wake");
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(Duration::from_secs(5));
+        }
+    });
 }
 
 /// Opens a stream to the guest port; `None` when nothing listens there.
@@ -637,15 +670,28 @@ async fn hold<S: Store>(front: Arc<Front<S>>, lane: Arc<Lane>, team: String, id:
                 Ok(Some(row)) if row.record.state == State::Running
             );
             if running {
-                match front
+                // A hold wakes the sandbox, so it is fenced like a connect.
+                let fence = Fence::new(&front, id);
+                let holding = front
                     .service
                     .hold(&team, id, front.stream_hold(), Some(HOLD_TTL))
-                    .await
-                {
+                    .await;
+                let still = fence.now().await.unwrap_or(false);
+                match holding {
                     Ok(()) => held = true,
                     Err(failure) => {
                         tracing::debug!(%id, %failure, "holding a sandbox for its streams");
                     }
+                }
+                // Paused meanwhile: its streams are cut, and the hold
+                // would keep the pause from saving it.
+                if held && !still {
+                    if let Err(failure) =
+                        front.service.release(&team, id, front.stream_hold()).await
+                    {
+                        tracing::debug!(%id, %failure, "releasing a stream hold after a pause");
+                    }
+                    held = false;
                 }
             }
         }

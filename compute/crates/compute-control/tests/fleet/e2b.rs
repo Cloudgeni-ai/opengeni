@@ -33,8 +33,9 @@ struct Seen {
     requests: AtomicUsize,
     /// Streaming responses still open.
     streams: AtomicUsize,
-    /// Port 8081 answers its gateway header only once this is notified,
-    /// as a slow connect would.
+    /// Ports 8081 (which then opens) and 8082 (which then refuses) answer
+    /// their gateway header only once this is notified, as a slow connect
+    /// would.
     slow: tokio::sync::Notify,
 }
 
@@ -103,7 +104,7 @@ async fn gateway(seen: Arc<Seen>, mut stream: GuestStream) {
     }
     let port: u16 = line.strip_prefix("tcp ").unwrap().parse().unwrap();
     *seen.dials.lock().unwrap().entry(port).or_default() += 1;
-    if port == 8081 {
+    if port == 8081 || port == 8082 {
         seen.slow.notified().await;
     }
     if port != ENVD_PORT && port != 8080 && port != 8081 {
@@ -819,50 +820,98 @@ async fn pauses_that_cannot_finish_do_not_hold_up_later_timeouts() {
 }
 
 /// A request whose connect is slow while another replica pauses the
-/// sandbox is not forwarded once the stream opens, and the sandbox its
-/// connect woke is saved again.
+/// sandbox, and that wakes it again, is not forwarded, whether its stream
+/// opens (8081) or the port refuses it (8082); the pause is carried out
+/// again, and the sandbox ends paused and saved.
 #[tokio::test]
-async fn a_request_whose_connect_outlasts_a_pause_is_not_forwarded() {
+async fn a_request_whose_connect_outlasts_a_pause_leaves_it_paused() {
     let (fleet, _host, levels, seen, door) = fleet_with_guest().await;
-    let sandbox = door.create(json!({"templateID": "base"})).await;
+    for (port, status) in [(8081, 409), (8082, 502)] {
+        let sandbox = door.create(json!({"templateID": "base"})).await;
+        let id = sandbox["sandboxID"].as_str().unwrap().to_owned();
+        let sandbox_id: Id = id.parse().unwrap();
+        let served = seen.requests.load(Ordering::SeqCst);
+        let request = tokio::spawn({
+            let call = door.traffic(&id, port, "/work");
+            async move { call.send().await.unwrap().status().as_u16() }
+        });
+        until(
+            Duration::from_secs(5),
+            "the connect reaches the guest",
+            async || seen.dials.lock().unwrap().get(&port).copied() == Some(1),
+        )
+        .await;
+        // Another replica's pause completes meanwhile; the connect has
+        // woken the sandbox again (the fake host runs it on connects).
+        let mut row = fleet.store.lifecycle(sandbox_id).await.unwrap().unwrap();
+        row.record
+            .set(e2b::lifecycle::State::Paused, e2b::ops::now_ms());
+        assert!(
+            compute_control::store::replace_lifecycle(&*fleet.store, &mut row)
+                .await
+                .unwrap()
+        );
+        assert_eq!(levels.lock().unwrap().at[&sandbox_id], LevelName::Running);
+        seen.slow.notify_one();
+        assert_eq!(request.await.unwrap(), status, "port {port}");
+        assert_eq!(seen.requests.load(Ordering::SeqCst), served);
+        until(
+            Duration::from_secs(10),
+            "the pause is carried out again",
+            async || {
+                let state = fleet
+                    .store
+                    .lifecycle(sandbox_id)
+                    .await
+                    .unwrap()
+                    .map(|row| row.record.state);
+                state == Some(e2b::lifecycle::State::Paused)
+                    && levels.lock().unwrap().at[&sandbox_id] == LevelName::Saved
+            },
+        )
+        .await;
+    }
+}
+
+/// Pause work read before a pause finished and the sandbox resumed (a
+/// sweep's copy of the record, say) neither cuts nor saves the running
+/// sandbox.
+#[tokio::test]
+async fn pause_work_from_before_a_resume_leaves_the_sandbox_running() {
+    let (fleet, _host, levels, _seen, door) = fleet_with_guest().await;
+    let sandbox = door
+        .create(json!({"templateID": "base", "autoPause": true}))
+        .await;
     let id = sandbox["sandboxID"].as_str().unwrap().to_owned();
     let sandbox_id: Id = id.parse().unwrap();
-    let served = seen.requests.load(Ordering::SeqCst);
-    let request = tokio::spawn({
-        let call = door.traffic(&id, 8081, "/work");
-        async move { call.send().await.unwrap().status().as_u16() }
-    });
-    until(
-        Duration::from_secs(5),
-        "the connect reaches the guest",
-        async || seen.dials.lock().unwrap().get(&8081).copied() == Some(1),
-    )
-    .await;
-    // Another replica's pause completes meanwhile.
-    let mut row = fleet.store.lifecycle(sandbox_id).await.unwrap().unwrap();
-    row.record
-        .set(e2b::lifecycle::State::Paused, e2b::ops::now_ms());
-    assert!(
-        compute_control::store::replace_lifecycle(&*fleet.store, &mut row)
-            .await
-            .unwrap()
-    );
-    levels
-        .lock()
-        .unwrap()
-        .at
-        .insert(sandbox_id, LevelName::Saved);
-    seen.slow.notify_one();
-    assert_eq!(request.await.unwrap(), 409);
-    assert_eq!(seen.requests.load(Ordering::SeqCst), served);
-    assert_eq!(levels.lock().unwrap().at[&sandbox_id], LevelName::Saved);
-    assert!(
+    let (status, _) = door
+        .post(&format!("/sandboxes/{id}/pause"), json!({}))
+        .await;
+    assert_eq!(status, 204);
+    // As a sweep read it while the pause was under way.
+    let mut stale = fleet.store.lifecycle(sandbox_id).await.unwrap().unwrap();
+    stale
+        .record
+        .set(e2b::lifecycle::State::Pausing, e2b::ops::now_ms());
+    let (status, _) = door
+        .post(&format!("/v2/sandboxes/{id}/connect"), json!({}))
+        .await;
+    assert_eq!(status, 201);
+    let saves = |levels: &Arc<Mutex<Levels>>| {
         levels
             .lock()
             .unwrap()
             .log
-            .contains(&"sleep Saved".to_owned())
-    );
+            .iter()
+            .filter(|line| *line == "sleep Saved")
+            .count()
+    };
+    let before = saves(&levels);
+    e2b::ops::sweep_row(&door.front, stale).await.unwrap();
+    assert_eq!(saves(&levels), before);
+    assert_eq!(levels.lock().unwrap().at[&sandbox_id], LevelName::Running);
+    let (_, detail) = door.get(&format!("/sandboxes/{id}")).await;
+    assert_eq!(detail["state"], "running");
 }
 
 /// A sweep that read a sandbox when its timeout had passed, and runs only

@@ -182,29 +182,91 @@ pub fn create(root: &Path, path: &Path, mode: u32) -> io::Result<File> {
 
 /// Opens the file at `path`, which must be a regular file, to read, or to
 /// append to (creating it with `mode` if missing). A symlink, FIFO, device
-/// or socket there is refused; the open does not block on a FIFO.
+/// or socket there is refused without being opened: the entry is pinned
+/// and its type checked first, and only a regular file is then opened, so
+/// neither a FIFO's wait nor a device's own open ever happens.
 ///
 /// # Errors
 ///
 /// When it is not a regular file, and when opening fails.
 pub fn open(path: &Path, append: Option<u32>) -> io::Result<File> {
-    let (flags, mode) = match append {
-        None => (OFlags::RDONLY, 0),
-        Some(mode) => (OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE, mode),
+    let flags = match append {
+        None => OFlags::RDONLY,
+        Some(_) => OFlags::WRONLY | OFlags::APPEND,
     };
+    match open_regular(path, flags) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let Some(mode) = append else {
+                return Err(error);
+            };
+            // A new file: exclusive, so it is the one made here.
+            let fd = rustix::fs::open(
+                path,
+                flags | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                mode_of(mode),
+            )?;
+            let file = File::from(fd);
+            rustix::fs::fchmod(&file, mode_of(mode))?;
+            Ok(file)
+        }
+        other => other,
+    }
+}
+
+/// Refuses `stat` unless it is a regular file's.
+fn regular(path: &Path, stat: &rustix::fs::Stat) -> io::Result<()> {
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::RegularFile {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not a regular file", path.display()),
+        ))
+    }
+}
+
+/// Opens the regular file at `path` with `flags`. The entry is pinned
+/// with `O_PATH`, which opens nothing, checked, and then opened through
+/// that pin, so the file opened is the one checked.
+#[cfg(target_os = "linux")]
+fn open_regular(path: &Path, flags: OFlags) -> io::Result<File> {
+    use std::os::fd::AsRawFd as _;
+    let pinned = rustix::fs::open(
+        path,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    regular(path, &rustix::fs::fstat(&pinned)?)?;
+    let fd = rustix::fs::open(
+        format!("/proc/self/fd/{}", pinned.as_raw_fd()),
+        flags | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    Ok(File::from(fd))
+}
+
+/// Opens the regular file at `path` with `flags`. Without `O_PATH`, the
+/// entry is checked without following it, then opened, and the file
+/// opened must be the one checked. Images are built on Linux; this serves
+/// development elsewhere.
+#[cfg(not(target_os = "linux"))]
+fn open_regular(path: &Path, flags: OFlags) -> io::Result<File> {
+    let checked = rustix::fs::lstat(path)?;
+    regular(path, &checked)?;
     let fd = rustix::fs::open(
         path,
         flags | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
-        mode_of(mode),
+        Mode::empty(),
     )?;
-    let file = File::from(fd);
-    if !file.metadata()?.file_type().is_file() {
+    let opened = rustix::fs::fstat(&fd)?;
+    regular(path, &opened)?;
+    if (opened.st_dev, opened.st_ino) != (checked.st_dev, checked.st_ino) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{} is not a regular file", path.display()),
+            format!("{} changed while it was opened", path.display()),
         ));
     }
-    Ok(file)
+    Ok(File::from(fd))
 }
 
 /// Sets the mode, and the modification time if given, of the directory at

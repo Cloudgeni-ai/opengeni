@@ -82,10 +82,14 @@ an init system of its own.
   access token passes through; a sandbox created without public traffic
   also needs its traffic token on user ports. A pause or kill ends every
   stream through the front door. The traffic token is checked before
-  anything else, auto-resume included. A request re-reads the lifecycle
-  once its stream to the guest is open, so a pause another replica
-  finished meanwhile is not undone: the request is not forwarded, and a
-  sandbox its connect woke is saved again.
+  anything else, auto-resume included. A connect to the guest, or a
+  stream hold, may wake a sandbox that another replica paused meanwhile.
+  So however it ends (opened, refused, failed, or abandoned), the front
+  door reads the lifecycle again: a request is forwarded only if the
+  sandbox still runs, and a sandbox paused meanwhile is recorded as
+  pausing again, which any replica's sweeper then finishes. A pause
+  records `Paused` only if the record is unchanged since the host reported
+  the save, and pause work stops once the record no longer asks for it.
 - **TLS: either the front door or a terminator in front.** The SDK uses
   HTTPS for the API and for `<port>-<id>.<domain>`. With `--e2b-tls-cert`
   and `--e2b-tls-key` the front door serves HTTPS itself, with one

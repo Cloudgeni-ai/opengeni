@@ -272,20 +272,51 @@ pub async fn pause<S: Store>(front: &Front<S>, team: &str, id: Id) -> Result<(),
 /// sees `Pausing` and does the same for its own, and until then the host
 /// keeps the sandbox awake, so the save is asked for again until it is
 /// done.
+///
+/// Every step is for the pause the record still asks for: each round reads
+/// it again and stops once it is no longer `Pausing` (finished, or
+/// resumed after another replica finished it). `Paused` is written only on
+/// condition that the record is still at the version read before the host
+/// reported the save, so traffic that woke the sandbox meanwhile, and
+/// wrote the record again (see [`fence_wake`]), makes it look again.
 async fn finish_pause<S: Store>(
     front: &Front<S>,
     team: &str,
     id: Id,
     within: Duration,
 ) -> Result<(), Refused> {
-    front.traffic.cut(id);
-    match front.service.release(team, id, front.stream_hold()).await {
-        Ok(()) | Err(Failure::NotFound) => {}
-        Err(failure) => tracing::debug!(%id, %failure, "releasing a pausing sandbox's stream hold"),
-    }
     let deadline = Instant::now() + within;
     let mut asked_at: Option<Instant> = None;
     loop {
+        let mut row = read(front, team, id).await?;
+        match row.record.state {
+            State::Pausing => {}
+            State::Paused => return Ok(()),
+            State::Running | State::Creating => {
+                // Resumed after another replica finished the pause. A
+                // save this asked for may have come after the resume's
+                // wake, so it is woken again.
+                if asked_at.is_some()
+                    && let Err(failure) = front
+                        .service
+                        .wake(team, id, PriorityName::Interactive)
+                        .await
+                {
+                    tracing::debug!(%id, %failure, "waking a sandbox resumed during a pause");
+                }
+                return Ok(());
+            }
+            State::Killing => return Err(Refused::not_found(id)),
+        }
+        if asked_at.is_none() {
+            front.traffic.cut(id);
+            match front.service.release(team, id, front.stream_hold()).await {
+                Ok(()) | Err(Failure::NotFound) => {}
+                Err(failure) => {
+                    tracing::debug!(%id, %failure, "releasing a pausing sandbox's stream hold");
+                }
+            }
+        }
         if asked_at.is_none_or(|at| at.elapsed() >= SLEEP_AGAIN_EVERY) {
             asked_at = Some(Instant::now());
             match front.service.sleep(team, id, LevelName::Saved).await {
@@ -295,7 +326,14 @@ async fn finish_pause<S: Store>(
             }
         }
         match front.service.depth(team, id).await {
-            Ok(depth) if depth.saved() => break,
+            Ok(depth) if depth.saved() => {
+                row.record.set(State::Paused, now_ms());
+                if replace_lifecycle(front.store(), &mut row).await? {
+                    return Ok(());
+                }
+                // Written meanwhile: look again at once.
+                continue;
+            }
             Ok(_) => {}
             Err(Failure::NotFound) => return gone(front, id).await,
             Err(failure) => {
@@ -310,15 +348,35 @@ async fn finish_pause<S: Store>(
         }
         tokio::time::sleep(POLL_EVERY).await;
     }
-    settle(front, team, id, |record, now| match record.state {
-        State::Pausing => {
-            record.set(State::Paused, now);
-            Ok(true)
+}
+
+/// After traffic that may have woken sandbox `id` (a connect through its
+/// host, or a hold), found running before it: makes sure a pause that
+/// began or finished since still holds. A `Paused` record goes back to
+/// `Pausing`, and a `Pausing` one is written again, so a pause about to
+/// record `Paused` looks at the host again; the sweeper of any replica
+/// then finishes the pause, after a crash too. Answers whether the
+/// sandbox is still recorded running.
+///
+/// # Errors
+///
+/// When the store fails; the caller tries again.
+pub async fn fence_wake<S: Store>(front: &Front<S>, id: Id) -> Result<bool, Refused> {
+    loop {
+        let Some(mut row) = front.store().lifecycle(id).await? else {
+            return Ok(false);
+        };
+        match row.record.state {
+            State::Running => return Ok(true),
+            State::Creating | State::Killing => return Ok(false),
+            State::Pausing | State::Paused => {
+                row.record.set(State::Pausing, now_ms());
+                if replace_lifecycle(front.store(), &mut row).await? {
+                    return Ok(false);
+                }
+            }
         }
-        _ => Ok(false),
-    })
-    .await
-    .map(|_| ())
+    }
 }
 
 /// The fleet no longer has the sandbox: forget its record too.
