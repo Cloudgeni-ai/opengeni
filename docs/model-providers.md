@@ -63,7 +63,8 @@ JSON must not declare overlay kinds (`vercel-gateway-managed`,
 `opper-organization`, `xai-subscription`) or reserved provider ids (`openai`,
 `azure`, `codex-subscription`, `xai-subscription`, `opengeni-gateway`,
 `workspace-gateway`, `openrouter`, `workspace-openrouter`, `opper`,
-`workspace-opper`, `organization-opper`). `baseUrl` is origin + path (no userinfo, query,
+`workspace-opper`, `organization-opper`, `organization-azure-openai`; also the
+`direct-azure-organization` kind). `baseUrl` is origin + path (no userinfo, query,
 fragment). Put extra query/headers in `defaultQuery` / `defaultHeaders`;
 `Authorization` is SDK-managed. `publicDefaultQueryNames` /
 `publicDefaultHeaderNames` mark which of those appear in public definition
@@ -96,8 +97,9 @@ These connections are workspace-owned, including in the onboarding Personal
 workspace. The existing Connections API encrypts the key at rest and returns
 metadata only. Usage is externally billed to that provider account and consumes
 no Opengeni credits. Organization provider inheritance does not apply to these
-workspace connections. Replace a key, endpoint, or model by disconnecting and
-reconnecting; the new connection has a distinct model ID.
+workspace connections; to share Azure OpenAI across an organization's shared
+workspaces, use the organization rail below. Replace a key, endpoint, or model
+by disconnecting and reconnecting; the new connection has a distinct model ID.
 
 `directModelProvider` metadata declares the provider, model/deployment, and Azure
 endpoint. `credentialRole` is `direct_openai` or `direct_azure_openai`. Model IDs
@@ -109,11 +111,55 @@ customer connections never fall back to deployment credentials. Customer routes
 use conservative text/function capabilities; hosted tools and reasoning controls
 are not enabled implicitly for an arbitrary Azure deployment name.
 
+#### Organization Azure OpenAI
+
+Organization owners/admins can connect **Azure OpenAI once for the whole
+organization** in **Organization settings → Models → Azure OpenAI**
+(`OrganizationModelProviderKind` `azure_openai`, the same admin-only,
+same-origin browser routes as the other organization providers). The connection
+stores the encrypted API key plus the non-secret resource endpoint
+(`https://RESOURCE.openai.azure.com`, normalized to `…/openai/v1`; proxies are
+refused). The upsert request hash binds the key digest **and** the endpoint, so an
+idempotent replay that names another endpoint conflicts and changing the
+endpoint writes a new connection version. The endpoint is returned in
+connection responses; the key never is. Revocation clears the key and keeps the
+endpoint, so curated deployments stay listed as not ready.
+
+Admins then add **deployments** as the organization's custom models: the
+`upstreamModelId` is the exact Azure deployment name (same rule as workspace
+Azure). Before saving, the API runs the setup check above against the
+organization's endpoint and key; failures return a safe 422 (409 when Azure is
+not connected) and save nothing. Products are
+`organization-azure-openai/<deployment>` (provider `organization-azure-openai`,
+kind `direct-azure-organization`), use Responses with the `azure-openai` wire
+profile and the same conservative capabilities as workspace Azure (no reasoning
+control, no hosted web search), and send the key as Azure's `api-key` header on
+`<endpoint>/responses`. They inherit into current and future shared workspaces
+only (Personal workspaces stay local, by the same RLS rule as the other
+organization API-key rails), are billed to the organization's Azure account with
+no Opengeni credits, and are narrowed by
+`/v1/organizations/:id/model-connections/azure_openai/current/access`. The
+workspace catalog reads the endpoint without decrypting; the worker loads the
+active key and endpoint for the turn. A missing or revoked connection fails
+closed (`OrganizationAzureOpenAIUnavailableError`) and never falls back to the
+deployment's own OpenAI/Azure credentials. The endpoint is part of each model's
+definition version, so an accepted turn never silently moves to another
+resource.
+
 Canonical: `packages/contracts/src/direct-model-provider.ts`,
 `packages/core/src/domain/direct-model-provider.ts` for the setup check,
 `withDirectModelProviders` in `packages/config/src/index.ts`,
 `loadDirectModelProviderConnection` in `packages/db/src/index.ts`, and the direct
 provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
+Organization Azure: `withOrganizationAzureOpenAICatalogProvider` /
+`withOrganizationAzureOpenAICredential` in `packages/config/src/index.ts`,
+`packages/db/src/organization-model-providers.ts` (endpoint, digest binding,
+`loadOrganizationModelProviderCredential`), migration
+`packages/db/drizzle/0832_organization_azure_openai_model_providers.sql`,
+`settingsWithOrganizationProviderCredentials` in
+`packages/core/src/model-provider-credentials.ts`,
+`apps/api/src/routes/organization-model-providers.ts`, and the organization
+provider hook `apps/web/src/components/organization-model-provider-connection.tsx`.
 
 ### Reviewed overlays — not generic JSON
 
@@ -483,15 +529,17 @@ derives both from the provider kind:
 | Organization Vercel AI Gateway      | organization connection       | organization           | external         |
 | Organization OpenRouter             | organization connection       | organization           | external         |
 | Organization Opper                  | organization connection       | organization           | external         |
+| Organization Azure OpenAI           | organization connection       | organization           | external         |
 
 `workspace_connection` is a reserved normalized contract. Generic JSON does
 not enable workspace BYOK; that requires a separately reviewed encrypted
 credential broker.
 
 `organization_connection` is the peer organization-owned broker. Organization
-admins connect Vercel AI Gateway, OpenRouter, or Opper once in Organization
-settings and curate explicit custom model slugs. Active products use
-`organization-gateway/`, `organization-openrouter/`, or `organization-opper/`,
+admins connect Vercel AI Gateway, OpenRouter, Opper, or Azure OpenAI once in
+Organization settings and curate explicit custom model slugs (Azure: deployment
+names). Active products use `organization-gateway/`, `organization-openrouter/`,
+`organization-opper/`, or `organization-azure-openai/`,
 are externally billed to
 the organization provider account, and inherit into current and future shared
 workspaces only. Canonical Personal workspaces remain local. Workspace provider

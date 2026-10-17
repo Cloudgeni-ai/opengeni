@@ -574,7 +574,11 @@ of upstream settlement. Workspace Gateway, OpenRouter, Opper, Anthropic API, and
 Claude subscription rows are provider-qualified overlays, separate from deployment
 catalog/billing. `openrouter/*` and `workspace-openrouter/*` (likewise `opper/*`,
 `workspace-opper/*`, `organization-opper/*`) retain distinct provider/billing
-identities for identical slugs. Claude setup:
+identities for identical slugs. Organization Azure OpenAI
+(`organization-azure-openai/<deployment>`) is the organization peer of the
+workspace direct Azure route: one encrypted key plus a non-secret endpoint per
+organization, inherited by shared workspaces only (see
+[model-providers.md](model-providers.md#organization-azure-openai)). Claude setup:
 `apps/api/src/routes/workspace-model-providers.ts`; transport:
 `packages/runtime/src/anthropic-messages.ts`.
 Claude request-byte and independent image bounds live in
