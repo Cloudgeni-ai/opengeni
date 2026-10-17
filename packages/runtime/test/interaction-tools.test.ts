@@ -342,7 +342,7 @@ describe("interaction attempt tools", () => {
         expect(computer).toBe(computerSessionId);
         expect(request.arguments).toEqual({
           steps: [{ tool: "click", args: { pid: 42, window_id: 1, element_token: "snapshot:0" } }],
-          observe: true,
+          observe: {},
         });
         calls++;
         return {
@@ -375,8 +375,8 @@ describe("interaction attempt tools", () => {
       permissions: ["sessions:control"],
     });
     expect(calls).toBe(0);
-    const batch = definitions.find((tool) => tool.modelName === "interaction__cua_run_actions")!;
-    const upstream = CUA_DESKTOP_TOOLS.find((tool) => tool.name === "run_actions")!;
+    const batch = definitions.find((tool) => tool.modelName === "interaction__cua_run_steps")!;
+    const upstream = CUA_DESKTOP_TOOLS.find((tool) => tool.name === "run_steps")!;
     expect((batch.inputSchema.properties as any).steps).toEqual(
       (upstream.inputSchema.properties as any).steps,
     );
@@ -385,7 +385,7 @@ describe("interaction attempt tools", () => {
       {
         computerSessionId,
         steps: [{ tool: "click", args: { pid: 42, window_id: 1, element_token: "snapshot:0" } }],
-        observe: true,
+        observe: {},
       },
       { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:fixture" } },
     );

@@ -218,9 +218,9 @@ test.skipIf(process.platform !== "darwin" || process.env.OPENGENI_CUA_E2E !== "1
           await supervisor.observe(reference, target.id);
           await Bun.sleep(2100);
         }
-        const batched = nativeCall("run_actions", {
+        const batched = nativeCall("run_steps", {
           steps: [{ tool: "click", args: { element_token: increment.element_token } }],
-          observe: true,
+          observe: {},
         });
         const batchedReceipt = await supervisor.nativeCall(batched);
         expect(batchedReceipt.state).toBe("completed");

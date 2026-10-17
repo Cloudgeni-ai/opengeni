@@ -158,7 +158,7 @@ test.skipIf(process.platform !== "linux" || process.env.OPENGENI_CUA_E2E !== "1"
         });
         expect(frame.data.subarray(0, 4)).toEqual(Buffer.from([137, 80, 78, 71]));
       }
-      const batch = command("run_actions", {
+      const batch = command("run_steps", {
         steps: [
           {
             tool: "set_value",
