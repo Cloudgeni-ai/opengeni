@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use super::disk::{DiskRoom, Resource};
+use super::disk::{DiskRoom, DiskSpace, Resource};
 use super::{Action, Host, Notice, Squeeze};
 use crate::ids::SandboxId;
 use crate::level::{Level, Priority, Step};
@@ -323,6 +323,36 @@ impl Host {
             }
         }
         changed
+    }
+
+    /// Starts queued checkpoints while their limit allows and the disk
+    /// left can book what each adds while it runs (see
+    /// [`Sandbox::checkpoint_need`]). One that does not fit stays queued
+    /// without holding up those behind it, and is tried again at every
+    /// decision, a disk reading's among them; [`Host::keep_disk`] makes
+    /// room for it meanwhile.
+    pub(super) fn admit_checkpoints(&mut self, left: Option<&mut Left>, out: &mut Vec<Action>) {
+        let index = Step::Checkpoint.index();
+        let limit = self.policy.limits.get(Step::Checkpoint);
+        let mut disk = left.and_then(|left| left.disk.as_mut());
+        let keys: Vec<QueueKey> = self.queues[index].iter().copied().collect();
+        for key in keys {
+            if self.in_flight[index] >= limit {
+                break;
+            }
+            let need = self
+                .sandboxes
+                .get(&key.sandbox)
+                .map_or_else(DiskSpace::default, Sandbox::checkpoint_need);
+            if disk
+                .as_deref_mut()
+                .is_some_and(|room| room.take(need).is_err())
+            {
+                continue;
+            }
+            self.queues[index].remove(&key);
+            self.start(Step::Checkpoint, key, out);
+        }
     }
 
     /// Lets sandboxes refused earlier but still held try again once their

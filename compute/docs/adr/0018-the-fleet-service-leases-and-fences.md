@@ -241,12 +241,86 @@ can be built and tested.
   and the host must register again), it raises the owner epoch of each of
   its sandboxes and clears their owner. Each comes back on its next wake,
   from its latest archive, on another host. A sandbox never archived is
-  lost with its host. Early copies, a first archive soon after a sandbox
-  is created and periodic checkpoints while it runs, are planned as their
-  own piece; until they land, a sandbox survives the loss of its host
-  only once it has been archived. A lost host that comes back gets back each sandbox nobody
+  lost with its host; checkpoints, below, keep that window short. A lost
+  host that comes back gets back each sandbox nobody
   adopted since, with its local state, which is at least as new as the
   archive, and drops the rest.
+- **Checkpoints.** A sandbox whose sleep rules set `checkpoint_every_ms`
+  is copied to object storage while it runs, so losing its host costs
+  only what changed since. The fleet sets it to 10 minutes for every
+  sandbox whose create names no sleep rules. Protection starts once a
+  copy is in the store, not when it was captured, and the period counts
+  running time from the later of when its newest copy got there and its
+  last wake, so a sandbox that sleeps and is archived anyway takes none.
+  The period is a scheduling target, not a bound on what a lost host
+  costs. A checkpoint is due once the sandbox has run for the period, and
+  one with no copy yet is due after a minute of running; it protects only
+  once it is published, and on its way it may wait for disk admission and
+  the step limit, for a lazily woken VM to settle, and for its capture,
+  merge and upload, and fail and be tried again later. None of those
+  waits has a bound. Losing its host costs a sandbox everything since
+  the capture of its newest published copy, so that capture's age is its
+  recovery point: the sandbox's status reports it as `backed_up_ms`, and
+  that, not the period, is what to watch and alert on.
+  One created and never run is archived at once, so it survives
+  its host from then on; a wake meanwhile comes first and cancels that
+  archive, and the sandbox is then protected only once its first
+  checkpoint is in the store.
+  - *A coherent bundle.* The step settles a lazily woken VM first (its
+    image whole, its pager holding all of it), then pauses the VM, has
+    its VMM write the pages changed since its last snapshot, and clones
+    the disk sharing every extent once the snapshot has made it durable.
+    The VM then runs again while those pages are merged over its last
+    image into a new self-contained one, and the bundle, which nothing
+    changes any more, is uploaded as the owner's next save under the
+    same owner stamp and fences as an archive. The guest stands still
+    only from the pause to the resume (`compute.paused_us`): the merge
+    and the upload run while it works. A resume the VMM refuses having
+    changed nothing is tried again for as long as the VM lives,
+    cancelled or not, with an error logged once it has failed for
+    30 seconds; giving up would end a VM that may yet run. Only a VM
+    whose resume may have changed something, or that ends while paused,
+    ends the step that way, and the sandbox goes back to its last saved
+    copy.
+  - *Admitted for its disk.* While the clone shares the disk's blocks,
+    any guest write may take a new one, so a running checkpoint books
+    the disk's whole growth bound. A checkpoint starts only when the
+    host's disk can book that on top of everything else; one that
+    cannot waits, without holding up others, while the host makes room
+    as it does for a refused wake, by evicting idle copies already in
+    object storage.
+  - *Still volatile.* The record goes on vouching for no local copy, since
+    the VM moves on: the sandbox stays `Running` and `Volatile`. Only its
+    `backed_up_ms` moves, to when the bundle was captured, and only once
+    the store holds it; protection starts at publication, not when the
+    step began.
+  - *The base moves even if the upload fails.* The new image becomes the
+    VM's base as soon as it is made, so its next save is a diff over it
+    whether or not this upload succeeded; a failed upload is retried
+    after the usual backoff from a fresh bundle, never from the old one.
+    From the snapshot until the image is made the VM's base is unknown,
+    so a merge that fails makes its next save a full one.
+  - *Ordered by the step.* The step runs in the sandbox's single step
+    slot and reserves its save number there, so no later save,
+    retirement or forgetting can touch the bundle while it uploads, and a
+    save captured after it always carries a higher number.
+  - *Use goes on, memory pressure wins.* A request during a checkpoint
+    neither waits for it nor cancels it: the guest is paused only while
+    its state is captured. The guest's own work counts as use from the
+    resume on: the step reads the VM's processor time and traffic for the
+    host agent, which cannot while the step holds the VM, so a guest busy
+    through a long upload is not taken for idle when it ends, and the
+    capture's own work never counts. A host that needs the memory cancels
+    it, as it cancels an archive, and the sandbox is checkpointed again
+    once it runs.
+  - *Fenced like an archive.* A checkpoint that finds a later owner in the
+    store is refused and drops this host's copy, ending its VM.
+  - *Only where extents are shared.* The disk clone needs a state root on
+    a filesystem whose files share extents (XFS, btrfs). A host on any
+    other says so in its status (`about.checkpoints` false) and takes
+    none; a host without a store refuses a sandbox that asks for them, as
+    it refuses an archive. The sleep ladder is unchanged: an idle sandbox
+    pauses, saves and archives as before, and checkpoints never skip it.
 - **Moves while asleep.** To drain or rebalance a host, the service sends
   `hand_off` for its sleeping sandboxes and clears their owner with a raised
   epoch once the host answers; the next wake adopts each elsewhere. Live

@@ -123,23 +123,25 @@ async fn new_sandboxes_restore_the_template_and_learn_who_they_are() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn without_a_ready_template_a_sandbox_boots_cold_at_once() {
-    let delays = Delays {
-        boot: Duration::from_millis(300),
-        ..Delays::default()
-    };
-    let lab = warm_lab(Lab::root(), Arc::default(), delays, Vec::new()).await;
+    let lab = warm_lab(Lab::root(), Arc::default(), Delays::default(), Vec::new()).await;
     assert!(
         lab.status().await.templates.is_empty(),
         "built on first use"
     );
 
-    let started = Instant::now();
-    lab.create(id(1), NEVER).await;
-    assert!(
-        started.elapsed() < Duration::from_millis(250),
-        "creating never waits for a template build"
+    // A template build boots a VM, and every boot waits now: a create that
+    // waited for the build would never return.
+    lab.world.hold_boots.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(10), lab.create(id(1), NEVER))
+        .await
+        .expect("creating never waits for a template build");
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 0, "none booted");
+    assert_ne!(
+        template_state(&lab.status().await),
+        Some(TemplateState::Ready)
     );
     assert!(!memory_saved(&lab.status().await, id(1)));
+    lab.world.hold_boots.store(false, Ordering::SeqCst);
     assert_eq!(lab.run(id(1), &["sandbox?"]).await, [""]);
 
     wait_ready(&lab).await;
@@ -651,17 +653,7 @@ async fn template_builds_respect_the_boot_limit() {
     let lab =
         Lab::start_configured(Lab::root(), Arc::default(), delays, policy, warm(shapes)).await;
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut most = 0;
     loop {
-        let builds = lab
-            .world
-            .live
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|name| name.starts_with("template-"))
-            .count();
-        most = most.max(builds);
         let status = lab.status().await;
         if status.templates.len() == 3
             && status
@@ -678,8 +670,15 @@ async fn template_builds_respect_the_boot_limit() {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     // One booting and one being saved; without the limits all three boot
-    // at once.
-    assert!(most <= 2, "{most} build VMs at once");
+    // at once. A build waiting for its turn to be saved is neither, so up
+    // to three may be alive at a time.
+    let booting = lab.world.max_booting.load(Ordering::SeqCst);
+    let saving = lab.world.max_snapshotting.load(Ordering::SeqCst);
+    assert_eq!(
+        (booting, saving),
+        (1, 1),
+        "build VMs booting and saved at once"
+    );
     lab.assert_clean();
 }
 

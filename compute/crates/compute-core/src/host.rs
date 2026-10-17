@@ -99,9 +99,10 @@ pub enum Input {
     },
     /// The sandbox did work on its own while running, such as a build using
     /// its processors or a download moving data. Counts as activity only
-    /// while it runs with no step in progress: it never wakes the sandbox,
-    /// never cancels an [`Input::Sleep`] request, and a step already putting
-    /// the sandbox to sleep goes ahead.
+    /// while it runs with no step in progress but a checkpoint, which lets
+    /// it run: it never wakes the sandbox, never cancels an
+    /// [`Input::Sleep`] request, and a step already putting the sandbox to
+    /// sleep goes ahead.
     Busy {
         /// The sandbox.
         sandbox: SandboxId,
@@ -447,6 +448,15 @@ pub struct SandboxView {
     pub balloon: u64,
 }
 
+impl SandboxView {
+    /// Whether its VM runs with nothing stopping it: no step in flight, or
+    /// a checkpoint, which pauses it only while its state is captured.
+    #[must_use]
+    pub fn runs(&self) -> bool {
+        self.state.level == Level::Running && self.step.is_none_or(|step| step == Step::Checkpoint)
+    }
+}
+
 /// The decision core for one host.
 ///
 /// Feed it every [`Input`] with the current time; execute the [`Action`]s it
@@ -721,9 +731,13 @@ impl Host {
                 }
             }
             Input::Busy { sandbox } => {
+                // A checkpoint pauses the VM only while it captures it: its
+                // guest runs, and works, through the rest.
                 if let Some(slot) = self.sandboxes.get_mut(&sandbox)
                     && slot.state.level == Level::Running
-                    && slot.in_flight.is_none()
+                    && slot
+                        .in_flight
+                        .is_none_or(|flight| flight.step == Step::Checkpoint)
                 {
                     slot.touch(now);
                     self.mark(sandbox);
@@ -912,17 +926,19 @@ impl Host {
         }
         // What deleting local files freed shows only in a later reading.
         self.disk_fresh &= !matches!(flight.step, Step::Evict | Step::Forget);
-        // What a failed save or fetch wrote may stay, such as a failed
-        // copy kept in quarantine, while a retry books its writes afresh:
-        // it stays booked until a reading shows it.
-        if matches!(outcome, Outcome::Failed(_)) {
-            let wrote = match flight.step {
-                Step::Save => slot.save_space(),
-                Step::Fetch => DiskSpace::save(slot.size.fetch),
-                _ => DiskSpace::default(),
-            };
-            self.disk_spent = self.disk_spent.add(wrote);
-        }
+        // What a step wrote stays booked until a reading shows it. A
+        // failed save or fetch may leave what it wrote, such as a failed
+        // copy kept in quarantine, while a retry books its writes afresh.
+        // A checkpoint leaves its sandbox running, booking its next save as
+        // before, so what it wrote, its new memory image, is booked here
+        // whatever it came to: one cancelled while it uploads has written
+        // it too.
+        let wrote = match (flight.step, outcome) {
+            (Step::Checkpoint, _) | (Step::Save, Outcome::Failed(_)) => slot.save_space(),
+            (Step::Fetch, Outcome::Failed(_)) => DiskSpace::save(slot.size.fetch),
+            _ => DiskSpace::default(),
+        };
+        self.disk_spent = self.disk_spent.add(wrote);
         let before = slot.state;
         let backoff = if flight.step.wakes() {
             &self.policy.wake_backoff
@@ -1066,7 +1082,13 @@ impl Host {
             return;
         };
         slot.settle_room();
-        if slot.state.level == Level::Running && slot.in_flight.is_none() {
+        // A checkpoint leaves the VM running, so a sandbox under one is
+        // already awake: a use meanwhile wakes nothing.
+        if slot.state.level == Level::Running
+            && slot
+                .in_flight
+                .is_none_or(|flight| flight.step == Step::Checkpoint)
+        {
             slot.wake = None;
         } else if slot.wake.is_none() && !slot.holds.is_empty() && slot.room != WakeRoom::Refused {
             slot.wake = Some(Wake {
@@ -1080,8 +1102,11 @@ impl Host {
                 slot.floor = Level::Running;
                 slot.floor_relief = 0;
             }
+            // A checkpoint is for a sandbox in use: it goes on, and the VM
+            // runs again as soon as its state is captured.
             if let Some(flight) = &mut slot.in_flight
                 && !flight.step.wakes()
+                && flight.step != Step::Checkpoint
                 && !flight.cancel_sent
             {
                 flight.cancel_sent = true;
@@ -1092,12 +1117,13 @@ impl Host {
             }
         } else if slot.floor != Level::Running
             && let Some(flight) = &mut slot.in_flight
-            && flight.step == Step::Archive
+            && matches!(flight.step, Step::Archive | Step::Checkpoint)
             && !flight.cancel_sent
         {
             // Archiving frees no memory and is not needed to free it, so it
             // must not hold up the memory pressure demands. It starts again
-            // from the saved copy once the pressure is relieved.
+            // from the saved copy once the pressure is relieved; a
+            // checkpoint, once the sandbox runs again.
             flight.cancel_sent = true;
             out.push(Action::Cancel {
                 sandbox: id,
@@ -1151,6 +1177,8 @@ impl Host {
         for step in Step::ALL {
             if let Some(left) = left.as_mut().filter(|_| admission::needs_memory(step)) {
                 changed |= self.admit_measured(now, step, left, out);
+            } else if step == Step::Checkpoint {
+                self.admit_checkpoints(left.as_mut(), out);
             } else {
                 let index = step.index();
                 let limit = self.policy.limits.get(step);

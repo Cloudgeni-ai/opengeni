@@ -40,11 +40,22 @@ impl Rng {
     }
 }
 
-fn policies() -> [SleepPolicy; 5] {
+fn policies() -> [SleepPolicy; 7] {
     let s = Duration::from_secs;
     let policy = |rules| SleepPolicy::new(rules).unwrap();
     [
         policy(SleepRules::RECOMMENDED),
+        // A fleet's sandboxes: checkpointed while in use.
+        policy(SleepRules {
+            checkpoint_every: Some(s(120)),
+            ..SleepRules::RECOMMENDED
+        }),
+        // Never asleep, at a fleet's default interval: only checkpoints
+        // copy it. (Shorter intervals cost the long quiet phase dearly.)
+        policy(SleepRules {
+            checkpoint_every: Some(s(600)),
+            ..SleepRules::NEVER
+        }),
         // A nested host: huge pages cannot be compressed.
         policy(SleepRules {
             compress_under_pressure: false,
@@ -104,6 +115,10 @@ struct Truth {
     unreported_losses: u32,
     /// Latest resident memory reported to the core.
     resident: u64,
+    /// When the newest copy in object storage was taken, if one is known.
+    copied: Option<At>,
+    /// When it last started running.
+    running_since: At,
 }
 
 impl Truth {
@@ -231,7 +246,21 @@ impl World {
                     "{step:?} cannot start from {:?}",
                     truth.state
                 );
-                if !step.wakes() {
+                if step == Step::Checkpoint {
+                    // Only once due: its running time since the later of
+                    // its newest copy and its wake.
+                    let after = truth
+                        .policy
+                        .checkpoint_after(truth.copied.is_some())
+                        .expect("checkpointed without the rule");
+                    let from = truth
+                        .copied
+                        .map_or(truth.running_since, |at| at.max(truth.running_since));
+                    assert!(
+                        now >= from + after,
+                        "checkpoint for {sandbox:?} before it was due"
+                    );
+                } else if !step.wakes() {
                     assert!(!truth.held(now), "sleep step {step:?} while held");
                     assert!(
                         !truth.wake_pending,
@@ -319,7 +348,15 @@ impl World {
                 truth.settle(truth.state.without_saved_copies());
             }
             match outcome {
-                Outcome::Done => truth.state = pending.step.apply(truth.state),
+                Outcome::Done => {
+                    truth.state = pending.step.apply(truth.state);
+                    if pending.step.wakes() && truth.state.level == Level::Running {
+                        truth.running_since = now;
+                    }
+                    if matches!(pending.step, Step::Archive | Step::Checkpoint) {
+                        truth.copied = Some(now);
+                    }
+                }
                 Outcome::Cancelled | Outcome::Failed(Failure::Transient | Failure::Unsavable) => {}
                 Outcome::Failed(Failure::Untrusted) => {
                     truth.settle(truth.state.without_saved_copies());
@@ -439,6 +476,8 @@ impl World {
                 unreported_losses: 0,
                 // A VM found running counts whole until it is measured.
                 resident: if state.level.has_process() { GIB } else { 0 },
+                copied: (state.durability == Durability::Remote).then_some(self.now),
+                running_since: self.now,
             },
         );
         self.send(Input::Add {
@@ -594,10 +633,19 @@ fn run(seed: u64, events: usize) -> ([u64; Step::COUNT], u64) {
         world.send(Input::Release { sandbox, hold });
     }
     world.advance(world.now + Duration::from_secs(400 * 86_400));
-    assert!(
-        world.pending.is_empty(),
-        "seed {seed}: steps still running when idle"
-    );
+    // Only checkpoints of sandboxes that never sleep go on: they bound what
+    // losing the host costs for as long as the sandbox runs.
+    for pending in &world.pending {
+        let truth = &world.live[&pending.sandbox];
+        assert!(
+            pending.step == Step::Checkpoint
+                && truth.state.level == Level::Running
+                && truth.policy.rules().checkpoint_every.is_some(),
+            "seed {seed}: {:?} still running when idle at {:?}",
+            pending.step,
+            truth.state
+        );
+    }
     for (id, truth) in &world.live {
         if !truth.broken {
             let settled = Duration::from_secs(300 * 86_400);

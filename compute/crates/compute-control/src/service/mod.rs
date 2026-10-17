@@ -18,7 +18,7 @@ use compute_fleet::{
     Demand, HostId, LeaseTerms, Next, Op, Outcome, OwnerEpoch, Ownership, Prefer, SandboxId,
     answered,
 };
-use compute_protocol::host::{ErrorCode, Id, Reply, Request, SandboxConfig};
+use compute_protocol::host::{ErrorCode, Id, Reply, Request, SandboxConfig, SleepConfig};
 use compute_storage::store::ChunkStore;
 
 use crate::hosts::{Answered, Hosts};
@@ -27,6 +27,18 @@ use crate::view::{Target, View, shape_key};
 
 pub use moves::Drained;
 pub use reach::Reached;
+
+/// How a fleet sandbox sleeps when its create says nothing: the
+/// recommended ladder, with a checkpoint after every ten minutes it runs,
+/// counted from when the last one reached the store. That is a scheduling
+/// target, not a bound on loss: losing its host costs a sandbox what it did
+/// since the capture of its newest published copy, which its status reports
+/// as `backed_up_ms` (ADR 18). A host whose files share no extents takes no
+/// checkpoints, and says so.
+pub const DEFAULT_SLEEP: SleepConfig = SleepConfig {
+    checkpoint_every_ms: Some(10 * 60 * 1000),
+    ..SleepConfig::RECOMMENDED
+};
 
 /// How long a host may take to answer a create.
 const CREATE_WAIT: Duration = Duration::from_secs(30);
@@ -88,6 +100,8 @@ pub struct Settings {
     pub wake_within: Duration,
     /// The image a create that names none starts from.
     pub image: String,
+    /// How a sandbox whose create says nothing sleeps.
+    pub sleep: SleepConfig,
 }
 
 impl Default for Settings {
@@ -98,6 +112,7 @@ impl Default for Settings {
             max_tries: 3,
             wake_within: Duration::from_secs(60),
             image: "base".into(),
+            sleep: DEFAULT_SLEEP,
         }
     }
 }

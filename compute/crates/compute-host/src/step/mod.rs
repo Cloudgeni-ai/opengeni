@@ -18,6 +18,7 @@
 //! of the host's own (a full file table, a pager that did not start) is kept
 //! and the step retried.
 
+mod checkpoint;
 mod remote;
 #[cfg(test)]
 mod tests;
@@ -73,14 +74,15 @@ mod files;
 mod learned;
 mod live;
 
+use files::checkpoint_disk;
 #[cfg(target_os = "linux")]
 pub(crate) use files::reconnect_paging;
 use files::{
-    archive_receipt, diff_files, drop_snapshot, link, paged_marker, pager_control, pager_dir,
-    pager_learned, wake_profile,
+    Taken, archive_receipt, diff_files, drop_snapshot, link, paged_marker, pager_control,
+    pager_dir, pager_learned, wake_profile,
 };
 pub(crate) use files::{
-    clear_local, images_of, mark_archived, paged, recover_images, take_written,
+    clear_checkpoint, clear_local, images_of, mark_archived, paged, recover_images, take_written,
 };
 pub(crate) use live::{Base, DiskWatch, LiveMemory, Reconnected};
 
@@ -131,6 +133,53 @@ pub(crate) struct Report {
     pub reading: Option<(u64, MemoryStats)>,
 }
 
+/// A VM's activity counters, read at one moment: what the host judges
+/// whether its guest is busy by.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Reading {
+    /// The VM process read.
+    pub incarnation: u64,
+    pub at: tokio::time::Instant,
+    /// Processor time so far, if it could be read.
+    pub cpu: Option<Duration>,
+    /// Traffic so far, if it could be read.
+    pub io: Option<u64>,
+    /// Whether it is the last reading before the step pauses the VM, so
+    /// the guest's window ends with it.
+    pub last_before_pause: bool,
+}
+
+impl Reading {
+    /// Reads the counters of `vm`, VM process `incarnation`, now.
+    pub fn of<E: Engine>(engine: &E, vm: &E::Vm, incarnation: u64) -> Self {
+        Self {
+            incarnation,
+            at: tokio::time::Instant::now(),
+            cpu: engine.cpu_time(vm).ok(),
+            io: engine.io_bytes(vm).ok(),
+            last_before_pause: false,
+        }
+    }
+
+    /// The same reading, marked as the last before the VM pauses.
+    #[must_use]
+    pub fn before_pause(self) -> Self {
+        Self {
+            last_before_pause: true,
+            ..self
+        }
+    }
+}
+
+/// Where a step that holds a running VM without stopping its guest sends
+/// readings of its activity (see [`Reading`]), so the guest's use still
+/// counts while the agent cannot read the VM itself.
+pub(crate) struct Meter {
+    /// How often.
+    pub every: Duration,
+    pub send: Box<dyn Fn(Reading) + Send + Sync>,
+}
+
 /// Which stored copy matches the local files. The record says whether an
 /// archived copy exists; this names it, so eviction can check the store
 /// still holds exactly that copy.
@@ -172,6 +221,9 @@ pub(crate) struct Job<E: Engine, S> {
     /// concurrency limit protects (a wake, once its VMM has resumed), so
     /// another may start while this one waits for its guest.
     pub unthrottle: Option<Box<dyn FnOnce() + Send + Sync>>,
+    /// Takes readings of the VM's activity while the step holds it and its
+    /// guest runs: a checkpoint's, once the VM runs again.
+    pub meter: Option<Meter>,
     /// The sandbox's last activity when the step was issued, in
     /// milliseconds since the Unix epoch; every write of the record keeps it.
     pub last_used_ms: u64,
@@ -296,7 +348,12 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
         }
         match step {
-            Step::Pause | Step::Resume | Step::Compress | Step::Save | Step::Drop => {
+            Step::Pause
+            | Step::Resume
+            | Step::Compress
+            | Step::Save
+            | Step::Drop
+            | Step::Checkpoint => {
                 let Some(live) = self.live.take() else {
                     // The VM vanished between the decision and the step; the
                     // exit notice is on its way.
@@ -307,6 +364,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                     Step::Resume => self.resume(live).await,
                     Step::Compress => self.compress(live).await,
                     Step::Save => self.save(live).await,
+                    Step::Checkpoint => self.checkpoint(live).await,
                     _ => self.end_process(live).await,
                 }
             }
@@ -567,6 +625,16 @@ impl<E: Engine, S: Store> Job<E, S> {
     /// Snapshots the paused VM and publishes the result as a new image
     /// generation, which becomes the VM's base.
     async fn write_image(&self, live: &mut Live<E::Vm>) -> Result<Verified, EngineError> {
+        let taken = self.take_snapshot(live).await?;
+        self.make_image(&mut live.memory.base, taken).await
+    }
+
+    /// Has the paused VM's VMM write a snapshot, moves it out of the jail
+    /// and makes the disk durable as the snapshot needs it. Only this needs
+    /// the VM paused: what it returns no longer changes when the guest
+    /// runs, and becomes an image in [`Self::make_image`]. The VM's base
+    /// is unknown from the snapshot on, until that image is made.
+    async fn take_snapshot(&self, live: &mut Live<E::Vm>) -> Result<Taken, EngineError> {
         const OP: &str = "save";
         let images = images_of(&self.paths);
         #[cfg(target_os = "linux")]
@@ -614,11 +682,7 @@ impl<E: Engine, S: Store> Job<E, S> {
         notes::phase("snapshot");
         let scratch = self.paths.dir.join("saving");
         let watching = Arc::clone(&live.memory.disk);
-        // The runtime of the VMM that wrote the snapshot, which after an
-        // upgrade can be older than the engine's own.
-        let runtime = self.engine.vm_runtime(&live.vm).to_owned();
-        let memory_len = self.spec.memory_bytes();
-        let published = blocking(move || {
+        let files = blocking(move || {
             // The VMM wrote these inside its jail, where it could have put
             // links instead: they move somewhere only the host reaches and
             // must prove to be plain files before anything reads them.
@@ -627,14 +691,43 @@ impl<E: Engine, S: Store> Job<E, S> {
             // snapshot was taken, so the disk must be durable first, with
             // nothing written since the VM started lost on the way.
             watching.sync()?;
-            let parts = match base {
-                Base::Image(generation) if kind == SnapshotKind::Diff => Parts::Diff {
+            Ok::<_, std::io::Error>(files)
+        })
+        .await
+        .and_then(|files| files)
+        .map_err(|error| EngineError::io(OP, error))?;
+        notes::phase("taken");
+        Ok(Taken {
+            files,
+            over: match base {
+                Base::Image(generation) if kind == SnapshotKind::Diff => Some(generation),
+                // A diff over zeros, or a full snapshot, is already whole.
+                _ => None,
+            },
+            runtime: self.engine.vm_runtime(&live.vm).to_owned(),
+        })
+    }
+
+    /// Publishes what [`Self::take_snapshot`] took as a new image
+    /// generation, merging a diff over the image it was taken against, and
+    /// makes it the VM's `base`. The VM may run meanwhile.
+    async fn make_image(&self, base: &mut Base, taken: Taken) -> Result<Verified, EngineError> {
+        const OP: &str = "save";
+        let images = images_of(&self.paths);
+        let memory_len = self.spec.memory_bytes();
+        let published = blocking(move || {
+            let Taken {
+                files,
+                over,
+                runtime,
+            } = taken;
+            let parts = match over {
+                Some(generation) => Parts::Diff {
                     base: generation,
                     state: &files.state,
                     diff: &files.memory,
                 },
-                // A diff over zeros, or a full snapshot, is already whole.
-                _ => Parts::Whole {
+                None => Parts::Whole {
                     state: &files.state,
                     memory: &files.memory,
                     len: memory_len,
@@ -652,8 +745,8 @@ impl<E: Engine, S: Store> Job<E, S> {
         .map_err(|error| EngineError::io(OP, error))?
         .map_err(|suspect| suspect_error(OP, suspect))?;
         notes::phase("merge");
-        tracing::debug!(id = %self.id, ?kind, generation = %published.generation(), "memory image saved");
-        live.memory.base = Base::Image(published.generation());
+        tracing::debug!(id = %self.id, generation = %published.generation(), "memory image saved");
+        *base = Base::Image(published.generation());
         Ok(published)
     }
 

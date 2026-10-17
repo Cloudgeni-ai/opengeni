@@ -48,7 +48,7 @@ pub use host::{
 pub use ids::{BalloonRequest, HoldId, LoanId, OpId, SandboxId};
 pub use level::{Durability, Level, Priority, State, Step};
 pub use policy::{
-    Admission, Backoff, DiskPolicy, HostPolicy, MemoryPolicy, PolicyError, Rule, SleepPolicy,
-    SleepRules, StepLimits,
+    Admission, Backoff, DiskPolicy, FIRST_CHECKPOINT, HostPolicy, MemoryPolicy, PolicyError, Rule,
+    SleepPolicy, SleepRules, StepLimits,
 };
 pub use time::At;

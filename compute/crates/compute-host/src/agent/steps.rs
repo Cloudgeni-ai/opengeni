@@ -22,7 +22,7 @@ use crate::pool::{Loaning, Template};
 use crate::protocol::Id;
 use crate::restore_notice::ask_commands;
 use crate::state::{Change, Disk, Fence, Record, Records};
-use crate::step::{After, Job, Live, LiveMemory, Report};
+use crate::step::{After, Job, Live, LiveMemory, Meter, Reading, Report};
 use crate::store::{Owned, Store};
 
 use super::holds::Closing;
@@ -64,6 +64,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 self.input(Input::Return { loan });
             }
             Event::Unthrottled { id, op } => self.input(Input::Unthrottled { sandbox: id.0, op }),
+            Event::Reading { id, reading } => {
+                // The last reading before a checkpoint's capture is judged
+                // at once: the capture must not hide a busy guest.
+                if let Some(slot) = self.slots.get_mut(&id.0)
+                    && slot.usage.lend(reading, self.busy)
+                {
+                    self.input(Input::Busy { sandbox: id.0 });
+                }
+            }
             Event::Exited { id, incarnation } => self.exited(id, incarnation),
             Event::Asked {
                 id,
@@ -310,8 +319,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             });
             return;
         };
-        // What the VM does from here is the step's work, not the guest's.
-        slot.activity = None;
+        // What the VM does from here is the step's work, not the guest's,
+        // unless it is a checkpoint, whose guest runs on while it reads it.
+        slot.usage.step_started(step == Step::Checkpoint);
         slot.op = Some(Running {
             op,
             step,
@@ -419,7 +429,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // step finishes; archiving a paused VM's saved copy hands it back.
         let needs_vm = matches!(
             step,
-            Step::Pause | Step::Resume | Step::Compress | Step::Save | Step::Drop | Step::Archive
+            Step::Pause
+                | Step::Resume
+                | Step::Compress
+                | Step::Save
+                | Step::Drop
+                | Step::Archive
+                | Step::Checkpoint
         );
         let events = self.events_tx.clone();
         let (spec, paths) = (VmSpec::clone(&slot.spec), Paths::clone(&slot.paths));
@@ -436,6 +452,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 let _ = events.send(Event::Unthrottled { id, op });
             })
         });
+        if step == Step::Checkpoint {
+            let events = events.clone();
+            job.meter = Some(Meter {
+                every: self.sample_every,
+                send: Box::new(move |reading| {
+                    let _ = events.send(Event::Reading { id, reading });
+                }),
+            });
+        }
         tokio::spawn(async move {
             // Without that kept, the step does not run: it fails for now,
             // handing back its VM untouched, and is tried again.
@@ -499,6 +524,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             pager: self.pager.clone(),
             launches: 0,
             unthrottle: None,
+            meter: None,
             last_used_ms: self.unix_ms(last_activity),
         }
     }
@@ -510,7 +536,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         outcome: Outcome,
         after: After<E::Vm>,
         mut report: Report,
-        busy: bool,
+        mut busy: bool,
     ) {
         let fresh = match after {
             After::New(vm, memory) => Some(self.own(id, vm, memory)),
@@ -573,6 +599,17 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
                 Some(live) => {
                     debug_assert_ne!(outcome, Outcome::Failed(Failure::MemoryLost));
+                    // A checkpoint's guest ran on: what it did since the
+                    // resume counts before the core picks the next step,
+                    // however short that was.
+                    if let Some(rule) = self.busy
+                        && finished_step
+                            .as_ref()
+                            .is_some_and(|running: &Running| running.step == Step::Checkpoint)
+                    {
+                        let reading = Reading::of(&*self.engine, &live.vm, live.incarnation);
+                        busy |= slot.usage.judge_now(&reading, rule);
+                    }
                     slot.incarnation = Some(live.incarnation);
                     slot.vm = Some(live);
                 }
@@ -930,7 +967,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let result = if view.broken {
             Err(HostError::Broken(id))
-        } else if view.state.level == Level::Running && view.step.is_none() && slot.vm.is_some() {
+        } else if view.runs() && (slot.vm.is_some() || view.step == Some(Step::Checkpoint)) {
+            // A checkpoint holds the VM while it runs on: its guest answers
+            // once the capture's pause ends.
             Ok(slot.spec.vsock_path())
         } else {
             return;

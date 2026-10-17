@@ -168,13 +168,38 @@ impl Sandbox {
     /// waking, since only a running VM writes to it; and what a wake from
     /// object storage still writes locally, from its admission, across
     /// any retry, until its copy is whole.
+    ///
+    /// While a checkpoint runs, a clone of its disk shares every block the
+    /// disk held alone, so any guest write may take a new one: its disk
+    /// may grow by its whole bound until the clone is gone and a reading
+    /// shows what it took.
     pub(super) fn disk_booking(&self) -> DiskSpace {
+        let checkpointing = self
+            .in_flight
+            .is_some_and(|flight| flight.step == Step::Checkpoint);
+        self.booking(checkpointing)
+    }
+
+    /// What a checkpoint of it books besides what it already does: the
+    /// rest of its disk's bound, which its disk may grow by while the
+    /// checkpoint runs; see [`Self::disk_booking`].
+    pub(super) fn checkpoint_need(&self) -> DiskSpace {
+        self.booking(true).saturating_sub(self.booking(false))
+    }
+
+    /// [`Self::disk_booking`], with a checkpoint running or not.
+    fn booking(&self, checkpointing: bool) -> DiskSpace {
         let mut booked = DiskSpace::default();
         if self.books_save() {
             booked = booked.add(self.save_space());
         }
         if self.reserves() {
-            booked = booked.add(DiskSpace::bytes(self.local_disk.growth));
+            let growth = if checkpointing {
+                self.local_disk.growth.max(self.size.disk)
+            } else {
+                self.local_disk.growth
+            };
+            booked = booked.add(DiskSpace::bytes(growth));
         }
         if self.local_disk.hydrating || (self.reserves() && self.state.level == Level::Remote) {
             booked = booked.add(DiskSpace::save(self.size.fetch));
@@ -348,13 +373,13 @@ impl Host {
         })
     }
 
-    /// While the disk cannot book what is booked already and what the
-    /// wakes refused and still held need, has idle sandboxes that may live
-    /// in object storage give up their local copies, least recently used
-    /// first, as many at once as may be evicted. Waits for those to finish
-    /// and for a reading taken after them before giving up more, since
-    /// what a local copy takes is only known from the disk. Returns
-    /// whether any floor changed.
+    /// While the disk cannot book what is booked already, what the wakes
+    /// refused and still held need and what queued checkpoints add, has
+    /// idle sandboxes that may live in object storage give up their local
+    /// copies, least recently used first, as many at once as may be
+    /// evicted. Waits for those to finish and for a reading taken after
+    /// them before giving up more, since what a local copy takes is only
+    /// known from the disk. Returns whether any floor changed.
     pub(super) fn keep_disk(&mut self, now: At) -> bool {
         let Some(mut room) = self.disk_room() else {
             return false;
@@ -364,6 +389,10 @@ impl Host {
             .iter()
             .filter_map(|id| self.sandboxes.get(id))
             .fold(DiskSpace::default(), |sum, slot| sum.add(slot.disk_need()));
+        let held = self.queues[Step::Checkpoint.index()]
+            .iter()
+            .filter_map(|key| self.sandboxes.get(&key.sandbox))
+            .fold(held, |sum, slot| sum.add(slot.checkpoint_need()));
         let leaving = self
             .sandboxes
             .values()

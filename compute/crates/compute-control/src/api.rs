@@ -199,7 +199,9 @@ pub struct CreateBody {
     pub memory_request_mib: Option<u32>,
     #[serde(default)]
     pub cpu_request_millis: Option<u32>,
-    /// How it sleeps; the fleet's recommended ladder when omitted.
+    /// How it sleeps; the fleet's default when omitted (see
+    /// [`crate::service::DEFAULT_SLEEP`]). Taken as given otherwise: one
+    /// without `checkpoint_every_ms` takes no checkpoints.
     #[serde(default)]
     pub sleep: Option<SleepConfig>,
     #[serde(default)]
@@ -271,7 +273,7 @@ async fn create<S: Store>(
         memory_mib: body.memory_mib,
         memory_request_mib: body.memory_request_mib,
         cpu_request_millis: body.cpu_request_millis,
-        sleep: body.sleep.unwrap_or(SleepConfig::RECOMMENDED),
+        sleep: body.sleep.unwrap_or(service.settings().sleep),
     };
     let spec = Spec {
         image: body

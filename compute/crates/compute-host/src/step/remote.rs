@@ -107,7 +107,7 @@ impl<E: Engine, S: Store> Job<E, S> {
 
     /// Archives `files` as this owner's next save: the receipt of the
     /// stored copy, or the outcome that ends the step.
-    async fn archive_files(&mut self, files: &SavedFiles) -> Result<Receipt, Outcome> {
+    pub(super) async fn archive_files(&mut self, files: &SavedFiles) -> Result<Receipt, Outcome> {
         const OP: &str = "archive";
         // A number no other archive of this owner has used, even one cut
         // short by a crash: recorded before the store sees it.

@@ -14,9 +14,12 @@ for activity ([3](0003-activity-idle-and-sleep-levels.md)).
 
 - **One wide event per step, request and stream.** Each step gets an
   operation id, and its event holds everything about it (levels, time per
-  phase, bytes, outcome, cause such as a request, idle, pressure or
-  recovery, and the caller's W3C trace id if any). A request that joins a
-  step in flight logs that operation id. Request latency ends at the reply;
+  phase, bytes, outcome, cause such as a request, idle, pressure,
+  recovery or a checkpoint's schedule, and the caller's W3C trace id if
+  any). A checkpoint's event also holds how long its guest stood paused
+  (`compute.paused_us`), the cost a running sandbox pays for it. A
+  request that joins a step in flight logs that operation id. Request
+  latency ends at the reply;
   a connection logs once when established and once when closed. Requests
   that change nothing (hold renewals, status reads) are only counted.
 - **Metrics with bounded cardinality.** Counters and fixed-bucket

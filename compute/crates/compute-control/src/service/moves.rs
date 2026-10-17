@@ -60,33 +60,34 @@ impl<S: Store> Service<S> {
 
     /// Moves a team's sandbox off its host: the owner hands it off and the
     /// service clears its owner. With `to`, the host of that name adopts
-    /// it at once; otherwise its next wake places it.
+    /// it at once, under its renewal as it stands once the hand-off is
+    /// done (which can take minutes); otherwise its next wake places it.
     pub async fn move_to(
         &self,
         team: &str,
         id: Id,
         to: Option<&str>,
     ) -> Result<SandboxRow, Failure> {
-        let target = to
+        let to = to
             .map(|name| {
                 self.view
                     .named(name)
                     .filter(|known| known.state == HostState::Live)
-                    .map(|known| known.target)
+                    .map(|known| known.target.host)
                     .ok_or_else(|| Failure::Invalid(format!("no live host is named {name}")))
             })
             .transpose()?;
         let row = self.get(team, id).await?;
         if let Some(host) = row.ownership.owner {
-            if target.as_ref().is_some_and(|target| target.host == host) {
+            if to == Some(host) {
                 return Ok(row);
             }
             self.hand_off(&row, host).await?;
         }
-        if let Some(target) = target {
+        if let Some(to) = to {
             let row = self.get(team, id).await?;
             if row.ownership.owner.is_none() {
-                self.adopt(row, Some(target), Vec::new()).await?;
+                self.adopt(row, Some(to), Vec::new()).await?;
             }
         }
         self.get(team, id).await

@@ -398,6 +398,37 @@ pub(crate) fn open_jailed(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Clones the file in a VM's jail at `from` to a new file `to` outside it,
+/// sharing every extent: instant whatever its size, and refused, never
+/// copied, where the filesystem cannot share extents (see
+/// [`shares_extents`]). The source is opened as [`open_jailed`] opens it,
+/// and the kernel writes back what is cached of it first.
+#[cfg(target_os = "linux")]
+pub(crate) fn clone_jailed(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let source = open_jailed(from)?;
+    let target = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(to)?;
+    let cloned = rustix::fs::ioctl_ficlone(&target, &source).map_err(io::Error::from);
+    if cloned.is_err() {
+        drop(target);
+        let _ = fs::remove_file(to);
+    }
+    cloned
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn clone_jailed(_: &Path, _: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "files share extents only on Linux",
+    ))
+}
+
 /// Copies `from` to `to` as cheaply as the filesystem allows: a shared-extent
 /// clone where supported (XFS, btrfs), otherwise only the data regions, so
 /// holes stay holes and a mostly empty 2 GiB image costs only its data.

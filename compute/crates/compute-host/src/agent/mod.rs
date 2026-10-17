@@ -36,7 +36,7 @@ use crate::pool::{Built, Held, Lender, Loaning, Pool, PoolConfig, Shape, Sources
 
 use crate::protocol::{About, HostStatus, Id, SandboxConfig, StepStats};
 use crate::state::{Record, Records, StateError, Stray, claim_host, unix_ms_now};
-use crate::step::{After, Live, Report};
+use crate::step::{After, Live, Reading, Report};
 use crate::store::{OwnerEpoch, Store};
 use compute_protocol::fleet::Verdict;
 
@@ -50,6 +50,7 @@ mod recover;
 mod requests;
 mod sample;
 mod steps;
+mod usage;
 mod warm;
 
 /// Takes the host's lock at `path` for state root `root`; see
@@ -568,6 +569,12 @@ enum Event<V> {
         id: Id,
         op: OpId,
     },
+    /// A step that holds `id`'s running VM read its activity; see
+    /// [`crate::step::Meter`].
+    Reading {
+        id: Id,
+        reading: Reading,
+    },
     Exited {
         id: Id,
         incarnation: u64,
@@ -631,22 +638,6 @@ struct Running {
     before: Option<State>,
 }
 
-/// The start of one VM's current activity window. Each reading is kept only
-/// when the rule wants it and it worked, so one signal failing leaves the
-/// other to judge alone.
-#[derive(Clone, Copy, Debug)]
-struct ActivityWindow {
-    incarnation: u64,
-    started: Instant,
-    /// Processor time so far.
-    cpu: Option<Duration>,
-    /// Traffic so far.
-    io: Option<u64>,
-    /// Whether nothing the rule watches could be read over the window
-    /// before this one, so the sandbox counted as busy unseen.
-    unseen: bool,
-}
-
 #[derive(Debug)]
 struct Slot<V> {
     paths: Arc<Paths>,
@@ -669,8 +660,8 @@ struct Slot<V> {
     waiters: Vec<Waiter>,
     /// A step the core started that waits for a dead VM's teardown.
     deferred: Option<Step>,
-    /// Processor use and traffic measured so far, while the VM runs.
-    activity: Option<ActivityWindow>,
+    /// Processor use and traffic measured so far, while its guest runs.
+    usage: usage::Usage,
     /// The incarnation of the running VM and its memory statistics when
     /// last sampled running; see [`HostAgent::check_uncompressed`].
     stats: Option<(u64, MemoryStats)>,
@@ -1046,6 +1037,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         )
         .await;
         let runtime = engine.runtime().to_owned();
+        let store_configured = store.is_configured();
         let mut agent = Self {
             engine: Arc::new(engine),
             #[cfg(target_os = "linux")]
@@ -1101,6 +1093,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             allocation_unit,
             about: About {
                 runtime,
+                checkpoints: store_configured && save_copies == 1,
                 ..config.about
             },
             lease: config.lease,
@@ -1198,7 +1191,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 waiters: Vec::new(),
                 hand_off: false,
                 deferred: None,
-                activity: None,
+                usage: usage::Usage::default(),
                 stats: None,
                 reported: None,
                 summarized: Instant::now(),
@@ -1217,7 +1210,20 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         config.validate()?;
         let mut rules = config.sleep.rules();
         rules.compress_under_pressure &= self.can_compress;
+        // A checkpoint clones the disk while its VM is paused. Where files
+        // cannot share extents that would copy the whole disk with the VM
+        // paused, so such a host takes none (its status says so), and its
+        // sandboxes reach the store only as they sleep.
+        if !self.shares_extents() {
+            rules.checkpoint_every = None;
+        }
         SleepPolicy::new(rules).map_err(|error| format!("invalid sleep settings: {error}"))
+    }
+
+    /// Whether files under the state root share extents, which checkpoints
+    /// need: a save then writes one copy of memory at most.
+    const fn shares_extents(&self) -> bool {
+        self.save_copies == 1
     }
 
     /// What a sandbox of `config` whose disk is `disk_bytes` long reserves

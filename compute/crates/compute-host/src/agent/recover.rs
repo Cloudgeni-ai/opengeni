@@ -2,6 +2,7 @@
 //! adopted, put back to sleep or blocked, never forgotten.
 
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -494,6 +495,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         };
         let size = self.record_size(&record);
         let paths = Paths::of(&self.root, &record);
+        // Only a checkpoint under way uses its disk's clone, and none is.
+        let clone = paths.clone();
+        if let Err(error) =
+            tokio::task::spawn_blocking(move || crate::step::clear_checkpoint(&clone))
+                .await
+                .map_err(io::Error::other)
+                .and_then(|cleared| cleared)
+        {
+            tracing::warn!(%id, %error, "a checkpoint's disk clone was not removed");
+        }
         let spec = vm_spec(&record, &paths, &self.images);
         let found = match found? {
             Some((vm, Found::Running, memory)) if record.identity == Identity::Pending => {
